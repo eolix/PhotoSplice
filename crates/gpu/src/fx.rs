@@ -353,9 +353,13 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
             let mut h = if bv.technique == BevelTechnique::Smooth {
                 b.conv(In::Shape, photosuite_compose::effects::tent_kernel(g.width))
             } else {
-                let din = b.field(FieldKind::Inside, size);
-                let dout = b.field(FieldKind::Outside, size);
-                let h = b.push(stage(Kernel::MBevelH, Some(din), Some(dout), [paint(g.paint), size, 0.0, 0.0], 0));
+                // The fields must reach past the longer ramp (outside: the size and 1.5 px).
+                let reach = size.max(g.chisel[0]).max(g.chisel[1]) + 1.0;
+                let din = b.field(FieldKind::Inside, reach);
+                let dout = b.field(FieldKind::BevelOutside, reach);
+                let mut st = stage(Kernel::MBevelH, Some(din), Some(dout), [paint(g.paint), g.chisel[0], g.chisel[1], 0.0], 0);
+                st.s = Some(In::Shape);
+                let h = b.push(st);
                 if g.chisel_soft > 0.0 { b.conv(h, photosuite_compose::effects::tent_kernel(g.chisel_soft)) } else { h }
             };
             if let Some(c) = &bv.contour {
@@ -691,7 +695,15 @@ mod tests {
             }
         }
         for kind in
-            [FieldKind::Outside, FieldKind::Inside, FieldKind::ChokeInside, FieldKind::StrokeOutside, FieldKind::StrokeInside, FieldKind::StrokeOutsideVector]
+            [
+                FieldKind::Outside,
+                FieldKind::BevelOutside,
+                FieldKind::Inside,
+                FieldKind::ChokeInside,
+                FieldKind::StrokeOutside,
+                FieldKind::StrokeInside,
+                FieldKind::StrokeOutsideVector,
+            ]
         {
             let reach = 9;
             let whole = photosuite_compose::effects::distance_field(kind, shape.clone(), w, h);

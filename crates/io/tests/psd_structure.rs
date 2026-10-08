@@ -563,3 +563,23 @@ fn export_writes_a_thumbnail() {
         assert!(px(20, 40) < 60 && px(140, 40) > 200, "{mode:?}: {} {}", px(20, 40), px(140, 40));
     }
 }
+
+#[test]
+fn background_layer_has_no_transparency_channel() {
+    use photosuite_color::{Color, ColorMode as Mode, SampleType};
+    for sample in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        let mut d = photosuite_doc::Document::with_background("t", photosuite_geom::Size::new(8, 6), Mode::Rgb, sample, Color::WHITE);
+        d.layers.push(photosuite_doc::Layer::raster("top", d.pixel_format()));
+        let (f, _) = document_to_psd_with(&d, &PsdExportOptions::default());
+        let bg = &f.layers()[0];
+        assert!(bg.channel(-1).is_none(), "{sample:?}");
+        assert_eq!(bg.flags.0, 9, "{sample:?}: transparency protected + bit 3, as Photoshop writes it");
+        assert!(f.layers()[1].channel(-1).is_some());
+        let (back, _) = psd_to_document(&f);
+        assert_eq!(back.layers[0].surface().unwrap().pixel(3, 3)[3], 1.0);
+        // A hole in it: no longer a Background, the transparency channel is back.
+        d.layers[0].surface_mut().unwrap().fill_rect(photosuite_geom::Rect::new(0, 0, 1, 1), &[0.0; 4]);
+        let (f, _) = document_to_psd_with(&d, &PsdExportOptions::default());
+        assert!(f.layers()[0].channel(-1).is_some(), "{sample:?}");
+    }
+}

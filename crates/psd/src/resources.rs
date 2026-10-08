@@ -18,6 +18,12 @@ pub mod ids {
     pub const THUMBNAIL: u16 = 1036;
     /// Global lighting angle.
     pub const GLOBAL_ANGLE: u16 = 1037;
+    /// Document-specific ids seed: the base for new layer ids.
+    pub const DOCUMENT_IDS_SEED: u16 = 1044;
+    /// Selected layers: u16 count, then one u32 layer id each.
+    pub const LAYER_SELECTION_IDS: u16 = 1069;
+    /// Layer group(s) enabled: one byte per layer record.
+    pub const LAYER_GROUPS_ENABLED: u16 = 1072;
     /// ICC profile.
     pub const ICC_PROFILE: u16 = 1039;
     /// Global altitude.
@@ -250,15 +256,19 @@ pub(crate) fn write_section(out: &mut Vec<u8>, res: &[ImageResource]) -> Result<
     out.end_len(at, false)
 }
 
-/// Builds the data for a 1057 version info resource.
+/// Builds the data for a 1057 version info resource, with the writer and reader names a current
+/// Photoshop writes (no NUL terminator). The reader names the oldest version the file is meant
+/// for: Photoshop asks to "update" the type layers of a file whose reader is older than its own
+/// text engine (an earlier "Adobe Photoshop CS6" made it prompt on every PhotoSuite PSD with type;
+/// Photoshop's own re-save of such a file names "Adobe Photoshop 2020").
 pub fn version_info_resource(has_real_merged_data: bool) -> ImageResource {
     ImageResource::new(
         ids::VERSION_INFO,
         VersionInfo {
             version: 1,
             has_real_merged_data,
-            writer: UnicodeString::new_nul("Adobe Photoshop"),
-            reader: UnicodeString::new_nul("Adobe Photoshop CS6"),
+            writer: UnicodeString::new("Adobe Photoshop"),
+            reader: UnicodeString::new("Adobe Photoshop 2020"),
             file_version: 1,
         }
         .to_bytes(),

@@ -152,7 +152,10 @@ fn text_shape_smart_raw_blocks_survive() {
     if let LayerContent::Shape(s) = &bsh.content {
         assert_eq!(s.psd_raw.as_deref(), Some(&vec![7u8; 8]));
     }
-    assert_eq!(bsh.psd_blocks, d.layers[n - 1].psd_blocks);
+    // Plus the advanced-blending defaults Photoshop writes on every non-group layer.
+    let mut expected = d.layers[n - 1].psd_blocks.clone();
+    expected.extend([(*b"clbl", std::sync::Arc::new(vec![1u8, 0, 0, 0])), (*b"infx", std::sync::Arc::new(vec![0u8; 4])), (*b"knko", std::sync::Arc::new(vec![0u8; 4]))]);
+    assert_eq!(bsh.psd_blocks, expected);
 }
 
 #[test]
@@ -165,8 +168,11 @@ fn raster_layer_blocks_preserved() {
     let back = roundtrip(&d);
     // An odd-length layer block comes back with its pad byte inside the length (as Photoshop
     // lays layer blocks out, #200); everything else is verbatim.
+    // The layer's own `clbl` is kept; the other advanced-blending defaults are added, as
+    // Photoshop writes them on every non-group layer.
     let mut expected = blocks.clone();
     expected[2].1 = std::sync::Arc::new(vec![1u8, 0]);
+    expected.extend([(*b"infx", std::sync::Arc::new(vec![0u8; 4])), (*b"knko", std::sync::Arc::new(vec![0u8; 4]))]);
     assert_eq!(back.layers[1].psd_blocks, expected);
     assert_eq!(roundtrip(&back).layers[1].psd_blocks, expected, "stable after the first save");
     assert_eq!(back.layers[1].vector_mask, d.layers[1].vector_mask);
@@ -442,7 +448,7 @@ fn link_groups_and_effects_reference_round_trip() {
     big.layers[1].link_group = Some(1 << 40);
     let fb = PsdFile::from_bytes(&export(&big, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap();
     assert_eq!(res(&fb).unwrap(), vec![0, 1, 0, 1, 0, 0, 0, 2, 0, 0]);
-    // Unlinked documents write no 1026.
+    // Unlinked documents write zeros (Photoshop writes the resource in every layered file).
     let mut none = d.clone();
     none.layers[0].link_group = None;
     none.layers[1].link_group = None;
@@ -450,7 +456,7 @@ fn link_groups_and_effects_reference_round_trip() {
         g.children[0].link_group = None;
     }
     let fnone = PsdFile::from_bytes(&export(&none, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap();
-    assert!(res(&fnone).is_none());
+    assert!(res(&fnone).unwrap().iter().all(|b| *b == 0));
 }
 
 #[test]
@@ -500,10 +506,12 @@ fn blend_if_round_trips_as_blending_ranges() {
     want.extend_from_slice(&full);
     want.extend_from_slice(&[0, 0, 255, 255, 64, 64, 255, 255]);
     want.extend_from_slice(&full);
+    // Padded to the five entries Photoshop writes in every mode.
+    want.extend_from_slice(&full);
     assert_eq!(rec.blending_ranges.data, want);
-    // Layers without Blend If keep full ranges for gray + R, G, B.
+    // Layers without Blend If get full ranges for gray + four channels.
     let rb = f.layers().iter().find(|r| r.name() == "b").unwrap();
-    assert_eq!(rb.blending_ranges, photosuite_psd::BlendingRanges::full(3));
+    assert_eq!(rb.blending_ranges, photosuite_psd::BlendingRanges::full(4));
     let back = roundtrip(&d);
     assert_eq!(back.layers[0].blend_if, bi);
     assert!(back.layers[1].blend_if.is_default());

@@ -244,7 +244,9 @@ fn every_blend_mode_round_trips() {
             let adj = Layer::new("inside", LayerContent::Adjustment(Adjustment::Invert));
             d.layers.push(Layer::group("pass-through adj", vec![raster("px", fmt, Rect::new(0, 0, 6, 6), 6, true), adj]));
             let (back, _, file) = export_import(&d);
-            assert!(file.layers().iter().any(|l| l.blend_mode == photosuite_psd::BlendMode::PassThrough), "pass key written");
+            // As Photoshop writes it: `pass` in the section divider, `norm` in the record.
+            let group = file.layers().iter().find(|l| l.block(b"lsct").is_some_and(|b| b.data.get(8..12) == Some(b"pass"))).expect("pass key written");
+            assert_eq!(group.blend_mode, photosuite_psd::BlendMode::Normal);
             assert_docs_eq(&d, &back);
             assert_composite_eq(&d, &back, "pass-through");
             continue;

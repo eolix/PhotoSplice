@@ -33,7 +33,10 @@ pub fn blend_if_from_ranges(r: &BlendingRanges) -> BlendIf {
 
 /// Inverse of [`blend_if_from_ranges`] for a document with `channels` colour channels: one
 /// entry for gray plus one per channel (more when the setting stores more), unset entries full.
+/// Photoshop writes at least five entries in every colour mode, Grayscale included (observed on
+/// every Photoshop-authored layer of the oracle corpus).
 pub fn ranges_from_blend_if(b: &BlendIf, channels: usize) -> BlendingRanges {
+    let channels = channels.max(4);
     if b.is_default() {
         return BlendingRanges::full(channels);
     }
@@ -426,6 +429,17 @@ pub fn write_fill(f: &Fill) -> ([u8; 4], Vec<u8>) {
     (k, VersionedDescriptor::new(d).to_bytes())
 }
 
+/// A fill as (block key, descriptor), merged onto the descriptor of the block it replaces when
+/// that is the same kind of fill (`old`: key and descriptor bytes, version prefix included), so
+/// what the model doesn't carry survives (gradient interpolation method, noise seed…).
+pub fn fill_to_desc_onto(f: &Fill, old: Option<(&[u8; 4], &[u8])>) -> ([u8; 4], Descriptor) {
+    let (k, d) = fill_to_desc(f);
+    match old.filter(|(ok, _)| **ok == k).and_then(|(_, data)| parse_prefix_versioned(data)) {
+        Some(base) => (k, merge_descriptor(&base, d, &[])),
+        None => (k, d),
+    }
+}
+
 /// A fill as (block key, descriptor with class `null`).
 pub fn fill_to_desc(f: &Fill) -> ([u8; 4], Descriptor) {
     match f {
@@ -666,16 +680,20 @@ mod tests {
         assert_eq!(b.get(0), [BlendRange { black: [10, 40], white: [255, 255] }, BlendRange::FULL]);
         assert_eq!(b.get(3), [BlendRange::FULL, BlendRange { black: [0, 0], white: [200, 200] }]);
         assert_eq!(b.ranges.len(), 4);
-        assert_eq!(super::ranges_from_blend_if(&b, 3).data, data);
-        // The default writes full ranges for gray + each channel.
+        // Written back padded to the five entries Photoshop writes in every mode.
+        let mut five = data.clone();
+        five.extend_from_slice(&[0, 0, 255, 255, 0, 0, 255, 255]);
+        assert_eq!(super::ranges_from_blend_if(&b, 3).data, five);
+        // The default writes full ranges for gray + four channels, Grayscale included.
         assert_eq!(super::ranges_from_blend_if(&BlendIf::default(), 4), BlendingRanges::full(4));
-        // A trimmed setting is padded to the document's channel count.
+        assert_eq!(super::ranges_from_blend_if(&BlendIf::default(), 1), BlendingRanges::full(4));
+        // A trimmed setting is padded the same way.
         let mut short = BlendIf::default();
         short.set(0, [BlendRange { black: [5, 5], white: [255, 255] }, BlendRange::FULL]);
         let r = super::ranges_from_blend_if(&short, 3);
-        assert_eq!(r.data.len(), 4 * 8);
+        assert_eq!(r.data.len(), 5 * 8);
         assert_eq!(&r.data[..8], &[5, 5, 255, 255, 0, 0, 255, 255]);
-        assert_eq!(&r.data[8..], &BlendingRanges::full(2).data[..]);
+        assert_eq!(&r.data[8..], &BlendingRanges::full(3).data[..]);
     }
 
     #[test]

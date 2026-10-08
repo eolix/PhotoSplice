@@ -10,6 +10,7 @@
 //! cargo run --release -p photosuite-io --example psd_fidelity -- file.psd            # one file, per-layer detail
 //! TOP=40 …                                                                            # descriptor paths listed per key
 //! REGEN=1 …                                                                           # as if every layer were edited
+//! PAIR=1 … a.psd b.psd                                                                # compare two files as they are (b against a)
 //! ```
 //!
 //! `REGEN=1` flips each layer's effects master switch, drops the verbatim adjustment, fill and
@@ -283,9 +284,17 @@ impl Census {
                 return;
             }
         };
-        self.files += 1;
         if verbose {
             println!("{name}: {} warnings {warnings:?}", warnings.len());
+        }
+        self.compare(&name, &orig, &exp, verbose);
+    }
+
+    /// Compares two parsed files: `orig` as the reference, `exp` as the one under test.
+    fn compare(&mut self, name: &str, orig: &PsdFile, exp: &PsdFile, verbose: bool) {
+        let name = name.to_string();
+        self.files += 1;
+        {
         }
         if orig.header.color_mode == exp.header.color_mode && orig.header.depth == exp.header.depth {
             self.stat("header:color_mode+depth".into(), &name).same += 1;
@@ -360,11 +369,17 @@ fn main() {
     for a in &args {
         collect(Path::new(a), &mut files);
     }
-    let verbose = files.len() == 1;
     let top: usize = std::env::var("TOP").ok().and_then(|v| v.parse().ok()).unwrap_or(25);
     let mut c = Census::default();
-    for f in &files {
-        c.file(f, verbose);
+    if std::env::var_os("PAIR").is_some() {
+        let [a, b] = &files[..] else { panic!("PAIR=1 takes exactly two files") };
+        let parse = |p: &PathBuf| PsdFile::from_bytes(&std::fs::read(p).expect("read")).expect("parse");
+        c.compare(&b.display().to_string(), &parse(a), &parse(b), true);
+    } else {
+        let verbose = files.len() == 1;
+        for f in &files {
+            c.file(f, verbose);
+        }
     }
     println!("# PSD structural round-trip census\n");
     println!("{} files round-tripped, {} failed; layers {} (matched {})\n", c.files, c.failed.len(), c.layers_orig, c.layers_matched);

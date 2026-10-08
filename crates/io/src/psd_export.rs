@@ -3,7 +3,7 @@
 use photosuite_color::{ColorMode, PixelFormat, SampleType};
 use photosuite_doc::{Document, Layer, LayerContent, LayerMask};
 use photosuite_psd::file::{GlobalLayerMask, LayerInfoPlacement};
-use photosuite_psd::layer::{BlendingRanges, ChannelData, LayerFlags, LayerInfo, LayerMask as PsdMask, MaskData, MaskParameters};
+use photosuite_psd::layer::{ChannelData, LayerFlags, LayerInfo, LayerMask as PsdMask, MaskData, MaskParameters};
 use photosuite_psd::resources::{ImageResource, ResolutionInfo, ids, version_info_resource};
 use photosuite_psd::{
     BlendMode as PsdBlend, ColorMode as PsdMode, Compression, Header, ImageData, LayerRecord, PsdFile, Rect as PsdRect, SectionType, TaggedBlock, Version,
@@ -60,6 +60,29 @@ struct Ex {
     comps: Option<(Vec<photosuite_doc::LayerComp>, Option<photosuite_doc::LayerComp>)>,
     /// Smart objects: embedded files and filter caches for the global blocks.
     smart: SmartOut,
+    /// The layer that may be written as Photoshop's Background (see [`background_candidate`]).
+    background: Option<photosuite_doc::LayerId>,
+}
+
+/// The layer to write as Photoshop's Background: a pixel layer with no transparency channel
+/// (Photoshop's own files: bottom-most, flags "transparency protected", `lspf` locking
+/// transparency and position, no merged alpha). Our importer reads that as a bottom raster layer
+/// locked for transparency and position; it stays a Background while it has nothing a
+/// Background can't have (masks, effects, clipping, a blend mode, partial opacity). Whether its
+/// pixels are opaque over the whole canvas is checked when they are encoded.
+fn background_candidate(doc: &Document) -> Option<photosuite_doc::LayerId> {
+    let l = doc.layers.first()?;
+    let plain = matches!(l.content, LayerContent::Raster(_))
+        && l.locks.transparency
+        && l.locks.position
+        && l.blend == photosuite_color::BlendMode::Normal
+        && l.opacity >= 1.0
+        && l.fill_opacity >= 1.0
+        && !l.clipped
+        && l.mask.is_none()
+        && l.vector_mask.is_none()
+        && l.effects.items.is_empty();
+    plain.then_some(l.id)
 }
 
 /// How deep embedded documents are exported inside each other before a smart object is written
@@ -253,7 +276,9 @@ impl Ex {
         (-1..self.cc as i16).map(|id| self.encode(id, &[], 0, 0)).collect()
     }
 
-    fn pixel_channels(&mut self, s: &Surface, name: &str) -> (PsdRect, Vec<ChannelData>) {
+    /// Channel data of a layer's pixels. A `background` candidate whose pixels are opaque over
+    /// exactly the canvas is written as Photoshop's Background, with no transparency channel.
+    fn pixel_channels(&mut self, s: &Surface, name: &str, background: bool) -> (PsdRect, Vec<ChannelData>) {
         let s = if s.format() != self.fmt {
             self.warnings.push(format!("layer \"{name}\": pixels converted from {:?} to {:?}", s.format(), self.fmt));
             s.convert(self.fmt)
@@ -273,9 +298,17 @@ impl Ex {
         let planes = deinterleave(&bytes, self.cc + 1, self.fmt.sample, &invert);
         drop(bytes);
         let (w, h) = (r.width() as usize, r.height() as usize);
+        let opaque = || {
+            let mut one = Vec::new();
+            crate::pixels::encode_be(1.0, self.fmt.sample, &mut one);
+            planes.get(self.cc).is_some_and(|a| a.chunks(one.len().max(1)).all(|c| c == one.as_slice()))
+        };
+        let alpha = !(background && r == self.canvas && opaque());
         // Alpha (-1) first, then the colour channels; each compressed on its own thread.
-        let order: Vec<(i16, &Vec<u8>)> =
-            std::iter::once((-1, &planes[self.cc])).chain(planes.iter().take(self.cc).enumerate().map(|(c, p)| (c as i16, p))).collect();
+        let order: Vec<(i16, &Vec<u8>)> = std::iter::once((-1, &planes[self.cc]))
+            .filter(|_| alpha)
+            .chain(planes.iter().take(self.cc).enumerate().map(|(c, p)| (c as i16, p)))
+            .collect();
         let ch = crate::pixels::par_map(order, |(id, plane)| self.encode(id, plane, w, h));
         (to_psd_rect(r), ch)
     }
@@ -325,7 +358,7 @@ impl Ex {
     fn record(&mut self, l: &Layer, extra: Vec<TaggedBlock>, pixels: Option<&Surface>) -> LayerRecord {
         let id = self.layer_id(l);
         let (rect, mut channels) = match pixels {
-            Some(s) => self.pixel_channels(s, &l.name),
+            Some(s) => self.pixel_channels(s, &l.name, self.background == Some(l.id)),
             None => (PsdRect::default(), self.empty_channels()),
         };
         let mut mask = MaskData::None;
@@ -347,18 +380,20 @@ impl Ex {
                 real_first: true,
             });
         }
-        let mut flags = LayerFlags(0);
+        let mut flags = LayerFlags(layer_flags(&l.content));
         flags.set_hidden(!l.visible);
         flags.set_transparency_protected(l.locks.transparency);
-        let mut blocks = vec![TaggedBlock::unicode_name(&l.name), TaggedBlock::layer_id(id)];
-        let lspf = blocks::lspf_from_locks(&l.locks);
-        if lspf != 0 {
-            blocks.push(TaggedBlock::protection(lspf));
+        // Photoshop writes the locks and the label colour on every layer, zero or not.
+        let mut blocks = vec![
+            TaggedBlock::unicode_name(&l.name),
+            TaggedBlock::layer_id(id),
+            TaggedBlock::protection(blocks::lspf_from_locks(&l.locks)),
+            TaggedBlock::sheet_color(blocks::label_index(l.label)),
+        ];
+        // Photoshop writes the fill opacity only when it is below 100 %.
+        if q255(l.fill_opacity) != 255 {
+            blocks.push(TaggedBlock::fill_opacity(q255(l.fill_opacity)));
         }
-        if l.label != photosuite_doc::LabelColor::None {
-            blocks.push(TaggedBlock::sheet_color(blocks::label_index(l.label)));
-        }
-        blocks.push(TaggedBlock::fill_opacity(q255(l.fill_opacity)));
         // Effects: the original lfx2 while the effects are unchanged (or could not be decoded at
         // all), an unchanged lmfx stays with the raw blocks; otherwise regenerated onto the
         // original block, as lmfx when a kind has several instances (as Photoshop stores them).
@@ -378,6 +413,15 @@ impl Ex {
             blocks.push(TaggedBlock::new(key, d));
         }
         blocks.extend(extra);
+        // Photoshop writes the advanced-blending settings on every non-group layer, defaults
+        // included (blend clipped layers as group on, interior effects and knockout off).
+        if !l.is_group() {
+            for (key, v) in [(b"clbl", 1u8), (b"infx", 0), (b"knko", 0)] {
+                if !blocks.iter().any(|b| &b.key == key) {
+                    blocks.push(TaggedBlock::new(*key, vec![v, 0, 0, 0]));
+                }
+            }
+        }
         // Layer-level blocks keep their pad byte inside the length, as Photoshop writes them:
         // readers such as psd-tools do not skip a pad after an odd length, so a regenerated
         // odd-length `lfx2` misaligned every block after it (#200).
@@ -389,7 +433,13 @@ impl Ex {
         LayerRecord {
             rect,
             channels,
-            blend_mode: PsdBlend::from_key(l.blend.psd_key()),
+            // A pass-through group keeps `pass` in its section divider; Photoshop writes `norm` in
+            // the record itself.
+            blend_mode: PsdBlend::from_key(if l.is_group() && l.blend == photosuite_color::BlendMode::PassThrough {
+                photosuite_color::BlendMode::Normal.psd_key()
+            } else {
+                l.blend.psd_key()
+            }),
             opacity: q255(l.opacity),
             clipping: u8::from(l.clipped),
             flags,
@@ -427,8 +477,10 @@ impl Ex {
         let fill_rule = |raw: &mut Vec<([u8; 4], Vec<u8>)>, regenerated: &mut Vec<([u8; 4], Vec<u8>)>, f: &photosuite_doc::Fill| {
             let keep = raw.iter().any(|(k, d)| matches!(k, b"SoCo" | b"GdFl" | b"PtFl") && blocks::parse_fill(k, d).as_ref() == Some(f));
             if !keep {
+                let old = raw.iter().find(|(k, _)| matches!(k, b"SoCo" | b"GdFl" | b"PtFl")).map(|(k, d)| (k, d.as_slice()));
+                let (k, d) = blocks::fill_to_desc_onto(f, old);
                 raw.retain(|(k, _)| !matches!(k, b"SoCo" | b"GdFl" | b"PtFl"));
-                regenerated.push(blocks::write_fill(f));
+                regenerated.push((k, photosuite_psd::descriptor::VersionedDescriptor::new(d).to_bytes()));
             }
         };
         match &l.content {
@@ -453,11 +505,14 @@ impl Ex {
             }
             LayerContent::Fill(f) => fill_rule(&mut raw, &mut regenerated, f),
             LayerContent::Shape(sh) => {
-                if let Some(f) = &sh.fill {
-                    fill_rule(&mut raw, &mut regenerated, f);
-                }
+                // Shapes keep their fill in `vscg` (updated by `shape_blocks`); only shapes from
+                // files older than Photoshop CS6 have a top-level fill block, kept in that form.
+                let legacy = !raw.iter().any(|(k, _)| k == b"vscg") && raw.iter().any(|(k, _)| matches!(k, b"SoCo" | b"GdFl" | b"PtFl"));
                 let (w, h) = (self.canvas.width(), self.canvas.height());
                 crate::vector_map::shape_blocks(sh, &mut raw, w, h, self.dpi);
+                if legacy && let Some(f) = &sh.fill {
+                    fill_rule(&mut raw, &mut regenerated, f);
+                }
             }
             LayerContent::Text(t) => {
                 // Text layers without PSD data (created here) get a generated TySh.
@@ -767,12 +822,15 @@ impl Ex {
                     let id = self.fresh_id();
                     self.records.push(LayerRecord {
                         channels: self.empty_channels(),
-                        blending_ranges: BlendingRanges::full(self.cc),
+                        blending_ranges: blocks::ranges_from_blend_if(&photosuite_doc::BlendIf::default(), self.cc),
+                        flags: LayerFlags(LayerFlags::BIT4_USEFUL | LayerFlags::PIXEL_DATA_IRRELEVANT),
                         name: b"</Layer group>".to_vec(),
                         blocks: vec![
                             TaggedBlock::unicode_name("</Layer group>"),
                             TaggedBlock::layer_id(id),
                             TaggedBlock::section_divider(SectionType::BoundingDivider, None, None),
+                            TaggedBlock::protection(0),
+                            TaggedBlock::sheet_color(0),
                         ],
                         ..Default::default()
                     });
@@ -812,11 +870,22 @@ impl Ex {
     }
 }
 
+/// Layer record flag bits besides hidden and transparency-locked, as Photoshop sets them: bit 3
+/// ("bit 4 is meaningful") always, and bit 4 ("pixel data irrelevant to the document's
+/// appearance") on layers whose pixels are rendered from other data: adjustment, fill, shape
+/// and group layers (and group end dividers), not pixel, type or smart object layers (observed
+/// on every Photoshop-authored layer of the oracle corpus).
+fn layer_flags(c: &LayerContent) -> u8 {
+    let irrelevant = matches!(c, LayerContent::Adjustment(_) | LayerContent::Fill(_) | LayerContent::Shape(_) | LayerContent::Group(_));
+    LayerFlags::BIT4_USEFUL | if irrelevant { LayerFlags::PIXEL_DATA_IRRELEVANT } else { 0 }
+}
+
 /// Resource 1026 (Layer › Link Layers): one u16 group id per layer record, in the order
 /// [`Ex::emit`] writes records (a group's bounding divider, its children, then the group).
 /// Imported ids that fit in a u16 are kept, so unchanged files write the same bytes; otherwise
-/// groups are renumbered by first appearance. `None` when no layer is linked.
-fn link_group_resource(layers: &[Layer]) -> Option<Vec<u8>> {
+/// groups are renumbered by first appearance. All zeros when no layer is linked (Photoshop writes
+/// the resource in every layered file).
+fn link_group_resource(layers: &[Layer]) -> Vec<u8> {
     fn walk(layers: &[Layer], out: &mut Vec<Option<u64>>) {
         for l in layers {
             if let LayerContent::Group(g) = &l.content {
@@ -829,7 +898,7 @@ fn link_group_resource(layers: &[Layer]) -> Option<Vec<u8>> {
     let mut per = Vec::new();
     walk(layers, &mut per);
     if per.iter().all(Option::is_none) {
-        return None;
+        return vec![0; per.len() * 2];
     }
     let fits = per.iter().flatten().all(|&g| (1..=u64::from(u16::MAX)).contains(&g));
     let mut seen: Vec<u64> = Vec::new();
@@ -844,7 +913,26 @@ fn link_group_resource(layers: &[Layer]) -> Option<Vec<u8>> {
             u16::try_from(i + 1).unwrap_or(u16::MAX)
         }
     });
-    Some(ids.flat_map(u16::to_be_bytes).collect())
+    ids.flat_map(u16::to_be_bytes).collect()
+}
+
+/// The layer-state resources Photoshop writes in every layered file, for the records written: the
+/// target layer (1024: record index), the selected layers (1069: count, then layer ids), each
+/// record's group-enabled flag (1072: one byte, 1) and the layer id seed (1044: the highest id).
+/// The document model keeps no target or selection, so the top record is both, as in a file
+/// Photoshop has just opened.
+fn layer_state_resources(records: &[LayerRecord]) -> Vec<ImageResource> {
+    let max_id = records.iter().filter_map(LayerRecord::layer_id).max().unwrap_or(0);
+    let mut out = vec![ImageResource::new(ids::DOCUMENT_IDS_SEED, max_id.to_be_bytes().to_vec())];
+    let Some((top, rec)) = records.len().checked_sub(1).zip(records.last()) else { return out };
+    out.push(ImageResource::new(ids::LAYER_STATE, u16::try_from(top).unwrap_or(u16::MAX).to_be_bytes().to_vec()));
+    if let Some(id) = rec.layer_id() {
+        let mut sel = 1u16.to_be_bytes().to_vec();
+        sel.extend_from_slice(&id.to_be_bytes());
+        out.push(ImageResource::new(ids::LAYER_SELECTION_IDS, sel));
+    }
+    out.push(ImageResource::new(ids::LAYER_GROUPS_ENABLED, vec![1; records.len()]));
+    out
 }
 
 /// Whether the layer's effects still equal what its preserved `lmfx`/`lfx2`
@@ -1191,6 +1279,7 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         guides: doc.guides.clone(),
         comps: (!crate::comps_map::comps_unchanged(doc)).then(|| (doc.layer_comps.clone(), doc.last_document_state.clone())),
         smart: SmartOut::new(doc, depth),
+        background: background_candidate(doc),
     };
     if big && !opts.force_psb {
         ex.warnings.push("document exceeds 30000 px; written as PSB".into());
@@ -1283,9 +1372,8 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     if let Some(icc) = &doc.icc_profile {
         resources.push(ImageResource::new(ids::ICC_PROFILE, icc.to_vec()));
     }
-    if !doc.guides.horizontal.is_empty() || !doc.guides.vertical.is_empty() {
-        resources.push(ImageResource::new(1032, guides_resource(doc)));
-    }
+    // Photoshop writes the grid and guides resource in every file, guides or not.
+    resources.push(ImageResource::new(1032, guides_resource(doc)));
     if !extra.is_empty() {
         let names: Vec<&str> = extra.iter().map(|a| a.name.as_str()).collect();
         resources.push(ImageResource::new(1006, pascal_names_resource(&names)));
@@ -1334,9 +1422,8 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
             resources.push(ImageResource::new(CLIPPING_PATH, data));
         }
     }
-    if let Some(groups) = link_group_resource(&doc.layers) {
-        resources.push(ImageResource::new(ids::LAYER_GROUP_INFO, groups));
-    }
+    resources.push(ImageResource::new(ids::LAYER_GROUP_INFO, link_group_resource(&doc.layers)));
+    resources.extend(layer_state_resources(&ex.records));
     if let Some(x) = &doc.metadata.xmp {
         // The pixels are saved as they are shown: never let a reader rotate them again.
         resources.push(ImageResource::new(ids::XMP, photosuite_codecs::upright_xmp(x).as_bytes().to_vec()));
@@ -1366,6 +1453,10 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         }
         // Slices: the preserved resource while unchanged, else regenerated (or dropped) below.
         if *id == crate::slices_map::SLICES && slices_resource.is_some() {
+            continue;
+        }
+        // The layer id seed is regenerated from the ids written (see `layer_state_resources`).
+        if *id == ids::DOCUMENT_IDS_SEED {
             continue;
         }
         // Measurement scale / count resources: only while they still describe the document.

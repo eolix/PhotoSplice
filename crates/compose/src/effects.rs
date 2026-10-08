@@ -262,6 +262,69 @@ fn dist_outside_by(s: &Map, m: Metric) -> Vec<f32> {
     (0..d.len()).map(|i| if inside[i] { -0.5 } else { d[i] - 0.5 + (1.0 - s.v[near[i]].min(1.0)) }).collect()
 }
 
+/// Distance from inside pixel `i` to the shape's edge as seen from its nearest not fully covered
+/// pixel `seed`, at sub-pixel precision: the edge is taken as the straight line across the seed,
+/// perpendicular to the alpha gradient there, `offset` pixels from the seed's centre (its
+/// coverage places it). Measured along that normal rather than to the seed's centre, so curved
+/// anti-aliased edges give a smooth field instead of the pixel staircase whose ripples,
+/// differentiated and scaled by a bevel's depth, streaked chiselled bevels (the anti-aliased
+/// Euclidean distance transform of Gustavson & Strand, 2011). Falls back to the seed-centre
+/// distance `d` where the gradient is flat or the projection disagrees with it by more than a
+/// pixel. (Outside distances keep the seed-centre distance: the projection measured no better
+/// there on the oracles and slightly worse on precise glows.)
+fn edge_distance(s: &Map, i: usize, seed: usize, d: f32, offset: f32) -> f32 {
+    edge_distance_dir(s, i, seed, d, 1.0, offset)
+}
+
+/// [`edge_distance`] looking inwards (`sign` 1, alpha rising) or outwards (−1).
+fn edge_distance_dir(s: &Map, i: usize, seed: usize, d: f32, sign: f32, offset: f32) -> f32 {
+    let w = s.w.max(1);
+    let (sx, sy) = ((seed % w) as i64, (seed / w) as i64);
+    let plain = d - offset;
+    let Some((nx, ny, len)) = edge_normal(s, sx, sy) else { return plain };
+    let (px, py) = ((i % w) as f32 - sx as f32, (i / w) as f32 - sy as f32);
+    let r = (px * px + py * py).sqrt();
+    if r < 1e-3 {
+        return plain;
+    }
+    let along = sign * (px * nx + py * ny);
+    // The edge line is the right model for a seed on an edge or a gentle curve. At a corner the
+    // distance is radial: a convex corner's facets fan around it, as Photoshop draws them
+    // (projected on the corner pixel's diagonal normal, the whole corner wedge was one flat facet
+    // with a seam). A seed whose 4-neighbours' edge directions differ from its own by more than
+    // 30° (a square corner: 45°; a curve of radius 3 px: 19°) is a corner; below 15°, an edge.
+    // Neighbours with a weak gradient (past the edge) say nothing about its direction.
+    let straight = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        .iter()
+        .filter_map(|(dx, dy)| edge_normal(s, sx + dx, sy + dy))
+        .filter(|n| n.2 >= 0.5 * len)
+        .map(|(mx, my, _)| mx * nx + my * ny)
+        .fold(1.0f32, f32::min);
+    let t = ((straight - 0.866) / 0.1).clamp(0.0, 1.0);
+    let projected = along - offset;
+    if (projected - plain).abs() > 1.0 { plain } else { plain + t * (projected - plain) }
+}
+
+/// Unit direction of rising alpha at pixel (x, y) (3 × 3 Sobel) and the gradient's length, if the
+/// alpha isn't flat there.
+fn edge_normal(s: &Map, x: i64, y: i64) -> Option<(f32, f32, f32)> {
+    let a = |dx: i64, dy: i64| s.get(x + dx, y + dy).min(1.0);
+    let gx = (a(1, -1) + 2.0 * a(1, 0) + a(1, 1)) - (a(-1, -1) + 2.0 * a(-1, 0) + a(-1, 1));
+    let gy = (a(-1, 1) + 2.0 * a(0, 1) + a(1, 1)) - (a(-1, -1) + 2.0 * a(0, -1) + a(1, -1));
+    let len = (gx * gx + gy * gy).sqrt();
+    (len >= 1e-3).then(|| (gx / len, gy / len, len))
+}
+
+/// [`dist_outside`] measured to the anti-aliased edge across its local direction (see
+/// [`edge_distance`]), for bevels: their outside halves shade with the field's gradient, which the
+/// seed-centre staircase streaked around curves. Glows keep [`dist_outside`], which matched
+/// Photoshop's precise glows slightly better.
+fn dist_outside_smooth(s: &Map) -> Vec<f32> {
+    let inside: Vec<bool> = s.v.iter().map(|&a| a > INSIDE_EPS).collect();
+    let (d, near) = edt_nearest(&inside, s.w, s.h);
+    (0..d.len()).map(|i| if inside[i] { -0.5 } else { edge_distance_dir(s, i, near[i], d[i], -1.0, s.v[near[i]].min(1.0) - 0.5) }).collect()
+}
+
 /// Distance from each pixel centre inside the shape to the shape's edge
 /// (≤ 0 outside).
 fn dist_inside(s: &Map) -> Vec<f32> {
@@ -291,7 +354,22 @@ fn dist_inside_by(s: &Map, m: Metric) -> Vec<f32> {
     }
     let outside: Vec<bool> = s.v.iter().map(|&a| a <= INSIDE_EPS).collect();
     let (d, _) = edt_nearest(&outside, s.w, s.h);
-    d.iter().zip(&outside).map(|(d, o)| if *o { -0.5 } else { d - 0.5 }).collect()
+    // Fully covered pixels measure to the anti-aliased edge: seeds are the pixels not fully
+    // covered, the edge `½ − coverage` beyond their centre (see `edge_distance`). Edge pixels
+    // keep the distance to the nearest uncovered pixel.
+    let seeds: Vec<bool> = s.v.iter().map(|&a| a < 1.0 - INSIDE_EPS).collect();
+    let (ds, near) = edt_nearest(&seeds, s.w, s.h);
+    (0..d.len())
+        .map(|i| {
+            if outside[i] {
+                -0.5
+            } else if seeds[i] {
+                d[i] - 0.5
+            } else {
+                edge_distance(s, i, near[i], ds[i], 0.5 - s.v[near[i]].min(1.0)).max(0.0)
+            }
+        })
+        .collect()
 }
 
 /// Alpha relative to the 3×3 neighbourhood maximum: separates edge coverage
@@ -887,13 +965,24 @@ pub struct BevelGeom {
     pub paint: BevelPaint,
     /// Box width of the smooth height blur (size; half the size, rounded up, for emboss styles).
     pub width: f32,
-    /// Height-map gradient scale: depth × width (smooth) or depth × size (chisel), signed by
-    /// direction.
+    /// Height-map gradient scale: depth × width (smooth) or depth × ramp length ×
+    /// [`chisel_slope`] (chisel), signed by direction.
     pub depth: f32,
     /// Pillow emboss: the outside slopes face the other way.
     pub pillow: bool,
     /// Chisel Soft: extra tent width over the chiselled height map.
     pub chisel_soft: f32,
+    /// Chisel: the inside and outside ramp lengths of the height map (see [`bevel_chisel_h`]).
+    pub chisel: [f32; 2],
+}
+
+/// Steepness of a chisel bevel's facets at 100 % depth for facet width `w` (the size; half of it,
+/// rounded up, for emboss styles): `w / (2 (w + 1))`. Fitted on Photoshop's own renderings through
+/// the same lighting model: inner size 10 (w 10) 0.451-0.457 → 0.4545, emboss size 10 (w 5)
+/// 0.415-0.422 → 0.4167, emboss size 13 (w 7) 0.435-0.437 → 0.4375, on both halves of an emboss.
+/// (A 45° facet, slope 1, made the shadows near black.)
+fn chisel_slope(w: f32) -> f32 {
+    w / (2.0 * (w + 1.0))
 }
 
 pub fn bevel_geom(b: &Bevel) -> BevelGeom {
@@ -910,29 +999,49 @@ pub fn bevel_geom(b: &Bevel) -> BevelGeom {
     let width = if emboss { (size / 2.0).ceil() } else { size };
     let smooth = b.technique == BevelTechnique::Smooth;
     let sign = if b.up { 1.0 } else { -1.0 };
+    // Chisel facets as Photoshop draws them (oracles at sizes 10 and 13, inner, outer, emboss):
+    // full shading for pixel centres up to W − ½ inside and W + ½ outside the edge (W = the size,
+    // half of it rounded up for emboss styles), then one partly shaded pixel. A height ramp that
+    // ends half a pixel past the last full centre gives exactly that through the shading's central
+    // differences. (A hair past it outside, so that pixel's height stays above `BEVEL_H_EPS`.)
+    let chisel = [width + 0.5, width + 1.5 + 1e-3];
+    // The height gradient scale that makes the facets [`chisel_slope`] steep at 100 % depth.
+    let ramp = match paint {
+        BevelPaint::Inner => chisel[0],
+        BevelPaint::Outer => chisel[1],
+        // Emboss halves share one slope (see `bevel_chisel_h`): the inside half rises
+        // 1 / (chisel[0] + chisel[1]) per pixel.
+        BevelPaint::Both => chisel[0] + chisel[1],
+    };
     BevelGeom {
         paint,
         width,
-        depth: b.depth * if smooth { width } else { size } * sign,
+        depth: b.depth * if smooth { width } else { ramp * chisel_slope(width) } * sign,
         pillow: b.style == BevelStyle::PillowEmboss,
         chisel_soft: if b.technique == BevelTechnique::ChiselSoft { (size / 4.0).max(1.0) } else { 0.0 },
+        chisel,
     }
 }
 
 /// Bevel height map in `0..=1`. Smooth: the shape blurred by two box passes of the bevel
-/// width. Chisel: linear ramps of the exact distance to the edge (size wide; emboss styles
-/// straddle the edge), slightly blurred for Chisel Soft. Soften blurs the result.
+/// width. Chisel: linear ramps of the exact distance to the edge ([`BevelGeom::chisel`] long;
+/// emboss styles straddle the edge), slightly blurred for Chisel Soft. Soften blurs the result.
 fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, patterns: &PreparedPatterns<'_>) -> Map {
-    let size = b.size.max(1.0);
     let mut h = if b.technique == BevelTechnique::Smooth {
         let mut h = shape.clone();
         tent(&mut h, g.width);
         h
     } else {
-        let (din, dout) = (dist_inside(shape), dist_outside(shape));
+        let (din, dout) = (dist_inside(shape), dist_outside_smooth(shape));
         let mut h = Map::new(shape.w, shape.h, 0.0);
         for i in 0..h.v.len() {
-            h.v[i] = bevel_chisel_h(g.paint, size, din[i], dout[i]);
+            // A partly covered edge pixel lies `coverage − ½` inside the edge (outside below ½),
+            // as the distances around it assume; taken as fully inside, its height broke the
+            // slope across the edge and the shading's differences put a dark or light dotted line
+            // along it (keep in sync with `fs_mbevelh`).
+            let a = shape.v[i];
+            let (di, dou) = if a > INSIDE_EPS && a < 1.0 - INSIDE_EPS { (a - 0.5, 0.5 - a) } else { (din[i], dout[i]) };
+            h.v[i] = bevel_chisel_h(g.paint, g.chisel, di, dou);
         }
         if g.chisel_soft > 0.0 {
             tent(&mut h, g.chisel_soft);
@@ -975,18 +1084,25 @@ pub struct TextureCtx<'a> {
     pub anchor: (f64, f64),
 }
 
-/// Chiselled height from the inside / outside distances (keep in sync with `fs_mbevelh`).
-pub fn bevel_chisel_h(paint: BevelPaint, size: f32, din: f32, dout: f32) -> f32 {
+/// Chiselled height from the inside / outside distances and the ramp lengths `[inside,
+/// outside]` ([`BevelGeom::chisel`]; keep in sync with `fs_mbevelh`). Clamped only at the far
+/// end of each ramp: across the shape's edge the ramp runs on, so the edge pixels shade at the full
+/// facet slope as Photoshop's do.
+pub fn bevel_chisel_h(paint: BevelPaint, ramp: [f32; 2], din: f32, dout: f32) -> f32 {
+    let [rin, rout] = ramp.map(|r| r.max(1e-3));
     match paint {
-        BevelPaint::Outer => 1.0 - (dout / size).clamp(0.0, 1.0),
+        BevelPaint::Outer => (1.0 - dout / rout).max(0.0),
+        // Emboss: one slope across both halves (Photoshop's outside facet is as steep as the
+        // inside one, and longer), from 0 at the end of the outside ramp to 1 at the end of the
+        // inside one.
         BevelPaint::Both => {
             if din > 0.0 {
-                0.5 + 0.5 * (din / (size / 2.0)).clamp(0.0, 1.0)
+                (rout + din.min(rin)) / (rin + rout)
             } else {
-                0.5 - 0.5 * (dout / (size / 2.0)).clamp(0.0, 1.0)
+                (rout - dout.min(rout)) / (rin + rout)
             }
         }
-        BevelPaint::Inner => (din / size).clamp(0.0, 1.0),
+        BevelPaint::Inner => (din / rin).min(1.0),
     }
 }
 
@@ -1517,8 +1633,10 @@ fn mix_premul(a: [f32; 4], b: [f32; 4], k: f32) -> [f32; 4] {
 /// `glow_map`, `bevel_maps` and `build_maps`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FieldKind {
-    /// `dist_outside` of the shape: precise outer and centre glows, bevels.
+    /// `dist_outside` of the shape: precise outer and centre glows.
     Outside,
+    /// `dist_outside_smooth` of the shape: bevels.
+    BevelOutside,
     /// `dist_inside` of the shape: precise edge inner glows, bevels.
     Inside,
     /// Chamfer distance outside the shape: outside strokes, and the spread of drop shadows and
@@ -1537,6 +1655,7 @@ pub fn distance_field(kind: FieldKind, alpha: Vec<f32>, w: usize, h: usize) -> V
     let s = Map { w, h, v: alpha };
     match kind {
         FieldKind::Outside => dist_outside(&s),
+        FieldKind::BevelOutside => dist_outside_smooth(&s),
         FieldKind::Inside => dist_inside(&s),
         FieldKind::StrokeOutside => dist_outside_by(&s, Metric::Chamfer),
         FieldKind::ChokeInside => dist_outside_by(&s.map(|a| 1.0 - a), Metric::Chamfer),
@@ -1774,6 +1893,82 @@ mod tests {
         let at = |x: usize, y: usize| m[0].v[y * 48 + x];
         // A constant slope: equal highlight along the top facet.
         assert!(at(24, 12) > 0.1 && (at(24, 12) - at(24, 13)).abs() < 1e-3);
+    }
+
+    /// Photoshop's chisel facets (oracle bevel-inner-chisel-hard: size 10, depth 100 %, light at
+    /// 120° / 30°) shade at highlight 0.27 (left), 0.53 (top) and shadow 0.44 (right), 0.71
+    /// (bottom), as measured from its composite. A 45° facet gave 0.32 / 0.77 / 0.91 / 1.0.
+    #[test]
+    fn chisel_facets_match_photoshop() {
+        let shape = square(64, 10, 54);
+        let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::ChiselHard);
+        (b.size, b.angle, b.altitude) = (10.0, 120.0, 30.0);
+        let (m, _) = bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        let at = |k: usize, x: usize, y: usize| m[k].v[y * 64 + x];
+        for (got, want) in [(at(0, 13, 32), 0.266), (at(0, 32, 13), 0.534), (at(1, 50, 32), 0.445), (at(1, 32, 50), 0.71)] {
+            assert!((got - want).abs() < 0.03, "{got} vs {want}");
+        }
+    }
+
+    /// An anti-aliased disc: a chiselled bevel's shading follows the curve smoothly. The pixel
+    /// staircase of a binary distance transform streaked it (neighbours along the ring differing
+    /// by more than half the shading range).
+    #[test]
+    fn chisel_on_a_curve_has_no_streaks() {
+        let n = 96;
+        let mut shape = Map::new(n, n, 0.0);
+        let (c, r) = (48.0f32, 36.0f32);
+        for y in 0..n {
+            for x in 0..n {
+                // 4 × 4 supersampled coverage.
+                let mut cov = 0.0;
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        let (px, py) = (x as f32 + (sx as f32 + 0.5) / 4.0, y as f32 + (sy as f32 + 0.5) / 4.0);
+                        cov += f32::from(((px - c).powi(2) + (py - c).powi(2)).sqrt() < r) / 16.0;
+                    }
+                }
+                shape.v[y * n + x] = cov;
+            }
+        }
+        let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::ChiselHard);
+        b.size = 10.0;
+        let (m, _) = bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        // Walk the middle of the facet (radius r − 5) around the circle.
+        let shade = |t: f32| {
+            let (x, y) = ((c + (r - 5.0) * t.cos()) as usize, (c + (r - 5.0) * t.sin()) as usize);
+            m[0].v[y * n + x] - m[1].v[y * n + x]
+        };
+        let steps = 720;
+        let worst = (0..steps)
+            .map(|k| {
+                let t = k as f32 / steps as f32 * std::f32::consts::TAU;
+                (shade(t) - shade(t + std::f32::consts::TAU / steps as f32)).abs()
+            })
+            .fold(0.0f32, f32::max);
+        assert!(worst < 0.12, "largest jump between neighbours on the ring: {worst}");
+    }
+
+    /// A straight edge whose last column is 43 % covered: the emboss shades on across it at the
+    /// facet's own value. Taking the partly covered column as fully inside broke the height ramp
+    /// there, and the first outside pixel shaded a quarter darker: a dotted line along every
+    /// anti-aliased edge (Photoshop kit, file 01).
+    #[test]
+    fn chisel_edge_pixels_continue_the_facet() {
+        let n = 64;
+        let mut shape = square(n, 10, 40);
+        for y in 10..40 {
+            shape.v[y * n + 40] = 0.43;
+        }
+        let mut b = bevel_of(BevelStyle::Emboss, BevelTechnique::ChiselHard);
+        (b.size, b.angle) = (13.0, 180.0);
+        let (m, _) = bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        // Light from the left: the right-hand facets are in shadow, inside and outside alike.
+        let sh = |x: usize| m[1].v[25 * n + x];
+        assert!(sh(42) > 0.2);
+        for x in [41, 43, 44] {
+            assert!((sh(x) - sh(42)).abs() < 0.02, "x {x}: {} vs {}", sh(x), sh(42));
+        }
     }
 
     #[test]

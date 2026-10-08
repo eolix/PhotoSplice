@@ -194,7 +194,13 @@ pub fn fill_from_vscg(data: &[u8]) -> Option<Fill> {
 }
 
 pub fn vscg_bytes(f: &Fill) -> Vec<u8> {
-    let (k, d) = fill_to_desc(f);
+    vscg_bytes_onto(f, None)
+}
+
+/// [`vscg_bytes`] merged onto the `vscg` data it replaces (see [`crate::blocks::fill_to_desc_onto`]).
+pub fn vscg_bytes_onto(f: &Fill, old: Option<&[u8]>) -> Vec<u8> {
+    let old = old.and_then(|d| Some((<&[u8; 4]>::try_from(d.get(..4)?).ok()?, d.get(4..)?)));
+    let (k, d) = crate::blocks::fill_to_desc_onto(f, old);
     let mut out = k.to_vec();
     out.extend(VersionedDescriptor::new(d).to_bytes());
     out
@@ -491,17 +497,24 @@ pub fn shape_blocks(sh: &ShapeLayer, raw: &mut Vec<([u8; 4], Vec<u8>)>, w: u32, 
                 Some(r) if keep(r) => r.to_vec(),
                 _ => vmsk_bytes(&sh.path, 0, w, h),
             };
+            // A shape in the CS6 form (fill in `vscg`, or a new shape) keeps its path under
+            // `vsms`, as Photoshop writes it; legacy shapes (top-level fill) under `vmsk`.
+            let legacy = raw.iter().any(|(k, _)| matches!(k, b"SoCo" | b"GdFl" | b"PtFl"));
             match pos {
                 Some(i) => raw[i].1 = data,
-                None => raw.push((*b"vmsk", data)),
+                None => raw.push((if legacy { *b"vmsk" } else { *b"vsms" }, data)),
             }
         }
     }
     // Fill content.
+    // Photoshop CS6 and later keep a shape's fill in `vscg`; older files have a top-level fill
+    // block instead (the caller updates that one). Photoshop never writes both.
     if let Some(f) = &sh.fill {
+        let legacy = raw.iter().any(|(k, _)| matches!(k, b"SoCo" | b"GdFl" | b"PtFl"));
         match find(raw, b"vscg") {
             Some(i) if fill_from_vscg(&raw[i].1).as_ref() == Some(f) => {}
-            Some(i) => raw[i].1 = vscg_bytes(f),
+            Some(i) => raw[i].1 = vscg_bytes_onto(f, Some(&raw[i].1)),
+            None if !legacy => raw.push((*b"vscg", vscg_bytes(f))),
             None => {}
         }
     }
@@ -686,7 +699,8 @@ mod tests {
         let mut raw = Vec::new();
         shape_blocks(&sh, &mut raw, 64, 64, 72.0);
         let keys: Vec<&[u8; 4]> = raw.iter().map(|(k, _)| k).collect();
-        assert_eq!(keys, [b"vmsk", b"vstk", b"vogk"]);
+        // A new shape keeps its fill in `vscg`, as Photoshop CS6 and later write shapes.
+        assert_eq!(keys, [b"vsms", b"vscg", b"vstk", b"vogk"]);
         let before = raw.clone();
         shape_blocks(&sh, &mut raw, 64, 64, 72.0);
         assert_eq!(raw, before);

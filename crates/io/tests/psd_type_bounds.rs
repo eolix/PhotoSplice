@@ -1,7 +1,7 @@
 //! Imported type-layer geometry (#148): PSD type layers built the way Photoshop writes them (a
 //! `TySh` with the text-space → document transform, `EngineData` with `StyleRun`/`ParagraphRun`
 //! sizes in text-space units, `BoxBounds` for paragraph text, `bounds`/`boundingBox` and the
-//! trailing integer bounds) must import with the right model, so that
+//! trailing f32 bounds) must import with the right model, so that
 //! - the layer's pixels (Photoshop's cache) keep their full extent: nothing is clipped,
 //! - re-rendering the imported model with our engine lands on the same pixels (no transform
 //!   scale applied twice or not at all, no 72-vs-document-dpi mix-up, no box height used as a
@@ -107,7 +107,8 @@ fn tysh(text: &str, runs: &[Run], box_bounds: Option<[f64; 4]>, transform: Affin
         .with("boundingBox", rect("boundingBox"))
         .with("TextIndex", D::Integer(0))
         .with("EngineData", D::RawData(photosuite_text::engine_data::write(&engine_data(text, runs, box_bounds))));
-    let bounds = [ink[0].floor() as i32, ink[1].floor() as i32, ink[2].ceil() as i32, ink[3].ceil() as i32];
+    // Photoshop's trailing bounds: the `bounds` rectangle as four f32s.
+    let bounds = ink.map(|v| v as f32);
     write_tysh(&TySh { transform, text: desc, warp: None, bounds })
 }
 

@@ -16,8 +16,10 @@ use crate::blocks;
 use crate::pixels::{interleave, max_sample, sample_for_depth, zero_sample};
 
 /// Resources that are mapped to document fields or regenerated on export.
-pub(crate) const MAPPED_RESOURCES: [u16; 19] = [
+pub(crate) const MAPPED_RESOURCES: [u16; 20] = [
     ids::GLOBAL_ANGLE,
+    // Regenerated from the layer ids on export.
+    ids::DOCUMENT_IDS_SEED,
     ids::GLOBAL_ALTITUDE,
     ids::RESOLUTION_INFO,
     ids::ICC_PROFILE,

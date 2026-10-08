@@ -81,6 +81,41 @@ impl Value {
     }
 }
 
+/// Nesting depth past which [`merge`] takes `over` as it is.
+const MERGE_DEPTH: usize = 32;
+
+/// Merges a regenerated value onto the one the file had, so a rewrite keeps what the model
+/// doesn't carry: dictionary keys of `over` win, keys only in `base` stay (in `base`'s order,
+/// new keys after); nested dictionaries merge recursively, as do arrays of the same length;
+/// anything else is `over`.
+pub fn merge(base: &Value, over: Value) -> Value {
+    merge_at(base, over, 0)
+}
+
+fn merge_at(base: &Value, over: Value, depth: usize) -> Value {
+    if depth > MERGE_DEPTH {
+        return over;
+    }
+    match (base, over) {
+        (Value::Dict(b), Value::Dict(mut o)) => {
+            let mut items = Vec::with_capacity(b.len().max(o.len()));
+            for (k, bv) in b {
+                match o.iter().position(|(ok, _)| ok == k) {
+                    Some(i) => {
+                        let (ok, ov) = o.remove(i);
+                        items.push((ok, merge_at(bv, ov, depth + 1)));
+                    }
+                    None => items.push((k.clone(), bv.clone())),
+                }
+            }
+            items.append(&mut o);
+            Value::Dict(items)
+        }
+        (Value::Array(b), Value::Array(o)) if b.len() == o.len() => Value::Array(b.iter().zip(o).map(|(bv, ov)| merge_at(bv, ov, depth + 1)).collect()),
+        (_, o) => o,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError(pub String);
 
@@ -219,11 +254,11 @@ pub fn parse(data: &[u8]) -> Result<Value, ParseError> {
     p.value(0)
 }
 
-/// Serializes in Photoshop's layout (tab-indented, one key per line).
+/// Serializes in Photoshop's layout (tab-indented, one key per line, nothing after the closing
+/// `>>`: all 92 EngineData blocks of the oracle and psd-tools corpora end that way).
 pub fn write(v: &Value) -> Vec<u8> {
     let mut out = b"\n\n".to_vec();
     write_value(v, 0, &mut out);
-    out.push(b'\n');
     out
 }
 
@@ -243,7 +278,9 @@ fn write_value(v: &Value, depth: usize, out: &mut Vec<u8>) {
                 indent(out, depth + 1);
                 out.push(b'/');
                 out.extend_from_slice(k.as_bytes());
-                if is_container(v) {
+                // Photoshop opens a dictionary on the next line but an array on the key's own
+                // line (`/RunArray [`).
+                if matches!(v, Value::Dict(_)) {
                     out.push(b'\n');
                     indent(out, depth + 1);
                 } else {
