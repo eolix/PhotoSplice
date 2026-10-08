@@ -359,15 +359,22 @@ impl Ex {
             blocks.push(TaggedBlock::sheet_color(blocks::label_index(l.label)));
         }
         blocks.push(TaggedBlock::fill_opacity(q255(l.fill_opacity)));
-        // Effects: the original lfx2 while the effects are unchanged (or
-        // could not be decoded at all); otherwise regenerated.
+        // Effects: the original lfx2 while the effects are unchanged (or could not be decoded at
+        // all), an unchanged lmfx stays with the raw blocks; otherwise regenerated onto the
+        // original block, as lmfx when a kind has several instances (as Photoshop stores them).
         let fx = &l.effects;
-        let lfx2 = match effects_unchanged(l) {
-            Some(true) | None if fx.psd_raw.is_some() => fx.psd_raw.as_ref().map(|r| r.to_vec()),
-            _ => (!fx.items.is_empty()).then(|| crate::effects_map::write_lfx2(fx.enabled, &fx.items)),
+        let lmfx = l.psd_blocks.iter().find(|(k, _)| k == b"lmfx").map(|(_, d)| d.clone());
+        let key = if l.is_group() { *b"lfxs" } else { *b"lfx2" };
+        let fx_block = match effects_unchanged(l) {
+            Some(true) | None if fx.psd_raw.is_some() => fx.psd_raw.as_ref().map(|r| (key, r.to_vec())),
+            Some(true) if lmfx.is_some() => None,
+            _ => (!fx.items.is_empty()).then(|| {
+                let template = lmfx.as_ref().or(fx.psd_raw.as_ref()).map(|d| d.as_slice());
+                let (d, multi) = crate::effects_map::write_lfx2_onto(template, fx.enabled, &fx.items);
+                (if multi { *b"lmfx" } else { key }, d)
+            }),
         };
-        if let Some(d) = lfx2 {
-            let key = if l.is_group() { *b"lfxs" } else { *b"lfx2" };
+        if let Some((key, d)) = fx_block {
             blocks.push(TaggedBlock::new(key, d));
         }
         blocks.extend(extra);
@@ -401,9 +408,10 @@ impl Ex {
     /// the layer's current parameters; otherwise it is regenerated.
     fn content_blocks(&mut self, l: &Layer) -> Vec<TaggedBlock> {
         let mut raw: Vec<([u8; 4], Vec<u8>)> = l.psd_blocks.iter().filter(|(k, _)| !REGENERATED.contains(&k)).map(|(k, d)| (*k, d.to_vec())).collect();
-        // A stale multi-effects block would override the regenerated lfx2.
+        // A stale multi-effects block would override the regenerated effects, and a stale legacy
+        // lrFX would disagree with them.
         if effects_unchanged(l) == Some(false) {
-            raw.retain(|(k, _)| k != b"lmfx");
+            raw.retain(|(k, _)| k != b"lmfx" && k != b"lrFX");
         }
         let mut regenerated: Vec<([u8; 4], Vec<u8>)> = Vec::new();
         // `keys` is in the importer's priority order (`psd_raw` came from the first key present),
@@ -853,9 +861,15 @@ fn smart_keys(data: Option<&[u8]>) -> &'static [&'static [u8; 4]] {
     }
 }
 
+/// Whether the layer's effects still match the block they were imported from (`lmfx`, `lfx2`, or
+/// on a non-group layer the legacy `lrFX`); `None` when there is none or it doesn't decode.
 fn effects_unchanged(l: &Layer) -> Option<bool> {
-    let src = l.psd_blocks.iter().find(|(k, _)| k == b"lmfx").map(|(_, d)| d.clone()).or_else(|| l.effects.psd_raw.clone())?;
-    let (m, items) = crate::effects_map::parse_lfx2(&src)?;
+    let raw = |key: &[u8; 4]| l.psd_blocks.iter().find(|(k, _)| k == key).map(|(_, d)| d.clone());
+    let (m, items) = match raw(b"lmfx").or_else(|| l.effects.psd_raw.clone()) {
+        Some(src) => crate::effects_map::parse_lfx2(&src)?,
+        None if !l.is_group() => crate::effects_map::parse_lrfx(&raw(b"lrFX")?)?,
+        None => return None,
+    };
     Some(m == l.effects.enabled && items == l.effects.items)
 }
 
@@ -905,9 +919,72 @@ fn cmyk_of(fmt: &PixelFormat) -> bool {
     fmt.mode == ColorMode::Cmyk
 }
 
+/// Longest side of the thumbnail Photoshop stores in resource 1036.
+const THUMB_MAX: usize = 160;
+/// Samples per thumbnail pixel along each axis (box filter over a sparse grid, so the thumbnail
+/// costs a fixed amount however large the document is).
+const THUMB_SAMPLES: usize = 4;
+
+/// The composite's thumbnail, averaged from the bands the merged image is rendered in.
+struct Thumb {
+    /// Canvas size.
+    w: usize,
+    h: usize,
+    /// Thumbnail size.
+    tw: usize,
+    th: usize,
+    /// Sum of RGB over white, and the sample count, per thumbnail pixel.
+    sum: Vec<[f32; 4]>,
+}
+
+impl Thumb {
+    fn new(w: usize, h: usize) -> Self {
+        let scale = (THUMB_MAX as f64 / w.max(h).max(1) as f64).min(1.0);
+        let (tw, th) = (((w as f64 * scale).round() as usize).max(1), ((h as f64 * scale).round() as usize).max(1));
+        Thumb { w, h, tw, th, sum: vec![[0.0; 4]; tw * th] }
+    }
+
+    /// Adds the canvas rows `y0..` of a full-width band.
+    fn add(&mut self, y0: usize, px: &[[f32; 4]]) {
+        let (sx, sy) = ((self.w / (self.tw * THUMB_SAMPLES)).max(1), (self.h / (self.th * THUMB_SAMPLES)).max(1));
+        let rows = px.len() / self.w.max(1);
+        for y in (y0.next_multiple_of(sy)..y0 + rows).step_by(sy) {
+            let ty = (y * self.th / self.h).min(self.th - 1);
+            for x in (0..self.w).step_by(sx) {
+                let Some(p) = px.get((y - y0) * self.w + x) else { continue };
+                let tx = (x * self.tw / self.w).min(self.tw - 1);
+                if let Some(acc) = self.sum.get_mut(ty * self.tw + tx) {
+                    let a = p[3].clamp(0.0, 1.0);
+                    for c in 0..3 {
+                        acc[c] += p[c].clamp(0.0, 1.0) * a + (1.0 - a);
+                    }
+                    acc[3] += 1.0;
+                }
+            }
+        }
+    }
+
+    /// Resource 1036 data: the thumbnail header (format 1 = JPEG RGB, size, row bytes, sizes,
+    /// 24 bits per pixel, 1 plane; Adobe PSD spec, "Thumbnail resource format") and a JFIF image.
+    fn resource(&self) -> Option<Vec<u8>> {
+        let rgb: Vec<u8> = self.sum.iter().flat_map(|s| (0..3).map(move |c| if s[3] > 0.0 { q255(s[c] / s[3]) } else { 255 })).collect();
+        let jpeg = photosuite_codecs::web::encode_jpeg_rgb8(self.tw as u32, self.th as u32, &rgb, 85, false, false, None, None, None).ok()?;
+        let row = (self.tw * 24).div_ceil(32) * 4;
+        let mut v = Vec::with_capacity(28 + jpeg.len());
+        for x in [1, self.tw, self.th, row, row * self.th, jpeg.len()] {
+            v.extend_from_slice(&u32::try_from(x).ok()?.to_be_bytes());
+        }
+        v.extend_from_slice(&24u16.to_be_bytes());
+        v.extend_from_slice(&1u16.to_be_bytes());
+        v.extend(jpeg);
+        Some(v)
+    }
+}
+
 /// The merged image's planes (colour channels, then alpha), big-endian, matted against white
 /// when `matte`; with whether any pixel needs the alpha channel and whether any is below 1.
-fn merged_planes(doc: &Document, fmt: &PixelFormat, cmyk: bool, matte: bool) -> (Vec<u8>, bool, bool) {
+/// `thumb`, when given, collects the composite's thumbnail on the way.
+fn merged_planes(doc: &Document, fmt: &PixelFormat, cmyk: bool, matte: bool, mut thumb: Option<&mut Thumb>) -> (Vec<u8>, bool, bool) {
     let sample = fmt.sample;
     let cc = fmt.mode.color_channels();
     let bps = sample.bytes();
@@ -928,6 +1005,9 @@ fn merged_planes(doc: &Document, fmt: &PixelFormat, cmyk: bool, matte: bool) -> 
             SampleType::F32 => p[3] != 1.0,
         });
         translucent |= band.px.iter().any(|p| p[3] < 1.0);
+        if let Some(t) = thumb.as_deref_mut() {
+            t.add((band.rect.y0 - canvas.y0) as usize, &band.px);
+        }
         let start = (band.rect.y0 - canvas.y0) as usize * w;
         // Converted and encoded on all cores, then copied into each plane.
         let parts = crate::pixels::par_map(crate::pixels::bands(band.px.len()), |range| {
@@ -1149,9 +1229,10 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     // Merged composite, rendered and encoded in bands (no full-size float composite). Matting
     // against white only changes pixels with alpha < 1; if some are slightly translucent but all
     // round to opaque (so no alpha channel is written), encode once more without the matte.
-    let (mut planes, has_alpha, translucent) = merged_planes(doc, &fmt, cmyk_of(&fmt), opts.merged_matte);
+    let mut thumb = Thumb::new(doc.size.width as usize, doc.size.height as usize);
+    let (mut planes, has_alpha, translucent) = merged_planes(doc, &fmt, cmyk_of(&fmt), opts.merged_matte, Some(&mut thumb));
     if !has_alpha && translucent && opts.merged_matte {
-        planes = merged_planes(doc, &fmt, cmyk_of(&fmt), false).0;
+        planes = merged_planes(doc, &fmt, cmyk_of(&fmt), false, None).0;
     }
     let n = doc.size.area() as usize;
     if !has_alpha {
@@ -1194,6 +1275,11 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         ImageResource::new(ids::GLOBAL_ANGLE, (doc.global_light.angle.round() as i32).to_be_bytes().to_vec()),
         ImageResource::new(ids::GLOBAL_ALTITUDE, (doc.global_light.altitude.round() as i32).to_be_bytes().to_vec()),
     ];
+    // Photoshop's own thumbnail (Finder, Bridge and other readers show it); regenerated, since an
+    // imported one goes stale with any edit.
+    if let Some(t) = thumb.resource() {
+        resources.push(ImageResource::new(ids::THUMBNAIL, t));
+    }
     if let Some(icc) = &doc.icc_profile {
         resources.push(ImageResource::new(ids::ICC_PROFILE, icc.to_vec()));
     }

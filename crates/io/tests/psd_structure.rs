@@ -541,3 +541,25 @@ fn every_blend_mode_maps_both_ways() {
         assert_eq!(photosuite_color::BlendMode::from_psd_key(k.key()), Some(m));
     }
 }
+
+#[test]
+fn export_writes_a_thumbnail() {
+    use photosuite_color::ColorMode as Mode;
+    use photosuite_color::SampleType;
+    for (mode, sample) in [(Mode::Rgb, SampleType::U8), (Mode::Cmyk, SampleType::U16), (Mode::Grayscale, SampleType::F32)] {
+        let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(320, 160), mode, sample);
+        let mut l = photosuite_doc::Layer::raster("red", d.pixel_format());
+        // Left half dark, right half transparent (white in the thumbnail).
+        l.surface_mut().unwrap().fill_rect(photosuite_geom::Rect::new(0, 0, 160, 160), &photosuite_raster::from_rgba(&d.pixel_format(), [0.1, 0.1, 0.1, 1.0]));
+        d.layers.push(l);
+        let (f, _) = document_to_psd_with(&d, &PsdExportOptions::default());
+        let r = f.resource(1036).expect("thumbnail");
+        let be = |at: usize| u32::from_be_bytes(r.data[at..at + 4].try_into().unwrap());
+        assert_eq!((be(0), be(4), be(8)), (1, 160, 80), "{mode:?}");
+        assert_eq!(be(20) as usize, r.data.len() - 28);
+        let img = photosuite_codecs::decode(&r.data[28..]).unwrap();
+        assert_eq!((img.width(), img.height()), (160, 80));
+        let px = |x: usize, y: usize| img.data()[(y * 160 + x) * 3];
+        assert!(px(20, 40) < 60 && px(140, 40) > 200, "{mode:?}: {} {}", px(20, 40), px(140, 40));
+    }
+}

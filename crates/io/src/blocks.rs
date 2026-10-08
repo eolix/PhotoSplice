@@ -136,6 +136,47 @@ pub fn color_to_desc(c: &Color) -> Descriptor {
     }
 }
 
+/// Nesting depth past which [`merge_descriptor`] stops merging and takes the regenerated value.
+const MERGE_DEPTH: usize = 32;
+
+/// Merges a regenerated descriptor onto the one the file had, so a rewrite keeps what the
+/// document model doesn't carry ("merge, don't rebuild"). Keys of `over` win, except those named
+/// in `keep`, whose original value stays. Keys only in `base` are kept. The result follows
+/// `base`'s key order, then `over`'s new keys. Nested descriptors of the same class merge
+/// recursively, as do lists of the same length; anything else takes `over`'s value.
+pub(crate) fn merge_descriptor(base: &Descriptor, over: Descriptor, keep: &[&str]) -> Descriptor {
+    merge_desc(base, over, keep, 0)
+}
+
+fn merge_desc(base: &Descriptor, mut over: Descriptor, keep: &[&str], depth: usize) -> Descriptor {
+    if depth > MERGE_DEPTH {
+        return over;
+    }
+    let mut items = Vec::with_capacity(base.items.len().max(over.items.len()));
+    for (k, bv) in &base.items {
+        match over.items.iter().position(|(ok, _)| ok == k) {
+            Some(i) => {
+                let (ok, ov) = over.items.remove(i);
+                let v = if keep.iter().any(|s| k.is(s)) { bv.clone() } else { merge_value(bv, ov, keep, depth + 1) };
+                items.push((ok, v));
+            }
+            None => items.push((k.clone(), bv.clone())),
+        }
+    }
+    items.append(&mut over.items);
+    Descriptor { name: over.name, class_id: over.class_id, items }
+}
+
+fn merge_value(base: &Value, over: Value, keep: &[&str], depth: usize) -> Value {
+    match (base, over) {
+        (Value::Descriptor(b), Value::Descriptor(o)) if b.class_id == o.class_id => Value::Descriptor(merge_desc(b, o, keep, depth)),
+        (Value::List(b), Value::List(o)) if b.len() == o.len() => {
+            Value::List(b.iter().zip(o).map(|(bv, ov)| merge_value(bv, ov, keep, depth + 1)).collect())
+        }
+        (_, o) => o,
+    }
+}
+
 pub(crate) fn get_desc<'a>(d: &'a Descriptor, key: &str) -> Option<&'a Descriptor> {
     match d.get(key)? {
         Value::Descriptor(x) | Value::GlobalObject(x) => Some(x),
@@ -784,5 +825,32 @@ mod more_tests {
     #[test]
     fn tysh_garbage_is_none() {
         assert!(parse_tysh(&[0; 10]).is_none());
+    }
+
+    #[test]
+    fn merge_keeps_unmodelled_keys() {
+        let rgb = |r: f64| Value::Descriptor(Descriptor::new("RGBC").with("Rd  ", Value::Double(r)));
+        let base = Descriptor::new("x")
+            .with("a", Value::Integer(1))
+            .with("old", Value::Integer(2))
+            .with("Clr ", Value::Descriptor(Descriptor::new("Grsc").with("Gry ", Value::Double(5.0))))
+            .with("list", Value::List(vec![Value::Descriptor(Descriptor::new("pt").with("extra", Value::Boolean(true)))]))
+            .with("kept", Value::Integer(3));
+        let over = Descriptor::new("x")
+            .with("new", Value::Integer(4))
+            .with("a", Value::Integer(10))
+            .with("Clr ", rgb(1.0))
+            .with("list", Value::List(vec![Value::Descriptor(Descriptor::new("pt").with("v", Value::Integer(7)))]))
+            .with("kept", Value::Integer(30));
+        let m = merge_descriptor(&base, over, &["kept"]);
+        let keys: Vec<_> = m.items.iter().map(|(k, _)| String::from_utf8_lossy(k.as_bytes()).into_owned()).collect();
+        assert_eq!(keys, ["a", "old", "Clr ", "list", "kept", "new"]);
+        assert_eq!(m.get("a"), Some(&Value::Integer(10)));
+        assert_eq!(m.get("kept"), Some(&Value::Integer(3)));
+        // Another colour class replaces the old one outright.
+        assert_eq!(m.get("Clr "), Some(&rgb(1.0)));
+        let Some(Value::List(l)) = m.get("list") else { panic!() };
+        let Value::Descriptor(pt) = &l[0] else { panic!() };
+        assert_eq!(pt.items.len(), 2);
     }
 }

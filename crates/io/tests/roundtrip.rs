@@ -346,11 +346,14 @@ fn effects_roundtrip_typed_and_raw() {
     assert_eq!(back.global_light, d.global_light);
     let fx = &back.layers[1].effects;
     assert_eq!(fx.items.len(), 3);
-    let raw = fx.psd_raw.clone().expect("lfx2 kept");
-    // Unchanged → the same lfx2 bytes are written again.
+    // Two strokes: stored as `lmfx` alone, as Photoshop does.
+    let raw = back.layers[1].psd_blocks.iter().find(|(k, _)| k == b"lmfx").map(|(_, d)| d.clone()).expect("lmfx kept");
+    assert!(fx.psd_raw.is_none());
+    // Unchanged → the same lmfx bytes are written again, with no lfx2 beside them.
     let f = document_to_psd(&back);
     let rec = f.layers().iter().find(|r| r.name() == back.layers[1].name).unwrap();
-    assert_eq!(rec.block(b"lfx2").unwrap().data, *raw);
+    assert_eq!(rec.block(b"lmfx").unwrap().data, *raw);
+    assert!(rec.block(b"lfx2").is_none());
     // Edited → regenerated.
     let mut edited = back.clone();
     if let Effect::DropShadow(s) = &mut edited.layers[1].effects.items[0] {
@@ -358,10 +361,19 @@ fn effects_roundtrip_typed_and_raw() {
     }
     let f = document_to_psd(&edited);
     let rec = f.layers().iter().find(|r| r.name() == back.layers[1].name).unwrap();
-    let data = &rec.block(b"lfx2").unwrap().data;
+    let data = &rec.block(b"lmfx").unwrap().data;
     assert_ne!(data, &*raw);
+    assert!(rec.block(b"lfx2").is_none());
     let (_, items) = photosuite_io::effects_map::parse_lfx2(data).unwrap();
     assert!(matches!(&items[0], Effect::DropShadow(s) if s.distance == 20.0));
+    // One instance per kind → lfx2, kept verbatim while unchanged.
+    edited.layers[1].effects.items.truncate(2);
+    let back = roundtrip(&edited);
+    let raw = back.layers[1].effects.psd_raw.clone().expect("lfx2 kept");
+    let f = document_to_psd(&back);
+    let rec = f.layers().iter().find(|r| r.name() == back.layers[1].name).unwrap();
+    assert_eq!(rec.block(b"lfx2").unwrap().data, *raw);
+    assert!(rec.block(b"lmfx").is_none());
 }
 
 #[test]

@@ -535,6 +535,9 @@ fn kind_of(s: &Session, id: LayerId) -> Option<&'static str> {
     })
 }
 
+/// PSD blocks that define fill and placed (smart object) layer content.
+const RASTERIZED_KEYS: [&[u8; 4]; 6] = [b"SoCo", b"GdFl", b"PtFl", b"SoLd", b"PlLd", b"SoLE"];
+
 /// Rasterize one layer; `only` restricts it to one kind. Returns false when there was nothing to do.
 fn rasterize_one(s: &mut Session, id: LayerId, only: Option<&str>, key: &str) -> Result<bool> {
     let Some(kind) = kind_of(s, id).filter(|k| only.is_none_or(|o| o == *k)) else { return Ok(false) };
@@ -554,6 +557,9 @@ fn rasterize_one(s: &mut Session, id: LayerId, only: Option<&str>, key: &str) ->
                 let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
                 l.content = LayerContent::Raster(px);
                 l.fill_cache = None;
+                // The PSD blocks that made this a fill or placed layer would otherwise be written
+                // back verbatim, and the pixel layer would reopen as a fill or smart object.
+                l.psd_blocks.retain(|(k, _)| !RASTERIZED_KEYS.contains(&k));
                 Ok(())
             });
             s.coalesce_request = None;
@@ -1039,5 +1045,26 @@ mod tests {
         assert_eq!(s.execute("layer.rasterize.allLayers", json!({})).unwrap()["rasterized"], 1);
         assert_eq!(s.active().unwrap().history.past_len(), steps + 1);
         assert!(doc(&s).walk().iter().all(|(_, _, l)| !matches!(l.content, LayerContent::Fill(_))));
+    }
+
+    #[test]
+    fn rasterized_fill_reopens_as_pixels() {
+        // An imported fill layer keeps its PSD `SoCo` block; once rasterized, the PSD must not
+        // carry it any more, or the layer reopens as a fill layer.
+        let mut s = session(8);
+        s.execute("layer.newFillLayer.solidColor", json!({"color": "#00ff00"})).unwrap();
+        let id = s.active().unwrap().active_layer.unwrap();
+        let (psd, _) = photosuite_io::document_to_psd_with(doc(&s), &Default::default());
+        let soco = psd.layers().iter().find_map(|r| r.blocks.iter().find(|b| &b.key == b"SoCo")).unwrap().data.clone();
+        s.edit("import", |doc, _| {
+            doc.layer_mut(id).unwrap().psd_blocks.push((*b"SoCo", std::sync::Arc::new(soco)));
+            Ok(())
+        })
+        .unwrap();
+        s.execute("layer.rasterize.fillContent", json!({})).unwrap();
+        let (psd, _) = photosuite_io::document_to_psd_with(doc(&s), &Default::default());
+        assert!(psd.layers().iter().all(|r| r.blocks.iter().all(|b| &b.key != b"SoCo")));
+        let (back, _) = photosuite_io::psd_to_document(&psd);
+        assert!(back.walk().iter().all(|(_, _, l)| !matches!(l.content, LayerContent::Fill(_))));
     }
 }
