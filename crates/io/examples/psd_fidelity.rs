@@ -312,6 +312,11 @@ impl Census {
                 println!("  header channels {} -> {}", orig.header.channels, exp.header.channels);
             }
         }
+        // The merged image's pixels (Photoshop's composite vs ours: equal for flat files).
+        match (orig.decode_merged(), exp.decode_merged()) {
+            (Ok(a), Ok(b)) if a == b => self.stat("image:merged".into(), &name).same += 1,
+            _ => self.bad("image:merged".into(), &name).changed += 1,
+        }
         if orig.color_mode_data == exp.color_mode_data {
             self.stat("header:color_mode_data".into(), &name).same += 1;
         } else {

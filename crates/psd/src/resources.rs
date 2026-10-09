@@ -26,6 +26,10 @@ pub mod ids {
     pub const LAYER_GROUPS_ENABLED: u16 = 1072;
     /// ICC profile.
     pub const ICC_PROFILE: u16 = 1039;
+    /// Unicode alpha channel names (the merged transparency first, named "Transparency").
+    pub const UNICODE_ALPHA_NAMES: u16 = 1045;
+    /// Alpha channel ids: one u32 per entry of the names (no count, whatever the spec says).
+    pub const ALPHA_IDS: u16 = 1053;
     /// Global altitude.
     pub const GLOBAL_ALTITUDE: u16 = 1049;
     /// Version info (has real merged data flag).
@@ -254,6 +258,25 @@ pub(crate) fn write_section(out: &mut Vec<u8>, res: &[ImageResource]) -> Result<
         r.write(out)?;
     }
     out.end_len(at, false)
+}
+
+/// The name Photoshop gives the merged image's transparency in the alpha channel lists.
+pub const TRANSPARENCY_NAME: &str = "Transparency";
+
+/// The names in a 1045 resource (each a u32 length in UTF-16 units, then the units), trailing
+/// NULs removed. Stops at the first entry that runs past the data.
+pub fn unicode_names(data: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while let Some(len) = data.get(at..at.saturating_add(4)).and_then(|b| <[u8; 4]>::try_from(b).ok()) {
+        at += 4;
+        let Some(end) = (u32::from_be_bytes(len) as usize).checked_mul(2).and_then(|n| at.checked_add(n)) else { break };
+        let Some(b) = data.get(at..end) else { break };
+        let units: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        out.push(String::from_utf16_lossy(&units).trim_end_matches('\0').to_string());
+        at = end;
+    }
+    out
 }
 
 /// Builds the data for a 1057 version info resource, with the writer and reader names a current

@@ -108,6 +108,11 @@ pub fn color_from_desc(d: &Descriptor) -> Option<Color> {
         b"RGBC" => Color::rgb(g("Rd  ")? / 255.0, g("Grn ")? / 255.0, g("Bl  ")? / 255.0),
         b"CMYC" => Color { mode: ColorMode::Cmyk, c: [g("Cyn ")? / 100.0, g("Mgnt")? / 100.0, g("Ylw ")? / 100.0, g("Blck")? / 100.0], alpha: 1.0 },
         b"Grsc" => Color::gray(1.0 - g("Gry ")? / 100.0),
+        // HSB: hue in degrees (`H   `, unit `#Ang`), saturation and brightness 0..100.
+        b"HSBC" => {
+            let [r, gr, b] = hsb_to_rgb(g("H   ")?, g("Strt")? / 100.0, g("Brgh")? / 100.0);
+            Color::rgb(r, gr, b)
+        }
         // CIE L*a*b*: L 0..100, a / b −128..127 (stored like Lab pixels: offset by 128).
         b"LbCl" => Color { mode: ColorMode::Lab, c: [g("Lmnc")? / 100.0, (g("A   ")? + 128.0) / 255.0, (g("B   ")? + 128.0) / 255.0, 0.0], alpha: 1.0 },
         // Newer Photoshop writes 0..1 floats.
@@ -117,6 +122,22 @@ pub fn color_from_desc(d: &Descriptor) -> Option<Color> {
             Color::rgb(g("Rd  ")? / 255.0, g("Grn ")? / 255.0, g("Bl  ")? / 255.0)
         }
     })
+}
+
+/// HSB (hue in degrees, saturation and brightness 0..1) → RGB 0..1.
+fn hsb_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
+    let (s, v) = (s.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
+    let h = if h.is_finite() { h.rem_euclid(360.0) / 60.0 } else { 0.0 };
+    let f = h - h.floor();
+    let (p, q, t) = (v * (1.0 - s), v * (1.0 - s * f), v * (1.0 - s * (1.0 - f)));
+    match h as u32 {
+        0 => [v, t, p],
+        1 => [q, v, p],
+        2 => [p, v, t],
+        3 => [p, q, v],
+        4 => [t, p, v],
+        _ => [v, p, q],
+    }
 }
 
 /// [`Color`] → descriptor in its own model.
@@ -843,6 +864,25 @@ mod more_tests {
     #[test]
     fn tysh_garbage_is_none() {
         assert!(parse_tysh(&[0; 10]).is_none());
+    }
+
+    #[test]
+    fn hsb_colours_decode() {
+        let hsb = |h: f64, s: f64, b: f64| {
+            Descriptor::new("HSBC")
+                .with("H   ", Value::UnitFloat { unit: *b"#Ang", value: h })
+                .with("Strt", Value::Double(s))
+                .with("Brgh", Value::Double(b))
+        };
+        let rgb = |d: &Descriptor| color_from_desc(d).unwrap().to_rgb();
+        assert_eq!(rgb(&hsb(0.0, 0.0, 100.0)), [1.0, 1.0, 1.0]);
+        assert_eq!(rgb(&hsb(0.0, 100.0, 100.0)), [1.0, 0.0, 0.0]);
+        assert_eq!(rgb(&hsb(120.0, 100.0, 50.0)), [0.0, 0.5, 0.0]);
+        let c = rgb(&hsb(210.0, 50.0, 80.0));
+        assert!((c[0] - 0.4).abs() < 1e-5 && (c[1] - 0.6).abs() < 1e-5 && (c[2] - 0.8).abs() < 1e-5, "{c:?}");
+        // Hue wraps; missing keys are not a colour.
+        assert_eq!(rgb(&hsb(360.0, 100.0, 100.0)), [1.0, 0.0, 0.0]);
+        assert!(color_from_desc(&Descriptor::new("HSBC").with("H   ", Value::Double(1.0))).is_none());
     }
 
     #[test]

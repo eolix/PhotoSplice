@@ -48,9 +48,9 @@ pub(crate) fn import(file: &PsdFile, all: &[u8], doc: &mut Document, names: &[St
         doc.channels.push(AlphaChannel { spot: Some((Color::BLACK, 0.0)), ..AlphaChannel::new(name, s) });
     }
     if let Some(r) = file.resource(crate::channel_map::DISPLAY_INFO) {
-        crate::channel_map::apply_display_info(&r.data, true, &mut doc.channels);
+        crate::channel_map::apply_display_info(&r.data, true, 0, &mut doc.channels);
     } else if let Some(r) = file.resource(crate::channel_map::DISPLAY_INFO_OLD) {
-        crate::channel_map::apply_display_info(&r.data, false, &mut doc.channels);
+        crate::channel_map::apply_display_info(&r.data, false, 0, &mut doc.channels);
     }
 }
 
@@ -102,7 +102,7 @@ pub(crate) fn document_to_psd(doc: &Document, force_psb: bool) -> (PsdFile, Vec<
         let names: Vec<&str> = channels.iter().map(|c| c.name.as_str()).collect();
         resources.push(ImageResource::new(1006, crate::psd_export::pascal_names_resource(&names)));
         resources.push(ImageResource::new(1045, crate::psd_export::unicode_names_resource(&names)));
-        resources.push(ImageResource::new(crate::channel_map::DISPLAY_INFO, crate::channel_map::display_info(&channels)));
+        resources.push(ImageResource::new(crate::channel_map::DISPLAY_INFO, crate::channel_map::display_info(false, &channels)));
     }
     if let Some(x) = &doc.metadata.xmp {
         resources.push(ImageResource::new(ids::XMP, x.as_bytes().to_vec()));

@@ -31,6 +31,7 @@ mod channel_map;
 pub mod comps_map;
 pub mod effects_map;
 mod flat;
+mod flat_modes;
 mod gradient_bake;
 pub mod linked;
 mod multichannel_map;

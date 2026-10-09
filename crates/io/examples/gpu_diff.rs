@@ -34,6 +34,13 @@ fn main() {
     let (cm, cx) = err(&cpu, &merged);
     let (dm, dx) = err(&gpu, &cpu);
     println!("{path} ({format:?})\n  GPU vs Photoshop: mean {gm:.4} max {gx:.3}\n  CPU vs Photoshop: mean {cm:.4} max {cx:.3}\n  GPU vs CPU:       mean {dm:.4} max {dx:.3}");
+    // Over white hides alpha: compare it on its own (what shows over the transparency grid).
+    let alpha = |a: &[[f32; 4]], b: &[[f32; 4]]| {
+        let ds: Vec<f32> = a.iter().zip(b).map(|(x, y)| (x[3] - y[3]).abs()).collect();
+        (ds.iter().sum::<f32>() / ds.len().max(1) as f32, ds.iter().copied().fold(0.0, f32::max))
+    };
+    let ((am, ax), (cam, cax)) = (alpha(&gpu, &merged), alpha(&cpu, &merged));
+    println!("  alpha GPU vs Photoshop: mean {am:.4} max {ax:.3}; CPU: mean {cam:.4} max {cax:.3}");
 
     let Some(out) = std::env::args().nth(2) else { return };
     let (w, h) = (doc.size.width as usize, doc.size.height as usize);

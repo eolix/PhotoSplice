@@ -30,11 +30,15 @@ pub struct PsdExportOptions {
     pub merged_matte: bool,
     /// Compression of the merged image (32-bit float documents are always written raw).
     pub merged_compression: Compression,
+    /// Write Indexed, Bitmap and Duotone documents in their own mode when they fit it (see
+    /// `flat_modes`); `false` writes them as RGB / Grayscale layers, for containers that hold
+    /// those only (a layered TIFF's layer data).
+    pub native_modes: bool,
 }
 
 impl Default for PsdExportOptions {
     fn default() -> Self {
-        PsdExportOptions { force_psb: false, merged_matte: true, merged_compression: Compression::Rle }
+        PsdExportOptions { force_psb: false, merged_matte: true, merged_compression: Compression::Rle, native_modes: true }
     }
 }
 
@@ -918,11 +922,13 @@ fn link_group_resource(layers: &[Layer]) -> Vec<u8> {
 
 /// The layer-state resources Photoshop writes in every layered file, for the records written: the
 /// target layer (1024: record index), the selected layers (1069: count, then layer ids), each
-/// record's group-enabled flag (1072: one byte, 1) and the layer id seed (1044: the highest id).
+/// record's group-enabled flag (1072: one byte, 1) and the layer id seed (1044: the highest id,
+/// at least `min_seed`, the file's own).
 /// The document model keeps no target or selection, so the top record is both, as in a file
 /// Photoshop has just opened.
-fn layer_state_resources(records: &[LayerRecord]) -> Vec<ImageResource> {
-    let max_id = records.iter().filter_map(LayerRecord::layer_id).max().unwrap_or(0);
+fn layer_state_resources(records: &[LayerRecord], min_seed: u32) -> Vec<ImageResource> {
+    // The seed never goes back: Photoshop numbers new layers from it.
+    let max_id = records.iter().filter_map(LayerRecord::layer_id).max().unwrap_or(0).max(min_seed);
     let mut out = vec![ImageResource::new(ids::DOCUMENT_IDS_SEED, max_id.to_be_bytes().to_vec())];
     let Some((top, rec)) = records.len().checked_sub(1).zip(records.last()) else { return out };
     out.push(ImageResource::new(ids::LAYER_STATE, u16::try_from(top).unwrap_or(u16::MAX).to_be_bytes().to_vec()));
@@ -963,6 +969,28 @@ fn effects_unchanged(l: &Layer) -> Option<bool> {
 
 fn legacy_name(s: &str) -> Vec<u8> {
     s.chars().map(|c| if c.is_ascii() && !c.is_ascii_control() { c as u8 } else { b'?' }).take(255).collect()
+}
+
+/// Resource 1053: one u32 id per entry of the channel names (observed in Photoshop's files; no
+/// count before them). The file's ids are kept while the count still matches; otherwise the
+/// transparency keeps 0 and the channels reuse the file's other ids in order, then new ones.
+pub(crate) fn alpha_ids_resource(old: Option<&[u8]>, has_alpha: bool, count: usize) -> Vec<u8> {
+    let old: Vec<u32> = old.map(|d| d.chunks_exact(4).map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]])).collect()).unwrap_or_default();
+    let ids = if old.len() == count {
+        old
+    } else {
+        let mut reuse = old.iter().copied().filter(|&i| i != 0);
+        let mut next = old.iter().copied().max().unwrap_or(0);
+        let mut ids: Vec<u32> = has_alpha.then_some(0).into_iter().collect();
+        while ids.len() < count {
+            ids.push(reuse.next().unwrap_or_else(|| {
+                next = next.saturating_add(1);
+                next
+            }));
+        }
+        ids
+    };
+    ids.iter().flat_map(|i| i.to_be_bytes()).collect()
 }
 
 pub(crate) fn unicode_names_resource(names: &[&str]) -> Vec<u8> {
@@ -1286,7 +1314,13 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     } else if size_exceeds_limit && !opts.force_psb {
         ex.warnings.push("estimated encoded size exceeds 2 GB; written as PSB".into());
     }
-    if fmt.mode != doc.mode {
+    // A duotone from a PSD goes back as Duotone with its ink data (undocumented, kept verbatim);
+    // one made here has no Photoshop ink data to write and goes out as its gray plate.
+    let duotone_raw =
+        (opts.native_modes && doc.mode == ColorMode::Duotone && sample != SampleType::F32).then(|| doc.duotone.as_ref().and_then(|d| d.psd_raw.clone())).flatten();
+    // A single plain Indexed / Bitmap image goes back in its own mode (see `flat_modes`).
+    let flat_mode = opts.native_modes && crate::flat_modes::eligible(doc);
+    if fmt.mode != doc.mode && duotone_raw.is_none() && !flat_mode {
         ex.warnings.push(format!("{:?} document written as {:?}", doc.mode, fmt.mode));
     }
     // Assign layer ids up front (stable across round trips): keep unique
@@ -1352,7 +1386,8 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         planes.extend(deinterleave(&bytes, 1, sample, &[false]).remove(0));
     }
     let channels = (cc + usize::from(has_alpha) + extra.len()) as u16;
-    let header = Header::new(version, doc.size.width, doc.size.height, channels, psd_depth(sample), psd_mode(fmt.mode));
+    let mode = if duotone_raw.is_some() { PsdMode::Duotone } else { psd_mode(fmt.mode) };
+    let header = Header::new(version, doc.size.width, doc.size.height, channels, psd_depth(sample), mode);
     let mcomp = if sample == SampleType::F32 { Compression::Raw } else { opts.merged_compression };
     let image_data = ImageData::encode(mcomp, &planes, &header)
         .or_else(|_| ImageData::encode(Compression::Raw, &planes, &header))
@@ -1374,11 +1409,15 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     }
     // Photoshop writes the grid and guides resource in every file, guides or not.
     resources.push(ImageResource::new(1032, guides_resource(doc)));
-    if !extra.is_empty() {
-        let names: Vec<&str> = extra.iter().map(|a| a.name.as_str()).collect();
+    // Alpha channel names, ids and display options. Photoshop lists the merged transparency
+    // first ("Transparency", id 0), then the alpha and spot channels.
+    if has_alpha || !extra.is_empty() {
+        let names: Vec<&str> = has_alpha.then_some(photosuite_psd::resources::TRANSPARENCY_NAME).into_iter().chain(extra.iter().map(|a| a.name.as_str())).collect();
         resources.push(ImageResource::new(1006, pascal_names_resource(&names)));
         resources.push(ImageResource::new(1045, unicode_names_resource(&names)));
-        resources.push(ImageResource::new(crate::channel_map::DISPLAY_INFO, crate::channel_map::display_info(&extra)));
+        let old = doc.metadata.psd_resources.iter().find(|r| r.0 == ids::ALPHA_IDS).map(|r| r.2.as_slice());
+        resources.push(ImageResource::new(ids::ALPHA_IDS, alpha_ids_resource(old, has_alpha, names.len())));
+        resources.push(ImageResource::new(crate::channel_map::DISPLAY_INFO, crate::channel_map::display_info(has_alpha, &extra)));
     }
     if let Some(id) = quick_mask_id {
         let mut data = id.to_be_bytes().to_vec();
@@ -1423,7 +1462,8 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         }
     }
     resources.push(ImageResource::new(ids::LAYER_GROUP_INFO, link_group_resource(&doc.layers)));
-    resources.extend(layer_state_resources(&ex.records));
+    let old_seed = doc.metadata.psd_resources.iter().find(|r| r.0 == ids::DOCUMENT_IDS_SEED).and_then(|r| r.2.get(..4)).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    resources.extend(layer_state_resources(&ex.records, old_seed.unwrap_or(0)));
     if let Some(x) = &doc.metadata.xmp {
         // The pixels are saved as they are shown: never let a reader rotate them again.
         resources.push(ImageResource::new(ids::XMP, photosuite_codecs::upright_xmp(x).as_bytes().to_vec()));
@@ -1455,8 +1495,9 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         if *id == crate::slices_map::SLICES && slices_resource.is_some() {
             continue;
         }
-        // The layer id seed is regenerated from the ids written (see `layer_state_resources`).
-        if *id == ids::DOCUMENT_IDS_SEED {
+        // The layer id seed is regenerated from the ids written (see `layer_state_resources`), the
+        // alpha ids with the channel names.
+        if *id == ids::DOCUMENT_IDS_SEED || *id == ids::ALPHA_IDS {
             continue;
         }
         // Measurement scale / count resources: only while they still describe the document.
@@ -1503,8 +1544,8 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     }
     // 32-bit files carry Photoshop's HDR toning records as Color Mode Data; Photoshop will not
     // open a 32-bit file without them (#291).
-    let color_mode_data = photosuite_psd::hdr::color_mode_data_for_depth(header.depth);
-    let file = PsdFile {
+    let color_mode_data = duotone_raw.unwrap_or_else(|| photosuite_psd::hdr::color_mode_data_for_depth(header.depth));
+    let mut file = PsdFile {
         header,
         color_mode_data,
         resources,
@@ -1515,6 +1556,9 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         layer_mask_trailing: Vec::new(),
         image_data,
     };
+    if flat_mode {
+        crate::flat_modes::apply(doc, &mut file);
+    }
     (file, ex.warnings)
 }
 

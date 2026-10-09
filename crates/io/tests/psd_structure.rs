@@ -583,3 +583,122 @@ fn background_layer_has_no_transparency_channel() {
         assert!(f.layers()[0].channel(-1).is_some(), "{sample:?}");
     }
 }
+
+/// Photoshop lists the merged transparency first in the alpha channel resources ("Transparency",
+/// id 0, red 100 %). Read as the first alpha channel, it renamed "Alpha 1" to "Transparency" and
+/// gave it the transparency's overlay (psd-tools stroke-without-vector-mask.psd).
+#[test]
+fn merged_transparency_is_listed_first_and_skipped_on_import() {
+    use photosuite_color::{ColorMode as Mode, SampleType};
+    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 6), Mode::Rgb, SampleType::U8);
+    let fmt = d.pixel_format();
+    let mut l = photosuite_doc::Layer::raster("half", fmt);
+    l.surface_mut().unwrap().fill_rect(photosuite_geom::Rect::new(0, 0, 4, 6), &photosuite_raster::from_rgba(&fmt, [1.0, 0.0, 0.0, 1.0]));
+    d.layers.push(l);
+    let mut a = photosuite_doc::AlphaChannel::new("Alpha 1", photosuite_raster::Surface::new(photosuite_color::PixelFormat::new(Mode::Grayscale, SampleType::U8, false)));
+    a.opacity = 0.3;
+    d.channels.push(a);
+    let (f, _) = document_to_psd_with(&d, &PsdExportOptions::default());
+    let names = photosuite_psd::resources::unicode_names(&f.resource(1045).unwrap().data);
+    assert_eq!(names, ["Transparency", "Alpha 1"]);
+    assert_eq!(f.resource(1053).unwrap().data.len(), 8, "one id per name");
+    let (back, _) = psd_to_document(&f);
+    assert_eq!(back.channels.len(), 1);
+    assert_eq!((back.channels[0].name.as_str(), back.channels[0].opacity), ("Alpha 1", 0.3));
+    // Without layer info, the names decide whether the merged image has a transparency channel:
+    // here they cover every extra channel and don't start with "Transparency".
+    let mut flat = f.clone();
+    flat.layer_info = None;
+    flat.header.channels = 4;
+    for r in flat.resources.iter_mut().filter(|r| r.id == 1045) {
+        r.data = r.data[4 + 2 * 13..].to_vec();
+    }
+    assert_eq!(photosuite_psd::resources::unicode_names(&flat.resources.iter().find(|r| r.id == 1045).unwrap().data), ["Alpha 1"]);
+    assert!(!flat.merged_has_alpha());
+}
+
+/// A Duotone PSD keeps its layers and goes back as Duotone with its (undocumented) ink data;
+/// layers used to be dropped and the file written as Grayscale.
+#[test]
+fn duotone_keeps_layers_mode_and_inks() {
+    use photosuite_color::{ColorMode as Mode, SampleType};
+    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 6), Mode::Duotone, SampleType::U8);
+    let inks = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+    d.duotone = Some(photosuite_doc::Duotone { inks: vec![photosuite_doc::DuotoneInk::new("Black", [0.0; 3])], psd_raw: Some(inks.clone()) });
+    let fmt = d.pixel_format();
+    for name in ["one", "two"] {
+        let mut l = photosuite_doc::Layer::raster(name, fmt);
+        l.surface_mut().unwrap().fill_rect(photosuite_geom::Rect::new(0, 0, 4, 3), &photosuite_raster::from_rgba(&fmt, [0.5, 0.5, 0.5, 1.0]));
+        d.layers.push(l);
+    }
+    let (f, warnings) = document_to_psd_with(&d, &PsdExportOptions::default());
+    assert_eq!(f.header.color_mode, ColorMode::Duotone);
+    assert_eq!(f.color_mode_data, inks);
+    assert!(warnings.iter().all(|w| !w.contains("written as")), "{warnings:?}");
+    let (back, _) = psd_to_document(&f);
+    assert_eq!(back.mode, Mode::Duotone);
+    assert_eq!(back.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["one", "two"]);
+    assert_eq!(back.duotone.and_then(|d| d.psd_raw), Some(inks));
+    // Made here without Photoshop's ink data: its gray plate, as Grayscale.
+    d.duotone = Some(photosuite_doc::Duotone { inks: vec![photosuite_doc::DuotoneInk::new("Black", [0.0; 3])], psd_raw: None });
+    assert_eq!(document_to_psd(&d).header.color_mode, ColorMode::Grayscale);
+}
+
+/// Indexed Color and Bitmap files go back in their own mode while they are one plain image:
+/// palette, colour count and transparent index for Indexed, 1-bit pixels for Bitmap. They used
+/// to be written as RGB / 8-bit Grayscale.
+#[test]
+fn indexed_and_bitmap_keep_their_mode() {
+    for (mode, depth, w) in [(ColorMode::Indexed, 8, 7u32), (ColorMode::Bitmap, 1, 13)] {
+        let mut f = testgen::merged_only(Version::Psd, mode, depth, Compression::Rle, w, 3);
+        // Indexed: 200 colours, the transparent one an entry the image uses.
+        let t = f.decode_merged().unwrap()[1];
+        if mode == ColorMode::Indexed {
+            assert!(t < 200);
+            f.resources.push(photosuite_psd::ImageResource::new(1046, 200u16.to_be_bytes().to_vec()));
+            f.resources.push(photosuite_psd::ImageResource::new(1047, u16::from(t).to_be_bytes().to_vec()));
+        }
+        let (d, _) = psd_to_document(&f);
+        let (back, warnings) = document_to_psd_with(&d, &PsdExportOptions::default());
+        assert_eq!((back.header.color_mode, back.header.depth, back.header.channels), (mode, depth, 1), "{mode:?}");
+        assert!(warnings.iter().all(|w| !w.contains("written as")), "{warnings:?}");
+        assert!(back.layer_info.is_none());
+        let (a, b) = (f.decode_merged().unwrap(), back.decode_merged().unwrap());
+        let row = f.header.row_bytes();
+        for y in 0..3 {
+            let (ra, rb) = (&a[y * row..(y + 1) * row], &b[y * row..(y + 1) * row]);
+            if mode == ColorMode::Bitmap {
+                // Pixels only: the padding bits past the width are free.
+                let pad = (8 - w as usize % 8) % 8;
+                assert_eq!(ra[..row - 1], rb[..row - 1]);
+                assert_eq!(ra[row - 1] >> pad, rb[row - 1] >> pad);
+            } else {
+                assert_eq!(ra, rb, "{mode:?} row {y}");
+            }
+        }
+        if mode == ColorMode::Indexed {
+            assert_eq!(back.color_mode_data[..200], f.color_mode_data[..200]);
+            let table = d.color_table.as_ref().unwrap();
+            assert_eq!((table.colors.len(), table.transparent), (200, Some(t)));
+            // Pixels of the transparent entry come in transparent (and go back as that entry,
+            // checked by the plane comparison above).
+            let s = d.layers[0].surface().unwrap();
+            let plane = f.decode_merged().unwrap();
+            let mut seen = false;
+            for (i, idx) in plane.iter().enumerate() {
+                let a = s.pixel((i % w as usize) as i32, (i / w as usize) as i32)[3];
+                assert_eq!(a == 0.0, *idx == t, "pixel {i} index {idx} alpha {a}");
+                seen |= *idx == t;
+            }
+            assert!(seen, "the sample image uses the transparent entry");
+            assert_eq!(back.resource(1046).unwrap().data, 200u16.to_be_bytes());
+            assert_eq!(back.resource(1047).unwrap().data, u16::from(t).to_be_bytes());
+        }
+        // With a second layer it can't stay flat: RGB / Grayscale, with the warning.
+        let mut layered = d.clone();
+        layered.layers.push(photosuite_doc::Layer::raster("more", d.pixel_format()));
+        let (f2, w2) = document_to_psd_with(&layered, &PsdExportOptions::default());
+        assert_ne!(f2.header.color_mode, mode);
+        assert!(w2.iter().any(|w| w.contains("written as")));
+    }
+}
