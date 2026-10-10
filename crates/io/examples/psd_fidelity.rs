@@ -13,8 +13,8 @@
 //! PAIR=1 … a.psd b.psd                                                                # compare two files as they are (b against a)
 //! ```
 //!
-//! `REGEN=1` flips each layer's effects master switch, drops the verbatim adjustment, fill and
-//! shape blocks the importer keeps, rebuilds each type layer's `TySh` the way a text edit does, and
+//! `REGEN=1` flips each layer's effects master switch, nudges fill colours / angles / scales,
+//! drops the verbatim adjustment and shape-path blocks the importer keeps, rebuilds each type layer's `TySh` the way a text edit does, and
 //! nudges each smart object's transform, so the export regenerates everything from the document model. The lost
 //! descriptor paths are then what an edit in PhotoSuite would lose.
 use std::collections::{BTreeMap, BTreeSet};
@@ -350,6 +350,17 @@ impl Census {
     }
 }
 
+/// A fill changed by a hair, so the export regenerates its block (merged onto the original, as
+/// for a real edit).
+fn nudge(f: &mut photosuite_doc::Fill) {
+    use photosuite_doc::Fill;
+    match f {
+        Fill::Solid(c) => c.c[0] = (c.c[0] + 1e-4).min(1.0) - if c.c[0] >= 1.0 { 2e-4 } else { 0.0 },
+        Fill::Gradient { angle, .. } => *angle += 1e-3,
+        Fill::Pattern { scale, .. } => *scale *= 1.0001,
+    }
+}
+
 /// See `REGEN=1` above.
 fn regenerate(layers: &mut [photosuite_doc::Layer], dpi: f32) {
     use photosuite_doc::LayerContent;
@@ -357,12 +368,18 @@ fn regenerate(layers: &mut [photosuite_doc::Layer], dpi: f32) {
         if !l.effects.items.is_empty() {
             l.effects.enabled = !l.effects.enabled;
         }
-        l.psd_blocks.retain(|(k, _)| !photosuite_io::ADJUSTMENT_KEYS.contains(&k) && !matches!(k, b"SoCo" | b"GdFl" | b"PtFl"));
+        l.psd_blocks.retain(|(k, _)| !photosuite_io::ADJUSTMENT_KEYS.contains(&k));
         match &mut l.content {
             LayerContent::Group(g) => regenerate(&mut g.children, dpi),
             LayerContent::Text(t) if t.psd_raw.is_some() => t.psd_raw = Some(std::sync::Arc::new(photosuite_text::psd::build_tysh(t, dpi, None))),
             LayerContent::Smart(sm) => sm.transform.m[4] += 1e-6,
-            LayerContent::Shape(sh) => sh.psd_raw = None,
+            LayerContent::Fill(f) => nudge(f),
+            LayerContent::Shape(sh) => {
+                sh.psd_raw = None;
+                if let Some(f) = &mut sh.fill {
+                    nudge(f);
+                }
+            }
             _ => {}
         }
     }

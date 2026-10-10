@@ -644,11 +644,14 @@ impl Ex {
             filter_fx: fx,
         };
         let sold = sold_bytes(same_source.map(|t| &t.descriptor), &spec, &mut warnings);
-        let plld = plld_bytes(&spec, &mut warnings);
+        let plld = plld_bytes(&spec, &sold, &mut warnings);
         warnings.dedup();
         let key = if same_source.is_some() && raw.iter().any(|(k, _)| k == b"SoLE") && !raw.iter().any(|(k, _)| k == b"SoLd") { *b"SoLE" } else { *b"SoLd" };
         raw.retain(|(k, _)| k == &key || !matches!(k, b"SoLd" | b"SoLE"));
-        upsert(raw, b"PlLd", plld, Some(&key));
+        // Photoshop writes `PlLd` beside `SoLd` only: a linked layer (`SoLE`) has none.
+        if key == *b"SoLd" || raw.iter().any(|(k, _)| k == b"PlLd") {
+            upsert(raw, b"PlLd", plld, Some(&key));
+        }
         upsert(raw, &key, sold, None);
         if !stack.filters.is_empty() {
             let bounds = sm.cache.as_ref().map_or(self.canvas, |c| c.content_bounds().union(&self.canvas));
@@ -810,10 +813,31 @@ impl Ex {
             return c.surface.clone();
         }
         // In the frame the layer's masks give it, like the compositor (masks are stored apart).
-        let buf = photosuite_compose::render_fill_content(l, f, self.canvas, &[]);
+        // Photoshop keeps the pixels to the part of the canvas a hiding mask shows.
+        let shown = match &l.mask {
+            Some(m) if m.enabled && m.density >= 1.0 && m.feather <= 0.0 && m.surface.default_pixel().first().is_some_and(|v| *v <= 0.0) => {
+                m.surface.content_bounds().intersect(&self.canvas)
+            }
+            _ => self.canvas,
+        };
         let mut s = Surface::new(self.fmt);
-        let vals: Vec<f32> = buf.px.iter().flat_map(|p| photosuite_raster::from_rgba(&self.fmt, *p)).collect();
-        s.write_region(self.canvas, &vals);
+        if shown.is_empty() {
+            return s;
+        }
+        // Rendered over the canvas (the fill's frame), then cut to what is shown.
+        let buf = photosuite_compose::render_fill_content(l, f, self.canvas, &[]);
+        let (cw, x0, w) = (self.canvas.width() as usize, (shown.x0 - self.canvas.x0) as usize, shown.width() as usize);
+        let rows = (shown.y0 - self.canvas.y0) as usize..(shown.y1 - self.canvas.y0) as usize;
+        let vals: Vec<f32> = rows
+            .flat_map(|y| buf.px.get(y * cw + x0..y * cw + x0 + w).unwrap_or_default())
+            .flat_map(|p| photosuite_raster::from_rgba(&self.fmt, *p))
+            .collect();
+        if vals.len() == w * shown.height() as usize * s.channels() {
+            s.write_region(shown, &vals);
+        } else {
+            let all: Vec<f32> = buf.px.iter().flat_map(|p| photosuite_raster::from_rgba(&self.fmt, *p)).collect();
+            s.write_region(self.canvas, &all);
+        }
         s.prune();
         s
     }

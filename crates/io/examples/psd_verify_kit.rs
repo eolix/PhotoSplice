@@ -46,6 +46,64 @@ fn main() {
     std::fs::create_dir_all(&out).expect("out dir");
     let mut cases: Vec<Case> = Vec::new();
     let mut log = Vec::new();
+    if std::env::var("KIT").as_deref() == Ok("4") {
+        kit4(&out, &mut cases, &mut log);
+    } else {
+        kit1(&out, &mut cases, &mut log);
+    }
+    finish(&out, &cases, &log);
+}
+
+/// Milestone 4: colour modes, alpha channels, gradients kept through an edit, masks, warps.
+fn kit4(out: &Path, cases: &mut Vec<Case>, log: &mut Vec<Vec<String>>) {
+    let mut gradient_case = |file: &'static str, src: &'static str, expect: &'static str| {
+        let mut d = load(src);
+        for_each_layer(&mut d.layers, &mut |l| {
+            if let LayerContent::Fill(Fill::Gradient { angle, .. }) = &mut l.content {
+                *angle += 20.0;
+            }
+        });
+        log.push(save(&d, out, file));
+        cases.push(Case { file, source: Some(src), edit: "each Gradient Fill layer's angle +20°", expect });
+    };
+    gradient_case(
+        "10-noise-gradient-edited.psd",
+        "corpus/psd-tools/gradients/noise-gradient-rgb.psd",
+        "Double-click a gradient fill and open its gradient: still a Noise gradient (same roughness, colour model, restrictions, seed as the original), angle 20° more than the original.",
+    );
+    gradient_case(
+        "11-cmyk-gradient-edited.psd",
+        "corpus/psd-tools/blend-modes/cmyk-blend-modes.psd",
+        "Open a gradient fill's gradient: the colour stops still show their CMYK values (Color Picker in CMYK), angle 20° more than the original.",
+    );
+    for (file, src, expect) in [
+        ("12-indexed.psd", "corpus/psd-tools/colormodes/4x4_8bit_index_color.psd", "Image › Mode shows Indexed Color; Image › Mode › Color Table shows the same palette as the original."),
+        ("13-bitmap.psd", "corpus/psd-tools/colormodes/100x20_1bit_bitmap_rle.psd", "Image › Mode shows Bitmap; the image is identical to the original."),
+        ("14-duotone.psd", "corpus/psd-tools/colormodes/4x4_8bit_duotone.psd", "Image › Mode shows Duotone; Image › Mode › Duotone… shows the same inks and curves as the original; both layers are there."),
+        ("15-alpha-channel.psd", "corpus/psd-tools/effects/stroke-without-vector-mask.psd", "Channels panel: \"Alpha 1\" (no extra channel), its Channel Options red at 50 % like the original."),
+        ("16-pixel-and-vector-masks.psd", "corpus/psd-tools/mask-density-layervectormask.psd", "Each layer has both a layer (pixel) mask and a vector mask, with the same densities (Properties panel) and the same look as the original."),
+    ] {
+        let d = load(src);
+        log.push(save(&d, out, file));
+        cases.push(Case { file, source: Some(src), edit: "none (opened and saved by PhotoSuite)", expect });
+    }
+    let src = "corpus/psd-tools/placedLayer.psd";
+    let mut d = load(src);
+    for_each_layer(&mut d.layers, &mut |l| {
+        if let LayerContent::Smart(sm) = &mut l.content {
+            sm.transform.m[4] += 1e-6;
+        }
+    });
+    log.push(save(&d, out, "17-smart-object-warp.psd"));
+    cases.push(Case {
+        file: "17-smart-object-warp.psd",
+        source: Some(src),
+        edit: "placed-layer data regenerated (transform moved by 0.000001 px)",
+        expect: "Each smart object keeps its warp: Edit › Transform › Warp shows the same mesh / style as the original.",
+    });
+}
+
+fn kit1(out: &Path, cases: &mut Vec<Case>, log: &mut Vec<Vec<String>>) {
 
     // 1. One effect edited: the regenerated lfx2 is merged onto Photoshop's, placeholders kept.
     let src = "corpus/photoshop/effects/bevel-emboss-chisel-hard.psd";
@@ -57,7 +115,7 @@ fn main() {
             }
         }
     });
-    log.push(save(&d, &out, "01-effect-edited.psd"));
+    log.push(save(&d, out, "01-effect-edited.psd"));
     cases.push(Case {
         file: "01-effect-edited.psd",
         source: Some(src),
@@ -72,7 +130,7 @@ fn main() {
             l.effects.items.push(Effect::default_drop_shadow());
         }
     });
-    log.push(save(&d, &out, "02-effect-added.psd"));
+    log.push(save(&d, out, "02-effect-added.psd"));
     cases.push(Case {
         file: "02-effect-added.psd",
         source: Some(src),
@@ -88,7 +146,7 @@ fn main() {
             s.size += 2.0;
         }
     });
-    log.push(save(&d, &out, "03-two-strokes-edited.psd"));
+    log.push(save(&d, out, "03-two-strokes-edited.psd"));
     cases.push(Case {
         file: "03-two-strokes-edited.psd",
         source: Some(src3),
@@ -99,7 +157,7 @@ fn main() {
     // 4. Background layer and the regenerated thumbnail, no edit.
     let src4 = "corpus/photoshop/adjustments/rgb8/baseline-layer-copy.psd";
     let d = load(src4);
-    log.push(save(&d, &out, "04-background.psd"));
+    log.push(save(&d, out, "04-background.psd"));
     cases.push(Case {
         file: "04-background.psd",
         source: Some(src4),
@@ -129,7 +187,7 @@ fn main() {
     shape.cache = Some(photosuite_vector::render_shape(&shape, fmt, d.bounds()));
     let shape = Layer::new("Rectangle 1", LayerContent::Shape(shape));
     d.layers.extend([px, shape, group]);
-    log.push(save(&d, &out, "05-new-document.psd"));
+    log.push(save(&d, out, "05-new-document.psd"));
     cases.push(Case {
         file: "05-new-document.psd",
         source: None,
@@ -145,7 +203,7 @@ fn main() {
             sm.transform.m[4] += 1e-6;
         }
     });
-    log.push(save(&d, &out, "06-smart-object-rewritten.psd"));
+    log.push(save(&d, out, "06-smart-object-rewritten.psd"));
     cases.push(Case {
         file: "06-smart-object-rewritten.psd",
         source: Some(src6),
@@ -164,7 +222,7 @@ fn main() {
             t.psd_raw = Some(Arc::new(photosuite_text::psd::build_tysh(t, dpi, None)));
         }
     });
-    log.push(save(&d, &out, "07-type-rewritten.psd"));
+    log.push(save(&d, out, "07-type-rewritten.psd"));
     cases.push(Case {
         file: "07-type-rewritten.psd",
         source: Some(src7),
@@ -175,7 +233,7 @@ fn main() {
     // 7b. Control: the same file through PhotoSuite with the type layer untouched (verbatim
     //     `TySh`): if this one also prompts, the cause is outside the type data.
     let d = load(src7);
-    log.push(save(&d, &out, "07b-type-untouched.psd"));
+    log.push(save(&d, out, "07b-type-untouched.psd"));
     cases.push(Case {
         file: "07b-type-untouched.psd",
         source: Some(src7),
@@ -199,7 +257,7 @@ fn main() {
             t.psd_raw = Some(Arc::new(photosuite_text::psd::build_tysh(t, dpi, None)));
         }
     });
-    log.push(save(&d, &out, "07c-type-text-edited.psd"));
+    log.push(save(&d, out, "07c-type-text-edited.psd"));
     cases.push(Case {
         file: "07c-type-text-edited.psd",
         source: Some(src7),
@@ -239,7 +297,7 @@ fn main() {
     if let Some(c) = d.layer_comps.first_mut() {
         c.name.push_str(" (renamed)");
     }
-    log.push(save(&d, &out, "08-layer-comps-edited.psd"));
+    log.push(save(&d, out, "08-layer-comps-edited.psd"));
     cases.push(Case {
         file: "08-layer-comps-edited.psd",
         source: Some(src8),
@@ -255,7 +313,7 @@ fn main() {
             *angle += 15.0;
         }
     });
-    log.push(save(&d, &out, "09-gradient-fill-edited.psd"));
+    log.push(save(&d, out, "09-gradient-fill-edited.psd"));
     cases.push(Case {
         file: "09-gradient-fill-edited.psd",
         source: Some(src9),
@@ -263,7 +321,10 @@ fn main() {
         expect: "Double-click each gradient fill thumbnail: the angle is 15° more than in the original, and Method (Perceptual / Linear / Classic…), Style, Scale, Reverse, Dither, Align with layer match the original.",
     });
 
-    for (c, w) in cases.iter().zip(&log) {
+}
+
+fn finish(out: &Path, cases: &[Case], log: &[Vec<String>]) {
+    for (c, w) in cases.iter().zip(log) {
         if let Some(src) = c.source {
             std::fs::copy(src, out.join(c.file.replace(".psd", "-original.psd"))).expect("copy original");
         }
@@ -277,7 +338,7 @@ fn main() {
          **File › Save As** each `NN-….psd` into this folder as `NN-…-ps.psd` (Maximize Compatibility on), without other \
          changes: diffing Photoshop's re-save against ours shows exactly what Photoshop normalizes.\n\n",
     );
-    for c in &cases {
+    for c in cases {
         md.push_str(&format!("## {}\n\n- Source: {}\n- Edit: {}\n- Expect: {}\n- [ ] OK\n\n", c.file, c.source.unwrap_or("new document"), c.edit, c.expect));
     }
     std::fs::write(out.join("CHECKLIST.md"), md).expect("checklist");

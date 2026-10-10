@@ -454,11 +454,38 @@ pub fn write_fill(f: &Fill) -> ([u8; 4], Vec<u8>) {
 /// that is the same kind of fill (`old`: key and descriptor bytes, version prefix included), so
 /// what the model doesn't carry survives (gradient interpolation method, noise seed…).
 pub fn fill_to_desc_onto(f: &Fill, old: Option<(&[u8; 4], &[u8])>) -> ([u8; 4], Descriptor) {
-    let (k, d) = fill_to_desc(f);
-    match old.filter(|(ok, _)| **ok == k).and_then(|(_, data)| parse_prefix_versioned(data)) {
-        Some(base) => (k, merge_descriptor(&base, d, &[])),
-        None => (k, d),
+    let (k, mut d) = fill_to_desc(f);
+    let Some(base) = old.filter(|(ok, _)| **ok == k).and_then(|(_, data)| parse_prefix_versioned(data)) else { return (k, d) };
+    // Keys written only when not at their default: a file that has one gets the default spelled
+    // out, or the merge would keep its old value (a reversed gradient stayed reversed).
+    let prc = |v: f64| Value::UnitFloat { unit: *b"#Prc", value: v };
+    let defaults = match f {
+        Fill::Gradient { .. } => vec![
+            ("Scl ", prc(100.0)),
+            ("Rvrs", Value::Boolean(false)),
+            ("Dthr", Value::Boolean(false)),
+            ("Algn", Value::Boolean(true)),
+            ("Ofst", Value::Descriptor(Descriptor::new("Pnt ").with("Hrzn", prc(0.0)).with("Vrtc", prc(0.0)))),
+        ],
+        Fill::Pattern { .. } => vec![("Angl", Value::UnitFloat { unit: *b"#Ang", value: 0.0 })],
+        Fill::Solid(_) => Vec::new(),
+    };
+    for (key, v) in defaults {
+        if base.get(key).is_some() && d.get(key).is_none() {
+            d.items.push((Id::new(key), v));
+        }
     }
+    // A gradient whose stops weren't edited keeps the file's definition verbatim: its colour
+    // model (CMYK, gray, Lab stops), a noise gradient, the name and interpolation the model
+    // bakes into its stops.
+    let same_stops = match (fill_from_desc(&k, &base), f) {
+        (
+            Some(Fill::Gradient { stops: s0, opacity_stops: o0, midpoints: m0, .. }),
+            Fill::Gradient { stops: s1, opacity_stops: o1, midpoints: m1, .. },
+        ) => s0 == *s1 && o0 == *o1 && m0 == *m1,
+        _ => false,
+    };
+    (k, merge_descriptor(&base, d, if same_stops { &["Grad"] } else { &[] }))
 }
 
 /// A fill as (block key, descriptor with class `null`).
@@ -469,9 +496,12 @@ pub fn fill_to_desc(f: &Fill) -> ([u8; 4], Descriptor) {
             let prc = |v: f32| Value::UnitFloat { unit: *b"#Prc", value: f64::from(v * 100.0) };
             let mut d = Descriptor::new("null")
                 .with("Angl", Value::UnitFloat { unit: *b"#Ang", value: f64::from(*angle) })
-                .with("Type", gradient_style_value(*style))
-                .with("Scl ", prc(*scale))
-                .with("Grad", Value::Descriptor(gradient_desc_with(stops, opacity_stops, midpoints)));
+                .with("Type", gradient_style_value(*style));
+            // Photoshop writes the scale only when it isn't 100 %.
+            if *scale != 1.0 {
+                d = d.with("Scl ", prc(*scale));
+            }
+            d = d.with("Grad", Value::Descriptor(gradient_desc_with(stops, opacity_stops, midpoints)));
             if *reverse {
                 d = d.with("Rvrs", Value::Boolean(true));
             }
@@ -535,12 +565,17 @@ pub(crate) fn with_pattern_placement(mut d: Descriptor, angle: f32, link: bool, 
 /// axis, bounds and, for `warpCustom`, the 4 × 4 `customEnvelopeWarp` mesh. Read-only: the raw
 /// block is what gets written back. `None` when absent or `warpNone` with no mesh.
 pub fn parse_placed_warp(key: &[u8; 4], data: &[u8]) -> Option<photosuite_geom::warp::Warp> {
-    use photosuite_geom::warp::{BezierMesh, Warp, WarpStyle};
     if key != b"SoLd" && key != b"SoLE" {
         return None;
     }
     let d = data.get(8..).and_then(parse_prefix_versioned)?;
-    let w = get_desc(&d, "warp")?;
+    warp_from_desc(get_desc(&d, "warp")?)
+}
+
+/// A placed layer's `warp` descriptor as a [`photosuite_geom::warp::Warp`]: `None` for no warp
+/// and for warps the model can't hold (a multi-patch mesh, "quilt").
+pub(crate) fn warp_from_desc(w: &Descriptor) -> Option<photosuite_geom::warp::Warp> {
+    use photosuite_geom::warp::{BezierMesh, Warp, WarpStyle};
     let style = enum_of(w, "warpStyle").and_then(|v| WarpStyle::parse(&String::from_utf8_lossy(v)))?;
     let b = get_desc(w, "bounds")?;
     let g = |k: &str| num(b.get(k));
@@ -883,6 +918,86 @@ mod more_tests {
         // Hue wraps; missing keys are not a colour.
         assert_eq!(rgb(&hsb(360.0, 100.0, 100.0)), [1.0, 0.0, 0.0]);
         assert!(color_from_desc(&Descriptor::new("HSBC").with("H   ", Value::Double(1.0))).is_none());
+    }
+
+    /// A CMYK gradient fill whose angle is edited keeps its gradient definition verbatim (its
+    /// stops used to be rewritten as RGB, and a noise gradient as black to white).
+    #[test]
+    fn unedited_gradient_definition_is_kept() {
+        let cmyk = |c: f64, k: f64| {
+            Value::Descriptor(
+                Descriptor::new("CMYC")
+                    .with("Cyn ", Value::Double(c))
+                    .with("Mgnt", Value::Double(0.0))
+                    .with("Ylw ", Value::Double(0.0))
+                    .with("Blck", Value::Double(k)),
+            )
+        };
+        let stop = |l: f64, c: Value| {
+            Value::Descriptor(
+                Descriptor::new("Clrt")
+                    .with("Clr ", c)
+                    .with("Type", Value::Enumerated { type_id: Id::new("Clry"), value: Id::new("UsrS") })
+                    .with("Lctn", Value::Integer(l as i32))
+                    .with("Mdpn", Value::Integer(50)),
+            )
+        };
+        let grad = Descriptor::new("Grdn")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("Cyan to black")))
+            .with("GrdF", Value::Enumerated { type_id: Id::new("GrdF"), value: Id::new("CstS") })
+            .with("Intr", Value::Double(4096.0))
+            .with("Clrs", Value::List(vec![stop(0.0, cmyk(100.0, 0.0)), stop(4096.0, cmyk(0.0, 100.0))]));
+        let base = Descriptor::new("null")
+            .with("Angl", Value::UnitFloat { unit: *b"#Ang", value: 90.0 })
+            .with("Type", Value::Enumerated { type_id: Id::new("GrdT"), value: Id::new("Lnr ") })
+            .with("Grad", Value::Descriptor(grad.clone()));
+        let data = VersionedDescriptor::new(base).to_bytes();
+        let Some(Fill::Gradient { mut angle, stops, opacity_stops, midpoints, style, scale, reverse, offset, dither, align }) = parse_fill(b"GdFl", &data) else { panic!() };
+        angle += 30.0;
+        let edited = Fill::Gradient { angle, stops, opacity_stops, midpoints, style, scale, reverse, offset, dither, align };
+        let (_, d) = fill_to_desc_onto(&edited, Some((b"GdFl", &data)));
+        assert_eq!(get_desc(&d, "Grad"), Some(&grad));
+        assert!(matches!(d.get("Angl"), Some(Value::UnitFloat { value, .. }) if (*value - 120.0).abs() < 1e-3));
+        // Edited stops are written from the model.
+        let Fill::Gradient { mut stops, angle, opacity_stops, midpoints, style, scale, reverse, offset, dither, align } = edited else { panic!() };
+        stops[0].1 = Color::rgb(1.0, 0.0, 0.0);
+        let changed = Fill::Gradient { angle, stops, opacity_stops, midpoints, style, scale, reverse, offset, dither, align };
+        let (_, d) = fill_to_desc_onto(&changed, Some((b"GdFl", &data)));
+        assert_ne!(get_desc(&d, "Grad"), Some(&grad));
+    }
+
+    /// Options set back to their defaults are written as defaults onto a file that had them set
+    /// (the merge used to keep the old values: a gradient stayed reversed, a pattern rotated),
+    /// and a 100 % scale adds no `Scl` to a file without one (as Photoshop writes it).
+    #[test]
+    fn fill_options_back_to_defaults_are_written() {
+        let set = Fill::Gradient {
+            stops: vec![(0.0, Color::rgb(1.0, 0.0, 0.0)), (1.0, Color::rgb(0.0, 0.0, 1.0))],
+            angle: 10.0,
+            scale: 1.5,
+            style: GradientStyle::Linear,
+            reverse: true,
+            opacity_stops: Vec::new(),
+            midpoints: Vec::new(),
+            offset: (0.25, 0.5),
+            dither: true,
+            align: false,
+        };
+        let (k, data) = write_fill(&set);
+        let Fill::Gradient { stops, angle, style, opacity_stops, midpoints, .. } = set.clone() else { panic!() };
+        let plain = Fill::Gradient { stops, angle, scale: 1.0, style, reverse: false, opacity_stops, midpoints, offset: (0.0, 0.0), dither: false, align: true };
+        let (_, d) = fill_to_desc_onto(&plain, Some((&k, &data)));
+        let back = parse_fill(&k, &VersionedDescriptor::new(d).to_bytes()).unwrap();
+        assert_eq!(back, plain);
+        // No `Scl` where the file had none and the scale is 100 %.
+        let (_, d) = fill_to_desc_onto(&plain, Some((&k, &write_fill(&plain).1)));
+        assert!(d.get("Scl ").is_none());
+
+        let rotated = Fill::Pattern { name: "P".into(), scale: 1.0, id: "id".into(), angle: 30.0, link: true, phase: (0.0, 0.0) };
+        let (k, data) = write_fill(&rotated);
+        let level = Fill::Pattern { name: "P".into(), scale: 1.0, id: "id".into(), angle: 0.0, link: true, phase: (0.0, 0.0) };
+        let (_, d) = fill_to_desc_onto(&level, Some((&k, &data)));
+        assert_eq!(parse_fill(&k, &VersionedDescriptor::new(d).to_bytes()), Some(level));
     }
 
     #[test]

@@ -523,7 +523,7 @@ pub fn write_lfx2_onto(template: Option<&[u8]>, master: bool, items: &[Effect]) 
     let multi = KINDS.iter().any(|(single, multi)| !multi.is_empty() && instances(&fresh, single, multi).len() > 1);
     let base = template.and_then(|t| VersionedDescriptor::parse_prefix(t.get(4..)?).ok()).map(|(v, _)| v.descriptor);
     let d = match base {
-        Some(base) => merge_lfx2(&base, fresh),
+        Some(base) => merge_lfx2(&base, fresh, items),
         None => fresh,
     };
     (lfx2_data(d), multi)
@@ -560,14 +560,14 @@ fn set_key(d: &mut Descriptor, key: &str, v: Value) {
 }
 
 /// See [`write_lfx2_onto`].
-fn merge_lfx2(base: &Descriptor, fresh: Descriptor) -> Descriptor {
+fn merge_lfx2(base: &Descriptor, fresh: Descriptor, items: &[Effect]) -> Descriptor {
     let mut out = Descriptor { name: base.name.clone(), class_id: base.class_id.clone(), items: Vec::new() };
     let mut done = [false; KINDS.len()];
     for (k, v) in &base.items {
         if let Some(i) = kind_index(k) {
             if !done[i] {
                 done[i] = true;
-                out.items.extend(merge_kind(i, base, &fresh));
+                out.items.extend(merge_kind(i, base, &fresh, items));
             }
         } else if k.is("Scl ") {
             // The effects scale isn't modelled.
@@ -580,7 +580,7 @@ fn merge_lfx2(base: &Descriptor, fresh: Descriptor) -> Descriptor {
     }
     for (i, d) in done.iter().enumerate() {
         if !d {
-            out.items.extend(merge_kind(i, base, &fresh));
+            out.items.extend(merge_kind(i, base, &fresh, items));
         }
     }
     for (k, v) in fresh.items {
@@ -602,10 +602,12 @@ fn merge_lfx2(base: &Descriptor, fresh: Descriptor) -> Descriptor {
 
 /// Entries for kind `i`: the document's instances merged onto the file's (pairwise when the
 /// counts match), or the file's instances as placeholders when the document has none.
-fn merge_kind(i: usize, base: &Descriptor, fresh: &Descriptor) -> Vec<(Id, Value)> {
+fn merge_kind(i: usize, base: &Descriptor, fresh: &Descriptor, items: &[Effect]) -> Vec<(Id, Value)> {
     let Some(&(single, multi)) = KINDS.get(i) else { return Vec::new() };
     let old = instances(base, single, multi);
     let new = instances(fresh, single, multi);
+    // The document's effects of this kind, in the order `new` holds them.
+    let model: Vec<&Effect> = items.iter().filter(|e| write_one(e).0 == single).collect();
     let (items, as_list) = if new.is_empty() {
         let kept: Vec<Descriptor> = old
             .into_iter()
@@ -620,8 +622,24 @@ fn merge_kind(i: usize, base: &Descriptor, fresh: &Descriptor) -> Vec<(Id, Value
         (kept, as_list)
     } else {
         let merged = if old.len() == new.len() {
-            // `showInDialog` isn't modelled; a placeholder's says nothing about a live effect.
-            old.iter().zip(new).map(|(o, n)| crate::blocks::merge_descriptor(o, n, if placeholder(o) { &[] } else { &["showInDialog"] })).collect()
+            old.iter()
+                .zip(new)
+                .enumerate()
+                .map(|(k, (o, n))| {
+                    // `showInDialog` isn't modelled; a placeholder's says nothing about a live
+                    // effect. A gradient whose stops weren't edited keeps the file's definition
+                    // (colour model, noise gradient, name, interpolation).
+                    let file = parse_one(single, o);
+                    let file_stops = file.as_ref().and_then(gradient_stops);
+                    let same_gradient = file_stops.is_some() && file_stops == model.get(k).and_then(|e| gradient_stops(e));
+                    let keep: &[&str] = match (placeholder(o), same_gradient) {
+                        (true, _) => &[],
+                        (false, true) => &["showInDialog", "Grad"],
+                        (false, false) => &["showInDialog"],
+                    };
+                    crate::blocks::merge_descriptor(o, n, keep)
+                })
+                .collect()
         } else {
             new
         };
@@ -633,6 +651,19 @@ fn merge_kind(i: usize, base: &Descriptor, fresh: &Descriptor) -> Vec<(Id, Value
         (_, true) => vec![(Id::new(multi), Value::List(items.into_iter().map(Value::Descriptor).collect()))],
         _ => items.into_iter().take(1).map(|d| (Id::new(single), Value::Descriptor(d))).collect(),
     }
+}
+
+/// A gradient's definition: its colour stops and opacity stops.
+type GradientStops<'a> = (&'a [(f32, Color)], &'a [(f32, f32)]);
+
+/// The gradient definition an effect paints with, if any.
+fn gradient_stops(e: &Effect) -> Option<GradientStops<'_>> {
+    let g = match e {
+        Effect::GradientOverlay { gradient, .. } => gradient,
+        Effect::Stroke(StrokeFx { paint: FxPaint::Gradient(g), .. }) | Effect::OuterGlow(Glow { paint: FxPaint::Gradient(g), .. }) | Effect::InnerGlow(Glow { paint: FxPaint::Gradient(g), .. }) => g,
+        _ => return None,
+    };
+    Some((&g.stops, &g.opacity_stops))
 }
 
 fn lfx2_descriptor(master: bool, items: &[Effect]) -> Descriptor {
@@ -1010,6 +1041,35 @@ mod tests {
         assert!(placeholder(shadow) && shadow.get("unmodelled").is_some());
         assert_eq!(d.get("numModifyingFX"), Some(&Value::Integer(1)));
         assert_eq!(parse_lfx2(&data).unwrap().1, fx);
+    }
+
+    /// A gradient overlay whose opacity is edited keeps its gradient definition verbatim (gray
+    /// stops and keys the model doesn't hold); its stops used to be rewritten as RGB.
+    #[test]
+    fn edited_gradient_overlay_keeps_its_gradient() {
+        let enumv = |t: &str, v: &str| Value::Enumerated { type_id: Id::new(t), value: Id::new(v) };
+        let gray = |g: f64| Value::Descriptor(Descriptor::new("Grsc").with("Gry ", Value::Double(g)));
+        let stop = |l: i32, c: Value| {
+            Value::Descriptor(Descriptor::new("Clrt").with("Clr ", c).with("Type", enumv("Clry", "UsrS")).with("Lctn", Value::Integer(l)).with("Mdpn", Value::Integer(50)))
+        };
+        let grad = Descriptor::new("Grdn")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("Grays")))
+            .with("GrdF", enumv("GrdF", "CstS"))
+            .with("Intr", Value::Double(4096.0))
+            .with("Clrs", Value::List(vec![stop(0, gray(0.0)), stop(4096, gray(100.0))]))
+            .with("unmodelled", Value::Boolean(true));
+        let (_, mut overlay) = write_one(&Effect::GradientOverlay { common: FxCommon::new(BlendMode::Normal, 1.0), gradient: Gradient::default(), dither: false });
+        set_key(&mut overlay, "Grad", Value::Descriptor(grad.clone()));
+        let src = lfx2_data(Descriptor::new("null").with("masterFXSwitch", Value::Boolean(true)).with("GrFl", Value::Descriptor(overlay)));
+        let (_, mut fx) = parse_lfx2(&src).unwrap();
+        if let Effect::GradientOverlay { common, .. } = &mut fx[0] {
+            common.opacity = 0.4;
+        }
+        let (data, _) = write_lfx2_onto(Some(&src), true, &fx);
+        let d = VersionedDescriptor::parse_prefix(&data[4..]).unwrap().0.descriptor;
+        let gr = get_desc(&d, "GrFl").unwrap();
+        assert_eq!(get_desc(gr, "Grad"), Some(&grad));
+        assert_eq!(gr.get("Opct"), Some(&unit(b"#Prc", 40.0)));
     }
 
     #[test]

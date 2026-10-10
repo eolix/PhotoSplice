@@ -517,3 +517,31 @@ fn blend_if_round_trips_as_blending_ranges() {
     assert!(back.layers[1].blend_if.is_default());
     assert_eq!(back.layers[2].blend_if.get(1)[0], BlendRange { black: [1, 2], white: [3, 4] });
 }
+
+/// An edited fill layer behind a hiding mask is written over the part the mask shows, as
+/// Photoshop writes it (it used to fill the whole canvas), with the pixels the compositor shows.
+#[test]
+fn edited_fill_is_written_over_its_mask() {
+    use photosuite_color::Color;
+    use photosuite_doc::{Document, Fill, GradientStyle, Layer, LayerContent, LayerMask, Size};
+    let mut d = Document::new("f", Size::new(8, 24), ColorMode::Rgb, SampleType::U8);
+    let fill = Fill::gradient(vec![(0.0, Color::rgb(0.0, 0.0, 0.0)), (1.0, Color::rgb(1.0, 1.0, 1.0))], 90.0, 1.0, GradientStyle::Linear, false);
+    let mut l = Layer::new("band", LayerContent::Fill(fill));
+    let mut mask = LayerMask::hide_all();
+    mask.surface.fill_rect(photosuite_geom::Rect::new(0, 8, 8, 16), &[1.0]);
+    l.mask = Some(mask);
+    d.layers = vec![l];
+    let f = PsdFile::from_bytes(&export(&d, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap();
+    let rec = f.layers().iter().find(|r| r.name() == "band").unwrap();
+    assert_eq!((rec.rect.top, rec.rect.left, rec.rect.bottom, rec.rect.right), (8, 0, 16, 8));
+    // The written pixels (read back as the fill's cache) are the ones the compositor renders.
+    let back = roundtrip(&d);
+    assert!(back.layers[0].fill_cache.is_some());
+    let full = photosuite_compose::flatten(&d);
+    let band = photosuite_compose::flatten(&back);
+    for y in 8..16 {
+        for (a, b) in band.get(3, y).iter().zip(full.get(3, y)) {
+            assert!((a - b).abs() < 2.0 / 255.0, "row {y}: {:?} vs {:?}", band.get(3, y), full.get(3, y));
+        }
+    }
+}

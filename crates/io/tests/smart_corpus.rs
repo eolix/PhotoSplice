@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use photosuite_doc::{Document, LayerContent, SmartObject, SmartSource};
+use photosuite_psd::descriptor::{Descriptor, Value, VersionedDescriptor};
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
@@ -141,6 +142,53 @@ fn re_embed(doc: &mut Document) -> bool {
     any
 }
 
+/// Every layer's placed-layer blocks: its name, which of `PlLd` / `SoLd` / `SoLE` it has, and the
+/// `PlLd` and `SoLd`/`SoLE` warp descriptors.
+type PlacedRow = (String, Vec<[u8; 4]>, Option<Descriptor>, Option<Descriptor>);
+
+fn placed_rows(bytes: &[u8]) -> Vec<PlacedRow> {
+    let Ok(f) = photosuite_psd::PsdFile::from_bytes(bytes) else { return Vec::new() };
+    let warp = |d: Descriptor| match d.get("warp") {
+        Some(Value::Descriptor(w)) => Some(w.clone()),
+        _ => None,
+    };
+    let mut rows = Vec::new();
+    for r in f.layers() {
+        let keys: Vec<[u8; 4]> = r.blocks.iter().map(|b| b.key).filter(|k| matches!(k, b"PlLd" | b"SoLd" | b"SoLE")).collect();
+        if keys.is_empty() {
+            continue;
+        }
+        let (mut pl, mut so) = (None, None);
+        for b in &r.blocks {
+            match &b.key {
+                // plcL, version, Pascal id, page / pages / anti-alias / type, 8 doubles, warp version.
+                b"PlLd" => {
+                    let at = b.data.get(8).map_or(usize::MAX, |n| 8 + 1 + usize::from(*n) + 16 + 64 + 4);
+                    pl = b.data.get(at..).and_then(|d| VersionedDescriptor::parse_prefix(d).ok()).map(|(v, _)| v.descriptor);
+                }
+                b"SoLd" | b"SoLE" => so = b.data.get(8..).and_then(|d| VersionedDescriptor::parse_prefix(d).ok()).and_then(|(v, _)| warp(v.descriptor)),
+                _ => {}
+            }
+        }
+        rows.push((String::from_utf8_lossy(&r.name).into_owned(), keys, pl, so));
+    }
+    rows
+}
+
+fn keys_str(k: &[[u8; 4]]) -> Vec<String> {
+    k.iter().map(|k| String::from_utf8_lossy(k).into_owned()).collect()
+}
+
+fn nudge(doc: &mut Document) {
+    for id in doc.walk().into_iter().map(|(_, _, l)| l.id).collect::<Vec<_>>() {
+        if let Some(l) = doc.layer_mut(id)
+            && let LayerContent::Smart(sm) = &mut l.content
+        {
+            sm.transform.m[4] += 0.25;
+        }
+    }
+}
+
 #[test]
 fn smart_objects_round_trip_through_psd() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus");
@@ -176,6 +224,28 @@ fn smart_objects_round_trip_through_psd() {
                 Ok((back, _)) => compare(&ed, &back, true).into_iter().for_each(|e| fail("filters edited", e)),
                 Err(e) => fail("filters edited", e),
             }
+        }
+        // Placed-layer data regenerated (moved by ¼ px): each layer keeps its own set of placed blocks (a linked
+        // `SoLE` layer gets no `PlLd`), and `PlLd` carries the warp `SoLd`/`SoLE` carries.
+        let mut moved = doc.clone();
+        nudge(&mut moved);
+        match round_trip(&moved) {
+            Ok((back, out)) => {
+                compare(&moved, &back, true).into_iter().for_each(|e| fail("moved", e));
+                let (before, after) = (placed_rows(&bytes), placed_rows(&out));
+                for ((name, keys, ..), (_, out_keys, pl, so)) in before.iter().zip(&after) {
+                    let (mut a, mut b) = (keys.clone(), out_keys.clone());
+                    a.sort();
+                    b.sort();
+                    if a != b {
+                        fail("moved", format!("layer \"{name}\": placed blocks {:?} became {:?}", keys_str(&a), keys_str(&b)));
+                    }
+                    if pl.is_some() && so.is_some() && pl != so {
+                        fail("moved", format!("layer \"{name}\": PlLd warp differs from the SoLd warp"));
+                    }
+                }
+            }
+            Err(e) => fail("moved", e),
         }
         let mut em = doc.clone();
         if re_embed(&mut em) {
