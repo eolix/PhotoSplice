@@ -288,6 +288,13 @@ const KINDS: [(&str, &str); 10] = [
     ("FrFX", "frameFXMulti"),
 ];
 
+/// An effect Photoshop keeps only so the Layer Style dialog remembers its settings
+/// (`present: false`): current Photoshop writes one for every kind the layer doesn't use. It is
+/// not part of the layer's effects.
+fn placeholder(d: &Descriptor) -> bool {
+    matches!(d.get("present"), Some(Value::Boolean(false)))
+}
+
 /// Parses `lfx2` block data: `(master switch, effects)`.
 pub fn parse_lfx2(data: &[u8]) -> Option<(bool, Vec<Effect>)> {
     let (vd, _) = VersionedDescriptor::parse_prefix(data.get(4..)?).ok()?;
@@ -300,6 +307,7 @@ pub fn parse_lfx2(data: &[u8]) -> Option<(bool, Vec<Effect>)> {
             Some(Value::List(items)) => {
                 for it in items {
                     if let Value::Descriptor(x) = it
+                        && !placeholder(x)
                         && let Some(e) = parse_one(single, x)
                     {
                         out.push(e);
@@ -308,6 +316,7 @@ pub fn parse_lfx2(data: &[u8]) -> Option<(bool, Vec<Effect>)> {
             }
             _ => {
                 if let Some(x) = get_desc(&d, single)
+                    && !placeholder(x)
                     && let Some(e) = parse_one(single, x)
                 {
                     out.push(e);
@@ -501,6 +510,163 @@ fn write_one(e: &Effect) -> (&'static str, Descriptor) {
 
 /// Serializes effects as `lfx2` block data.
 pub fn write_lfx2(master: bool, items: &[Effect]) -> Vec<u8> {
+    lfx2_data(lfx2_descriptor(master, items))
+}
+
+/// Serializes effects onto the `lfx2` or `lmfx` block data the file had (`template`), keeping
+/// what the document model doesn't carry: unmodelled keys of each effect, the effects scale,
+/// Photoshop's placeholders for unused kinds (an effect removed here becomes one), and the
+/// order. `numModifyingFX` is recomputed. Returns the data and whether a kind has several
+/// instances, in which case Photoshop stores the block as `lmfx`.
+pub fn write_lfx2_onto(template: Option<&[u8]>, master: bool, items: &[Effect]) -> (Vec<u8>, bool) {
+    let fresh = lfx2_descriptor(master, items);
+    let multi = KINDS.iter().any(|(single, multi)| !multi.is_empty() && instances(&fresh, single, multi).len() > 1);
+    let base = template.and_then(|t| VersionedDescriptor::parse_prefix(t.get(4..)?).ok()).map(|(v, _)| v.descriptor);
+    let d = match base {
+        Some(base) => merge_lfx2(&base, fresh, items),
+        None => fresh,
+    };
+    (lfx2_data(d), multi)
+}
+
+fn lfx2_data(d: Descriptor) -> Vec<u8> {
+    let mut out = 0u32.to_be_bytes().to_vec();
+    out.extend(VersionedDescriptor::new(d).to_bytes());
+    out
+}
+
+/// Index into [`KINDS`] of a single or multi key.
+fn kind_index(k: &Id) -> Option<usize> {
+    KINDS.iter().position(|(single, multi)| k.is(single) || (!multi.is_empty() && k.is(multi)))
+}
+
+/// Every instance of one kind, from its multi list and its single key.
+fn instances(d: &Descriptor, single: &str, multi: &str) -> Vec<Descriptor> {
+    let mut out = Vec::new();
+    if !multi.is_empty()
+        && let Some(Value::List(xs)) = d.get(multi)
+    {
+        out.extend(xs.iter().filter_map(|x| if let Value::Descriptor(x) = x { Some(x.clone()) } else { None }));
+    }
+    out.extend(get_desc(d, single).cloned());
+    out
+}
+
+fn set_key(d: &mut Descriptor, key: &str, v: Value) {
+    match d.items.iter_mut().find(|(k, _)| k.is(key)) {
+        Some((_, old)) => *old = v,
+        None => d.items.push((Id::new(key), v)),
+    }
+}
+
+/// See [`write_lfx2_onto`].
+fn merge_lfx2(base: &Descriptor, fresh: Descriptor, items: &[Effect]) -> Descriptor {
+    let mut out = Descriptor { name: base.name.clone(), class_id: base.class_id.clone(), items: Vec::new() };
+    let mut done = [false; KINDS.len()];
+    for (k, v) in &base.items {
+        if let Some(i) = kind_index(k) {
+            if !done[i] {
+                done[i] = true;
+                out.items.extend(merge_kind(i, base, &fresh, items));
+            }
+        } else if k.is("Scl ") {
+            // The effects scale isn't modelled.
+            out.items.push((k.clone(), v.clone()));
+        } else if let Some((_, fv)) = fresh.items.iter().find(|(fk, _)| fk == k) {
+            out.items.push((k.clone(), fv.clone()));
+        } else {
+            out.items.push((k.clone(), v.clone()));
+        }
+    }
+    for (i, d) in done.iter().enumerate() {
+        if !d {
+            out.items.extend(merge_kind(i, base, &fresh, items));
+        }
+    }
+    for (k, v) in fresh.items {
+        if kind_index(&k).is_none() && !out.items.iter().any(|(ok, _)| *ok == k) {
+            out.items.push((k, v));
+        }
+    }
+    // The number of effects in use (present and enabled), whatever the master switch says.
+    let active = KINDS
+        .iter()
+        .flat_map(|(single, multi)| instances(&out, single, multi))
+        .filter(|d| !placeholder(d) && !matches!(d.get("enab"), Some(Value::Boolean(false))))
+        .count();
+    if let Some((_, v)) = out.items.iter_mut().find(|(k, _)| k.is("numModifyingFX")) {
+        *v = Value::Integer(i32::try_from(active).unwrap_or(i32::MAX));
+    }
+    out
+}
+
+/// Entries for kind `i`: the document's instances merged onto the file's (pairwise when the
+/// counts match), or the file's instances as placeholders when the document has none.
+fn merge_kind(i: usize, base: &Descriptor, fresh: &Descriptor, items: &[Effect]) -> Vec<(Id, Value)> {
+    let Some(&(single, multi)) = KINDS.get(i) else { return Vec::new() };
+    let old = instances(base, single, multi);
+    let new = instances(fresh, single, multi);
+    // The document's effects of this kind, in the order `new` holds them.
+    let model: Vec<&Effect> = items.iter().filter(|e| write_one(e).0 == single).collect();
+    let (items, as_list) = if new.is_empty() {
+        let kept: Vec<Descriptor> = old
+            .into_iter()
+            .map(|mut d| {
+                set_key(&mut d, "enab", Value::Boolean(false));
+                set_key(&mut d, "present", Value::Boolean(false));
+                d
+            })
+            .collect();
+        // Placeholders keep the file's form (Photoshop lists them under the multi key).
+        let as_list = !multi.is_empty() && matches!(base.get(multi), Some(Value::List(_)));
+        (kept, as_list)
+    } else {
+        let merged = if old.len() == new.len() {
+            old.iter()
+                .zip(new)
+                .enumerate()
+                .map(|(k, (o, n))| {
+                    // `showInDialog` isn't modelled; a placeholder's says nothing about a live
+                    // effect. A gradient whose stops weren't edited keeps the file's definition
+                    // (colour model, noise gradient, name, interpolation).
+                    let file = parse_one(single, o);
+                    let file_stops = file.as_ref().and_then(gradient_stops);
+                    let same_gradient = file_stops.is_some() && file_stops == model.get(k).and_then(|e| gradient_stops(e));
+                    let keep: &[&str] = match (placeholder(o), same_gradient) {
+                        (true, _) => &[],
+                        (false, true) => &["showInDialog", "Grad"],
+                        (false, false) => &["showInDialog"],
+                    };
+                    crate::blocks::merge_descriptor(o, n, keep)
+                })
+                .collect()
+        } else {
+            new
+        };
+        let as_list = merged.len() > 1 && !multi.is_empty();
+        (merged, as_list)
+    };
+    match (items.len(), as_list) {
+        (0, _) => Vec::new(),
+        (_, true) => vec![(Id::new(multi), Value::List(items.into_iter().map(Value::Descriptor).collect()))],
+        _ => items.into_iter().take(1).map(|d| (Id::new(single), Value::Descriptor(d))).collect(),
+    }
+}
+
+/// A gradient's definition: its colour stops and opacity stops.
+type GradientStops<'a> = (&'a [(f32, Color)], &'a [(f32, f32)]);
+
+/// The gradient definition an effect paints with, if any.
+fn gradient_stops(e: &Effect) -> Option<GradientStops<'_>> {
+    let g = match e {
+        Effect::GradientOverlay { gradient, .. } => gradient,
+        Effect::Stroke(StrokeFx { paint: FxPaint::Gradient(g), .. }) | Effect::OuterGlow(Glow { paint: FxPaint::Gradient(g), .. }) | Effect::InnerGlow(Glow { paint: FxPaint::Gradient(g), .. }) => g,
+        _ => return None,
+    };
+    Some((&g.stops, &g.opacity_stops))
+}
+
+fn lfx2_descriptor(master: bool, items: &[Effect]) -> Descriptor {
     let mut d = Descriptor::new("null").with("Scl ", unit(b"#Prc", 100.0)).with("masterFXSwitch", Value::Boolean(master));
     for (single, multi) in KINDS {
         let of_kind: Vec<Descriptor> = items.iter().map(write_one).filter(|(k, _)| *k == single).map(|(_, d)| d).collect();
@@ -512,9 +678,7 @@ pub fn write_lfx2(master: bool, items: &[Effect]) -> Vec<u8> {
             _ => d = d.with(single, Value::Descriptor(of_kind.into_iter().next().unwrap_or_default())),
         }
     }
-    let mut out = 0u32.to_be_bytes().to_vec();
-    out.extend(VersionedDescriptor::new(d).to_bytes());
-    out
+    d
 }
 
 fn fixed(v: u32) -> f32 {
@@ -817,5 +981,104 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// lfx2 data as current Photoshop writes it: a live drop shadow carrying a key we don't model,
+    /// placeholders for unused kinds, an effects scale and an effect count.
+    fn photoshop_style_lfx2() -> Vec<u8> {
+        let placeholder = |class: &str| Descriptor::new(class).with("enab", Value::Boolean(false)).with("present", Value::Boolean(false));
+        let (_, shadow) = write_one(&Effect::default_drop_shadow());
+        let d = Descriptor::new("null")
+            .with("Scl ", unit(b"#Prc", 50.0))
+            .with("masterFXSwitch", Value::Boolean(true))
+            .with("DrSh", Value::Descriptor(shadow.with("unmodelled", Value::Boolean(true))))
+            .with("OrGl", Value::Descriptor(placeholder("OrGl")))
+            .with("frameFXMulti", Value::List(vec![Value::Descriptor(placeholder("FrFX"))]))
+            .with("numModifyingFX", Value::Integer(1));
+        lfx2_data(d)
+    }
+
+    fn stroke() -> Effect {
+        Effect::Stroke(StrokeFx {
+            common: FxCommon::new(BlendMode::Normal, 1.0),
+            size: 3.0,
+            position: StrokePosition::Center,
+            paint: FxPaint::Color(Color::rgb(0.0, 1.0, 0.0)),
+        })
+    }
+
+    #[test]
+    fn placeholders_are_not_effects() {
+        let (_, fx) = parse_lfx2(&photoshop_style_lfx2()).unwrap();
+        assert_eq!(fx.len(), 1);
+        assert!(matches!(fx[0], Effect::DropShadow(_)));
+    }
+
+    #[test]
+    fn rewrite_merges_onto_the_original() {
+        let src = photoshop_style_lfx2();
+        let (_, mut fx) = parse_lfx2(&src).unwrap();
+        fx.push(stroke());
+        let (data, multi) = write_lfx2_onto(Some(&src), true, &fx);
+        assert!(!multi);
+        let d = VersionedDescriptor::parse_prefix(&data[4..]).unwrap().0.descriptor;
+        // Unmodelled values survive: the effects scale and the shadow's extra key.
+        assert_eq!(d.get("Scl "), Some(&unit(b"#Prc", 50.0)));
+        assert_eq!(get_desc(&d, "DrSh").unwrap().get("unmodelled"), Some(&Value::Boolean(true)));
+        // The new stroke replaces its placeholder in place; the outer glow stays one.
+        let keys: Vec<_> = d.items.iter().map(|(k, _)| String::from_utf8_lossy(k.as_bytes()).into_owned()).collect();
+        assert_eq!(keys, ["Scl ", "masterFXSwitch", "DrSh", "OrGl", "FrFX", "numModifyingFX"]);
+        assert_eq!(get_desc(&d, "FrFX").unwrap().get("present"), Some(&Value::Boolean(true)));
+        assert!(placeholder(get_desc(&d, "OrGl").unwrap()));
+        assert_eq!(d.get("numModifyingFX"), Some(&Value::Integer(2)));
+        assert_eq!(parse_lfx2(&data).unwrap().1, fx);
+
+        // Removing the shadow leaves a placeholder that keeps its settings.
+        fx.remove(0);
+        let (data, _) = write_lfx2_onto(Some(&src), true, &fx);
+        let d = VersionedDescriptor::parse_prefix(&data[4..]).unwrap().0.descriptor;
+        let shadow = get_desc(&d, "DrSh").unwrap();
+        assert!(placeholder(shadow) && shadow.get("unmodelled").is_some());
+        assert_eq!(d.get("numModifyingFX"), Some(&Value::Integer(1)));
+        assert_eq!(parse_lfx2(&data).unwrap().1, fx);
+    }
+
+    /// A gradient overlay whose opacity is edited keeps its gradient definition verbatim (gray
+    /// stops and keys the model doesn't hold); its stops used to be rewritten as RGB.
+    #[test]
+    fn edited_gradient_overlay_keeps_its_gradient() {
+        let enumv = |t: &str, v: &str| Value::Enumerated { type_id: Id::new(t), value: Id::new(v) };
+        let gray = |g: f64| Value::Descriptor(Descriptor::new("Grsc").with("Gry ", Value::Double(g)));
+        let stop = |l: i32, c: Value| {
+            Value::Descriptor(Descriptor::new("Clrt").with("Clr ", c).with("Type", enumv("Clry", "UsrS")).with("Lctn", Value::Integer(l)).with("Mdpn", Value::Integer(50)))
+        };
+        let grad = Descriptor::new("Grdn")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("Grays")))
+            .with("GrdF", enumv("GrdF", "CstS"))
+            .with("Intr", Value::Double(4096.0))
+            .with("Clrs", Value::List(vec![stop(0, gray(0.0)), stop(4096, gray(100.0))]))
+            .with("unmodelled", Value::Boolean(true));
+        let (_, mut overlay) = write_one(&Effect::GradientOverlay { common: FxCommon::new(BlendMode::Normal, 1.0), gradient: Gradient::default(), dither: false });
+        set_key(&mut overlay, "Grad", Value::Descriptor(grad.clone()));
+        let src = lfx2_data(Descriptor::new("null").with("masterFXSwitch", Value::Boolean(true)).with("GrFl", Value::Descriptor(overlay)));
+        let (_, mut fx) = parse_lfx2(&src).unwrap();
+        if let Effect::GradientOverlay { common, .. } = &mut fx[0] {
+            common.opacity = 0.4;
+        }
+        let (data, _) = write_lfx2_onto(Some(&src), true, &fx);
+        let d = VersionedDescriptor::parse_prefix(&data[4..]).unwrap().0.descriptor;
+        let gr = get_desc(&d, "GrFl").unwrap();
+        assert_eq!(get_desc(gr, "Grad"), Some(&grad));
+        assert_eq!(gr.get("Opct"), Some(&unit(b"#Prc", 40.0)));
+    }
+
+    #[test]
+    fn several_of_a_kind_are_multi() {
+        let fx = vec![Effect::default_drop_shadow(), Effect::default_drop_shadow()];
+        let (data, multi) = write_lfx2_onto(None, true, &fx);
+        assert!(multi);
+        assert_eq!(parse_lfx2(&data).unwrap().1.len(), 2);
+        // A template that doesn't parse is ignored.
+        assert_eq!(write_lfx2_onto(Some(&[1, 2, 3]), true, &fx).0, data);
     }
 }

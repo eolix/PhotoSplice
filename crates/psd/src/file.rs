@@ -239,7 +239,17 @@ impl PsdFile {
         }
         match &self.layer_info {
             Some(li) => li.merged_alpha,
-            None => true,
+            // No layer info to say so: Photoshop lists the merged transparency first among the
+            // alpha channel names, as "Transparency". A name list that covers every extra
+            // channel and doesn't start with it means they are all alpha / spot channels
+            // (psd-tools cmyk-alpha-spot.psd: a spot channel was taken for transparency).
+            None => {
+                let extra = usize::from(self.header.channels - color);
+                match self.resource(crate::resources::ids::UNICODE_ALPHA_NAMES).map(|r| crate::resources::unicode_names(&r.data)) {
+                    Some(names) if names.len() >= extra => names.first().is_some_and(|n| n == crate::resources::TRANSPARENCY_NAME),
+                    _ => true,
+                }
+            }
         }
     }
 

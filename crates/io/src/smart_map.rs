@@ -608,7 +608,13 @@ pub fn sold_bytes(template: Option<&Descriptor>, s: &PlacedSpec<'_>, warnings: &
                 set(&mut d, "Trnf", quad(s));
                 set(&mut d, "nonAffineTransform", quad(s));
             }
-            set(&mut d, "warp", warp);
+            // The file's warp stays while it still reads as the layer's warp: one the model
+            // can't hold (a multi-patch "quilt" mesh reads as none) survived a move only as
+            // "no warp" before.
+            let same_warp = get_desc(t, "warp").is_some_and(|w| crate::blocks::warp_from_desc(w).as_ref() == s.warp);
+            if !same_warp {
+                set(&mut d, "warp", warp);
+            }
             match &s.filter_fx {
                 Some(fx) => set(&mut d, "filterFX", Value::Descriptor(fx.clone())),
                 None => d.items.retain(|(k, _)| !k.is("filterFX")),
@@ -646,8 +652,9 @@ pub fn sold_bytes(template: Option<&Descriptor>, s: &PlacedSpec<'_>, warnings: &
 }
 
 /// `PlLd` block data (`plcL` version 3): the legacy placed-layer record Photoshop writes next to
-/// `SoLd`.
-pub fn plld_bytes(s: &PlacedSpec<'_>, warnings: &mut Vec<String>) -> Vec<u8> {
+/// `SoLd`. Its warp is the one `sold` (the `SoLd` data written beside it) carries, so a warp kept
+/// from the file (one the model can't hold) is not reset to none here.
+pub fn plld_bytes(s: &PlacedSpec<'_>, sold: &[u8], warnings: &mut Vec<String>) -> Vec<u8> {
     let mut out = b"plcL".to_vec();
     out.extend_from_slice(&3u32.to_be_bytes());
     let id = s.idnt.as_bytes();
@@ -665,7 +672,14 @@ pub fn plld_bytes(s: &PlacedSpec<'_>, warnings: &mut Vec<String>) -> Vec<u8> {
         }
     }
     out.extend_from_slice(&0u32.to_be_bytes());
-    let Value::Descriptor(w) = warp_desc(s.warp, s.size, warnings) else { return pad4(out) };
+    let kept = sold_descriptor(sold).and_then(|d| get_desc(&d, "warp").cloned());
+    let w = match kept {
+        Some(w) => w,
+        None => {
+            let Value::Descriptor(w) = warp_desc(s.warp, s.size, warnings) else { return pad4(out) };
+            w
+        }
+    };
     out.extend(VersionedDescriptor::new(w).to_bytes());
     pad4(out)
 }
@@ -903,7 +917,7 @@ mod tests {
         assert_eq!(p.stack, Some(stack));
         let tb = photosuite_psd::TaggedBlock::new(*b"SoLd", sold.clone());
         tb.check_structure().unwrap();
-        let pl = photosuite_psd::TaggedBlock::new(*b"PlLd", plld_bytes(&spec, &mut w));
+        let pl = photosuite_psd::TaggedBlock::new(*b"PlLd", plld_bytes(&spec, &sold, &mut w));
         pl.check_structure().unwrap();
         // A template keeps its other keys; an unmoved transform keeps its exact quad.
         let mut tmpl = sold_descriptor(&sold).unwrap();
@@ -1007,6 +1021,41 @@ mod tests {
                 let _ = sold_bytes(Some(&p.descriptor), &spec, &mut w);
             }
         }
+    }
+
+        /// `PlLd` carries the warp its `SoLd` carries: a warp kept from the file because the model
+    /// reads it as none (here an identity custom mesh) is not written as `warpNone` in `PlLd`
+    /// (Photoshop then showed no warp).
+    #[test]
+    fn plld_warp_follows_the_sold_warp() {
+        use photosuite_geom::warp::BezierMesh;
+        let bounds = [0.0, 0.0, 64.0, 64.0];
+        let mut identity = Warp::preset(WarpStyle::Custom, 0.0, bounds);
+        identity.mesh = Some(BezierMesh::identity(bounds, 1, 1));
+        let mut w = Vec::new();
+        let spec = PlacedSpec {
+            idnt: "i",
+            placed: "p",
+            transform: Affine::IDENTITY,
+            perspective: None,
+            size: (64.0, 64.0),
+            dpi: 72.0,
+            warp: Some(&identity),
+            filter_fx: None,
+        };
+        let tmpl = sold_descriptor(&sold_bytes(None, &spec, &mut w)).unwrap();
+        assert_eq!(crate::blocks::warp_from_desc(get_desc(&tmpl, "warp").unwrap()), None, "the model holds no warp");
+        let moved = PlacedSpec { transform: Affine { m: [1.0, 0.0, 0.0, 1.0, 1e-6, 0.0] }, warp: None, ..spec };
+        let sold = sold_bytes(Some(&tmpl), &moved, &mut w);
+        let plld = plld_bytes(&moved, &sold, &mut w);
+        // plcL, version, Pascal id, page / pages / anti-alias / type, 8 doubles, warp version.
+        let at = 8 + 1 + moved.idnt.len() + 16 + 64 + 4;
+        let pl_warp = crate::blocks::parse_prefix_versioned(&plld[at..]).unwrap();
+        assert_eq!(Some(&pl_warp), get_desc(&sold_descriptor(&sold).unwrap(), "warp"));
+        assert_eq!(enum_of(&pl_warp, "warpStyle"), Some(&b"warpCustom"[..]));
+        // Without a `SoLd` warp to follow, the model's warp is written.
+        let plld = plld_bytes(&moved, &[], &mut w);
+        assert_eq!(enum_of(&crate::blocks::parse_prefix_versioned(&plld[at..]).unwrap(), "warpStyle"), Some(&b"warpNone"[..]));
     }
 
     #[test]

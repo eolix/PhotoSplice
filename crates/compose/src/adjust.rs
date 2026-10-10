@@ -85,12 +85,15 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
         }
         Adjustment::Posterize { levels } => map_rgb(buf, |c| c.map(|v| posterize(v, *levels))),
         Adjustment::BrightnessContrast { brightness, contrast, legacy: true } => {
-            // Legacy: contrast scales around mid-grey, then brightness is added
-            // (fitted to Photoshop's rendering, exact on the corpus).
+            // Legacy: contrast scales around mid-grey. A positive contrast stretches the input
+            // (brightness shifts the input first: Photoshop corpus rgb8 / cmyk8
+            // brightness-contrast-legacy.psd, +25 / +30); a negative one compresses the output
+            // (brightness is added after: psd-tools brightnesscontrast_legacy_grayscale, −23 / −26).
             let b = brightness / 255.0;
             let c = contrast.clamp(-100.0, 99.0);
             let k = if c >= 0.0 { 1.0 / (1.0 - c / 100.0) } else { 1.0 + c / 100.0 };
-            map_rgb(buf, |px| px.map(|v| ((v - 0.5) * k + 0.5 + b).clamp(0.0, 1.0)))
+            let f = move |v: f32| if c >= 0.0 { (v + b - 0.5) * k + 0.5 } else { (v - 0.5) * k + 0.5 + b };
+            map_rgb(buf, |px| px.map(|v| f(v).clamp(0.0, 1.0)))
         }
         Adjustment::BrightnessContrast { brightness, contrast, .. } => {
             // Modern (CS3+) Brightness/Contrast, reverse-engineered from Photoshop ground truth
@@ -439,7 +442,7 @@ pub fn selective_color(c: [f32; 3], relative: bool, adj: &[[f32; 4]; 9]) -> [f32
     std::array::from_fn(|i| (c[i] - delta[i]).clamp(0.0, 1.0))
 }
 
-const LUT_SIZE: usize = 4096;
+pub(crate) const LUT_SIZE: usize = 4096;
 
 fn map_rgb(buf: &mut Buffer, f: impl Fn([f32; 3]) -> [f32; 3]) {
     for p in &mut buf.px {
@@ -454,7 +457,7 @@ fn map_rgb(buf: &mut Buffer, f: impl Fn([f32; 3]) -> [f32; 3]) {
 }
 
 #[inline]
-fn lut(table: &[f32], v: f32) -> f32 {
+pub(crate) fn lut(table: &[f32], v: f32) -> f32 {
     let x = v.clamp(0.0, 1.0) * (table.len() - 1) as f32;
     let i = x.floor() as usize;
     let j = (i + 1).min(table.len() - 1);
@@ -621,7 +624,7 @@ pub fn curve_lut(points: &[CurvePoint]) -> Vec<f32> {
         .collect()
 }
 
-fn gradient(stops: &[(f32, [f32; 3])], t: f32) -> [f32; 3] {
+pub(crate) fn gradient(stops: &[(f32, [f32; 3])], t: f32) -> [f32; 3] {
     match stops {
         [] => [t; 3],
         [s] => s.1,
@@ -726,6 +729,29 @@ mod lookup_tests {
         let sum: f32 = (0..4).flat_map(|y| (0..4).map(move |x| bayer4(x, y))).sum();
         assert!(sum.abs() < 1e-5);
         assert_eq!(bayer4(-4, -4), bayer4(0, 0));
+    }
+}
+
+#[cfg(test)]
+mod brightness_contrast_tests {
+    use super::*;
+
+    /// Legacy Brightness/Contrast: with positive contrast brightness shifts the input first
+    /// (Photoshop corpus rgb8 / cmyk8 brightness-contrast-legacy.psd, +25 / +30: 85 → 103,
+    /// 170 → 224); with negative contrast it is added after (psd-tools
+    /// brightnesscontrast_legacy_grayscale, −23 / −26).
+    #[test]
+    fn legacy_order_depends_on_the_contrast_sign() {
+        let at = |b: f32, c: f32, v: f32| {
+            let mut buf = Buffer { rect: photosuite_geom::Rect::new(0, 0, 1, 1), px: vec![[v, v, v, 1.0]] };
+            apply_depth(&Adjustment::BrightnessContrast { brightness: b, contrast: c, legacy: true }, &mut buf, Transfer::Srgb, None);
+            buf.px[0][0] * 255.0
+        };
+        assert!((at(25.0, 30.0, 85.0 / 255.0) - 103.0).abs() < 1.0);
+        assert!((at(25.0, 30.0, 170.0 / 255.0) - 224.0).abs() < 1.0);
+        let k = 1.0 - 26.0 / 100.0;
+        let want = (100.0 - 127.5) * k + 127.5 - 23.0;
+        assert!((at(-23.0, -26.0, 100.0 / 255.0) - want).abs() < 0.01);
     }
 }
 

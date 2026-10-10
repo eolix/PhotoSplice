@@ -39,3 +39,7 @@ blake3 = { version = "1.8", default-features = false, features = ["pure"] }
 photosuite-psd = { workspace = true, features = ["testgen"] }
 photosuite-raw = { workspace = true, features = ["testgen"] }
 proptest = { workspace = true }
+# examples/gpu_diff.rs: the GPU compositor (what the app draws) against Photoshop's composite.
+photosuite-gpu = { path = "../gpu" }
+wgpu = { version = "30" }
+pollster = "1"

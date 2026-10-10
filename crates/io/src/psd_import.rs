@@ -16,8 +16,11 @@ use crate::blocks;
 use crate::pixels::{interleave, max_sample, sample_for_depth, zero_sample};
 
 /// Resources that are mapped to document fields or regenerated on export.
-pub(crate) const MAPPED_RESOURCES: [u16; 19] = [
+pub(crate) const MAPPED_RESOURCES: [u16; 21] = [
     ids::GLOBAL_ANGLE,
+    // Indexed colour: the palette's colour count and transparent index (into `ColorTable`).
+    crate::flat_modes::COLOR_COUNT,
+    crate::flat_modes::TRANSPARENCY_INDEX,
     ids::GLOBAL_ALTITUDE,
     ids::RESOLUTION_INFO,
     ids::ICC_PROFILE,
@@ -468,20 +471,6 @@ fn be_to_ne_plane(plane: &[u8], s: SampleType, n: usize) -> Vec<u8> {
     interleave(&[Some(plane)], &[zero_sample(s)], n, s, &[false])
 }
 
-fn unicode_names(data: &[u8]) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut at = 0;
-    while at + 4 <= data.len() {
-        let n = u32::from_be_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]) as usize;
-        at += 4;
-        let Some(b) = data.get(at..at + n * 2) else { break };
-        let units: Vec<u16> = b.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
-        out.push(String::from_utf16_lossy(&units).trim_end_matches('\0').to_string());
-        at += n * 2;
-    }
-    out
-}
-
 fn parse_guides(data: &[u8], doc: &mut Document) {
     let rd = |at: usize| data.get(at..at + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
     let Some(count) = rd(12) else { return };
@@ -513,7 +502,8 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
         warnings.push(format!("unknown color mode {}; importing as RGB", h.color_mode.as_u16()));
         ColorMode::Rgb
     });
-    let layered = matches!(mode, ColorMode::Grayscale | ColorMode::Rgb | ColorMode::Cmyk | ColorMode::Lab) && h.depth != 1;
+    // Duotone layers are stored like grayscale ones (the gray plate plus transparency).
+    let layered = matches!(mode, ColorMode::Grayscale | ColorMode::Rgb | ColorMode::Cmyk | ColorMode::Lab | ColorMode::Duotone) && h.depth != 1;
     let multichannel = mode == ColorMode::Multichannel && h.depth != 1;
     let depth = if layered || multichannel { sample_for_depth(h.depth) } else { SampleType::U8 };
     let mut doc = Document::new("Untitled", Size::new(h.width, h.height), mode, depth);
@@ -560,6 +550,20 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
                 doc.metadata.psd_resources.push((r.id, String::from_utf8_lossy(&r.name).into_owned(), Arc::new(r.data.clone())));
             }
             id if MAPPED_RESOURCES.contains(&id) => {}
+            // The layer id seed: export writes the highest layer id, never less than this, so it
+            // is kept only when it says more than the ids do.
+            ids::DOCUMENT_IDS_SEED
+                if r.data.get(..4).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+                    <= file.layers().iter().filter_map(LayerRecord::layer_id).max().unwrap_or(0) => {}
+            // Alpha ids: kept only when they aren't the ones export writes by default anyway
+            // (transparency 0, then 1, 2…), so the document model stays canonical.
+            ids::ALPHA_IDS
+                if r.data
+                    == crate::psd_export::alpha_ids_resource(
+                        None,
+                        file.merged_has_alpha(),
+                        file.resource(ids::UNICODE_ALPHA_NAMES).map_or(0, |n| photosuite_psd::resources::unicode_names(&n.data).len()),
+                    ) => {}
             id => doc.metadata.psd_resources.push((id, String::from_utf8_lossy(&r.name).into_owned(), Arc::new(r.data.clone()))),
         }
     }
@@ -625,10 +629,17 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
         None
     };
 
+    if h.color_mode == PsdMode::Duotone && !file.color_mode_data.is_empty() {
+        // The duotone ink block is undocumented (the spec says to treat the image as gray and
+        // keep the block): kept raw and written back; the image shows as its gray plate.
+        doc.duotone =
+            Some(photosuite_doc::Duotone { inks: vec![photosuite_doc::DuotoneInk::new("Black", [0.0; 3])], psd_raw: Some(file.color_mode_data.clone()) });
+        cx.warn("duotone inks are not interpreted (shown as grayscale)");
+    }
     if multichannel {
         // Ink channels only (no layers); see `multichannel_map`.
         if let Some(Ok(all)) = &merged {
-            let names = file.resource(1045).map(|r| unicode_names(&r.data)).unwrap_or_default();
+            let names = file.resource(1045).map(|r| photosuite_psd::resources::unicode_names(&r.data)).unwrap_or_default();
             crate::multichannel_map::import(file, all, &mut doc, &names, &mut cx.warnings);
         }
         if !file.layers().is_empty() {
@@ -696,13 +707,14 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
         if h.color_mode == PsdMode::Indexed && file.color_mode_data.len() >= 768 {
             // Planar palette: 256 reds, 256 greens, 256 blues (the Color Table).
             let m = &file.color_mode_data;
-            let colors = (0..256).map(|i| [m[i], m[256 + i], m[512 + i]]).collect();
-            doc.color_table = Some(photosuite_doc::ColorTable { colors, transparent: None });
-        } else if h.color_mode == PsdMode::Duotone && !file.color_mode_data.is_empty() {
-            // The duotone ink block is undocumented: keep it raw; the image shows as its gray plate.
-            doc.duotone =
-                Some(photosuite_doc::Duotone { inks: vec![photosuite_doc::DuotoneInk::new("Black", [0.0; 3])], psd_raw: Some(file.color_mode_data.clone()) });
-            cx.warn("duotone inks are not interpreted (shown as grayscale)");
+            let u16_of = |id: u16| file.resource(id).and_then(|r| r.data.get(..2)).map(|b| u16::from_be_bytes([b[0], b[1]]));
+            // Resource 1046: how many entries are used (the rest of the 256 are padding).
+            let count = u16_of(crate::flat_modes::COLOR_COUNT).map_or(256, |n| usize::from(n).clamp(1, 256));
+            let colors = (0..count).map(|i| [m[i], m[256 + i], m[512 + i]]).collect();
+            let transparent = u16_of(crate::flat_modes::TRANSPARENCY_INDEX).filter(|&t| usize::from(t) < count).map(|t| t as u8);
+            doc.color_table = Some(photosuite_doc::ColorTable { colors, transparent });
+        } else if h.color_mode == PsdMode::Duotone {
+            // Kept with the document (see below).
         } else if !file.color_mode_data.is_empty() {
             cx.warn("color mode data is not preserved");
         }
@@ -719,7 +731,18 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
             }
             Ok::<_, photosuite_psd::PsdError>(photosuite_psd::RgbaImage { left: 0, top: 0, width: h.width, height: h.height, data })
         });
-        if let Ok(img) = rgba {
+        if let Ok(mut img) = rgba {
+            // Indexed Color › Transparency: pixels of that palette entry are transparent.
+            if let Some(t) = doc.color_table.as_ref().and_then(|c| c.transparent)
+                && h.color_mode == PsdMode::Indexed
+                && let Some(Ok(plane)) = &merged
+            {
+                for (px, idx) in img.data.chunks_exact_mut(4).zip(plane.iter()) {
+                    if *idx == t {
+                        px[3] = 0;
+                    }
+                }
+            }
             let mut s = Surface::new(fmt);
             let vals: Vec<f32> = img
                 .data
@@ -741,7 +764,11 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
     if layered && let Some(Ok(all)) = &merged {
         let first = cc + usize::from(file.merged_has_alpha());
         let plane = h.row_bytes() * hh;
-        let names = file.resource(1045).map(|r| unicode_names(&r.data)).unwrap_or_default();
+        let names = file.resource(1045).map(|r| photosuite_psd::resources::unicode_names(&r.data)).unwrap_or_default();
+        // Photoshop lists the merged transparency first ("Transparency") in the channel names and
+        // display info; the alpha channels follow it.
+        let skip = usize::from(file.merged_has_alpha() && names.first().is_some_and(|n| n == photosuite_psd::resources::TRANSPARENCY_NAME));
+        let names = names.get(skip..).unwrap_or_default();
         for (k, idx) in (first..usize::from(h.channels)).enumerate() {
             let Some(p) = all.get(idx * plane..(idx + 1) * plane) else { break };
             let mut s = Surface::new(cx.mask_fmt);
@@ -752,9 +779,9 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
         }
         // Channel options (overlay colour, opacity, colour indicates) and spot inks.
         if let Some(r) = file.resource(crate::channel_map::DISPLAY_INFO) {
-            crate::channel_map::apply_display_info(&r.data, true, &mut doc.channels);
+            crate::channel_map::apply_display_info(&r.data, true, skip, &mut doc.channels);
         } else if let Some(r) = file.resource(crate::channel_map::DISPLAY_INFO_OLD) {
-            crate::channel_map::apply_display_info(&r.data, false, &mut doc.channels);
+            crate::channel_map::apply_display_info(&r.data, false, skip, &mut doc.channels);
         }
         // Saved in Quick Mask mode: that channel becomes the document's Quick Mask again.
         if let Some(r) = file.resource(crate::channel_map::QUICK_MASK_INFO)

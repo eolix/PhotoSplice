@@ -33,7 +33,10 @@ pub fn blend_if_from_ranges(r: &BlendingRanges) -> BlendIf {
 
 /// Inverse of [`blend_if_from_ranges`] for a document with `channels` colour channels: one
 /// entry for gray plus one per channel (more when the setting stores more), unset entries full.
+/// Photoshop writes at least five entries in every colour mode, Grayscale included (observed on
+/// every Photoshop-authored layer of the oracle corpus).
 pub fn ranges_from_blend_if(b: &BlendIf, channels: usize) -> BlendingRanges {
+    let channels = channels.max(4);
     if b.is_default() {
         return BlendingRanges::full(channels);
     }
@@ -105,6 +108,11 @@ pub fn color_from_desc(d: &Descriptor) -> Option<Color> {
         b"RGBC" => Color::rgb(g("Rd  ")? / 255.0, g("Grn ")? / 255.0, g("Bl  ")? / 255.0),
         b"CMYC" => Color { mode: ColorMode::Cmyk, c: [g("Cyn ")? / 100.0, g("Mgnt")? / 100.0, g("Ylw ")? / 100.0, g("Blck")? / 100.0], alpha: 1.0 },
         b"Grsc" => Color::gray(1.0 - g("Gry ")? / 100.0),
+        // HSB: hue in degrees (`H   `, unit `#Ang`), saturation and brightness 0..100.
+        b"HSBC" => {
+            let [r, gr, b] = hsb_to_rgb(g("H   ")?, g("Strt")? / 100.0, g("Brgh")? / 100.0);
+            Color::rgb(r, gr, b)
+        }
         // CIE L*a*b*: L 0..100, a / b −128..127 (stored like Lab pixels: offset by 128).
         b"LbCl" => Color { mode: ColorMode::Lab, c: [g("Lmnc")? / 100.0, (g("A   ")? + 128.0) / 255.0, (g("B   ")? + 128.0) / 255.0, 0.0], alpha: 1.0 },
         // Newer Photoshop writes 0..1 floats.
@@ -114,6 +122,22 @@ pub fn color_from_desc(d: &Descriptor) -> Option<Color> {
             Color::rgb(g("Rd  ")? / 255.0, g("Grn ")? / 255.0, g("Bl  ")? / 255.0)
         }
     })
+}
+
+/// HSB (hue in degrees, saturation and brightness 0..1) → RGB 0..1.
+pub(crate) fn hsb_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
+    let (s, v) = (s.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
+    let h = if h.is_finite() { h.rem_euclid(360.0) / 60.0 } else { 0.0 };
+    let f = h - h.floor();
+    let (p, q, t) = (v * (1.0 - s), v * (1.0 - s * f), v * (1.0 - s * (1.0 - f)));
+    match h as u32 {
+        0 => [v, t, p],
+        1 => [q, v, p],
+        2 => [p, v, t],
+        3 => [p, q, v],
+        4 => [t, p, v],
+        _ => [v, p, q],
+    }
 }
 
 /// [`Color`] → descriptor in its own model.
@@ -133,6 +157,47 @@ pub fn color_to_desc(c: &Color) -> Descriptor {
             let rgb = c.to_rgb();
             Descriptor::new("RGBC").with("Rd  ", d(rgb[0] * 255.0)).with("Grn ", d(rgb[1] * 255.0)).with("Bl  ", d(rgb[2] * 255.0))
         }
+    }
+}
+
+/// Nesting depth past which [`merge_descriptor`] stops merging and takes the regenerated value.
+const MERGE_DEPTH: usize = 32;
+
+/// Merges a regenerated descriptor onto the one the file had, so a rewrite keeps what the
+/// document model doesn't carry ("merge, don't rebuild"). Keys of `over` win, except those named
+/// in `keep`, whose original value stays. Keys only in `base` are kept. The result follows
+/// `base`'s key order, then `over`'s new keys. Nested descriptors of the same class merge
+/// recursively, as do lists of the same length; anything else takes `over`'s value.
+pub(crate) fn merge_descriptor(base: &Descriptor, over: Descriptor, keep: &[&str]) -> Descriptor {
+    merge_desc(base, over, keep, 0)
+}
+
+fn merge_desc(base: &Descriptor, mut over: Descriptor, keep: &[&str], depth: usize) -> Descriptor {
+    if depth > MERGE_DEPTH {
+        return over;
+    }
+    let mut items = Vec::with_capacity(base.items.len().max(over.items.len()));
+    for (k, bv) in &base.items {
+        match over.items.iter().position(|(ok, _)| ok == k) {
+            Some(i) => {
+                let (ok, ov) = over.items.remove(i);
+                let v = if keep.iter().any(|s| k.is(s)) { bv.clone() } else { merge_value(bv, ov, keep, depth + 1) };
+                items.push((ok, v));
+            }
+            None => items.push((k.clone(), bv.clone())),
+        }
+    }
+    items.append(&mut over.items);
+    Descriptor { name: over.name, class_id: over.class_id, items }
+}
+
+fn merge_value(base: &Value, over: Value, keep: &[&str], depth: usize) -> Value {
+    match (base, over) {
+        (Value::Descriptor(b), Value::Descriptor(o)) if b.class_id == o.class_id => Value::Descriptor(merge_desc(b, o, keep, depth)),
+        (Value::List(b), Value::List(o)) if b.len() == o.len() => {
+            Value::List(b.iter().zip(o).map(|(bv, ov)| merge_value(bv, ov, keep, depth + 1)).collect())
+        }
+        (_, o) => o,
     }
 }
 
@@ -385,6 +450,44 @@ pub fn write_fill(f: &Fill) -> ([u8; 4], Vec<u8>) {
     (k, VersionedDescriptor::new(d).to_bytes())
 }
 
+/// A fill as (block key, descriptor), merged onto the descriptor of the block it replaces when
+/// that is the same kind of fill (`old`: key and descriptor bytes, version prefix included), so
+/// what the model doesn't carry survives (gradient interpolation method, noise seed…).
+pub fn fill_to_desc_onto(f: &Fill, old: Option<(&[u8; 4], &[u8])>) -> ([u8; 4], Descriptor) {
+    let (k, mut d) = fill_to_desc(f);
+    let Some(base) = old.filter(|(ok, _)| **ok == k).and_then(|(_, data)| parse_prefix_versioned(data)) else { return (k, d) };
+    // Keys written only when not at their default: a file that has one gets the default spelled
+    // out, or the merge would keep its old value (a reversed gradient stayed reversed).
+    let prc = |v: f64| Value::UnitFloat { unit: *b"#Prc", value: v };
+    let defaults = match f {
+        Fill::Gradient { .. } => vec![
+            ("Scl ", prc(100.0)),
+            ("Rvrs", Value::Boolean(false)),
+            ("Dthr", Value::Boolean(false)),
+            ("Algn", Value::Boolean(true)),
+            ("Ofst", Value::Descriptor(Descriptor::new("Pnt ").with("Hrzn", prc(0.0)).with("Vrtc", prc(0.0)))),
+        ],
+        Fill::Pattern { .. } => vec![("Angl", Value::UnitFloat { unit: *b"#Ang", value: 0.0 })],
+        Fill::Solid(_) => Vec::new(),
+    };
+    for (key, v) in defaults {
+        if base.get(key).is_some() && d.get(key).is_none() {
+            d.items.push((Id::new(key), v));
+        }
+    }
+    // A gradient whose stops weren't edited keeps the file's definition verbatim: its colour
+    // model (CMYK, gray, Lab stops), a noise gradient, the name and interpolation the model
+    // bakes into its stops.
+    let same_stops = match (fill_from_desc(&k, &base), f) {
+        (
+            Some(Fill::Gradient { stops: s0, opacity_stops: o0, midpoints: m0, .. }),
+            Fill::Gradient { stops: s1, opacity_stops: o1, midpoints: m1, .. },
+        ) => s0 == *s1 && o0 == *o1 && m0 == *m1,
+        _ => false,
+    };
+    (k, merge_descriptor(&base, d, if same_stops { &["Grad"] } else { &[] }))
+}
+
 /// A fill as (block key, descriptor with class `null`).
 pub fn fill_to_desc(f: &Fill) -> ([u8; 4], Descriptor) {
     match f {
@@ -393,9 +496,12 @@ pub fn fill_to_desc(f: &Fill) -> ([u8; 4], Descriptor) {
             let prc = |v: f32| Value::UnitFloat { unit: *b"#Prc", value: f64::from(v * 100.0) };
             let mut d = Descriptor::new("null")
                 .with("Angl", Value::UnitFloat { unit: *b"#Ang", value: f64::from(*angle) })
-                .with("Type", gradient_style_value(*style))
-                .with("Scl ", prc(*scale))
-                .with("Grad", Value::Descriptor(gradient_desc_with(stops, opacity_stops, midpoints)));
+                .with("Type", gradient_style_value(*style));
+            // Photoshop writes the scale only when it isn't 100 %.
+            if *scale != 1.0 {
+                d = d.with("Scl ", prc(*scale));
+            }
+            d = d.with("Grad", Value::Descriptor(gradient_desc_with(stops, opacity_stops, midpoints)));
             if *reverse {
                 d = d.with("Rvrs", Value::Boolean(true));
             }
@@ -459,12 +565,17 @@ pub(crate) fn with_pattern_placement(mut d: Descriptor, angle: f32, link: bool, 
 /// axis, bounds and, for `warpCustom`, the 4 × 4 `customEnvelopeWarp` mesh. Read-only: the raw
 /// block is what gets written back. `None` when absent or `warpNone` with no mesh.
 pub fn parse_placed_warp(key: &[u8; 4], data: &[u8]) -> Option<photosuite_geom::warp::Warp> {
-    use photosuite_geom::warp::{BezierMesh, Warp, WarpStyle};
     if key != b"SoLd" && key != b"SoLE" {
         return None;
     }
     let d = data.get(8..).and_then(parse_prefix_versioned)?;
-    let w = get_desc(&d, "warp")?;
+    warp_from_desc(get_desc(&d, "warp")?)
+}
+
+/// A placed layer's `warp` descriptor as a [`photosuite_geom::warp::Warp`]: `None` for no warp
+/// and for warps the model can't hold (a multi-patch mesh, "quilt").
+pub(crate) fn warp_from_desc(w: &Descriptor) -> Option<photosuite_geom::warp::Warp> {
+    use photosuite_geom::warp::{BezierMesh, Warp, WarpStyle};
     let style = enum_of(w, "warpStyle").and_then(|v| WarpStyle::parse(&String::from_utf8_lossy(v)))?;
     let b = get_desc(w, "bounds")?;
     let g = |k: &str| num(b.get(k));
@@ -625,16 +736,20 @@ mod tests {
         assert_eq!(b.get(0), [BlendRange { black: [10, 40], white: [255, 255] }, BlendRange::FULL]);
         assert_eq!(b.get(3), [BlendRange::FULL, BlendRange { black: [0, 0], white: [200, 200] }]);
         assert_eq!(b.ranges.len(), 4);
-        assert_eq!(super::ranges_from_blend_if(&b, 3).data, data);
-        // The default writes full ranges for gray + each channel.
+        // Written back padded to the five entries Photoshop writes in every mode.
+        let mut five = data.clone();
+        five.extend_from_slice(&[0, 0, 255, 255, 0, 0, 255, 255]);
+        assert_eq!(super::ranges_from_blend_if(&b, 3).data, five);
+        // The default writes full ranges for gray + four channels, Grayscale included.
         assert_eq!(super::ranges_from_blend_if(&BlendIf::default(), 4), BlendingRanges::full(4));
-        // A trimmed setting is padded to the document's channel count.
+        assert_eq!(super::ranges_from_blend_if(&BlendIf::default(), 1), BlendingRanges::full(4));
+        // A trimmed setting is padded the same way.
         let mut short = BlendIf::default();
         short.set(0, [BlendRange { black: [5, 5], white: [255, 255] }, BlendRange::FULL]);
         let r = super::ranges_from_blend_if(&short, 3);
-        assert_eq!(r.data.len(), 4 * 8);
+        assert_eq!(r.data.len(), 5 * 8);
         assert_eq!(&r.data[..8], &[5, 5, 255, 255, 0, 0, 255, 255]);
-        assert_eq!(&r.data[8..], &BlendingRanges::full(2).data[..]);
+        assert_eq!(&r.data[8..], &BlendingRanges::full(3).data[..]);
     }
 
     #[test]
@@ -784,5 +899,131 @@ mod more_tests {
     #[test]
     fn tysh_garbage_is_none() {
         assert!(parse_tysh(&[0; 10]).is_none());
+    }
+
+    #[test]
+    fn hsb_colours_decode() {
+        let hsb = |h: f64, s: f64, b: f64| {
+            Descriptor::new("HSBC")
+                .with("H   ", Value::UnitFloat { unit: *b"#Ang", value: h })
+                .with("Strt", Value::Double(s))
+                .with("Brgh", Value::Double(b))
+        };
+        let rgb = |d: &Descriptor| color_from_desc(d).unwrap().to_rgb();
+        assert_eq!(rgb(&hsb(0.0, 0.0, 100.0)), [1.0, 1.0, 1.0]);
+        assert_eq!(rgb(&hsb(0.0, 100.0, 100.0)), [1.0, 0.0, 0.0]);
+        assert_eq!(rgb(&hsb(120.0, 100.0, 50.0)), [0.0, 0.5, 0.0]);
+        let c = rgb(&hsb(210.0, 50.0, 80.0));
+        assert!((c[0] - 0.4).abs() < 1e-5 && (c[1] - 0.6).abs() < 1e-5 && (c[2] - 0.8).abs() < 1e-5, "{c:?}");
+        // Hue wraps; missing keys are not a colour.
+        assert_eq!(rgb(&hsb(360.0, 100.0, 100.0)), [1.0, 0.0, 0.0]);
+        assert!(color_from_desc(&Descriptor::new("HSBC").with("H   ", Value::Double(1.0))).is_none());
+    }
+
+    /// A CMYK gradient fill whose angle is edited keeps its gradient definition verbatim (its
+    /// stops used to be rewritten as RGB, and a noise gradient as black to white).
+    #[test]
+    fn unedited_gradient_definition_is_kept() {
+        let cmyk = |c: f64, k: f64| {
+            Value::Descriptor(
+                Descriptor::new("CMYC")
+                    .with("Cyn ", Value::Double(c))
+                    .with("Mgnt", Value::Double(0.0))
+                    .with("Ylw ", Value::Double(0.0))
+                    .with("Blck", Value::Double(k)),
+            )
+        };
+        let stop = |l: f64, c: Value| {
+            Value::Descriptor(
+                Descriptor::new("Clrt")
+                    .with("Clr ", c)
+                    .with("Type", Value::Enumerated { type_id: Id::new("Clry"), value: Id::new("UsrS") })
+                    .with("Lctn", Value::Integer(l as i32))
+                    .with("Mdpn", Value::Integer(50)),
+            )
+        };
+        let grad = Descriptor::new("Grdn")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("Cyan to black")))
+            .with("GrdF", Value::Enumerated { type_id: Id::new("GrdF"), value: Id::new("CstS") })
+            .with("Intr", Value::Double(4096.0))
+            .with("Clrs", Value::List(vec![stop(0.0, cmyk(100.0, 0.0)), stop(4096.0, cmyk(0.0, 100.0))]));
+        let base = Descriptor::new("null")
+            .with("Angl", Value::UnitFloat { unit: *b"#Ang", value: 90.0 })
+            .with("Type", Value::Enumerated { type_id: Id::new("GrdT"), value: Id::new("Lnr ") })
+            .with("Grad", Value::Descriptor(grad.clone()));
+        let data = VersionedDescriptor::new(base).to_bytes();
+        let Some(Fill::Gradient { mut angle, stops, opacity_stops, midpoints, style, scale, reverse, offset, dither, align }) = parse_fill(b"GdFl", &data) else { panic!() };
+        angle += 30.0;
+        let edited = Fill::Gradient { angle, stops, opacity_stops, midpoints, style, scale, reverse, offset, dither, align };
+        let (_, d) = fill_to_desc_onto(&edited, Some((b"GdFl", &data)));
+        assert_eq!(get_desc(&d, "Grad"), Some(&grad));
+        assert!(matches!(d.get("Angl"), Some(Value::UnitFloat { value, .. }) if (*value - 120.0).abs() < 1e-3));
+        // Edited stops are written from the model.
+        let Fill::Gradient { mut stops, angle, opacity_stops, midpoints, style, scale, reverse, offset, dither, align } = edited else { panic!() };
+        stops[0].1 = Color::rgb(1.0, 0.0, 0.0);
+        let changed = Fill::Gradient { angle, stops, opacity_stops, midpoints, style, scale, reverse, offset, dither, align };
+        let (_, d) = fill_to_desc_onto(&changed, Some((b"GdFl", &data)));
+        assert_ne!(get_desc(&d, "Grad"), Some(&grad));
+    }
+
+    /// Options set back to their defaults are written as defaults onto a file that had them set
+    /// (the merge used to keep the old values: a gradient stayed reversed, a pattern rotated),
+    /// and a 100 % scale adds no `Scl` to a file without one (as Photoshop writes it).
+    #[test]
+    fn fill_options_back_to_defaults_are_written() {
+        let set = Fill::Gradient {
+            stops: vec![(0.0, Color::rgb(1.0, 0.0, 0.0)), (1.0, Color::rgb(0.0, 0.0, 1.0))],
+            angle: 10.0,
+            scale: 1.5,
+            style: GradientStyle::Linear,
+            reverse: true,
+            opacity_stops: Vec::new(),
+            midpoints: Vec::new(),
+            offset: (0.25, 0.5),
+            dither: true,
+            align: false,
+        };
+        let (k, data) = write_fill(&set);
+        let Fill::Gradient { stops, angle, style, opacity_stops, midpoints, .. } = set.clone() else { panic!() };
+        let plain = Fill::Gradient { stops, angle, scale: 1.0, style, reverse: false, opacity_stops, midpoints, offset: (0.0, 0.0), dither: false, align: true };
+        let (_, d) = fill_to_desc_onto(&plain, Some((&k, &data)));
+        let back = parse_fill(&k, &VersionedDescriptor::new(d).to_bytes()).unwrap();
+        assert_eq!(back, plain);
+        // No `Scl` where the file had none and the scale is 100 %.
+        let (_, d) = fill_to_desc_onto(&plain, Some((&k, &write_fill(&plain).1)));
+        assert!(d.get("Scl ").is_none());
+
+        let rotated = Fill::Pattern { name: "P".into(), scale: 1.0, id: "id".into(), angle: 30.0, link: true, phase: (0.0, 0.0) };
+        let (k, data) = write_fill(&rotated);
+        let level = Fill::Pattern { name: "P".into(), scale: 1.0, id: "id".into(), angle: 0.0, link: true, phase: (0.0, 0.0) };
+        let (_, d) = fill_to_desc_onto(&level, Some((&k, &data)));
+        assert_eq!(parse_fill(&k, &VersionedDescriptor::new(d).to_bytes()), Some(level));
+    }
+
+    #[test]
+    fn merge_keeps_unmodelled_keys() {
+        let rgb = |r: f64| Value::Descriptor(Descriptor::new("RGBC").with("Rd  ", Value::Double(r)));
+        let base = Descriptor::new("x")
+            .with("a", Value::Integer(1))
+            .with("old", Value::Integer(2))
+            .with("Clr ", Value::Descriptor(Descriptor::new("Grsc").with("Gry ", Value::Double(5.0))))
+            .with("list", Value::List(vec![Value::Descriptor(Descriptor::new("pt").with("extra", Value::Boolean(true)))]))
+            .with("kept", Value::Integer(3));
+        let over = Descriptor::new("x")
+            .with("new", Value::Integer(4))
+            .with("a", Value::Integer(10))
+            .with("Clr ", rgb(1.0))
+            .with("list", Value::List(vec![Value::Descriptor(Descriptor::new("pt").with("v", Value::Integer(7)))]))
+            .with("kept", Value::Integer(30));
+        let m = merge_descriptor(&base, over, &["kept"]);
+        let keys: Vec<_> = m.items.iter().map(|(k, _)| String::from_utf8_lossy(k.as_bytes()).into_owned()).collect();
+        assert_eq!(keys, ["a", "old", "Clr ", "list", "kept", "new"]);
+        assert_eq!(m.get("a"), Some(&Value::Integer(10)));
+        assert_eq!(m.get("kept"), Some(&Value::Integer(3)));
+        // Another colour class replaces the old one outright.
+        assert_eq!(m.get("Clr "), Some(&rgb(1.0)));
+        let Some(Value::List(l)) = m.get("list") else { panic!() };
+        let Value::Descriptor(pt) = &l[0] else { panic!() };
+        assert_eq!(pt.items.len(), 2);
     }
 }

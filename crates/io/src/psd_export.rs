@@ -3,7 +3,7 @@
 use photosuite_color::{ColorMode, PixelFormat, SampleType};
 use photosuite_doc::{Document, Layer, LayerContent, LayerMask};
 use photosuite_psd::file::{GlobalLayerMask, LayerInfoPlacement};
-use photosuite_psd::layer::{BlendingRanges, ChannelData, LayerFlags, LayerInfo, LayerMask as PsdMask, MaskData, MaskParameters};
+use photosuite_psd::layer::{ChannelData, LayerFlags, LayerInfo, LayerMask as PsdMask, MaskData, MaskParameters};
 use photosuite_psd::resources::{ImageResource, ResolutionInfo, ids, version_info_resource};
 use photosuite_psd::{
     BlendMode as PsdBlend, ColorMode as PsdMode, Compression, Header, ImageData, LayerRecord, PsdFile, Rect as PsdRect, SectionType, TaggedBlock, Version,
@@ -30,11 +30,15 @@ pub struct PsdExportOptions {
     pub merged_matte: bool,
     /// Compression of the merged image (32-bit float documents are always written raw).
     pub merged_compression: Compression,
+    /// Write Indexed, Bitmap and Duotone documents in their own mode when they fit it (see
+    /// `flat_modes`); `false` writes them as RGB / Grayscale layers, for containers that hold
+    /// those only (a layered TIFF's layer data).
+    pub native_modes: bool,
 }
 
 impl Default for PsdExportOptions {
     fn default() -> Self {
-        PsdExportOptions { force_psb: false, merged_matte: true, merged_compression: Compression::Rle }
+        PsdExportOptions { force_psb: false, merged_matte: true, merged_compression: Compression::Rle, native_modes: true }
     }
 }
 
@@ -60,6 +64,29 @@ struct Ex {
     comps: Option<(Vec<photosuite_doc::LayerComp>, Option<photosuite_doc::LayerComp>)>,
     /// Smart objects: embedded files and filter caches for the global blocks.
     smart: SmartOut,
+    /// The layer that may be written as Photoshop's Background (see [`background_candidate`]).
+    background: Option<photosuite_doc::LayerId>,
+}
+
+/// The layer to write as Photoshop's Background: a pixel layer with no transparency channel
+/// (Photoshop's own files: bottom-most, flags "transparency protected", `lspf` locking
+/// transparency and position, no merged alpha). Our importer reads that as a bottom raster layer
+/// locked for transparency and position; it stays a Background while it has nothing a
+/// Background can't have (masks, effects, clipping, a blend mode, partial opacity). Whether its
+/// pixels are opaque over the whole canvas is checked when they are encoded.
+fn background_candidate(doc: &Document) -> Option<photosuite_doc::LayerId> {
+    let l = doc.layers.first()?;
+    let plain = matches!(l.content, LayerContent::Raster(_))
+        && l.locks.transparency
+        && l.locks.position
+        && l.blend == photosuite_color::BlendMode::Normal
+        && l.opacity >= 1.0
+        && l.fill_opacity >= 1.0
+        && !l.clipped
+        && l.mask.is_none()
+        && l.vector_mask.is_none()
+        && l.effects.items.is_empty();
+    plain.then_some(l.id)
 }
 
 /// How deep embedded documents are exported inside each other before a smart object is written
@@ -253,7 +280,9 @@ impl Ex {
         (-1..self.cc as i16).map(|id| self.encode(id, &[], 0, 0)).collect()
     }
 
-    fn pixel_channels(&mut self, s: &Surface, name: &str) -> (PsdRect, Vec<ChannelData>) {
+    /// Channel data of a layer's pixels. A `background` candidate whose pixels are opaque over
+    /// exactly the canvas is written as Photoshop's Background, with no transparency channel.
+    fn pixel_channels(&mut self, s: &Surface, name: &str, background: bool) -> (PsdRect, Vec<ChannelData>) {
         let s = if s.format() != self.fmt {
             self.warnings.push(format!("layer \"{name}\": pixels converted from {:?} to {:?}", s.format(), self.fmt));
             s.convert(self.fmt)
@@ -273,9 +302,17 @@ impl Ex {
         let planes = deinterleave(&bytes, self.cc + 1, self.fmt.sample, &invert);
         drop(bytes);
         let (w, h) = (r.width() as usize, r.height() as usize);
+        let opaque = || {
+            let mut one = Vec::new();
+            crate::pixels::encode_be(1.0, self.fmt.sample, &mut one);
+            planes.get(self.cc).is_some_and(|a| a.chunks(one.len().max(1)).all(|c| c == one.as_slice()))
+        };
+        let alpha = !(background && r == self.canvas && opaque());
         // Alpha (-1) first, then the colour channels; each compressed on its own thread.
-        let order: Vec<(i16, &Vec<u8>)> =
-            std::iter::once((-1, &planes[self.cc])).chain(planes.iter().take(self.cc).enumerate().map(|(c, p)| (c as i16, p))).collect();
+        let order: Vec<(i16, &Vec<u8>)> = std::iter::once((-1, &planes[self.cc]))
+            .filter(|_| alpha)
+            .chain(planes.iter().take(self.cc).enumerate().map(|(c, p)| (c as i16, p)))
+            .collect();
         let ch = crate::pixels::par_map(order, |(id, plane)| self.encode(id, plane, w, h));
         (to_psd_rect(r), ch)
     }
@@ -325,7 +362,7 @@ impl Ex {
     fn record(&mut self, l: &Layer, extra: Vec<TaggedBlock>, pixels: Option<&Surface>) -> LayerRecord {
         let id = self.layer_id(l);
         let (rect, mut channels) = match pixels {
-            Some(s) => self.pixel_channels(s, &l.name),
+            Some(s) => self.pixel_channels(s, &l.name, self.background == Some(l.id)),
             None => (PsdRect::default(), self.empty_channels()),
         };
         let mut mask = MaskData::None;
@@ -347,30 +384,48 @@ impl Ex {
                 real_first: true,
             });
         }
-        let mut flags = LayerFlags(0);
+        let mut flags = LayerFlags(layer_flags(&l.content));
         flags.set_hidden(!l.visible);
         flags.set_transparency_protected(l.locks.transparency);
-        let mut blocks = vec![TaggedBlock::unicode_name(&l.name), TaggedBlock::layer_id(id)];
-        let lspf = blocks::lspf_from_locks(&l.locks);
-        if lspf != 0 {
-            blocks.push(TaggedBlock::protection(lspf));
+        // Photoshop writes the locks and the label colour on every layer, zero or not.
+        let mut blocks = vec![
+            TaggedBlock::unicode_name(&l.name),
+            TaggedBlock::layer_id(id),
+            TaggedBlock::protection(blocks::lspf_from_locks(&l.locks)),
+            TaggedBlock::sheet_color(blocks::label_index(l.label)),
+        ];
+        // Photoshop writes the fill opacity only when it is below 100 %.
+        if q255(l.fill_opacity) != 255 {
+            blocks.push(TaggedBlock::fill_opacity(q255(l.fill_opacity)));
         }
-        if l.label != photosuite_doc::LabelColor::None {
-            blocks.push(TaggedBlock::sheet_color(blocks::label_index(l.label)));
-        }
-        blocks.push(TaggedBlock::fill_opacity(q255(l.fill_opacity)));
-        // Effects: the original lfx2 while the effects are unchanged (or
-        // could not be decoded at all); otherwise regenerated.
+        // Effects: the original lfx2 while the effects are unchanged (or could not be decoded at
+        // all), an unchanged lmfx stays with the raw blocks; otherwise regenerated onto the
+        // original block, as lmfx when a kind has several instances (as Photoshop stores them).
         let fx = &l.effects;
-        let lfx2 = match effects_unchanged(l) {
-            Some(true) | None if fx.psd_raw.is_some() => fx.psd_raw.as_ref().map(|r| r.to_vec()),
-            _ => (!fx.items.is_empty()).then(|| crate::effects_map::write_lfx2(fx.enabled, &fx.items)),
+        let lmfx = l.psd_blocks.iter().find(|(k, _)| k == b"lmfx").map(|(_, d)| d.clone());
+        let key = if l.is_group() { *b"lfxs" } else { *b"lfx2" };
+        let fx_block = match effects_unchanged(l) {
+            Some(true) | None if fx.psd_raw.is_some() => fx.psd_raw.as_ref().map(|r| (key, r.to_vec())),
+            Some(true) if lmfx.is_some() => None,
+            _ => (!fx.items.is_empty()).then(|| {
+                let template = lmfx.as_ref().or(fx.psd_raw.as_ref()).map(|d| d.as_slice());
+                let (d, multi) = crate::effects_map::write_lfx2_onto(template, fx.enabled, &fx.items);
+                (if multi { *b"lmfx" } else { key }, d)
+            }),
         };
-        if let Some(d) = lfx2 {
-            let key = if l.is_group() { *b"lfxs" } else { *b"lfx2" };
+        if let Some((key, d)) = fx_block {
             blocks.push(TaggedBlock::new(key, d));
         }
         blocks.extend(extra);
+        // Photoshop writes the advanced-blending settings on every non-group layer, defaults
+        // included (blend clipped layers as group on, interior effects and knockout off).
+        if !l.is_group() {
+            for (key, v) in [(b"clbl", 1u8), (b"infx", 0), (b"knko", 0)] {
+                if !blocks.iter().any(|b| &b.key == key) {
+                    blocks.push(TaggedBlock::new(*key, vec![v, 0, 0, 0]));
+                }
+            }
+        }
         // Layer-level blocks keep their pad byte inside the length, as Photoshop writes them:
         // readers such as psd-tools do not skip a pad after an odd length, so a regenerated
         // odd-length `lfx2` misaligned every block after it (#200).
@@ -382,7 +437,13 @@ impl Ex {
         LayerRecord {
             rect,
             channels,
-            blend_mode: PsdBlend::from_key(l.blend.psd_key()),
+            // A pass-through group keeps `pass` in its section divider; Photoshop writes `norm` in
+            // the record itself.
+            blend_mode: PsdBlend::from_key(if l.is_group() && l.blend == photosuite_color::BlendMode::PassThrough {
+                photosuite_color::BlendMode::Normal.psd_key()
+            } else {
+                l.blend.psd_key()
+            }),
             opacity: q255(l.opacity),
             clipping: u8::from(l.clipped),
             flags,
@@ -401,9 +462,10 @@ impl Ex {
     /// the layer's current parameters; otherwise it is regenerated.
     fn content_blocks(&mut self, l: &Layer) -> Vec<TaggedBlock> {
         let mut raw: Vec<([u8; 4], Vec<u8>)> = l.psd_blocks.iter().filter(|(k, _)| !REGENERATED.contains(&k)).map(|(k, d)| (*k, d.to_vec())).collect();
-        // A stale multi-effects block would override the regenerated lfx2.
+        // A stale multi-effects block would override the regenerated effects, and a stale legacy
+        // lrFX would disagree with them.
         if effects_unchanged(l) == Some(false) {
-            raw.retain(|(k, _)| k != b"lmfx");
+            raw.retain(|(k, _)| k != b"lmfx" && k != b"lrFX");
         }
         let mut regenerated: Vec<([u8; 4], Vec<u8>)> = Vec::new();
         // `keys` is in the importer's priority order (`psd_raw` came from the first key present),
@@ -419,8 +481,10 @@ impl Ex {
         let fill_rule = |raw: &mut Vec<([u8; 4], Vec<u8>)>, regenerated: &mut Vec<([u8; 4], Vec<u8>)>, f: &photosuite_doc::Fill| {
             let keep = raw.iter().any(|(k, d)| matches!(k, b"SoCo" | b"GdFl" | b"PtFl") && blocks::parse_fill(k, d).as_ref() == Some(f));
             if !keep {
+                let old = raw.iter().find(|(k, _)| matches!(k, b"SoCo" | b"GdFl" | b"PtFl")).map(|(k, d)| (k, d.as_slice()));
+                let (k, d) = blocks::fill_to_desc_onto(f, old);
                 raw.retain(|(k, _)| !matches!(k, b"SoCo" | b"GdFl" | b"PtFl"));
-                regenerated.push(blocks::write_fill(f));
+                regenerated.push((k, photosuite_psd::descriptor::VersionedDescriptor::new(d).to_bytes()));
             }
         };
         match &l.content {
@@ -445,11 +509,14 @@ impl Ex {
             }
             LayerContent::Fill(f) => fill_rule(&mut raw, &mut regenerated, f),
             LayerContent::Shape(sh) => {
-                if let Some(f) = &sh.fill {
-                    fill_rule(&mut raw, &mut regenerated, f);
-                }
+                // Shapes keep their fill in `vscg` (updated by `shape_blocks`); only shapes from
+                // files older than Photoshop CS6 have a top-level fill block, kept in that form.
+                let legacy = !raw.iter().any(|(k, _)| k == b"vscg") && raw.iter().any(|(k, _)| matches!(k, b"SoCo" | b"GdFl" | b"PtFl"));
                 let (w, h) = (self.canvas.width(), self.canvas.height());
                 crate::vector_map::shape_blocks(sh, &mut raw, w, h, self.dpi);
+                if legacy && let Some(f) = &sh.fill {
+                    fill_rule(&mut raw, &mut regenerated, f);
+                }
             }
             LayerContent::Text(t) => {
                 // Text layers without PSD data (created here) get a generated TySh.
@@ -577,11 +644,14 @@ impl Ex {
             filter_fx: fx,
         };
         let sold = sold_bytes(same_source.map(|t| &t.descriptor), &spec, &mut warnings);
-        let plld = plld_bytes(&spec, &mut warnings);
+        let plld = plld_bytes(&spec, &sold, &mut warnings);
         warnings.dedup();
         let key = if same_source.is_some() && raw.iter().any(|(k, _)| k == b"SoLE") && !raw.iter().any(|(k, _)| k == b"SoLd") { *b"SoLE" } else { *b"SoLd" };
         raw.retain(|(k, _)| k == &key || !matches!(k, b"SoLd" | b"SoLE"));
-        upsert(raw, b"PlLd", plld, Some(&key));
+        // Photoshop writes `PlLd` beside `SoLd` only: a linked layer (`SoLE`) has none.
+        if key == *b"SoLd" || raw.iter().any(|(k, _)| k == b"PlLd") {
+            upsert(raw, b"PlLd", plld, Some(&key));
+        }
         upsert(raw, &key, sold, None);
         if !stack.filters.is_empty() {
             let bounds = sm.cache.as_ref().map_or(self.canvas, |c| c.content_bounds().union(&self.canvas));
@@ -743,10 +813,31 @@ impl Ex {
             return c.surface.clone();
         }
         // In the frame the layer's masks give it, like the compositor (masks are stored apart).
-        let buf = photosuite_compose::render_fill_content(l, f, self.canvas, &[]);
+        // Photoshop keeps the pixels to the part of the canvas a hiding mask shows.
+        let shown = match &l.mask {
+            Some(m) if m.enabled && m.density >= 1.0 && m.feather <= 0.0 && m.surface.default_pixel().first().is_some_and(|v| *v <= 0.0) => {
+                m.surface.content_bounds().intersect(&self.canvas)
+            }
+            _ => self.canvas,
+        };
         let mut s = Surface::new(self.fmt);
-        let vals: Vec<f32> = buf.px.iter().flat_map(|p| photosuite_raster::from_rgba(&self.fmt, *p)).collect();
-        s.write_region(self.canvas, &vals);
+        if shown.is_empty() {
+            return s;
+        }
+        // Rendered over the canvas (the fill's frame), then cut to what is shown.
+        let buf = photosuite_compose::render_fill_content(l, f, self.canvas, &[]);
+        let (cw, x0, w) = (self.canvas.width() as usize, (shown.x0 - self.canvas.x0) as usize, shown.width() as usize);
+        let rows = (shown.y0 - self.canvas.y0) as usize..(shown.y1 - self.canvas.y0) as usize;
+        let vals: Vec<f32> = rows
+            .flat_map(|y| buf.px.get(y * cw + x0..y * cw + x0 + w).unwrap_or_default())
+            .flat_map(|p| photosuite_raster::from_rgba(&self.fmt, *p))
+            .collect();
+        if vals.len() == w * shown.height() as usize * s.channels() {
+            s.write_region(shown, &vals);
+        } else {
+            let all: Vec<f32> = buf.px.iter().flat_map(|p| photosuite_raster::from_rgba(&self.fmt, *p)).collect();
+            s.write_region(self.canvas, &all);
+        }
         s.prune();
         s
     }
@@ -759,12 +850,15 @@ impl Ex {
                     let id = self.fresh_id();
                     self.records.push(LayerRecord {
                         channels: self.empty_channels(),
-                        blending_ranges: BlendingRanges::full(self.cc),
+                        blending_ranges: blocks::ranges_from_blend_if(&photosuite_doc::BlendIf::default(), self.cc),
+                        flags: LayerFlags(LayerFlags::BIT4_USEFUL | LayerFlags::PIXEL_DATA_IRRELEVANT),
                         name: b"</Layer group>".to_vec(),
                         blocks: vec![
                             TaggedBlock::unicode_name("</Layer group>"),
                             TaggedBlock::layer_id(id),
                             TaggedBlock::section_divider(SectionType::BoundingDivider, None, None),
+                            TaggedBlock::protection(0),
+                            TaggedBlock::sheet_color(0),
                         ],
                         ..Default::default()
                     });
@@ -804,11 +898,22 @@ impl Ex {
     }
 }
 
+/// Layer record flag bits besides hidden and transparency-locked, as Photoshop sets them: bit 3
+/// ("bit 4 is meaningful") always, and bit 4 ("pixel data irrelevant to the document's
+/// appearance") on layers whose pixels are rendered from other data: adjustment, fill, shape
+/// and group layers (and group end dividers), not pixel, type or smart object layers (observed
+/// on every Photoshop-authored layer of the oracle corpus).
+fn layer_flags(c: &LayerContent) -> u8 {
+    let irrelevant = matches!(c, LayerContent::Adjustment(_) | LayerContent::Fill(_) | LayerContent::Shape(_) | LayerContent::Group(_));
+    LayerFlags::BIT4_USEFUL | if irrelevant { LayerFlags::PIXEL_DATA_IRRELEVANT } else { 0 }
+}
+
 /// Resource 1026 (Layer › Link Layers): one u16 group id per layer record, in the order
 /// [`Ex::emit`] writes records (a group's bounding divider, its children, then the group).
 /// Imported ids that fit in a u16 are kept, so unchanged files write the same bytes; otherwise
-/// groups are renumbered by first appearance. `None` when no layer is linked.
-fn link_group_resource(layers: &[Layer]) -> Option<Vec<u8>> {
+/// groups are renumbered by first appearance. All zeros when no layer is linked (Photoshop writes
+/// the resource in every layered file).
+fn link_group_resource(layers: &[Layer]) -> Vec<u8> {
     fn walk(layers: &[Layer], out: &mut Vec<Option<u64>>) {
         for l in layers {
             if let LayerContent::Group(g) = &l.content {
@@ -821,7 +926,7 @@ fn link_group_resource(layers: &[Layer]) -> Option<Vec<u8>> {
     let mut per = Vec::new();
     walk(layers, &mut per);
     if per.iter().all(Option::is_none) {
-        return None;
+        return vec![0; per.len() * 2];
     }
     let fits = per.iter().flatten().all(|&g| (1..=u64::from(u16::MAX)).contains(&g));
     let mut seen: Vec<u64> = Vec::new();
@@ -836,7 +941,28 @@ fn link_group_resource(layers: &[Layer]) -> Option<Vec<u8>> {
             u16::try_from(i + 1).unwrap_or(u16::MAX)
         }
     });
-    Some(ids.flat_map(u16::to_be_bytes).collect())
+    ids.flat_map(u16::to_be_bytes).collect()
+}
+
+/// The layer-state resources Photoshop writes in every layered file, for the records written: the
+/// target layer (1024: record index), the selected layers (1069: count, then layer ids), each
+/// record's group-enabled flag (1072: one byte, 1) and the layer id seed (1044: the highest id,
+/// at least `min_seed`, the file's own).
+/// The document model keeps no target or selection, so the top record is both, as in a file
+/// Photoshop has just opened.
+fn layer_state_resources(records: &[LayerRecord], min_seed: u32) -> Vec<ImageResource> {
+    // The seed never goes back: Photoshop numbers new layers from it.
+    let max_id = records.iter().filter_map(LayerRecord::layer_id).max().unwrap_or(0).max(min_seed);
+    let mut out = vec![ImageResource::new(ids::DOCUMENT_IDS_SEED, max_id.to_be_bytes().to_vec())];
+    let Some((top, rec)) = records.len().checked_sub(1).zip(records.last()) else { return out };
+    out.push(ImageResource::new(ids::LAYER_STATE, u16::try_from(top).unwrap_or(u16::MAX).to_be_bytes().to_vec()));
+    if let Some(id) = rec.layer_id() {
+        let mut sel = 1u16.to_be_bytes().to_vec();
+        sel.extend_from_slice(&id.to_be_bytes());
+        out.push(ImageResource::new(ids::LAYER_SELECTION_IDS, sel));
+    }
+    out.push(ImageResource::new(ids::LAYER_GROUPS_ENABLED, vec![1; records.len()]));
+    out
 }
 
 /// Whether the layer's effects still equal what its preserved `lmfx`/`lfx2`
@@ -853,14 +979,82 @@ fn smart_keys(data: Option<&[u8]>) -> &'static [&'static [u8; 4]] {
     }
 }
 
+/// Whether the layer's effects still match the block they were imported from (`lmfx`, `lfx2`, or
+/// on a non-group layer the legacy `lrFX`); `None` when there is none or it doesn't decode.
 fn effects_unchanged(l: &Layer) -> Option<bool> {
-    let src = l.psd_blocks.iter().find(|(k, _)| k == b"lmfx").map(|(_, d)| d.clone()).or_else(|| l.effects.psd_raw.clone())?;
-    let (m, items) = crate::effects_map::parse_lfx2(&src)?;
+    let raw = |key: &[u8; 4]| l.psd_blocks.iter().find(|(k, _)| k == key).map(|(_, d)| d.clone());
+    let (m, items) = match raw(b"lmfx").or_else(|| l.effects.psd_raw.clone()) {
+        Some(src) => crate::effects_map::parse_lfx2(&src)?,
+        None if !l.is_group() => crate::effects_map::parse_lrfx(&raw(b"lrFX")?)?,
+        None => return None,
+    };
     Some(m == l.effects.enabled && items == l.effects.items)
 }
 
-fn legacy_name(s: &str) -> Vec<u8> {
+/// Paths: saved paths (2000+), the work path (1025), the clipping path name (2999).
+pub(crate) fn path_resources(doc: &Document, warnings: &mut Vec<String>) -> Vec<ImageResource> {
+    use crate::vector_map::{CLIPPING_PATH, WORK_PATH, path_from_resource, path_to_records};
+    let mut out = Vec::new();
+    let (w, h) = (doc.size.width, doc.size.height);
+    let max = (*crate::vector_map::SAVED_PATHS.end() - *crate::vector_map::SAVED_PATHS.start() + 1) as usize;
+    if doc.paths.len() > max {
+        warnings.push(format!("only {max} saved paths fit in PSD; the rest were dropped"));
+    }
+    for (i, p) in doc.paths.iter().take(max).enumerate() {
+        let data = match &p.psd_raw {
+            Some(r) if path_from_resource(r, w, h).as_ref() == Some(&p.path) => r.to_vec(),
+            _ => path_to_records(&p.path, w, h).to_bytes(),
+        };
+        let mut r = ImageResource::new(crate::vector_map::SAVED_PATHS.start() + i as u16, data);
+        r.name = legacy_name(&p.name);
+        out.push(r);
+    }
+    if let Some(wp) = &doc.work_path {
+        out.push(ImageResource::new(WORK_PATH, path_to_records(wp, w, h).to_bytes()));
+    }
+    let raw_clip = doc.metadata.psd_resources.iter().find(|(id, _, _)| *id == CLIPPING_PATH);
+    let raw_name = raw_clip.map(|(_, _, d)| {
+        let n = usize::from(d.first().copied().unwrap_or(0));
+        d.get(1..1 + n).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default()
+    });
+    if let Some(c) = &doc.clipping_path
+        && raw_name.as_deref() != Some(c.name.as_str())
+    {
+        // Pascal name, then flatness as 16.16 fixed (best effort; see vector_map docs).
+        let mut data = vec![0u8];
+        let name = legacy_name(&c.name);
+        data[0] = name.len() as u8;
+        data.extend_from_slice(&name);
+        data.extend_from_slice(&((c.flatness.max(0.0) * 65536.0) as u32).to_be_bytes());
+        out.push(ImageResource::new(CLIPPING_PATH, data));
+    }
+    out
+}
+
+pub(crate) fn legacy_name(s: &str) -> Vec<u8> {
     s.chars().map(|c| if c.is_ascii() && !c.is_ascii_control() { c as u8 } else { b'?' }).take(255).collect()
+}
+
+/// Resource 1053: one u32 id per entry of the channel names (observed in Photoshop's files; no
+/// count before them). The file's ids are kept while the count still matches; otherwise the
+/// transparency keeps 0 and the channels reuse the file's other ids in order, then new ones.
+pub(crate) fn alpha_ids_resource(old: Option<&[u8]>, has_alpha: bool, count: usize) -> Vec<u8> {
+    let old: Vec<u32> = old.map(|d| d.chunks_exact(4).map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]])).collect()).unwrap_or_default();
+    let ids = if old.len() == count {
+        old
+    } else {
+        let mut reuse = old.iter().copied().filter(|&i| i != 0);
+        let mut next = old.iter().copied().max().unwrap_or(0);
+        let mut ids: Vec<u32> = has_alpha.then_some(0).into_iter().collect();
+        while ids.len() < count {
+            ids.push(reuse.next().unwrap_or_else(|| {
+                next = next.saturating_add(1);
+                next
+            }));
+        }
+        ids
+    };
+    ids.iter().flat_map(|i| i.to_be_bytes()).collect()
 }
 
 pub(crate) fn unicode_names_resource(names: &[&str]) -> Vec<u8> {
@@ -885,7 +1079,7 @@ pub(crate) fn pascal_names_resource(names: &[&str]) -> Vec<u8> {
     v
 }
 
-fn guides_resource(doc: &Document) -> Vec<u8> {
+pub(crate) fn guides_resource(doc: &Document) -> Vec<u8> {
     let mut v = Vec::new();
     v.extend_from_slice(&1u32.to_be_bytes());
     v.extend_from_slice(&576u32.to_be_bytes());
@@ -905,9 +1099,72 @@ fn cmyk_of(fmt: &PixelFormat) -> bool {
     fmt.mode == ColorMode::Cmyk
 }
 
+/// Longest side of the thumbnail Photoshop stores in resource 1036.
+const THUMB_MAX: usize = 160;
+/// Samples per thumbnail pixel along each axis (box filter over a sparse grid, so the thumbnail
+/// costs a fixed amount however large the document is).
+const THUMB_SAMPLES: usize = 4;
+
+/// The composite's thumbnail, averaged from the bands the merged image is rendered in.
+struct Thumb {
+    /// Canvas size.
+    w: usize,
+    h: usize,
+    /// Thumbnail size.
+    tw: usize,
+    th: usize,
+    /// Sum of RGB over white, and the sample count, per thumbnail pixel.
+    sum: Vec<[f32; 4]>,
+}
+
+impl Thumb {
+    fn new(w: usize, h: usize) -> Self {
+        let scale = (THUMB_MAX as f64 / w.max(h).max(1) as f64).min(1.0);
+        let (tw, th) = (((w as f64 * scale).round() as usize).max(1), ((h as f64 * scale).round() as usize).max(1));
+        Thumb { w, h, tw, th, sum: vec![[0.0; 4]; tw * th] }
+    }
+
+    /// Adds the canvas rows `y0..` of a full-width band.
+    fn add(&mut self, y0: usize, px: &[[f32; 4]]) {
+        let (sx, sy) = ((self.w / (self.tw * THUMB_SAMPLES)).max(1), (self.h / (self.th * THUMB_SAMPLES)).max(1));
+        let rows = px.len() / self.w.max(1);
+        for y in (y0.next_multiple_of(sy)..y0 + rows).step_by(sy) {
+            let ty = (y * self.th / self.h).min(self.th - 1);
+            for x in (0..self.w).step_by(sx) {
+                let Some(p) = px.get((y - y0) * self.w + x) else { continue };
+                let tx = (x * self.tw / self.w).min(self.tw - 1);
+                if let Some(acc) = self.sum.get_mut(ty * self.tw + tx) {
+                    let a = p[3].clamp(0.0, 1.0);
+                    for c in 0..3 {
+                        acc[c] += p[c].clamp(0.0, 1.0) * a + (1.0 - a);
+                    }
+                    acc[3] += 1.0;
+                }
+            }
+        }
+    }
+
+    /// Resource 1036 data: the thumbnail header (format 1 = JPEG RGB, size, row bytes, sizes,
+    /// 24 bits per pixel, 1 plane; Adobe PSD spec, "Thumbnail resource format") and a JFIF image.
+    fn resource(&self) -> Option<Vec<u8>> {
+        let rgb: Vec<u8> = self.sum.iter().flat_map(|s| (0..3).map(move |c| if s[3] > 0.0 { q255(s[c] / s[3]) } else { 255 })).collect();
+        let jpeg = photosuite_codecs::web::encode_jpeg_rgb8(self.tw as u32, self.th as u32, &rgb, 85, false, false, None, None, None).ok()?;
+        let row = (self.tw * 24).div_ceil(32) * 4;
+        let mut v = Vec::with_capacity(28 + jpeg.len());
+        for x in [1, self.tw, self.th, row, row * self.th, jpeg.len()] {
+            v.extend_from_slice(&u32::try_from(x).ok()?.to_be_bytes());
+        }
+        v.extend_from_slice(&24u16.to_be_bytes());
+        v.extend_from_slice(&1u16.to_be_bytes());
+        v.extend(jpeg);
+        Some(v)
+    }
+}
+
 /// The merged image's planes (colour channels, then alpha), big-endian, matted against white
 /// when `matte`; with whether any pixel needs the alpha channel and whether any is below 1.
-fn merged_planes(doc: &Document, fmt: &PixelFormat, cmyk: bool, matte: bool) -> (Vec<u8>, bool, bool) {
+/// `thumb`, when given, collects the composite's thumbnail on the way.
+fn merged_planes(doc: &Document, fmt: &PixelFormat, cmyk: bool, matte: bool, mut thumb: Option<&mut Thumb>) -> (Vec<u8>, bool, bool) {
     let sample = fmt.sample;
     let cc = fmt.mode.color_channels();
     let bps = sample.bytes();
@@ -920,6 +1177,51 @@ fn merged_planes(doc: &Document, fmt: &PixelFormat, cmyk: bool, matte: bool) -> 
     let w = canvas.width() as usize;
     let space = photosuite_compose::cmyk_space(doc);
     let lab16 = fmt.mode == ColorMode::Lab && sample == SampleType::U16;
+    // A CMYK document's composite in its own inks (screen RGB would regenerate K).
+    if cmyk && doc.mode == ColorMode::Cmyk {
+        let _ = photosuite_compose::render_ink_bands(doc, canvas, 0, |band| -> Result<(), ()> {
+            has_alpha |= band.px.iter().any(|p| match sample {
+                SampleType::U8 => q255(p[4]) < 255,
+                SampleType::U16 => (p[4].clamp(0.0, 1.0) * 65535.0 + 0.5) as u16 != u16::MAX,
+                SampleType::F32 => p[4] != 1.0,
+            });
+            translucent |= band.px.iter().any(|p| p[4] < 1.0);
+            if let Some(t) = thumb.as_deref_mut() {
+                let rgb: Vec<[f32; 4]> = photosuite_color::convert::with_cmyk_space(space.as_ref(), || {
+                    band.px
+                        .iter()
+                        .map(|p| {
+                            let c = photosuite_color::convert::cmyk_to_rgb([p[0], p[1], p[2], p[3]]);
+                            [c[0], c[1], c[2], p[4]]
+                        })
+                        .collect()
+                });
+                t.add((band.rect.y0 - canvas.y0) as usize, &rgb);
+            }
+            let start = (band.rect.y0 - canvas.y0) as usize * w;
+            let parts = crate::pixels::par_map(crate::pixels::bands(band.px.len()), |range| {
+                let mut out: Vec<Vec<u8>> = vec![Vec::with_capacity(range.len() * bps); cc + 1];
+                for v in &band.px[range.clone()] {
+                    for c in 0..=cc {
+                        // Matte against white (no ink) like Photoshop (see `pixels::matte`).
+                        let m = if c < cc && matte { crate::pixels::matte(v[c], v[cc], 0.0) } else { v[c] };
+                        // PSD stores CMYK inverted (1 = no ink).
+                        let x = if c < cc { 1.0 - m } else { m };
+                        encode_be(x, sample, &mut out[c]);
+                    }
+                }
+                (range.start, out)
+            });
+            for (at, part) in parts {
+                for (c, src) in part.iter().enumerate() {
+                    let o = c * plane + (start + at) * bps;
+                    planes[o..o + src.len()].copy_from_slice(src);
+                }
+            }
+            Ok(())
+        });
+        return (planes, has_alpha, translucent);
+    }
     let _ = photosuite_compose::render_bands(doc, canvas, 0, |band| -> Result<(), ()> {
         // Retain alpha whenever it differs from opaque at the stored precision.
         has_alpha |= band.px.iter().any(|p| match sample {
@@ -928,6 +1230,9 @@ fn merged_planes(doc: &Document, fmt: &PixelFormat, cmyk: bool, matte: bool) -> 
             SampleType::F32 => p[3] != 1.0,
         });
         translucent |= band.px.iter().any(|p| p[3] < 1.0);
+        if let Some(t) = thumb.as_deref_mut() {
+            t.add((band.rect.y0 - canvas.y0) as usize, &band.px);
+        }
         let start = (band.rect.y0 - canvas.y0) as usize * w;
         // Converted and encoded on all cores, then copied into each plane.
         let parts = crate::pixels::par_map(crate::pixels::bands(band.px.len()), |range| {
@@ -1111,13 +1416,20 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         guides: doc.guides.clone(),
         comps: (!crate::comps_map::comps_unchanged(doc)).then(|| (doc.layer_comps.clone(), doc.last_document_state.clone())),
         smart: SmartOut::new(doc, depth),
+        background: background_candidate(doc),
     };
     if big && !opts.force_psb {
         ex.warnings.push("document exceeds 30000 px; written as PSB".into());
     } else if size_exceeds_limit && !opts.force_psb {
         ex.warnings.push("estimated encoded size exceeds 2 GB; written as PSB".into());
     }
-    if fmt.mode != doc.mode {
+    // A duotone from a PSD goes back as Duotone with its ink data (undocumented, kept verbatim);
+    // one made here has no Photoshop ink data to write and goes out as its gray plate.
+    let duotone_raw =
+        (opts.native_modes && doc.mode == ColorMode::Duotone && sample != SampleType::F32).then(|| doc.duotone.as_ref().and_then(|d| d.psd_raw.clone())).flatten();
+    // A single plain Indexed / Bitmap image goes back in its own mode (see `flat_modes`).
+    let flat_mode = opts.native_modes && crate::flat_modes::eligible(doc);
+    if fmt.mode != doc.mode && duotone_raw.is_none() && !flat_mode {
         ex.warnings.push(format!("{:?} document written as {:?}", doc.mode, fmt.mode));
     }
     // Assign layer ids up front (stable across round trips): keep unique
@@ -1149,9 +1461,10 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     // Merged composite, rendered and encoded in bands (no full-size float composite). Matting
     // against white only changes pixels with alpha < 1; if some are slightly translucent but all
     // round to opaque (so no alpha channel is written), encode once more without the matte.
-    let (mut planes, has_alpha, translucent) = merged_planes(doc, &fmt, cmyk_of(&fmt), opts.merged_matte);
+    let mut thumb = Thumb::new(doc.size.width as usize, doc.size.height as usize);
+    let (mut planes, has_alpha, translucent) = merged_planes(doc, &fmt, cmyk_of(&fmt), opts.merged_matte, Some(&mut thumb));
     if !has_alpha && translucent && opts.merged_matte {
-        planes = merged_planes(doc, &fmt, cmyk_of(&fmt), false).0;
+        planes = merged_planes(doc, &fmt, cmyk_of(&fmt), false, None).0;
     }
     let n = doc.size.area() as usize;
     if !has_alpha {
@@ -1182,7 +1495,8 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         planes.extend(deinterleave(&bytes, 1, sample, &[false]).remove(0));
     }
     let channels = (cc + usize::from(has_alpha) + extra.len()) as u16;
-    let header = Header::new(version, doc.size.width, doc.size.height, channels, psd_depth(sample), psd_mode(fmt.mode));
+    let mode = if duotone_raw.is_some() { PsdMode::Duotone } else { psd_mode(fmt.mode) };
+    let header = Header::new(version, doc.size.width, doc.size.height, channels, psd_depth(sample), mode);
     let mcomp = if sample == SampleType::F32 { Compression::Raw } else { opts.merged_compression };
     let image_data = ImageData::encode(mcomp, &planes, &header)
         .or_else(|_| ImageData::encode(Compression::Raw, &planes, &header))
@@ -1194,63 +1508,35 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         ImageResource::new(ids::GLOBAL_ANGLE, (doc.global_light.angle.round() as i32).to_be_bytes().to_vec()),
         ImageResource::new(ids::GLOBAL_ALTITUDE, (doc.global_light.altitude.round() as i32).to_be_bytes().to_vec()),
     ];
+    // Photoshop's own thumbnail (Finder, Bridge and other readers show it); regenerated, since an
+    // imported one goes stale with any edit.
+    if let Some(t) = thumb.resource() {
+        resources.push(ImageResource::new(ids::THUMBNAIL, t));
+    }
     if let Some(icc) = &doc.icc_profile {
         resources.push(ImageResource::new(ids::ICC_PROFILE, icc.to_vec()));
     }
-    if !doc.guides.horizontal.is_empty() || !doc.guides.vertical.is_empty() {
-        resources.push(ImageResource::new(1032, guides_resource(doc)));
-    }
-    if !extra.is_empty() {
-        let names: Vec<&str> = extra.iter().map(|a| a.name.as_str()).collect();
+    // Photoshop writes the grid and guides resource in every file, guides or not.
+    resources.push(ImageResource::new(1032, guides_resource(doc)));
+    // Alpha channel names, ids and display options. Photoshop lists the merged transparency
+    // first ("Transparency", id 0), then the alpha and spot channels.
+    if has_alpha || !extra.is_empty() {
+        let names: Vec<&str> = has_alpha.then_some(photosuite_psd::resources::TRANSPARENCY_NAME).into_iter().chain(extra.iter().map(|a| a.name.as_str())).collect();
         resources.push(ImageResource::new(1006, pascal_names_resource(&names)));
         resources.push(ImageResource::new(1045, unicode_names_resource(&names)));
-        resources.push(ImageResource::new(crate::channel_map::DISPLAY_INFO, crate::channel_map::display_info(&extra)));
+        let old = doc.metadata.psd_resources.iter().find(|r| r.0 == ids::ALPHA_IDS).map(|r| r.2.as_slice());
+        resources.push(ImageResource::new(ids::ALPHA_IDS, alpha_ids_resource(old, has_alpha, names.len())));
+        resources.push(ImageResource::new(crate::channel_map::DISPLAY_INFO, crate::channel_map::display_info(has_alpha, &extra)));
     }
     if let Some(id) = quick_mask_id {
         let mut data = id.to_be_bytes().to_vec();
         data.push(0);
         resources.push(ImageResource::new(crate::channel_map::QUICK_MASK_INFO, data));
     }
-    // Paths: saved paths (2000+), the work path (1025), the clipping path name (2999).
-    {
-        use crate::vector_map::{CLIPPING_PATH, WORK_PATH, path_from_resource, path_to_records};
-        let (w, h) = (doc.size.width, doc.size.height);
-        let max = (*crate::vector_map::SAVED_PATHS.end() - *crate::vector_map::SAVED_PATHS.start() + 1) as usize;
-        if doc.paths.len() > max {
-            ex.warnings.push(format!("only {max} saved paths fit in PSD; the rest were dropped"));
-        }
-        for (i, p) in doc.paths.iter().take(max).enumerate() {
-            let data = match &p.psd_raw {
-                Some(r) if path_from_resource(r, w, h).as_ref() == Some(&p.path) => r.to_vec(),
-                _ => path_to_records(&p.path, w, h).to_bytes(),
-            };
-            let mut r = ImageResource::new(crate::vector_map::SAVED_PATHS.start() + i as u16, data);
-            r.name = legacy_name(&p.name);
-            resources.push(r);
-        }
-        if let Some(wp) = &doc.work_path {
-            resources.push(ImageResource::new(WORK_PATH, path_to_records(wp, w, h).to_bytes()));
-        }
-        let raw_clip = doc.metadata.psd_resources.iter().find(|(id, _, _)| *id == CLIPPING_PATH);
-        let raw_name = raw_clip.map(|(_, _, d)| {
-            let n = usize::from(d.first().copied().unwrap_or(0));
-            d.get(1..1 + n).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default()
-        });
-        if let Some(c) = &doc.clipping_path
-            && raw_name.as_deref() != Some(c.name.as_str())
-        {
-            // Pascal name, then flatness as 16.16 fixed (best effort; see vector_map docs).
-            let mut data = vec![0u8];
-            let name = legacy_name(&c.name);
-            data[0] = name.len() as u8;
-            data.extend_from_slice(&name);
-            data.extend_from_slice(&((c.flatness.max(0.0) * 65536.0) as u32).to_be_bytes());
-            resources.push(ImageResource::new(CLIPPING_PATH, data));
-        }
-    }
-    if let Some(groups) = link_group_resource(&doc.layers) {
-        resources.push(ImageResource::new(ids::LAYER_GROUP_INFO, groups));
-    }
+    resources.extend(path_resources(doc, &mut ex.warnings));
+    resources.push(ImageResource::new(ids::LAYER_GROUP_INFO, link_group_resource(&doc.layers)));
+    let old_seed = doc.metadata.psd_resources.iter().find(|r| r.0 == ids::DOCUMENT_IDS_SEED).and_then(|r| r.2.get(..4)).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    resources.extend(layer_state_resources(&ex.records, old_seed.unwrap_or(0)));
     if let Some(x) = &doc.metadata.xmp {
         // The pixels are saved as they are shown: never let a reader rotate them again.
         resources.push(ImageResource::new(ids::XMP, photosuite_codecs::upright_xmp(x).as_bytes().to_vec()));
@@ -1280,6 +1566,11 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         }
         // Slices: the preserved resource while unchanged, else regenerated (or dropped) below.
         if *id == crate::slices_map::SLICES && slices_resource.is_some() {
+            continue;
+        }
+        // The layer id seed is regenerated from the ids written (see `layer_state_resources`), the
+        // alpha ids with the channel names.
+        if *id == ids::DOCUMENT_IDS_SEED || *id == ids::ALPHA_IDS {
             continue;
         }
         // Measurement scale / count resources: only while they still describe the document.
@@ -1326,8 +1617,8 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     }
     // 32-bit files carry Photoshop's HDR toning records as Color Mode Data; Photoshop will not
     // open a 32-bit file without them (#291).
-    let color_mode_data = photosuite_psd::hdr::color_mode_data_for_depth(header.depth);
-    let file = PsdFile {
+    let color_mode_data = duotone_raw.unwrap_or_else(|| photosuite_psd::hdr::color_mode_data_for_depth(header.depth));
+    let mut file = PsdFile {
         header,
         color_mode_data,
         resources,
@@ -1338,6 +1629,9 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         layer_mask_trailing: Vec::new(),
         image_data,
     };
+    if flat_mode {
+        crate::flat_modes::apply(doc, &mut file);
+    }
     (file, ex.warnings)
 }
 

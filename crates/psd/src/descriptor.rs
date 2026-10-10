@@ -55,12 +55,21 @@ pub enum Id {
     Str(Vec<u8>),
 }
 
+/// Four-character identifiers Photoshop stores as length-prefixed strings rather than codes:
+/// they are its long string IDs that happen to be four characters long (observed in every
+/// Photoshop-authored file of the oracle corpus: `warp` on placed-layer and type warps, `list`
+/// in layer comps, `time` in the timeline). Photoshop tells the two forms apart, so a code
+/// would name a different key.
+const STRING_IDS: [&str; 6] = ["warp", "list", "time", "view", "json", "PNG8"];
+
 impl Id {
-    /// Convenience constructor: 4-byte strings become [`Id::Code`], others
-    /// [`Id::Str`].
+    /// Convenience constructor: 4-byte strings become [`Id::Code`], others (and the four-byte
+    /// names Photoshop stores as strings, such as `warp`) [`Id::Str`].
     pub fn new(s: &str) -> Self {
-        let b = s.as_bytes();
-        if b.len() == 4 { Id::Code([b[0], b[1], b[2], b[3]]) } else { Id::Str(b.to_vec()) }
+        match s.as_bytes() {
+            &[a, b, c, d] if !STRING_IDS.contains(&s) => Id::Code([a, b, c, d]),
+            b => Id::Str(b.to_vec()),
+        }
     }
     /// The identifier's bytes.
     pub fn as_bytes(&self) -> &[u8] {
@@ -560,6 +569,18 @@ mod tests {
 
     fn class(name: &str, id: &str) -> Class {
         Class { name: UnicodeString::new(name), class_id: Id::new(id) }
+    }
+
+    #[test]
+    fn photoshop_string_ids_stay_strings() {
+        // `warp` is a string ID in Photoshop's files (length 4 + bytes), not a code (length 0).
+        let mut out = Vec::new();
+        Id::new("warp").write(&mut out);
+        assert_eq!(out, b"\0\0\0\x04warp");
+        out.clear();
+        Id::new("Opct").write(&mut out);
+        assert_eq!(out, b"\0\0\0\0Opct");
+        assert!(Id::new("list").is("list"));
     }
 
     pub(crate) fn sample() -> Descriptor {

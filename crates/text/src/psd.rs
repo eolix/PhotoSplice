@@ -24,8 +24,11 @@ pub struct TySh {
     pub transform: Affine,
     pub text: Descriptor,
     pub warp: Option<Descriptor>,
-    /// The four trailing i32 values (left, top, right, bottom).
-    pub bounds: [i32; 4],
+    /// The trailing left, top, right, bottom: four big-endian `f32`s holding the `bounds`
+    /// rectangle (every Photoshop type layer of the oracle corpus; the spec's "4 × 8 bytes" is not
+    /// what Photoshop writes). Integers here read back as NaN and denormals, and Photoshop then
+    /// asks to update the layer and loses its warp when it does (Photoshop kit case 07).
+    pub bounds: [f32; 4],
 }
 
 /// Parses a `TySh` block.
@@ -42,10 +45,10 @@ pub fn parse_tysh(data: &[u8]) -> Option<TySh> {
         None => (None, 0),
     };
     let tail = rest.get(wused..).unwrap_or(&[]);
-    let mut bounds = [0i32; 4];
+    let mut bounds = [0f32; 4];
     for (i, b) in bounds.iter_mut().enumerate() {
         if let Some(x) = tail.get(i * 4..i * 4 + 4) {
-            *b = i32::from_be_bytes(x.try_into().unwrap_or([0; 4]));
+            *b = f32::from_be_bytes(x.try_into().unwrap_or([0; 4]));
         }
     }
     Some(TySh { transform: Affine { m }, text: text.descriptor, warp, bounds })
@@ -68,7 +71,7 @@ pub fn write_tysh(t: &TySh) -> Vec<u8> {
 }
 
 fn default_warp() -> Descriptor {
-    Descriptor::new("warp")
+    Descriptor { name: UnicodeString::new_nul(""), ..Descriptor::new("warp") }
         .with("warpStyle", enumv("warpStyle", "warpNone"))
         .with("warpValue", D::Double(0.0))
         .with("warpPerspective", D::Double(0.0))
@@ -575,7 +578,8 @@ pub(crate) fn style_sheet_data(s: &CharStyle, font: usize, k: f32) -> E {
         ("FauxBold".into(), E::Bool(s.faux_bold)),
         ("FauxItalic".into(), E::Bool(s.faux_italic)),
         ("AutoLeading".into(), E::Bool(s.leading_pt.is_none())),
-        ("Leading".into(), real(s.leading_pt.unwrap_or(0.0) / k)),
+        // Auto leading keeps whatever `Leading` the run had (Photoshop stores the last manual
+        // value there); written only when it is the one in use.
         ("HorizontalScale".into(), real(s.horizontal_scale)),
         ("VerticalScale".into(), real(s.vertical_scale)),
         ("Tracking".into(), E::Int(s.tracking.round() as i64)),
@@ -596,6 +600,9 @@ pub(crate) fn style_sheet_data(s: &CharStyle, font: usize, k: f32) -> E {
         ("DLigatures".into(), E::Bool(s.discretionary_ligatures)),
         ("FillColor".into(), E::Dict(vec![("Type".into(), E::Int(color_type)), ("Values".into(), E::Array(values))])),
     ];
+    if let Some(l) = s.leading_pt {
+        dict.insert(5, ("Leading".into(), real(l / k)));
+    }
     dict.append(&mut opentype);
     E::Dict(dict)
 }
@@ -648,6 +655,24 @@ pub fn build_engine_data(layer: &TextLayer, template: Option<E>, dpi: f32) -> E 
     let text = layer.text.replace('\n', "\r");
     let ed_text = format!("{text}\r");
 
+    // The runs the file had, by the UTF-16 offset where each starts: regenerated runs are merged
+    // onto the one they start in, so attributes the model doesn't carry survive an edit.
+    let template_runs = |key: &str| -> Vec<(i64, E)> {
+        let arr = e.path(&["EngineDict", key, "RunArray"]).and_then(E::as_array).unwrap_or(&[]);
+        let lens = e.path(&["EngineDict", key, "RunLengthArray"]).and_then(E::as_array).unwrap_or(&[]);
+        let mut at = 0i64;
+        arr.iter()
+            .zip(lens)
+            .map(|(r, n)| {
+                let start = at;
+                at = at.saturating_add(n.as_i64().unwrap_or(0).max(0));
+                (start, r.clone())
+            })
+            .collect()
+    };
+    let run_at = |runs: &[(i64, E)], offset: i64| runs.iter().rev().find(|(start, _)| *start <= offset).map(|(_, r)| r.clone());
+    let (old_styles, old_paras) = (template_runs("StyleRun"), template_runs("ParagraphRun"));
+    let old_fonts: Vec<E> = e.path(&["ResourceDict", "FontSet"]).and_then(E::as_array).map(<[E]>::to_vec).unwrap_or_default();
     // Fonts: keep the template's font list and append new PostScript names.
     let mut fonts: Vec<String> = e
         .path(&["ResourceDict", "FontSet"])
@@ -663,14 +688,30 @@ pub fn build_engine_data(layer: &TextLayer, template: Option<E>, dpi: f32) -> E 
     };
     let mut sruns = Vec::new();
     let mut slens = Vec::new();
+    let mut offset = 0i64;
     for (ri, pair, n) in pair_runs(&ed_text, &runs) {
         let Some(r) = runs.get(ri) else { continue };
         let fi = font_index(postscript_for(&r.style));
         let mut data = style_sheet_data(&r.style, fi, k);
         data.set("AutoKerning", E::Bool(pair.0));
         data.set("Kerning", E::Int(pair.1));
-        sruns.push(E::Dict(vec![("StyleSheet".into(), E::Dict(vec![("StyleSheetData".into(), data)]))]));
+        let run = E::Dict(vec![("StyleSheet".into(), E::Dict(vec![("StyleSheetData".into(), data)]))]);
+        let mut run = match run_at(&old_styles, offset) {
+            Some(old) => ed::merge(&old, run),
+            None => run,
+        };
+        // OpenType keys are written only when on; one the file had on but the model has off is
+        // switched off rather than kept from the merge.
+        if let Some(data) = run.get_mut("StyleSheet").and_then(|s| s.get_mut("StyleSheetData")) {
+            for (key, tag) in OPENTYPE_KEYS {
+                if data.get(key).is_some() && !r.style.features.iter().any(|f| f.tag == tag && f.value > 0) {
+                    data.set(key, E::Bool(false));
+                }
+            }
+        }
+        sruns.push(run);
         slens.push(E::Int(n as i64));
+        offset = offset.saturating_add(n as i64);
     }
     let mut pruns = Vec::new();
     let mut plens = Vec::new();
@@ -682,13 +723,24 @@ pub fn build_engine_data(layer: &TextLayer, template: Option<E>, dpi: f32) -> E 
         if i + 1 == paras.len() {
             n += 1;
         }
-        pruns.push(E::Dict(vec![(
+        let run = E::Dict(vec![(
             "ParagraphSheet".into(),
             E::Dict(vec![("DefaultStyleSheet".into(), E::Int(0)), ("Properties".into(), paragraph_properties(&p.style, k))]),
-        )]));
+        )]);
+        let start = plens.iter().filter_map(E::as_i64).sum::<i64>();
+        pruns.push(match run_at(&old_paras, start) {
+            Some(old) => ed::merge(&old, run),
+            None => run,
+        });
         plens.push(E::Int(n));
     }
-    let fontset = E::Array(fonts.iter().map(|f| font_entry(f)).collect());
+    // Fonts the file had keep their entry (script, font type, synthetic flag).
+    let fontset = E::Array(
+        fonts
+            .iter()
+            .map(|f| old_fonts.iter().find(|o| o.get("Name").and_then(E::as_str) == Some(f.as_str())).cloned().unwrap_or_else(|| font_entry(f)))
+            .collect(),
+    );
 
     let Some(dict) = e.get_mut("EngineDict") else {
         return fresh();
@@ -713,13 +765,15 @@ pub fn build_engine_data(layer: &TextLayer, template: Option<E>, dpi: f32) -> E 
     dict.set(
         "AntiAlias",
         E::Int(match layer.antialias {
+            // As Photoshop numbers them (every type layer of the oracle corpus: `AnCr` 1,
+            // `AnSt` 2, `AnSm` 3, `antiAliasSharp` 4, `antiAliasPlatformLCD` 6).
             AntiAlias::None => 0,
-            AntiAlias::Sharp => 1,
-            AntiAlias::Crisp => 2,
-            AntiAlias::Strong => 3,
-            AntiAlias::Smooth => 4,
-            // EngineData has no platform modes; the `AntA` descriptor carries the exact value.
-            AntiAlias::Windows | AntiAlias::WindowsLcd => 1,
+            AntiAlias::Crisp => 1,
+            AntiAlias::Strong => 2,
+            AntiAlias::Smooth => 3,
+            AntiAlias::Sharp => 4,
+            AntiAlias::Windows => 5,
+            AntiAlias::WindowsLcd => 6,
         }),
     );
     if dict.get("UseFractionalGlyphWidths").is_none() {
@@ -752,13 +806,29 @@ pub fn build_engine_data(layer: &TextLayer, template: Option<E>, dpi: f32) -> E 
         ("Lines".into(), E::Dict(vec![("WritingDirection".into(), E::Int(writing)), ("Children".into(), E::Array(vec![]))])),
         ("Cookie".into(), E::Dict(vec![("Photoshop".into(), photoshop)])),
     ]);
-    dict.set(
-        "Rendered",
-        E::Dict(vec![
-            ("Version".into(), E::Int(1)),
-            ("Shapes".into(), E::Dict(vec![("WritingDirection".into(), E::Int(writing)), ("Children".into(), E::Array(vec![child]))])),
-        ]),
-    );
+    let rendered = E::Dict(vec![
+        ("Version".into(), E::Int(1)),
+        ("Shapes".into(), E::Dict(vec![("WritingDirection".into(), E::Int(writing)), ("Children".into(), E::Array(vec![child]))])),
+    ]);
+    // Merged onto the file's own when the shape kind is the same, keeping its `Base` transform
+    // (an identity `Base` would drop a transformed layer's frame when Photoshop re-lays it out).
+    let old_rendered = dict.get("Rendered").cloned();
+    let old_child = old_rendered.as_ref().and_then(|r| r.path(&["Shapes", "Children"])).and_then(E::as_array).and_then(<[E]>::first).cloned();
+    let same_kind = old_child.as_ref().and_then(|c| c.get("ShapeType")).and_then(E::as_i64) == Some(shape_type);
+    let rendered = match old_rendered {
+        Some(old) if same_kind => {
+            let mut merged = ed::merge(&old, rendered);
+            if let Some(base) = old_child.as_ref().and_then(|c| c.path(&["Cookie", "Photoshop", "Base"])).cloned()
+                && let Some(E::Array(children)) = merged.get_mut("Shapes").and_then(|s| s.get_mut("Children"))
+                && let Some(ps) = children.first_mut().and_then(|c| c.get_mut("Cookie")).and_then(|c| c.get_mut("Photoshop"))
+            {
+                ps.set("Base", base);
+            }
+            merged
+        }
+        _ => rendered,
+    };
+    dict.set("Rendered", rendered);
 
     for key in ["ResourceDict", "DocumentResources"] {
         if key == "DocumentResources" && e.get(key).is_none() {
@@ -826,29 +896,53 @@ pub fn build_tysh(layer: &TextLayer, dpi: f32, ink: Option<[f32; 4]>) -> Vec<u8>
             },
         ),
     );
+    // Point text without a layout to measure (a move with a missing font) keeps the bounds it
+    // had: they are in text space, and Photoshop lays warped type out against them.
+    let old_rect = |key: &str| -> Option<[f32; 4]> {
+        let d = match old.as_ref()?.text.get(key)? {
+            D::Descriptor(d) => d,
+            _ => return None,
+        };
+        let v = |k: &str| match d.get(k) {
+            Some(D::UnitFloat { value, .. } | D::Double(value)) => Some(*value as f32),
+            _ => None,
+        };
+        Some([v("Left")?, v("Top ")?, v("Rght")?, v("Btom")?]).filter(|r| r.iter().any(|x| *x != 0.0))
+    };
+    let kept = |key: &str| if ink.is_none() && matches!(layer.shape, TextShape::Point) { old_rect(key) } else { None };
     let [l, t, r, b] = match (layer.shape, ink) {
         (TextShape::Box { x, y, width, height }, _) => [x, y, x + width, y + height],
         (_, Some(i)) => i,
-        _ => [0.0; 4],
+        _ => kept("bounds").unwrap_or([0.0; 4]),
     };
-    let rect = |cls: &str| {
+    let bounding = kept("boundingBox").unwrap_or([l, t, r, b]);
+    // Named with one NUL character, as Photoshop writes these rectangles, in the unit the file
+    // used (Photoshop writes `#Pxl` or `#Pnt`; both hold the same text-space numbers).
+    let rect = |cls: &str, [l, t, r, b]: [f32; 4]| {
+        let unit = match old.as_ref().and_then(|o| o.text.get(cls)) {
+            Some(D::Descriptor(d)) => match d.get("Left") {
+                Some(D::UnitFloat { unit, .. }) => *unit,
+                _ => *b"#Pnt",
+            },
+            _ => *b"#Pnt",
+        };
         D::Descriptor(
-            Descriptor::new(cls)
-                .with("Left", D::UnitFloat { unit: *b"#Pnt", value: f64::from(l) })
-                .with("Top ", D::UnitFloat { unit: *b"#Pnt", value: f64::from(t) })
-                .with("Rght", D::UnitFloat { unit: *b"#Pnt", value: f64::from(r) })
-                .with("Btom", D::UnitFloat { unit: *b"#Pnt", value: f64::from(b) }),
+            Descriptor { name: UnicodeString::new_nul(""), ..Descriptor::new(cls) }
+                .with("Left", D::UnitFloat { unit, value: f64::from(l) })
+                .with("Top ", D::UnitFloat { unit, value: f64::from(t) })
+                .with("Rght", D::UnitFloat { unit, value: f64::from(r) })
+                .with("Btom", D::UnitFloat { unit, value: f64::from(b) }),
         )
     };
-    set(&mut text, "bounds", rect("bounds"));
-    set(&mut text, "boundingBox", rect("boundingBox"));
+    set(&mut text, "bounds", rect("bounds", [l, t, r, b]));
+    set(&mut text, "boundingBox", rect("boundingBox", bounding));
     if text.get("TextIndex").is_none() {
         set(&mut text, "TextIndex", D::Integer(0));
     }
     set(&mut text, "EngineData", D::RawData(ed::write(&e)));
     let warp = match (&layer.warp, old.as_ref().and_then(|o| o.warp.clone())) {
         (Some(w), _) => Some(
-            Descriptor::new("warp")
+            Descriptor { name: UnicodeString::new_nul(""), ..Descriptor::new("warp") }
                 .with("warpStyle", enumv("warpStyle", &w.style))
                 .with("warpValue", D::Double(f64::from(w.value)))
                 .with("warpPerspective", D::Double(f64::from(w.horizontal_distortion)))
@@ -858,6 +952,5 @@ pub fn build_tysh(layer: &TextLayer, dpi: f32, ink: Option<[f32; 4]>) -> Vec<u8>
         (None, Some(old)) if enum_value(&old, "warpStyle").as_deref() == Some("warpNone") => Some(old),
         _ => None,
     };
-    let bounds = [l.floor() as i32, t.floor() as i32, r.ceil() as i32, b.ceil() as i32];
-    write_tysh(&TySh { transform: layer.transform, text, warp, bounds })
+    write_tysh(&TySh { transform: layer.transform, text, warp, bounds: [l, t, r, b] })
 }

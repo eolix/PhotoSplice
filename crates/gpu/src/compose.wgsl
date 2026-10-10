@@ -1042,25 +1042,32 @@ fn fs_mfinish(in: VOut) -> @location(0) vec4<f32> {
     return mout(v);
 }
 
-// Chiselled bevel height from A = dist_inside, B = dist_outside (`effects::bevel_chisel_h`):
-// p0 = (paint (0 outer, 1 both / emboss, 2 inner), size).
+// Chiselled bevel height from A = dist_inside, B = dist_outside (`effects::bevel_chisel_h`)
+// over shape S (`layer_tex`): p0 = (paint (0 outer, 1 both / emboss, 2 inner), inside ramp,
+// outside ramp). A partly covered edge pixel lies `coverage − ½` inside the edge.
 @fragment
 fn fs_mbevelh(in: VOut) -> @location(0) vec4<f32> {
     let p = local(in.pos);
-    let din = textureLoad(tex_a, p, 0).r;
-    let dout = textureLoad(tex_b, p, 0).r;
-    let size = op.p0.y;
+    var din = textureLoad(tex_a, p, 0).r;
+    var dout = textureLoad(tex_b, p, 0).r;
+    let a = textureLoad(layer_tex, p, 0).r;
+    if (a > INSIDE_EPS && a < 1.0 - INSIDE_EPS) {
+        din = a - 0.5;
+        dout = 0.5 - a;
+    }
+    let rin = max(op.p0.y, 1e-3);
+    let rout = max(op.p0.z, 1e-3);
     var h: f32;
     switch i32(op.p0.x) {
-        case 0: { h = 1.0 - clamp(dout / size, 0.0, 1.0); }
+        case 0: { h = max(1.0 - dout / rout, 0.0); }
         case 1: {
             if (din > 0.0) {
-                h = 0.5 + 0.5 * clamp(din / (size / 2.0), 0.0, 1.0);
+                h = (rout + min(din, rin)) / (rin + rout);
             } else {
-                h = 0.5 - 0.5 * clamp(dout / (size / 2.0), 0.0, 1.0);
+                h = (rout - min(dout, rout)) / (rin + rout);
             }
         }
-        default: { h = clamp(din / size, 0.0, 1.0); }
+        default: { h = min(din / rin, 1.0); }
     }
     return mout(h);
 }

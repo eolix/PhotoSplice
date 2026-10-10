@@ -16,6 +16,26 @@ use photosuite_raster::Surface;
 
 use crate::pixels::{encode_be, psd_depth};
 
+/// Resources that only describe layers (target and selected layers, link groups, layer groups
+/// enabled, the layer id seed, alpha ids): a Multichannel file has no layers.
+const LAYER_RESOURCES: [u16; 6] = [1024, 1026, 1069, 1072, ids::DOCUMENT_IDS_SEED, ids::ALPHA_IDS];
+
+/// The document-level tagged blocks kept from the file (`FMsk`, `Patt`, …), padded to 4 as
+/// Photoshop writes them; not layer data.
+fn global_blocks(doc: &Document) -> Vec<photosuite_psd::TaggedBlock> {
+    doc.metadata
+        .psd_global_blocks
+        .iter()
+        .filter(|(_, key, _)| !matches!(key, b"Layr" | b"Lr16" | b"Lr32"))
+        .map(|(sig, key, data)| {
+            let mut tb = photosuite_psd::TaggedBlock::new(*key, data.to_vec());
+            tb.signature = *sig;
+            tb.padding = Some(vec![0; (4 - data.len() % 4) % 4]);
+            tb
+        })
+        .collect()
+}
+
 /// Value of sample `i` of a big-endian plane.
 fn decode(plane: &[u8], i: usize, s: SampleType) -> f32 {
     match s {
@@ -48,9 +68,9 @@ pub(crate) fn import(file: &PsdFile, all: &[u8], doc: &mut Document, names: &[St
         doc.channels.push(AlphaChannel { spot: Some((Color::BLACK, 0.0)), ..AlphaChannel::new(name, s) });
     }
     if let Some(r) = file.resource(crate::channel_map::DISPLAY_INFO) {
-        crate::channel_map::apply_display_info(&r.data, true, &mut doc.channels);
+        crate::channel_map::apply_display_info(&r.data, true, 0, &mut doc.channels);
     } else if let Some(r) = file.resource(crate::channel_map::DISPLAY_INFO_OLD) {
-        crate::channel_map::apply_display_info(&r.data, false, &mut doc.channels);
+        crate::channel_map::apply_display_info(&r.data, false, 0, &mut doc.channels);
     }
 }
 
@@ -97,15 +117,48 @@ pub(crate) fn document_to_psd(doc: &Document, force_psb: bool) -> (PsdFile, Vec<
     let image_data = ImageData::encode(Compression::Rle, &planes, &header)
         .or_else(|_| ImageData::encode(Compression::Raw, &planes, &header))
         .unwrap_or(ImageData { compression: Compression::Raw, data: planes });
-    let mut resources = vec![ImageResource::new(ids::RESOLUTION_INFO, ResolutionInfo::from_dpi(f64::from(doc.resolution_dpi)).to_bytes())];
+    let mut resources = vec![
+        ImageResource::new(ids::RESOLUTION_INFO, ResolutionInfo::from_dpi(f64::from(doc.resolution_dpi)).to_bytes()),
+        ImageResource::new(ids::GLOBAL_ANGLE, (doc.global_light.angle.round() as i32).to_be_bytes().to_vec()),
+        ImageResource::new(ids::GLOBAL_ALTITUDE, (doc.global_light.altitude.round() as i32).to_be_bytes().to_vec()),
+        // Photoshop writes the grid and guides resource in every file.
+        ImageResource::new(1032, crate::psd_export::guides_resource(doc)),
+    ];
     if !channels.is_empty() {
         let names: Vec<&str> = channels.iter().map(|c| c.name.as_str()).collect();
         resources.push(ImageResource::new(1006, crate::psd_export::pascal_names_resource(&names)));
         resources.push(ImageResource::new(1045, crate::psd_export::unicode_names_resource(&names)));
-        resources.push(ImageResource::new(crate::channel_map::DISPLAY_INFO, crate::channel_map::display_info(&channels)));
+        let old = doc.metadata.psd_resources.iter().find(|r| r.0 == ids::ALPHA_IDS).map(|r| r.2.as_slice());
+        resources.push(ImageResource::new(ids::ALPHA_IDS, crate::psd_export::alpha_ids_resource(old, false, names.len())));
+        resources.push(ImageResource::new(crate::channel_map::DISPLAY_INFO, crate::channel_map::display_info(false, &channels)));
     }
+    resources.extend(crate::psd_export::path_resources(doc, &mut warnings));
+    // The layer id seed (Photoshop writes it in every file): the file's, as there are no layers.
+    let seed = doc.metadata.psd_resources.iter().find(|r| r.0 == ids::DOCUMENT_IDS_SEED).and_then(|r| r.2.get(..4)).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    resources.push(ImageResource::new(ids::DOCUMENT_IDS_SEED, seed.to_be_bytes().to_vec()));
     if let Some(x) = &doc.metadata.xmp {
         resources.push(ImageResource::new(ids::XMP, x.as_bytes().to_vec()));
+    }
+    if let Some(e) = &doc.metadata.exif {
+        resources.push(ImageResource::new(ids::EXIF, photosuite_codecs::upright_exif(e).into_owned()));
+    }
+    // The file's other resources (print settings, IPTC, guides, …) as imported; not the ones that
+    // only describe layers, nor any written above.
+    for (id, name, data) in &doc.metadata.psd_resources {
+        if LAYER_RESOURCES.contains(id) || resources.iter().any(|r| r.id == *id) || *id == ids::VERSION_INFO {
+            continue;
+        }
+        // A preserved clipping-path resource only while it names the current clipping path.
+        if *id == crate::vector_map::CLIPPING_PATH {
+            let n = usize::from(data.first().copied().unwrap_or(0));
+            let raw_name = data.get(1..1 + n).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
+            if doc.clipping_path.as_ref().is_none_or(|c| c.name != raw_name) {
+                continue;
+            }
+        }
+        let mut r = ImageResource::new(*id, data.to_vec());
+        r.name = crate::psd_export::legacy_name(name);
+        resources.push(r);
     }
     resources.push(version_info_resource(true));
     let color_mode_data = photosuite_psd::hdr::color_mode_data_for_depth(header.depth);
@@ -116,7 +169,7 @@ pub(crate) fn document_to_psd(doc: &Document, force_psb: bool) -> (PsdFile, Vec<
         layer_info: None,
         layer_info_placement: LayerInfoPlacement::Section,
         global_layer_mask: None,
-        global_blocks: Vec::new(),
+        global_blocks: global_blocks(doc),
         layer_mask_trailing: Vec::new(),
         image_data,
     };

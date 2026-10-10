@@ -18,8 +18,18 @@ pub mod ids {
     pub const THUMBNAIL: u16 = 1036;
     /// Global lighting angle.
     pub const GLOBAL_ANGLE: u16 = 1037;
+    /// Document-specific ids seed: the base for new layer ids.
+    pub const DOCUMENT_IDS_SEED: u16 = 1044;
+    /// Selected layers: u16 count, then one u32 layer id each.
+    pub const LAYER_SELECTION_IDS: u16 = 1069;
+    /// Layer group(s) enabled: one byte per layer record.
+    pub const LAYER_GROUPS_ENABLED: u16 = 1072;
     /// ICC profile.
     pub const ICC_PROFILE: u16 = 1039;
+    /// Unicode alpha channel names (the merged transparency first, named "Transparency").
+    pub const UNICODE_ALPHA_NAMES: u16 = 1045;
+    /// Alpha channel ids: one u32 per entry of the names (no count, whatever the spec says).
+    pub const ALPHA_IDS: u16 = 1053;
     /// Global altitude.
     pub const GLOBAL_ALTITUDE: u16 = 1049;
     /// Version info (has real merged data flag).
@@ -250,15 +260,38 @@ pub(crate) fn write_section(out: &mut Vec<u8>, res: &[ImageResource]) -> Result<
     out.end_len(at, false)
 }
 
-/// Builds the data for a 1057 version info resource.
+/// The name Photoshop gives the merged image's transparency in the alpha channel lists.
+pub const TRANSPARENCY_NAME: &str = "Transparency";
+
+/// The names in a 1045 resource (each a u32 length in UTF-16 units, then the units), trailing
+/// NULs removed. Stops at the first entry that runs past the data.
+pub fn unicode_names(data: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while let Some(len) = data.get(at..at.saturating_add(4)).and_then(|b| <[u8; 4]>::try_from(b).ok()) {
+        at += 4;
+        let Some(end) = (u32::from_be_bytes(len) as usize).checked_mul(2).and_then(|n| at.checked_add(n)) else { break };
+        let Some(b) = data.get(at..end) else { break };
+        let units: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        out.push(String::from_utf16_lossy(&units).trim_end_matches('\0').to_string());
+        at = end;
+    }
+    out
+}
+
+/// Builds the data for a 1057 version info resource, with the writer and reader names a current
+/// Photoshop writes (no NUL terminator). The reader names the oldest version the file is meant
+/// for: Photoshop asks to "update" the type layers of a file whose reader is older than its own
+/// text engine (an earlier "Adobe Photoshop CS6" made it prompt on every PhotoSuite PSD with type;
+/// Photoshop's own re-save of such a file names "Adobe Photoshop 2020").
 pub fn version_info_resource(has_real_merged_data: bool) -> ImageResource {
     ImageResource::new(
         ids::VERSION_INFO,
         VersionInfo {
             version: 1,
             has_real_merged_data,
-            writer: UnicodeString::new_nul("Adobe Photoshop"),
-            reader: UnicodeString::new_nul("Adobe Photoshop CS6"),
+            writer: UnicodeString::new("Adobe Photoshop"),
+            reader: UnicodeString::new("Adobe Photoshop 2020"),
             file_version: 1,
         }
         .to_bytes(),

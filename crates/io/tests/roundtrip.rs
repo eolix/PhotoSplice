@@ -152,7 +152,10 @@ fn text_shape_smart_raw_blocks_survive() {
     if let LayerContent::Shape(s) = &bsh.content {
         assert_eq!(s.psd_raw.as_deref(), Some(&vec![7u8; 8]));
     }
-    assert_eq!(bsh.psd_blocks, d.layers[n - 1].psd_blocks);
+    // Plus the advanced-blending defaults Photoshop writes on every non-group layer.
+    let mut expected = d.layers[n - 1].psd_blocks.clone();
+    expected.extend([(*b"clbl", std::sync::Arc::new(vec![1u8, 0, 0, 0])), (*b"infx", std::sync::Arc::new(vec![0u8; 4])), (*b"knko", std::sync::Arc::new(vec![0u8; 4]))]);
+    assert_eq!(bsh.psd_blocks, expected);
 }
 
 #[test]
@@ -165,8 +168,11 @@ fn raster_layer_blocks_preserved() {
     let back = roundtrip(&d);
     // An odd-length layer block comes back with its pad byte inside the length (as Photoshop
     // lays layer blocks out, #200); everything else is verbatim.
+    // The layer's own `clbl` is kept; the other advanced-blending defaults are added, as
+    // Photoshop writes them on every non-group layer.
     let mut expected = blocks.clone();
     expected[2].1 = std::sync::Arc::new(vec![1u8, 0]);
+    expected.extend([(*b"infx", std::sync::Arc::new(vec![0u8; 4])), (*b"knko", std::sync::Arc::new(vec![0u8; 4]))]);
     assert_eq!(back.layers[1].psd_blocks, expected);
     assert_eq!(roundtrip(&back).layers[1].psd_blocks, expected, "stable after the first save");
     assert_eq!(back.layers[1].vector_mask, d.layers[1].vector_mask);
@@ -346,11 +352,14 @@ fn effects_roundtrip_typed_and_raw() {
     assert_eq!(back.global_light, d.global_light);
     let fx = &back.layers[1].effects;
     assert_eq!(fx.items.len(), 3);
-    let raw = fx.psd_raw.clone().expect("lfx2 kept");
-    // Unchanged → the same lfx2 bytes are written again.
+    // Two strokes: stored as `lmfx` alone, as Photoshop does.
+    let raw = back.layers[1].psd_blocks.iter().find(|(k, _)| k == b"lmfx").map(|(_, d)| d.clone()).expect("lmfx kept");
+    assert!(fx.psd_raw.is_none());
+    // Unchanged → the same lmfx bytes are written again, with no lfx2 beside them.
     let f = document_to_psd(&back);
     let rec = f.layers().iter().find(|r| r.name() == back.layers[1].name).unwrap();
-    assert_eq!(rec.block(b"lfx2").unwrap().data, *raw);
+    assert_eq!(rec.block(b"lmfx").unwrap().data, *raw);
+    assert!(rec.block(b"lfx2").is_none());
     // Edited → regenerated.
     let mut edited = back.clone();
     if let Effect::DropShadow(s) = &mut edited.layers[1].effects.items[0] {
@@ -358,10 +367,19 @@ fn effects_roundtrip_typed_and_raw() {
     }
     let f = document_to_psd(&edited);
     let rec = f.layers().iter().find(|r| r.name() == back.layers[1].name).unwrap();
-    let data = &rec.block(b"lfx2").unwrap().data;
+    let data = &rec.block(b"lmfx").unwrap().data;
     assert_ne!(data, &*raw);
+    assert!(rec.block(b"lfx2").is_none());
     let (_, items) = photosuite_io::effects_map::parse_lfx2(data).unwrap();
     assert!(matches!(&items[0], Effect::DropShadow(s) if s.distance == 20.0));
+    // One instance per kind → lfx2, kept verbatim while unchanged.
+    edited.layers[1].effects.items.truncate(2);
+    let back = roundtrip(&edited);
+    let raw = back.layers[1].effects.psd_raw.clone().expect("lfx2 kept");
+    let f = document_to_psd(&back);
+    let rec = f.layers().iter().find(|r| r.name() == back.layers[1].name).unwrap();
+    assert_eq!(rec.block(b"lfx2").unwrap().data, *raw);
+    assert!(rec.block(b"lmfx").is_none());
 }
 
 #[test]
@@ -430,7 +448,7 @@ fn link_groups_and_effects_reference_round_trip() {
     big.layers[1].link_group = Some(1 << 40);
     let fb = PsdFile::from_bytes(&export(&big, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap();
     assert_eq!(res(&fb).unwrap(), vec![0, 1, 0, 1, 0, 0, 0, 2, 0, 0]);
-    // Unlinked documents write no 1026.
+    // Unlinked documents write zeros (Photoshop writes the resource in every layered file).
     let mut none = d.clone();
     none.layers[0].link_group = None;
     none.layers[1].link_group = None;
@@ -438,7 +456,7 @@ fn link_groups_and_effects_reference_round_trip() {
         g.children[0].link_group = None;
     }
     let fnone = PsdFile::from_bytes(&export(&none, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap();
-    assert!(res(&fnone).is_none());
+    assert!(res(&fnone).unwrap().iter().all(|b| *b == 0));
 }
 
 #[test]
@@ -488,12 +506,42 @@ fn blend_if_round_trips_as_blending_ranges() {
     want.extend_from_slice(&full);
     want.extend_from_slice(&[0, 0, 255, 255, 64, 64, 255, 255]);
     want.extend_from_slice(&full);
+    // Padded to the five entries Photoshop writes in every mode.
+    want.extend_from_slice(&full);
     assert_eq!(rec.blending_ranges.data, want);
-    // Layers without Blend If keep full ranges for gray + R, G, B.
+    // Layers without Blend If get full ranges for gray + four channels.
     let rb = f.layers().iter().find(|r| r.name() == "b").unwrap();
-    assert_eq!(rb.blending_ranges, photosuite_psd::BlendingRanges::full(3));
+    assert_eq!(rb.blending_ranges, photosuite_psd::BlendingRanges::full(4));
     let back = roundtrip(&d);
     assert_eq!(back.layers[0].blend_if, bi);
     assert!(back.layers[1].blend_if.is_default());
     assert_eq!(back.layers[2].blend_if.get(1)[0], BlendRange { black: [1, 2], white: [3, 4] });
+}
+
+/// An edited fill layer behind a hiding mask is written over the part the mask shows, as
+/// Photoshop writes it (it used to fill the whole canvas), with the pixels the compositor shows.
+#[test]
+fn edited_fill_is_written_over_its_mask() {
+    use photosuite_color::Color;
+    use photosuite_doc::{Document, Fill, GradientStyle, Layer, LayerContent, LayerMask, Size};
+    let mut d = Document::new("f", Size::new(8, 24), ColorMode::Rgb, SampleType::U8);
+    let fill = Fill::gradient(vec![(0.0, Color::rgb(0.0, 0.0, 0.0)), (1.0, Color::rgb(1.0, 1.0, 1.0))], 90.0, 1.0, GradientStyle::Linear, false);
+    let mut l = Layer::new("band", LayerContent::Fill(fill));
+    let mut mask = LayerMask::hide_all();
+    mask.surface.fill_rect(photosuite_geom::Rect::new(0, 8, 8, 16), &[1.0]);
+    l.mask = Some(mask);
+    d.layers = vec![l];
+    let f = PsdFile::from_bytes(&export(&d, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap();
+    let rec = f.layers().iter().find(|r| r.name() == "band").unwrap();
+    assert_eq!((rec.rect.top, rec.rect.left, rec.rect.bottom, rec.rect.right), (8, 0, 16, 8));
+    // The written pixels (read back as the fill's cache) are the ones the compositor renders.
+    let back = roundtrip(&d);
+    assert!(back.layers[0].fill_cache.is_some());
+    let full = photosuite_compose::flatten(&d);
+    let band = photosuite_compose::flatten(&back);
+    for y in 8..16 {
+        for (a, b) in band.get(3, y).iter().zip(full.get(3, y)) {
+            assert!((a - b).abs() < 2.0 / 255.0, "row {y}: {:?} vs {:?}", band.get(3, y), full.get(3, y));
+        }
+    }
 }

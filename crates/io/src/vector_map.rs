@@ -194,7 +194,13 @@ pub fn fill_from_vscg(data: &[u8]) -> Option<Fill> {
 }
 
 pub fn vscg_bytes(f: &Fill) -> Vec<u8> {
-    let (k, d) = fill_to_desc(f);
+    vscg_bytes_onto(f, None)
+}
+
+/// [`vscg_bytes`] merged onto the `vscg` data it replaces (see [`crate::blocks::fill_to_desc_onto`]).
+pub fn vscg_bytes_onto(f: &Fill, old: Option<&[u8]>) -> Vec<u8> {
+    let old = old.and_then(|d| Some((<&[u8; 4]>::try_from(d.get(..4)?).ok()?, d.get(4..)?)));
+    let (k, d) = crate::blocks::fill_to_desc_onto(f, old);
     let mut out = k.to_vec();
     out.extend(VersionedDescriptor::new(d).to_bytes());
     out
@@ -393,6 +399,40 @@ fn px(v: f64) -> Value {
 }
 
 /// `vogk` for a live shape (None for kinds Photoshop has no origination type for here).
+/// Stroke settings the model doesn't carry, written as Photoshop's defaults: a rewrite keeps the
+/// file's values.
+const VSTK_UNMODELLED: [&str; 3] = ["strokeStyleBlendMode", "strokeStyleScaleLock", "strokeStyleStrokeAdjust"];
+
+/// [`vstk_bytes`] merged onto the `vstk` data it replaces.
+pub fn vstk_bytes_onto(stroke: Option<&ShapeStroke>, fill_enabled: bool, dpi: f32, old: Option<&[u8]>) -> Vec<u8> {
+    let fresh = vstk_bytes(stroke, fill_enabled, dpi);
+    match (old.and_then(parse_prefix_versioned), parse_prefix_versioned(&fresh)) {
+        (Some(base), Some(new)) => VersionedDescriptor::new(crate::blocks::merge_descriptor(&base, new, &VSTK_UNMODELLED)).to_bytes(),
+        _ => fresh,
+    }
+}
+
+/// Line arrowheads, not modelled: a rewrite of the same line keeps the file's.
+const VOGK_UNMODELLED: [&str; 5] = ["keyOriginLineArrowSt", "keyOriginLineArrowEnd", "keyOriginLineArrWdth", "keyOriginLineArrLngth", "keyOriginLineArrConc"];
+
+/// [`vogk_bytes`] merged onto the `vogk` data it replaces when that describes the same kind of
+/// shape (keys the model doesn't carry survive, such as a line's arrowheads).
+pub fn vogk_bytes_onto(s: &LiveShape, dpi: f32, old: Option<&[u8]>) -> Option<Vec<u8>> {
+    let fresh = vogk_bytes(s, dpi)?;
+    let parse = |d: &[u8]| d.get(4..).and_then(parse_prefix_versioned);
+    let kind = |d: &Descriptor| match d.get("keyDescriptorList") {
+        Some(Value::List(l)) => l.first().and_then(|v| if let Value::Descriptor(o) = v { o.get("keyOriginType").cloned() } else { None }),
+        _ => None,
+    };
+    let (Some(base), Some(new)) = (old.and_then(parse), parse(&fresh)) else { return Some(fresh) };
+    if kind(&base).is_none() || kind(&base) != kind(&new) {
+        return Some(fresh);
+    }
+    let mut out = 1u32.to_be_bytes().to_vec();
+    out.extend(VersionedDescriptor::new(crate::blocks::merge_descriptor(&base, new, &VOGK_UNMODELLED)).to_bytes());
+    Some(out)
+}
+
 pub fn vogk_bytes(s: &LiveShape, dpi: f32) -> Option<Vec<u8>> {
     let bbox = |r: [f64; 4]| {
         Value::Descriptor(
@@ -491,17 +531,24 @@ pub fn shape_blocks(sh: &ShapeLayer, raw: &mut Vec<([u8; 4], Vec<u8>)>, w: u32, 
                 Some(r) if keep(r) => r.to_vec(),
                 _ => vmsk_bytes(&sh.path, 0, w, h),
             };
+            // A shape in the CS6 form (fill in `vscg`, or a new shape) keeps its path under
+            // `vsms`, as Photoshop writes it; legacy shapes (top-level fill) under `vmsk`.
+            let legacy = raw.iter().any(|(k, _)| matches!(k, b"SoCo" | b"GdFl" | b"PtFl"));
             match pos {
                 Some(i) => raw[i].1 = data,
-                None => raw.push((*b"vmsk", data)),
+                None => raw.push((if legacy { *b"vmsk" } else { *b"vsms" }, data)),
             }
         }
     }
     // Fill content.
+    // Photoshop CS6 and later keep a shape's fill in `vscg`; older files have a top-level fill
+    // block instead (the caller updates that one). Photoshop never writes both.
     if let Some(f) = &sh.fill {
+        let legacy = raw.iter().any(|(k, _)| matches!(k, b"SoCo" | b"GdFl" | b"PtFl"));
         match find(raw, b"vscg") {
             Some(i) if fill_from_vscg(&raw[i].1).as_ref() == Some(f) => {}
-            Some(i) => raw[i].1 = vscg_bytes(f),
+            Some(i) => raw[i].1 = vscg_bytes_onto(f, Some(&raw[i].1)),
+            None if !legacy => raw.push((*b"vscg", vscg_bytes(f))),
             None => {}
         }
     }
@@ -515,7 +562,7 @@ pub fn shape_blocks(sh: &ShapeLayer, raw: &mut Vec<([u8; 4], Vec<u8>)>, w: u32, 
     let same = |v: &VstkInfo| v.stroke == sh.stroke && (v.fill_enabled == sh.fill.is_some() || (v.fill_enabled && undecodable_fill));
     match find(raw, b"vstk") {
         Some(i) if parse_vstk(&raw[i].1, dpi).as_ref().is_some_and(same) => {}
-        Some(i) => raw[i].1 = vstk_bytes(sh.stroke.as_ref(), sh.fill.is_some(), dpi),
+        Some(i) => raw[i].1 = vstk_bytes_onto(sh.stroke.as_ref(), sh.fill.is_some(), dpi, Some(&raw[i].1)),
         // "No fill" needs a vstk only when a fill block would otherwise paint.
         None if sh.stroke.is_some() || (sh.fill.is_none() && has_fill_block(raw)) => {
             raw.push((*b"vstk", vstk_bytes(sh.stroke.as_ref(), sh.fill.is_some(), dpi)));
@@ -526,7 +573,7 @@ pub fn shape_blocks(sh: &ShapeLayer, raw: &mut Vec<([u8; 4], Vec<u8>)>, w: u32, 
     let pos = find(raw, b"vogk");
     let current = pos.and_then(|i| live_from_vogk(&raw[i].1));
     if current != sh.live || (pos.is_none() && sh.live.is_some()) {
-        let generated = sh.live.as_ref().and_then(|l| vogk_bytes(l, dpi));
+        let generated = sh.live.as_ref().and_then(|l| vogk_bytes_onto(l, dpi, pos.and_then(|i| raw.get(i)).map(|r| r.1.as_slice())));
         match (pos, generated) {
             (Some(i), Some(g)) => raw[i].1 = g,
             (Some(i), None) => {
@@ -660,6 +707,41 @@ mod tests {
         assert!(off.stroke.is_none() && off.fill_enabled);
     }
 
+    /// Settings the model doesn't carry survive a rewrite: a stroke's blend mode and scale lock
+    /// when its width changes, a line's arrowheads when its weight changes.
+    #[test]
+    fn rewrites_keep_unmodelled_stroke_and_shape_settings() {
+        let stroke = ShapeStroke { width: 3.0, ..Default::default() };
+        let mut d = parse_prefix_versioned(&vstk_bytes(Some(&stroke), true, 72.0)).unwrap();
+        for (k, v) in &mut d.items {
+            if k.is("strokeStyleBlendMode") {
+                *v = Value::Enumerated { type_id: Id::new("BlnM"), value: Id::new("Mltp") };
+            } else if k.is("strokeStyleScaleLock") {
+                *v = Value::Boolean(true);
+            }
+        }
+        let old = VersionedDescriptor::new(d).to_bytes();
+        let wider = ShapeStroke { width: 7.0, ..stroke };
+        let back = parse_prefix_versioned(&vstk_bytes_onto(Some(&wider), true, 72.0, Some(&old))).unwrap();
+        assert_eq!(back.get("strokeStyleBlendMode"), Some(&Value::Enumerated { type_id: Id::new("BlnM"), value: Id::new("Mltp") }));
+        assert_eq!(back.get("strokeStyleScaleLock"), Some(&Value::Boolean(true)));
+        assert_eq!(parse_vstk(&VersionedDescriptor::new(back).to_bytes(), 72.0).and_then(|v| v.stroke).map(|s| s.width), Some(7.0));
+
+        let line = LiveShape::Line { from: [0.0, 10.0], to: [20.0, 0.0], weight: 3.0 };
+        let mut old = vogk_bytes(&line, 72.0).unwrap();
+        let arrow = b"keyOriginLineArrowEndbool";
+        let at = old.windows(arrow.len()).position(|w| w == arrow).unwrap() + arrow.len();
+        old[at] = 1;
+        let thicker = LiveShape::Line { from: [0.0, 10.0], to: [20.0, 0.0], weight: 5.0 };
+        let back = vogk_bytes_onto(&thicker, 72.0, Some(&old)).unwrap();
+        let at = back.windows(arrow.len()).position(|w| w == arrow).unwrap() + arrow.len();
+        assert_eq!(back[at], 1, "arrowhead kept");
+        assert_eq!(live_from_vogk(&back), Some(thicker));
+        // Another kind of shape: written fresh.
+        let ellipse = LiveShape::Ellipse { rect: [0.0, 0.0, 10.0, 10.0] };
+        assert_eq!(vogk_bytes_onto(&ellipse, 72.0, Some(&old)), vogk_bytes(&ellipse, 72.0));
+    }
+
     #[test]
     fn vogk_roundtrip() {
         for s in [
@@ -686,7 +768,8 @@ mod tests {
         let mut raw = Vec::new();
         shape_blocks(&sh, &mut raw, 64, 64, 72.0);
         let keys: Vec<&[u8; 4]> = raw.iter().map(|(k, _)| k).collect();
-        assert_eq!(keys, [b"vmsk", b"vstk", b"vogk"]);
+        // A new shape keeps its fill in `vscg`, as Photoshop CS6 and later write shapes.
+        assert_eq!(keys, [b"vsms", b"vscg", b"vstk", b"vogk"]);
         let before = raw.clone();
         shape_blocks(&sh, &mut raw, 64, 64, 72.0);
         assert_eq!(raw, before);

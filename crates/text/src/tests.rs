@@ -844,3 +844,59 @@ fn word_and_line_navigation() {
     assert_eq!(jumped, char_index(text, l.lines[1].range.end), "own column");
     assert!(jumped > kept);
 }
+
+/// What a rewrite of a Photoshop type layer must keep (Photoshop verification kit, case 07: a
+/// rewritten warped layer made Photoshop ask to update it and lose the warp when it did).
+#[test]
+fn rewrite_keeps_what_photoshop_wrote() {
+    use crate::engine_data::{self as ed, Value as E};
+    use photosuite_doc::text::{AntiAlias, TextWarp};
+    use photosuite_psd::descriptor::{Id, Value as D};
+    fn first<'a>(v: &'a mut E, path: &[&str]) -> Option<&'a mut E> {
+        let mut v = v;
+        for k in path {
+            v = match v.get_mut(k)? {
+                E::Array(a) => a.first_mut()?,
+                x => x,
+            };
+        }
+        Some(v)
+    }
+    let mut t = styled("Warped", CharStyle::default());
+    t.antialias = AntiAlias::Sharp;
+    t.warp = Some(TextWarp { style: "warpArc".into(), value: 50.0, horizontal_distortion: 0.0, vertical_distortion: 0.0, horizontal: true });
+    let mut ty = crate::psd::parse_tysh(&crate::psd::build_tysh(&t, 72.0, Some([0.0, -34.0, 289.0, 15.0]))).unwrap();
+    // Keys Photoshop writes that the model doesn't carry.
+    let mut e = crate::psd::engine_data(&ty.text).unwrap();
+    let data = first(&mut e, &["EngineDict", "StyleRun", "RunArray", "StyleSheet", "StyleSheetData"]).unwrap();
+    data.set("Tsume", E::Real(0.25));
+    data.set("Leading", E::Real(27.0));
+    let run = first(&mut e, &["EngineDict", "ParagraphRun", "RunArray"]).unwrap();
+    run.set("Adjustments", E::Dict(vec![("Axis".into(), E::Array(vec![E::Real(1.0), E::Real(0.0), E::Real(1.0)]))]));
+    first(run, &["ParagraphSheet", "Properties"]).unwrap().set("Burasagari", E::Bool(true));
+    let base = first(&mut e, &["EngineDict", "Rendered", "Shapes", "Children", "Cookie", "Photoshop", "Base"]).unwrap();
+    base.set("TransformPoint0", E::Array(vec![E::Real(2.0), E::Real(0.0)]));
+    ty.text.items.retain(|(k, _)| !k.is("EngineData"));
+    ty.text.items.push((Id::new("EngineData"), D::RawData(ed::write(&e))));
+    t.psd_raw = Some(std::sync::Arc::new(crate::psd::write_tysh(&ty)));
+
+    // Rewritten the way a move with a missing font does it: no layout to measure.
+    let back = crate::psd::parse_tysh(&crate::psd::build_tysh(&t, 72.0, None)).unwrap();
+    let mut e = crate::psd::engine_data(&back.text).unwrap();
+    let data = first(&mut e, &["EngineDict", "StyleRun", "RunArray", "StyleSheet", "StyleSheetData"]).unwrap().clone();
+    assert_eq!(data.get("Tsume"), Some(&E::Real(0.25)));
+    assert_eq!(data.get("Leading"), Some(&E::Real(27.0)), "auto leading keeps the stored value");
+    let run = first(&mut e, &["EngineDict", "ParagraphRun", "RunArray"]).unwrap().clone();
+    assert!(run.get("Adjustments").is_some());
+    assert_eq!(run.path(&["ParagraphSheet", "Properties", "Burasagari"]), Some(&E::Bool(true)));
+    let base = first(&mut e, &["EngineDict", "Rendered", "Shapes", "Children", "Cookie", "Photoshop", "Base"]).unwrap();
+    assert_eq!(base.get("TransformPoint0"), Some(&E::Array(vec![E::Real(2.0), E::Real(0.0)])));
+    assert_eq!(e.path(&["EngineDict", "AntiAlias"]), Some(&E::Int(4)), "Photoshop numbers Sharp 4");
+    // The measured bounds stay; zero bounds made Photoshop re-lay out the type and drop its warp.
+    let D::Descriptor(b) = back.text.get("bounds").unwrap() else { panic!() };
+    assert!(matches!(b.get("Rght"), Some(D::UnitFloat { value, .. }) if *value == 289.0));
+    assert!(back.warp.is_some_and(|w| w.items.iter().any(|(k, v)| k.is("warpValue") && *v == D::Double(50.0))));
+    // Photoshop's layout: an array opens on its key's line.
+    let raw = String::from_utf8_lossy(&ed::write(&e)).into_owned();
+    assert!(raw.contains("/RunArray [") && !raw.contains("/RunArray\n"));
+}
