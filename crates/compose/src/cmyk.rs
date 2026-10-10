@@ -8,10 +8,12 @@
 //! the composite turns into screen RGB once, at the end, through the document's CMYK profile
 //! (the caller's [`photosuite_color::convert::with_cmyk_space`] scope).
 //!
-//! A layer this module doesn't composite in CMYK yet (layer effects, Blend If, most adjustments)
-//! is an "RGB island": the RGB compositor draws it over the backdrop's RGB conversion, and only
-//! the pixels it changed take the result back, separated through the profile. Untouched pixels
-//! keep their exact inks.
+//! Adjustments work on the inks too: Levels and Curves through their CMYK records, Invert,
+//! Posterize and Brightness/Contrast through one curve for every ink, Threshold and Gradient Map
+//! on the inks' own lightness ([`ink_lightness`]). A layer this module doesn't composite in CMYK
+//! yet (layer effects, Blend If, the other adjustments) is an "RGB island": the RGB compositor
+//! draws it over the backdrop's RGB conversion, and only the pixels it changed take the result
+//! back, separated through the profile. Untouched pixels keep their exact inks.
 
 use photosuite_color::ColorMode;
 use photosuite_color::blend::BlendMode;
@@ -121,19 +123,74 @@ fn native(l: &Layer, clipped: &[Layer], cx: &Ctx) -> bool {
     }
 }
 
-/// Adjustments evaluated on the inks.
+/// Adjustments evaluated on the inks: each ink's complement through a curve of its own (Levels
+/// and Curves in their CMYK records) or the same curve for all four.
 fn native_adjustment(a: &Adjustment) -> bool {
-    matches!(a, Adjustment::Invert)
+    use photosuite_doc::adjust::ToneSpace;
+    matches!(
+        a,
+        Adjustment::Invert
+            | Adjustment::Threshold { .. }
+            | Adjustment::GradientMap { .. }
+            | Adjustment::Posterize { .. }
+            | Adjustment::BrightnessContrast { .. }
+            | Adjustment::Levels { space: ToneSpace::Cmyk, .. }
+            | Adjustment::Curves { space: ToneSpace::Cmyk, .. }
+    )
+}
+
+/// A pixel's lightness as Photoshop's CMYK adjustments measure it from the inks alone (no
+/// profile): the complements of C, M, Y weighted 0.30 / 0.59 / 0.11, times 1 − K.
+fn ink_lightness(p: &Px) -> f32 {
+    (0.30 * p[0] + 0.59 * p[1] + 0.11 * p[2]) * p[3]
+}
+
+/// The four ink curves of a [`native_adjustment`] (on 1 − ink).
+fn ink_luts(a: &Adjustment, cx: &Ctx) -> [Vec<f32>; 4] {
+    if matches!(a, Adjustment::Levels { .. } | Adjustment::Curves { .. }) {
+        return crate::adjust::tone_luts_depth(a, Some(cx.depth));
+    }
+    // One curve for every channel: the RGB adjustment sampled on a gray ramp.
+    let n = crate::adjust::LUT_SIZE;
+    let mut ramp = Buffer { rect: Rect::new(0, 0, n as i32, 1), px: (0..n).map(|k| [k as f32 / (n - 1) as f32; 4]).collect() };
+    ramp.px.iter_mut().for_each(|p| p[3] = 1.0);
+    crate::adjust::apply_depth(a, &mut ramp, cx.transfer, Some(cx.depth));
+    let row: Vec<f32> = ramp.px.iter().map(|p| p[0]).collect();
+    [row.clone(), row.clone(), row.clone(), row]
 }
 
 /// Applies a [`native_adjustment`] to every pixel's inks.
-fn adjust(a: &Adjustment, buf: &mut CBuf) {
-    if let Adjustment::Invert = a {
-        // Photoshop inverts each ink (psd-tools / Photoshop corpus `cmyk8/invert.psd`).
+fn adjust(a: &Adjustment, buf: &mut CBuf, cx: &Ctx) {
+    // Threshold: paper white or pure K black (Photoshop corpus `cmyk8/threshold-128.psd` has
+    // only those two), split on the inks' own lightness, no profile involved: the complements of
+    // C, M, Y weighted 0.30 / 0.59 / 0.11, times 1 − K, compared on the 8-bit grid. That splits
+    // the file's 9216 pixels exactly at its level (`cmyk_probe` THRESH=1); screen luminance
+    // misclassifies 100 of them.
+    if let Adjustment::Threshold { level } = a {
+        let t = (level * 255.0).round();
         for p in &mut buf.px {
-            for v in p.iter_mut().take(4) {
-                *v = 1.0 - *v;
+            let white = (ink_lightness(p) * 255.0).round() >= t;
+            let k = if white { 1.0 } else { 0.0 };
+            p[..4].copy_from_slice(&[1.0, 1.0, 1.0, k]);
+        }
+        return;
+    }
+    if let Adjustment::GradientMap { stops, reverse, .. } = a {
+        for p in &mut buf.px {
+            let mut t = ink_lightness(p);
+            if *reverse {
+                t = 1.0 - t;
             }
+            let o = crate::adjust::gradient(stops, t);
+            let inks = rgb_to_cmyk(o);
+            p[..4].copy_from_slice(&[1.0 - inks[0], 1.0 - inks[1], 1.0 - inks[2], 1.0 - inks[3]]);
+        }
+        return;
+    }
+    let luts = ink_luts(a, cx);
+    for p in &mut buf.px {
+        for (v, t) in p.iter_mut().zip(&luts) {
+            *v = crate::adjust::lut(t, *v);
         }
     }
 }
@@ -225,7 +282,7 @@ fn plain(l: &Layer, clipped: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
         }
         LayerContent::Adjustment(a) => {
             let mut adjusted = CBuf { rect, px: backdrop.px.clone() };
-            adjust(a, &mut adjusted);
+            adjust(a, &mut adjusted, cx);
             for c in clipped.iter().filter(|c| c.visible) {
                 atop(c, &mut adjusted, cx);
             }
@@ -316,7 +373,7 @@ fn atop(l: &Layer, base: &mut CBuf, cx: &Ctx) {
     let opacity = l.opacity * l.fill_opacity;
     if let LayerContent::Adjustment(a) = &l.content {
         let mut adjusted = CBuf { rect, px: base.px.clone() };
-        adjust(a, &mut adjusted);
+        adjust(a, &mut adjusted, cx);
         let mv = crate::mask_vals(l, rect, cx);
         for (i, (p, a)) in base.px.iter_mut().zip(&adjusted.px).enumerate() {
             let k = opacity * crate::mask_k(&mv, i);
@@ -476,6 +533,26 @@ mod tests {
         let mut d = doc([0.2, 0.4, 0.0, 0.5]);
         d.layers.push(Layer::new("inv", LayerContent::Adjustment(Adjustment::Invert)));
         assert!(close(inks_at(&d, 2), [0.8, 0.6, 1.0, 0.5]));
+    }
+
+    /// Threshold gives paper white or pure K black, split on the inks' own lightness (Photoshop
+    /// corpus cmyk8/threshold-128.psd: exact): 60 % cyan alone is light, 60 % K alone dark.
+    #[test]
+    fn threshold_is_white_or_k_black() {
+        for (inks, black) in [([0.6, 0.0, 0.0, 0.0], false), ([0.0, 0.0, 0.0, 0.6], true), ([0.8, 0.8, 0.0, 0.0], true)] {
+            let mut d = doc(inks);
+            d.layers.push(Layer::new("t", LayerContent::Adjustment(Adjustment::Threshold { level: 128.0 / 255.0 })));
+            let want = if black { [0.0, 0.0, 0.0, 1.0] } else { [0.0; 4] };
+            assert!(close(inks_at(&d, 0), want), "{inks:?}: {:?}", inks_at(&d, 0));
+        }
+    }
+
+    /// Posterize steps each ink on its own (Photoshop corpus cmyk8/posterize-4.psd: exact).
+    #[test]
+    fn posterize_steps_each_ink() {
+        let mut d = doc([0.1, 0.4, 0.62, 0.9]);
+        d.layers.push(Layer::new("p", LayerContent::Adjustment(Adjustment::Posterize { levels: 2 })));
+        assert!(close(inks_at(&d, 0), [0.0, 0.0, 1.0, 1.0]), "{:?}", inks_at(&d, 0));
     }
 
     /// Blending Options › Channels: a layer that leaves K out keeps the backdrop's K.

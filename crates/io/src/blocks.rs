@@ -125,7 +125,7 @@ pub fn color_from_desc(d: &Descriptor) -> Option<Color> {
 }
 
 /// HSB (hue in degrees, saturation and brightness 0..1) → RGB 0..1.
-fn hsb_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
+pub(crate) fn hsb_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
     let (s, v) = (s.clamp(0.0, 1.0), v.clamp(0.0, 1.0));
     let h = if h.is_finite() { h.rem_euclid(360.0) / 60.0 } else { 0.0 };
     let f = h - h.floor();

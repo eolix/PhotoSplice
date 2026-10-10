@@ -13,6 +13,9 @@
 
 use photosuite_psd::{LayerRecord, PsdFile};
 
+/// A named lightness measure of a pixel's inks.
+type Measure<'a> = (&'a str, &'a dyn Fn([f32; 4]) -> f32);
+
 struct Planes {
     rect: (i32, i32, i32, i32),
     chans: Vec<(i16, Vec<u8>)>,
@@ -129,9 +132,139 @@ fn probe_nonsep(f: &PsdFile, recs: &[LayerRecord], i: usize, m: &dyn Fn(usize, i
     }
 }
 
+/// `CURVE=1`: the transfer curve of an adjustment over one pixel layer (the first record), per
+/// channel: the mean merged value for each stored input value (8-bit CMYK or RGB files).
+fn curve(f: &PsdFile, merged: &[u8], w: usize, h: usize) {
+    let base = Planes::of(f, &f.layers()[0]);
+    let colors = if f.header.color_mode == photosuite_psd::ColorMode::Cmyk { 4 } else { 3 };
+    for c in 0..colors {
+        let mut sum = vec![(0.0f64, 0usize); 256];
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let Some(v) = base.get(c as i16, x, y) else { continue };
+                let i = (v * 255.0).round() as usize;
+                sum[i].0 += f64::from(merged[c * w * h + y as usize * w + x as usize]);
+                sum[i].1 += 1;
+            }
+        }
+        let row: Vec<String> = (0..256).step_by(17).map(|i| if sum[i].1 > 0 { format!("{i}:{:.1}", sum[i].0 / sum[i].1 as f64) } else { format!("{i}:-") }).collect();
+        println!("ch{c} {}", row.join(" "));
+    }
+}
+
+/// `THRESH=1`: which lightness measure of the first layer's inks Photoshop's Threshold splits on:
+/// for each candidate, the fewest pixels misclassified by any cut (black = merged K full ink).
+fn thresh(f: &PsdFile, bytes: &[u8], merged: &[u8], w: usize, h: usize) {
+    use photosuite_color::convert::{cmyk_to_rgb, rgb_to_gray, srgb_to_lab, with_cmyk_space};
+    let doc = photosuite_io::import("x.psd", bytes).unwrap().document;
+    let space = photosuite_compose::cmyk_space(&doc);
+    let base = Planes::of(f, &f.layers()[0]);
+    let mut rows: Vec<([f32; 4], bool)> = Vec::new();
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let Some(c) = (0..4).map(|c| base.get(c, x, y).map(|v| 1.0 - v)).collect::<Option<Vec<f32>>>() else { continue };
+            let black = merged[3 * w * h + y as usize * w + x as usize] < 128;
+            rows.push(([c[0], c[1], c[2], c[3]], black));
+        }
+    }
+    let metrics: [Measure; 4] = [
+        ("screen gray", &|c| rgb_to_gray(cmyk_to_rgb(c))),
+        ("Lab L*", &|c| srgb_to_lab(cmyk_to_rgb(c))[0] / 100.0),
+        ("naive", &|c| (1.0 - (0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]) ).max(0.0) * (1.0 - c[3])),
+        ("1 - K - mean CMY / 3", &|c| 1.0 - c[3] - (c[0] + c[1] + c[2]) / 3.0),
+    ];
+    with_cmyk_space(space.as_ref(), || {
+        for (name, m) in metrics {
+            let mut v: Vec<(f32, bool)> = rows.iter().map(|(c, b)| (m(*c), *b)).collect();
+            v.sort_by(|a, b| a.0.total_cmp(&b.0));
+            // Cut at index i: below = black. Errors = whites below + blacks above.
+            let total_black = v.iter().filter(|r| r.1).count();
+            let (mut best, mut at, mut whites_below, mut blacks_below) = (usize::MAX, 0.0, 0usize, 0usize);
+            for (i, r) in v.iter().enumerate() {
+                let err = whites_below + (total_black - blacks_below);
+                if err < best {
+                    (best, at) = (err, r.0);
+                }
+                if r.1 { blacks_below += 1 } else { whites_below += 1 }
+                let _ = i;
+            }
+            println!("{name:<22} best cut {:.4} ({:.1}/255): {best} of {} pixels misclassified", at, at * 255.0, v.len());
+        }
+    });
+}
+
+/// `GMAP=1`: a CMYK gradient map over one pixel layer: Photoshop's merged inks against the
+/// file's CMYK stops interpolated linearly (on stored values, 1 − ink) at each lightness measure.
+fn gmap(f: &PsdFile, bytes: &[u8], merged: &[u8], w: usize, h: usize) {
+    use photosuite_color::convert::{cmyk_to_rgb, rgb_to_gray, with_cmyk_space};
+    let rec = &f.layers()[1];
+    let d = &rec.blocks.iter().find(|b| &b.key == b"grdm").expect("grdm").data;
+    let be16 = |at: usize| u16::from_be_bytes([d[at], d[at + 1]]);
+    let be32 = |at: usize| u32::from_be_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]]);
+    let mut at = if be16(0) == 3 { 8 } else { 4 };
+    at += 4 + be32(at) as usize * 2;
+    let n = be16(at) as usize;
+    at += 2;
+    let mut stops = Vec::new();
+    for _ in 0..n {
+        let loc = be32(at) as f32 / 4096.0;
+        let v: Vec<f32> = (0..4).map(|k| f32::from(be16(at + 10 + 2 * k)) / 65535.0).collect();
+        stops.push((loc, [v[0], v[1], v[2], v[3]]));
+        at += 20;
+    }
+    println!("stops (stored, 1 − ink): {stops:?}");
+    let lerp = |t: f32| -> [f32; 4] {
+        let t = t.clamp(0.0, 1.0);
+        let i = stops.iter().rposition(|s| s.0 <= t).unwrap_or(0);
+        let j = (i + 1).min(stops.len() - 1);
+        let (a, b) = (stops[i], stops[j]);
+        let k = if b.0 > a.0 { (t - a.0) / (b.0 - a.0) } else { 0.0 };
+        std::array::from_fn(|c| a.1[c] + (b.1[c] - a.1[c]) * k)
+    };
+    let doc = photosuite_io::import("x.psd", bytes).unwrap().document;
+    let space = photosuite_compose::cmyk_space(&doc);
+    let base = Planes::of(f, &f.layers()[0]);
+    let metrics: [Measure; 2] = [
+        ("ink lightness", &|s| (0.30 * s[0] + 0.59 * s[1] + 0.11 * s[2]) * s[3]),
+        ("screen gray", &|s| rgb_to_gray(cmyk_to_rgb([1.0 - s[0], 1.0 - s[1], 1.0 - s[2], 1.0 - s[3]]))),
+    ];
+    with_cmyk_space(space.as_ref(), || {
+        for (name, m) in metrics {
+            let (mut err, mut cnt) = ([0.0f32; 4], 0usize);
+            for y in 0..h as i32 {
+                for x in 0..w as i32 {
+                    let Some(s) = (0..4).map(|c| base.get(c, x, y)).collect::<Option<Vec<f32>>>() else { continue };
+                    let want = lerp(m([s[0], s[1], s[2], s[3]]));
+                    for c in 0..4 {
+                        err[c] += (want[c] - f32::from(merged[c * w * h + y as usize * w + x as usize]) / 255.0).abs();
+                    }
+                    cnt += 1;
+                }
+            }
+            println!("{name:<14} mean error per channel {:?}", err.map(|e| e / cnt.max(1) as f32));
+        }
+    });
+}
+
 fn main() {
     let path = std::env::args().nth(1).expect("file.psd");
-    let f = PsdFile::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let f = PsdFile::from_bytes(&bytes).unwrap();
+    if std::env::var_os("GMAP").is_some() {
+        let merged = f.decode_merged().unwrap();
+        gmap(&f, &bytes, &merged, f.header.width as usize, f.header.height as usize);
+        return;
+    }
+    if std::env::var_os("THRESH").is_some() {
+        let merged = f.decode_merged().unwrap();
+        thresh(&f, &bytes, &merged, f.header.width as usize, f.header.height as usize);
+        return;
+    }
+    if std::env::var_os("CURVE").is_some() {
+        let merged = f.decode_merged().unwrap();
+        curve(&f, &merged, f.header.width as usize, f.header.height as usize);
+        return;
+    }
     assert_eq!(f.header.depth, 8, "8-bit files only");
     let merged = f.decode_merged().unwrap();
     let (w, h) = (f.header.width as usize, f.header.height as usize);

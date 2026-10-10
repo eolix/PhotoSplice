@@ -225,7 +225,7 @@ fn be32(d: &[u8], at: usize) -> Option<u32> {
 /// key), reverse, dither, [method], name, colour stops (location /4096, midpoint %, colour
 /// space + four u16 components, 2 bytes), transparency stops, then smoothness (/4096) among
 /// noise-gradient fields. Smoothness, midpoints and the method are baked into dense stops like
-/// gradient fills. Noise gradients (no colour stops) and non-RGB stops stay unsupported.
+/// gradient fills. Noise gradients (no colour stops) and book colours stay unsupported.
 fn parse_gradient_map(d: &[u8]) -> Option<Adjustment> {
     let version = be16(d, 0)?;
     let reverse = *d.get(2)? != 0;
@@ -243,11 +243,19 @@ fn parse_gradient_map(d: &[u8]) -> Option<Adjustment> {
     for _ in 0..n {
         let loc = (be32(d, at)? as f32 / 4096.0).clamp(0.0, 1.0);
         let mid = be32(d, at + 4)? as f32 / 100.0;
-        if be16(d, at + 8)? != 0 {
-            return None;
-        }
-        let c = |k: usize| be16(d, at + 10 + 2 * k).map(|v| f32::from(v) / 65535.0);
-        stops.push((loc, photosuite_color::Color::rgb(c(0)?, c(1)?, c(2)?)));
+        let raw = [be16(d, at + 10)?, be16(d, at + 12)?, be16(d, at + 14)?, be16(d, at + 16)?];
+        let n = |k: usize| f32::from(raw[k]) / 65535.0;
+        // A colour structure in its own space: RGB, HSB, CMYK, Lab or Gray (Photoshop writes the
+        // document's space in CMYK and Lab files; Photoshop corpus cmyk8/gradient-map.psd).
+        let color = match be16(d, at + 8)? {
+            1 => {
+                let [r, g, b] = crate::blocks::hsb_to_rgb(n(0) * 360.0, n(1), n(2));
+                photosuite_color::Color::rgb(r, g, b)
+            }
+            space @ (0 | 2 | 7 | 8) => crate::channel_map::decode_color(space, raw),
+            _ => return None,
+        };
+        stops.push((loc, color));
         mids.push(mid);
         at += 20;
     }
@@ -705,6 +713,26 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stops in another colour space (CMYK here, as Photoshop writes them in CMYK documents)
+    /// import; they made the whole layer Unsupported (Photoshop corpus cmyk8/gradient-map.psd).
+    #[test]
+    fn gradient_map_with_cmyk_stops_imports() {
+        let mut v = write_gradient_map(&[(0.0, [0.0; 3]), (1.0, [1.0; 3])], false, false);
+        // First stop: colour space 2 (CMYK), stored inverted: full black ink only.
+        let first = 4 + 4 + 2 * 7 + 2;
+        v[first + 8..first + 10].copy_from_slice(&2u16.to_be_bytes());
+        for (k, x) in [0xffffu16, 0xffff, 0xffff, 0].into_iter().enumerate() {
+            v[first + 10 + 2 * k..first + 12 + 2 * k].copy_from_slice(&x.to_be_bytes());
+        }
+        let Adjustment::GradientMap { stops, .. } = parse(b"grdm", &v, None, Channels::Rgb) else { panic!("unsupported") };
+        let dark = stops.first().unwrap().1;
+        assert!(dark.iter().all(|c| *c < 0.3), "black ink reads dark: {dark:?}");
+        assert!(stops.last().unwrap().1.iter().all(|c| *c > 0.99));
+        // An unknown colour space still leaves the layer unsupported.
+        v[first + 8..first + 10].copy_from_slice(&3u16.to_be_bytes());
+        assert!(matches!(parse(b"grdm", &v, None, Channels::Rgb), Adjustment::Unsupported { .. }));
+    }
 
     #[test]
     fn gradient_map_v3_methods_and_smoothness() {
