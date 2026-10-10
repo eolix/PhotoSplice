@@ -134,7 +134,7 @@ pub fn show(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
             let eye_resp = ui.interact(eye, ui.id().with(("chan-eye", format!("{:?}", row.reference()))), Sense::click());
             // Like Photoshop, the temporary mask row's eye is empty until the mask is shown.
             if row != Row::LayerMask || visible || eye_resp.hovered() {
-                icons::paint(ui, eye, if visible { "eye" } else { "eye-off" }, 14.0, if visible { t.icon } else { t.text_faint });
+                icons::paint(ui, eye, if visible { "lrs-eye" } else { "eye-off" }, 14.0, if visible { t.icon } else { t.text_faint });
             }
             let eye_resp = eye_resp.on_hover_text(if row == Row::LayerMask { tl!("Show the layer mask as an overlay") } else { tl!("Toggle visibility") });
             eye_resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Visibility {name}")));
@@ -278,17 +278,17 @@ pub fn show(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
             ChannelTarget::Color(k) => json!({ "color": k }),
             ChannelTarget::Composite => json!("composite"),
         };
-        if icons::button(ui, "circle-dashed", 26.0, false, tl!("Load channel as selection")).clicked() {
+        if icons::button(ui, "lrs-makesel", 26.0, false, tl!("Load channel as selection")).clicked() {
             actions.push(("select.loadSelection".into(), json!({ "channel": target_ref })));
         }
-        if icons::button(ui, "square-dashed", 26.0, false, tl!("Save selection as channel")).clicked() {
+        if icons::button(ui, "lrs-mask", 26.0, false, tl!("Save selection as channel")).clicked() {
             actions.push(("select.saveSelection".into(), json!({})));
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if icons::button(ui, "trash", 26.0, false, tl!("Delete current channel")).clicked() {
+            if icons::button(ui, "lrs-bin", 26.0, false, tl!("Delete current channel")).clicked() {
                 actions.push(("channel.delete".into(), json!({})));
             }
-            if icons::button(ui, "plus", 26.0, false, tl!("Create new channel")).clicked() {
+            if icons::button(ui, "lrs-newlayer", 26.0, false, tl!("Create new channel")).clicked() {
                 actions.push(("channel.new".into(), json!({})));
             }
         });

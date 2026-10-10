@@ -839,11 +839,11 @@ pub fn paths_panel(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
         let items: [(&str, &str, &str, Value); 7] = [
             ("paint-bucket", "Fill path with foreground color", "path.fill", json!({"name": sel, "color": fg})),
             ("circle", "Stroke path with brush", "path.stroke", json!({"name": sel, "tool": "brush"})),
-            ("square-dashed", "Load path as a selection", "path.toSelection", json!({"name": sel})),
-            ("spline", "Make work path from selection", "select.toWorkPath", json!({"tolerance": 2.0})),
-            ("square", "Add vector mask", "layer.vectorMask.fromPath", json!({"name": sel})),
-            ("square-plus", "Create new path", "path.set", json!({"name": format!("Path {n}"), "path": {"subpaths": []}})),
-            ("trash", "Delete path", "path.delete", json!({"name": sel})),
+            ("lrs-makesel", "Load path as a selection", "path.toSelection", json!({"name": sel})),
+            ("lrs-makepath", "Make work path from selection", "select.toWorkPath", json!({"tolerance": 2.0})),
+            ("lrs-mask", "Add vector mask", "layer.vectorMask.fromPath", json!({"name": sel})),
+            ("lrs-newlayer", "Create new path", "path.set", json!({"name": format!("Path {n}"), "path": {"subpaths": []}})),
+            ("lrs-bin", "Delete path", "path.delete", json!({"name": sel})),
         ];
         // The layer's own path: deleting it deletes the vector mask (a shape keeps its path).
         let shape = rows.iter().any(|r| r.kind == PathRow::Layer && r.name.ends_with(" Shape Path"));

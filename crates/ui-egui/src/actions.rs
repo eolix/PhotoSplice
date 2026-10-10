@@ -147,10 +147,10 @@ pub fn panel(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
         if crate::icons::button(ui, "play", 24.0, false, tl!("Play selection")).clicked() {
             play_idx = app.ui.actions.selected;
         }
-        if crate::icons::button(ui, "plus", 24.0, false, tl!("Create new action")).clicked() && !recording_now {
+        if crate::icons::button(ui, "lrs-newlayer", 24.0, false, tl!("Create new action")).clicked() && !recording_now {
             begin_recording(app);
         }
-        if crate::icons::button(ui, "trash", 24.0, false, tl!("Delete")).clicked()
+        if crate::icons::button(ui, "lrs-bin", 24.0, false, tl!("Delete")).clicked()
             && !recording_now
             && let Some(i) = app.ui.actions.selected
             && app.run("actions.delete", json!({"action": i})).is_ok()

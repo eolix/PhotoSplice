@@ -301,14 +301,14 @@ fn radio(ui: &mut egui::Ui, on: bool, label: &str) -> egui::Response {
     .inner
 }
 
-/// Eyedropper button: the pipette icon with a +/− badge; labelled for accessibility.
+/// Eyedropper button: PS-JS's eyedropper, plus or minus eyedropper; labelled for accessibility.
 fn eyedropper(ui: &mut egui::Ui, badge: &str, selected: bool, label: &str) -> egui::Response {
-    let t = Tokens::get(ui.ctx());
-    let r = crate::icons::button(ui, "pipette", 26.0, selected, label);
-    if !badge.is_empty() {
-        let at = r.rect.right_bottom() - vec2(5.0, 6.0);
-        ui.painter().text(at, egui::Align2::CENTER_CENTER, badge, crate::theme::semibold(12.0), if selected { t.accent_text } else { t.text });
-    }
+    let icon = match badge {
+        "+" => "tools-eyedropper_add",
+        "−" | "-" => "tools-eyedropper_rm",
+        _ => "tools-eyedropper",
+    };
+    let r = crate::icons::button(ui, icon, 26.0, selected, label);
     r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, label));
     r
 }

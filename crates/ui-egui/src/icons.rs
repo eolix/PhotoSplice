@@ -33,17 +33,24 @@ fn white_icons() -> &'static HashMap<&'static str, Arc<[u8]>> {
 /// keep the licence simple); all of this happens on the way into the texture.
 fn whiten(svg: &str) -> String {
     let mut s = svg.to_string();
-    // Resolve `.cls { fill: … }` rules into explicit attributes, then drop the stylesheet, so
-    // nothing depends on the renderer's CSS support.
+    // Resolve `.cls { fill: …; stroke: … }` rules into the same presentation attributes, then
+    // drop the stylesheet, so nothing depends on the renderer's CSS support. Every declaration
+    // is carried over as written (`fill: none` stays none: a 24 × 24 background path drawn
+    // filled would cover the icon); the colours are whitened below like any other.
     if let (Some(a), Some(b)) = (s.find("<style>"), s.find("</style>")) {
         let sheet = s[a + 7..b].to_string();
         for rule in sheet.split('}') {
             let Some((sel, body)) = rule.split_once('{') else { continue };
-            let sel = sel.trim();
-            if let Some(class) = sel.strip_prefix('.')
-                && body.contains("fill:")
-            {
-                s = s.replace(&format!("class=\"{class}\""), "fill=\"#ffffff\"");
+            let Some(class) = sel.trim().strip_prefix('.') else { continue };
+            let attrs: Vec<String> = body
+                .split(';')
+                .filter_map(|d| d.split_once(':'))
+                .map(|(k, v)| (k.trim(), v.trim()))
+                .filter(|(k, v)| !k.is_empty() && !v.is_empty() && k.bytes().all(|c| c.is_ascii_lowercase() || c == b'-'))
+                .map(|(k, v)| format!("{k}=\"{}\"", v.replace('"', "")))
+                .collect();
+            if !attrs.is_empty() {
+                s = s.replace(&format!("class=\"{class}\""), &attrs.join(" "));
             }
         }
         if let (Some(a), Some(b)) = (s.find("<style>"), s.find("</style>")) {
@@ -225,5 +232,42 @@ mod tests {
             let s = std::str::from_utf8(b).unwrap();
             assert!(!s.contains("currentColor"), "{name}");
         }
+    }
+
+    /// Every icon, rendered the way the app renders it, is a drawing rather than a filled block:
+    /// a stylesheet's `fill: none` used to come out as a white fill, so Dodge, Slice Select and
+    /// the two eyedroppers showed as squares.
+    #[test]
+    fn no_icon_renders_as_a_solid_block() {
+        let opts = resvg::usvg::Options::default();
+        let mut worst = Vec::new();
+        for (name, bytes) in white_icons().iter() {
+            let tree = resvg::usvg::Tree::from_data(bytes, &opts).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let side = 48u32;
+            let mut pm = resvg::tiny_skia::Pixmap::new(side, side).unwrap();
+            let s = tree.size();
+            let k = side as f32 / s.width().max(s.height());
+            resvg::render(&tree, resvg::tiny_skia::Transform::from_scale(k, k), &mut pm.as_mut());
+            let painted = pm.pixels().iter().filter(|p| p.alpha() > 128).count() as f32 / (side * side) as f32;
+            // Pixels are premultiplied: compare the colour of the opaque-enough ones.
+            let white = |p: &resvg::tiny_skia::PremultipliedColorU8| {
+                let c = p.demultiply();
+                c.alpha() < 32 || (c.red() > 200 && c.green() > 200 && c.blue() > 200)
+            };
+            assert!(pm.pixels().iter().all(white), "{name}: not white");
+            if painted > 0.6 {
+                worst.push(format!("{name} ({:.0}%)", painted * 100.0));
+            }
+        }
+        assert!(worst.is_empty(), "icons that paint most of their square: {worst:?}");
+    }
+
+    #[test]
+    fn stylesheet_rules_become_attributes_as_written() {
+        let svg = std::str::from_utf8(include_bytes!("../../../assets/ico/tools/dodge.svg")).unwrap();
+        let w = whiten(svg);
+        assert!(!w.contains("<style") && !w.contains("class="));
+        assert!(w.contains(r#"fill="none" d="m0 0h24v24h-24z""#), "the background path stays unfilled: {w}");
+        assert!(w.contains(r##"stroke="#ffffff""##) && w.contains(r#"stroke-width="1.3""#));
     }
 }

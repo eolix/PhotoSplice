@@ -525,14 +525,14 @@ pub fn keys(app: &mut PhotosuiteApp, ctx: &egui::Context) {
 
 fn tool_icon(t: LiquifyTool) -> &'static str {
     match t {
-        LiquifyTool::ForwardWarp => "pointer",
-        LiquifyTool::Reconstruct => "brush-cleaning",
-        LiquifyTool::Smooth => "droplet",
-        LiquifyTool::TwirlCw => "rotate-cw",
+        LiquifyTool::ForwardWarp => "liq-smudge",
+        LiquifyTool::Reconstruct => "liq-reconstruct",
+        LiquifyTool::Smooth => "liq-smooth",
+        LiquifyTool::TwirlCw => "liq-twirl",
         LiquifyTool::TwirlCcw => "undo-2",
-        LiquifyTool::Pucker => "scan",
-        LiquifyTool::Bloat => "maximize-2",
-        LiquifyTool::PushLeft => "chevrons-left",
+        LiquifyTool::Pucker => "liq-shrink",
+        LiquifyTool::Bloat => "liq-blow",
+        LiquifyTool::PushLeft => "liq-pleft",
         LiquifyTool::Freeze => "lock",
         LiquifyTool::Thaw => "lock-open",
         LiquifyTool::LassoMask => "lasso",

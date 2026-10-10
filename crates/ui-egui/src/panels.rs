@@ -338,6 +338,22 @@ pub fn title_bar_height(ctx: &egui::Context) -> f32 {
     if Tokens::get(ctx).pro { 32.0 } else { 38.0 }
 }
 
+/// How long after the window comes to the front a title-bar double click is ignored.
+const TITLE_FOCUS_GRACE: f64 = 0.5;
+
+/// Whether a title-bar double click may toggle the window's size now. The click that brings the
+/// window to the front (from behind another app's) must not count as the first half of a double
+/// click, or that one click would maximize or restore the window. Call it every frame: it
+/// follows when the window gains focus.
+fn title_double_click_counts(ctx: &egui::Context) -> bool {
+    let id = egui::Id::new("title-bar-focus-gained");
+    let (focused, now) = ctx.input(|i| (i.focused, i.time));
+    let (was_focused, gained) = ctx.data(|d| d.get_temp::<(bool, f64)>(id)).unwrap_or((focused, f64::NEG_INFINITY));
+    let gained = if focused && !was_focused { now } else { gained };
+    ctx.data_mut(|d| d.insert_temp(id, (focused, gained)));
+    focused && now - gained > TITLE_FOCUS_GRACE
+}
+
 pub fn title_bar(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let left = if cfg!(target_os = "macos") && app.integrated_titlebar { 78 } else { 10 };
@@ -350,7 +366,8 @@ pub fn title_bar(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
             if drag.drag_started() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
-            if drag.double_clicked() {
+            let may_zoom = title_double_click_counts(ui.ctx());
+            if drag.double_clicked() && may_zoom {
                 let max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
             }
@@ -428,6 +445,25 @@ fn title_x(center: f32, menus_right: f32, controls_left: f32, width: f32) -> Opt
 #[cfg(test)]
 mod title_tests {
     use super::title_x;
+
+    /// The click that brings the window to the front doesn't start a zooming double click; a
+    /// double click a moment later does.
+    #[test]
+    fn title_double_click_waits_for_the_window_to_be_in_front() {
+        let ctx = egui::Context::default();
+        let frame = |time: f64, focused: bool| {
+            let mut counts = false;
+            let input = egui::RawInput { time: Some(time), focused, ..Default::default() };
+            ctx.run_ui(input, |ui| counts = super::title_double_click_counts(ui.ctx())).textures_delta.clear();
+            counts
+        };
+        assert!(!frame(0.0, false), "not while another app is in front");
+        assert!(!frame(10.0, true), "the activating click");
+        assert!(!frame(10.2, true), "its follow-up, inside the grace period");
+        assert!(frame(11.0, true), "a real double click later");
+        assert!(!frame(12.0, false));
+        assert!(!frame(20.0, true), "and again after the next switch back");
+    }
 
     /// Is "PhotoSuite - Untitled" among the text the title bar paints?
     fn paints_window_title(os_title_bar: bool) -> bool {
@@ -800,9 +836,9 @@ pub fn options_bar(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
                         widgets::vline(ui, 22.0);
                         ui.spacing_mut().item_spacing.x = 0.0;
                         for (icon, tip, cmd) in [
-                            ("panels-top-left", tl!("Align left edges"), "layer.align.leftEdges"),
-                            ("app-window", tl!("Align horizontal centers"), "layer.align.horizontalCenters"),
-                            ("panel-right", tl!("Align right edges"), "layer.align.rightEdges"),
+                            ("align-h0", tl!("Align left edges"), "layer.align.leftEdges"),
+                            ("align-h1", tl!("Align horizontal centers"), "layer.align.horizontalCenters"),
+                            ("align-h2", tl!("Align right edges"), "layer.align.rightEdges"),
                         ] {
                             let on = app.session.is_enabled(cmd);
                             if ui.add_enabled_ui(on, |ui| icons::button(ui, icon, 24.0, false, tip)).inner.clicked() {
@@ -992,11 +1028,11 @@ pub fn right_dock(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
             ui.spacing_mut().item_spacing.y = 4.0;
             use crate::dock::Group;
             let entries: [(&str, &str, Group); 5] = [
-                ("sliders-horizontal", tl!("Properties"), Group::Properties),
-                ("navigation", tl!("Navigator"), Group::Navigator),
-                ("palette", tl!("Color & Swatches"), Group::Color),
-                ("layers", tl!("Layers"), Group::Layers),
-                ("clock", tl!("History"), Group::History),
+                ("panels-properties", tl!("Properties"), Group::Properties),
+                ("panels-navigator", tl!("Navigator"), Group::Navigator),
+                ("panels-colour", tl!("Color & Swatches"), Group::Color),
+                ("panels-layers", tl!("Layers"), Group::Layers),
+                ("panels-history", tl!("History"), Group::History),
             ];
             for (icon, name, g) in entries {
                 // Studio floats Properties outside the dock.
@@ -1411,11 +1447,11 @@ fn layers(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 let lk = l.locks;
                 for (key, icon, tip, on) in [
-                    ("transparency", "grid-3x3", tl!("Lock transparent pixels"), lk.transparency),
-                    ("pixels", "brush", tl!("Lock image pixels"), lk.pixels),
-                    ("position", "move", tl!("Lock position"), lk.position),
+                    ("transparency", "tools-grid-4x4", tl!("Lock transparent pixels"), lk.transparency),
+                    ("pixels", "tools-brush", tl!("Lock image pixels"), lk.pixels),
+                    ("position", "tools-move", tl!("Lock position"), lk.position),
                     ("artboard", "scan", tl!("Prevent auto-nesting in and out of Artboards and Frames"), lk.artboard),
-                    ("all", "lock", tl!("Lock all"), lk.all),
+                    ("all", "lrs-lock", tl!("Lock all"), lk.all),
                 ] {
                     if icons::button(ui, icon, 20.0, on, tip).clicked() {
                         actions.push(("layer.setProps".into(), json!({"layer": l.id.0, "locks": { key: !on }})));
@@ -1504,16 +1540,16 @@ fn layers(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if icons::button(ui, "trash", 26.0, false, tl!("Delete layer")).clicked() {
+            if icons::button(ui, "lrs-bin", 26.0, false, tl!("Delete layer")).clicked() {
                 actions.push(("layer.delete".into(), json!({})));
             }
-            if icons::button(ui, "square-plus", 26.0, false, &crate::shortcuts::tip_label(app, "Create a new layer", "layer.new.layer")).clicked() {
+            if icons::button(ui, "lrs-newlayer", 26.0, false, &crate::shortcuts::tip_label(app, "Create a new layer", "layer.new.layer")).clicked() {
                 actions.push(("layer.new.layer".into(), json!({})));
             }
-            if icons::button(ui, "folder", 26.0, false, tl!("Create a new group")).clicked() {
+            if icons::button(ui, "lrs-folder", 26.0, false, tl!("Create a new group")).clicked() {
                 actions.push(("layer.new.group".into(), json!({})));
             }
-            let adj = icons::button(ui, "contrast", 26.0, false, tl!("Create new fill or adjustment layer"));
+            let adj = icons::button(ui, "lrs-adj", 26.0, false, tl!("Create new fill or adjustment layer"));
             egui::Popup::menu(&adj).show(|ui| {
                 ui.set_min_width(190.0);
                 for c in photosuite_engine::command_specs().iter().filter(|c| c.id.starts_with("layer.newAdjustmentLayer.")) {
@@ -1534,7 +1570,7 @@ fn layers(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
             });
             if icons::button(
                 ui,
-                "square-dot",
+                "lrs-mask",
                 26.0,
                 false,
                 &crate::i18n::fmt(tl!("Add a mask  (from the selection; {key} inverts)"), &[("key", &crate::shortcuts::pretty("Alt"))]),
@@ -1561,7 +1597,7 @@ fn layers(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
             });
             // Photoshop's footer starts with Link Layers (enabled with two or more layers selected).
             let can_link = app.session.is_enabled("layer.linkLayers");
-            if ui.add_enabled_ui(can_link, |ui| icons::button(ui, "link", 26.0, false, tl!("Link layers"))).inner.clicked() {
+            if ui.add_enabled_ui(can_link, |ui| icons::button(ui, "lrs-link", 26.0, false, tl!("Link layers"))).inner.clicked() {
                 actions.push(("layer.linkLayers".into(), json!({})));
             }
         });
@@ -1592,16 +1628,7 @@ fn layers(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
 
 /// Photoshop's italic "fx" footer button (no icon-font equivalent).
 fn fx_button(ui: &mut egui::Ui, size: f32, tip: &str) -> egui::Response {
-    let t = Tokens::get(ui.ctx());
-    let (r, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
-    if resp.hovered() {
-        ui.painter().rect_filled(r, t.radius_sm, t.hover);
-    }
-    let mut job = egui::text::LayoutJob::default();
-    job.append("fx", 0.0, egui::TextFormat { font_id: egui::FontId::proportional(15.0), color: t.icon, italics: true, ..Default::default() });
-    let g = ui.painter().layout_job(job);
-    ui.painter().galley(r.center() - g.size() / 2.0, g, t.icon);
-    resp.on_hover_text(tip)
+    icons::button(ui, "lrs-fx", size, false, tip)
 }
 
 /// How a Layers panel row is selected: in the (multi-)selection, the primary/active layer, and
@@ -1716,7 +1743,7 @@ fn layer_row(
     let eye_resp = ui.interact(eye, ui.id().with(("eye", l.id.0)), Sense::click_and_drag());
     // A hidden layer's eye box is left empty (still clickable).
     if l.visible {
-        icons::paint(ui, eye, "eye", 15.0, t.icon);
+        icons::paint(ui, eye, "lrs-eye", 15.0, t.icon);
     }
     eye_sweep(ctx, l, rect, &eye_resp, actions);
     if eye_resp.clicked() {
@@ -1985,7 +2012,7 @@ fn history(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let _ = icons::button(ui, "trash", 24.0, false, tl!("Delete current state"));
+                let _ = icons::button(ui, "lrs-bin", 24.0, false, tl!("Delete current state"));
                 let _ = icons::button(ui, "scan", 24.0, false, tl!("Create new snapshot"));
                 let _ = icons::button(ui, "file-plus", 24.0, false, tl!("Create new document from current state"));
             });
@@ -2477,11 +2504,11 @@ fn effect_rows(app: &mut PhotosuiteApp, ui: &mut egui::Ui, l: &Layer, depth: usi
         }
         let eye = Rect::from_min_size(pos2(rect.left() + 6.0, rect.center().y - 9.0), vec2(18.0, 18.0));
         if on {
-            icons::paint(ui, eye, "eye", 12.0, t.icon);
+            icons::paint(ui, eye, "lrs-eye", 12.0, t.icon);
         }
         let x = rect.left() + indent + if i == 0 { 0.0 } else { 16.0 };
         if i == 0 {
-            icons::paint(ui, Rect::from_center_size(pos2(x - 12.0, rect.center().y), vec2(14.0, 14.0)), "sparkles", 11.0, t.text_dim);
+            icons::paint(ui, Rect::from_center_size(pos2(x - 12.0, rect.center().y), vec2(14.0, 14.0)), "lrs-fx", 11.0, t.text_dim);
         }
         let right = rect.right() - crate::layer_row_ui::RIGHT_PAD;
         crate::layer_row_ui::label(

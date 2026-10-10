@@ -40,6 +40,8 @@ egui_kittest = { workspace = true, features = ["wgpu", "snapshot", "eframe"] }
 # Only for examples/snapshot.rs (offscreen UI renders of real files).
 # Only for examples/interactive_bench.rs (JPEG encode, .pcraft saves).
 photosuite-codecs = { workspace = true }
+# Renders every icon in a test, as egui_extras does (same version, already in the lockfile).
+resvg = { version = "0.45", default-features = false }
 # Benchmark helpers for the `--json` benches `cargo xtask perf` runs (in-process RSS, percentiles).
 photosuite-testkit = { workspace = true }
 # Only for examples/perf_scenarios.rs (a 500-brush .abr for the #210 import row).

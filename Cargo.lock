@@ -4323,6 +4323,7 @@ dependencies = [
  "photosuite-text",
  "photosuite-vector",
  "rayon",
+ "resvg",
  "serde",
  "serde_json",
 ]

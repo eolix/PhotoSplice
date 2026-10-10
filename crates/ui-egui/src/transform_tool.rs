@@ -1315,7 +1315,7 @@ fn transform_fields(app: &mut PhotosuiteApp, ui: &mut egui::Ui, t: &TransformSes
     let rw = crate::widgets::value_field(ui, &mut w, -10000.0..=10000.0, "%", 66.0);
     let link_id = egui::Id::new("transform-link");
     let mut link: bool = ui.data(|d| d.get_temp(link_id)).unwrap_or(true);
-    if crate::icons::button(ui, if link { "link" } else { "unlink" }, 22.0, link, tl!("Maintain aspect ratio")).clicked() {
+    if crate::icons::button(ui, if link { "ui-aspect-lock" } else { "unlink" }, 22.0, link, tl!("Maintain aspect ratio")).clicked() {
         link = !link;
         ui.data_mut(|d| d.insert_temp(link_id, link));
     }
