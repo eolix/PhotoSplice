@@ -18,6 +18,7 @@
 
 pub mod adjust;
 pub mod bounds;
+mod cmyk;
 pub mod effects;
 pub mod fill_layout;
 pub mod gradient_fill;
@@ -101,14 +102,16 @@ fn render_tiled_with(doc: &Document, rect: Rect, tile: i32, cx: &Ctx) -> Buffer 
     if rect.is_empty() {
         return Buffer::transparent(rect);
     }
-    if rect.width() as i32 <= tile && rect.height() as i32 <= tile {
-        return photosuite_color::convert::with_cmyk_space(cmyk, || {
-            let mut buf = multichannel::backdrop(doc, rect);
+    let run = |t: Rect| {
+        photosuite_color::convert::with_cmyk_space(cmyk, || {
             psblend::LAB_MIX.with(|l| l.set(lab));
-            composite_stack(&doc.layers, &mut buf, cx);
+            let b = composite_doc(doc, t, cx);
             psblend::LAB_MIX.with(|l| l.set(false));
-            buf
-        });
+            b
+        })
+    };
+    if rect.width() as i32 <= tile && rect.height() as i32 <= tile {
+        return run(rect);
     }
     // Effect maps are built once, here, before any tile needs them (#276).
     prepare_effects(&doc.layers, rect, cx, |f| {
@@ -118,19 +121,17 @@ fn render_tiled_with(doc: &Document, rect: Rect, tile: i32, cx: &Ctx) -> Buffer 
             psblend::LAB_MIX.with(|l| l.set(false));
         });
     });
-    let run = |t: Rect| {
-        photosuite_color::convert::with_cmyk_space(cmyk, || {
-            let mut b = multichannel::backdrop(doc, t);
-            psblend::LAB_MIX.with(|l| l.set(lab));
-            composite_stack(&doc.layers, &mut b, cx);
-            psblend::LAB_MIX.with(|l| l.set(false));
-            b
-        })
-    };
-    // Tiles are written straight into the output, one row of tiles (a band) at a time, so the
-    // peak is the output plus the tiles in flight, not a second full-size copy.
+    Buffer { rect, px: tiled(rect, tile, [0.0; 4], |t| run(t).px) }
+}
+
+/// Renders `rect` in `tile`-sized tiles with `run` (each returns its tile's pixels, row-major),
+/// in parallel on native targets, into one row-major buffer. Tiles are written straight into
+/// the output, one row of tiles (a band) at a time, so the peak is the output plus the tiles in
+/// flight, not a second full-size copy.
+fn tiled<P: Copy + Send + Sync>(rect: Rect, tile: i32, empty: P, run: impl Fn(Rect) -> Vec<P> + Sync) -> Vec<P> {
+    let tile = tile.max(1);
     let w = rect.width() as usize;
-    let mut out = Buffer::transparent(rect);
+    let mut out = vec![empty; w * rect.height() as usize];
     let band_tiles = |y0: i32| {
         let y1 = y0.saturating_add(tile).min(rect.y1);
         let mut v = Vec::new();
@@ -142,45 +143,102 @@ fn render_tiled_with(doc: &Document, rect: Rect, tile: i32, cx: &Ctx) -> Buffer 
         }
         v
     };
-    let put = |band: &mut [[f32; 4]], y0: i32, part: &Buffer| {
-        let pw = part.rect.width() as usize;
-        for (row, src) in part.px.chunks_exact(pw).enumerate() {
-            let o = ((part.rect.y0 - y0) as usize + row) * w + (part.rect.x0 - rect.x0) as usize;
-            band[o..o + pw].copy_from_slice(src);
+    let put = |band: &mut [P], y0: i32, t: Rect, part: &[P]| {
+        let pw = t.width() as usize;
+        for (row, src) in part.chunks_exact(pw.max(1)).enumerate() {
+            let o = ((t.y0 - y0) as usize + row) * w + (t.x0 - rect.x0) as usize;
+            if let Some(dst) = band.get_mut(o..o + pw) {
+                dst.copy_from_slice(src);
+            }
         }
     };
-    let band_len = w * tile as usize;
+    let band_len = (w * tile as usize).max(1);
     #[cfg(not(target_arch = "wasm32"))]
     {
         use rayon::prelude::*;
         let bands = rect.height().div_ceil(tile as u32) as usize;
         if bands >= 2 * rayon::current_num_threads() {
             // Enough bands to keep every core busy: one band per task, its tiles in turn.
-            out.px.par_chunks_mut(band_len).enumerate().for_each(|(i, band)| {
+            out.par_chunks_mut(band_len).enumerate().for_each(|(i, band)| {
                 let y0 = rect.y0 + i as i32 * tile;
                 for t in band_tiles(y0) {
-                    put(band, y0, &run(t));
+                    put(band, y0, t, &run(t));
                 }
             });
         } else {
             // Few, wide bands: the tiles of each band in parallel.
-            for (i, band) in out.px.chunks_mut(band_len).enumerate() {
+            for (i, band) in out.chunks_mut(band_len).enumerate() {
                 let y0 = rect.y0 + i as i32 * tile;
-                let parts: Vec<Buffer> = band_tiles(y0).into_par_iter().map(run).collect();
-                for part in &parts {
-                    put(band, y0, part);
+                let parts: Vec<(Rect, Vec<P>)> = band_tiles(y0).into_par_iter().map(|t| (t, run(t))).collect();
+                for (t, part) in &parts {
+                    put(band, y0, *t, part);
                 }
             }
         }
     }
     #[cfg(target_arch = "wasm32")]
-    for (i, band) in out.px.chunks_mut(band_len).enumerate() {
+    for (i, band) in out.chunks_mut(band_len).enumerate() {
         let y0 = rect.y0 + i as i32 * tile;
         for t in band_tiles(y0) {
-            put(band, y0, &run(t));
+            put(band, y0, t, &run(t));
         }
     }
     out
+}
+
+/// A CMYK document's composite in its own inks: `[C, M, Y, K, alpha]` per pixel (ink amounts,
+/// 1 = full ink; straight alpha), before any screen conversion.
+pub struct InkBuffer {
+    pub rect: Rect,
+    pub px: Vec<[f32; 5]>,
+}
+
+/// [`render_bands`] for a CMYK document in its inks ([`InkBuffer`]): what its merged image and
+/// flattened layers store, without a trip through screen RGB (which regenerates K). Other
+/// documents' composites are separated through the default CMYK profile.
+pub fn render_ink_bands<E>(doc: &Document, rect: Rect, band_rows: i32, mut sink: impl FnMut(InkBuffer) -> Result<(), E>) -> Result<(), E> {
+    if doc.mode != photosuite_color::ColorMode::Cmyk {
+        return render_bands(doc, rect, band_rows, |b| {
+            let px = b.px.iter().map(|p| {
+                let k = photosuite_color::convert::rgb_to_cmyk([p[0], p[1], p[2]]);
+                [k[0], k[1], k[2], k[3], p[3]]
+            });
+            sink(InkBuffer { rect: b.rect, px: px.collect() })
+        });
+    }
+    if rect.is_empty() {
+        return Ok(());
+    }
+    let patterns = pattern::PreparedPatterns::new(&doc.patterns, pattern::PREPARED_PATTERN_BYTES);
+    let cx = Ctx::for_doc(doc, &patterns);
+    let space = cmyk_space(doc);
+    let space = space.as_ref();
+    let rows = band_rows_for(rect.width(), band_rows);
+    let mut y = rect.y0;
+    while y < rect.y1 {
+        let y1 = y.saturating_add(rows).min(rect.y1);
+        let band = Rect::new(rect.x0, y, rect.x1, y1);
+        prepare_effects(&doc.layers, band, &cx, |f| photosuite_color::convert::with_cmyk_space(space, &mut *f));
+        let px = tiled(band, RENDER_TILE, [0.0; 5], |t| {
+            photosuite_color::convert::with_cmyk_space(space, || {
+                cmyk::composite(&doc.layers, t, &cx).px.iter().map(|p| [1.0 - p[0], 1.0 - p[1], 1.0 - p[2], 1.0 - p[3], p[4]]).collect()
+            })
+        });
+        sink(InkBuffer { rect: band, px })?;
+        y = y1;
+    }
+    Ok(())
+}
+
+/// One tile of `doc`'s composite (inside the caller's colour scopes): CMYK documents are
+/// composited in CMYK ([`cmyk`]), Multichannel ones over their printed inks.
+fn composite_doc(doc: &Document, rect: Rect, cx: &Ctx) -> Buffer {
+    if doc.mode == photosuite_color::ColorMode::Cmyk {
+        return cmyk::render(&doc.layers, rect, cx);
+    }
+    let mut b = multichannel::backdrop(doc, rect);
+    composite_stack(&doc.layers, &mut b, cx);
+    b
 }
 
 /// The document's own CMYK profile for reading its CMYK pixels (`None`: not a CMYK document,
@@ -231,6 +289,30 @@ pub fn flatten_to_surface(doc: &Document, fmt: photosuite_color::PixelFormat, ba
     let mut s = Surface::new(fmt);
     let n = fmt.channels();
     let mut data = Vec::new();
+    // A CMYK document flattened into CMYK keeps its composited inks (no trip through screen RGB).
+    if doc.mode == photosuite_color::ColorMode::Cmyk && fmt.mode == photosuite_color::ColorMode::Cmyk {
+        let space = cmyk_space(doc);
+        let bg = background.map(|b| photosuite_color::convert::with_cmyk_space(space.as_ref(), || photosuite_color::convert::rgb_to_cmyk(b)));
+        let _ = render_ink_bands(doc, doc.bounds(), 0, |band| -> Result<(), ()> {
+            data.clear();
+            data.reserve(band.px.len() * n);
+            for p in &band.px {
+                let (inks, a) = match bg {
+                    // Over an opaque background: mix the inks by coverage.
+                    Some(b) => (std::array::from_fn(|c| b[c] + (p[c] - b[c]) * p[4]), 1.0),
+                    None => ([p[0], p[1], p[2], p[3]], p[4]),
+                };
+                data.extend_from_slice(&inks);
+                if fmt.alpha {
+                    data.push(a);
+                }
+            }
+            s.write_region(band.rect, &data);
+            Ok(())
+        });
+        s.prune();
+        return s;
+    }
     let _ = render_bands(doc, doc.bounds(), 0, |band| -> Result<(), ()> {
         let band = match background {
             Some(bg) => band.over_background(bg),

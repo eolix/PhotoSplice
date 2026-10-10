@@ -15,15 +15,9 @@ fn check_export_oracle(d: &photosuite_doc::Document, tol: f32) {
     let f = PsdFile::from_bytes(&r.bytes).unwrap();
     let merged = merged_composite(&f).unwrap();
     let d2 = import("x.psd", &r.bytes).unwrap().document;
-    let mut ours = photosuite_compose::flatten(&d2).px;
-    if d.mode == ColorMode::Cmyk {
-        // The merged CMYK image is the RGB composite separated through the CMYK profile, which
-        // gamut-maps colours that blend modes push outside CMYK: project ours the same way.
-        let fmt = d.pixel_format();
-        for p in &mut ours {
-            *p = photosuite_raster::to_rgba(&fmt, &photosuite_raster::from_rgba(&fmt, *p));
-        }
-    }
+    // CMYK documents: the merged image holds the composited inks, so both sides are the same
+    // composite (no separation of a screen colour in between).
+    let ours = photosuite_compose::flatten(&d2).px;
     let m = max_diff(&ours, &merged);
     assert!(m <= tol, "max diff {m} > {tol}");
 }

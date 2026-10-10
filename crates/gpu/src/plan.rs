@@ -313,6 +313,14 @@ pub fn plan(doc: &Document) -> Result<Plan<'_>, Unsupported> {
     if doc.mode == photosuite_color::ColorMode::Multichannel {
         return Err(Unsupported("Multichannel inks (printed on the CPU)".into()));
     }
+    // CMYK documents blend in CMYK (`photosuite_compose`'s CMYK compositor); one visible layer
+    // without effects converts the same either way.
+    if doc.mode == photosuite_color::ColorMode::Cmyk {
+        let visible: Vec<_> = doc.walk().into_iter().filter(|(_, _, l)| l.visible).collect();
+        if visible.len() > 1 || visible.iter().any(|(_, _, l)| photosuite_compose::effects::has_effects(l)) {
+            return Err(Unsupported("CMYK blending (composited in CMYK on the CPU)".into()));
+        }
+    }
     let mut p = Planner::new(DocCtx::of(doc));
     let root = p.clear();
     // Start at the topmost layer that hides everything beneath it (an opaque fill layer): the

@@ -1177,6 +1177,51 @@ fn merged_planes(doc: &Document, fmt: &PixelFormat, cmyk: bool, matte: bool, mut
     let w = canvas.width() as usize;
     let space = photosuite_compose::cmyk_space(doc);
     let lab16 = fmt.mode == ColorMode::Lab && sample == SampleType::U16;
+    // A CMYK document's composite in its own inks (screen RGB would regenerate K).
+    if cmyk && doc.mode == ColorMode::Cmyk {
+        let _ = photosuite_compose::render_ink_bands(doc, canvas, 0, |band| -> Result<(), ()> {
+            has_alpha |= band.px.iter().any(|p| match sample {
+                SampleType::U8 => q255(p[4]) < 255,
+                SampleType::U16 => (p[4].clamp(0.0, 1.0) * 65535.0 + 0.5) as u16 != u16::MAX,
+                SampleType::F32 => p[4] != 1.0,
+            });
+            translucent |= band.px.iter().any(|p| p[4] < 1.0);
+            if let Some(t) = thumb.as_deref_mut() {
+                let rgb: Vec<[f32; 4]> = photosuite_color::convert::with_cmyk_space(space.as_ref(), || {
+                    band.px
+                        .iter()
+                        .map(|p| {
+                            let c = photosuite_color::convert::cmyk_to_rgb([p[0], p[1], p[2], p[3]]);
+                            [c[0], c[1], c[2], p[4]]
+                        })
+                        .collect()
+                });
+                t.add((band.rect.y0 - canvas.y0) as usize, &rgb);
+            }
+            let start = (band.rect.y0 - canvas.y0) as usize * w;
+            let parts = crate::pixels::par_map(crate::pixels::bands(band.px.len()), |range| {
+                let mut out: Vec<Vec<u8>> = vec![Vec::with_capacity(range.len() * bps); cc + 1];
+                for v in &band.px[range.clone()] {
+                    for c in 0..=cc {
+                        // Matte against white (no ink) like Photoshop (see `pixels::matte`).
+                        let m = if c < cc && matte { crate::pixels::matte(v[c], v[cc], 0.0) } else { v[c] };
+                        // PSD stores CMYK inverted (1 = no ink).
+                        let x = if c < cc { 1.0 - m } else { m };
+                        encode_be(x, sample, &mut out[c]);
+                    }
+                }
+                (range.start, out)
+            });
+            for (at, part) in parts {
+                for (c, src) in part.iter().enumerate() {
+                    let o = c * plane + (start + at) * bps;
+                    planes[o..o + src.len()].copy_from_slice(src);
+                }
+            }
+            Ok(())
+        });
+        return (planes, has_alpha, translucent);
+    }
     let _ = photosuite_compose::render_bands(doc, canvas, 0, |band| -> Result<(), ()> {
         // Retain alpha whenever it differs from opaque at the stored precision.
         has_alpha |= band.px.iter().any(|p| match sample {

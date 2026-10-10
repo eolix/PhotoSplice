@@ -89,6 +89,19 @@ pub fn blend_rgb(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
     }
 }
 
+/// One channel of a separable mode `B(cb, cs)` with Photoshop's variants (non-separable modes
+/// give `cs`; they need the whole colour, see [`blend_rgb`]).
+pub fn blend_channel(mode: BlendMode, cb: f32, cs: f32) -> f32 {
+    match mode {
+        BlendMode::VividLight => vivid_light_ps(cb, cs),
+        BlendMode::HardMix => hard_mix_ps(cb, cs),
+        BlendMode::ColorBurn => color_burn(cb, cs),
+        BlendMode::ColorDodge => color_dodge(cb, cs),
+        m if m.is_separable() => generic::blend_channel(m, cb, cs),
+        _ => cs,
+    }
+}
+
 /// Straight-alpha source over straight-alpha backdrop (W3C/PDF general
 /// formula) using [`blend_rgb`].
 pub fn composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
