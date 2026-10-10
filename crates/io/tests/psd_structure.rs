@@ -198,6 +198,27 @@ fn multichannel_imports_ink_channels() {
     }
 }
 
+/// A Multichannel file keeps its other resources and document-level blocks (only resolution,
+/// channel names and XMP were written back), but not the layer-only resources.
+#[test]
+fn multichannel_keeps_resources_and_global_blocks() {
+    use photosuite_psd::{ImageResource, TaggedBlock};
+    let mut f = testgen::merged_only(Version::Psd, ColorMode::Multichannel, 8, Compression::Rle, 9, 5);
+    f.resources.push(ImageResource::new(1028, b"iptc".to_vec()));
+    f.resources.push(ImageResource::new(1011, vec![1]));
+    f.resources.push(ImageResource::new(1069, vec![0, 1, 0, 0]));
+    f.global_blocks.push(TaggedBlock::new(*b"FMsk", vec![0, 0, 0, 0, 0, 50]));
+    let (d, _) = psd_to_document(&f);
+    let back = PsdFile::from_bytes(&export(&d, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap();
+    let res = |id: u16| back.resources.iter().find(|r| r.id == id).map(|r| r.data.clone());
+    assert_eq!(res(1028), Some(b"iptc".to_vec()));
+    assert_eq!(res(1011), Some(vec![1]));
+    assert_eq!(res(1069), None);
+    assert_eq!(back.resources.iter().filter(|r| r.id == 1005).count(), 1);
+    let fmsk = back.global_blocks.iter().find(|b| &b.key == b"FMsk").map(|b| b.data.clone());
+    assert_eq!(fmsk, Some(vec![0, 0, 0, 0, 0, 50]));
+}
+
 #[test]
 fn indexed_colors_match_palette() {
     let f = testgen::merged_only(Version::Psd, ColorMode::Indexed, 8, Compression::Raw, 4, 2);

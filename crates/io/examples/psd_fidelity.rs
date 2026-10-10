@@ -11,6 +11,7 @@
 //! TOP=40 …                                                                            # descriptor paths listed per key
 //! REGEN=1 …                                                                           # as if every layer were edited
 //! PAIR=1 … a.psd b.psd                                                                # compare two files as they are (b against a)
+//! OUT=x.psd … file.psd                                                                # also save our export (one file)
 //! ```
 //!
 //! `REGEN=1` flips each layer's effects master switch, nudges fill colours / angles / scales,
@@ -77,6 +78,12 @@ fn key_str(k: &[u8; 4]) -> String {
 fn descriptors(key: &str, data: &[u8]) -> Vec<Descriptor> {
     if matches!(key, "lnk2" | "lnk3" | "lnkD" | "lnkE" | "Patt" | "Pat2" | "Pat3" | "FEid" | "FXid" | "Txt2" | "Anno") {
         return Vec::new();
+    }
+    // `PlLd` by its layout (`plcL`, version, Pascal id, 4 integers, 8 doubles, warp version, then
+    // the warp): scanning finds phantom version-16 prefixes in its integers and transform.
+    if key == "PlLd" {
+        let at = data.get(8).map(|n| 8 + 1 + usize::from(*n) + 16 + 64 + 4);
+        return at.and_then(|a| data.get(a..)).and_then(|d| VersionedDescriptor::parse_prefix(d).ok()).map(|(d, _)| d.descriptor).into_iter().collect();
     }
     let mut out = Vec::new();
     let mut start = 0usize;
@@ -271,6 +278,9 @@ impl Census {
             }
             let (exp, warnings) = photosuite_io::document_to_psd_with(&doc, &Default::default());
             let bytes = exp.to_bytes().map_err(|e| e.to_string())?;
+            if let Some(out) = std::env::var_os("OUT") {
+                std::fs::write(out, &bytes).map_err(|e| e.to_string())?;
+            }
             PsdFile::from_bytes(&bytes).map(|f| (f, warnings)).map_err(|e| e.to_string())
         }));
         let (exp, warnings) = match run {

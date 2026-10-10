@@ -991,7 +991,47 @@ fn effects_unchanged(l: &Layer) -> Option<bool> {
     Some(m == l.effects.enabled && items == l.effects.items)
 }
 
-fn legacy_name(s: &str) -> Vec<u8> {
+/// Paths: saved paths (2000+), the work path (1025), the clipping path name (2999).
+pub(crate) fn path_resources(doc: &Document, warnings: &mut Vec<String>) -> Vec<ImageResource> {
+    use crate::vector_map::{CLIPPING_PATH, WORK_PATH, path_from_resource, path_to_records};
+    let mut out = Vec::new();
+    let (w, h) = (doc.size.width, doc.size.height);
+    let max = (*crate::vector_map::SAVED_PATHS.end() - *crate::vector_map::SAVED_PATHS.start() + 1) as usize;
+    if doc.paths.len() > max {
+        warnings.push(format!("only {max} saved paths fit in PSD; the rest were dropped"));
+    }
+    for (i, p) in doc.paths.iter().take(max).enumerate() {
+        let data = match &p.psd_raw {
+            Some(r) if path_from_resource(r, w, h).as_ref() == Some(&p.path) => r.to_vec(),
+            _ => path_to_records(&p.path, w, h).to_bytes(),
+        };
+        let mut r = ImageResource::new(crate::vector_map::SAVED_PATHS.start() + i as u16, data);
+        r.name = legacy_name(&p.name);
+        out.push(r);
+    }
+    if let Some(wp) = &doc.work_path {
+        out.push(ImageResource::new(WORK_PATH, path_to_records(wp, w, h).to_bytes()));
+    }
+    let raw_clip = doc.metadata.psd_resources.iter().find(|(id, _, _)| *id == CLIPPING_PATH);
+    let raw_name = raw_clip.map(|(_, _, d)| {
+        let n = usize::from(d.first().copied().unwrap_or(0));
+        d.get(1..1 + n).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default()
+    });
+    if let Some(c) = &doc.clipping_path
+        && raw_name.as_deref() != Some(c.name.as_str())
+    {
+        // Pascal name, then flatness as 16.16 fixed (best effort; see vector_map docs).
+        let mut data = vec![0u8];
+        let name = legacy_name(&c.name);
+        data[0] = name.len() as u8;
+        data.extend_from_slice(&name);
+        data.extend_from_slice(&((c.flatness.max(0.0) * 65536.0) as u32).to_be_bytes());
+        out.push(ImageResource::new(CLIPPING_PATH, data));
+    }
+    out
+}
+
+pub(crate) fn legacy_name(s: &str) -> Vec<u8> {
     s.chars().map(|c| if c.is_ascii() && !c.is_ascii_control() { c as u8 } else { b'?' }).take(255).collect()
 }
 
@@ -1039,7 +1079,7 @@ pub(crate) fn pascal_names_resource(names: &[&str]) -> Vec<u8> {
     v
 }
 
-fn guides_resource(doc: &Document) -> Vec<u8> {
+pub(crate) fn guides_resource(doc: &Document) -> Vec<u8> {
     let mut v = Vec::new();
     v.extend_from_slice(&1u32.to_be_bytes());
     v.extend_from_slice(&576u32.to_be_bytes());
@@ -1448,43 +1488,7 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         data.push(0);
         resources.push(ImageResource::new(crate::channel_map::QUICK_MASK_INFO, data));
     }
-    // Paths: saved paths (2000+), the work path (1025), the clipping path name (2999).
-    {
-        use crate::vector_map::{CLIPPING_PATH, WORK_PATH, path_from_resource, path_to_records};
-        let (w, h) = (doc.size.width, doc.size.height);
-        let max = (*crate::vector_map::SAVED_PATHS.end() - *crate::vector_map::SAVED_PATHS.start() + 1) as usize;
-        if doc.paths.len() > max {
-            ex.warnings.push(format!("only {max} saved paths fit in PSD; the rest were dropped"));
-        }
-        for (i, p) in doc.paths.iter().take(max).enumerate() {
-            let data = match &p.psd_raw {
-                Some(r) if path_from_resource(r, w, h).as_ref() == Some(&p.path) => r.to_vec(),
-                _ => path_to_records(&p.path, w, h).to_bytes(),
-            };
-            let mut r = ImageResource::new(crate::vector_map::SAVED_PATHS.start() + i as u16, data);
-            r.name = legacy_name(&p.name);
-            resources.push(r);
-        }
-        if let Some(wp) = &doc.work_path {
-            resources.push(ImageResource::new(WORK_PATH, path_to_records(wp, w, h).to_bytes()));
-        }
-        let raw_clip = doc.metadata.psd_resources.iter().find(|(id, _, _)| *id == CLIPPING_PATH);
-        let raw_name = raw_clip.map(|(_, _, d)| {
-            let n = usize::from(d.first().copied().unwrap_or(0));
-            d.get(1..1 + n).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default()
-        });
-        if let Some(c) = &doc.clipping_path
-            && raw_name.as_deref() != Some(c.name.as_str())
-        {
-            // Pascal name, then flatness as 16.16 fixed (best effort; see vector_map docs).
-            let mut data = vec![0u8];
-            let name = legacy_name(&c.name);
-            data[0] = name.len() as u8;
-            data.extend_from_slice(&name);
-            data.extend_from_slice(&((c.flatness.max(0.0) * 65536.0) as u32).to_be_bytes());
-            resources.push(ImageResource::new(CLIPPING_PATH, data));
-        }
-    }
+    resources.extend(path_resources(doc, &mut ex.warnings));
     resources.push(ImageResource::new(ids::LAYER_GROUP_INFO, link_group_resource(&doc.layers)));
     let old_seed = doc.metadata.psd_resources.iter().find(|r| r.0 == ids::DOCUMENT_IDS_SEED).and_then(|r| r.2.get(..4)).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
     resources.extend(layer_state_resources(&ex.records, old_seed.unwrap_or(0)));
