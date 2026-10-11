@@ -10,7 +10,8 @@
 //!
 //! Adjustments work on the inks too: Levels and Curves through their CMYK records, Invert,
 //! Posterize and Brightness/Contrast through one curve for every ink, Threshold and Gradient Map
-//! on the inks' own lightness ([`ink_lightness`]). A layer this module doesn't composite in CMYK
+//! on the inks' own lightness ([`ink_lightness`]), Hue/Saturation, Color Balance, Selective
+//! Color and Photo Filter on C, M, Y as an RGB colour with K kept. A layer this module doesn't composite in CMYK
 //! yet (layer effects, Blend If, the other adjustments) is an "RGB island": the RGB compositor
 //! draws it over the backdrop's RGB conversion, and only the pixels it changed take the result
 //! back, separated through the profile. Untouched pixels keep their exact inks.
@@ -132,6 +133,10 @@ fn native_adjustment(a: &Adjustment) -> bool {
         Adjustment::Invert
             | Adjustment::Threshold { .. }
             | Adjustment::GradientMap { .. }
+            | Adjustment::HueSaturation { colorize: false, .. }
+            | Adjustment::ColorBalance { .. }
+            | Adjustment::SelectiveColor { .. }
+            | Adjustment::PhotoFilter { .. }
             | Adjustment::Posterize { .. }
             | Adjustment::BrightnessContrast { .. }
             | Adjustment::Levels { space: ToneSpace::Cmyk, .. }
@@ -172,6 +177,17 @@ fn adjust(a: &Adjustment, buf: &mut CBuf, cx: &Ctx) {
             let white = (ink_lightness(p) * 255.0).round() >= t;
             let k = if white { 1.0 } else { 0.0 };
             p[..4].copy_from_slice(&[1.0, 1.0, 1.0, k]);
+        }
+        return;
+    }
+    // Colour adjustments: C, M, Y's complements through the RGB adjustment as an RGB colour, K
+    // untouched (Photoshop corpus cmyk8: K exact in every one; Selective Color within 0.006, the
+    // others carry the residual their RGB versions have; `cmyk_probe` ADJ=1).
+    if matches!(a, Adjustment::HueSaturation { .. } | Adjustment::ColorBalance { .. } | Adjustment::SelectiveColor { .. } | Adjustment::PhotoFilter { .. }) {
+        let mut rgb = Buffer { rect: buf.rect, px: buf.px.iter().map(|p| [p[0], p[1], p[2], 1.0]).collect() };
+        crate::adjust::apply_depth(a, &mut rgb, cx.transfer, Some(cx.depth));
+        for (p, o) in buf.px.iter_mut().zip(&rgb.px) {
+            p[..3].copy_from_slice(&o[..3]);
         }
         return;
     }
@@ -553,6 +569,17 @@ mod tests {
         let mut d = doc([0.1, 0.4, 0.62, 0.9]);
         d.layers.push(Layer::new("p", LayerContent::Adjustment(Adjustment::Posterize { levels: 2 })));
         assert!(close(inks_at(&d, 0), [0.0, 0.0, 1.0, 1.0]), "{:?}", inks_at(&d, 0));
+    }
+
+    /// Colour adjustments change C, M, Y and leave K exactly as it was (Photoshop corpus cmyk8
+    /// hue-saturation / color-balance / selective-color / photo-filter: K exact in all four).
+    #[test]
+    fn colour_adjustments_keep_k() {
+        let mut d = doc([0.1, 0.6, 0.3, 0.45]);
+        d.layers.push(Layer::new("h", LayerContent::Adjustment(Adjustment::HueSaturation { hue: 60.0, saturation: 20.0, lightness: 0.0, colorize: false, ranges: photosuite_doc::adjust::HueRange::defaults() })));
+        let got = inks_at(&d, 0);
+        assert!((got[3] - 0.45).abs() < 1e-6, "{got:?}");
+        assert!((got[0] - 0.1).abs() > 0.05 || (got[1] - 0.6).abs() > 0.05, "hue moved the colour: {got:?}");
     }
 
     /// Blending Options › Channels: a layer that leaves K out keeps the backdrop's K.

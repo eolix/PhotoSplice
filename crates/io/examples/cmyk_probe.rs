@@ -246,10 +246,58 @@ fn gmap(f: &PsdFile, bytes: &[u8], merged: &[u8], w: usize, h: usize) {
     });
 }
 
+/// `ADJ=1`: an adjustment over one pixel layer, mean error per ink against Photoshop's merged
+/// image for: (a) the RGB adjustment run on the C, M, Y complements as RGB with K kept, (b) the
+/// same with K through it as a gray, (c) the screen colour through the profile, separated back.
+fn adj(f: &PsdFile, bytes: &[u8], merged: &[u8], w: usize, h: usize) {
+    use photosuite_color::convert::{cmyk_to_rgb, rgb_to_cmyk, with_cmyk_space};
+    use photosuite_compose::adjust::{Transfer, apply_depth};
+    let doc = photosuite_io::import("x.psd", bytes).unwrap().document;
+    let Some(photosuite_doc::LayerContent::Adjustment(a)) = doc.layers.get(1).map(|l| &l.content) else { panic!("no adjustment") };
+    println!("{a:?}");
+    let space = photosuite_compose::cmyk_space(&doc);
+    let transfer = Transfer::for_document(photosuite_color::ColorMode::Rgb, doc.depth);
+    let base = Planes::of(f, &f.layers()[0]);
+    let run = |rgb: [f32; 3]| {
+        let mut b = photosuite_compose::Buffer { rect: photosuite_geom::Rect::new(0, 0, 1, 1), px: vec![[rgb[0], rgb[1], rgb[2], 1.0]] };
+        apply_depth(a, &mut b, transfer, Some(doc.depth));
+        [b.px[0][0], b.px[0][1], b.px[0][2]]
+    };
+    with_cmyk_space(space.as_ref(), || {
+        let mut err = [[0.0f32; 4]; 3];
+        let mut n = 0usize;
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let Some(s) = (0..4).map(|c| base.get(c, x, y)).collect::<Option<Vec<f32>>>() else { continue };
+                let want: Vec<f32> = (0..4).map(|c| f32::from(merged[c * w * h + y as usize * w + x as usize]) / 255.0).collect();
+                let cmy = run([s[0], s[1], s[2]]);
+                let k = run([s[3]; 3])[0];
+                let screen = run(cmyk_to_rgb([1.0 - s[0], 1.0 - s[1], 1.0 - s[2], 1.0 - s[3]]));
+                let sep = rgb_to_cmyk(screen).map(|v| 1.0 - v);
+                let cand = [[cmy[0], cmy[1], cmy[2], s[3]], [cmy[0], cmy[1], cmy[2], k], sep];
+                for (e, c) in err.iter_mut().zip(cand) {
+                    for i in 0..4 {
+                        e[i] += (c[i] - want[i]).abs();
+                    }
+                }
+                n += 1;
+            }
+        }
+        for (name, e) in ["CMY as RGB, K kept", "CMY as RGB, K as gray", "screen, separated"].iter().zip(err) {
+            println!("{name:<22} {:?}", e.map(|v| v / n.max(1) as f32));
+        }
+    });
+}
+
 fn main() {
     let path = std::env::args().nth(1).expect("file.psd");
     let bytes = std::fs::read(&path).unwrap();
     let f = PsdFile::from_bytes(&bytes).unwrap();
+    if std::env::var_os("ADJ").is_some() {
+        let merged = f.decode_merged().unwrap();
+        adj(&f, &bytes, &merged, f.header.width as usize, f.header.height as usize);
+        return;
+    }
     if std::env::var_os("GMAP").is_some() {
         let merged = f.decode_merged().unwrap();
         gmap(&f, &bytes, &merged, f.header.width as usize, f.header.height as usize);
