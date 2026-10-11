@@ -123,9 +123,15 @@ fn save_writes_every_writable_format_in_place_and_asks_for_the_rest() {
         assert_eq!(written.borrow().len(), i + 1, "{path}");
         assert!(!app.session.active().unwrap().is_dirty());
     }
+    // A PDF goes back to its file too, through Save Adobe PDF (written once that's answered).
+    app.open_file("/pics/brochure.pdf", b"x").unwrap();
+    let r = menus::invoke(&mut app, &ctx, "file.save", json!({})).unwrap();
+    assert_eq!(r["path"], "/pics/brochure.pdf", "{r}");
+    assert_eq!(app.pdf_options.as_ref().map(|p| p.path.as_str()), Some("/pics/brochure.pdf"));
+    app.pdf_options = None;
     let n = written.borrow().len();
-    // A PDF page, a camera raw file and a new document have nothing to write in place: Save As.
-    for path in ["/pics/brochure.pdf", "/pics/raw.NEF"] {
+    // A camera raw file and a new document have nothing to write in place: Save As.
+    for path in ["/pics/raw.NEF"] {
         app.open_file(path, b"x").unwrap();
         let r = menus::invoke(&mut app, &ctx, "file.save", json!({})).unwrap();
         let d = app.ui.dialog_mut(r["dialog"].as_u64().unwrap()).unwrap();
