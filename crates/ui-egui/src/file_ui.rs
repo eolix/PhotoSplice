@@ -332,10 +332,63 @@ fn variants(p: &Value) -> Vec<Value> {
 
 /// The flattened preview image: pixels, width, height, full-size / proxy pixel ratio.
 type WebProxy = (Arc<Vec<[f32; 4]>>, u32, u32, f64);
+/// The crop of the export a zoomed-in pane shows: (signature with the crop, its texture).
+type WebCrop = (String, Arc<egui::TextureHandle>);
+
+/// Photoshop's zoom levels for the Save for Web previews (0 = Fit on Screen).
+const WEB_ZOOMS: [f32; 12] = [0.0, 12.5, 25.0, 33.3, 50.0, 66.7, 100.0, 200.0, 300.0, 400.0, 800.0, 1600.0];
+
+/// The previews' shared view, as Photoshop keeps them in step: zoom in screen points per
+/// exported pixel (`None` = fit in the pane) and the centre in exported pixels (`None` = the
+/// image's). Kept in the dialog's `__zoom` / `__cx` / `__cy` fields.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct WebView {
+    zoom: Option<f32>,
+    centre: Option<[f32; 2]>,
+}
+
+impl WebView {
+    fn read(f: &Map<String, Value>) -> Self {
+        let num = |k: &str| f.get(k).and_then(Value::as_f64).map(|v| v as f32).filter(|v| v.is_finite());
+        let zoom = num("__zoom").filter(|z| *z > 0.0);
+        let centre = num("__cx").zip(num("__cy")).map(|(x, y)| [x, y]);
+        WebView { zoom, centre }
+    }
+
+    fn write(self, f: &mut Map<String, Value>) {
+        match self.zoom {
+            Some(z) => f.insert("__zoom".into(), json!(z)),
+            None => f.remove("__zoom"),
+        };
+        match self.centre {
+            Some([x, y]) => {
+                f.insert("__cx".into(), json!(x));
+                f.insert("__cy".into(), json!(y))
+            }
+            None => {
+                f.remove("__cx");
+                f.remove("__cy")
+            }
+        };
+    }
+}
+
+/// Zoom and centre a pane of `pane` points shows an `ew` × `eh` export at, the centre kept
+/// where the image still covers the pane.
+fn web_layout(view: &WebView, pane: egui::Vec2, ew: f32, eh: f32) -> (f32, [f32; 2]) {
+    let fit = (pane.x / ew).min(pane.y / eh).min(1.0);
+    let z = view.zoom.unwrap_or(fit).clamp(0.005, 64.0);
+    let c = view.centre.unwrap_or([ew / 2.0, eh / 2.0]);
+    let keep = |c: f32, len: f32, extent: f32| {
+        let half = extent / (2.0 * z);
+        if len <= 2.0 * half { len / 2.0 } else { c.clamp(half, len - half) }
+    };
+    (z, [keep(c[0], ew, pane.x), keep(c[1], eh, pane.y)])
+}
 type WebCache = (String, Arc<egui::TextureHandle>, Option<(usize, Option<usize>, &'static str)>);
 
 /// Renders one preview pane: the original (`None`) or an optimised variant.
-fn web_pane(app: &PhotosuiteApp, ui: &mut egui::Ui, size: egui::Vec2, p: Option<&Value>, full_px: f64) {
+fn web_pane(app: &PhotosuiteApp, ui: &mut egui::Ui, size: egui::Vec2, p: Option<&Value>, view: &mut WebView) {
     let t = Tokens::get(ui.ctx());
     let Some(st) = app.session.active() else { return };
     let doc = st.doc.clone();
@@ -380,19 +433,46 @@ fn web_pane(app: &PhotosuiteApp, ui: &mut egui::Ui, size: egui::Vec2, p: Option<
             };
             let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
             let tex = Arc::new(ui.ctx().load_texture("web-pane", img, egui::TextureOptions::LINEAR));
-            ui.data_mut(|d| d.insert_temp(key, (sig, tex.clone(), info)));
+            ui.data_mut(|d| d.insert_temp(key, (sig.clone(), tex.clone(), info)));
             (tex, info)
         }
     };
+    // The export's own size (the proxy is at most 640 px across).
+    let pct = base["percent"].as_f64().unwrap_or(100.0).max(1.0) / 100.0;
+    let (ew, eh) = ((f64::from(doc.size.width) * pct).round().max(1.0) as f32, (f64::from(doc.size.height) * pct).round().max(1.0) as f32);
     ui.vertical(|ui| {
-        let (r, _) = ui.allocate_exact_size(size - egui::vec2(0.0, 34.0), egui::Sense::hover());
+        let (r, resp) = ui.allocate_exact_size(size - egui::vec2(0.0, 34.0), egui::Sense::click_and_drag());
+        let (z, c) = web_layout(view, r.size(), ew, eh);
+        // Drag or scroll pans; pinch (or ⌘-scroll) zooms about the pointer, every pane alike.
+        let (zoom_by, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
+        if resp.dragged() || (resp.hovered() && scroll != egui::Vec2::ZERO) {
+            let d = if resp.dragged() { resp.drag_delta() } else { scroll };
+            *view = WebView { zoom: Some(z), centre: Some([c[0] - d.x / z, c[1] - d.y / z]) };
+        }
+        if resp.hovered()
+            && (zoom_by - 1.0).abs() > 1e-4
+            && let Some(at) = resp.hover_pos()
+        {
+            let nz = (z * zoom_by).clamp(0.005, 64.0);
+            let off = at - r.center();
+            let under = [c[0] + off.x / z, c[1] + off.y / z];
+            *view = WebView { zoom: Some(nz), centre: Some([under[0] - off.x / nz, under[1] - off.y / nz]) };
+        }
         crate::widgets::checker(ui.painter(), r, 8.0);
-        let ts = tex.size_vec2();
-        let k = (r.width() / ts.x).min(r.height() / ts.y).min(1.0);
-        let ir = egui::Rect::from_center_size(r.center(), ts * k);
-        ui.painter().image(tex.id(), ir, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+        // The part of the export in view (export pixels) and where it lands.
+        let (hx, hy) = (r.width() / (2.0 * z), r.height() / (2.0 * z));
+        let vis = egui::Rect::from_min_max(egui::pos2((c[0] - hx).max(0.0), (c[1] - hy).max(0.0)), egui::pos2((c[0] + hx).min(ew), (c[1] + hy).min(eh)));
+        let on_screen = |q: egui::Pos2| r.center() + (q - egui::pos2(c[0], c[1])) * z;
+        let ppp = ui.ctx().pixels_per_point();
+        let painter = ui.painter().with_clip_rect(r);
+        if w as f32 / ew >= z * ppp * 0.999 {
+            // The proxy has the pixels for this zoom.
+            let uv = egui::Rect::from_min_max(egui::pos2(vis.min.x / ew, vis.min.y / eh), egui::pos2(vis.max.x / ew, vis.max.y / eh));
+            painter.image(tex.id(), egui::Rect::from_min_max(on_screen(vis.min), on_screen(vis.max)), uv, egui::Color32::WHITE);
+        } else if let Some((crop_tex, crop)) = web_crop(ui, &doc, rev, &size_sig, &sig, p, (ew, eh), vis) {
+            painter.image(crop_tex.id(), egui::Rect::from_min_max(on_screen(crop.min), on_screen(crop.max)), egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+        }
         ui.painter().rect_stroke(r, 0.0, egui::Stroke::new(1.0, t.separator), egui::StrokeKind::Outside);
-        let _ = full_px;
         let (l1, l2) = match (p, info) {
             (None, _) => ("Original".to_string(), format!("{}  ·  {} × {} px", doc.name, doc.size.width, doc.size.height)),
             (Some(_), Some((bytes, colors, ext))) => {
@@ -408,6 +488,51 @@ fn web_pane(app: &PhotosuiteApp, ui: &mut egui::Ui, size: egui::Vec2, p: Option<
         ui.label(egui::RichText::new(l1).color(t.text).size(11.5));
         ui.label(egui::RichText::new(l2).color(t.text_dim).size(11.0));
     });
+}
+
+/// The exported pixels in `vis` (export pixels, widened to whole ones) as `p` optimises them (the
+/// original's when `None`): what a pane zoomed past the proxy's resolution shows. The export is
+/// built once per document revision and size; only the crop in view is rendered and optimised
+/// (so an indexed palette is the crop's own).
+#[allow(clippy::too_many_arguments)]
+fn web_crop(ui: &egui::Ui, doc: &photosuite_doc::Document, rev: u64, size_sig: &str, sig: &str, p: Option<&Value>, (ew, eh): (f32, f32), vis: egui::Rect) -> Option<(Arc<egui::TextureHandle>, egui::Rect)> {
+    let crop = photosuite_geom::Rect::new(vis.min.x.floor() as i32, vis.min.y.floor() as i32, vis.max.x.ceil() as i32, vis.max.y.ceil() as i32);
+    if crop.is_empty() {
+        return None;
+    }
+    let fkey = egui::Id::new(("web-full", doc.id.0, rev, size_sig.to_string()));
+    let full: Option<Arc<photosuite_doc::Document>> = ui.data(|d| d.get_temp(fkey));
+    let full = match full {
+        Some(f) => f,
+        None => {
+            let (wd, _, _) = web_cmds::web_document(doc, &json!({"width": ew, "height": eh, "resample": "bicubic"}), &WebSettings::default()).ok()?;
+            let wd = Arc::new(wd);
+            ui.data_mut(|d| d.insert_temp(fkey, wd.clone()));
+            wd
+        }
+    };
+    let ckey = egui::Id::new(("web-crop", doc.id.0, sig.to_string()));
+    let want = format!("{rev}|{crop:?}");
+    let cached: Option<WebCrop> = ui.data(|d| d.get_temp(ckey));
+    let tex = match cached.filter(|c| c.0 == want) {
+        Some((_, tex)) => tex,
+        None => {
+            let buf = photosuite_compose::render(&full, crop);
+            let (w, h) = (crop.width() as usize, crop.height() as usize);
+            let rgba = match p {
+                None => buf.px.iter().flat_map(|q| q.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)).collect(),
+                Some(p) => WebSettings::from_params(p, "preview")
+                    .and_then(|st| web_cmds::optimize(&buf.px, w, photosuite_geom::Rect::new(0, 0, w as i32, h as i32), &st, None, None, 72.0, true))
+                    .map(|o| o.preview)
+                    .ok()?,
+            };
+            let img = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+            let tex = Arc::new(ui.ctx().load_texture("web-crop", img, egui::TextureOptions::NEAREST));
+            ui.data_mut(|d| d.insert_temp(ckey, (want, tex.clone())));
+            tex
+        }
+    };
+    Some((tex, egui::Rect::from_min_max(egui::pos2(crop.x0 as f32, crop.y0 as f32), egui::pos2(crop.x1 as f32, crop.y1 as f32))))
 }
 
 fn dropdown_str(ui: &mut egui::Ui, id: &str, f: &mut Map<String, Value>, key: &str, opts: &[(&str, &str)], w: f32) {
@@ -451,7 +576,7 @@ fn web_body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
     }));
     ui.add_space(4.0);
     let p = params(f);
-    let full_px = f64::from(doc.size.width) * f64::from(doc.size.height);
+    let mut web_view = WebView::read(f);
     ui.horizontal_top(|ui| {
         // Previews.
         let area = egui::vec2(600.0, 470.0);
@@ -459,25 +584,42 @@ fn web_body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
             ui.set_width(area.x);
             let view = if doc_fmt { "original".to_string() } else { s(f, "__view", "2up") };
             match view.as_str() {
-                "original" => web_pane(app, ui, area, None, full_px),
-                "optimized" => web_pane(app, ui, area, Some(&p), full_px),
+                "original" => web_pane(app, ui, area, None, &mut web_view),
+                "optimized" => web_pane(app, ui, area, Some(&p), &mut web_view),
                 "2up" => {
                     ui.horizontal(|ui| {
-                        web_pane(app, ui, egui::vec2(area.x / 2.0 - 4.0, area.y), None, full_px);
-                        web_pane(app, ui, egui::vec2(area.x / 2.0 - 4.0, area.y), Some(&p), full_px);
+                        web_pane(app, ui, egui::vec2(area.x / 2.0 - 4.0, area.y), None, &mut web_view);
+                        web_pane(app, ui, egui::vec2(area.x / 2.0 - 4.0, area.y), Some(&p), &mut web_view);
                     });
                 }
                 _ => {
                     let v = variants(&p);
                     let cell = egui::vec2(area.x / 2.0 - 4.0, area.y / 2.0 - 2.0);
                     ui.horizontal(|ui| {
-                        web_pane(app, ui, cell, None, full_px);
-                        web_pane(app, ui, cell, Some(&v[0]), full_px);
+                        web_pane(app, ui, cell, None, &mut web_view);
+                        web_pane(app, ui, cell, Some(&v[0]), &mut web_view);
                     });
                     ui.horizontal(|ui| {
-                        web_pane(app, ui, cell, Some(&v[1]), full_px);
-                        web_pane(app, ui, cell, Some(&v[2]), full_px);
+                        web_pane(app, ui, cell, Some(&v[1]), &mut web_view);
+                        web_pane(app, ui, cell, Some(&v[2]), &mut web_view);
                     });
+                }
+            }
+            // Photoshop's zoom menu, below the previews: percentages of the exported pixels.
+            ui.add_space(4.0);
+            let ppp = ui.ctx().pixels_per_point();
+            let tenths = |z: f32| (z * ppp * 1000.0).round() as i32;
+            let mut current = web_view.zoom.map_or(0, tenths);
+            let mut opts: Vec<(i32, String)> =
+                WEB_ZOOMS.iter().map(|z| if *z == 0.0 { (0, tl!("Fit on Screen").to_string()) } else { ((z * 10.0).round() as i32, format!("{z}%")) }).collect();
+            if !opts.iter().any(|o| o.0 == current) {
+                opts.insert(1, (current, format!("{:.1}%", current as f32 / 10.0)));
+            }
+            let refs: Vec<(i32, &str)> = opts.iter().map(|(k, l)| (*k, l.as_str())).collect();
+            if crate::widgets::dropdown(ui, "web-zoom", &mut current, &refs, 130.0) {
+                web_view.zoom = (current > 0).then(|| current as f32 / 10.0 / 100.0 / ppp);
+                if current == 0 {
+                    web_view.centre = None;
                 }
             }
         });
@@ -609,6 +751,7 @@ fn web_body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
             }
         });
     });
+    web_view.write(f);
 }
 
 fn web_confirm(app: &mut PhotosuiteApp, f: &Map<String, Value>) -> Result<Value, String> {
@@ -874,6 +1017,30 @@ fn print_confirm(app: &mut PhotosuiteApp, f: &Map<String, Value>) -> Result<Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_previews_fit_then_zoom_and_pan_inside_the_image() {
+        let pane = egui::vec2(300.0, 200.0);
+        // Fit: the 1200 × 400 export at a quarter, centred.
+        let (z, c) = web_layout(&WebView::default(), pane, 1200.0, 400.0);
+        assert_eq!((z, c), (0.25, [600.0, 200.0]));
+        // A small export isn't enlarged to fit (Photoshop's 100% cap).
+        assert_eq!(web_layout(&WebView::default(), pane, 100.0, 50.0).0, 1.0);
+        // Zoomed in, the centre stays where the image still covers the pane.
+        let v = WebView { zoom: Some(2.0), centre: Some([-50.0, 10_000.0]) };
+        assert_eq!(web_layout(&v, pane, 1200.0, 400.0), (2.0, [75.0, 350.0]));
+        // Zoomed out past the image, it sits in the middle.
+        let v = WebView { zoom: Some(0.1), centre: Some([0.0, 0.0]) };
+        assert_eq!(web_layout(&v, pane, 1200.0, 400.0).1, [600.0, 200.0]);
+        // The view lives in the dialog's fields, out of the export's params.
+        let mut f = Map::new();
+        let v = WebView { zoom: Some(3.0), centre: Some([1.0, 2.0]) };
+        v.write(&mut f);
+        assert_eq!(WebView::read(&f), v);
+        assert!(params(&f).as_object().unwrap().is_empty());
+        WebView::default().write(&mut f);
+        assert!(f.is_empty());
+    }
 
     fn app() -> (PhotosuiteApp, egui::Context) {
         let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());

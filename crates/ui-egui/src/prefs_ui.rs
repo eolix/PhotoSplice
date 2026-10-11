@@ -1055,19 +1055,27 @@ fn section_fields(ui: &mut egui::Ui, section: &str, obj: &mut Map<String, Value>
     });
 }
 
+/// Only the Keyboard Shortcuts tab for now: the Menus and Toolbar tabs are hidden while
+/// PhotoSuite focuses on a reduced, fully working feature set (their code stays, behind this).
+const SHORTCUTS_TABS_ONLY: bool = true;
+
 /// Keyboard Shortcuts and Menus: a searchable list of commands by menu with editable shortcuts
 /// (click a shortcut, press keys; ⌫ removes it), menu visibility and colours, toolbar tools.
 fn shortcuts_body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     let t = Tokens::get(ui.ctx());
     let mut tab = f.get("tab").and_then(Value::as_u64).unwrap_or(0);
-    ui.horizontal(|ui| {
-        for (i, name) in [tl!("Keyboard Shortcuts"), tl!("Menus"), tl!("Toolbar")].iter().enumerate() {
-            if crate::widgets::pill_tab(ui, name, tab == i as u64).clicked() {
-                tab = i as u64;
-                f.insert("capture".into(), json!(false));
+    if SHORTCUTS_TABS_ONLY {
+        tab = 0;
+    } else {
+        ui.horizontal(|ui| {
+            for (i, name) in [tl!("Keyboard Shortcuts"), tl!("Menus"), tl!("Toolbar")].iter().enumerate() {
+                if crate::widgets::pill_tab(ui, name, tab == i as u64).clicked() {
+                    tab = i as u64;
+                    f.insert("capture".into(), json!(false));
+                }
             }
-        }
-    });
+        });
+    }
     f.insert("tab".into(), json!(tab));
     ui.add_space(6.0);
     if tab == 2 {
