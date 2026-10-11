@@ -954,6 +954,8 @@ pub enum BevelPaint {
     Inner,
     Outer,
     Both,
+    /// Stroke Emboss: shades the stroke effect's area, after the layer and its strokes.
+    Stroke,
 }
 
 /// Height below which an outer bevel pixel counts as off the bevel (beyond the blur's reach):
@@ -1006,7 +1008,7 @@ pub fn bevel_geom(b: &Bevel) -> BevelGeom {
     let chisel = [width + 0.5, width + 1.5 + 1e-3];
     // The height gradient scale that makes the facets [`chisel_slope`] steep at 100 % depth.
     let ramp = match paint {
-        BevelPaint::Inner => chisel[0],
+        BevelPaint::Inner | BevelPaint::Stroke => chisel[0],
         BevelPaint::Outer => chisel[1],
         // Emboss halves share one slope (see `bevel_chisel_h`): the inside half rises
         // 1 / (chisel[0] + chisel[1]) per pixel.
@@ -1101,7 +1103,7 @@ pub fn bevel_chisel_h(paint: BevelPaint, ramp: [f32; 2], din: f32, dout: f32) ->
                 (rout - dout.min(rout)) / (rin + rout)
             }
         }
-        BevelPaint::Inner => (din / rin).min(1.0),
+        BevelPaint::Inner | BevelPaint::Stroke => (din / rin).min(1.0),
     }
 }
 
@@ -1145,7 +1147,7 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
         (apply_contour(hi, &b.gloss_contour), apply_contour(sh, &b.gloss_contour))
     };
     let maps = match g.paint {
-        BevelPaint::Inner | BevelPaint::Outer => {
+        BevelPaint::Inner | BevelPaint::Outer | BevelPaint::Stroke => {
             let (hi, sh) = shade_into(g.depth, u8::from(g.paint == BevelPaint::Outer));
             vec![hi, sh]
         }
@@ -1258,6 +1260,8 @@ pub(crate) fn build_maps_prepared(
     let (w, h) = (rect.width() as usize, rect.height() as usize);
     let shape = Map { w, h, v: shape };
     let items: Vec<&Effect> = layer.effects.items.iter().filter(|e| e.enabled()).collect();
+    let has_stroke = items.iter().any(|e| matches!(e, Effect::Stroke(_)));
+    let (din, dout) = if has_stroke { (Some(dist_inside_by(&shape, Metric::Chamfer)), Some(dist_outside_by(&shape, Metric::Chamfer))) } else { (None, None) };
     let mut bevel_paint = vec![BevelPaint::Inner; items.len()];
     let per: Vec<Vec<Map>> = items
         .iter()
@@ -1268,6 +1272,36 @@ pub(crate) fn build_maps_prepared(
             Effect::OuterGlow(g) => vec![glow_map(&shape, g, false, (rect.x0, rect.y0))],
             Effect::InnerGlow(g) => vec![glow_map(&shape, g, true, (rect.x0, rect.y0))],
             Effect::Satin(s) => vec![satin_map(&shape, s)],
+            // Stroke Emboss: an inner bevel of the stroke effect's area, painted over the stroke
+            // (Photoshop corpus bevel-stroke-*: the stroke is shaded, the layer stays flat;
+            // pixels off 29-35 % → 10-20 %). An inside stroke is the shape's own inner band, and
+            // Photoshop shades it as an inner bevel of the shape (bevel-stroke-emboss-inside-stroke
+            // 3.6 %, the ring 13 %). Without a stroke there is nothing to emboss.
+            Effect::BevelEmboss(b)
+                if b.style == BevelStyle::StrokeEmboss
+                    && items.iter().find_map(|e| if let Effect::Stroke(st) = e { Some(st.position) } else { None }) != Some(StrokePosition::Inside) =>
+            {
+                bevel_paint[i] = BevelPaint::Stroke;
+                let stroke = items.iter().find_map(|e| if let Effect::Stroke(st) = e { Some(st) } else { None });
+                match (stroke, &din, &dout) {
+                    (Some(st), Some(di), Some(dou)) => {
+                        let (in_w, out_w) = stroke_widths(st);
+                        let ring = Map {
+                            w,
+                            h,
+                            v: shape
+                                .v
+                                .iter()
+                                .zip(di.iter().zip(dou))
+                                .map(|(a, (di, dou))| if *a > INSIDE_EPS { (in_w + 0.5 - di).clamp(0.0, 1.0) } else { (out_w + 0.5 - dou).clamp(0.0, 1.0) })
+                                .collect(),
+                        };
+                        let inner = Bevel { style: BevelStyle::InnerBevel, ..(*b).clone() };
+                        bevel_maps(&ring, &inner, light, tex, patterns).0
+                    }
+                    _ => Vec::new(),
+                }
+            }
             Effect::BevelEmboss(b) => {
                 let (maps, paint) = bevel_maps(&shape, b, light, tex, patterns);
                 bevel_paint[i] = paint;
@@ -1276,9 +1310,7 @@ pub(crate) fn build_maps_prepared(
             _ => Vec::new(),
         })
         .collect();
-    let has_stroke = items.iter().any(|e| matches!(e, Effect::Stroke(_)));
     let vector_shape = matches!(layer.content, photosuite_doc::LayerContent::Shape(_));
-    let (din, dout) = if has_stroke { (Some(dist_inside_by(&shape, Metric::Chamfer)), Some(dist_outside_by(&shape, Metric::Chamfer))) } else { (None, None) };
     // Without an outline (unfilled shapes), estimate the vector outline from local coverage.
     let outline = crate::effect_outline(layer).is_some();
     let vdout = (has_stroke && vector_shape && !outline).then(|| dist_outside_by(&local_coverage(&shape), Metric::Chamfer));
@@ -1555,7 +1587,8 @@ pub(crate) fn composite_with_effects_prepared(
     // to 6/255 dark (psd-tools layer_effects Emboss: 7.8 → 5.7/255).
     for (i, e) in rev() {
         if let Effect::BevelEmboss(b) = e
-            && maps.bevel_paint[i] == BevelPaint::Both
+            && matches!(maps.bevel_paint[i], BevelPaint::Both | BevelPaint::Stroke)
+            && !maps.per.get(i).is_none_or(Vec::is_empty)
         {
             paint_color(&mut work, &fx(i, 0), rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
             paint_color(&mut work, &fx(i, 1), rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
@@ -1916,6 +1949,33 @@ mod tests {
         for (got, want) in [(at(0, 13, 32), 0.266), (at(0, 32, 13), 0.534), (at(1, 50, 32), 0.445), (at(1, 32, 50), 0.71)] {
             assert!((got - want).abs() < 0.03, "{got} vs {want}");
         }
+    }
+
+    /// Stroke Emboss shades the stroke effect's area (an outside stroke: the ring outside the
+    /// shape) and leaves the layer's interior flat; without a stroke there is nothing to shade.
+    #[test]
+    fn stroke_emboss_shades_the_stroke() {
+        let n = 48;
+        let shape = square(n, 12, 36);
+        let stroke = Effect::Stroke(photosuite_doc::StrokeFx {
+            common: photosuite_doc::FxCommon::new(BlendMode::Normal, 1.0),
+            size: 6.0,
+            position: StrokePosition::Outside,
+            paint: FxPaint::Color(photosuite_doc::Color::BLACK),
+        });
+        let emboss = Effect::BevelEmboss(Bevel { size: 5.0, ..bevel_of(BevelStyle::StrokeEmboss, BevelTechnique::Smooth) });
+        let mut layer = Layer::raster("l", photosuite_color::PixelFormat::RGBA8);
+        layer.effects.items = vec![stroke, emboss.clone()];
+        let maps = build_maps(&layer, shape.v.clone(), Rect::new(0, 0, n as i32, n as i32), &GlobalLight::default(), &no_tex());
+        let (hi, sh) = (&maps.per[1][0], &maps.per[1][1]);
+        let at = |m: &Map, x: usize, y: usize| m.v[y * n + x];
+        // The ring's lit and shaded sides are painted; the middle of the shape isn't.
+        assert!(at(hi, 8, 24) > 0.05 || at(sh, 8, 24) > 0.05 || at(hi, 24, 8) > 0.05 || at(sh, 24, 8) > 0.05);
+        assert_eq!((at(hi, 24, 24), at(sh, 24, 24)), (0.0, 0.0));
+        // No stroke, no emboss.
+        layer.effects.items = vec![emboss];
+        let maps = build_maps(&layer, shape.v.clone(), Rect::new(0, 0, n as i32, n as i32), &GlobalLight::default(), &no_tex());
+        assert!(maps.per[0].is_empty());
     }
 
     /// Chisel Soft draws the same facets as Chisel Hard along straight edges (Photoshop corpus

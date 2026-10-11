@@ -348,7 +348,7 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
             let paint = |p: BevelPaint| match p {
                 BevelPaint::Outer => 0.0,
                 BevelPaint::Both => 1.0,
-                BevelPaint::Inner => 2.0,
+                BevelPaint::Inner | BevelPaint::Stroke => 2.0,
             };
             let mut h = if bv.technique == BevelTechnique::Smooth {
                 b.conv(In::Shape, photosuite_compose::effects::tent_kernel(g.width))
@@ -391,7 +391,7 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
             // Region (`fs_mbevelshade`): 0 inside, 1 under the edge and outside, 2 / 3 emboss /
             // pillow emboss (both halves in one map).
             let passes: Vec<(f32, f32)> = match g.paint {
-                BevelPaint::Inner => vec![(g.depth, 0.0)],
+                BevelPaint::Inner | BevelPaint::Stroke => vec![(g.depth, 0.0)],
                 BevelPaint::Outer => vec![(g.depth, 1.0)],
                 BevelPaint::Both => vec![(g.depth, if g.pillow { 3.0 } else { 2.0 })],
             };

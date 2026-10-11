@@ -353,6 +353,12 @@ fn cpu_clipping(layers: &[Layer], depth: u32) -> Option<String> {
         if !l.clipped && clipped && (l.fill_opacity < 1.0 || !l.blend_clipped) {
             return Some(format!("layers clipped to `{}` (faded or ungrouped base, composited on the CPU)", l.name));
         }
+        // Stroke Emboss shades the stroke's ring on the CPU; with an inside stroke (or none, where
+        // it draws nothing) it is an inner bevel the GPU draws the same, resp. not at all.
+        let inside_stroke = l.effects.items.iter().find_map(|e| if let Effect::Stroke(s) = e { Some(s.position) } else { None }) == Some(photosuite_doc::StrokePosition::Inside);
+        if !inside_stroke && l.effects.items.iter().any(|e| e.enabled() && matches!(e, Effect::BevelEmboss(b) if b.style == photosuite_doc::BevelStyle::StrokeEmboss)) {
+            return Some(format!("Stroke Emboss on `{}` (composited on the CPU)", l.name));
+        }
         if photosuite_compose::effects_unmasked(l).is_some() {
             return Some(format!("masks of `{}` hide its effects (composited on the CPU)", l.name));
         }

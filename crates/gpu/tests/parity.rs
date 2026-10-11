@@ -712,7 +712,14 @@ fn effect_cases() -> Vec<(&'static str, Vec<Effect>)> {
             vec![Effect::BevelEmboss(Bevel { technique: BevelTechnique::ChiselHard, ..bevel(BevelStyle::PillowEmboss, false, 7.0, 0.0) })],
         ),
         ("bevel emboss smooth wide", vec![Effect::BevelEmboss(bevel(BevelStyle::Emboss, true, 21.0, 0.0))]),
-        ("bevel stroke emboss", vec![Effect::BevelEmboss(bevel(BevelStyle::StrokeEmboss, true, 6.0, 0.0))]),
+        // With an inside stroke (the case the GPU draws; outside strokes and none go to the CPU).
+        (
+            "bevel stroke emboss",
+            vec![
+                Effect::BevelEmboss(bevel(BevelStyle::StrokeEmboss, true, 6.0, 0.0)),
+                Effect::Stroke(stroke(4.0, StrokePosition::Inside, FxPaint::Color(Color::rgb(0.2, 0.3, 0.8)))),
+            ],
+        ),
         (
             "bevel texture",
             vec![Effect::BevelEmboss(Bevel {
