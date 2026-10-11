@@ -8,7 +8,7 @@
 //! Control channel: `ui.menu.invoke {"id":"filter.adaptiveWideAngle","params":{"ui":{"set":{…},
 //! "add":{"a":[x,y],"b":[x,y],"orientation":"…"}, "remove":i, "commit":true | "cancel":true}}}`.
 
-use egui::{Align2, Color32, FontId, Pos2, Rect as ERect, Sense, Stroke, TextureHandle, pos2, vec2};
+use egui::{Color32, Pos2, Rect as ERect, Sense, Stroke, TextureHandle, pos2, vec2};
 use photosuite_algo::transform::Interp;
 use photosuite_algo::wideangle::{self, Camera, Constraint, Orientation, WideAngle, WideModel};
 use photosuite_color::PixelFormat;
@@ -206,27 +206,30 @@ fn commit(app: &mut PhotosuiteApp) -> Result<Value, String> {
     app.run("filter.adaptiveWideAngle", d.command_params())
 }
 
+/// The dialog's largest size; smaller windows get a smaller one ([`widgets::tool_dialog_rect`]).
+const DIALOG_MAX: egui::Vec2 = vec2(1280.0, 860.0);
+
+/// Draws the dialog (a large modal over the document) while it is open.
 pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
     if app.wide_angle.is_none() {
         return;
     }
     let t = Tokens::get(ctx);
-    let screen = ctx.content_rect();
+    let heading = app.wide_angle.as_ref().map(|d| format!("{} ({})", tl!("Adaptive Wide Angle"), d.layer_name)).unwrap_or_default();
+    let rect = widgets::tool_dialog_rect(ctx, DIALOG_MAX);
     let mut action: Option<&str> = None;
     let shift = ctx.input(|i| i.modifiers.shift);
-    egui::Area::new(egui::Id::new("awa-dialog")).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
+    // The dialogs' own frame (title bar, dragging), at a fixed size, like Lens Correction's.
+    let size = crate::dialogs::FrameSize::Fixed(rect.size());
+    crate::dialogs::frame(ctx, egui::Id::new("awa-dialog"), &heading, size, |ui, size| {
         let Some(d) = app.wide_angle.as_mut() else { return };
         if d.dirty {
             d.render(ctx);
         }
-        let (full, _) = ui.allocate_exact_size(screen.size(), Sense::hover());
+        let (full, _) = ui.allocate_exact_size(size.unwrap_or(rect.size()), Sense::hover());
         let painter = ui.painter().clone();
-        painter.rect_filled(full, 0.0, t.chrome);
-        let title = ERect::from_min_size(full.min, vec2(full.width(), 30.0));
-        painter.rect_filled(title, 0.0, t.dock);
-        painter.text(title.center(), Align2::CENTER_CENTER, format!("Adaptive Wide Angle ({})", d.layer_name), FontId::proportional(13.0), t.text);
         let footer_h = 48.0;
-        let body = ERect::from_min_max(pos2(full.left(), title.bottom()), pos2(full.right(), full.bottom() - footer_h));
+        let body = ERect::from_min_max(full.min, pos2(full.right(), full.bottom() - footer_h));
         let view = ERect::from_min_max(body.min, pos2(body.right() - PANEL_W, body.bottom())).shrink(16.0);
         painter.rect_filled(view, 0.0, t.canvas);
         let s = (view.width() / d.pw as f32).min(view.height() / d.ph as f32);

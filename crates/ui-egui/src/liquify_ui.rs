@@ -8,7 +8,7 @@
 //! recorded exactly as the engine replays them (`stroke_begin` + `stroke_segment` per point), so
 //! OK runs `filter.liquify` with the same strokes and gets the same field.
 
-use egui::{Align2, Color32, FontId, Pos2, Rect as ERect, Sense, Stroke, TextureHandle, pos2, vec2};
+use egui::{Color32, Pos2, Rect as ERect, Sense, Stroke, TextureHandle, pos2, vec2};
 use photosuite_algo::liquify::{LiquifyField, LiquifyStroke, LiquifyTool, ProxyImage, auto_cell};
 use photosuite_doc::LayerId;
 use photosuite_geom::Rect;
@@ -566,10 +566,19 @@ fn load_backdrop(app: &PhotosuiteApp, ctx: &egui::Context, layer: LayerId, canva
     Some(ctx.load_texture("liquify-backdrop", crate::distort_ui::surface_image(&s, canvas, PROXY_SIDE), egui::TextureOptions::LINEAR))
 }
 
-/// Draws the dialog (a full-window layer over the app).
+/// The dialog's largest size; smaller windows get a smaller one ([`widgets::tool_dialog_rect`]).
+const DIALOG_MAX: egui::Vec2 = vec2(1280.0, 860.0);
+
+/// Draws the dialog (a large modal over the document, like Lens Correction's) while it is open.
 pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
-    let screen = ctx.content_rect();
+    let Some(heading) = app.distort.liquify.as_ref().map(|d| {
+        let pct = if d.zoom > 0.0 { d.zoom * 100.0 } else { 100.0 };
+        format!("{} ({}, {pct:.0}%)", tl!("Liquify"), d.layer_name)
+    }) else {
+        return;
+    };
+    let rect = widgets::tool_dialog_rect(ctx, DIALOG_MAX);
     if app.distort.liquify.as_ref().is_some_and(|d| d.opts.show_backdrop && d.backdrop.is_none()) {
         let tex = app.distort.liquify.as_ref().map(|d| (d.layer, d.canvas)).and_then(|(layer, canvas)| load_backdrop(app, ctx, layer, canvas));
         if let Some(d) = app.distort.liquify.as_mut() {
@@ -579,19 +588,12 @@ pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
     let mut action: Option<&str> = None;
     let mut events: Vec<ToolEvent> = Vec::new();
     let mut mods = egui::Modifiers::NONE;
-    egui::Area::new(egui::Id::new("liquify-dialog")).order(egui::Order::Foreground).fixed_pos(screen.min).show(ctx, |ui| {
+    let size = crate::dialogs::FrameSize::Fixed(rect.size());
+    crate::dialogs::frame(ctx, egui::Id::new("liquify-dialog"), &heading, size, |ui, size| {
         let Some(d) = app.distort.liquify.as_mut() else { return };
         d.upload(ctx);
-        let (full, _) = ui.allocate_exact_size(screen.size(), Sense::hover());
+        let (body, _) = ui.allocate_exact_size(size.unwrap_or(rect.size()), Sense::hover());
         let painter = ui.painter().clone();
-        painter.rect_filled(full, 0.0, t.chrome);
-        // Title strip.
-        let title = ERect::from_min_size(full.min, vec2(full.width(), 30.0));
-        painter.rect_filled(title, 0.0, t.dock);
-        painter.line_segment([title.left_bottom(), title.right_bottom()], Stroke::new(1.0, t.separator));
-        let pct = if d.zoom > 0.0 { d.zoom * 100.0 } else { 100.0 };
-        painter.text(title.center(), Align2::CENTER_CENTER, format!("Liquify ({}, {:.0}%)", d.layer_name, pct), FontId::proportional(13.0), t.text);
-        let body = ERect::from_min_max(pos2(full.left(), title.bottom()), full.max);
         // Left tool strip.
         let left = ERect::from_min_size(body.min, vec2(LEFT_W, body.height()));
         painter.rect_filled(left, 0.0, t.dock);
