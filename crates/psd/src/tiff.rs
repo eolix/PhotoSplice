@@ -1568,6 +1568,10 @@ mod tests {
         if d.layer_info.is_none() {
             d.layer_info_key = *b"Layr";
         }
+        // An empty global mask is written as Photoshop's default record.
+        if let Some(m) = d.global_layer_mask.as_mut().filter(|m| m.data.is_empty()) {
+            m.data = DEFAULT_GLOBAL_MASK.to_vec();
+        }
         if let Some(info) = &mut d.layer_info {
             info.padding = None;
             for l in &mut info.layers {
