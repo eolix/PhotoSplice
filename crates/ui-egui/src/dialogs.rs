@@ -219,7 +219,10 @@ pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
                 }
                 DialogKind::Command if fields.contains_key("__form") => crate::view_cmds::form_body(ui, &mut fields),
                 DialogKind::Command => {}
-                DialogKind::LayerStyle => crate::layer_style::body(ui, &mut fields, &app.session.patterns),
+                DialogKind::LayerStyle => {
+                    let styles = crate::layer_style::style_choices(app, ui.ctx());
+                    crate::layer_style::body(ui, &mut fields, &app.session.patterns, &styles)
+                }
                 DialogKind::Error => {
                     ui.label(fields.get("message").and_then(Value::as_str).unwrap_or("Error"));
                 }

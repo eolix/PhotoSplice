@@ -226,6 +226,7 @@ enum Ev {
     DeleteGroup(String),
     NewGroup,
     New,
+    Import,
 }
 
 fn group_open(st: &PresetUi, panel: &str, gi: usize, name: &str) -> bool {
@@ -238,6 +239,8 @@ struct Place<'a> {
     canvas: Rect,
     max_h: f32,
     new_tip: &'a str,
+    /// A button after the thumbnail slider that imports preset files (its tooltip).
+    import_tip: Option<&'a str>,
 }
 
 fn browser(
@@ -249,7 +252,7 @@ fn browser(
     thumb: &mut dyn FnMut(&egui::Ui, Rect, usize, usize),
 ) -> Vec<Ev> {
     let t = Tokens::get(ui.ctx());
-    let Place { canvas, max_h, new_tip } = place;
+    let Place { canvas, max_h, new_tip, import_tip } = place;
     let mut ev = Vec::new();
     let size = *st.sizes.get(panel).unwrap_or(&40.0);
     let list = size <= MIN_THUMB + 0.5;
@@ -409,6 +412,11 @@ fn browser(
         if (s - size).abs() > 0.01 {
             st.sizes.insert(panel.to_string(), s);
         }
+        if let Some(tip) = import_tip
+            && crate::icons::button(ui, "folder-open", 24.0, false, tip).clicked()
+        {
+            ev.push(Ev::Import);
+        }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if crate::icons::button(ui, "trash", 24.0, false, tl!("Delete")).clicked()
                 && let Some(k) = selected.clone()
@@ -501,7 +509,7 @@ pub fn gradients_browser(app: &mut PhotosuiteApp, ui: &mut egui::Ui, max_h: f32)
         .collect();
     let canvas = app.last_canvas_rect;
     let mut st = std::mem::take(&mut app.ui.presets_ui);
-    let events = browser(ui, &mut st, "gradients", &groups, Place { canvas, max_h, new_tip: tl!("Create new gradient") }, &mut |ui, r, gi, ii| {
+    let events = browser(ui, &mut st, "gradients", &groups, Place { canvas, max_h, new_tip: tl!("Create new gradient"), import_tip: None }, &mut |ui, r, gi, ii| {
         let stops = groups_src[gi].items[ii].resolve(fg, bg);
         paint_gradient(ui, r, &stops);
     });
@@ -551,7 +559,7 @@ pub fn patterns_panel(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
     let max_h = (ui.available_height() - 40.0).clamp(90.0, 280.0);
     let ctx = ui.ctx().clone();
     let events =
-        browser(ui, &mut st, "patterns", &groups, Place { canvas, max_h, new_tip: tl!("Create new pattern from the selection") }, &mut |ui, r, gi, ii| {
+        browser(ui, &mut st, "patterns", &groups, Place { canvas, max_h, new_tip: tl!("Create new pattern from the selection"), import_tip: None }, &mut |ui, r, gi, ii| {
             let tex = pattern_texture(&ctx, &pats[gi][ii]);
             ui.painter().image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
         });
@@ -655,7 +663,7 @@ pub fn styles_panel(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
         &mut st,
         "styles",
         &groups,
-        Place { canvas, max_h: 300.0, new_tip: tl!("Create new style from the selected layer") },
+        Place { canvas, max_h: 300.0, new_tip: tl!("Create new style from the selected layer"), import_tip: Some(tl!("Import Styles… (.asl)")) },
         &mut |ui, r, gi, ii| {
             ui.painter().rect_filled(r, 2.0, t.field);
             ui.painter().image(texes[gi][ii].id(), r, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
@@ -675,6 +683,8 @@ pub fn styles_panel(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
                 let _ = pos;
                 run(app, "style.presets.apply", json!({"preset": k}));
             }
+            // File › Open's picker: an .asl lands here through the preset-file import.
+            Ev::Import => app.open_dialog_file(),
             _ => {
                 generic(app, "styles", "style.presets", &e, json!({"name": "Style"}));
             }
@@ -699,7 +709,7 @@ pub fn shapes_panel(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
         &mut st,
         "shapes",
         &groups,
-        Place { canvas, max_h: 300.0, new_tip: tl!("Create new shape from the current path") },
+        Place { canvas, max_h: 300.0, new_tip: tl!("Create new shape from the current path"), import_tip: None },
         &mut |ui, r, gi, ii| {
             let tex = shape_texture(&ctx, &src[gi].items[ii]);
             ui.painter().image(tex.id(), r.shrink(2.0), Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), t.text);

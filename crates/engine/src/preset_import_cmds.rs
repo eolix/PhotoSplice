@@ -5,6 +5,8 @@
 //!   `photosuite-psd` (`abr`), the mapping onto [`BrushSettings`] in `photosuite-io` (`abr_map`).
 //! - `gradient.presets.importGrd` adds the gradients of a `.grd` file (version 5) to the
 //!   Gradients panel as one group.
+//! - `style.presets.importAsl` adds the styles of an `.asl` layer-style library to the Styles
+//!   panel as one group, and its patterns (for pattern overlays) to the pattern library.
 //!
 //! [`BrushSettings`]: photosuite_paint::BrushSettings
 
@@ -130,7 +132,56 @@ pub fn specs() -> Vec<CommandSpec> {
             run: import_grd,
             journal: true,
         },
+        CommandSpec {
+            id: "style.presets.importAsl",
+            label: "Import Styles…",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"path":".asl file"?,"data":base64 bytes?,"group":string?=file name,"replace":bool=true (replace a group of the same name)}"##,
+            enabled: always,
+            run: import_asl,
+            journal: true,
+        },
     ]
+}
+
+// ------------------------------------------------------------------ styles (.asl)
+
+fn import_asl(s: &mut Session, p: &Value) -> Result<Value> {
+    use crate::presets::{Group, styles::StylePreset};
+    let cmd = "style.presets.importAsl";
+    let (bytes, stem) = file_bytes(p, cmd, ".asl file")?;
+    let group = match p.get("group") {
+        Some(v) => v.as_str().map(str::trim).filter(|g| !g.is_empty()).ok_or_else(|| bad(cmd, "`group` must be a non-empty string"))?.to_string(),
+        None if !stem.is_empty() => stem,
+        None => "Imported Styles".to_string(),
+    };
+    let (styles, patterns) = photosuite_io::asl_map::read_asl(&bytes).map_err(|e| bad(cmd, e))?;
+    if styles.is_empty() {
+        return Err(bad(cmd, "the file holds no styles"));
+    }
+    let mut warnings = Vec::new();
+    let empty = styles.iter().filter(|st| st.effects.is_empty() && st.blend.is_none() && st.fill_opacity.is_none()).count();
+    if empty > 0 {
+        warnings.push(format!("{empty} style(s) have no effects PhotoSuite can draw"));
+    }
+    let mut items: Vec<StylePreset> = Vec::new();
+    for st in styles {
+        let taken: Vec<String> = items.iter().map(|i| i.name.clone()).collect();
+        items.push(StylePreset { name: unique(&st.name, &taken), effects: st.effects, blend: st.blend, fill_opacity: st.fill_opacity });
+    }
+    // Pattern overlays find their patterns in the library, by id.
+    let npat = patterns.len();
+    if npat > 0 {
+        crate::pattern_cmds::attach_group(s, &group, patterns);
+    }
+    let names: Vec<String> = items.iter().map(|i| i.name.clone()).collect();
+    if p.get("replace").and_then(Value::as_bool).unwrap_or(true) {
+        s.presets.styles.retain(|g| g.name != group);
+    }
+    s.presets.styles.push(Group::new(&group, items));
+    s.presets_changed();
+    Ok(json!({"group": group, "imported": names, "count": names.len(), "patterns": npat, "warnings": warnings}))
 }
 
 // ------------------------------------------------------------------ gradients (.grd)
@@ -359,5 +410,24 @@ mod tests {
         let taken = vec!["A".to_string(), "a 2".to_string()];
         assert_eq!(unique("a", &taken), "a 3");
         assert_eq!(unique("B", &taken), "B");
+    }
+
+    #[test]
+    fn asl_libraries_import_as_a_styles_group() {
+        use photosuite_psd::asl::{AslFile, AslStyle, write};
+        let fx = photosuite_io::effects_map::write_lfx2(true, &[photosuite_doc::Effect::default_drop_shadow()]);
+        let (lefx, _) = photosuite_psd::descriptor::VersionedDescriptor::parse_prefix(&fx[4..]).unwrap();
+        let st = Descriptor::new("Styl").with("Lefx", DV::Descriptor(lefx.descriptor));
+        let styles = ["Gold", "Gold", ""].map(|n| AslStyle { name: n.into(), id: String::new(), style: st.clone() }).to_vec();
+        let data = photosuite_paint::tile::b64_encode(&write(&AslFile { patterns: Vec::new(), styles }).unwrap());
+        let mut s = Session::new();
+        let r = s.execute("style.presets.importAsl", json!({"data": data, "group": "Metals"})).unwrap();
+        assert_eq!(r["imported"], json!(["Gold", "Gold 2", "Style"]), "names kept unique");
+        let g = s.presets.styles.iter().find(|g| g.name == "Metals").unwrap();
+        assert!(matches!(g.items[0].effects.as_slice(), [photosuite_doc::Effect::DropShadow(_)]));
+        // Bad input is an error, not a crash.
+        for p in [json!({}), json!({"data": "%%%"}), json!({"data": photosuite_paint::tile::b64_encode(b"8BSL")}), json!({"data": data, "group": ""})] {
+            assert!(s.execute("style.presets.importAsl", p.clone()).is_err(), "{p}");
+        }
     }
 }

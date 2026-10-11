@@ -125,12 +125,10 @@ fn save_writes_every_writable_format_in_place_and_asks_for_the_rest() {
     }
     let n = written.borrow().len();
     // A camera raw file and a new document have nothing to write in place: Save As.
-    for path in ["/pics/raw.NEF"] {
-        app.open_file(path, b"x").unwrap();
-        let r = menus::invoke(&mut app, &ctx, "file.save", json!({})).unwrap();
-        let d = app.ui.dialog_mut(r["dialog"].as_u64().unwrap()).unwrap();
-        assert!(d.fields.contains_key("__saveAs"), "{path}");
-    }
+    app.open_file("/pics/raw.NEF", b"x").unwrap();
+    let r = menus::invoke(&mut app, &ctx, "file.save", json!({})).unwrap();
+    let d = app.ui.dialog_mut(r["dialog"].as_u64().unwrap()).unwrap();
+    assert!(d.fields.contains_key("__saveAs"), "raw.NEF");
     app.run("file.new", json!({"width": 8, "height": 8})).unwrap();
     let r = menus::invoke(&mut app, &ctx, "file.save", json!({})).unwrap();
     assert!(r["dialog"].is_u64(), "{r}");

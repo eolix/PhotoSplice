@@ -277,6 +277,66 @@ fn blend_mode_key(mode: ColorMode) -> Option<&'static str> {
     }
 }
 
+/// A style the dialog can load (the Styles panel's presets, with their thumbnails).
+pub struct StyleChoice {
+    pub group: String,
+    pub name: String,
+    pub tex: egui::TextureHandle,
+    pub effects: Vec<Effect>,
+    pub blend: Option<photosuite_color::BlendMode>,
+    pub fill_opacity: Option<f32>,
+}
+
+/// The Styles panel's presets as dialog choices.
+pub fn style_choices(app: &PhotosuiteApp, ctx: &egui::Context) -> Vec<StyleChoice> {
+    app.session
+        .presets
+        .styles
+        .iter()
+        .flat_map(|g| {
+            g.items.iter().map(|st| StyleChoice {
+                group: g.name.clone(),
+                name: st.name.clone(),
+                tex: crate::preset_panels::style_texture(app, ctx, st),
+                effects: st.effects.clone(),
+                blend: st.blend,
+                fill_opacity: st.fill_opacity,
+            })
+        })
+        .collect()
+}
+
+/// Loads style `st` into the dialog, as picking it in Photoshop's Styles page does: its effects
+/// replace the dialog's (each kind on with its settings, or off at its defaults), and the
+/// blending options it was saved with replace those.
+pub fn load_style(f: &mut Map<String, Value>, st: &StyleChoice) {
+    let light = f.get("globalLight").and_then(Value::as_f64).unwrap_or(120.0) as f32;
+    for &(kind, _) in KINDS {
+        let e = st.effects.iter().find(|e| kind_of(e) == kind);
+        f.insert(format!("on:{kind}"), json!(e.is_some_and(|e| e.enabled())));
+        let params = e.map(|e| values_of(e, light)).unwrap_or_else(|| {
+            let mut params = defaults(kind);
+            if params.get("useGlobalLight").and_then(Value::as_bool) == Some(true) {
+                params["angle"] = json!(light);
+            }
+            params
+        });
+        f.insert(format!("p:{kind}"), params);
+    }
+    let key = format!("p:{BLENDING}");
+    if let Some(Value::Object(bo)) = f.get_mut(&key) {
+        if let Some(b) = st.blend {
+            bo.insert("blend".into(), json!(b.label()));
+        }
+        if let Some(fill) = st.fill_opacity {
+            bo.insert("fillOpacity".into(), json!((fill * 100.0).round()));
+        }
+    }
+    if let Some(first) = st.effects.first() {
+        f.insert("selected".into(), json!(kind_of(first)));
+    }
+}
+
 /// Dialog fields for a layer: selected kind, and per kind {enabled, params}. `light` is the
 /// document's global light angle, shown by effects that use it.
 pub fn initial_fields(layer: &Layer, mode: ColorMode, select: Option<&str>, light: f32) -> Map<String, Value> {
@@ -425,7 +485,7 @@ pub fn preview_document(
 }
 
 /// Dialog body (left list, right parameters).
-pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>, patterns: &photosuite_engine::pattern_cmds::PatternLibrary) {
+pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>, patterns: &photosuite_engine::pattern_cmds::PatternLibrary, styles: &[StyleChoice]) {
     let t = Tokens::get(ui.ctx());
     let selected = f.get("selected").and_then(Value::as_str).unwrap_or("dropShadow").to_string();
     let invalid = validate_params(f).err();
@@ -590,6 +650,50 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>, patterns: &photosuite
             }
             ui.add_space(6.0);
             swatch(ui, f, patterns);
+            // The Styles panel's styles, beside the swatch: picking one loads it.
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(tl!("Styles")).color(t.text_dim).size(11.0));
+                let (cr, cresp) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
+                if cresp.hovered() {
+                    ui.painter().rect_filled(cr, t.radius_sm, t.hover);
+                }
+                widgets::chevron_icon(ui, cr, ui.style().interact(&cresp), false);
+                let mut picked = None;
+                egui::Popup::from_toggle_button_response(&cresp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                    const THUMB: f32 = 36.0;
+                    ui.set_width(6.0 * (THUMB + 4.0));
+                    if styles.is_empty() {
+                        ui.label(RichText::new(tl!("No styles (Window › Styles)")).color(t.text_dim));
+                    }
+                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                        let mut start = 0;
+                        while start < styles.len() {
+                            let group = styles[start].group.as_str();
+                            let end = styles[start..].iter().position(|st| st.group != group).map_or(styles.len(), |n| start + n);
+                            ui.label(RichText::new(group).color(t.text_dim).size(11.0));
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                                for (i, st) in styles.iter().enumerate().take(end).skip(start) {
+                                    let (r, resp) = ui.allocate_exact_size(vec2(THUMB, THUMB), Sense::click());
+                                    ui.painter().rect_filled(r, 2.0, t.field);
+                                    ui.painter().image(st.tex.id(), r, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), Color32::WHITE);
+                                    if resp.hovered() {
+                                        ui.painter().rect_stroke(r, 2.0, Stroke::new(1.5, t.accent), StrokeKind::Inside);
+                                    }
+                                    if resp.on_hover_text(&st.name).clicked() {
+                                        picked = Some(i);
+                                    }
+                                }
+                            });
+                            start = end;
+                        }
+                    });
+                });
+                if let Some(st) = picked.and_then(|i| styles.get(i)) {
+                    load_style(f, st);
+                    egui::Popup::close_all(ui.ctx());
+                }
+            });
         });
     });
     let r = row.response.rect;
@@ -992,7 +1096,7 @@ mod tests {
         fields.insert("p:dropShadow".into(), json!(7));
 
         let patterns = photosuite_engine::pattern_cmds::PatternLibrary::default();
-        let mut out = ctx.run_ui(Default::default(), |ui| body(ui, &mut fields, &patterns));
+        let mut out = ctx.run_ui(Default::default(), |ui| body(ui, &mut fields, &patterns, &[]));
         out.textures_delta.clear();
 
         assert_eq!(fields.get("p:dropShadow"), Some(&json!(7)));

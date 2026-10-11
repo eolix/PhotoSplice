@@ -1,14 +1,15 @@
 //! Preset files opened like documents (File › Open, drag-and-drop, the Brushes panel's
 //! Import Brushes…, the Preset Manager's Load…): Photoshop brushes (`.abr`) go to the brush
 //! library through `brush.presets.importAbr`, gradients (`.grd`) to the Gradients panel through
-//! `gradient.presets.importGrd`, instead of opening as documents.
+//! `gradient.presets.importGrd`, layer-style libraries (`.asl`) to the Styles panel through
+//! `style.presets.importAsl` (also its Import Styles… button), instead of opening as documents.
 
 use serde_json::{Value, json};
 
 use crate::PhotosuiteApp;
 
 /// Extensions handled here rather than by the document importer.
-pub const PRESET_EXTS: &[&str] = &["abr", "grd"];
+pub const PRESET_EXTS: &[&str] = &["abr", "grd", "asl"];
 
 fn ext(name: &str) -> String {
     std::path::Path::new(name).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default()
@@ -34,6 +35,7 @@ pub fn open(app: &mut PhotosuiteApp, name: &str, bytes: &[u8]) -> Option<Result<
     let (cmd, what) = match ext(name).as_str() {
         "abr" => ("brush.presets.importAbr", "brushes"),
         "grd" => ("gradient.presets.importGrd", "gradients"),
+        "asl" => ("style.presets.importAsl", "styles"),
         _ => return None,
     };
     let stem = std::path::Path::new(name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| tl!("Imported").into());
@@ -61,6 +63,9 @@ pub fn open(app: &mut PhotosuiteApp, name: &str, bytes: &[u8]) -> Option<Result<
             app.ui.panels.brush_settings = true;
             app.ui.brush_tab = 1;
         }
+        if what == "styles" {
+            app.ui.presets_ui.styles = true;
+        }
     }))
 }
 
@@ -72,6 +77,7 @@ mod tests {
     fn recognises_preset_files() {
         assert!(is_preset_file("/a/b/Set.ABR"));
         assert!(is_preset_file("sunsets.grd"));
+        assert!(is_preset_file("Old Gold.asl"));
         assert!(!is_preset_file("photo.psd"));
         assert!(!is_preset_file("abr"));
     }
