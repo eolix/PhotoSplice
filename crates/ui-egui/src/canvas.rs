@@ -3151,7 +3151,7 @@ mod tests {
             assert_eq!(app.session.active().unwrap().revision, rev, "{tool:?}: sampling must not edit the document");
             assert!(app.drag.is_none() && !app.alt_sampling);
         }
-        // Agents get the same through `ui.pointer` (MCP `ui_pointer`).
+        // Agents get the same through `ui.pointer`.
         app.ui.tool = Tool::Brush;
         let ctx = egui::Context::default();
         let events = json!([{"kind": "down", "x": 10, "y": 10}, {"kind": "up", "x": 10, "y": 10}]);

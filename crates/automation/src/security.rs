@@ -17,8 +17,6 @@ pub const AUTH_METHOD: &str = "auth";
 pub const MAX_REQUEST_BYTES: usize = 1 << 20;
 /// Maximum simultaneously serviced TCP connections per listener.
 pub const MAX_CONNECTIONS: usize = 16;
-/// Maximum commands or method calls in one batch.
-pub const MAX_BATCH_STEPS: usize = 256;
 /// Idle/read and write timeout for loopback TCP connections.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(30);
 

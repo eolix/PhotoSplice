@@ -584,7 +584,7 @@ pub fn is_enabled(app: &PhotosuiteApp, id: &str) -> Option<bool> {
 }
 
 /// While transforming, the box owns the history for every caller (menus, shortcuts, the control
-/// channel, MCP): Undo and Redo step through it, and Toggle Last State, which would change the
+/// channel): Undo and Redo step through it, and Toggle Last State, which would change the
 /// document under the box, is refused. `None` for other commands or when not transforming.
 pub fn intercept(app: &mut PhotosuiteApp, id: &str) -> Option<Result<serde_json::Value, String>> {
     app.ui.transform.as_ref()?;

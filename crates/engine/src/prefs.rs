@@ -4,7 +4,7 @@
 //! The whole set is plain serde data owned by the [`Session`] ([`Session::prefs`]), so every
 //! frontend reads the same values and agents change them with `prefs.get` / `prefs.set` /
 //! `prefs.reset`. Sections that only the GUI shell honours (cursors, checkerboard, guide colours,
-//! interface theme…) live here too: keeping one document means the headless MCP server sees and
+//! interface theme…) live here too: keeping one document means the control channel sees and
 //! edits exactly what the desktop app persists, and the shell has no second store to keep in sync.
 //!
 //! The engine never touches the filesystem for preferences (it must build for wasm). Frontends
@@ -694,7 +694,7 @@ impl Default for RawDefaults {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Integrations {
-    /// Allow agents to drive the app over the loopback control channel / MCP bridge.
+    /// Allow agents to drive the app over the loopback control channel.
     pub allow_agent_control: bool,
     /// Default control port (0 = only when `--control` is given).
     pub control_port: u32,

@@ -1,7 +1,7 @@
 //! Window › Actions, as engine commands (`actions.record` / `stop` / `play` / `list` / `get` /
 //! `delete`).
 //!
-//! The list lives on [`Session`] so the panel, the CLI, the control channel and MCP share one
+//! The list lives on [`Session`] so the panel and the control channel share one
 //! copy. Recording copies replayable journal entries (commands whose [`CommandSpec::journal`] is
 //! set, except `actions.*`) into an action. Playback runs those steps with [`Session::execute`]
 //! and stops at the first error, leaving one history step per step that ran.

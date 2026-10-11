@@ -5,7 +5,7 @@
 //! preview and Invert. Controls a mode doesn't use are disabled, like Photoshop's.
 //!
 //! Everything lives in the dialog fields (`ui.dialog.set` drives it). The preview and OK run the
-//! same engine command, `select.colorRange`, so the GUI, MCP and scripts select identically; the
+//! same engine command, `select.colorRange`, so the GUI, agents and scripts select identically; the
 //! preview runs it on a small proxy of the document, OK on the document itself (one history step).
 //! Cancel never touches the document, so the previous selection stays as it was.
 

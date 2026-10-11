@@ -2,7 +2,7 @@
 # run); a tag also gathers them into a draft GitHub Release.
 #
 # Artifacts per packaging run (packaging/* scripts do the work; this file only prepares runners):
-#   photosuite-macos            universal (arm64 + x86_64) .dmg, CLI .zip
+#   photosuite-macos            universal (arm64 + x86_64) .dmg
 #   photosuite-windows          x64 .msi installer, portable .zip
 #   photosuite-linux-x86_64     .AppImage (+ .zsync), .deb, .rpm, Arch .pkg.tar.zst, .tar.gz
 #   photosuite-linux-aarch64    .AppImage (+ .zsync), .deb, .rpm, Arch .pkg.tar.zst, .tar.gz

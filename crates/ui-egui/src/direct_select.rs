@@ -11,7 +11,7 @@
 //!
 //! A drag previews with `photosuite_vector::edit` and commits once on release through the engine
 //! (`path.moveAnchors`, `path.moveHandle`, `path.bendSegment`, `path.convertPoint`): one history
-//! step per drag, and the same commands drive it over MCP and the control channel.
+//! step per drag, and the same commands drive it over the control channel.
 
 use egui::{Color32, Modifiers, Pos2};
 use photosuite_doc::vector::Path;

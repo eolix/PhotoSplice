@@ -5,7 +5,7 @@
 .DESCRIPTION
   Produces, in $env:DIST (default: dist/release):
     photosuite-<version>-windows-<arch>.msi            per-machine installer (WiX v5)
-    photosuite-<version>-windows-<arch>-portable.zip   photosuite.exe + photosuite-cli.exe + portable.txt
+    photosuite-<version>-windows-<arch>-portable.zip   photosuite.exe + portable.txt
 
   The binaries link the C runtime statically (+crt-static), so neither the MSI nor the portable
   zip needs the Visual C++ redistributable. Signing is delegated to sign.ps1 (skipped with a
@@ -61,14 +61,14 @@ if (-not $SkipBuild) {
   [Environment]::SetEnvironmentVariable($flagVar, '-C target-feature=+crt-static')
   # Fail the build (rather than warn) if the icon/VERSIONINFO can't be embedded.
   $env:PHOTOSUITE_REQUIRE_WINRES = '1'
-  Invoke-Native "cargo build ($Target)" { cargo build --release --locked -p photosuite -p photosuite-cli --target $Target }
+  Invoke-Native "cargo build ($Target)" { cargo build --release --locked -p photosuite --target $Target }
 }
 
 $Bin = Join-Path $TargetDir "$Target\release"
 $Stage = Join-Path $TargetDir "windows-package\$Arch"
 Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
-Copy-Item (Join-Path $Bin 'photosuite.exe'), (Join-Path $Bin 'photosuite-cli.exe') $Stage
+Copy-Item (Join-Path $Bin 'photosuite.exe') $Stage
 # Bundled resources beside the exe: the same allowlist as SHIPPED_RESOURCES in packaging/env.sh.
 foreach ($d in 'luts', 'lensfun', 'gradients', 'brushes', 'patterns', 'shapes') {
   New-Item -ItemType Directory -Force -Path (Join-Path $Stage 'resources') | Out-Null
@@ -83,7 +83,7 @@ foreach ($f in 'README.md', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE', 'THIRD-PA
   if (Test-Path $p) { Copy-Item $p $Notices }
 }
 
-& (Join-Path $PSScriptRoot 'sign.ps1') (Join-Path $Stage 'photosuite.exe') (Join-Path $Stage 'photosuite-cli.exe')
+& (Join-Path $PSScriptRoot 'sign.ps1') (Join-Path $Stage 'photosuite.exe')
 
 # ---- MSI ---------------------------------------------------------------------------------------
 $Msi = Join-Path $Dist "photosuite-$Version-windows-$Arch.msi"
@@ -118,5 +118,6 @@ $Zip = Join-Path $Dist "photosuite-$Version-windows-$Arch-portable.zip"
 Remove-Item -Force $Zip -ErrorAction SilentlyContinue
 Compress-Archive -Path $Portable -DestinationPath $Zip
 
-Invoke-Native 'photosuite-cli --version' { & (Join-Path $Stage 'photosuite-cli.exe') --version }
+# A GUI-subsystem exe: piping its output makes PowerShell wait for it and show the version.
+Invoke-Native 'photosuite --version' { & (Join-Path $Stage 'photosuite.exe') --version | Out-Host }
 Get-Item $Msi, $Zip | Format-Table Name, Length

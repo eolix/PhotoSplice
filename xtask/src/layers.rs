@@ -261,7 +261,6 @@ mod tests {
             c("photosuite-doc", &[("photosuite-geom", Normal, true)]),
             c("photosuite-engine", &[("photosuite-doc", Normal, true), ("photosuite-testkit", Dev, true)]),
             c("photosuite-ui-egui", &[("photosuite-engine", Normal, true), ("egui", Normal, false)]),
-            c("photosuite-cli", &[("photosuite-ui-egui", Normal, true)]),
         ];
         assert!(check(&g).is_empty(), "{:?}", check(&g));
     }
@@ -342,7 +341,7 @@ mod tests {
 
     #[test]
     fn apps_and_xtask_exempt() {
-        for app in ["photosuite", "photosuite-cli", "photosuite-web", "xtask"] {
+        for app in ["photosuite", "photosuite-web", "xtask"] {
             assert!(check(&[c(app, &[("egui", Normal, false), ("photosuite-ui-egui", Normal, true)])]).is_empty());
         }
     }

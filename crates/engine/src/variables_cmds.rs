@@ -2,7 +2,7 @@
 //! data-driven graphics. Define variables that bind a layer's visibility, text or pixels to named
 //! data slots, then apply a data set (a row of values) to render a variation. Everything is
 //! headless and scriptable, so an agent can bind a template once and batch-render many files over
-//! the CLI/MCP (`file.export.dataSetsAsFiles`).
+//! the control channel (`file.export.dataSetsAsFiles`).
 
 use std::sync::Arc;
 

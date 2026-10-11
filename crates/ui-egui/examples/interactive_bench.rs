@@ -6,7 +6,7 @@
 //! cargo run --release -p photosuite-ui-egui --example interactive_bench -- [--size 7360x4912] [--reps 5] [--json out.json] [--only text] [--cpu]
 //! ```
 //!
-//! Every edit goes through `Session::execute` (the command path the UI, CLI and MCP share:
+//! Every edit goes through `Session::execute` (the command path the UI and the control channel share:
 //! history snapshot, command, damage), then the canvas refresh the app would do: the GPU
 //! compositor over the edit's damage rect (or the whole document), waited on so the time is the
 //! real latency. Without a GPU adapter the CPU compositor stands in. Zoom and pan don't

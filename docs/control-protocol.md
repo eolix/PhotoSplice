@@ -28,7 +28,7 @@ Each reply is one JSON line with the same `id`:
 {"id": 2, "ok": false, "error": "unknown tool `foo`"}
 ```
 
-The transport is `apps/photosuite/src/control_server.rs`, and the handlers are in `crates/ui-egui/src/control.rs`. The MCP server (`photosuite-cli mcp --bridge 127.0.0.1:<port>`, crate `photosuite-automation`) wraps this same protocol. See [MCP bridge](#mcp-bridge) below.
+The transport is `apps/photosuite/src/control_server.rs`, and the handlers are in `crates/ui-egui/src/control.rs`. The token, size limits and file-access checks are in `crates/automation`.
 
 ## Methods
 
@@ -76,7 +76,7 @@ UI-level commands (`file.open`, `file.save`, `view.zoomIn`, `window.theme.pro`, 
 ## Preferences
 
 Preferences (Edit › Preferences, grouped like Photoshop's dialog sections) live in the engine, so
-the same commands work in the app, the CLI and headless MCP. Paths are dotted camelCase keys:
+the same commands work in the app and over the control channel. Paths are dotted camelCase keys:
 `<section>.<key>`, with sections `general`, `interface`, `workspace`, `tools`, `historyLog`,
 `fileHandling`, `export`, `performance`, `scratchDisks`, `cursors`, `transparencyAndGamut`,
 `unitsAndRulers`, `guidesGridAndSlices`, `plugIns`, `type`, `enhancedControls`, `rawDefaults`,
@@ -112,7 +112,7 @@ User and imported (`.abr`) brush presets live in the config directory's `Presets
 `.pcbrushes` JSON file per preset group, content-addressed tip bitmaps under `tips/`, and an
 `index.json` with the group order and deleted built-ins (see `photosuite_engine::preset_store`).
 The store loads in the background at launch and syncs after every brush preset change; built-ins
-are never written. Headless CLI/MCP sessions and the web build keep brush presets for the session
+are never written. The web build keeps brush presets for the session
 only. Gradient presets (including imported `.grd` groups) persist with the preferences.
 
 ## Snapping
@@ -124,120 +124,19 @@ Free Transform handles and drags inside the box, and guides. Holding Ctrl disabl
 the drag. With View › Show › Smart Guides on, the Move tool also snaps to other layers and draws
 magenta alignment lines. `ui.pointer` drives the same code, so agents get identical results.
 
-## MCP bridge
-
-`photosuite-automation` provides an MCP server built on the official Rust SDK (`rmcp`). It runs in one of two modes:
-
-- **Headless** (`photosuite-cli mcp`): an in-process `photosuite_engine::Session`. There is no window.
-- **Bridge** (`photosuite-cli mcp --bridge 127.0.0.1:7878 --control-token-file <path>`): every tool is forwarded to a running `photosuite --control 7878 --control-token-file <path>` over this protocol, so agents see and drive the live app.
-
-The bridge keeps one authenticated TCP connection open. It reconnects and authenticates once if a request fails, and it skips reply lines whose `id` doesn't match the request (for example, stale replies to requests that timed out). It only accepts loopback addresses, because the app only listens on loopback. Supply its bearer token with `--control-token-file`, `--control-token`, `PHOTOSUITE_CONTROL_TOKEN_FILE`, or `PHOTOSUITE_CONTROL_TOKEN`:
-
-```sh
-photosuite-cli mcp --bridge 127.0.0.1:7878 \
-  --control-token-file /private/path/photosuite-control.token
-```
-
-How each MCP tool maps onto control methods in bridge mode:
-
-| MCP tool | Control method |
-|---|---|
-| `command_run {id, params}` | `engine.execute {command: id, params}` |
-| `command_list {filter?, enabled_only?}` | `engine.commands` (filtered by the MCP server) |
-| `doc_new {…}` | `engine.execute {command: "file.new", params}` |
-| `doc_inspect` | `engine.execute {command: "document.inspect"}` |
-| `doc_open {path}` | `app.open {path}` |
-| `doc_save {path}` / `doc_export {path}` | `app.save {path}` |
-| `doc_render_preview {max_side?}` | `ui.screenshot`, returned directly as PNG image content |
-| `session_list`, `ui_inspect` | `ui.inspect` |
-| `ui_screenshot {max_side?}` | `ui.screenshot`, returned as PNG image content |
-| `ui_pointer {events, modifiers?}` | `ui.pointer` |
-| `ui_menu_invoke {id}` | `ui.menu.invoke` |
-| `ui_set {fields}` | `ui.set` |
-| `control_call {method, params}` | any method, passed through unchanged |
-
-`doc_select` and `doc_close` work only in headless mode. The `ui_*` tools and `control_call` work only in bridge mode; in headless mode they return a tool error that explains how to start bridge mode.
-
-**Security note:** TCP control uses a bearer token, not client identity or general per-method
-authorization. A client that possesses the token receives the non-filesystem control surface,
-including UI input, command execution, and application control. Keep token files private, do not
-commit or log tokens, and do not pass a token directly on a shared system where process command
-lines are visible. The protocol is unencrypted and must remain on loopback; do not tunnel or proxy
-it to an untrusted host.
-
-Filesystem access fails closed unless launch-time read and/or write roots are granted with
-`--automation-read-root` and `--automation-write-root` (or
-`PHOTOSUITE_AUTOMATION_READ_ROOT` / `PHOTOSUITE_AUTOMATION_WRITE_ROOT`). Request paths must be
-non-empty, forward-slash relative paths beneath the applicable root. Absolute paths, parent
-traversal, alternate separators, drive/device/stream prefixes, malformed components, and link
-escapes are rejected before file effects. Read and write authority are independent; the parent of
-a new output file must already exist. Engine commands that still use ambient filesystem paths are
-disabled for automation until they are migrated to the same capability interface. Interactive
-desktop file pickers retain normal user-selected access.
-
-## Headless server
-
-`photosuite-cli serve` keeps one headless engine session (no window, no GPU) and answers the same
-JSON-lines envelope on stdio, or on `127.0.0.1:<port>` with `--port <port>` (loopback only; each
-authenticated connection shares the session). TCP uses the same first-frame `auth` exchange and
-token options as desktop control. Stdio does not require this TCP handshake because access is
-inherited from the process pipe. It is the fastest way for a script or agent to make many edits:
-no MCP framing, no app start-up per command. Configure its file access with the same
-`--automation-read-root` and `--automation-write-root` flags. Implementation:
-`crates/automation/src/rpc.rs`.
-
-| Method | Params |
-|---|---|
-| `engine.execute` | `{command, params?}`: any engine command |
-| `engine.commands` | `{filter?}`: registry with params docs and enablement |
-| `session.list` | open documents and the active index |
-| `doc.open` / `doc.new` | `{path}` / `file.new` params |
-| `doc.save` | `{path?, format?, quality?, index?}` (`.pcraft` native, else export by extension) |
-| `doc.inspect` | `{index?}`: same JSON as `document.inspect` |
-| `doc.render` | `{index?, maxSide? (1024; 0 = full), path?}`: PNG to `path`, else `{mime, base64}` |
-| `doc.select` / `doc.close` | `{index}` / `{index?}` |
-| `batch` | `{steps: [{command, params?} \| {method, params?}], stopOnError? (true)}` → `{completed, failed, results}` |
-| `methods` | the list above |
-
-```sh
-printf '%s\n' \
-  '{"id":1,"method":"doc.open","params":{"path":"in.jpg"}}' \
-  '{"id":2,"method":"batch","params":{"steps":[{"command":"image.adjustments.invert"},{"command":"filter.blur.gaussianBlur","params":{"radius":3}}]}}' \
-  '{"id":3,"method":"doc.save","params":{"path":"out.png"}}' | \
-  photosuite-cli serve --automation-read-root /work/project --automation-write-root /work/project
-```
-
-The MCP server has the same batching as the `command_batch` tool (`{steps:[{id, params}], stop_on_error}`),
-in headless and bridge mode.
-
 ## Transport limits
 
-The desktop and headless TCP listeners currently enforce:
+The desktop listener currently enforces:
 
 - a 1 MiB maximum encoded request line;
 - an 8 MiB maximum encoded JSON reply, including the newline;
-- at most 16 simultaneously serviced connections per listener;
-- a 30-second socket read/write timeout;
-- at most 256 steps in a headless `batch` or MCP `command_batch` request.
+- at most 16 simultaneously serviced connections;
+- a 30-second socket read/write timeout.
 
 An oversized line, excess connection, unauthenticated request, or unauthorized filesystem path is
-rejected before command dispatch or file effects. The headless JSON-lines stdio server also
-enforces the request and reply byte ceilings. MCP tool results are checked as encoded JSON,
-including the text/image content envelope, and the MCP bridge bounds incoming desktop replies.
-
-Headless automation previews (`doc.render` / MCP `doc_render_preview`) allow a maximum requested
-edge of 2048 pixels and a source document of at most 67,108,864 pixels. `maxSide: 0` (MCP
-`max_side: 0`) still means full size, but fails if the document's longest edge exceeds 2048.
-PNG results are capped at 5 MiB before base64 encoding or writing a rendered file. Preview
-dimension/source checks run before compositing; the encoded-PNG check runs after encoding.
-Explicit trusted-local CLI rendering keeps its existing behavior.
-
-Batch replies have an aggregate byte budget with space reserved for the outer reply and ID.
-Exhausting it stops later steps even when `stopOnError` is false. A result can exceed the reply
-budget after an edit has run: the error says the operation may have completed. Earlier steps
-are not rolled back; inspect state before retrying. The MCP bridge drops an oversized incoming
-reply without automatically retrying the operation. Bridged screenshots are decoded with
-8192-pixel edge, 16,777,216-pixel, and 64 MiB allocation ceilings, even without downscaling.
+rejected before command dispatch or file effects. A result can exceed the reply budget after an
+edit has run: the error then says the operation may have completed, and it is not rolled back;
+inspect state before retrying.
 
 These ceilings do not implement explicit JSON-depth policy, total session/document-memory
 accounting, compositor scratch-space accounting, command cancellation/duration limits, or

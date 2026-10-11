@@ -535,7 +535,7 @@ mod tests {
     fn geometry_params_that_would_wrap_are_rejected() {
         let mut s = session();
         // 2^32 + 50 wrapped to `x = 50` and 3e9 to a negative coordinate through `as i32`;
-        // both are bad-params errors now, whatever the front door (UI, CLI, control, MCP).
+        // both are bad-params errors now, whatever the front door (UI, control channel).
         for x in [4_294_967_346_i64, 3_000_000_000_i64] {
             let err = s.execute("select.rect", json!({"x": x, "y": 0, "width": 10, "height": 10})).unwrap_err();
             assert!(err.to_string().contains("32-bit"), "{err}");

@@ -47,7 +47,7 @@ echo "==> PhotoSuite $VERSION for FreeBSD $ARCH"
 # The release VM has 12 GB; full parallelism on the biggest crates runs it out of memory.
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
 if [ "$SKIP_BUILD" = 0 ]; then
-  (cd "$ROOT" && cargo build --release --locked -p photosuite -p photosuite-cli)
+  (cd "$ROOT" && cargo build --release --locked -p photosuite)
 fi
 WORK="$CARGO_TARGET_DIR/freebsd-package"
 STAGE="$WORK/$BASENAME"
@@ -61,7 +61,7 @@ if [ "$DRY_RUN" = 1 ]; then
   BIN="$WORK/stub-bin"
   OUT_DIR="$WORK"
   mkdir -p "$BIN"
-  for b in photosuite photosuite-cli; do
+  for b in photosuite; do
     printf '#!/bin/sh\necho "%s %s (dry-run stub)"\n' "$b" "$VERSION" >"$BIN/$b"
     chmod 755 "$BIN/$b"
   done
@@ -71,9 +71,9 @@ fi
 # FreeBSD's install(1) has no -D: create the directories first.
 mkdir -p "$STAGE/bin" "$STAGE/share/applications" "$STAGE/share/mime/packages" \
   "$STAGE/share/metainfo" "$STAGE/share/icons" "$STAGE/share/doc/photosuite"
-install -m 755 "$BIN/photosuite" "$BIN/photosuite-cli" "$STAGE/bin/"
+install -m 755 "$BIN/photosuite" "$STAGE/bin/"
 copy_resources "$STAGE/share/photosuite/resources"
-strip "$STAGE/bin/photosuite" "$STAGE/bin/photosuite-cli" 2>/dev/null || true
+strip "$STAGE/bin/photosuite" 2>/dev/null || true
 # The desktop entry, MIME type, metainfo and icons are the freedesktop files Linux ships.
 install -m 644 "$LINUX/$APP_ID.desktop" "$STAGE/share/applications/$APP_ID.desktop"
 install -m 644 "$LINUX/$APP_ID.mime.xml" "$STAGE/share/mime/packages/$APP_ID.xml"
@@ -85,7 +85,7 @@ for f in NOTICE THIRD-PARTY-NOTICES.md THIRD-PARTY-CRATES.md; do
   if [ -f "$ROOT/$f" ]; then install -m 644 "$ROOT/$f" "$STAGE/share/doc/photosuite/"; fi
 done
 
-for f in bin/photosuite bin/photosuite-cli "share/applications/$APP_ID.desktop" \
+for f in bin/photosuite "share/applications/$APP_ID.desktop" \
   "share/icons/hicolor/256x256/apps/$APP_ID.png" "share/icons/hicolor/scalable/apps/$APP_ID.svg" \
   share/doc/photosuite/LICENSE-MIT share/doc/photosuite/LICENSE-APACHE; do
   if [ ! -e "$STAGE/$f" ]; then echo "error: $f is missing from the package" >&2; exit 1; fi
@@ -96,7 +96,7 @@ mkdir -p "$OUT_DIR"
 tar -C "$WORK" -czf "$OUT_DIR/$BASENAME.tar.gz" "$BASENAME"
 echo "wrote $OUT_DIR/$BASENAME.tar.gz"
 
-"$STAGE/bin/photosuite-cli" --version
+"$STAGE/bin/photosuite" --version
 if [ "$DRY_RUN" = 1 ]; then
   echo "==> dry run: tarball contents"
   tar -tzvf "$OUT_DIR/$BASENAME.tar.gz"

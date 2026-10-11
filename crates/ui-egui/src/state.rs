@@ -1,4 +1,4 @@
-//! UI state as plain data, so the control channel (and later MCP) can read and drive every
+//! UI state as plain data, so the control channel can read and drive every
 //! aspect of the interface: tools, zoom, panels, dialogs and windows.
 
 use serde::{Deserialize, Serialize};

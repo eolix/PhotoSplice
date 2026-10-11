@@ -192,7 +192,7 @@ const WEB_FORMATS: [(&str, &str); 7] =
 /// document takes the new path and is marked saved. The web formats below them write one
 /// optimised file through `file.export.saveForWebLegacy`, then retarget the document the same way.
 /// The native .pcraft format isn't offered (PSD is the document format); a .pcraft file that is
-/// opened still saves back in place, and the engine and CLI still write it.
+/// opened still saves back in place, and the engine still writes it.
 const DOC_FORMATS: [(&str, &str); 5] = [("psd", "PSD"), ("psb", "PSB"), ("tif", "TIFF"), ("exr", "OpenEXR"), ("pdf", "PDF")];
 
 /// File › Save As's formats: the document formats and the web ones, in alphabetical order of the

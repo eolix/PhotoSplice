@@ -20,7 +20,7 @@
       <li>Open, edit and save layered PSD and PSB files</li>
       <li>8-bit, 16-bit and 32-bit float documents in RGB, grayscale, CMYK and Lab</li>
       <li>A GPU compositor with multithreaded filters</li>
-      <li>Every action is a command, scriptable from a CLI, a JSON control channel and an MCP server</li>
+      <li>Every action is a command, scriptable from a JSON control channel</li>
     </ul>
   </description>
   <launchable type="desktop-id">io.github.eolix.PhotoSuite.desktop</launchable>

@@ -7,7 +7,7 @@ order = 6
 
 [[item]]
 id = "AUTO-1"
-target = "Every menu item dispatches a command id (UI, CLI, control channel and MCP share them)"
+target = "Every menu item dispatches a command id (the UI and the control channel share them)"
 status = "done"
 note = "docs/parity.md: all menu items live; menus.rs is_live"
 
@@ -27,10 +27,10 @@ note = "Panel deletes whole actions only (actions.rs:146)"
 
 [[item]]
 id = "AUTO-219-3"
-target = "actions.record/stop/play/list commands for agents and the CLI"
+target = "actions.record/stop/play/list commands for agents"
 status = "done"
 issue = 219
-note = "actions.list/get/record/stop/play/delete in actions_cmds.rs; the panel, CLI and MCP share them. Nested steps pass the session authorize hook."
+note = "actions.list/get/record/stop/play/delete in actions_cmds.rs; the panel and the control channel share them. Nested steps pass the session authorize hook."
 
 [[item]]
 id = "AUTO-219-4"
@@ -77,6 +77,6 @@ note = "type.hitTest, type.caret, type.navigate; filter.liquify strokes, edit.pu
 [[item]]
 id = "AUTO-219-10"
 target = "Agent acceptance suite grown to 30-50 workflows"
-status = "partial"
+status = "missing"
 issue = 219
-note = "automation/tests/agent_tasks.rs runs 10 workflows over MCP"
+note = "The 10 MCP workflows went with the MCP server; none over the control channel yet"

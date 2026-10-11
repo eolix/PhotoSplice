@@ -38,7 +38,6 @@ modules:
     buildsystem: simple
     build-commands:
       - install -Dm755 bin/photosuite /app/bin/photosuite
-      - install -Dm755 bin/photosuite-cli /app/bin/photosuite-cli
       - install -Dm644 share/applications/io.github.eolix.PhotoSuite.desktop /app/share/applications/io.github.eolix.PhotoSuite.desktop
       # .pcraft, .psb and .qoi; the runtime's shared-mime-info already knows PSD and the rest.
       - install -Dm644 share/mime/packages/io.github.eolix.PhotoSuite.xml /app/share/mime/packages/io.github.eolix.PhotoSuite.xml

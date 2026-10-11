@@ -42,11 +42,10 @@ crates/
   compose gpu format         L3 CPU compositor (the oracle), wgpu compositor, .pcraft native format
   io plugins                 L4 document <-> PSD / flat formats; sandboxed WebAssembly plug-ins
   engine                     L5 Session + command registry (every action is a command)
-  ui-egui automation         L6 egui shell (thin: all actions go through the engine); MCP server
+  ui-egui automation         L6 egui shell (thin: all actions go through the engine); control-channel security
   testkit                    test helpers
 apps/
   photosuite                 desktop app (eframe/wgpu), TCP control server
-  photosuite-cli             headless CLI (convert/info/run/batch/commands/mcp)
   photosuite-web             the same app in the browser (trunk + wasm-bindgen)
 xtask/                       cargo xtask layers | wasm | ci | stats | corpus | test-corpus | parity | perf | scorecard
 ```
@@ -57,7 +56,7 @@ xtask/                       cargo xtask layers | wasm | ci | stats | corpus | t
 
 ### Never crash (outranks feature work)
 
-People trust PhotoSuite with their work, and a crash loses it. A malformed file, a bad command or MCP param, a corrupt settings file, an odd keystroke or a full disk must produce an error the user or agent can act on, never a panic. Don't ship a feature by adding a panic path; fix a crash before building on top of it.
+People trust PhotoSuite with their work, and a crash loses it. A malformed file, a bad command or control-channel param, a corrupt settings file, an odd keystroke or a full disk must produce an error the user or agent can act on, never a panic. Don't ship a feature by adding a panic path; fix a crash before building on top of it.
 
 - **Non-test code never panics.** No `unwrap()`, `expect()`, `panic!`, `unreachable!`, `todo!` or `unimplemented!`. Return the crate's error type and propagate with `?`; use `ok_or(..)?`, `let .. else { return Err(..) }`, `if let`, or `unwrap_or*` where a fallback is truly correct (never one that silently corrupts a document). Unfinished features return an "unsupported" error. The only exception is a provably infallible literal: `#[allow(clippy::expect_used)]` plus `.expect("why it can't fail")`.
 - **No `unsafe`.** The workspace sets `unsafe_code = "forbid"`. The one exception is the isolated helper crate `photosuite-tablet` (`crates/tablet`): winit drops pen tablet data, and reading it on macOS needs an AppKit event monitor (Objective-C interop). Only its `src/macos.rs` allows `unsafe` (`unsafe_code = "deny"` crate-wide, every block has a `SAFETY:` comment, tested against real `NSEvent`s); its X11 path and all mapping code are safe. Don't add `unsafe` anywhere else.
@@ -68,7 +67,7 @@ People trust PhotoSuite with their work, and a crash loses it. A malformed file,
 - **Prove it.** Every crash fix comes with a small synthetic regression test that panicked before the fix.
 - **Enforced by clippy.** `clippy.toml` allows `unwrap`/`expect`/`panic`/indexing in tests only. Clean crates carry `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]`; new crates start with it.
 
-1. **Everything is a command.** New user-visible behaviour = a command in the engine (`crates/engine/src/*_cmds.rs`, registered in `commands.rs`) with id, label, menu path, shortcut, params doc, `enabled` and `run`, plus tests. The UI, CLI, control channel and MCP all dispatch commands by id. Use the **exact id from `crates/ui-egui/src/menu_catalog.rs`** and the menu item goes live automatically. Only pure view/window state (zoom, panels, screen mode) belongs to the shell (`menus.rs` `UI_COMMANDS`).
+1. **Everything is a command.** New user-visible behaviour = a command in the engine (`crates/engine/src/*_cmds.rs`, registered in `commands.rs`) with id, label, menu path, shortcut, params doc, `enabled` and `run`, plus tests. The UI and the control channel dispatch commands by id. Use the **exact id from `crates/ui-egui/src/menu_catalog.rs`** and the menu item goes live automatically. Only pure view/window state (zoom, panels, screen mode) belongs to the shell (`menus.rs` `UI_COMMANDS`).
 2. **No format or colour assumptions.** Bit depth (8/16/32f) and colour model (RGB/Gray/CMYK/Lab…) are runtime data. Never introduce a `u8`-only pixel path in public APIs. Never assume sRGB: colour conversions go through `photosuite-cms` (`Transform`, `transform::cached`). Test at several depths.
 3. **Clean-room.** We studied Photoshop and other proprietary editors for *behaviour and look only*. Never copy their code, shaders, profiles or assets. Implement from public specs (Adobe PSD spec, ICC, ISO 32000 blend modes, papers) and observation. Third-party assets must be permissively licensed, keep their license file next to them, and get a row in `THIRD-PARTY-NOTICES.md` (path, title, author, source, license) in the same change; so do original assets.
 4. **Tests are the gate.** Every change comes with tests. Format crates use round-trip, synthetic-generator, oracle and fuzz tests. Keep the PSD corpus results and the parity floor (`crates/ui-egui/src/parity.rs`) from regressing.

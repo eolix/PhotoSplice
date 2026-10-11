@@ -110,9 +110,6 @@
         <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\photosuite.exe" Value="[#PhotosuiteExe]" Type="string" />
       </Component>
 
-      <Component Id="PhotosuiteCli">
-        <File Id="PhotosuiteCliExe" Source="$(var.BinDir)\photosuite-cli.exe" KeyPath="yes" />
-      </Component>
     </ComponentGroup>
   </Fragment>
   <Fragment>

@@ -20,8 +20,8 @@ This plan sets out:
 
 **Principles**
 
-1. **Engine-first, headless-first.** Every feature is reachable without a GUI: from tests, the CLI and MCP. The GUI is one client of the engine.
-2. **Everything is a command.** Each user-visible action has a stable `CommandId` (such as `filter.blur.gaussian`) with typed, serializable parameters. The menu, command palette, shortcuts, recorded actions/macros, CLI, MCP and plugins all dispatch the same commands.
+1. **Engine-first, headless-first.** Every feature is reachable without a GUI: from tests and the control channel. The GUI is one client of the engine.
+2. **Everything is a command.** Each user-visible action has a stable `CommandId` (such as `filter.blur.gaussian`) with typed, serializable parameters. The menu, command palette, shortcuts, recorded actions/macros, the control channel and plugins all dispatch the same commands.
 3. **Data describes the UI; toolkits draw it.** Tools produce *overlay primitives* (lines, handles, marching-ants paths) as data. Filter and adjustment dialogs are generated from *parameter schemas*. A new toolkit implements one renderer for each, not about 150 bespoke dialogs.
 4. **One algorithm, one parameter struct.** Every algorithm has a CPU reference implementation (Rust + rayon, deterministic). Some also get a GPU implementation (WGSL). Both read the same `#[repr(C)]` `bytemuck::Pod` parameter struct. We never keep hand-synced copies of an algorithm in several languages.
 5. **Immutable snapshots, copy-on-write tiles.** Pixel data is stored in `Arc`-shared 256² tiles. Taking a document snapshot is O(layers), which makes undo, background jobs, autosave and UI reads cheap and lock-free.
@@ -110,11 +110,10 @@ photosuite/
 │  │  ── platform + frontends ──
 │  ├─ platform/                photosuite-platform  traits: file dialogs, clipboard, fonts, tablet input, menus, storage; native + web impls
 │  ├─ ui-egui/                 photosuite-ui-egui   the (first) GUI shell: panels, dialogs, canvas widget, theme
-│  ├─ automation/              photosuite-automation  MCP server (rmcp) + JSON-RPC over the command registry
+│  ├─ automation/              photosuite-automation  control-channel security: token, limits, file authority
 │  └─ testkit/                 photosuite-testkit   golden images, perceptual diff, fixtures, PSD corpus helpers
 ├─ apps/
 │  ├─ photosuite/              desktop binary (winit + wgpu + ui-egui + platform-native)
-│  ├─ photosuite-cli/          headless batch CLI (open → commands → export), also hosts `mcp` subcommand
 │  └─ photosuite-web/          wasm32 binary (ui-egui + platform-web), demo
 ├─ shaders/                    (or inside gpu/) WGSL, with generated struct headers
 ├─ assets/                     icons, bundled fonts, default brushes/swatches/presets
@@ -150,7 +149,7 @@ photosuite/
 2. **Nothing below L6 may depend on any UI toolkit, winit, or a `platform` implementation.** Platform services reach the engine through traits defined in `engine` (or in `platform`'s trait-only core), and are injected at startup.
 3. **`photosuite-psd` depends on no workspace crate.** The doc ⇄ PSD mapping lives in `io`. This keeps the PSD crate publishable and reusable by other projects.
 4. **wasm gate:** every crate in L0–L5 (except feature-gated native backends) must build for `wasm32-unknown-unknown`. CI runs `cargo build -p photosuite-engine --target wasm32-unknown-unknown --no-default-features --features web`.
-5. `gpu` is optional for `engine`. Engine features are `gpu` (default on) and `cpu-only`, and `cpu-only` builds are what the headless CLI and CI tests use.
+5. `gpu` is optional for `engine`. Engine features are `gpu` (default on) and `cpu-only`, and `cpu-only` builds are what CI tests use.
 6. **C dependencies** (libheif, optional LibRaw, pdfium) only behind features, only in `codecs`, `raw` or `io`, and never on by default for the web target.
 
 ---
@@ -188,8 +187,7 @@ Each command registers the following:
 
 **Consumers:**
 - The GUI builds the menu bar, the ⌘K palette and the shortcut editor from it.
-- `automation` exposes the registry as MCP tools.
-- `photosuite-cli` exposes `photosuite run --cmd filter.blur.gaussian --param radius=4 in.psd out.png`.
+- The control channel runs registry commands for agents (`engine.execute`, `engine.commands`).
 - Action recording is simply `Vec<CommandInvocation>`.
 
 ### 4.3 Tools: pointer events in, ops and overlays out
@@ -235,7 +233,7 @@ impl Viewport {
 - Panels (Layers, History, Channels, Paths, Properties, Navigator, Histogram, Swatches) read plain structs produced from a snapshot, such as `LayersModel { rows: Vec<LayerRow{ id, name, kind, depth, visible, locked, thumb: ThumbHandle, blend, opacity, has_mask, effects: Vec<..> }> }`. Thumbnails are `ThumbHandle`s that the UI resolves to textures through an engine thumbnail cache.
 - Dialogs are generated from command `params` schemas. A toolkit may register *custom* dialog widgets for a few complex commands: Curves, Levels, Camera Raw, Liquify, Layer Style.
 
-**Litmus test for the seam:** `apps/photosuite-cli` and the automation server must be able to do *everything* the GUI does, except pointer painting, which they do by replaying `PointerEvent` streams through tools.
+**Litmus test for the seam:** the control channel must be able to do *everything* the GUI does, except pointer painting, which it does by replaying `PointerEvent` streams through tools.
 
 ---
 
@@ -304,7 +302,7 @@ Both backends consume the same plan. This is the only place that encodes Photosh
 
 ### 7.2 Backends
 
-- **CPU (`compose`).** The reference implementation, done per tile with rayon. It is used for export, tests, the CLI, and the web fallback when WebGPU is unavailable.
+- **CPU (`compose`).** The reference implementation, done per tile with rayon. It is used for export, tests and the web fallback when WebGPU is unavailable.
 - **GPU (`gpu`).** wgpu compute and render pipelines that run the same plan. They use:
   - `rgba16float`/`rgba32float` accumulators,
   - specialized pipelines per blend family and adjustment (WGSL `override` constants, not one giant `switch`),
@@ -426,13 +424,11 @@ psd/src/
 
 ## 12. Automation and extensibility
 
-- **`automation`:** an MCP server built on `rmcp`. It exposes:
-  - `session.list`, `doc.open`, `doc.save`, `doc.export`, `doc.inspect` (layer tree as JSON), `doc.render_preview` (PNG).
-  - `command.list` and `command.run(id, params)`, both generated from the registry.
-  - Stdio for agent CLIs, and optionally loopback TCP with a token so it can attach to a running GUI.
-  - `AuthorizedWorkspace`, which holds independent read and write directory capabilities. Remote
-    paths are validated relative names; engine commands that still require ambient filesystem
-    access fail closed at the automation boundary.
+- **Control channel:** the desktop app's loopback JSON-lines server (`docs/control-protocol.md`),
+  guarded by `automation`: a token, request and reply size limits, and `AuthorizedWorkspace`,
+  which holds independent read and write directory capabilities. Remote paths are validated
+  relative names; engine commands that still require ambient filesystem access fail closed at
+  the automation boundary.
 - **Actions:** recorded `Vec<CommandInvocation>`, replayable in batch (File → Automate → Batch).
 - **Scripting (later):** embed a scripting language over the same registry. Options are Rhai, or Lua via mlua (C). JS via QuickJS is possible if we want Photoshop-script familiarity.
 - **Plugins:** sandboxed WebAssembly filter plug-ins (`photosuite-plugins`, L4) run by `wasmi`, a pure-Rust interpreter, with fuel, memory, stack and wall-time limits and no host imports. They are driven by the `plugin.*` commands and listed under Filter › Plug-ins; the ABI is in [`plugins.md`](plugins.md). Native Photoshop `.8BF`/CEP/UXP hosting is out of scope (it needs unsafe FFI and can't run on the web). Panel plug-ins are later.
@@ -498,8 +494,6 @@ skrifa = "*"
 vello_cpu = "*"
 # ml
 ort = { version = "*", optional = true }
-# automation
-rmcp = "*"
 
 [workspace.lints.rust]
 unsafe_code = "deny"   # allowed per-crate with justification (gpu, platform)

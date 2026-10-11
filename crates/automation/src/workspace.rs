@@ -474,16 +474,29 @@ mod tests {
         assert!(authorize_desktop_engine_step("file.saveACopy", &serde_json::json!({})).is_err());
     }
 
+    /// An automation session: nested steps checked like the request itself.
+    fn automation_session() -> photosuite_engine::Session {
+        let mut s = photosuite_engine::Session::new();
+        s.authorize = Some(authorize_engine_step);
+        s
+    }
+
+    /// A request as the control channel runs it: checked, then executed.
+    fn request(s: &mut photosuite_engine::Session, id: &str, params: serde_json::Value) -> Result<serde_json::Value, AutomationError> {
+        authorize_engine_command(id, &params)?;
+        Ok(s.execute(id, params)?)
+    }
+
     #[test]
     fn apply_data_set_is_judged_by_the_values_it_applies() {
-        let mut headless = crate::Headless::new();
-        headless.command_run("file.new", serde_json::json!({"width": 8, "height": 8})).unwrap();
-        let layer = headless.command_run("layer.new.layer", serde_json::json!({})).unwrap()["layer"].clone();
+        let mut headless = automation_session();
+        request(&mut headless, "file.new", serde_json::json!({"width": 8, "height": 8})).unwrap();
+        let layer = request(&mut headless, "layer.new.layer", serde_json::json!({})).unwrap()["layer"].clone();
         let defs = [
             serde_json::json!({"name": "shown", "layer": layer, "type": "visibility"}),
             serde_json::json!({"name": "photo", "layer": layer, "type": "pixelReplacement"}),
         ];
-        headless.command_run("image.variables.define", serde_json::json!({"defs": defs})).unwrap();
+        request(&mut headless, "image.variables.define", serde_json::json!({"defs": defs})).unwrap();
         let sets = serde_json::json!({"dataSets": [
             {"name": "hidden", "values": [{"variable": "shown", "kind": "visibility", "value": false}]},
             {"name": "swap", "values": [
@@ -491,12 +504,12 @@ mod tests {
                 {"variable": "photo", "kind": "pixels", "value": "/outside/photo.png"},
             ]},
         ]});
-        headless.command_run("image.variables.dataSets", sets).unwrap();
-        let visible = |headless: &crate::Headless| headless.session.active().unwrap().doc.layers.iter().all(|l| l.visible);
-        let refused = headless.command_run("image.applyDataSet", serde_json::json!({"name": "swap"})).unwrap_err();
+        request(&mut headless, "image.variables.dataSets", sets).unwrap();
+        let visible = |headless: &photosuite_engine::Session| headless.active().unwrap().doc.layers.iter().all(|l| l.visible);
+        let refused = request(&mut headless, "image.applyDataSet", serde_json::json!({"name": "swap"})).unwrap_err();
         assert!(refused.to_string().contains("ambient filesystem paths"), "{refused}");
         assert!(visible(&headless), "a refused data set applies none of its values");
-        assert!(headless.command_run("image.applyDataSet", serde_json::json!({"name": "hidden"})).is_ok());
+        assert!(request(&mut headless, "image.applyDataSet", serde_json::json!({"name": "hidden"})).is_ok());
         assert!(!visible(&headless));
     }
 
@@ -612,8 +625,8 @@ mod tests {
 
     #[test]
     fn whole_preferences_update_cannot_enable_automation_script_events() {
-        let mut headless = crate::headless::Headless::new();
-        let result = headless.command_run(
+        let mut headless = automation_session();
+        let result = request(&mut headless, 
             "prefs.set",
             serde_json::json!({
                 "path": "",
@@ -638,9 +651,9 @@ mod tests {
             ("prefs.set", serde_json::json!({"path": "historyLog.filePath", "value": "/outside/log"})),
             ("prefs.set", serde_json::json!({"values": {"interface.language": "fr", "historyLog.filePath": "/outside/log"}})),
         ] {
-            assert!(headless.command_run(id, params).is_err(), "{id}");
+            assert!(request(&mut headless, id, params).is_err(), "{id}");
         }
-        headless.command_run("file.new", serde_json::json!({"width": 5, "height": 5})).unwrap();
-        assert!(headless.session.file_menu.event_log.is_empty());
+        request(&mut headless, "file.new", serde_json::json!({"width": 5, "height": 5})).unwrap();
+        assert!(headless.file_menu.event_log.is_empty());
     }
 }

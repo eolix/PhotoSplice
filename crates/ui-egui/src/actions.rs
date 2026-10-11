@@ -1,7 +1,7 @@
 //! Actions panel: record and replay command sequences.
 //!
 //! The list and the recording flag live on the engine session (`actions.record` / `stop` /
-//! `play` / `list` / `get` / `delete`), so the panel, the CLI and MCP share them. This module
+//! `play` / `list` / `get` / `delete`), so the panel and the control channel share them. This module
 //! keeps only which row is selected and which rows are expanded.
 
 use egui::{Align2, Color32, Rect, Sense, Stroke, pos2, vec2};

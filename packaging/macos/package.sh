@@ -2,7 +2,6 @@
 # Build, sign and (optionally) notarize the macOS release artifacts:
 #
 #   $DIST/photosuite-<version>-macos-<arch>.dmg          PhotoSuite.app on a drag-to-Applications DMG
-#   $DIST/photosuite-cli-<version>-macos-<arch>.zip      the headless CLI
 #
 # Usage: packaging/macos/package.sh [--arch universal|aarch64|x86_64] [--skip-build]
 #
@@ -42,7 +41,6 @@ SHORT_VERSION="${VERSION%%-*}"
 WORK="$CARGO_TARGET_DIR/macos-package"
 APP="$WORK/PhotoSuite.app"
 DMG="$DIST/photosuite-$VERSION-macos-$ARCH.dmg"
-CLI_ZIP="$DIST/photosuite-cli-$VERSION-macos-$ARCH.zip"
 
 NOTARIZE=0
 NOTARY_AUTH=()
@@ -64,12 +62,12 @@ echo "==> PhotoSuite $VERSION for macOS ($ARCH), identity: $IDENTITY, notarize: 
 if [ "$SKIP_BUILD" = 0 ]; then
   args=()
   for t in "${TARGETS[@]}"; do args+=(--target "$t"); done
-  (cd "$ROOT" && cargo build --release --locked -p photosuite -p photosuite-cli "${args[@]}")
+  (cd "$ROOT" && cargo build --release --locked -p photosuite "${args[@]}")
 fi
 
 rm -rf "$WORK"
 mkdir -p "$WORK/bin"
-for bin in photosuite photosuite-cli; do
+for bin in photosuite; do
   inputs=()
   for t in "${TARGETS[@]}"; do inputs+=("$CARGO_TARGET_DIR/$t/release/$bin"); done
   lipo -create -output "$WORK/bin/$bin" "${inputs[@]}"
@@ -152,19 +150,6 @@ if [ "$NOTARIZE" = 1 ]; then
   spctl --assess --type open --context context:primary-signature -vvv "$DMG"
 fi
 
-# ---- CLI ---------------------------------------------------------------------------------------
-echo "==> building $CLI_ZIP"
-CLI_DIR="$WORK/photosuite-cli-$VERSION-macos-$ARCH"
-mkdir -p "$CLI_DIR"
-cp "$WORK/bin/photosuite-cli" "$CLI_DIR/"
-copy_docs "$CLI_DIR"
-sign --options runtime "$CLI_DIR/photosuite-cli"
-codesign --verify --strict --verbose=2 "$CLI_DIR/photosuite-cli"
-rm -f "$CLI_ZIP"
-ditto -c -k --keepParent "$CLI_DIR" "$CLI_ZIP"
-# A bare Mach-O can't carry a stapled ticket; Gatekeeper looks the notarization up online.
-if [ "$NOTARIZE" = 1 ]; then notarize "$CLI_ZIP"; fi
-
-"$WORK/bin/photosuite-cli" --version
+"$WORK/bin/photosuite" --version
 echo "==> done"
-ls -lh "$DMG" "$CLI_ZIP"
+ls -lh "$DMG"

@@ -8,7 +8,7 @@
 //!
 //! The panel never writes the session brush itself: each frame's edits become one
 //! `tools.setBrush` call carrying only the changed fields (Rule 1), so the journal, the control
-//! channel and the MCP server see exactly what the panel did and can do the same. A drag's calls
+//! channel sees exactly what the panel did and can do the same. A drag's calls
 //! share a `coalesce` key, so a whole gesture is one journal entry ([`commit_gesture`]).
 //!
 //! The lock beside a section name keeps that section's settings when another preset is picked

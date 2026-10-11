@@ -7,7 +7,7 @@
 //! the UI thread as one undo step, through the same path as [`Session::execute`], so the journal,
 //! history, damage and post-command hooks all behave as for a synchronous command.
 //!
-//! - [`Session::execute`] runs everything inline, as before: tests, the CLI and scripts see no
+//! - [`Session::execute`] runs everything inline, as before: tests and scripts see no
 //!   difference.
 //! - [`Session::start`] runs a job-capable command on a worker thread and returns its
 //!   [`JobId`]; [`Session::poll_jobs`] (called every frame by the UI) applies finished jobs.
@@ -130,7 +130,7 @@ pub struct JobEvent {
     pub outcome: JobOutcome,
 }
 
-/// A job's state for the UI, the control channel and MCP (`jobs.list`).
+/// A job's state for the UI and the control channel (`jobs.list`).
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobInfo {
@@ -492,8 +492,8 @@ impl Session {
         std::mem::take(&mut self.jobs.events)
     }
 
-    /// Block until job `id` ends, apply it, and return its result (the control channel's and
-    /// MCP's default `wait`, and the CLI). `Err(Cancelled)` if it was cancelled.
+    /// Block until job `id` ends, apply it, and return its result (the control channel's
+    /// default `wait`). `Err(Cancelled)` if it was cancelled.
     pub fn wait_job(&mut self, id: JobId) -> Result<Value> {
         if let Some(i) = self.jobs.running.iter().position(|r| r.id == id) {
             let job = self.jobs.running.remove(i);
@@ -731,7 +731,7 @@ impl Session {
     }
 }
 
-/// Engine commands for the job table (the control channel and MCP use them too).
+/// Engine commands for the job table (the control channel uses them too).
 pub fn specs() -> Vec<crate::commands::CommandSpec> {
     use crate::commands::CommandSpec;
     vec![

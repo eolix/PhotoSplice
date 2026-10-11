@@ -267,7 +267,7 @@ fn damaged_layer_data_opens_flattened() {
 
 #[test]
 fn default_export_options_write_a_flat_tiff() {
-    // Scripted and agent saves (CLI, batch, MCP) build on the defaults: layers only on request.
+    // Scripted and agent saves (batch, the control channel) build on the defaults: layers only on request.
     let d = gen_doc(ColorMode::Rgb, SampleType::U8, Features::PIXELS);
     assert!(tiff_layers::would_write_layers(&d));
     let r = export(&d, "x.tif", &ExportOptions::default()).unwrap();

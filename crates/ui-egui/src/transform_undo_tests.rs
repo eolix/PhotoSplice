@@ -130,7 +130,7 @@ fn undo_steps_back_through_the_transform_not_the_document() {
     assert_eq!(width(&h), 100, "the committed transform is undone");
 }
 
-/// `engine.execute` over the control channel (and MCP, which goes through it) as a programmatic
+/// `engine.execute` over the control channel as a programmatic
 /// caller: the result's `ok` flag.
 fn execute(h: &mut Harness<'static, PhotosuiteApp>, command: &str) -> bool {
     let ctx = h.ctx.clone();

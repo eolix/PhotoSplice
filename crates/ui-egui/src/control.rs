@@ -1,4 +1,4 @@
-//! Programmatic control of the running app, for agents, tests and (soon) MCP.
+//! Programmatic control of the running app, for agents and tests.
 //!
 //! Transport-agnostic: a transport thread (TCP in the desktop app, a channel in tests) sends
 //! [`ControlRequest`]s; the UI thread handles them between frames and replies with JSON.
@@ -748,7 +748,7 @@ mod tests {
         let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
         let ctx = egui::Context::default();
         app.set_theme(&ctx, ThemeKind::Pearl);
-        // `dark` was advertised to MCP clients but never read; a typo looked like success too.
+        // `dark` was advertised to agents but never read; a typo looked like success too.
         for params in [json!({"dark": true}), json!({"thme": "classic"}), json!({"tool": "move", "dark": true})] {
             let r = call(&mut app, &ctx, "ui.set", params.clone());
             assert_eq!(r["ok"], false, "{params}: {r}");

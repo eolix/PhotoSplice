@@ -2,8 +2,8 @@
 //!
 //! Every user-visible action is a command with a stable id (Photoshop-style, such as
 //! `layer.newAdjustmentLayer.invert`) and JSON parameters. Every frontend goes through the same
-//! [`Session::execute`] entry point: the egui UI, the CLI, the remote-control channel and the MCP
-//! server. This is what makes the UI swappable and the app fully scriptable.
+//! [`Session::execute`] entry point: the egui UI and the remote-control channel. This is what
+//! makes the UI swappable and the app fully scriptable.
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -321,9 +321,9 @@ pub struct Session {
     /// Window › Actions. The list persists with the preset store when one is attached.
     pub actions: actions_cmds::ActionState,
     /// Gate for every command the session runs, including the ones a command runs on its own
-    /// behalf and `actions.play` steps. Untrusted sessions (MCP, the control channel) install
-    /// the same check a top-level request sees. `None` runs everything, which is what a local
-    /// UI and `photosuite-cli run` do.
+    /// behalf and `actions.play` steps. Untrusted sessions (the control channel) install
+    /// the same check a top-level request sees. `None` runs everything, which is what the local
+    /// UI does.
     pub authorize: Option<fn(&str, &serde_json::Value) -> Result<()>>,
     /// Background jobs (see [`jobs`]).
     jobs: jobs::Jobs,

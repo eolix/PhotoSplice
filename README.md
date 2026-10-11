@@ -43,7 +43,7 @@ Installers are on the **[Releases](https://github.com/eolix/photosuite/releases)
 
 | Platform | Packages | Architecture |
 |:---|:---|:---|
-| **macOS** 11+ | `.dmg` (and a command-line `.zip`) | Universal: Apple silicon and Intel |
+| **macOS** 11+ | `.dmg` | Universal: Apple silicon and Intel |
 | **Windows** 10+ | `.msi` installer, portable `.zip` | x64 |
 | **Linux** | `.AppImage`, `.deb`, `.rpm`, Arch Linux `.pkg.tar.zst`, `.tar.gz` | x86_64 and arm64 |
 | **Linux** | `.flatpak` | x86_64 |
@@ -93,8 +93,8 @@ If you know Photoshop ~CS6, you already know PhotoSuite.
 - **Native.** egui on wgpu (Metal, Vulkan, DirectX 12), with a CPU fallback. No Electron, no
   web view, no JavaScript.
 - **Local and private.** No account, no telemetry, no cloud. Your files stay on your machine.
-- **Scriptable.** Every action is a command, the same ones the menus run, so the CLI, a JSON
-  control channel and an MCP server for AI agents can do anything the interface can.
+- **Scriptable.** Every action is a command, the same ones the menus run, so a JSON control
+  channel can do anything the interface can.
 
 > Not affiliated with or endorsed by Adobe. Photoshop is a registered trademark of Adobe Inc.,
 > named here only to describe the interface and behaviour PhotoSuite follows. PhotoSuite is
@@ -133,9 +133,8 @@ Gimp. Or Affinity. I'm certain they have great features, but my goal is not to m
   Filter Gallery and the classic filter menus.
 
 **Automation and integration**
-- Actions, Batch, droplets and script events.
-- `photosuite-cli` for headless conversion and scripted edits, plus a JSON control channel and
-  an MCP server (see [docs/control-protocol.md](docs/control-protocol.md)).
+- Actions, Batch and script events.
+- A JSON control channel (see [docs/control-protocol.md](docs/control-protocol.md)).
 - Sandboxed WebAssembly filter plug-ins ([docs/plugins.md](docs/plugins.md)).
 - Native menus on macOS, six themes, adjustable UI font size, and 38 interface languages.
 

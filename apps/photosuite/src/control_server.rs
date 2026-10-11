@@ -1,5 +1,5 @@
 //! Localhost JSON-lines control server (one request per line, one reply per line).
-//! Loopback only. This is the transport the MCP server will wrap.
+//! Loopback only.
 
 use std::io::{BufReader, Write};
 use std::net::{TcpListener, TcpStream};

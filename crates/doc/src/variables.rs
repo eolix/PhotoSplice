@@ -3,7 +3,7 @@
 //! A *variable* binds a named data slot to one layer, driving its visibility, its text, or its
 //! pixel content. A *data set* is a named row of values, one per variable. Applying a data set
 //! mutates the document so a single template renders many variations — ideal for batch generation
-//! (`file.export.dataSetsAsFiles`) and agents driving the CLI/MCP.
+//! (`file.export.dataSetsAsFiles`) and agents driving the control channel.
 //!
 //! Pure data (the doc crate takes no I/O): loading a replacement image for a Pixel Replacement
 //! variable is the engine's job; here a data value just names the file.

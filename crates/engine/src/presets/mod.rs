@@ -1,7 +1,7 @@
 //! Preset panels: Window › Gradients, Patterns, Styles, Shapes, Tool Presets and Clone Source.
 //!
 //! Photoshop keeps presets in named groups (folders) that the panels show as thumbnail grids or
-//! lists. The engine owns that data so every frontend (GUI, CLI, MCP) sees and edits the same
+//! lists. The engine owns that data so every frontend (GUI, control channel) sees and edits the same
 //! sets through `<kind>.presets.*` commands:
 //!
 //! - gradients ([`gradients`]): colour + transparency stops; the selected one drives the

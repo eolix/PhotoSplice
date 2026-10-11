@@ -457,17 +457,17 @@ mod tests {
 
     #[test]
     fn names_are_mapped_and_attribution_is_kept() {
-        let src = "use photocraft_doc::Layer; PhotocraftApp; PHOTOCRAFT_CONFIG_DIR; photocraft-cli\n\
+        let src = "use photocraft_doc::Layer; PhotocraftApp; PHOTOCRAFT_CONFIG_DIR; photocraft-web\n\
                    See https://github.com/storytold/photocraft/issues/1 and storytold/photocraft-corpus.\n\
                    © ArtCraft Team and the PhotoCraft contributors. Built on PhotoCraft (https://github.com/storytold/photocraft).\n\
                    The PhotoCraft window. ai.storyteller.photocraft.desktop";
         let out = map_text(src, "crates/x.rs");
-        assert!(out.contains("use photosuite_doc::Layer; PhotosuiteApp; PHOTOSUITE_CONFIG_DIR; photosuite-cli"));
+        assert!(out.contains("use photosuite_doc::Layer; PhotosuiteApp; PHOTOSUITE_CONFIG_DIR; photosuite-web"));
         assert!(out.contains("https://github.com/storytold/photocraft/issues/1 and storytold/photocraft-corpus."));
         assert!(out.contains("the PhotoCraft contributors. Built on PhotoCraft (https://github.com/storytold/photocraft)."));
         assert!(out.contains("The PhotoSuite window. io.github.eolix.PhotoSuite.desktop"));
         assert_eq!(map_text("<string>ai.storyteller.photocraft</string>", "packaging/macos/Info.plist.in"), "<string>app.photosuite</string>");
-        assert_eq!(map_path("apps/photocraft-cli/src/lib.rs"), "apps/photosuite-cli/src/lib.rs");
+        assert_eq!(map_path("apps/photocraft-web/src/lib.rs"), "apps/photosuite-web/src/lib.rs");
     }
 
     #[test]

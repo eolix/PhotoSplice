@@ -1,5 +1,5 @@
 //! Scorecard performance scenarios (#221): the measurable rows of the targets in #209, #210 and
-//! #211, each timed through the command path the UI, CLI and MCP share (`Session::execute`) plus
+//! #211, each timed through the command path the UI and the control channel share (`Session::execute`) plus
 //! the canvas refresh the app does after it (the app's own `GpuCanvas`, on a device created the
 //! way the app creates it; the CPU compositor without an adapter).
 //!

@@ -23,7 +23,6 @@ description: |-
   Open-source, native image editor that works the way Photoshop users expect.
   Layers, masks, adjustment layers, layer styles, type and brushes; opens and
   saves layered PSD/PSB files; 8/16/32-bit documents; GPU compositing (wgpu).
-  Includes photosuite-cli, a headless converter and command runner.
 
 # The binaries link only glibc and libgcc_s directly. Windowing (X11/Wayland, xkbcommon) and the
 # GPU (Vulkan, EGL/GL) are loaded at runtime with dlopen, so they aren't ELF NEEDED entries and
@@ -87,9 +86,6 @@ overrides:
 contents:
   - src: ${STAGE}/usr/bin/photosuite
     dst: /usr/bin/photosuite
-    file_info: { mode: 0755 }
-  - src: ${STAGE}/usr/bin/photosuite-cli
-    dst: /usr/bin/photosuite-cli
     file_info: { mode: 0755 }
   - src: ${STAGE}/usr/share/
     dst: /usr/share/

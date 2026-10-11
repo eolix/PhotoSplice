@@ -1,4 +1,4 @@
-//! Colour strings supplied through the same commands used by CLI/MCP clients.
+//! Colour strings supplied through the same commands used by the control channel.
 use photosuite_engine::{Session, command_specs};
 use serde_json::{Value, json};
 

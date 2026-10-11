@@ -8,7 +8,7 @@
 //! [`HIDDEN_MENU_ADDED`]: preferences saved by an older version take those once, on load.
 
 /// Incremented whenever the lists below change.
-pub const DEFAULTS_VERSION: u32 = 4;
+pub const DEFAULTS_VERSION: u32 = 5;
 
 pub const HIDDEN_MENU_ITEMS: &[&str] = &[
     "edit.checkSpelling",
@@ -19,6 +19,8 @@ pub const HIDDEN_MENU_ITEMS: &[&str] = &[
     "edit.toggleLastState",
     "edit.transform.skew",
     "file.automate.batch",
+    // A droplet only ran through the command-line tool, which PhotoSuite no longer ships.
+    "file.automate.createDroplet",
     "file.automate.contactSheetII",
     "file.automate.photomerge",
     "file.export.artboardsToPdf",
@@ -159,6 +161,7 @@ pub const HIDDEN_MENU_ADDED: &[(u32, &str)] = &[
     (3, "filter.adaptiveWideAngle"),
     // The engine's own Anti-Alias › None (not in Photoshop's catalogue) brought the Type menu back.
     (4, "type.antiAlias.none"),
+    (5, "file.automate.createDroplet"),
 ];
 
 /// `Tool` enum variant names, as `ToolbarCustomization::hidden` stores them.

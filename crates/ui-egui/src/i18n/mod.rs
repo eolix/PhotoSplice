@@ -1,6 +1,6 @@
 //! UI localisation. Strings in code stay English and are the default lookup keys; a per-language
 //! catalog (`*.tsv`, see `ja.tsv` for the format) maps them to display text at render time. Command
-//! ids, menu paths used for logic, the control channel, the CLI and MCP never see translated text,
+//! ids, menu paths used for logic, and the control channel never see translated text,
 //! so agents and scripts are unaffected. A string without a translation is shown in English.
 //!
 //! # Adding a language

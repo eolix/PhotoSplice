@@ -96,22 +96,6 @@ See `docs/control-protocol.md` for every method. Tips:
 - **Capture only our own window.** For native captures (to see the real title bar and traffic lights), capture by window id (`screencapture -l <CGWindowID>`), never a screen region, which can grab other apps.
 - **Pointer gestures:** `ui.pointer` takes events in *document* coordinates and runs them through the same tool state machine as the mouse.
 
-## Headless CLI
-
-`apps/photosuite-cli` builds the binary `photosuite-cli`:
-
-```sh
-cargo run -p photosuite-cli -- convert in.psd out.pcraft               # any supported format -> any
-cargo run -p photosuite-cli -- info out.pcraft                          # JSON: size, mode, depth, layer tree
-cargo run -p photosuite-cli -- run in.png --cmd layer.new.layer --params '{"name":"Ink"}' \
-                                          --cmd filter.blur.gaussian --params '{"radius":3}' --out out.psd
-cargo run -p photosuite-cli -- run --new '{"width":800,"height":600}' --cmd document.inspect
-cargo run -p photosuite-cli -- batch --actions actions.json --in photos/ --out done/ --format jpg
-cargo run -p photosuite-cli -- commands --filter blur                    # the command registry
-```
-
-`actions.json` is `[{"command": "<id>", "params": {…}}, …]`, which is the same shape as a recorded action. `run` prints one JSON line per command result.
-
 ## Native format (.pcraft)
 
 `crates/format` defines the lossless native bundle. It is either a ZIP of STORE entries or a directory with the same layout:
@@ -123,60 +107,6 @@ cargo run -p photosuite-cli -- commands --filter blur                    # the c
 Keep one `PcraftWriter` per open document: re-saving then only compresses and writes tiles that changed, and directory bundles garbage-collect unreferenced objects. `format::Autosaver` writes snapshots into a recovery directory on a background thread. `list_recovery` / `recover` / `discard_recovery` implement crash recovery.
 
 `photosuite-io` routes `.pcraft` through this crate in `import`/`export`, detecting it by magic or by extension.
-
-## MCP (agents)
-
-`photosuite-cli mcp` serves MCP on stdio using `crates/automation`, which is built on `rmcp`:
-
-- **Headless:** `photosuite-cli mcp --automation-read-root <dir> --automation-write-root <dir>`. It drives an in-process engine session and has no file authority when a root is omitted.
-- **Live app:** start `photosuite --control 7878 --control-token-file <private-path> --automation-read-root <dir> --automation-write-root <dir>`, then run `photosuite-cli mcp --bridge 127.0.0.1:7878 --control-token-file <private-path>`. The desktop process owns the roots. See `docs/control-protocol.md#mcp-bridge`.
-
-Tools:
-
-- `session_list`
-- `doc_open`, `doc_new`, `doc_save`, `doc_export`, `doc_inspect`, `doc_render_preview` (returns a PNG image), `doc_select`, `doc_close`
-- `command_list`, `command_run`, `command_batch` (several commands per call)
-- bridge only: `ui_inspect`, `ui_screenshot`, `ui_pointer`, `ui_menu_invoke`, `ui_set`, `control_call`
-
-Claude Code (`.mcp.json` in the repo root, or `claude mcp add`):
-
-```json
-{
-  "mcpServers": {
-    "photosuite": {
-      "command": "/path/to/photosuite/target/release/photosuite-cli",
-      "args": ["mcp"]
-    },
-    "photosuite-live": {
-      "command": "/path/to/photosuite/target/release/photosuite-cli",
-      "args": ["mcp", "--bridge", "127.0.0.1:7878", "--control-token-file", "/private/path/photosuite-control.token"]
-    }
-  }
-}
-```
-
-```sh
-cargo build --release -p photosuite-cli
-claude mcp add photosuite -- "$PWD/target/release/photosuite-cli" mcp
-```
-
-`doc_inspect` (and the engine command `document.inspect`) reports the layer tree with kinds,
-bounds, masks, selection, effects (`effects.items[].kind`), smart filters (`smartFilters[]`), type
-text, adjustment settings, channels and history, so agents can verify what they did without a
-screenshot. `crates/automation/tests/agent_tasks.rs` is the reference: ten realistic edit tasks
-(title card, colour grade, undo/redo, editable smart blur, masks, saved selections, align,
-capability-scoped export, resize/crop, CMYK + native save) driven purely over MCP.
-
-Without MCP, `photosuite-cli serve [--port N]` keeps a headless session open and answers JSON lines
-(see `docs/control-protocol.md#headless-server`).
-
-A typical agent loop:
-
-1. `doc_open {path}`
-2. `command_list {filter:"blur"}`
-3. `command_run {id:"filter.blur.gaussian", params:{radius:4}}`
-4. `doc_render_preview` to check the result
-5. `doc_save {path:"out.pcraft"}`
 
 ## Colour management
 

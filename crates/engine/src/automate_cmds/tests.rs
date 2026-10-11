@@ -98,14 +98,6 @@ fn droplets_are_written_and_run() {
     assert!(dp.ends_with("Rotate.pcdroplet"));
     let v: Value = serde_json::from_slice(&std::fs::read(&dp).unwrap()).unwrap();
     assert_eq!(v["photosuiteDroplet"], 1);
-    #[cfg(unix)]
-    {
-        let shim = r["shim"].as_str().unwrap();
-        let text = std::fs::read_to_string(shim).unwrap();
-        assert!(text.starts_with("#!/bin/sh") && text.contains("droplet"));
-        use std::os::unix::fs::PermissionsExt;
-        assert_ne!(std::fs::metadata(shim).unwrap().permissions().mode() & 0o111, 0, "executable");
-    }
     let r = s.execute("file.automate.runDroplet", json!({"droplet": dp, "input": [dir.clone()]})).unwrap();
     assert_eq!(r["files"].as_array().unwrap().len(), inputs.len(), "{r}");
     let out = photosuite_codecs::decode(&std::fs::read(format!("{dir}/out/img0.png")).unwrap()).unwrap();

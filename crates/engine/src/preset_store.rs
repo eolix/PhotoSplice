@@ -18,7 +18,7 @@
 //! ([`MAX_GROUP_BYTES`], [`MAX_TIP_BYTES`], [`MAX_STORE_BYTES`]); corrupt or oversized files are
 //! skipped with a warning and left on disk, never a panic.
 //!
-//! A [`Session`] has no store by default, so headless CLI/MCP sessions and tests never write.
+//! A [`Session`] has no store by default, so headless sessions and tests never write.
 //! The desktop app opens the store on a background thread ([`open`]) and attaches it with
 //! [`Session::attach_preset_store`] once loaded, so the first frame never waits for it. The web
 //! app has no store (localStorage is too small for sampled tips): its brush presets are

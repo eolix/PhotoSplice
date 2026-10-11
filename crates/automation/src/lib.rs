@@ -1,33 +1,20 @@
 //! # photosuite-automation
 //!
-//! Agent-facing automation (architecture §12):
+//! The policy behind the desktop app's loopback control channel (`docs/control-protocol.md`):
 //!
-//! * [`PhotosuiteMcp`]: an MCP server (official `rmcp` SDK) exposing session,
-//!   document and command tools. Headless mode drives an in-process
-//!   [`photosuite_engine::Session`]; bridge mode forwards to a running desktop
-//!   app over the JSON-lines control protocol (`docs/control-protocol.md`), so
-//!   agents can also inspect, screenshot and click the live UI.
-//! * [`Headless`]: the synchronous session + file I/O core, shared with the CLI.
-//! * [`rpc`]: a headless JSON-lines server (stdio or loopback TCP) with the
-//!   control protocol's envelope, used by `photosuite-cli serve`.
-//! * [`files`]: open/save any supported format, `.pcraft` natively.
+//! * [`security`]: the control token, request size and rate limits.
+//! * [`budgets`]: response and rendered-PNG size budgets, and the reply writer.
+//! * [`workspace`]: capability-scoped file access ([`AuthorizedWorkspace`]) and the checks that
+//!   keep agent-supplied commands from reaching ambient filesystem paths.
 //!
 //! L6, no UI-toolkit dependencies.
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
-pub mod bridge;
 pub mod budgets;
-pub mod files;
-pub mod headless;
-pub mod rpc;
 pub mod security;
-pub mod server;
 pub mod workspace;
 
-pub use bridge::BridgeClient;
-pub use headless::Headless;
-pub use server::{Backend, PhotosuiteMcp};
 pub use workspace::AuthorizedWorkspace;
 
 #[derive(Debug, thiserror::Error)]
@@ -39,13 +26,7 @@ pub enum AutomationError {
     #[error(transparent)]
     Engine(#[from] photosuite_engine::EngineError),
     #[error(transparent)]
-    Import(#[from] photosuite_io::IoError),
-    #[error(transparent)]
     Format(#[from] photosuite_format::FormatError),
-    #[error("bridge: {0}")]
-    Bridge(String),
-    #[error("app: {0}")]
-    App(String),
     #[error("{0}")]
     Other(String),
 }

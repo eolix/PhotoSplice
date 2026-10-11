@@ -40,7 +40,7 @@ fn flag(p: &Value, k: &str, d: bool) -> bool {
 
 // ---------- lens profiles ----------
 
-/// The measured lens profile database (Lensfun), registered once by the app or CLI.
+/// The measured lens profile database (Lensfun), registered once by the app.
 static LENS_DB: std::sync::RwLock<Option<std::sync::Arc<photosuite_algo::lensdb::LensDatabase>>> = std::sync::RwLock::new(None);
 
 /// Registers the lens profile database from `lens-database.json`; returns how many lenses it has.
@@ -51,7 +51,7 @@ pub fn set_lens_database_json(bytes: &[u8]) -> std::result::Result<usize, String
     Ok(n)
 }
 
-/// Supplies the database bytes the first time profiles are needed (the app and CLI read
+/// Supplies the database bytes the first time profiles are needed (the app reads
 /// `resources/lensfun/lens-database.json`; the engine itself touches no files).
 pub type LensDatabaseLoader = Box<dyn Fn() -> Option<Vec<u8>> + Send + Sync>;
 static LENS_DB_LOADER: std::sync::Mutex<Option<LensDatabaseLoader>> = std::sync::Mutex::new(None);

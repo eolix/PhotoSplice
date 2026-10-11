@@ -253,7 +253,7 @@ pub struct Services {
     pub gallery_thumbs_file: Option<std::path::PathBuf>,
     /// Write bytes to a path (native) or trigger a download (web).
     pub write: Option<WriteFn>,
-    /// File access used only by control/MCP requests. Interactive dialogs keep
+    /// File access used only by control-channel requests. Interactive dialogs keep
     /// using `pick_open`, `pick_save` and `write` with the user's authority.
     pub automation_read: Option<AutomationReadFn>,
     pub automation_write: Option<AutomationWriteFn>,

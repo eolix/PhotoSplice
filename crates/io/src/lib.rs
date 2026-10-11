@@ -108,7 +108,7 @@ pub struct ExportOptions {
     /// Write PSB even for `.psd` names when the document is small.
     pub force_psb: bool,
     /// TIFF: keep the layers (Photoshop layer data in tag 37724). Off by default, so scripted
-    /// and agent saves (CLI, batch, MCP) write a flat TIFF unless they ask for layers; the app's
+    /// and agent saves (batch, the control channel) write a flat TIFF unless they ask for layers; the app's
     /// Save As sets it from its Layers option, which keeps them as Photoshop does. `false` is
     /// Photoshop's "Discard Layers and Save a Copy".
     pub tiff_layers: bool,

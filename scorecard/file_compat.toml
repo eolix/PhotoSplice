@@ -189,7 +189,7 @@ note = "Features absent; no atomic-save failure-injection test"
 
 [[item]]
 id = "FILE-216-6"
-target = "30-50 end-to-end workflow acceptance tasks driven through MCP or commands"
-status = "partial"
+target = "30-50 end-to-end workflow acceptance tasks driven through the control channel or commands"
+status = "missing"
 issue = 216
-note = "automation/tests/agent_tasks.rs: 10 MCP tasks"
+note = "The 10 MCP tasks went with the MCP server; none over the control channel yet"

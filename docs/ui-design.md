@@ -68,8 +68,8 @@ continue to control the document independently of UI scaling.
 
 Strings in code stay English and are the default lookup keys. `crates/ui-egui/src/i18n` maps them
 to display text at render time from one catalog per language (`i18n/<code>.tsv`; the format is
-documented in the header of `ja.tsv`). Command ids, menu paths used for logic, the control channel,
-the CLI and MCP always use the English ids and labels.
+documented in the header of `ja.tsv`). Command ids, menu paths used for logic, and the control channel
+always use the English ids and labels.
 
 - `tr(lang, s)` plain strings; `tr_ctx` when one English word needs different translations;
   `tr_id(lang, command_id, label)` for menu items (keyed by command id, English label as the

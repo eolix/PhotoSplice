@@ -4,9 +4,8 @@
 //!
 //! "Scripts" are PhotoSuite action scripts: JSON (`[[id, params], …]`, `{"steps": …}` or a
 //! droplet) or a plain-text list with one `command.id {json params}` per line (`#` comments).
-//! Droplets are JSON files (`.pcdroplet`) holding an action plus batch options; `photosuite-cli
-//! droplet <file> <inputs…>` runs one, and on Unix a `.command` shim makes it
-//! double-clickable / drop-target-able from the shell.
+//! Droplets are JSON files (`.pcdroplet`) holding an action plus batch options;
+//! `file.automate.runDroplet` runs one on files and folders.
 //!
 //! Script events (Start Application, New / Open / Save / Close Document, Print, Export) are
 //! bound in Preferences (`scriptEvents`) and fired by [`fire_event`]: the engine fires New,
@@ -298,33 +297,8 @@ fn create_droplet(s: &mut Session, p: &Value) -> Result<Value> {
     let droplet = json!({"photosuiteDroplet": 1, "name": name, "action": {"name": name, "steps": steps_json}, "options": options});
     let text = serde_json::to_string_pretty(&droplet).unwrap_or_default();
     write_file(&path, text.as_bytes())?;
-    let shim = p.get("shim").and_then(Value::as_bool).unwrap_or(cfg!(unix));
-    let shim_path = if shim { Some(write_shim(&path)?) } else { None };
     let _ = s;
-    Ok(json!({"path": path, "shim": shim_path, "steps": steps.len()}))
-}
-
-/// A tiny shell script next to the droplet: drop files on it (or pass them) to run the droplet.
-#[cfg(not(target_arch = "wasm32"))]
-fn write_shim(droplet: &str) -> Result<String> {
-    let abs = std::fs::canonicalize(droplet).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| droplet.to_string());
-    let base = abs.trim_end_matches(".pcdroplet").trim_end_matches(".json");
-    let shim = format!("{base}.command");
-    let body = format!(
-        "#!/bin/sh\n# PhotoSuite droplet: runs the action on the files given (or dropped).\nexec \"${{PHOTOSUITE_CLI:-photosuite-cli}}\" droplet \"{}\" \"$@\"\n",
-        abs.replace('"', "\\\"")
-    );
-    crate::file_cmds::write_file(&shim, body.as_bytes())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755));
-    }
-    Ok(shim)
-}
-#[cfg(target_arch = "wasm32")]
-fn write_shim(_: &str) -> Result<String> {
-    Err(EngineError::Other("no file system on the web".into()))
+    Ok(json!({"path": path, "steps": steps.len()}))
 }
 
 /// Runs a droplet file on inputs (files and/or folders).
@@ -533,7 +507,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "file.automate.createDroplet",
             "Create Droplet…",
             &["File", "Automate"],
-            r##"{"path":str (.pcdroplet),"steps":[[id,params]…] (the action),"name":str?,"output":folder?,"format":"same|png|jpg|…"?,"quality":0..12?,"shim":bool=true on Unix (writes <name>.command calling `photosuite-cli droplet`)} → {path, shim}"##,
+            r##"{"path":str (.pcdroplet),"steps":[[id,params]…] (the action),"name":str?,"output":folder?,"format":"same|png|jpg|…"?,"quality":0..12?} → {path, steps}"##,
             native,
             create_droplet
         ),
