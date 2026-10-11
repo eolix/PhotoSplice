@@ -359,8 +359,7 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
                 let dout = b.field(FieldKind::BevelOutside, reach);
                 let mut st = stage(Kernel::MBevelH, Some(din), Some(dout), [paint(g.paint), g.chisel[0], g.chisel[1], 0.0], 0);
                 st.s = Some(In::Shape);
-                let h = b.push(st);
-                if g.chisel_soft > 0.0 { b.conv(h, photosuite_compose::effects::tent_kernel(g.chisel_soft)) } else { h }
+                b.push(st)
             };
             if let Some(c) = &bv.contour {
                 // Contour element: the height through the contour over its range.

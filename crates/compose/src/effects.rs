@@ -971,8 +971,6 @@ pub struct BevelGeom {
     pub depth: f32,
     /// Pillow emboss: the outside slopes face the other way.
     pub pillow: bool,
-    /// Chisel Soft: extra tent width over the chiselled height map.
-    pub chisel_soft: f32,
     /// Chisel: the inside and outside ramp lengths of the height map (see [`bevel_chisel_h`]).
     pub chisel: [f32; 2],
 }
@@ -1019,14 +1017,17 @@ pub fn bevel_geom(b: &Bevel) -> BevelGeom {
         width,
         depth: b.depth * if smooth { width } else { ramp * chisel_slope(width) } * sign,
         pillow: b.style == BevelStyle::PillowEmboss,
-        chisel_soft: if b.technique == BevelTechnique::ChiselSoft { (size / 4.0).max(1.0) } else { 0.0 },
         chisel,
     }
 }
 
 /// Bevel height map in `0..=1`. Smooth: the shape blurred by two box passes of the bevel
 /// width. Chisel: linear ramps of the exact distance to the edge ([`BevelGeom::chisel`] long;
-/// emboss styles straddle the edge), slightly blurred for Chisel Soft. Soften blurs the result.
+/// emboss styles straddle the edge). Chisel Soft uses the same profile: on straight edges
+/// Photoshop's Chisel Soft and Hard facets are identical (Photoshop corpus bevel-inner-chisel-*:
+/// the same values pixel for pixel across an edge); a blur over it softened them (pixels off
+/// 10-18 % → 8-12 %; what remains are the radial streaks Photoshop's Soft draws on curves).
+/// Soften blurs the result.
 fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, patterns: &PreparedPatterns<'_>) -> Map {
     let mut h = if b.technique == BevelTechnique::Smooth {
         let mut h = shape.clone();
@@ -1043,9 +1044,6 @@ fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, pattern
             let a = shape.v[i];
             let (di, dou) = if a > INSIDE_EPS && a < 1.0 - INSIDE_EPS { (a - 0.5, 0.5 - a) } else { (din[i], dout[i]) };
             h.v[i] = bevel_chisel_h(g.paint, g.chisel, di, dou);
-        }
-        if g.chisel_soft > 0.0 {
-            tent(&mut h, g.chisel_soft);
         }
         h
     };
@@ -1917,6 +1915,23 @@ mod tests {
         let at = |k: usize, x: usize, y: usize| m[k].v[y * 64 + x];
         for (got, want) in [(at(0, 13, 32), 0.266), (at(0, 32, 13), 0.534), (at(1, 50, 32), 0.445), (at(1, 32, 50), 0.71)] {
             assert!((got - want).abs() < 0.03, "{got} vs {want}");
+        }
+    }
+
+    /// Chisel Soft draws the same facets as Chisel Hard along straight edges (Photoshop corpus
+    /// bevel-inner-chisel-hard / -soft: equal pixel for pixel across an edge); a blur used to
+    /// soften them.
+    #[test]
+    fn chisel_soft_matches_hard_on_straight_edges() {
+        let shape = square(64, 10, 54);
+        let maps = |t: BevelTechnique| {
+            let mut b = bevel_of(BevelStyle::InnerBevel, t);
+            (b.size, b.angle, b.altitude) = (10.0, 120.0, 30.0);
+            bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES)).0
+        };
+        let (hard, soft) = (maps(BevelTechnique::ChiselHard), maps(BevelTechnique::ChiselSoft));
+        for (h, s) in hard.iter().zip(&soft) {
+            assert_eq!(h.v, s.v);
         }
     }
 
