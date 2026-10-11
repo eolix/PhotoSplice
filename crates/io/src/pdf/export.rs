@@ -291,6 +291,11 @@ impl Writer<'_> {
             return false;
         }
         let mut engine = photosuite_text::shared().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A font that isn't installed would be set in the fallback face: the layer's own pixels
+        // (from the PSD or PDF it came from) still show its font, as the canvas does.
+        if t.cache.is_some() && t.char_runs().iter().any(|r| !engine.fonts.renders_as_named(&r.style.font_family, r.style.postscript_name.as_deref())) {
+            return false;
+        }
         let layout = engine.layout(t, self.doc.resolution_dpi.max(1.0));
         drop(engine);
         let m = t.transform.m;

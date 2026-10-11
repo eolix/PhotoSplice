@@ -116,19 +116,13 @@ fn save_writes_every_writable_format_in_place_and_asks_for_the_rest() {
     let (mut app, written) = app_with(None, None);
     let ctx = egui::Context::default();
     // Layered, native and flat formats alike go straight back to their file.
-    for (i, path) in ["/pics/work.pcraft", "/pics/flat.png", "/pics/photo.JPEG", "/pics/scan.tiff", "/pics/icon.bmp"].into_iter().enumerate() {
+    for (i, path) in ["/pics/work.pcraft", "/pics/flat.png", "/pics/photo.JPEG", "/pics/scan.tiff", "/pics/icon.bmp", "/pics/brochure.pdf"].into_iter().enumerate() {
         app.open_file(path, b"x").unwrap();
         let r = menus::invoke(&mut app, &ctx, "file.save", json!({})).unwrap();
         assert_eq!(r["path"], path, "{path}: {r}");
         assert_eq!(written.borrow().len(), i + 1, "{path}");
         assert!(!app.session.active().unwrap().is_dirty());
     }
-    // A PDF goes back to its file too, through Save Adobe PDF (written once that's answered).
-    app.open_file("/pics/brochure.pdf", b"x").unwrap();
-    let r = menus::invoke(&mut app, &ctx, "file.save", json!({})).unwrap();
-    assert_eq!(r["path"], "/pics/brochure.pdf", "{r}");
-    assert_eq!(app.pdf_options.as_ref().map(|p| p.path.as_str()), Some("/pics/brochure.pdf"));
-    app.pdf_options = None;
     let n = written.borrow().len();
     // A camera raw file and a new document have nothing to write in place: Save As.
     for path in ["/pics/raw.NEF"] {
@@ -710,16 +704,22 @@ fn photoshop_pdfs_open_as_their_document_and_save_in_place() {
 }
 
 #[test]
-fn saving_a_pdf_asks_for_its_options_first() {
+fn save_as_pdf_takes_the_editing_option_from_the_dialog() {
     let (mut app, written) = app_with(None, None);
+    let ctx = egui::Context::default();
     app.run("file.new", json!({"width": 8, "height": 8, "name": "p"})).unwrap();
-    app.save_as(Some("/out/p.pdf".into())).unwrap();
-    assert!(written.borrow().is_empty(), "parked behind Save Adobe PDF");
-    let p = app.pdf_options.as_ref().expect("Save Adobe PDF");
-    assert!(p.preserve_editing, "Photoshop's default");
-    // The last choice is where the next PDF save starts.
-    app.pdf_options = None;
-    app.pdf_preserve_editing = false;
-    app.save_as(Some("/out/p.pdf".into())).unwrap();
-    assert!(!app.pdf_options.as_ref().unwrap().preserve_editing);
+    assert!(app.pdf_preserve_editing, "Photoshop's default");
+    let r = menus::invoke(&mut app, &ctx, "file.saveAs", json!({})).unwrap();
+    let id = r["dialog"].as_u64().unwrap();
+    let d = app.ui.dialog_mut(id).unwrap();
+    d.fields.insert("format".into(), json!("pdf"));
+    d.fields.insert("pdfEditing".into(), json!(false));
+    d.fields.insert("path".into(), json!("/out/p.pdf"));
+    crate::dialogs::confirm(&mut app, id).unwrap();
+    assert_eq!(written.borrow().last().map(|(p, _)| p.clone()).as_deref(), Some("/out/p.pdf"), "written on Save, no second dialog");
+    assert!(!app.pdf_preserve_editing, "remembered for the next PDF save");
+    // File › Save writes it back in place with that choice.
+    let n = written.borrow().len();
+    menus::invoke(&mut app, &ctx, "file.save", json!({})).unwrap();
+    assert_eq!(written.borrow().len(), n + 1);
 }

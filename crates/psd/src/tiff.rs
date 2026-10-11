@@ -54,6 +54,10 @@ pub const SIGNATURE: &[u8; 36] = b"Adobe Photoshop Document Data Block\0";
 /// Header string of 37724 data with PSB-sized (8-byte) lengths for the long keys.
 pub const SIGNATURE_PSB: &[u8; 36] = b"Adobe Photoshop Document Data V0002\0";
 
+/// The global layer mask record Photoshop writes when there is none to keep: overlay colour
+/// space 0 (RGB), colour 65535, 0, 0, 0, opacity 50, kind 128 (use the value stored per layer).
+pub const DEFAULT_GLOBAL_MASK: [u8; 14] = [0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x32, 0x80, 0x00];
+
 /// The layer-info block key Photoshop uses for a bit depth.
 pub fn layer_info_key(depth: u16) -> [u8; 4] {
     match depth {
@@ -159,7 +163,10 @@ impl ImageSourceData {
             blocks.push(padded_block(self.layer_info_key, data));
         }
         if let Some(m) = &self.global_layer_mask {
-            blocks.push(padded_block(*b"LMsk", m.data.clone()));
+            // Photoshop always writes the 14-byte record (and refuses a Photoshop PDF whose
+            // `LMsk` is empty, which a PSD's empty global-mask section would otherwise become).
+            let data = if m.data.is_empty() { DEFAULT_GLOBAL_MASK.to_vec() } else { m.data.clone() };
+            blocks.push(padded_block(*b"LMsk", data));
         }
         for b in &self.global_blocks {
             let mut b = b.clone();

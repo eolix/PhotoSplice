@@ -503,6 +503,11 @@ fn web_body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
             }
             ui.add_space(4.0);
             if doc_fmt {
+                // PDF: Photoshop's editing data, chosen here rather than in a dialog after Save.
+                if s(f, "format", "psd") == "pdf" {
+                    check(ui, f, "pdfEditing", tl!("Preserve Photoshop Editing Capabilities"), app.pdf_preserve_editing);
+                    ui.label(egui::RichText::new(tl!("Photoshop and PhotoSuite reopen the PDF with its layers. Other applications show its page.")).color(t.text_dim));
+                }
                 return;
             }
             let fmt = s(f, "format", "jpeg");
@@ -617,6 +622,9 @@ fn web_confirm(app: &mut PhotosuiteApp, f: &Map<String, Value>) -> Result<Value,
                 app.services.pick_save.as_mut().and_then(|pick| pick(&suggested)).ok_or("cancelled")?
             }
         };
+        if fmt == "pdf" {
+            app.pdf_preserve_editing = b(f, "pdfEditing", app.pdf_preserve_editing);
+        }
         return app.save_as(Some(path)).map(|(p, w)| json!({"path": p, "warnings": w}));
     }
     let mut p = params(f);

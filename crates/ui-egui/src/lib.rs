@@ -122,7 +122,6 @@ pub mod stylus;
 mod tab_strip;
 pub mod theme;
 pub mod tiff_options_ui;
-pub mod pdf_options_ui;
 pub mod pdf_import_ui;
 mod timeline_ui;
 pub mod tone;
@@ -459,9 +458,8 @@ pub struct PhotosuiteApp {
     pub(crate) discard: Option<discard_ui::Prompt>,
     /// A Save As to a layered TIFF parked behind the TIFF Options prompt (see `tiff_options_ui`).
     pub(crate) tiff_options: Option<tiff_options_ui::Prompt>,
-    /// A save to PDF parked behind Save Adobe PDF (see `pdf_options_ui`).
-    pub(crate) pdf_options: Option<pdf_options_ui::Prompt>,
-    /// The last Save Adobe PDF "Preserve Photoshop Editing Capabilities" choice.
+    /// The last "Preserve Photoshop Editing Capabilities" choice (File › Save As with PDF): what
+    /// PDFs are saved with, File › Save included.
     pub(crate) pdf_preserve_editing: bool,
     /// Import PDF while it is up (see `pdf_import_ui`).
     pub import_pdf: Option<pdf_import_ui::ImportPdf>,
@@ -560,7 +558,6 @@ impl PhotosuiteApp {
             prefs_rt: Default::default(),
             discard: None,
             tiff_options: None,
-            pdf_options: None,
             pdf_preserve_editing: true,
             import_pdf: None,
             allow_close: false,
@@ -911,14 +908,14 @@ impl PhotosuiteApp {
             tiff_options_ui::park(self, path.clone());
             return Ok((path, Vec::new()));
         }
-        // A PDF asks for its options (Save Adobe PDF), as in Photoshop.
-        if pdf_options_ui::is_pdf_path(&path) {
-            pdf_options_ui::park(self, path.clone());
-            return Ok((path, Vec::new()));
-        }
         // The quality the document was opened or last saved with (File › Save keeps it).
         let st = self.session.active().ok_or("no document")?;
-        let settings = ExportSettings { jpeg_quality: st.save_options.jpeg_quality, webp_quality: st.save_options.webp_quality, ..Default::default() };
+        let settings = ExportSettings {
+            jpeg_quality: st.save_options.jpeg_quality,
+            webp_quality: st.save_options.webp_quality,
+            pdf_editing: self.pdf_preserve_editing,
+            ..Default::default()
+        };
         self.write_document(path, &settings)
     }
 
@@ -1156,7 +1153,6 @@ impl eframe::App for PhotosuiteApp {
         jobs_ui::dialog(self, &ctx);
         discard_ui::show(self, &ctx);
         tiff_options_ui::show(self, &ctx);
-        pdf_options_ui::show(self, &ctx);
         pdf_import_ui::show(self, &ctx);
         distort_ui::show(self, &ctx);
         camera_raw_ui::show(self, &ctx);
