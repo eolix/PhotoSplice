@@ -51,7 +51,7 @@ fn plural_none(_: u64) -> usize {
 /// The registry. English first: it is the fallback and the source language.
 pub static LANGUAGES: [LangInfo; 39] = [
     LangInfo { code: "en", name: "English", source: "", plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
-    LangInfo { code: "ja", name: "日本語", source: include_str!("ja.tsv"), plural: plural_none, complete_menus: true, catalog: OnceLock::new() },
+    LangInfo { code: "ja", name: "日本語", source: include_str!("ja.tsv"), plural: plural_none, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "de", name: "Deutsch", source: include_str!("de.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "es", name: "Español", source: include_str!("es.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "fr", name: "Français", source: include_str!("fr.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
