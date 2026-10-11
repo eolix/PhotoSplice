@@ -1103,8 +1103,8 @@ fn modern_brightness_matches_photoshop() {
         for (i, &x) in xs.iter().enumerate() {
             let got = adjust::modern_brightness(x as f32 / 255.0, b) * 255.0;
             let err = (got - out[i] as f32).abs();
-            // The brightness roll-off is a spline; our fit is close but approximate at the top.
-            assert!(err <= 6.0, "brightness {b} x={x}: got {got:.1} want {} (err {err:.1})", out[i]);
+            // Interpolated from curves measured in Photoshop (a 0..255 ramp, 2026-10).
+            assert!(err <= 3.0, "brightness {b} x={x}: got {got:.1} want {} (err {err:.1})", out[i]);
         }
     }
     // Endpoints and the zero slider are exact.
@@ -1112,6 +1112,15 @@ fn modern_brightness_matches_photoshop() {
     assert_eq!(adjust::modern_brightness(1.0, -120.0), 1.0);
     assert_eq!(adjust::modern_brightness(0.37, 0.0), 0.37);
     assert_eq!(adjust::modern_contrast(0.37, 0.0), 0.37);
+    // Between measured sliders the curves blend smoothly and stay monotone in both v and b.
+    for b in [-150.0, -100.0, -20.0, 10.0, 75.0, 120.0, 150.0, 400.0, f32::NAN] {
+        let t = adjust::brightness_contrast_lut(b, 0.0, false);
+        assert!(t.windows(2).all(|w| w[1] >= w[0] - 1e-6), "brightness {b} not monotone");
+    }
+    for x in [0.1f32, 0.5, 0.9] {
+        let ys: Vec<f32> = (-150..=150).step_by(10).map(|b| adjust::modern_brightness(x, b as f32)).collect();
+        assert!(ys.windows(2).all(|w| w[1] >= w[0]), "x={x} not monotone in brightness");
+    }
 }
 
 // Levels ground truth from Adobe Photoshop 2026 (adjustLevels on a 0..255 ramp). Verifies our
@@ -1487,3 +1496,4 @@ fn photo_filter_matches_photoshop() {
         assert!(got.iter().zip(ps).all(|(g, p)| (g - p).abs() <= 2.5), "F32 {v:?}: got {got:?} want {ps:?}");
     }
 }
+

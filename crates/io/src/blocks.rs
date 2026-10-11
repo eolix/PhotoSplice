@@ -250,7 +250,7 @@ pub(crate) type Stops = (Vec<(f32, Color)>, Vec<(f32, f32)>);
 /// midpoints, and the parent's `gs99` interpolation method when given).
 pub(crate) fn gradient_stops_with(grad: &Descriptor, method: Option<&[u8]>) -> Stops {
     let raw = gradient_stops_raw(grad);
-    let stops = if raw.stops.len() >= 2 {
+    let stops = if raw.stops.len() >= 2 && !raw.noise {
         crate::gradient_bake::bake(raw.stops, &raw.mids, raw.smooth, crate::gradient_bake::Method::from_code(method))
     } else {
         raw.stops
@@ -265,6 +265,8 @@ pub(crate) struct RawStops {
     pub mids: Vec<f32>,
     pub opacity: Vec<(f32, f32)>,
     pub smooth: f32,
+    /// A generated noise gradient (dense stops; never baked).
+    pub noise: bool,
 }
 
 /// Stops of a gradient fill layer, kept editable: when Photoshop's interpolation is plain
@@ -276,7 +278,7 @@ pub(crate) fn gradient_stops_editable(grad: &Descriptor, method: Option<&[u8]>) 
     let m = crate::gradient_bake::Method::from_code(method);
     // Lab stops (Lab documents) interpolate in L*a*b*, which only baking reproduces.
     let lab = raw.stops.iter().all(|(_, c)| c.mode == photosuite_color::ColorMode::Lab);
-    if raw.stops.len() >= 2 && (raw.smooth > 0.0 || m != crate::gradient_bake::Method::Classic || lab) {
+    if raw.stops.len() >= 2 && !raw.noise && (raw.smooth > 0.0 || m != crate::gradient_bake::Method::Classic || lab) {
         raw.stops = crate::gradient_bake::bake(std::mem::take(&mut raw.stops), &raw.mids, raw.smooth, m);
         raw.mids.clear();
     }
@@ -290,6 +292,11 @@ pub(crate) fn gradient_stops_editable(grad: &Descriptor, method: Option<&[u8]>) 
 }
 
 fn gradient_stops_raw(grad: &Descriptor) -> RawStops {
+    // Noise gradients have no stops: an approximation of Photoshop's random ramp, generated.
+    if let Some(n) = crate::noise_gradient::Noise::from_desc(grad) {
+        let (stops, opacity) = n.stops();
+        return RawStops { stops, mids: Vec::new(), opacity, smooth: 0.0, noise: true };
+    }
     let mut stops = Vec::new();
     let mut mids = Vec::new();
     let mut opacity = Vec::new();
@@ -321,7 +328,7 @@ fn gradient_stops_raw(grad: &Descriptor) -> RawStops {
             }
         }
     }
-    RawStops { stops: sorted, mids, opacity, smooth }
+    RawStops { stops: sorted, mids, opacity, smooth, noise: false }
 }
 
 /// A `Grdn` descriptor for colour and opacity stops.
@@ -374,6 +381,9 @@ pub(crate) fn gradient_desc_with(stops: &[(f32, Color)], opacity: &[(f32, f32)],
 /// Opacity stops of a `Grdn` descriptor with Photoshop's smoothness and midpoints applied (the
 /// same curve as the colour stops, Classic interpolation), densely sampled.
 fn smoothed_opacity_stops(grad: &Descriptor) -> Vec<(f32, f32)> {
+    if let Some(n) = crate::noise_gradient::Noise::from_desc(grad) {
+        return n.stops().1;
+    }
     let mut stops = Vec::new();
     let mut mids = Vec::new();
     if let Some(Value::List(items)) = grad.get("Trns") {

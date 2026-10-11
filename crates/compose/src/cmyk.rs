@@ -387,6 +387,7 @@ fn adjust(a: &Adjustment, buf: &mut CBuf, cx: &Ctx) {
         return;
     }
     if let Adjustment::GradientMap { stops, reverse, ink_stops, .. } = a {
+        let stops = &crate::adjust::by_location(stops);
         for p in &mut buf.px {
             let mut t = ink_lightness(p);
             if *reverse {

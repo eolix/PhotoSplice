@@ -36,6 +36,7 @@ mod flat_modes;
 mod gradient_bake;
 pub mod linked;
 mod multichannel_map;
+mod noise_gradient;
 pub mod pattern_map;
 pub mod pdf;
 mod pixels;

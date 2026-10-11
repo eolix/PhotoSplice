@@ -59,6 +59,7 @@ pub(crate) fn apply(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, dept
     };
     // Gradient Map: driven by L, the stops' colour out.
     if let Adjustment::GradientMap { stops, reverse, .. } = adj {
+        let stops = &crate::adjust::by_location(stops);
         for p in &mut buf.px {
             if p[3] <= 0.0 {
                 continue;

@@ -66,33 +66,26 @@ pub fn midpoint_remap(u: f32, m: f32) -> f32 {
 }
 
 fn sample_color(stops: &[(f32, [f32; 4])], mids: &[f32], t: f32) -> [f32; 4] {
-    let (Some(first), Some(last)) = (stops.first(), stops.last()) else { return [0.0; 4] };
-    if t <= first.0 {
-        return first.1;
+    match crate::adjust::locate(stops, t) {
+        Ok((i, u)) => match (stops.get(i), stops.get(i + 1)) {
+            (Some(a), Some(b)) => {
+                let k = midpoint_remap(u, mids.get(i).copied().unwrap_or(0.5));
+                std::array::from_fn(|c| a.1[c] + (b.1[c] - a.1[c]) * k)
+            }
+            _ => [0.0; 4],
+        },
+        Err(j) => stops.get(j).map_or([0.0; 4], |s| s.1),
     }
-    for (i, w) in stops.windows(2).enumerate() {
-        let (a, b) = (&w[0], &w[1]);
-        if t <= b.0 {
-            let u = if b.0 > a.0 { (t - a.0) / (b.0 - a.0) } else { 0.0 };
-            let k = midpoint_remap(u, mids.get(i).copied().unwrap_or(0.5));
-            return std::array::from_fn(|c| a.1[c] + (b.1[c] - a.1[c]) * k);
-        }
-    }
-    last.1
 }
 
 fn sample_opacity(stops: &[(f32, f32)], t: f32) -> f32 {
-    let (Some(first), Some(last)) = (stops.first(), stops.last()) else { return 1.0 };
-    if t <= first.0 {
-        return first.1;
+    match crate::adjust::locate(stops, t) {
+        Ok((i, u)) => match (stops.get(i), stops.get(i + 1)) {
+            (Some(a), Some(b)) => a.1 + (b.1 - a.1) * u,
+            _ => 1.0,
+        },
+        Err(j) => stops.get(j).map_or(1.0, |s| s.1),
     }
-    for w in stops.windows(2) {
-        if t <= w[1].0 {
-            let u = if w[1].0 > w[0].0 { (t - w[0].0) / (w[1].0 - w[0].0) } else { 0.0 };
-            return w[0].1 + (w[1].1 - w[0].1) * u;
-        }
-    }
-    last.1
 }
 
 /// Adds one level of the shared dither noise to a colour (as the Gradient tool does).

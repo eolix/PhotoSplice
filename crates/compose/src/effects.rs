@@ -584,7 +584,11 @@ struct PreparedGradient {
 
 impl PreparedGradient {
     fn new(g: &Gradient) -> Self {
-        Self { color: g.stops.iter().map(|(p, c)| (*p, rgb(c))).collect(), opacity: g.opacity_stops.iter().map(|(p, a)| (*p, [*a; 3])).collect() }
+        let mut color: Vec<(f32, [f32; 3])> = g.stops.iter().map(|(p, c)| (*p, rgb(c))).collect();
+        let mut opacity: Vec<(f32, [f32; 3])> = g.opacity_stops.iter().map(|(p, a)| (*p, [*a; 3])).collect();
+        color.sort_by(|a, b| a.0.total_cmp(&b.0));
+        opacity.sort_by(|a, b| a.0.total_cmp(&b.0));
+        Self { color, opacity }
     }
 
     fn sample(&self, t: f32) -> [f32; 4] {
@@ -595,22 +599,7 @@ impl PreparedGradient {
 }
 
 fn sample_stops(stops: &[(f32, [f32; 3])], t: f32) -> [f32; 3] {
-    match stops {
-        [] => [t; 3],
-        [s] => s.1,
-        _ => {
-            if t <= stops[0].0 {
-                return stops[0].1;
-            }
-            for w in stops.windows(2) {
-                if t <= w[1].0 {
-                    let k = if w[1].0 > w[0].0 { (t - w[0].0) / (w[1].0 - w[0].0) } else { 0.0 };
-                    return std::array::from_fn(|i| w[0].1[i] + (w[1].1[i] - w[0].1[i]) * k);
-                }
-            }
-            stops[stops.len() - 1].1
-        }
-    }
+    crate::adjust::gradient(stops, t)
 }
 
 /// Composite `color × coverage` into `dst` (both over the same rectangle).

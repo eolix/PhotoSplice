@@ -447,31 +447,6 @@ fn exposure(v: f32, p: vec4<f32>) -> f32 {
     return clamp(t_encode(lin, p.w), 0.0, 1.0);
 }
 
-// Modern Brightness curve: line of slope 1.375^(b/50) rolled off to (1,1) by a v^P white anchor.
-// Mirrors compose::adjust::modern_brightness.
-fn mbright(v: f32, b: f32) -> f32 {
-    if (b == 0.0) { return v; }
-    let s = pow(1.375, b / 50.0);
-    var p: f32;
-    if (b >= 0.0) { p = max(4.5 - 0.013 * b, 2.0); } else { p = 5.0 - 0.072 * b; }
-    let vv = clamp(v, 0.0, 1.0);
-    return clamp(s * vv + (1.0 - s) * pow(vv, p), 0.0, 1.0);
-}
-
-// Modern Contrast curve: symmetric cubic-Hermite S pivoting at 0.5.
-// Mirrors compose::adjust::modern_contrast.
-fn mcontrast(v: f32, ct: f32) -> f32 {
-    if (ct == 0.0) { return v; }
-    let k = ct / 128.0;
-    let e = 1.0 - k; let m = 1.0 + k;
-    let vv = clamp(v, 0.0, 1.0);
-    var t: f32;
-    if (vv <= 0.5) { t = vv / 0.5; } else { t = (1.0 - vv) / 0.5; }
-    let h = e * 0.5 * (t * t * t - 2.0 * t * t + t) + (-2.0 * t * t * t + 3.0 * t * t) * 0.5 + m * 0.5 * (t * t * t - t * t);
-    if (vv <= 0.5) { return h; }
-    return 1.0 - h;
-}
-
 fn adjust(c: vec3<f32>) -> vec3<f32> {
     let p0 = op.p0;
     let p1 = op.p1;
@@ -483,13 +458,8 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
             return vec3(select(0.0, 1.0, round_half_up(gray(c) * 255.0) >= p0.x));
         }
         case 3: { return vec3(posterize(c.r, p0.x), posterize(c.g, p0.x), posterize(c.b, p0.x)); }
-        case 4: { return clamp((c - 0.5) * p0.y + 0.5 + p0.x, vec3(0.0), vec3(1.0)); }   // B/C legacy
-        case 5: {                                                              // B/C modern
-            let b = p0.x; let ct = p0.y;
-            return vec3(mcontrast(mbright(c.r, b), ct), mcontrast(mbright(c.g, b), ct), mcontrast(mbright(c.b, b), ct));
-        }
         case 6: { return vec3(exposure(c.r, p0), exposure(c.g, p0), exposure(c.b, p0)); }  // Exposure
-        case 7: { return vec3(lut(0, c.r), lut(1, c.g), lut(2, c.b)); }        // Levels / Curves
+        case 7: { return vec3(lut(0, c.r), lut(1, c.g), lut(2, c.b)); }        // Levels / Curves / B/C
         case 8: {                                                              // Hue/Saturation
             let hsl = rgb_to_hsl(c);
             var hh: f32;

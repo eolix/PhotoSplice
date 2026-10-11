@@ -229,7 +229,8 @@ fn be32(d: &[u8], at: usize) -> Option<u32> {
 /// key), reverse, dither, [method], name, colour stops (location /4096, midpoint %, colour
 /// space + four u16 components, 2 bytes), transparency stops, then smoothness (/4096) among
 /// noise-gradient fields. Smoothness, midpoints and the method are baked into dense stops like
-/// gradient fills. Noise gradients (no colour stops) and book colours stay unsupported.
+/// gradient fills; noise gradients are generated (an approximation). Book colours stay
+/// unsupported.
 fn parse_gradient_map(d: &[u8]) -> Option<Adjustment> {
     let version = be16(d, 0)?;
     let reverse = *d.get(2)? != 0;
@@ -263,11 +264,15 @@ fn parse_gradient_map(d: &[u8]) -> Option<Adjustment> {
         mids.push(mid);
         at += 20;
     }
+    let nt = usize::from(be16(d, at)?);
+    at += 2 + nt * 10 + 2; // transparency stops, expansion count
+    // Then smoothness, a length (32), the form (1 = noise) and the noise settings.
+    if be16(d, at + 4) == Some(1) {
+        return parse_noise_gradient_map(d, at + 6, reverse, dither);
+    }
     if stops.len() < 2 {
         return None;
     }
-    let nt = usize::from(be16(d, at)?);
-    at += 2 + nt * 10 + 2; // transparency stops, expansion count
     let smooth = f32::from(be16(d, at)?) / 4096.0;
     // Midpoint k applies to the segment after stop k (in location order).
     let mut order: Vec<usize> = (0..stops.len()).collect();
@@ -280,6 +285,27 @@ fn parse_gradient_map(d: &[u8]) -> Option<Adjustment> {
     let mut stops: Vec<(f32, [f32; 3])> = baked.iter().map(|(t, c)| (*t, c.to_rgb())).collect();
     stops.sort_by(|a, b| a.0.total_cmp(&b.0));
     Some(Adjustment::GradientMap { stops, reverse, dither, ink_stops })
+}
+
+/// A noise gradient map's settings at `at` (Adobe spec: seed, add-transparency and
+/// restrict-colours flags, roughness /4096, colour model, four minimums and four maximums on a
+/// 0..32768 scale), generated as dense stops (`noise_gradient`). The colour model code isn't
+/// documented, so these walk in RGB.
+fn parse_noise_gradient_map(d: &[u8], at: usize, reverse: bool, dither: bool) -> Option<Adjustment> {
+    let flag = |k: usize| be16(d, k).map(|v| v != 0);
+    let bound = |k: usize| be16(d, k).map(|v| (f32::from(v) / 32768.0).clamp(0.0, 1.0));
+    let noise = crate::noise_gradient::Noise {
+        seed: be32(d, at)?,
+        transparency: flag(at + 4)?,
+        restrict: flag(at + 6)?,
+        roughness: (be32(d, at + 8)? as f32 / 4096.0).clamp(0.0, 1.0),
+        model: crate::noise_gradient::Model::Rgb,
+        min: [bound(at + 14)?, bound(at + 16)?, bound(at + 18)?, bound(at + 20)?],
+        max: [bound(at + 22)?, bound(at + 24)?, bound(at + 26)?, bound(at + 28)?],
+    };
+    let (stops, _) = noise.stops();
+    let stops = stops.into_iter().map(|(t, c)| (t, c.to_rgb())).collect();
+    Some(Adjustment::GradientMap { stops, reverse, dither, ink_stops: Vec::new() })
 }
 
 /// `grdm` version 1 with CMYK stops (colour space 2, stored inverted: 65535 = no ink).
@@ -868,8 +894,23 @@ mod tests {
         smooth[at..at + 2].copy_from_slice(&4096u16.to_be_bytes());
         let (a, b) = (at_t(&write_gradient_map(&three, false, false), 0.4), at_t(&smooth, 0.4));
         assert!((0..3).any(|k| (a[k] - b[k]).abs() > 1e-3), "{a:?} {b:?}");
-        // Noise gradients (no colour stops) stay unsupported.
+        // A truncated block (no colour stops, no noise settings) stays unsupported.
         assert!(matches!(parse(b"grdm", &[0, 1, 0, 0, 0, 0, 0, 0, 0, 0], None, Channels::Rgb), Adjustment::Unsupported { .. }));
+        // A noise gradient map: no colour stops, form 1, then the noise settings.
+        let mut noise = vec![0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2];
+        noise.extend_from_slice(&[0, 0, 0, 32, 0, 1]); // smoothness, length, form = noise
+        noise.extend_from_slice(&632_413_682u32.to_be_bytes());
+        noise.extend_from_slice(&[0, 0, 0, 0]); // no transparency, no restrict
+        noise.extend_from_slice(&2048u32.to_be_bytes());
+        noise.extend_from_slice(&[0, 3]);
+        noise.extend_from_slice(&[0; 8]);
+        for _ in 0..4 {
+            noise.extend_from_slice(&32768u16.to_be_bytes());
+        }
+        noise.extend_from_slice(&[0, 0]);
+        let Adjustment::GradientMap { stops, .. } = parse(b"grdm", &noise, None, Channels::Rgb) else { panic!("noise gradient map") };
+        assert_eq!(stops.len(), crate::noise_gradient::ENTRIES);
+        assert!(stops.windows(2).any(|w| w[0].1 != w[1].1));
     }
 
     fn rt(a: Adjustment) {

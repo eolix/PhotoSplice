@@ -355,10 +355,60 @@ fn mixr(f: &PsdFile, merged: &[u8], w: usize, h: usize) {
     println!("on inks        {:?}\non complements {:?}", e_ink.map(|v| v / k), e_cmp.map(|v| v / k));
 }
 
+/// `BCFIT=1` on the Brightness/Contrast ramp reference (a black→white ramp; 10-px bands each under
+/// one Brightness/Contrast layer; plain ramp rows below them): for each positive-brightness band,
+/// the one Curves point (0,0)-(x,y)-(255,255) (Photoshop's curve interpolation, `curve_lut`)
+/// that reproduces the band best, and its worst error in levels.
+fn bcfit(f: &PsdFile, bytes: &[u8], merged: &[u8], w: usize) {
+    use photosuite_doc::adjust::CurvePoint;
+    let doc = photosuite_io::import("x.psd", bytes).unwrap().document;
+    let ramp_row = 130usize;
+    let input: Vec<u8> = (0..w).map(|x| merged[ramp_row * w + x]).collect();
+    for l in &doc.layers {
+        let photosuite_doc::LayerContent::Adjustment(photosuite_doc::Adjustment::BrightnessContrast { brightness, contrast, .. }) = &l.content else { continue };
+        if *brightness <= 0.0 || *contrast != 0.0 {
+            continue;
+        }
+        let Some(m) = &l.mask else { continue };
+        let y = (m.surface.content_bounds().y0 + 5) as usize;
+        let out: Vec<u8> = (0..w).map(|x| merged[y * w + x]).collect();
+        let mut best = (u32::MAX, 0, 0);
+        for px in 1..255u32 {
+            for py in px..256u32 {
+                let lut = photosuite_compose::adjust::curve_lut(&[
+                    CurvePoint { input: 0.0, output: 0.0 },
+                    CurvePoint { input: px as f32 / 255.0, output: py as f32 / 255.0 },
+                    CurvePoint { input: 1.0, output: 1.0 },
+                ]);
+                let mut err = 0u32;
+                for x in (0..w).step_by(2) {
+                    let v = f32::from(input[x]) / 255.0;
+                    let k = (v * (lut.len() - 1) as f32).round() as usize;
+                    let got = (lut[k.min(lut.len() - 1)] * 255.0).round() as i32;
+                    err = err.max(got.abs_diff(i32::from(out[x])));
+                    if err >= best.0 {
+                        break;
+                    }
+                }
+                if err < best.0 {
+                    best = (err, px, py);
+                }
+            }
+        }
+        println!("brightness {brightness:+}: point ({}, {}) worst {} levels", best.1, best.2, best.0);
+    }
+    let _ = f;
+}
+
 fn main() {
     let path = std::env::args().nth(1).expect("file.psd");
     let bytes = std::fs::read(&path).unwrap();
     let f = PsdFile::from_bytes(&bytes).unwrap();
+    if std::env::var_os("BCFIT").is_some() {
+        let merged = f.decode_merged().unwrap();
+        bcfit(&f, &bytes, &merged, f.header.width as usize);
+        return;
+    }
     if std::env::var_os("MIXR").is_some() {
         let merged = f.decode_merged().unwrap();
         mixr(&f, &merged, f.header.width as usize, f.header.height as usize);

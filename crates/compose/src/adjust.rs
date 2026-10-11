@@ -85,29 +85,15 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
         }
         Adjustment::Posterize { levels } => map_rgb(buf, |c| c.map(|v| posterize(v, *levels))),
         Adjustment::BrightnessContrast { brightness, contrast, legacy: true } => {
-            // Legacy: contrast scales around mid-grey. A positive contrast stretches the input
-            // (brightness shifts the input first: Photoshop corpus rgb8 / cmyk8
-            // brightness-contrast-legacy.psd, +25 / +30); a negative one compresses the output
-            // (brightness is added after: psd-tools brightnesscontrast_legacy_grayscale, −23 / −26).
-            let b = brightness / 255.0;
-            let c = contrast.clamp(-100.0, 99.0);
-            let k = if c >= 0.0 { 1.0 / (1.0 - c / 100.0) } else { 1.0 + c / 100.0 };
-            let f = move |v: f32| if c >= 0.0 { (v + b - 0.5) * k + 0.5 } else { (v - 0.5) * k + 0.5 + b };
+            let f = legacy_brightness_contrast(*brightness, *contrast);
             map_rgb(buf, |px| px.map(|v| f(v).clamp(0.0, 1.0)))
         }
         Adjustment::BrightnessContrast { brightness, contrast, .. } => {
-            // Modern (CS3+) Brightness/Contrast, reverse-engineered from Photoshop ground truth
-            // (a 0..255 ramp pushed through the real app; see log/devlog.md). Unlike the legacy
-            // linear scale, both are smooth curves that pin pure black and white:
-            //   • Brightness: a line of slope s = 1.375^(b/50) from the origin that rolls off to
-            //     (1,1) via a `v^P` white-anchor term (P grows as |b| grows).
-            //   • Contrast: a symmetric cubic-Hermite S-curve pivoting at 0.5, with endpoint slope
-            //     1 - c/128 and centre slope 1 + c/128 (near-exact: ≤0.5/255 vs Photoshop).
-            // Applied brightness-then-contrast. Exact at the sliders' zero and extremes still drift
-            // on the brightness side (the real curve is a spline); contrast matches closely.
-            let b = *brightness;
-            let c = *contrast;
-            map_rgb(buf, |px| px.map(|v| modern_contrast(modern_brightness(v, b), c).clamp(0.0, 1.0)))
+            // Modern (CS3+) Brightness/Contrast: smooth curves that pin pure black and white,
+            // brightness then contrast. Brightness interpolates curves measured from Photoshop
+            // (`modern_brightness`); contrast is a symmetric Hermite S-curve (≤0.5/255).
+            let t = brightness_contrast_lut(*brightness, *contrast, false);
+            map_rgb(buf, |px| px.map(|v| lut(&t, v)))
         }
         Adjustment::Exposure { exposure, offset, gamma } => {
             // In linear light: (lin·2^exposure + offset)^(1/gamma), then back
@@ -176,6 +162,7 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
         }),
         Adjustment::GradientMap { stops, reverse, dither, .. } => {
             let (w, x0, y0) = (buf.rect.width().max(1) as usize, buf.rect.x0, buf.rect.y0);
+            let stops = &by_location(stops);
             for (i, p) in buf.px.iter_mut().enumerate() {
                 if p[3] <= 0.0 {
                     continue;
@@ -484,18 +471,124 @@ pub fn photo_filter_matrix(color: [f32; 3], density: f32, normalize_y: bool) -> 
 
 /// Photoshop posterize: `n` equal input bins over 0..=255, output levels
 /// `floor(k * 255 / (n - 1))` (exact on the corpus for 3, 7, 13 and 21 levels).
-/// Modern Brightness curve (one channel, `brightness` in [-150, 150]). A line of slope
-/// `s = 1.375^(b/50)` from the origin, rolled off to (1, 1) by a `v^P` white-anchor term. Pins pure
-/// black and white; `b = 0` is the identity. Fit to Photoshop ground truth (see modern B/C above).
+/// Input levels (0..255) of the measured modern Brightness knots: every 8 levels, denser near
+/// white where the curves bend hardest.
+const BRIGHT_X: [f32; 37] = [
+    0.0, 8.0, 16.0, 24.0, 32.0, 40.0, 48.0, 56.0, 64.0, 72.0, 80.0, 88.0, 96.0, 104.0, 112.0, 120.0, 128.0, 136.0, 144.0, 152.0, 160.0, 168.0, 176.0,
+    184.0, 192.0, 200.0, 208.0, 216.0, 224.0, 232.0, 240.0, 244.0, 248.0, 250.0, 252.0, 254.0, 255.0,
+];
+/// Slider values of the measured curves in [`BRIGHT_Y`].
+const BRIGHT_B: [f32; 5] = [-150.0, -50.0, 50.0, 100.0, 150.0];
+/// Photoshop's modern Brightness curves at [`BRIGHT_B`], output levels at [`BRIGHT_X`]. Measured
+/// by pushing a 0..255 ramp through the real app (smoothed over ±2 levels).
+const BRIGHT_Y: [[f32; 37]; 5] = [
+    [
+        0.0, 3.0, 6.1, 9.6, 12.5, 15.6, 18.4, 22.0, 24.6, 28.2, 30.8, 34.3, 37.1, 40.5, 43.8, 46.7, 49.6, 53.0, 56.1, 59.7, 62.8, 66.7, 71.0, 74.9, 79.4,
+        84.5, 90.5, 97.0, 106.3, 116.0, 132.0, 143.0, 156.5, 164.0, 178.5, 214.0, 255.0,
+    ],
+    [
+        0.0, 6.0, 11.6, 17.4, 23.4, 29.3, 35.3, 40.8, 46.3, 52.6, 58.4, 64.3, 70.2, 75.8, 81.7, 88.0, 93.3, 99.4, 105.0, 112.0, 118.2, 124.7, 132.8,
+        140.3, 148.0, 155.8, 165.5, 175.0, 186.0, 198.0, 213.0, 219.0, 230.0, 234.5, 242.0, 252.5, 255.0,
+    ],
+    [
+        0.0, 11.2, 21.8, 33.2, 43.6, 54.8, 66.2, 77.2, 87.6, 99.0, 109.0, 121.0, 131.4, 141.8, 152.0, 162.0, 171.0, 180.2, 187.8, 196.2, 203.2, 210.0,
+        216.8, 223.0, 228.2, 233.2, 237.6, 242.0, 245.8, 249.0, 252.0, 252.0, 254.0, 254.0, 254.0, 255.0, 255.0,
+    ],
+    [
+        0.0, 15.2, 29.6, 44.6, 60.8, 75.0, 90.0, 105.2, 119.6, 135.6, 148.8, 161.8, 172.4, 183.2, 193.2, 201.6, 208.6, 216.0, 221.6, 227.4, 232.2, 236.0,
+        239.6, 242.8, 244.8, 247.2, 248.8, 250.2, 251.8, 253.0, 254.0, 254.0, 254.0, 254.0, 255.0, 255.0, 255.0,
+    ],
+    [
+        0.0, 21.4, 41.2, 62.8, 81.0, 103.4, 124.4, 144.4, 162.2, 179.8, 192.4, 205.0, 214.0, 222.0, 229.4, 234.4, 238.6, 242.4, 244.4, 247.2, 248.8, 250.0,
+        251.2, 252.0, 253.0, 253.0, 254.0, 254.0, 254.0, 255.0, 255.0, 255.0, 255.0, 255.0, 255.0, 255.0, 255.0,
+    ],
+];
+
+/// Monotone cubic (Fritsch–Carlson PCHIP) through the knots `(xs, ys)` at `x`, clamped to the ends.
+fn pchip(xs: &[f32], ys: &[f32], x: f32) -> f32 {
+    let n = xs.len().min(ys.len());
+    let (Some(&x0), Some(&xn), Some(&y0), Some(&yn)) = (xs.first(), xs.get(n.wrapping_sub(1)), ys.first(), ys.get(n.wrapping_sub(1))) else {
+        return x;
+    };
+    if n < 2 || x <= x0 {
+        return y0;
+    }
+    if x >= xn {
+        return yn;
+    }
+    let i = xs.iter().take(n - 1).rposition(|&k| k <= x).unwrap_or(0);
+    let h = |k: usize| xs.get(k + 1).zip(xs.get(k)).map_or(1.0, |(a, b)| a - b);
+    let d = |k: usize| ys.get(k + 1).zip(ys.get(k)).map_or(0.0, |(a, b)| a - b) / h(k);
+    let slope = |k: usize| {
+        if k == 0 {
+            return d(0);
+        }
+        if k >= n - 1 {
+            return d(n - 2);
+        }
+        let (d0, d1) = (d(k - 1), d(k));
+        if d0 * d1 <= 0.0 {
+            return 0.0;
+        }
+        let (w1, w2) = (2.0 * h(k) + h(k - 1), h(k) + 2.0 * h(k - 1));
+        (w1 + w2) / (w1 / d0 + w2 / d1)
+    };
+    let (hi, t) = (h(i), (x - xs.get(i).copied().unwrap_or(x0)) / h(i));
+    let (t2, t3) = (t * t, t * t * t);
+    let (ya, yb) = (ys.get(i).copied().unwrap_or(y0), ys.get(i + 1).copied().unwrap_or(yn));
+    (2.0 * t3 - 3.0 * t2 + 1.0) * ya + (t3 - 2.0 * t2 + t) * hi * slope(i) + (-2.0 * t3 + 3.0 * t2) * yb + (t3 - t2) * hi * slope(i + 1)
+}
+
+/// Modern Brightness curve (one channel, `brightness` in [-150, 150]). Photoshop's curve is a
+/// spline we don't have the formula for, so this interpolates curves measured from the real app
+/// at -150, -50, 50, 100 and 150 (identity at 0), with a monotone cubic across the sliders.
+/// Pins pure black and white; at most 2–5/255 off Photoshop at the measured sliders (the old fitted
+/// formula was up to 53/255 off at -150), about 4/255 between them.
 pub fn modern_brightness(v: f32, brightness: f32) -> f32 {
-    if brightness == 0.0 {
+    if brightness == 0.0 || !brightness.is_finite() {
         return v;
     }
-    let s = 1.375f32.powf(brightness / 50.0);
-    // Exponent of the white-anchor term grows with |b|; shapes the roll-off toward (1,1).
-    let p = if brightness >= 0.0 { (4.5 - 0.013 * brightness).max(2.0) } else { 5.0 - 0.072 * brightness };
-    let v = v.clamp(0.0, 1.0);
-    (s * v + (1.0 - s) * v.powf(p)).clamp(0.0, 1.0)
+    let b = brightness.clamp(-150.0, 150.0);
+    let x = v.clamp(0.0, 1.0) * 255.0;
+    let curve = |k: usize| BRIGHT_Y.get(k).map_or(x, |ys| pchip(&BRIGHT_X, ys, x));
+    // Output across the sliders at this level (identity at 0), then a monotone cubic in `b`: near
+    // white, Photoshop's output rises much faster over the first slider steps than a linear blend
+    // (b = 25 lands ~3/4 of the way to the b = 50 curve).
+    let [n0, n1, p0, p1, p2] = BRIGHT_B;
+    let y = pchip(&[n0, n1, 0.0, p0, p1, p2], &[curve(0), curve(1), x, curve(2), curve(3), curve(4)], b);
+    (y / 255.0).clamp(0.0, 1.0)
+}
+
+/// The Brightness/Contrast transfer curve sampled at [`LUT_SIZE`] points: the CPU applies it
+/// through [`lut`] and the GPU uploads it as a LUT row, so both draw the same curve.
+pub fn brightness_contrast_lut(brightness: f32, contrast: f32, legacy: bool) -> Vec<f32> {
+    let x = |k: usize| k as f32 / (LUT_SIZE - 1) as f32;
+    if legacy {
+        let f = legacy_brightness_contrast(brightness, contrast);
+        (0..LUT_SIZE).map(|k| f(x(k)).clamp(0.0, 1.0)).collect()
+    } else {
+        // Blending the measured curves can dip by a few thousandths of a level where they flatten
+        // near white; a running max keeps the curve monotone.
+        let mut top = 0.0f32;
+        (0..LUT_SIZE)
+            .map(|k| {
+                top = top.max(modern_brightness(x(k), brightness));
+                modern_contrast(top, contrast).clamp(0.0, 1.0)
+            })
+            .collect()
+    }
+}
+
+/// Legacy Brightness/Contrast on one channel (unclamped).
+fn legacy_brightness_contrast(brightness: f32, contrast: f32) -> impl Fn(f32) -> f32 {
+    // Legacy: contrast scales around mid-grey. A positive contrast stretches the input
+    // (brightness shifts the input first: Photoshop corpus rgb8 / cmyk8
+    // brightness-contrast-legacy.psd, +25 / +30); a negative one compresses the output
+    // (brightness is added after: psd-tools brightnesscontrast_legacy_grayscale, −23 / −26).
+    let b = brightness / 255.0;
+    let c = contrast.clamp(-100.0, 99.0);
+    let k = if c >= 0.0 { 1.0 / (1.0 - c / 100.0) } else { 1.0 + c / 100.0 };
+    move |v: f32| if c >= 0.0 { (v + b - 0.5) * k + 0.5 } else { (v - 0.5) * k + 0.5 + b }
 }
 
 /// Modern Contrast curve (one channel, `contrast` in [-50, 100]). A symmetric cubic-Hermite S-curve
@@ -625,22 +718,44 @@ pub fn curve_lut(points: &[CurvePoint]) -> Vec<f32> {
 }
 
 pub(crate) fn gradient(stops: &[(f32, [f32; 3])], t: f32) -> [f32; 3] {
-    match stops {
-        [] => [t; 3],
-        [s] => s.1,
-        _ => {
-            if t <= stops[0].0 {
-                return stops[0].1;
-            }
-            for w in stops.windows(2) {
-                if t <= w[1].0 {
-                    let k = if w[1].0 > w[0].0 { (t - w[0].0) / (w[1].0 - w[0].0) } else { 0.0 };
-                    return std::array::from_fn(|i| w[0].1[i] + (w[1].1[i] - w[0].1[i]) * k);
-                }
-            }
-            stops[stops.len() - 1].1
-        }
+    if stops.is_empty() {
+        return [t; 3];
     }
+    lerp_stops(stops, t)
+}
+
+/// The colour of `stops` (sorted by location) at `t`, linear between neighbours and clamped to
+/// the end stops. `[0; N]` when there are none.
+pub(crate) fn lerp_stops<const N: usize>(stops: &[(f32, [f32; N])], t: f32) -> [f32; N] {
+    match locate(stops, t) {
+        Ok((i, k)) => match (stops.get(i), stops.get(i + 1)) {
+            (Some(a), Some(b)) => std::array::from_fn(|c| a.1[c] + (b.1[c] - a.1[c]) * k),
+            _ => [0.0; N],
+        },
+        Err(j) => stops.get(j).map_or([0.0; N], |s| s.1),
+    }
+}
+
+/// Where `t` falls among `stops` sorted by location: `Ok((i, k))` inside the segment from stop
+/// `i` to `i + 1` at fraction `k`, or `Err(j)`, the end stop it clamps to (before the first, past
+/// the last). A binary search, so dense ramps (a noise gradient's 1024 stops) stay cheap per pixel.
+pub(crate) fn locate<T>(stops: &[(f32, T)], t: f32) -> Result<(usize, f32), usize> {
+    let j = stops.partition_point(|s| s.0 < t);
+    match (j.checked_sub(1).and_then(|i| stops.get(i)), stops.get(j)) {
+        (Some(a), Some(b)) => Ok((j - 1, if b.0 > a.0 { (t - a.0) / (b.0 - a.0) } else { 0.0 })),
+        (None, _) => Err(0),
+        (Some(_), None) => Err(stops.len() - 1),
+    }
+}
+
+/// `stops` ordered by location (borrowed when they already are), for [`locate`]'s search.
+pub(crate) fn by_location<T: Clone>(stops: &[(f32, T)]) -> std::borrow::Cow<'_, [(f32, T)]> {
+    if stops.windows(2).all(|w| w[0].0 <= w[1].0) {
+        return std::borrow::Cow::Borrowed(stops);
+    }
+    let mut v = stops.to_vec();
+    v.sort_by(|a, b| a.0.total_cmp(&b.0));
+    std::borrow::Cow::Owned(v)
 }
 
 pub fn rgb_to_hsl(c: [f32; 3]) -> (f32, f32, f32) {

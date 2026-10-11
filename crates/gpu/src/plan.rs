@@ -184,7 +184,7 @@ pub struct Pass<'a> {
     pub extra: [f32; 4],
     /// Extra shader flags (`F_KNOCKOUT`, …).
     pub flags: u32,
-    /// 4096-entry LUT rows (Levels / Curves / Gradient map / gradient stops).
+    /// 4096-entry LUT rows (Levels / Curves / Brightness/Contrast / Gradient map / gradient stops).
     pub lut: Option<Vec<[f32; 4096]>>,
     pub gradient: bool,
     /// Effect map sampled by `FxPaint`.
@@ -1507,17 +1507,11 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photosuit
             p[0][0] = (*levels).clamp(2, 255) as f32;
             (3, p, None)
         }
-        Adjustment::BrightnessContrast { brightness, contrast, legacy: true } => {
-            let c = contrast.clamp(-100.0, 99.0);
-            let k = if c >= 0.0 { 1.0 / (1.0 - c / 100.0) } else { 1.0 + c / 100.0 };
-            p[0] = [brightness / 255.0, k, 0.0, 0.0];
-            (4, p, None)
-        }
-        Adjustment::BrightnessContrast { brightness, contrast, .. } => {
-            // Modern B/C: the shader rebuilds the curves from raw slider values (see compose.wgsl
-            // `mbright`/`mcontrast`, mirroring compose::adjust::modern_brightness/modern_contrast).
-            p[0] = [*brightness, *contrast, 0.0, 0.0];
-            (5, p, None)
+        // The CPU's curve as LUT rows (see `adjust::brightness_contrast_lut`), so the GPU draws
+        // Photoshop's measured brightness curves and the legacy operation order exactly.
+        Adjustment::BrightnessContrast { brightness, contrast, legacy } => {
+            let row = to_row(&adjust::brightness_contrast_lut(*brightness, *contrast, *legacy));
+            (7, p, Some(vec![row; 3]))
         }
         Adjustment::Exposure { exposure, offset, gamma } => {
             p[0] = [2f32.powf(*exposure), *offset, gamma.max(0.01), transfer_exponent(transfer.for_exposure())];
