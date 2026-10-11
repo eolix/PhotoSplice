@@ -353,6 +353,9 @@ fn cpu_clipping(layers: &[Layer], depth: u32) -> Option<String> {
         if !l.clipped && clipped && (l.fill_opacity < 1.0 || !l.blend_clipped) {
             return Some(format!("layers clipped to `{}` (faded or ungrouped base, composited on the CPU)", l.name));
         }
+        if photosuite_compose::effects_unmasked(l).is_some() {
+            return Some(format!("masks of `{}` hide its effects (composited on the CPU)", l.name));
+        }
         if l.blend_interior && l.fill_opacity < 1.0 && photosuite_compose::effects::has_effects(l) {
             return Some(format!("interior effects of `{}` blended as a group (composited on the CPU)", l.name));
         }

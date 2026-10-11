@@ -505,6 +505,12 @@ pub struct Layer {
     /// the interior effects (overlays, satin, inner glow and shadow) become part of the layer,
     /// so its fill opacity fades them too. PSD `infx`.
     pub blend_interior: bool,
+    /// Blending Options › Advanced Blending › Layer Mask Hides Effects (default off): the
+    /// effects follow the unmasked layer and the layer mask hides them with it, instead of
+    /// the mask shaping the layer and its effects. PSD `lmgm`.
+    pub mask_hides_effects: bool,
+    /// The same for the vector mask (Vector Mask Hides Effects). PSD `vmgm`.
+    pub vector_mask_hides_effects: bool,
     /// Layer › Video Layers frame stack (None for a normal layer).
     pub video: Option<VideoData>,
 }
@@ -534,6 +540,8 @@ impl Layer {
             knockout: Knockout::None,
             blend_clipped: true,
             blend_interior: false,
+            mask_hides_effects: false,
+            vector_mask_hides_effects: false,
             video: None,
         }
     }

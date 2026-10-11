@@ -241,3 +241,48 @@ mod clip_tests {
         assert!(close(crate::flatten(&d).px[0], [0.75, 0.75, 0.75, 1.0]), "{:?}", crate::flatten(&d).px[0]);
     }
 }
+
+#[cfg(test)]
+mod mask_hides_effects_tests {
+    use photosuite_color::{ColorMode, SampleType};
+    use photosuite_doc::{Color, Document, Effect, FxCommon, FxPaint, Layer, LayerMask, Size, StrokeFx, StrokePosition};
+    use photosuite_geom::Rect;
+
+    /// A red square (x 2..6) masked over its right half (x 4..6), with a 1 px black outside
+    /// stroke, on white: Photoshop reference `mask-hides-effects.psd` in miniature.
+    fn doc(hides: bool) -> Document {
+        let mut d = Document::new("m", Size::new(9, 3), ColorMode::Rgb, SampleType::F32);
+        let mut bg = Layer::raster("bg", d.pixel_format());
+        if let Some(s) = bg.surface_mut() {
+            s.fill_rect(Rect::new(0, 0, 9, 3), &[1.0; 4]);
+        }
+        let mut l = Layer::raster("sq", d.pixel_format());
+        if let Some(s) = l.surface_mut() {
+            s.fill_rect(Rect::new(2, 0, 6, 3), &[1.0, 0.0, 0.0, 1.0]);
+        }
+        let mut m = LayerMask::reveal_all();
+        m.surface.fill_rect(Rect::new(4, 0, 6, 3), &[0.0]);
+        l.mask = Some(m);
+        l.effects.items = vec![Effect::Stroke(StrokeFx {
+            common: FxCommon::new(photosuite_color::BlendMode::Normal, 1.0),
+            size: 1.0,
+            position: StrokePosition::Outside,
+            paint: FxPaint::Color(Color::BLACK),
+        })];
+        l.mask_hides_effects = hides;
+        d.layers = vec![bg, l];
+        d
+    }
+
+    #[test]
+    fn layer_mask_hides_or_shapes_the_effects() {
+        // Off (default): the stroke follows the masked half; just right of the square is white.
+        let off = crate::flatten(&doc(false)).px;
+        assert!(off[6 + 9][0] > 0.99, "{:?}", off[6 + 9]);
+        assert!(off[4 + 9][0] < 0.01, "stroke at the mask's edge: {:?}", off[4 + 9]);
+        // On: the stroke goes round the whole square and the mask hides only its own area.
+        let on = crate::flatten(&doc(true)).px;
+        assert!(on[6 + 9][0] < 0.01, "stroke right of the square: {:?}", on[6 + 9]);
+        assert!(on[4 + 9][0] > 0.99, "masked area hidden: {:?}", on[4 + 9]);
+    }
+}

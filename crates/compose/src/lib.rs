@@ -557,7 +557,15 @@ fn prepare_effects(layers: &[Layer], rect: Rect, cx: &Ctx, setting: impl Fn(&mut
     effect_layers(layers, rect, 0, &mut todo);
     let build = |l: &&Layer| {
         setting(&mut || {
-            let _ = effect_maps(l, cx);
+            // A layer whose masks hide its effects has them built from its unmasked self.
+            match effects_unmasked(l) {
+                Some(u) => {
+                    let _ = effect_maps(&u, cx);
+                }
+                None => {
+                    let _ = effect_maps(l, cx);
+                }
+            }
         });
     };
     #[cfg(not(target_arch = "wasm32"))]
@@ -567,6 +575,45 @@ fn prepare_effects(layers: &[Layer], rect: Rect, cx: &Ctx, setting: impl Fn(&mut
         return;
     }
     todo.iter().for_each(build);
+}
+
+/// For a layer with effects whose layer or vector mask "hides effects" (Blending Options ›
+/// Advanced Blending), the layer without those masks: its effects follow the unmasked layer,
+/// and the masks then hide layer and effects together ([`effects_hiding_mask`]). `None` when the
+/// masks shape the effects (Photoshop's default).
+pub fn effects_unmasked(layer: &Layer) -> Option<Layer> {
+    let lm = layer.mask_hides_effects && layer.mask.as_ref().is_some_and(|m| m.enabled);
+    let vm = layer.vector_mask_hides_effects && layer.vector_mask.as_ref().is_some_and(|v| v.enabled);
+    if !(lm || vm) || !effects::has_effects(layer) {
+        return None;
+    }
+    let mut u = layer.clone();
+    if lm {
+        u.mask = None;
+    }
+    if vm {
+        u.vector_mask = None;
+    }
+    Some(u)
+}
+
+/// The coverage of the masks [`effects_unmasked`] took off `layer`, over `rect` (row-major).
+fn effects_hiding_mask(layer: &Layer, rect: Rect, cx: &Ctx) -> Vec<f32> {
+    let n = rect.width() as usize * rect.height() as usize;
+    let mut out = vec![1.0f32; n];
+    if layer.mask_hides_effects
+        && let Some(m) = layer.mask.as_ref().filter(|m| m.enabled)
+    {
+        let mut v = Vec::new();
+        m.values_into(rect, &mut v);
+        out.iter_mut().zip(&v).for_each(|(o, k)| *o *= k);
+    }
+    if layer.vector_mask_hides_effects
+        && let Some(vm) = layer.vector_mask.as_ref().filter(|v| v.enabled)
+    {
+        out.iter_mut().zip(cx.vector_masks.values(vm, rect)).for_each(|(o, k)| *o *= k);
+    }
+    out
 }
 
 /// The visible layers of `layers` (groups included) with effects that can reach `rect`.
@@ -1247,6 +1294,18 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
         return;
     }
 
+    // Layer / Vector Mask Hides Effects: the layer and its effects as if unmasked, then hidden
+    // by the masks (Photoshop reference temp/ps-ref mask-hides-effects: the stroke and shadow
+    // go round the whole square and are cut where the mask hides it).
+    if let Some(u) = effects_unmasked(layer) {
+        let hide = effects_hiding_mask(layer, rect, cx);
+        let before = backdrop.px.clone();
+        composite_layer_plain(&u, clipped, backdrop, cx);
+        for ((p, b), h) in backdrop.px.iter_mut().zip(&before).zip(&hide) {
+            *p = knockout::mix(*b, *p, *h);
+        }
+        return;
+    }
     if effects::has_effects(layer) {
         // Neighbourhoods are already captured by the full-region effect maps;
         // content and effect application only need the output rectangle.

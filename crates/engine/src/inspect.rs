@@ -115,6 +115,12 @@ fn layer_sel(l: &Layer, selected: &[photosuite_doc::LayerId]) -> Value {
     if l.blend_interior {
         v["blendInterior"] = json!(true);
     }
+    if l.mask_hides_effects {
+        v["maskHidesEffects"] = json!(true);
+    }
+    if l.vector_mask_hides_effects {
+        v["vectorMaskHidesEffects"] = json!(true);
+    }
     if l.knockout != photosuite_doc::Knockout::None {
         v["knockout"] = json!(if l.knockout == photosuite_doc::Knockout::Shallow { "shallow" } else { "deep" });
     }

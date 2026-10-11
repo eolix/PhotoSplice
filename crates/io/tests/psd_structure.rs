@@ -754,8 +754,12 @@ fn knockout_round_trips() {
     let mut flags = back.clone();
     flags.layers[0].blend_clipped = false;
     flags.layers[0].blend_interior = true;
+    flags.layers[0].mask_hides_effects = true;
+    flags.layers[0].vector_mask_hides_effects = true;
     let f = import("x.psd", &export(&flags, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap().document;
     assert!(!f.layers[0].blend_clipped && f.layers[0].blend_interior);
+    assert!(f.layers[0].mask_hides_effects && f.layers[0].vector_mask_hides_effects);
+    assert!(!f.layers[1].mask_hides_effects);
     assert!(f.layers[1].blend_clipped && !f.layers[1].blend_interior);
     let mut off = back.clone();
     off.layers[0].knockout = Knockout::None;

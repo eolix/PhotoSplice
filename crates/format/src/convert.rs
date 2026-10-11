@@ -199,6 +199,8 @@ fn layer_m(l: &Layer, sink: &mut dyn Sink) -> LayerM {
         knockout: l.knockout,
         blend_clipped: l.blend_clipped,
         blend_interior: l.blend_interior,
+        mask_hides_effects: l.mask_hides_effects,
+        vector_mask_hides_effects: l.vector_mask_hides_effects,
         blend_if: l.blend_if.clone(),
         video: l.video.as_ref().map(|v| video_m(v, sink)),
     }
@@ -493,6 +495,8 @@ impl Loader<'_> {
             knockout: m.knockout,
             blend_clipped: m.blend_clipped,
             blend_interior: m.blend_interior,
+            mask_hides_effects: m.mask_hides_effects,
+            vector_mask_hides_effects: m.vector_mask_hides_effects,
             blend_if: m.blend_if.clone(),
             video: m.video.as_ref().map(|v| self.video(v)).transpose()?,
         })

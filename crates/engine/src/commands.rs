@@ -495,7 +495,7 @@ fn build() -> Vec<CommandSpec> {
             "Layer Properties",
             [],
             None,
-            r##"{"layer":id?,"name":str?,"visible":bool?,"opacity":0..1?,"fill":0..1?,"blend":"Multiply|…"?,"clipped":bool?,"locked":bool?,"locks":{"transparency","pixels","position","artboard","all":bool}?,"channels":[bool,…]? (Advanced Blending: which colour channels blend, R G B / C M Y K / L a b),"knockout":"none|shallow|deep"?,"blendClipped":bool?,"blendInterior":bool? (Blend Clipped Layers / Interior Effects as Group)}"##,
+            r##"{"layer":id?,"name":str?,"visible":bool?,"opacity":0..1?,"fill":0..1?,"blend":"Multiply|…"?,"clipped":bool?,"locked":bool?,"locks":{"transparency","pixels","position","artboard","all":bool}?,"channels":[bool,…]? (Advanced Blending: which colour channels blend, R G B / C M Y K / L a b),"knockout":"none|shallow|deep"?,"blendClipped":bool?,"blendInterior":bool? (Blend Clipped Layers / Interior Effects as Group),"maskHidesEffects":bool?,"vectorMaskHidesEffects":bool?}"##,
             has_layer,
             |s, p| {
                 let id = layer_param(s, p)?;
@@ -504,7 +504,7 @@ fn build() -> Vec<CommandSpec> {
                 let label = if only_visibility { "Layer Visibility" } else { "Layer Properties" };
                 let before = s.active().ok_or(EngineError::NoDocument)?.doc.clone();
                 // Clipping and channel changes reach the layers around it: recomposite everything.
-                let local = p.get("clipped").is_none() && p.get("channels").is_none() && p.get("knockout").is_none() && p.get("blendClipped").is_none() && p.get("blendInterior").is_none();
+                let local = p.get("clipped").is_none() && p.get("channels").is_none() && p.get("knockout").is_none() && p.get("blendClipped").is_none() && p.get("blendInterior").is_none() && p.get("maskHidesEffects").is_none() && p.get("vectorMaskHidesEffects").is_none();
                 s.edit(label, |doc, _| {
                     let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
                     if let Some(v) = p.get("name").and_then(Value::as_str) {
@@ -537,6 +537,12 @@ fn build() -> Vec<CommandSpec> {
                     }
                     if let Some(v) = p.get("blendInterior").and_then(Value::as_bool) {
                         l.blend_interior = v;
+                    }
+                    if let Some(v) = p.get("maskHidesEffects").and_then(Value::as_bool) {
+                        l.mask_hides_effects = v;
+                    }
+                    if let Some(v) = p.get("vectorMaskHidesEffects").and_then(Value::as_bool) {
+                        l.vector_mask_hides_effects = v;
                     }
                     if let Some(v) = p.get("knockout").and_then(Value::as_str) {
                         // Blending Options › Advanced Blending › Knockout.

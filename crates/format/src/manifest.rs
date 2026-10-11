@@ -232,6 +232,11 @@ pub struct LayerM {
     /// Blend Interior Effects as Group (default off).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub blend_interior: bool,
+    /// Layer / Vector Mask Hides Effects (default off).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mask_hides_effects: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub vector_mask_hides_effects: bool,
     #[serde(default)]
     pub video: Option<VideoDataM>,
 }

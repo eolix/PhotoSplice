@@ -558,6 +558,8 @@ impl Ex {
             (b"knko", l.knockout.psd(), 0u8),
             (b"clbl", u8::from(l.blend_clipped), 1),
             (b"infx", u8::from(l.blend_interior), 0),
+            (b"lmgm", u8::from(l.mask_hides_effects), 0),
+            (b"vmgm", u8::from(l.vector_mask_hides_effects), 0),
         ] {
             match raw.iter_mut().find(|(k, _)| k == key) {
                 Some(e) => e.1 = vec![v, 0, 0, 0],

@@ -255,6 +255,13 @@ impl Ctx<'_> {
         if let Some(v) = rec.block(b"infx").and_then(|b| b.data.first().copied()) {
             l.blend_interior = v != 0;
         }
+        // Layer / Vector Mask Hides Effects (`lmgm`, `vmgm`; Photoshop writes them only when on).
+        if let Some(v) = rec.block(b"lmgm").and_then(|b| b.data.first().copied()) {
+            l.mask_hides_effects = v != 0;
+        }
+        if let Some(v) = rec.block(b"vmgm").and_then(|b| b.data.first().copied()) {
+            l.vector_mask_hides_effects = v != 0;
+        }
         // Blend If lives in the layer record's blending ranges.
         l.blend_if = crate::blocks::blend_if_from_ranges(&rec.blending_ranges);
         l.psd_id = rec.layer_id();

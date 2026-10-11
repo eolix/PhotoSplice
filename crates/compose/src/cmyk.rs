@@ -140,6 +140,10 @@ fn two_passes(buf: &mut CBuf, draw: impl Fn(&mut Buffer)) {
 /// with a separable mode, and no bevel texture (its height comes from the pattern's luminance).
 fn effects_native(l: &Layer) -> bool {
     use photosuite_doc::Effect;
+    // Masks that hide effects: drawn by the RGB compositor (an island).
+    if crate::effects_unmasked(l).is_some() {
+        return false;
+    }
     l.effects.items.iter().filter(|e| e.enabled()).all(|e| match e {
         Effect::DropShadow(s) | Effect::InnerShadow(s) => s.common.blend.is_separable(),
         Effect::OuterGlow(g) | Effect::InnerGlow(g) => g.common.blend.is_separable(),
