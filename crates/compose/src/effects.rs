@@ -514,7 +514,8 @@ fn apply_contour(m: Map, c: &Contour) -> Map {
 }
 
 fn rgb(c: &photosuite_color::Color) -> [f32; 3] {
-    c.to_rgb()
+    // In a CMYK document's projected passes, the colour's inks stand in (see `cmyk`).
+    crate::cmyk::project_color(c).unwrap_or_else(|| c.to_rgb())
 }
 
 /// Offset of an effect lit from `angle` at `distance` (shadow falls away from

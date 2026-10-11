@@ -32,7 +32,7 @@ impl Ramp {
         let mut color: Vec<(f32, [f32; 4])> = stops
             .iter()
             .map(|(p, c)| {
-                let rgb = c.to_rgb();
+                let rgb = crate::cmyk::project_color(c).unwrap_or_else(|| c.to_rgb());
                 (*p, [rgb[0], rgb[1], rgb[2], c.alpha])
             })
             .collect();

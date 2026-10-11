@@ -289,12 +289,55 @@ fn adj(f: &PsdFile, bytes: &[u8], merged: &[u8], w: usize, h: usize) {
     });
 }
 
+/// `ADJ=1` on a Lab file: the adjustment over one pixel layer against Photoshop's merged L, a,
+/// b (stored 0..1, a and b around 0.5) for: (a) run on L, a, b as an RGB colour, (b) on L only
+/// (as a gray), a and b kept, (c) the screen colour through Lab ↔ sRGB (today's route).
+fn adj_lab(f: &PsdFile, bytes: &[u8], merged: &[u8], w: usize, h: usize) {
+    use photosuite_color::convert::{lab_to_srgb, srgb_to_lab};
+    use photosuite_compose::adjust::{Transfer, apply_depth};
+    let doc = photosuite_io::import("x.psd", bytes).unwrap().document;
+    let Some(photosuite_doc::LayerContent::Adjustment(a)) = doc.layers.get(1).map(|l| &l.content) else { panic!("no adjustment") };
+    println!("{a:?}");
+    let transfer = Transfer::for_document(photosuite_color::ColorMode::Rgb, doc.depth);
+    let base = Planes::of(f, &f.layers()[0]);
+    let run = |rgb: [f32; 3]| {
+        let mut b = photosuite_compose::Buffer { rect: photosuite_geom::Rect::new(0, 0, 1, 1), px: vec![[rgb[0], rgb[1], rgb[2], 1.0]] };
+        apply_depth(a, &mut b, transfer, Some(doc.depth));
+        [b.px[0][0], b.px[0][1], b.px[0][2]]
+    };
+    let (mut err, mut n) = ([[0.0f32; 3]; 3], 0usize);
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let Some(s) = (0..3).map(|c| base.get(c, x, y)).collect::<Option<Vec<f32>>>() else { continue };
+            let want: Vec<f32> = (0..3).map(|c| f32::from(merged[c * w * h + y as usize * w + x as usize]) / 255.0).collect();
+            let as_rgb = run([s[0], s[1], s[2]]);
+            let l_only = [run([s[0]; 3])[0], s[1], s[2]];
+            let screen = run(lab_to_srgb([s[0] * 100.0, s[1] * 255.0 - 128.0, s[2] * 255.0 - 128.0]));
+            let back = srgb_to_lab(screen);
+            let via = [back[0] / 100.0, (back[1] + 128.0) / 255.0, (back[2] + 128.0) / 255.0];
+            for (e, c) in err.iter_mut().zip([as_rgb, l_only, via]) {
+                for i in 0..3 {
+                    e[i] += (c[i] - want[i]).abs();
+                }
+            }
+            n += 1;
+        }
+    }
+    for (name, e) in ["L, a, b as RGB", "L only, a b kept", "screen (today)"].iter().zip(err) {
+        println!("{name:<18} {:?}", e.map(|v| v / n.max(1) as f32));
+    }
+}
+
 fn main() {
     let path = std::env::args().nth(1).expect("file.psd");
     let bytes = std::fs::read(&path).unwrap();
     let f = PsdFile::from_bytes(&bytes).unwrap();
     if std::env::var_os("ADJ").is_some() {
         let merged = f.decode_merged().unwrap();
+        if f.header.color_mode == photosuite_psd::ColorMode::Lab {
+            adj_lab(&f, &bytes, &merged, f.header.width as usize, f.header.height as usize);
+            return;
+        }
         adj(&f, &bytes, &merged, f.header.width as usize, f.header.height as usize);
         return;
     }

@@ -883,7 +883,7 @@ impl<'a> Planner<'a> {
 
     /// adjust::apply_with on a slot (consumes it).
     fn adjust(&mut self, adj: &Adjustment, src: Slot) -> Result<Slot, Unsupported> {
-        if !adjustment_on_gpu(adj) {
+        if !adjustment_on_gpu(adj) || (self.cx.mode == photosuite_color::ColorMode::Lab && photosuite_compose::lab::native(adj)) {
             return Err(Unsupported(format!("{} on CMYK/Lab channels (evaluated on the CPU)", adj.label())));
         }
         let mut p = Pass::new(Kernel::Adjust, 0);

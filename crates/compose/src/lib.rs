@@ -22,6 +22,7 @@ mod cmyk;
 pub mod effects;
 pub mod fill_layout;
 pub mod gradient_fill;
+pub mod lab;
 pub mod masks;
 pub mod multichannel;
 pub mod pattern;
@@ -603,6 +604,16 @@ fn composite_stack(layers: &[Layer], backdrop: &mut Buffer, cx: &Ctx) {
             }
         }
         i = j.max(i + 1);
+    }
+}
+
+/// Applies an adjustment layer's change to `buf`: on L, a, b in a Lab document where Photoshop
+/// works there ([`lab`]), else on the screen colour.
+fn apply_adjustment(adj: &photosuite_doc::Adjustment, buf: &mut Buffer, cx: &Ctx) {
+    if cx.mode == photosuite_color::ColorMode::Lab && lab::native(adj) {
+        lab::apply(adj, buf, cx.transfer, cx.depth);
+    } else {
+        adjust::apply_depth(adj, buf, cx.transfer, Some(cx.depth));
     }
 }
 
@@ -1197,7 +1208,7 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
     // Adjustment layers transform the backdrop, then blend the result back in.
     if let LayerContent::Adjustment(adj) = &layer.content {
         let mut adjusted = backdrop.clone();
-        adjust::apply_depth(adj, &mut adjusted, cx.transfer, Some(cx.depth));
+        apply_adjustment(adj, &mut adjusted, cx);
         // Clipped layers onto an adjustment are uncommon; they composite atop the adjusted result.
         for c in clipped.iter().filter(|c| c.visible) {
             composite_atop(c, &mut adjusted, cx);
@@ -1493,7 +1504,7 @@ fn composite_atop_any(layer: &Layer, base: &mut Buffer, cx: &Ctx) {
     let rect = base.rect;
     if let LayerContent::Adjustment(adj) = &layer.content {
         let mut adjusted = base.clone();
-        adjust::apply_depth(adj, &mut adjusted, cx.transfer, Some(cx.depth));
+        apply_adjustment(adj, &mut adjusted, cx);
         let mv = mask_vals(layer, rect, cx);
         for (i, p) in base.px.iter_mut().enumerate() {
             let k = layer.opacity * layer.fill_opacity * mask_k(&mv, i);

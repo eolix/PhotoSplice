@@ -132,7 +132,8 @@ impl Tile {
         if acc[3] <= 0.0 {
             return [0.0; 4];
         }
-        [acc[0] / acc[3], acc[1] / acc[3], acc[2] / acc[3], acc[3].min(1.0)]
+        let c = crate::cmyk::project_rgb([acc[0] / acc[3], acc[1] / acc[3], acc[2] / acc[3]]);
+        [c[0], c[1], c[2], acc[3].min(1.0)]
     }
 }
 
