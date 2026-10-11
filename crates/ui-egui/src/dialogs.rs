@@ -92,15 +92,8 @@ pub fn frame<R>(
         ui.add_space(1.0);
         let t = ui.add(egui::Label::new(egui::RichText::new(title).font(crate::theme::semibold(13.0)).color(tk.text)).selectable(false)).rect;
         let frame_top = ui.max_rect().top() - f32::from(margin.top);
-        let band = egui::Rect::from_min_max(
-            egui::pos2(ui.max_rect().left() - f32::from(margin.left), frame_top),
-            egui::pos2(ui.max_rect().right() + f32::from(margin.right), t.bottom() + 7.0),
-        );
-        let r = ui.visuals().menu_corner_radius;
-        strip.set(strip_bg, egui::Shape::rect_filled(band, egui::CornerRadius { nw: r.nw, ne: r.ne, sw: 0, se: 0 }, tk.chrome));
-        strip.line_segment([band.left_bottom(), band.right_bottom()], egui::Stroke::new(1.0, tk.separator));
-        drag = ui.interact(band, id.with("title"), egui::Sense::drag()).drag_delta();
-        ui.add_space(band.bottom() - t.bottom() + 10.0);
+        let band_bottom = t.bottom() + 7.0;
+        ui.add_space(band_bottom - t.bottom() + 10.0);
         let body_size = match size {
             FrameSize::Width(..) => None,
             FrameSize::Fixed(outer) => {
@@ -108,7 +101,19 @@ pub fn frame<R>(
                 Some(egui::vec2(max_w, (outer.y - chrome.y - used).max(1.0)))
             }
         };
-        body(ui, body_size)
+        let out = body(ui, body_size);
+        // Sized after the body: content wider than the frame's maximum widens the dialog, and
+        // the band must span what is actually shown.
+        let right = ui.max_rect().right().max(ui.min_rect().right());
+        let band = egui::Rect::from_min_max(
+            egui::pos2(ui.max_rect().left() - f32::from(margin.left), frame_top),
+            egui::pos2(right + f32::from(margin.right), band_bottom),
+        );
+        let r = ui.visuals().menu_corner_radius;
+        strip.set(strip_bg, egui::Shape::rect_filled(band, egui::CornerRadius { nw: r.nw, ne: r.ne, sw: 0, se: 0 }, tk.chrome));
+        strip.line_segment([band.left_bottom(), band.right_bottom()], egui::Stroke::new(1.0, tk.separator));
+        drag = ui.interact(band, id.with("title"), egui::Sense::drag()).drag_delta();
+        out
     });
     ctx.data_mut(|m| m.insert_temp(size_id, modal.response.rect.size()));
     // A drag moves it from where it is shown, and stops at the bounds.
@@ -164,7 +169,10 @@ pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
         } else if d.kind == DialogKind::LayerStyle {
             // Effect list, parameters, and the Preview swatch column.
             680.0
-        } else if d.fields.contains_key("__export") || crate::color_picker_ui::owns(&d.fields) {
+        } else if crate::color_picker_ui::owns(&d.fields) {
+            min_w = crate::color_picker_ui::WIDTH;
+            crate::color_picker_ui::WIDTH
+        } else if d.fields.contains_key("__export") {
             600.0
         } else {
             440.0
@@ -227,40 +235,52 @@ pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
                     ui.label(fields.get("message").and_then(Value::as_str).unwrap_or("Error"));
                 }
             }
+            // The Color Picker draws its own OK / Cancel, top right as in Photoshop.
+            let own_buttons = d.kind == DialogKind::Command && crate::color_picker_ui::owns(&fields);
+            if own_buttons {
+                match fields.remove("__outcome").as_ref().and_then(Value::as_str) {
+                    Some("ok") => outcome = Some(true),
+                    Some("cancel") => outcome = Some(false),
+                    _ if ui.input(|i| i.key_pressed(egui::Key::Enter)) => outcome = Some(true),
+                    _ => {}
+                }
+            }
             ui.add_space(8.0);
             // Align::Min, not Center: a centred row fills the height left over from last frame's
             // (larger) size, so a dialog whose body gets shorter would never shrink back.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                ui.spacing_mut().item_spacing.x = 10.0;
-                if matches!(d.kind, DialogKind::About | DialogKind::Error) {
-                    if dialog_buttons(ui, &[DialogButton::new(ButtonRole::Default, tl!("OK"), 84.0)]).is_some() {
-                        outcome = Some(false);
-                    }
-                } else {
-                    let ok_label = if d.kind == DialogKind::NewDocument {
-                        tl!("Create")
-                    } else if d.fields.contains_key("__export") {
-                        tl!("Export")
+            if !own_buttons {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    if matches!(d.kind, DialogKind::About | DialogKind::Error) {
+                        if dialog_buttons(ui, &[DialogButton::new(ButtonRole::Default, tl!("OK"), 84.0)]).is_some() {
+                            outcome = Some(false);
+                        }
                     } else {
-                        crate::file_ui::ok_label(&d.fields).unwrap_or("OK")
-                    };
-                    let ok = DialogButton::new(ButtonRole::Default, ok_label, 84.0);
-                    let cancel = DialogButton::new(ButtonRole::Cancel, if d.kind == DialogKind::NewDocument { tl!("Close") } else { tl!("Cancel") }, 84.0);
-                    let clicked = if d.kind == DialogKind::Command && crate::prefs_ui::is_preferences(&fields) {
-                        let changed = crate::prefs_ui::preferences_changed(app, &fields);
-                        dialog_buttons(ui, &[ok, cancel, DialogButton::new(ButtonRole::Apply, tl!("Apply"), 84.0).enabled(changed)])
-                    } else {
-                        dialog_buttons(ui, &[ok, cancel])
-                    };
-                    match clicked {
-                        Some(ButtonRole::Cancel) => outcome = Some(false),
-                        Some(ButtonRole::Apply) => apply_requested = true,
-                        Some(_) => outcome = Some(true),
-                        None if ui.input(|i| i.key_pressed(egui::Key::Enter)) => outcome = Some(true),
-                        None => {}
+                        let ok_label = if d.kind == DialogKind::NewDocument {
+                            tl!("Create")
+                        } else if d.fields.contains_key("__export") {
+                            tl!("Export")
+                        } else {
+                            crate::file_ui::ok_label(&d.fields).unwrap_or("OK")
+                        };
+                        let ok = DialogButton::new(ButtonRole::Default, ok_label, 84.0);
+                        let cancel = DialogButton::new(ButtonRole::Cancel, if d.kind == DialogKind::NewDocument { tl!("Close") } else { tl!("Cancel") }, 84.0);
+                        let clicked = if d.kind == DialogKind::Command && crate::prefs_ui::is_preferences(&fields) {
+                            let changed = crate::prefs_ui::preferences_changed(app, &fields);
+                            dialog_buttons(ui, &[ok, cancel, DialogButton::new(ButtonRole::Apply, tl!("Apply"), 84.0).enabled(changed)])
+                        } else {
+                            dialog_buttons(ui, &[ok, cancel])
+                        };
+                        match clicked {
+                            Some(ButtonRole::Cancel) => outcome = Some(false),
+                            Some(ButtonRole::Apply) => apply_requested = true,
+                            Some(_) => outcome = Some(true),
+                            None if ui.input(|i| i.key_pressed(egui::Key::Enter)) => outcome = Some(true),
+                            None => {}
+                        }
                     }
-                }
-            });
+                });
+            }
             // The frame around the content (Frame::popup's margin and stroke).
             ui.min_rect().expand(ui.spacing().menu_margin.sum().max_elem() + 2.0)
         });

@@ -15,6 +15,35 @@ use crate::widgets;
 
 /// Radio components, Photoshop order: H, S, B, R, G, B.
 pub const MODES: &[(&str, &str)] = &[("h", "H:"), ("s", "S:"), ("v", "B:"), ("r", "R:"), ("g", "G:"), ("b", "B:")];
+/// The Lab radios, which pick the field's component too (Photoshop's L, a and b).
+pub const LAB_MODES: &[(&str, &str)] = &[("labL", "L:"), ("labA", "a:"), ("labB", "b:")];
+
+/// Lab at field position (x, y) (y down) and slider `z` (all 0..1) in Lab `mode`, the component
+/// the field doesn't vary taken from `lab`: L selected, the field is a (across) by b (up); a or
+/// b selected, it is the other one across by L up.
+fn lab_at(mode: &str, z: f32, x: f32, y: f32) -> [f32; 3] {
+    let ab = |v: f32| v * 255.0 - 128.0;
+    match mode {
+        "labA" => [(1.0 - y) * 100.0, ab(z), ab(x)],
+        "labB" => [(1.0 - y) * 100.0, ab(x), ab(z)],
+        _ => [z * 100.0, ab(x), ab(1.0 - y)],
+    }
+}
+
+/// Field position and slider value of `lab` in Lab `mode` (inverse of [`lab_at`]).
+fn lab_locate(mode: &str, lab: [f32; 3]) -> (f32, f32, f32) {
+    let u = |v: f32| ((v + 128.0) / 255.0).clamp(0.0, 1.0);
+    let l = (lab[0] / 100.0).clamp(0.0, 1.0);
+    match mode {
+        "labA" => (u(lab[2]), 1.0 - l, u(lab[1])),
+        "labB" => (u(lab[1]), 1.0 - l, u(lab[2])),
+        _ => (u(lab[1]), 1.0 - u(lab[2]), l),
+    }
+}
+
+fn lab_rgb(lab: [f32; 3]) -> [f32; 3] {
+    photosuite_color::convert::lab_to_srgb(lab).map(|c| c.clamp(0.0, 1.0))
+}
 
 pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
     let h = (h.rem_euclid(360.0)) / 60.0;
@@ -235,159 +264,235 @@ fn grid_mesh(rect: Rect, n: usize, color: impl Fn(f32, f32) -> [f32; 3]) -> Mesh
     m
 }
 
+/// Width of the dialog's content: the field and its slider, then two columns, each a header
+/// (the swatches; the buttons) over its fields, rows lined up across them.
+pub const WIDTH: f32 = 532.0;
+/// Height of the two column headers, so the rows below them line up.
+const HEADER: f32 = 116.0;
+const COLUMN: f32 = 104.0;
+
 pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     let t = Tokens::get(ui.ctx());
     let mode = f.get("__mode").and_then(Value::as_str).unwrap_or("h").to_string();
+    let lab_mode = mode.starts_with("lab");
     let now = current(f);
-    let (rgb, hsv) = (now.rgb, now.hsv);
-    let (fx, fy, fz) = locate(&mode, hsv, rgb);
+    let (rgb, hsv, lab) = (now.rgb, now.hsv, now.lab);
+    let (fx, fy, fz) = if lab_mode { lab_locate(&mode, lab) } else { locate(&mode, hsv, rgb) };
     ui.horizontal_top(|ui| {
-        // Colour field.
-        let (field, resp) = ui.allocate_exact_size(vec2(256.0, 256.0), Sense::click_and_drag());
-        ui.painter().add(grid_mesh(field, 32, |x, y| field_color(&mode, fz, x, y)));
-        ui.painter().rect_stroke(field, 0.0, Stroke::new(1.0, t.field_border), StrokeKind::Outside);
-        let marker = pos2(field.left() + fx * field.width(), field.top() + fy * field.height());
-        ui.painter().circle_stroke(marker, 5.0, Stroke::new(1.5, if hsv[2] > 0.6 && hsv[1] < 0.4 { Color32::BLACK } else { Color32::WHITE }));
-        if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
-            let (x, y) = (((p.x - field.left()) / field.width()).clamp(0.0, 1.0), ((p.y - field.top()) / field.height()).clamp(0.0, 1.0));
-            let c = field_color(&mode, fz, x, y);
-            let keep = match mode.as_str() {
-                "h" => Keep::Hsv([fz * 360.0, x, 1.0 - y]),
-                "s" => Keep::Hsv([x * 360.0, fz, 1.0 - y]),
-                "v" => Keep::Hsv([x * 360.0, 1.0 - y, fz]),
-                _ => Keep::Nothing,
-            };
-            set_rgb(f, c, keep);
-        }
-        ui.add_space(6.0);
-        // Component slider (hue runs 360° at the top to 0° at the bottom, like Photoshop).
-        let (strip, sresp) = ui.allocate_exact_size(vec2(20.0, 256.0), Sense::click_and_drag());
-        ui.painter().add(grid_mesh(strip, 32, |_, y| slider_color(&mode, 1.0 - y, hsv, rgb)));
-        let sy = strip.top() + (1.0 - fz) * strip.height();
-        for (x, dir) in [(strip.left() - 1.0, 1.0f32), (strip.right() + 1.0, -1.0)] {
-            let tri = vec![pos2(x, sy), pos2(x - 6.0 * dir, sy - 4.0), pos2(x - 6.0 * dir, sy + 4.0)];
-            ui.painter().add(egui::Shape::convex_polygon(tri, t.text, Stroke::NONE));
-        }
-        if let Some(p) = sresp.interact_pointer_pos().filter(|_| sresp.dragged() || sresp.clicked()) {
-            let z = 1.0 - ((p.y - strip.top()) / strip.height()).clamp(0.0, 1.0);
-            let h = match mode.as_str() {
-                "h" => Some([z * 360.0, hsv[1], hsv[2]]),
-                "s" => Some([hsv[0], z, hsv[2]]),
-                "v" => Some([hsv[0], hsv[1], z]),
-                _ => None,
-            };
-            match h {
-                Some(h) => set_rgb(f, hsv_to_rgb(h[0], h[1], h[2]), Keep::Hsv(h)),
-                None => set_rgb(f, slider_color(&mode, z, hsv, rgb), Keep::Nothing),
-            }
-        }
-        ui.add_space(14.0);
         ui.vertical(|ui| {
-            // new / current swatches.
-            ui.label(egui::RichText::new(tl!("new")).size(11.0).color(t.text_dim));
-            let (sw, _) = ui.allocate_exact_size(vec2(64.0, 72.0), Sense::hover());
-            let orig = f.get("__orig").and_then(Value::as_str).and_then(parse_hex).unwrap_or(rgb);
-            ui.painter().rect_filled(Rect::from_min_size(sw.min, vec2(64.0, 36.0)), 0.0, c32(rgb));
-            let cur = Rect::from_min_size(sw.min + vec2(0.0, 36.0), vec2(64.0, 36.0));
-            ui.painter().rect_filled(cur, 0.0, c32(orig));
-            ui.painter().rect_stroke(sw, 0.0, Stroke::new(1.0, t.field_border), StrokeKind::Outside);
-            let click_cur = ui.interact(cur, ui.id().with("cp-current"), Sense::click());
-            if click_cur.on_hover_text(tl!("Click to restore the current colour")).clicked() {
-                set_rgb(f, orig, Keep::Nothing);
+            let (field, resp) = ui.allocate_exact_size(vec2(256.0, 256.0), Sense::click_and_drag());
+            if lab_mode {
+                ui.painter().add(grid_mesh(field, 32, |x, y| lab_rgb(lab_at(&mode, fz, x, y))));
+            } else {
+                ui.painter().add(grid_mesh(field, 32, |x, y| field_color(&mode, fz, x, y)));
             }
-            ui.label(egui::RichText::new(tl!("current")).size(11.0).color(t.text_dim));
-            ui.add_space(10.0);
+            ui.painter().rect_stroke(field, 0.0, Stroke::new(1.0, t.field_border), StrokeKind::Outside);
+            let marker = pos2(field.left() + fx * field.width(), field.top() + fy * field.height());
+            ui.painter().with_clip_rect(field.expand(6.0)).circle_stroke(
+                marker,
+                5.0,
+                Stroke::new(1.5, if hsv[2] > 0.6 && hsv[1] < 0.4 { Color32::BLACK } else { Color32::WHITE }),
+            );
+            if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
+                let (x, y) = (((p.x - field.left()) / field.width()).clamp(0.0, 1.0), ((p.y - field.top()) / field.height()).clamp(0.0, 1.0));
+                if lab_mode {
+                    let l = lab_at(&mode, fz, x, y);
+                    set_rgb(f, lab_rgb(l), Keep::Lab(l));
+                } else {
+                    let c = field_color(&mode, fz, x, y);
+                    let keep = match mode.as_str() {
+                        "h" => Keep::Hsv([fz * 360.0, x, 1.0 - y]),
+                        "s" => Keep::Hsv([x * 360.0, fz, 1.0 - y]),
+                        "v" => Keep::Hsv([x * 360.0, 1.0 - y, fz]),
+                        _ => Keep::Nothing,
+                    };
+                    set_rgb(f, c, keep);
+                }
+            }
+            ui.add_space(12.0);
             let mut web = f.get("__webOnly").and_then(Value::as_bool).unwrap_or(false);
             if widgets::checkbox(ui, &mut web, tl!("Only Web Colors")).changed() {
                 f.insert("__webOnly".into(), json!(web));
                 set_rgb(f, rgb, Keep::Nothing);
             }
         });
-        ui.add_space(10.0);
-        ui.vertical(|ui| fields(ui, f, &mode, &now));
+        ui.add_space(8.0);
+        // Component slider (hue runs 360° at the top to 0° at the bottom, like Photoshop).
+        let (strip, sresp) = ui.allocate_exact_size(vec2(20.0, 256.0), Sense::click_and_drag());
+        if lab_mode {
+            let c = |z: f32| {
+                let mut l = lab;
+                match mode.as_str() {
+                    "labA" => l[1] = z * 255.0 - 128.0,
+                    "labB" => l[2] = z * 255.0 - 128.0,
+                    _ => l[0] = z * 100.0,
+                }
+                l
+            };
+            ui.painter().add(grid_mesh(strip, 32, |_, y| lab_rgb(c(1.0 - y))));
+            if let Some(p) = sresp.interact_pointer_pos().filter(|_| sresp.dragged() || sresp.clicked()) {
+                let z = 1.0 - ((p.y - strip.top()) / strip.height()).clamp(0.0, 1.0);
+                let l = c(z);
+                set_rgb(f, lab_rgb(l), Keep::Lab(l));
+            }
+        } else {
+            ui.painter().add(grid_mesh(strip, 32, |_, y| slider_color(&mode, 1.0 - y, hsv, rgb)));
+            if let Some(p) = sresp.interact_pointer_pos().filter(|_| sresp.dragged() || sresp.clicked()) {
+                let z = 1.0 - ((p.y - strip.top()) / strip.height()).clamp(0.0, 1.0);
+                let h = match mode.as_str() {
+                    "h" => Some([z * 360.0, hsv[1], hsv[2]]),
+                    "s" => Some([hsv[0], z, hsv[2]]),
+                    "v" => Some([hsv[0], hsv[1], z]),
+                    _ => None,
+                };
+                match h {
+                    Some(h) => set_rgb(f, hsv_to_rgb(h[0], h[1], h[2]), Keep::Hsv(h)),
+                    None => set_rgb(f, slider_color(&mode, z, hsv, rgb), Keep::Nothing),
+                }
+            }
+        }
+        let sy = strip.top() + (1.0 - fz) * strip.height();
+        for (x, dir) in [(strip.left() - 1.0, 1.0f32), (strip.right() + 1.0, -1.0)] {
+            let tri = vec![pos2(x, sy), pos2(x - 6.0 * dir, sy - 4.0), pos2(x - 6.0 * dir, sy + 4.0)];
+            ui.painter().add(egui::Shape::convex_polygon(tri, t.text, Stroke::NONE));
+        }
+        ui.add_space(16.0);
+        // Middle: new / current over H S B, R G B and #.
+        ui.vertical(|ui| {
+            ui.set_width(COLUMN);
+            let (head, _) = ui.allocate_exact_size(vec2(COLUMN, HEADER), Sense::hover());
+            let sw = Rect::from_min_size(head.min + vec2(24.0, 20.0), vec2(64.0, 76.0));
+            let orig = f.get("__orig").and_then(Value::as_str).and_then(parse_hex).unwrap_or(rgb);
+            ui.painter().rect_filled(Rect::from_min_max(sw.min, pos2(sw.max.x, sw.center().y)), 0.0, c32(rgb));
+            let cur = Rect::from_min_max(pos2(sw.min.x, sw.center().y), sw.max);
+            ui.painter().rect_filled(cur, 0.0, c32(orig));
+            ui.painter().rect_stroke(sw, 0.0, Stroke::new(1.0, t.field_border), StrokeKind::Outside);
+            if ui.interact(cur, ui.id().with("cp-current"), Sense::click()).on_hover_text(tl!("Click to restore the current colour")).clicked() {
+                set_rgb(f, orig, Keep::Nothing);
+            }
+            let caption = egui::FontId::proportional(12.0);
+            ui.painter().text(pos2(sw.center().x, sw.top() - 4.0), egui::Align2::CENTER_BOTTOM, tl!("new"), caption.clone(), t.text_dim);
+            ui.painter().text(pos2(sw.center().x, sw.bottom() + 4.0), egui::Align2::CENTER_TOP, tl!("current"), caption, t.text_dim);
+            fields(ui, f, &mode, &now, false);
+        });
+        ui.add_space(16.0);
+        // Right: OK / Cancel over L a b and C M Y K.
+        ui.vertical(|ui| {
+            ui.set_width(COLUMN);
+            ui.allocate_ui_with_layout(vec2(COLUMN, HEADER), egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.set_min_height(HEADER);
+                ui.add_space(2.0);
+                if widgets::primary_button(ui, tl!("OK"), COLUMN).clicked() {
+                    f.insert("__outcome".into(), json!("ok"));
+                }
+                ui.add_space(6.0);
+                if widgets::secondary_button(ui, tl!("Cancel"), COLUMN).clicked() {
+                    f.insert("__outcome".into(), json!("cancel"));
+                }
+            });
+            fields(ui, f, &mode, &now, true);
+        });
     });
 }
 
-/// Component radios and numeric fields: HSB, RGB, Lab, CMYK and hex.
-fn fields(ui: &mut egui::Ui, f: &mut Map<String, Value>, mode: &str, now: &Components) {
+/// One column of component radios and fields: H S B, R G B and # (`right` false), or L a b
+/// (radios too) and C M Y K. Seven rows either way, so the columns line up.
+fn fields(ui: &mut egui::Ui, f: &mut Map<String, Value>, mode: &str, now: &Components, right: bool) {
     let t = Tokens::get(ui.ctx());
     let &Components { rgb, hsv, lab, cmyk } = now;
     let mut edit: Option<([f32; 3], Keep)> = None;
     let mut new_mode: Option<&str> = None;
-    egui::Grid::new("cp-fields").num_columns(4).spacing([6.0, 4.0]).show(ui, |ui| {
-        let vals = [hsv[0], hsv[1] * 100.0, hsv[2] * 100.0, rgb[0] * 255.0, rgb[1] * 255.0, rgb[2] * 255.0];
-        let units = ["°", "%", "%", "", "", ""];
-        let ranges = [0.0..=360.0, 0.0..=100.0, 0.0..=100.0, 0.0..=255.0, 0.0..=255.0, 0.0..=255.0];
-        for i in 0..6 {
-            let (key, label) = MODES[i];
-            let on = mode == key;
-            let (r, resp) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::click());
-            ui.painter().circle_stroke(r.center(), 5.5, Stroke::new(1.2, if on { t.accent } else { t.text_faint }));
-            if on {
-                ui.painter().circle_filled(r.center(), 3.0, t.accent);
-            }
-            if resp.clicked() {
-                new_mode = Some(key);
-            }
-            ui.label(egui::RichText::new(tl!(&label)).color(t.text_dim));
-            let mut v = vals[i].round();
-            if widgets::value_field(ui, &mut v, ranges[i].clone(), "", 54.0).changed() {
-                let (mut h, mut c) = (hsv, rgb);
-                if i < 3 {
-                    h[i] = if i == 0 { v } else { v / 100.0 };
-                    c = hsv_to_rgb(h[0], h[1], h[2]);
-                    edit = Some((c, Keep::Hsv(h)));
-                } else {
-                    c[i - 3] = v / 255.0;
-                    edit = Some((c, Keep::Nothing));
+    let radio = |ui: &mut egui::Ui, key: &'static str, new_mode: &mut Option<&'static str>| {
+        let on = mode == key;
+        let (r, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
+        ui.painter().circle_stroke(r.center(), 6.0, Stroke::new(1.2, if on { t.accent } else { t.text_faint }));
+        if on {
+            ui.painter().circle_filled(r.center(), 3.2, t.accent);
+        }
+        if resp.clicked() {
+            *new_mode = Some(key);
+        }
+    };
+    let label = |ui: &mut egui::Ui, s: &str| {
+        ui.add_sized(vec2(16.0, 22.0), egui::Label::new(egui::RichText::new(tl!(s)).color(t.text_dim)));
+    };
+    let unit = |ui: &mut egui::Ui, s: &str| {
+        ui.label(egui::RichText::new(s).color(t.text_faint));
+    };
+    let blank = |ui: &mut egui::Ui| {
+        ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
+    };
+    egui::Grid::new(if right { "cp-fields-right" } else { "cp-fields-left" }).num_columns(4).min_col_width(0.0).min_row_height(22.0).spacing([4.0, 2.0]).show(ui, |ui| {
+        if !right {
+            let vals = [hsv[0], hsv[1] * 100.0, hsv[2] * 100.0, rgb[0] * 255.0, rgb[1] * 255.0, rgb[2] * 255.0];
+            let units = ["°", "%", "%", "", "", ""];
+            let ranges = [0.0..=360.0, 0.0..=100.0, 0.0..=100.0, 0.0..=255.0, 0.0..=255.0, 0.0..=255.0];
+            for row in 0..6 {
+                let (key, l) = MODES[row];
+                radio(ui, key, &mut new_mode);
+                label(ui, l);
+                let mut v = vals[row].round();
+                if widgets::value_field(ui, &mut v, ranges[row].clone(), "", 46.0).changed() {
+                    let (mut h, mut c) = (hsv, rgb);
+                    if row < 3 {
+                        h[row] = if row == 0 { v } else { v / 100.0 };
+                        c = hsv_to_rgb(h[0], h[1], h[2]);
+                        edit = Some((c, Keep::Hsv(h)));
+                    } else {
+                        c[row - 3] = v / 255.0;
+                        edit = Some((c, Keep::Nothing));
+                    }
                 }
+                unit(ui, units[row]);
+                ui.end_row();
             }
-            ui.label(egui::RichText::new(units[i]).color(t.text_faint));
-            ui.end_row();
-        }
-        for (i, (label, v, range)) in [("L:", lab[0], 0.0..=100.0), ("a:", lab[1], -128.0..=127.0), ("b:", lab[2], -128.0..=127.0)].into_iter().enumerate() {
-            ui.label("");
-            ui.label(egui::RichText::new(tl!(&label)).color(t.text_dim));
-            let mut x = v.round();
-            if widgets::value_field(ui, &mut x, range, "", 54.0).changed() {
-                let mut l = lab;
-                l[i] = x;
-                edit = Some((photosuite_color::convert::lab_to_srgb(l).map(|c| c.clamp(0.0, 1.0)), Keep::Lab(l)));
+            blank(ui);
+            label(ui, "#");
+            // While the field has focus it shows what is being typed, not the colour: rebuilding
+            // it from the colour every frame would throw away every keystroke until six valid
+            // digits were in.
+            let id = ui.id().with("cp-hex");
+            let typing = if ui.memory(|m| m.has_focus(id)) { ui.data(|d| d.get_temp::<String>(id)) } else { None };
+            let mut h = typing.unwrap_or_else(|| hex(rgb).trim_start_matches('#').to_string());
+            let r = ui.add(egui::TextEdit::singleline(&mut h).id(id).char_limit(6).desired_width(58.0).font(crate::theme::mono(12.0)));
+            if r.has_focus() {
+                ui.data_mut(|d| d.insert_temp(id, h.clone()));
+            } else {
+                ui.data_mut(|d| d.remove::<String>(id));
             }
-            ui.label("");
-            ui.end_row();
-        }
-        for (i, label) in ["C:", "M:", "Y:", "K:"].into_iter().enumerate() {
-            ui.label("");
-            ui.label(egui::RichText::new(tl!(&label)).color(t.text_dim));
-            let mut x = (cmyk[i] * 100.0).round();
-            if widgets::value_field(ui, &mut x, 0.0..=100.0, "", 54.0).changed() {
-                let mut k = cmyk;
-                k[i] = x / 100.0;
-                edit = Some((photosuite_color::convert::cmyk_to_rgb(k).map(|c| c.clamp(0.0, 1.0)), Keep::Cmyk(k)));
+            if r.changed()
+                && let Some(c) = parse_hex(&h)
+            {
+                edit = Some((c, Keep::Nothing));
             }
-            ui.label(egui::RichText::new("%").color(t.text_faint));
             ui.end_row();
-        }
-        ui.label("");
-        ui.label(egui::RichText::new("#").color(t.text_dim));
-        // While the field has focus it shows what is being typed, not the colour: rebuilding it from
-        // the colour every frame would throw away every keystroke until six valid digits were in.
-        let id = ui.id().with("cp-hex");
-        let typing = if ui.memory(|m| m.has_focus(id)) { ui.data(|d| d.get_temp::<String>(id)) } else { None };
-        let mut h = typing.unwrap_or_else(|| hex(rgb).trim_start_matches('#').to_string());
-        let r = ui.add(egui::TextEdit::singleline(&mut h).id(id).char_limit(6).desired_width(54.0).font(crate::theme::mono(12.0)));
-        if r.has_focus() {
-            ui.data_mut(|d| d.insert_temp(id, h.clone()));
         } else {
-            ui.data_mut(|d| d.remove::<String>(id));
+            for row in 0..3 {
+                let (key, l) = LAB_MODES[row];
+                radio(ui, key, &mut new_mode);
+                label(ui, l);
+                let range = if row == 0 { 0.0..=100.0 } else { -128.0..=127.0 };
+                let mut x = lab[row].round();
+                if widgets::value_field(ui, &mut x, range, "", 46.0).changed() {
+                    let mut l = lab;
+                    l[row] = x;
+                    edit = Some((lab_rgb(l), Keep::Lab(l)));
+                }
+                ui.end_row();
+            }
+            for (i, l) in ["C:", "M:", "Y:", "K:"].into_iter().enumerate() {
+                blank(ui);
+                label(ui, l);
+                let mut x = (cmyk[i] * 100.0).round();
+                if widgets::value_field(ui, &mut x, 0.0..=100.0, "", 46.0).changed() {
+                    let mut k = cmyk;
+                    k[i] = x / 100.0;
+                    edit = Some((photosuite_color::convert::cmyk_to_rgb(k).map(|c| c.clamp(0.0, 1.0)), Keep::Cmyk(k)));
+                }
+                unit(ui, "%");
+                ui.end_row();
+            }
         }
-        if r.changed()
-            && let Some(c) = parse_hex(&h)
-        {
-            edit = Some((c, Keep::Nothing));
-        }
-        ui.end_row();
     });
     if let Some(m) = new_mode {
         f.insert("__mode".into(), json!(m));
@@ -473,7 +578,7 @@ mod tests {
         let base = parse_hex("#336699").unwrap();
         let lab = photosuite_color::convert::srgb_to_lab(base);
         let cmyk = photosuite_color::convert::rgb_to_cmyk(base);
-        // Fields in order: H S B R G B, L a b, C M Y K.
+        // Fields in order: H S B R G B (left column), then L a b C M Y K (right).
         for (field, typed, want) in [
             (6, "60", photosuite_color::convert::lab_to_srgb([60.0, lab[1], lab[2]])),
             (7, "30", photosuite_color::convert::lab_to_srgb([lab[0], 30.0, lab[2]])),
