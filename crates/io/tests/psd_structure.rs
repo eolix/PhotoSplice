@@ -750,6 +750,13 @@ fn knockout_round_trips() {
     assert_eq!(back.layers[0].knockout, Knockout::Shallow);
     assert_eq!(back.layers[1].knockout, Knockout::Deep);
     // Turned off, it is written as off.
+    // Blend Clipped / Interior Effects as Group too.
+    let mut flags = back.clone();
+    flags.layers[0].blend_clipped = false;
+    flags.layers[0].blend_interior = true;
+    let f = import("x.psd", &export(&flags, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap().document;
+    assert!(!f.layers[0].blend_clipped && f.layers[0].blend_interior);
+    assert!(f.layers[1].blend_clipped && !f.layers[1].blend_interior);
     let mut off = back.clone();
     off.layers[0].knockout = Knockout::None;
     let again = import("x.psd", &export(&off, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap().document;

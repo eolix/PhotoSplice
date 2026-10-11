@@ -497,6 +497,14 @@ pub struct Layer {
     pub blend_if: BlendIf,
     /// Blending Options › Advanced Blending › Knockout. PSD `knko`.
     pub knockout: Knockout,
+    /// Blending Options › Advanced Blending › Blend Clipped Layers as Group (default on): the
+    /// layers clipped to this one composite with it and blend in its mode; off, each blends
+    /// on its own with what is beneath, inside this layer's shape. PSD `clbl`.
+    pub blend_clipped: bool,
+    /// Blending Options › Advanced Blending › Blend Interior Effects as Group (default off):
+    /// the interior effects (overlays, satin, inner glow and shadow) become part of the layer,
+    /// so its fill opacity fades them too. PSD `infx`.
+    pub blend_interior: bool,
     /// Layer › Video Layers frame stack (None for a normal layer).
     pub video: Option<VideoData>,
 }
@@ -524,6 +532,8 @@ impl Layer {
             excluded_channels: 0,
             blend_if: BlendIf::default(),
             knockout: Knockout::None,
+            blend_clipped: true,
+            blend_interior: false,
             video: None,
         }
     }

@@ -511,8 +511,13 @@ fn plain(l: &Layer, clipped: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
         }
         _ => {
             let Some(mut src) = content(l, rect, cx) else { return };
-            for c in clipped.iter().filter(|c| c.visible) {
-                atop(c, &mut src, cx);
+            let clip: Vec<&Layer> = clipped.iter().filter(|c| c.visible).collect();
+            // Clipped layers take the base's shape, not its fill (as `crate::clip_into`).
+            let separate = !clip.is_empty() && (l.fill_opacity < 1.0 || !l.blend_clipped);
+            if !separate {
+                for c in &clip {
+                    atop(c, &mut src, cx);
+                }
             }
             if crate::effects::has_effects(l) {
                 // The RGB effects pipeline, drawn per ink in two projected passes: the content
@@ -528,6 +533,10 @@ fn plain(l: &Layer, clipped: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
                     let content = if PROJECTION.with(std::cell::Cell::get) == Projection::Cmy { &cmy } else { &k };
                     crate::effects::composite_with_effects_prepared(l, content, b, &maps, bounds, cx.patterns, None);
                 });
+                if separate {
+                    let shape: Vec<f32> = src.px.iter().map(|p| p[4]).collect();
+                    clip_into(&clip, backdrop, &shape, l.opacity, cx);
+                }
                 return;
             }
             // Knockout (see `knockout`): the shape first reveals what it knocks out to.
@@ -538,7 +547,32 @@ fn plain(l: &Layer, clipped: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
                     *b = ko_mix(*b, *k, s[4] * l.opacity);
                 }
             }
+            if separate {
+                let shape: Vec<f32> = src.px.iter().map(|p| p[4]).collect();
+                if l.blend_clipped {
+                    let mut group = CBuf::transparent(rect);
+                    blend_into(&mut group, &src, BlendMode::Normal, l.fill_opacity);
+                    clip_into(&clip, &mut group, &shape, 1.0, cx);
+                    blend_into(backdrop, &group, l.blend, l.opacity);
+                } else {
+                    blend_into(backdrop, &src, l.blend, opacity);
+                    clip_into(&clip, backdrop, &shape, l.opacity, cx);
+                }
+                return;
+            }
             blend_into(backdrop, &src, l.blend, opacity);
+        }
+    }
+}
+
+/// Composites each clipped layer onto `buf` as a layer of its own, keeping its change only
+/// inside the base's `shape` (times `k`).
+fn clip_into(clipped: &[&Layer], buf: &mut CBuf, shape: &[f32], k: f32, cx: &Ctx) {
+    for c in clipped {
+        let before = buf.px.clone();
+        layer(c, &[], buf, cx);
+        for ((p, b), s) in buf.px.iter_mut().zip(&before).zip(shape) {
+            *p = ko_mix(*b, *p, s * k);
         }
     }
 }

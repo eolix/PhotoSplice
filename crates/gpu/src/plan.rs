@@ -313,6 +313,11 @@ pub fn plan(doc: &Document) -> Result<Plan<'_>, Unsupported> {
     if doc.mode == photosuite_color::ColorMode::Multichannel {
         return Err(Unsupported("Multichannel inks (printed on the CPU)".into()));
     }
+    // Clipping to a faded or ungrouped base, and interior effects blended as a group, are
+    // composited on the CPU (`photosuite_compose` clips by the base's shape).
+    if let Some(why) = cpu_clipping(&doc.layers, 0) {
+        return Err(Unsupported(why));
+    }
     // Knockout is composited on the CPU (`photosuite_compose`'s knockout frames).
     if doc.walk().into_iter().any(|(_, _, l)| l.visible && l.knockout != photosuite_doc::Knockout::None) {
         return Err(Unsupported("knockout (composited on the CPU)".into()));
@@ -332,6 +337,32 @@ pub fn plan(doc: &Document) -> Result<Plan<'_>, Unsupported> {
     let start = doc.layers.iter().rposition(|l| photosuite_compose::occludes_below(l, doc.mode)).unwrap_or(0);
     let root = p.stack(doc.layers.get(start..).unwrap_or(&doc.layers), root)?;
     Ok(p.finish(root))
+}
+
+/// Why `layers` (a sibling list, groups searched too) need the CPU's clipping or interior-effect
+/// rules, if they do.
+fn cpu_clipping(layers: &[Layer], depth: u32) -> Option<String> {
+    if depth > 64 {
+        return None;
+    }
+    for (i, l) in layers.iter().enumerate() {
+        if !l.visible {
+            continue;
+        }
+        let clipped = layers.get(i + 1..).unwrap_or(&[]).iter().take_while(|c| c.clipped).any(|c| c.visible);
+        if !l.clipped && clipped && (l.fill_opacity < 1.0 || !l.blend_clipped) {
+            return Some(format!("layers clipped to `{}` (faded or ungrouped base, composited on the CPU)", l.name));
+        }
+        if l.blend_interior && l.fill_opacity < 1.0 && photosuite_compose::effects::has_effects(l) {
+            return Some(format!("interior effects of `{}` blended as a group (composited on the CPU)", l.name));
+        }
+        if let LayerContent::Group(g) = &l.content
+            && let Some(why) = cpu_clipping(&g.children, depth + 1)
+        {
+            return Some(why);
+        }
+    }
+    None
 }
 
 struct Planner<'a> {
@@ -1713,7 +1744,12 @@ mod tests {
         for (k, f) in see_through.iter().enumerate() {
             let mut d2 = d.clone();
             f(&mut d2.layers[5]);
-            assert!(plan(&d2).unwrap().passes.len() > skipped, "case {k}: the layers below are planned");
+            // A faded base with a clipped layer goes to the CPU (clipping by shape, not fill).
+            let Ok(p) = plan(&d2) else {
+                assert_eq!(k, 1, "case {k}: only the faded fill falls back");
+                continue;
+            };
+            assert!(p.passes.len() > skipped, "case {k}: the layers below are planned");
             assert!(!photosuite_compose::occludes_below(&d2.layers[5], ColorMode::Rgb), "case {k}");
         }
         let mut translucent = d.clone();

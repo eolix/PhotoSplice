@@ -172,3 +172,72 @@ mod tests {
         assert!(close(doc(Knockout::Shallow, true, true), [0.5, 0.5, 1.0, 1.0]));
     }
 }
+
+#[cfg(test)]
+mod clip_tests {
+    use photosuite_color::{BlendMode, ColorMode, SampleType};
+    use photosuite_doc::{Color, Document, Effect, FxCommon, Layer, Size};
+    use photosuite_geom::Rect;
+
+    fn solid(name: &str, d: &Document, rgba: [f32; 4], w: i32) -> Layer {
+        let mut l = Layer::raster(name, d.pixel_format());
+        if let Some(s) = l.surface_mut() {
+            s.fill_rect(Rect::new(0, 0, w, 1), &rgba);
+        }
+        l
+    }
+
+    fn close(a: [f32; 4], b: [f32; 4]) -> bool {
+        a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-3)
+    }
+
+    /// White backdrop; a red base over pixel 0 at `fill`; a blue layer clipped to it, Multiply.
+    fn clipped(fill: f32, blend_clipped: bool) -> Document {
+        let mut d = Document::new("c", Size::new(2, 1), ColorMode::Rgb, SampleType::F32);
+        let bg = solid("bg", &d, [1.0, 1.0, 1.0, 1.0], 2);
+        let mut base = solid("base", &d, [1.0, 0.0, 0.0, 1.0], 1);
+        (base.fill_opacity, base.blend_clipped) = (fill, blend_clipped);
+        let mut top = solid("top", &d, [0.0, 0.0, 1.0, 1.0], 2);
+        (top.clipped, top.blend) = (true, BlendMode::Multiply);
+        d.layers = vec![bg, base, top];
+        d
+    }
+
+    /// Clipped layers take the base's shape, not its fill: over a 0 %-fill base the clipped
+    /// layer still shows, in its own mode over what the group holds (nothing: blue).
+    #[test]
+    fn clipped_layers_ignore_the_base_fill() {
+        let px = crate::flatten(&clipped(0.0, true)).px;
+        assert!(close(px[0], [0.0, 0.0, 1.0, 1.0]), "{:?}", px[0]);
+        // Outside the base's shape: untouched.
+        assert!(close(px[1], [1.0; 4]), "{:?}", px[1]);
+        // Full fill is unchanged: blue multiplied onto red.
+        assert!(close(crate::flatten(&clipped(1.0, true)).px[0], [0.0, 0.0, 0.0, 1.0]));
+    }
+
+    /// Blend Clipped Layers as Group off: the clipped layer blends on its own with what is
+    /// beneath the base too (Multiply over white at 0 % fill: blue).
+    #[test]
+    fn unblended_clipped_layers_reach_the_backdrop() {
+        let px = crate::flatten(&clipped(0.0, false)).px;
+        assert!(close(px[0], [0.0, 0.0, 1.0, 1.0]), "{:?}", px[0]);
+        // At 50 % fill, the base (red over white at 50 %) is multiplied by blue.
+        let px = crate::flatten(&clipped(0.5, false)).px;
+        assert!(close(px[0], [0.0, 0.0, 0.5, 1.0]), "{:?}", px[0]);
+    }
+
+    /// Blend Interior Effects as Group: a colour overlay fades with the layer's fill opacity.
+    #[test]
+    fn interior_effects_fade_with_fill_when_grouped() {
+        let mut d = Document::new("i", Size::new(2, 1), ColorMode::Rgb, SampleType::F32);
+        let bg = solid("bg", &d, [1.0, 1.0, 1.0, 1.0], 2);
+        let mut l = solid("l", &d, [1.0, 0.0, 0.0, 1.0], 1);
+        l.fill_opacity = 0.25;
+        l.effects.items = vec![Effect::ColorOverlay { common: FxCommon::new(BlendMode::Normal, 1.0), color: Color::BLACK }];
+        d.layers = vec![bg, l];
+        // Default: the overlay covers fully.
+        assert!(close(crate::flatten(&d).px[0], [0.0, 0.0, 0.0, 1.0]), "{:?}", crate::flatten(&d).px[0]);
+        d.layers[1].blend_interior = true;
+        assert!(close(crate::flatten(&d).px[0], [0.75, 0.75, 0.75, 1.0]), "{:?}", crate::flatten(&d).px[0]);
+    }
+}

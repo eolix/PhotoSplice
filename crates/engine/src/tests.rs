@@ -678,6 +678,12 @@ fn advanced_blending_knockout() {
     let ins = crate::inspect::layer(s.active().unwrap().doc.layer(LayerId(id)).unwrap());
     assert_eq!(ins["knockout"], json!("deep"));
     assert!(s.execute("layer.setProps", json!({"knockout": "sideways"})).is_err());
+    s.execute("layer.setProps", json!({"blendClipped": false, "blendInterior": true})).unwrap();
+    let l = s.active().unwrap().doc.layer(LayerId(id)).unwrap().clone();
+    assert!(!l.blend_clipped && l.blend_interior);
+    let ins = crate::inspect::layer(&l);
+    assert_eq!((ins["blendClipped"].clone(), ins["blendInterior"].clone()), (json!(false), json!(true)));
+    s.execute("edit.undo", json!({})).unwrap();
     s.execute("edit.undo", json!({})).unwrap();
     assert_eq!(s.active().unwrap().doc.layer(LayerId(id)).unwrap().knockout, photosuite_doc::Knockout::None);
 }

@@ -248,6 +248,13 @@ impl Ctx<'_> {
         if let Some(v) = rec.block(b"knko").and_then(|b| b.data.first().copied()) {
             l.knockout = photosuite_doc::Knockout::from_psd(v);
         }
+        // Blend Clipped Layers / Interior Effects as Group (`clbl`, `infx`), the same way.
+        if let Some(v) = rec.block(b"clbl").and_then(|b| b.data.first().copied()) {
+            l.blend_clipped = v != 0;
+        }
+        if let Some(v) = rec.block(b"infx").and_then(|b| b.data.first().copied()) {
+            l.blend_interior = v != 0;
+        }
         // Blend If lives in the layer record's blending ranges.
         l.blend_if = crate::blocks::blend_if_from_ranges(&rec.blending_ranges);
         l.psd_id = rec.layer_id();

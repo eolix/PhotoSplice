@@ -1258,8 +1258,15 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
                 (content, None)
             }
         };
-        for c in clipped.iter().filter(|c| c.visible) {
-            composite_atop(c, &mut content, cx);
+        // Clipped layers take the base's shape, not its fill (see the plain layers below): with
+        // a faded base or Blend Clipped Layers as Group off they composite after the layer and
+        // its effects, inside its shape (psd-tools advanced-blending).
+        let clip: Vec<&Layer> = clipped.iter().filter(|c| c.visible).collect();
+        let separate = !clip.is_empty() && (layer.fill_opacity < 1.0 || !layer.blend_clipped);
+        if !separate {
+            for c in &clip {
+                composite_atop(c, &mut content, cx);
+            }
         }
         let vstroke = vstroke.as_ref().map(|(s, m)| effects::VectorStroke { stroke: s, mask: m.as_deref() });
         let maps = effect_maps(layer, cx);
@@ -1272,6 +1279,10 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
             cx.patterns,
             vstroke,
         );
+        if separate {
+            let shape: Vec<f32> = content.px.iter().map(|p| p[3]).collect();
+            clip_into(&clip, backdrop, &shape, layer.opacity, cx);
+        }
         return;
     }
     if let Some((mut content, stroke, mask)) = shape_parts(layer, clipped, rect, cx) {
@@ -1286,8 +1297,15 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
         return;
     }
     let Some(mut content) = render_content(layer, rect, cx) else { return };
-    for c in clipped.iter().filter(|c| c.visible) {
-        composite_atop(c, &mut content, cx);
+    let clip: Vec<&Layer> = clipped.iter().filter(|c| c.visible).collect();
+    // Clipped layers take the base's shape, not its fill: when the fill fades the base, or they
+    // blend on their own (Blend Clipped Layers as Group off), each is composited normally and
+    // kept inside the shape (psd-tools advanced-blending).
+    let separate = !clip.is_empty() && (layer.fill_opacity < 1.0 || !layer.blend_clipped);
+    if !separate {
+        for c in &clip {
+            composite_atop(c, &mut content, cx);
+        }
     }
     // Knockout: the layer's shape (its alpha, at the layer's opacity) first replaces the
     // backdrop with what it knocks out to; the content then lands there at its fill opacity.
@@ -1298,7 +1316,34 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
             *b = knockout::mix(*b, *k, c[3] * layer.opacity);
         }
     }
+    if separate {
+        let shape: Vec<f32> = content.px.iter().map(|p| p[3]).collect();
+        if layer.blend_clipped {
+            // The clipping group: the base at its fill, the clipped layers in its shape, then
+            // all of it in the base's mode at the base's opacity.
+            let mut group = Buffer::transparent(rect);
+            blend_into_g(&mut group, &content, BlendMode::Normal, layer.fill_opacity, text_gamma(layer));
+            clip_into(&clip, &mut group, &shape, 1.0, cx);
+            blend_into(backdrop, &group, layer.blend, layer.opacity);
+        } else {
+            blend_into_g(backdrop, &content, layer.blend, opacity, text_gamma(layer));
+            clip_into(&clip, backdrop, &shape, layer.opacity, cx);
+        }
+        return;
+    }
     blend_into_g(backdrop, &content, layer.blend, opacity, text_gamma(layer));
+}
+
+/// Composites each clipped layer onto `buf` as a layer of its own, then keeps its change only
+/// inside the base's `shape` (alpha per pixel, times `k`).
+fn clip_into(clipped: &[&Layer], buf: &mut Buffer, shape: &[f32], k: f32, cx: &Ctx) {
+    for c in clipped {
+        let before = buf.px.clone();
+        composite_layer(c, &[], buf, cx);
+        for ((p, b), s) in buf.px.iter_mut().zip(&before).zip(shape) {
+            *p = knockout::mix(*b, *p, s * k);
+        }
+    }
 }
 
 /// The coverage-mixing gamma of a layer: the text blending gamma

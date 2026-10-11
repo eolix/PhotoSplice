@@ -1157,6 +1157,11 @@ fn type_layers_blend_with_text_gamma() {
     l.fill_opacity = 0.6;
     e.layers.push(l.clone());
     fx_check(&mut g, &e, "text emboss");
+    // The base at full fill: clipped layers onto a faded base composite on the CPU (they take
+    // the base's shape, not its fill).
+    if let Some(base) = e.layers.last_mut() {
+        base.fill_opacity = 1.0;
+    }
     let mut c = l;
     c.clipped = true;
     c.blend = BlendMode::Multiply;

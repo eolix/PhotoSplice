@@ -109,6 +109,12 @@ fn layer_sel(l: &Layer, selected: &[photosuite_doc::LayerId]) -> Value {
         _ => {}
     }
     // Advanced Blending › Channels (only when some channel is left out).
+    if !l.blend_clipped {
+        v["blendClipped"] = json!(false);
+    }
+    if l.blend_interior {
+        v["blendInterior"] = json!(true);
+    }
     if l.knockout != photosuite_doc::Knockout::None {
         v["knockout"] = json!(if l.knockout == photosuite_doc::Knockout::Shallow { "shallow" } else { "deep" });
     }

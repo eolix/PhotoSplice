@@ -552,12 +552,18 @@ impl Ex {
             }
             None => raw.retain(|(k, _)| k != b"fxrp"),
         }
-        // Knockout: written from the field (in place); a non-default one also on groups.
-        let knko = vec![l.knockout.psd(), 0, 0, 0];
-        match raw.iter_mut().find(|(k, _)| k == b"knko") {
-            Some(e) => e.1 = knko,
-            None if l.knockout != photosuite_doc::Knockout::None => raw.push((*b"knko", knko)),
-            None => {}
+        // Knockout and Blend Clipped / Interior as Group: written from the fields (in place); a
+        // non-default one also on groups (layers get Photoshop's defaults further on).
+        for (key, v, default) in [
+            (b"knko", l.knockout.psd(), 0u8),
+            (b"clbl", u8::from(l.blend_clipped), 1),
+            (b"infx", u8::from(l.blend_interior), 0),
+        ] {
+            match raw.iter_mut().find(|(k, _)| k == key) {
+                Some(e) => e.1 = vec![v, 0, 0, 0],
+                None if v != default => raw.push((*key, vec![v, 0, 0, 0])),
+                None => {}
+            }
         }
         // Advanced Blending channel restrictions: written from the field (in place).
         match crate::blocks::brst_data(l.excluded_channels) {

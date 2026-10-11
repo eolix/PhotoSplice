@@ -226,6 +226,12 @@ pub struct LayerM {
     /// Advanced Blending knockout (default none).
     #[serde(default, skip_serializing_if = "is_no_knockout")]
     pub knockout: photosuite_doc::Knockout,
+    /// Blend Clipped Layers as Group (default on).
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub blend_clipped: bool,
+    /// Blend Interior Effects as Group (default off).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub blend_interior: bool,
     #[serde(default)]
     pub video: Option<VideoDataM>,
 }
@@ -328,6 +334,10 @@ pub struct ChannelM {
 
 fn is_zero_u32(v: &u32) -> bool {
     *v == 0
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
 }
 
 fn is_no_knockout(k: &photosuite_doc::Knockout) -> bool {

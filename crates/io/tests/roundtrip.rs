@@ -164,6 +164,8 @@ fn raster_layer_blocks_preserved() {
     let blocks =
         vec![(*b"vmsk", std::sync::Arc::new(vec![0u8; 12])), (*b"clbl", std::sync::Arc::new(vec![0u8, 0, 0, 0])), (*b"Zzzz", std::sync::Arc::new(vec![1u8]))];
     d.layers[1].psd_blocks = blocks.clone();
+    // As import sets it from that `clbl` (export writes the block from the field).
+    d.layers[1].blend_clipped = false;
     d.layers[1].vector_mask = photosuite_io::vector_map::vector_mask_from_block(&[0; 12], d.size.width, d.size.height);
     let back = roundtrip(&d);
     // An odd-length layer block comes back with its pad byte inside the length (as Photoshop

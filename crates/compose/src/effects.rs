@@ -1376,6 +1376,10 @@ pub(crate) fn composite_with_effects_prepared(
     // applies: a colour overlay at 100 % replaces the colour of a half-transparent edge pixel and
     // keeps its alpha, as in Photoshop.
     let fill = layer.fill_opacity;
+    // Blend Interior Effects as Group: the interior effects join the layer before its fill
+    // opacity fades it (psd-tools advanced-blending: a 100 % colour overlay on an 11 %-fill
+    // layer comes out at 11 %).
+    let (fill, fill_after) = if layer.blend_interior { (1.0, fill) } else { (fill, 1.0) };
     let inside = |a: f32| a > INSIDE_EPS;
     // Within an outline (or a split-off vector stroke) the content's own transparency (a fading
     // gradient fill) acts like fill opacity: the effects still cover the whole shape.
@@ -1426,12 +1430,17 @@ pub(crate) fn composite_with_effects_prepared(
             paint_color(&mut lay, &m, rgb(&s.color), s.common.blend, s.common.opacity);
         }
     }
+    if fill_after < 1.0 {
+        for p in &mut lay.px {
+            p[3] *= fill_after;
+        }
+    }
     // A stroked shape's vector stroke: Photoshop draws it above the fill's clipped layers and
     // interior effects, below the stroke effect (psd-tools stroke-composite).
     if let Some(vs) = &vstroke {
         for (i, ((p, s), a)) in lay.px.iter_mut().zip(&vs.stroke.px).zip(&shape.v).enumerate() {
             if s[3] > 0.0 && inside(*a) {
-                *p = psblend::composite(BlendMode::Normal, *p, [s[0], s[1], s[2], fill * (kmask(i) * s[3] / a).min(1.0)], 1.0);
+                *p = psblend::composite(BlendMode::Normal, *p, [s[0], s[1], s[2], layer.fill_opacity * (kmask(i) * s[3] / a).min(1.0)], 1.0);
             }
         }
     }
