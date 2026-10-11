@@ -15,7 +15,9 @@ pub fn inks(doc: &Document, rect: Rect) -> Buffer {
     let mut buf = Buffer::filled(rect, [1.0, 1.0, 1.0, 1.0]);
     let mut vals = Vec::new();
     for ch in &doc.channels {
-        let Some((ink, solidity)) = ch.spot else { continue };
+        // Alpha-type channels print as black ink, as Photoshop shows a Multichannel document's
+        // "Masked Areas" channels (gray).
+        let (ink, solidity) = ch.spot.unwrap_or((photosuite_doc::Color::BLACK, 0.0));
         if ch.surface.content_bounds().intersect(&rect).is_empty() {
             continue;
         }

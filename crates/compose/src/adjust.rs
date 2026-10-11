@@ -153,7 +153,7 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
                 hsl_to_rgb(h, ns, l)
             })
         }
-        Adjustment::ChannelMixer { matrix, monochrome } => map_rgb(buf, |c| {
+        Adjustment::ChannelMixer { matrix, monochrome, .. } => map_rgb(buf, |c| {
             let mix = |row: &[f32; 4]| (row[0] * c[0] + row[1] * c[1] + row[2] * c[2] + row[3]).clamp(0.0, 1.0);
             if *monochrome { [mix(&matrix[0]); 3] } else { [mix(&matrix[0]), mix(&matrix[1]), mix(&matrix[2])] }
         }),
@@ -174,7 +174,7 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
                 None => [g; 3],
             }
         }),
-        Adjustment::GradientMap { stops, reverse, dither } => {
+        Adjustment::GradientMap { stops, reverse, dither, .. } => {
             let (w, x0, y0) = (buf.rect.width().max(1) as usize, buf.rect.x0, buf.rect.y0);
             for (i, p) in buf.px.iter_mut().enumerate() {
                 if p[3] <= 0.0 {
@@ -838,8 +838,8 @@ mod tone_tests {
         let stops = vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])];
         let mut a = ramp();
         let mut b = ramp();
-        apply(&Adjustment::GradientMap { stops: stops.clone(), reverse: false, dither: false }, &mut a);
-        apply(&Adjustment::GradientMap { stops, reverse: false, dither: true }, &mut b);
+        apply(&Adjustment::GradientMap { stops: stops.clone(), reverse: false, dither: false, ink_stops: Vec::new() }, &mut a);
+        apply(&Adjustment::GradientMap { stops, reverse: false, dither: true, ink_stops: Vec::new() }, &mut b);
         assert!(a.px.iter().zip(&b.px).all(|(x, y)| (x[0] - y[0]).abs() <= 0.5 / 255.0 + 1e-6));
         assert!(a.px.iter().zip(&b.px).any(|(x, y)| x[0] != y[0]));
     }

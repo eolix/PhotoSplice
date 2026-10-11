@@ -92,7 +92,7 @@ impl Duotone {
             let t = i as f32 / 32.0;
             (t, self.render(t))
         });
-        crate::Adjustment::GradientMap { stops: stops.collect(), reverse: false, dither: false }
+        crate::Adjustment::GradientMap { stops: stops.collect(), reverse: false, dither: false, ink_stops: Vec::new() }
     }
 }
 

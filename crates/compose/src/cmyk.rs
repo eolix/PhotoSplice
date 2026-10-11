@@ -11,8 +11,11 @@
 //! Adjustments work on the inks too: Levels and Curves through their CMYK records, Invert,
 //! Posterize and Brightness/Contrast through one curve for every ink, Threshold and Gradient Map
 //! on the inks' own lightness ([`ink_lightness`]), Hue/Saturation, Color Balance, Selective
-//! Color and Photo Filter on C, M, Y as an RGB colour with K kept. A layer this module doesn't composite in CMYK
-//! yet (layer effects, Blend If, the other adjustments) is an "RGB island": the RGB compositor
+//! Color and Photo Filter on C, M, Y as an RGB colour with K kept. Layer effects, gradients and
+//! patterns reuse the RGB code twice, on stand-in colours ([`Projection`]): once with C, M, Y's
+//! complements as R, G, B, once with K's in all three, so every separable blend is per ink. A layer this module doesn't composite in CMYK
+//! yet (effects with non-separable modes or a bevel texture, Blend If, the other adjustments)
+//! is an "RGB island": the RGB compositor
 //! draws it over the backdrop's RGB conversion, and only the pixels it changed take the result
 //! back, separated through the profile. Untouched pixels keep their exact inks.
 
@@ -71,6 +74,82 @@ fn color_inks(c: &Color) -> [f32; 4] {
     if c.mode == ColorMode::Cmyk { c.c } else { rgb_to_cmyk(c.to_rgb()) }
 }
 
+/// Which inks the RGB machinery stands for during a projected pass: effects, gradients and
+/// patterns are drawn twice, once with C, M, Y's complements as R, G, B and once with K's
+/// complement in all three, so their separable blends come out per ink.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Projection {
+    Off,
+    Cmy,
+    K,
+}
+
+thread_local! {
+    static PROJECTION: std::cell::Cell<Projection> = const { std::cell::Cell::new(Projection::Off) };
+}
+
+fn project(p: Projection, inks: [f32; 4]) -> [f32; 3] {
+    match p {
+        Projection::Cmy => [1.0 - inks[0], 1.0 - inks[1], 1.0 - inks[2]],
+        _ => [1.0 - inks[3]; 3],
+    }
+}
+
+/// During a projected pass, a colour's stand-in (its inks); `None` otherwise.
+pub(crate) fn project_color(c: &Color) -> Option<[f32; 3]> {
+    match PROJECTION.with(std::cell::Cell::get) {
+        Projection::Off => None,
+        p => Some(project(p, color_inks(c))),
+    }
+}
+
+/// During a projected pass, a screen colour's stand-in (separated through the profile).
+pub(crate) fn project_rgb(rgb: [f32; 3]) -> [f32; 3] {
+    match PROJECTION.with(std::cell::Cell::get) {
+        Projection::Off => rgb,
+        p => project(p, rgb_to_cmyk(rgb)),
+    }
+}
+
+/// Runs `f` with projection `p` (restored afterwards).
+fn projected<R>(p: Projection, f: impl FnOnce() -> R) -> R {
+    let before = PROJECTION.with(|c| c.replace(p));
+    let r = f();
+    PROJECTION.with(|c| c.set(before));
+    r
+}
+
+/// Runs `draw` (RGB machinery working on `buf`'s stand-in colours) in both projections and
+/// joins the two results into inks; alpha comes from the C, M, Y pass (both passes agree).
+fn two_passes(buf: &mut CBuf, draw: impl Fn(&mut Buffer)) {
+    let pass = |p: Projection| {
+        let mut b = Buffer {
+            rect: buf.rect,
+            px: buf.px.iter().map(|q| if p == Projection::Cmy { [q[0], q[1], q[2], q[4]] } else { [q[3], q[3], q[3], q[4]] }).collect(),
+        };
+        projected(p, || draw(&mut b));
+        b
+    };
+    let (cmy, k) = (pass(Projection::Cmy), pass(Projection::K));
+    for ((p, a), b) in buf.px.iter_mut().zip(&cmy.px).zip(&k.px) {
+        *p = [a[0], a[1], a[2], b[0], a[3]];
+    }
+}
+
+/// Whether `l`'s layer effects can be drawn in two projected passes: every enabled effect blends
+/// with a separable mode, and no bevel texture (its height comes from the pattern's luminance).
+fn effects_native(l: &Layer) -> bool {
+    use photosuite_doc::Effect;
+    l.effects.items.iter().filter(|e| e.enabled()).all(|e| match e {
+        Effect::DropShadow(s) | Effect::InnerShadow(s) => s.common.blend.is_separable(),
+        Effect::OuterGlow(g) | Effect::InnerGlow(g) => g.common.blend.is_separable(),
+        Effect::Stroke(s) => s.common.blend.is_separable(),
+        Effect::ColorOverlay { common, .. } | Effect::GradientOverlay { common, .. } | Effect::PatternOverlay { common, .. } => common.blend.is_separable(),
+        Effect::Satin(s) => s.common.blend.is_separable(),
+        Effect::BevelEmboss(b) => b.texture.is_none() && b.highlight.blend.is_separable() && b.shadow.blend.is_separable(),
+    })
+}
+
 /// The composite of `layers` over `rect` (transparent backdrop) in CMYK.
 pub(crate) fn composite(layers: &[Layer], rect: Rect, cx: &Ctx) -> CBuf {
     let mut b = CBuf::transparent(rect);
@@ -111,15 +190,17 @@ fn stack(layers: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
 /// Whether `l` is composited in CMYK here (else it is an RGB island). Clipped layers are decided
 /// one by one when they are applied.
 fn native(l: &Layer, clipped: &[Layer], cx: &Ctx) -> bool {
-    if crate::blend_if_active(l, cx.mode) || crate::effects::has_effects(l) {
+    let fx = crate::effects::has_effects(l);
+    if crate::blend_if_active(l, cx.mode) || (fx && !effects_native(l)) {
         return false;
     }
     let any_clipped = clipped.iter().any(|c| c.visible);
     match &l.content {
         LayerContent::Group(_) => !(l.blend == BlendMode::PassThrough && l.fill_opacity >= 1.0 && any_clipped),
         LayerContent::Adjustment(a) => native_adjustment(a),
-        // A stroked shape with clipped layers keeps its vector stroke above them (`split_parts`).
-        LayerContent::Shape(sh) => !(sh.stroke.is_some() && any_clipped),
+        // A stroked shape keeps its vector stroke above clipped layers and interior effects
+        // (`split_parts`).
+        LayerContent::Shape(sh) => !(sh.stroke.is_some() && (any_clipped || fx)),
         _ => true,
     }
 }
@@ -137,6 +218,7 @@ fn native_adjustment(a: &Adjustment) -> bool {
             | Adjustment::ColorBalance { .. }
             | Adjustment::SelectiveColor { .. }
             | Adjustment::PhotoFilter { .. }
+            | Adjustment::ChannelMixer { monochrome: false, .. }
             | Adjustment::Posterize { .. }
             | Adjustment::BrightnessContrast { .. }
             | Adjustment::Levels { space: ToneSpace::Cmyk, .. }
@@ -148,6 +230,16 @@ fn native_adjustment(a: &Adjustment) -> bool {
 /// profile): the complements of C, M, Y weighted 0.30 / 0.59 / 0.11, times 1 − K.
 fn ink_lightness(p: &Px) -> f32 {
     (0.30 * p[0] + 0.59 * p[1] + 0.11 * p[2]) * p[3]
+}
+
+/// Inks at `t` along CMYK stops (sorted by position), linearly between neighbours.
+fn ink_gradient(stops: &[(f32, [f32; 4])], t: f32) -> [f32; 4] {
+    let t = t.clamp(0.0, 1.0);
+    let Some(first) = stops.first() else { return [0.0; 4] };
+    let i = stops.iter().rposition(|s| s.0 <= t).unwrap_or(0);
+    let (a, b) = (stops.get(i).unwrap_or(first), stops.get(i + 1).unwrap_or(stops.get(i).unwrap_or(first)));
+    let k = if b.0 > a.0 { (t - a.0) / (b.0 - a.0) } else { 0.0 };
+    std::array::from_fn(|c| a.1[c] + (b.1[c] - a.1[c]) * k)
 }
 
 /// The four ink curves of a [`native_adjustment`] (on 1 − ink).
@@ -191,14 +283,26 @@ fn adjust(a: &Adjustment, buf: &mut CBuf, cx: &Ctx) {
         }
         return;
     }
-    if let Adjustment::GradientMap { stops, reverse, .. } = a {
+    // Channel Mixer: each output ink a mix of the input inks plus a constant (Photoshop corpus
+    // cmyk8/channel-mixer.psd: every ink within 0.0011); a mixer made here mixes the records
+    // its RGB matrix stands for, as it is saved.
+    if let Adjustment::ChannelMixer { matrix, cmyk, .. } = a {
+        let m = cmyk.unwrap_or_else(|| photosuite_doc::adjust::cmyk_mixer_records(matrix));
+        for p in &mut buf.px {
+            let ink = inks(p);
+            let out: [f32; 4] = std::array::from_fn(|o| (m[o][..4].iter().zip(&ink).map(|(k, v)| k * v).sum::<f32>() + m[o][4]).clamp(0.0, 1.0));
+            p[..4].copy_from_slice(&[1.0 - out[0], 1.0 - out[1], 1.0 - out[2], 1.0 - out[3]]);
+        }
+        return;
+    }
+    if let Adjustment::GradientMap { stops, reverse, ink_stops, .. } = a {
         for p in &mut buf.px {
             let mut t = ink_lightness(p);
             if *reverse {
                 t = 1.0 - t;
             }
-            let o = crate::adjust::gradient(stops, t);
-            let inks = rgb_to_cmyk(o);
+            // The file's CMYK stops interpolated in inks; else the RGB stops separated.
+            let inks = if ink_stops.len() >= 2 { ink_gradient(ink_stops, t) } else { rgb_to_cmyk(crate::adjust::gradient(stops, t)) };
             p[..4].copy_from_slice(&[1.0 - inks[0], 1.0 - inks[1], 1.0 - inks[2], 1.0 - inks[3]]);
         }
         return;
@@ -272,7 +376,7 @@ fn plain(l: &Layer, clipped: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
     match &l.content {
         // Pass-through groups composite their children straight into the backdrop; below 100 %
         // fill they render isolated, like Normal (the arm below).
-        LayerContent::Group(g) if l.blend == BlendMode::PassThrough && l.fill_opacity >= 1.0 => {
+        LayerContent::Group(g) if l.blend == BlendMode::PassThrough && l.fill_opacity >= 1.0 && !crate::effects::has_effects(l) => {
             let needs_mix = opacity < 1.0 || l.mask.is_some() || l.vector_mask.is_some();
             let before = needs_mix.then(|| backdrop.px.clone());
             stack(&g.children, backdrop, cx);
@@ -318,6 +422,22 @@ fn plain(l: &Layer, clipped: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
             let Some(mut src) = content(l, rect, cx) else { return };
             for c in clipped.iter().filter(|c| c.visible) {
                 atop(c, &mut src, cx);
+            }
+            if crate::effects::has_effects(l) {
+                // The RGB effects pipeline, drawn per ink in two projected passes: the content
+                // and backdrop as their stand-ins, effect colours as theirs ([`project_color`]).
+                let maps = crate::effect_maps(l, cx);
+                let bounds = crate::paint_bounds(l).unwrap_or_else(|| crate::layer_bounds(l, cx.canvas));
+                let content_in = |p: Projection| Buffer {
+                    rect,
+                    px: src.px.iter().map(|q| if p == Projection::Cmy { [q[0], q[1], q[2], q[4]] } else { [q[3], q[3], q[3], q[4]] }).collect(),
+                };
+                let (cmy, k) = (content_in(Projection::Cmy), content_in(Projection::K));
+                two_passes(backdrop, |b| {
+                    let content = if PROJECTION.with(std::cell::Cell::get) == Projection::Cmy { &cmy } else { &k };
+                    crate::effects::composite_with_effects_prepared(l, content, b, &maps, bounds, cx.patterns, None);
+                });
+                return;
             }
             blend_into(backdrop, &src, l.blend, opacity);
         }
@@ -368,21 +488,25 @@ fn from_surface(s: &Surface, rect: Rect) -> CBuf {
     CBuf { rect, px }
 }
 
-/// An edited fill layer: a solid colour in its own inks; gradients and patterns rendered in RGB
-/// and separated (Photoshop interpolates CMYK gradients in CMYK: not yet).
+/// An edited fill layer: a solid colour in its own inks; gradients interpolated in inks and
+/// patterns separated (two projected renders).
 fn fill(l: &Layer, f: &Fill, rect: Rect, cx: &Ctx) -> CBuf {
     if let Fill::Solid(c) = f {
         let p = from_inks(color_inks(c), c.alpha);
         return CBuf { rect, px: vec![p; rect.width() as usize * rect.height() as usize] };
     }
-    let rgb = crate::render_fill(f, rect, crate::fill_frame(l, cx.canvas), cx.patterns);
-    CBuf { rect, px: rgb.px.into_iter().map(from_rgba).collect() }
+    // Gradients interpolate their stops' inks and patterns separate their pixels: one
+    // projected render per ink group.
+    let frame = crate::fill_frame(l, cx.canvas);
+    let mut buf = CBuf::transparent(rect);
+    two_passes(&mut buf, |b| *b = crate::render_fill(f, rect, frame, cx.patterns));
+    buf
 }
 
 /// Composites a clipped layer onto its base `base` (as if opaque, keeping the base's alpha).
 fn atop(l: &Layer, base: &mut CBuf, cx: &Ctx) {
     let rect = base.rect;
-    if !native(l, &[], cx) {
+    if !native(l, &[], cx) || crate::effects::has_effects(l) {
         island(base, |rgb| crate::composite_atop(l, rgb, cx));
         return;
     }
@@ -582,6 +706,33 @@ mod tests {
         assert!((got[0] - 0.1).abs() > 0.05 || (got[1] - 0.6).abs() > 0.05, "hue moved the colour: {got:?}");
     }
 
+    /// Layer effects blend per ink (two projected passes): a K-only colour overlay in Multiply
+    /// at 50 % over cyan adds exactly half K, no rich-black C, M, Y.
+    #[test]
+    fn effects_blend_per_ink() {
+        let mut d = doc([0.0; 4]);
+        let mut t = top(&d, [0.5, 0.0, 0.0, 0.0], BlendMode::Normal);
+        t.effects.items = vec![Effect::ColorOverlay {
+            common: photosuite_doc::FxCommon::new(BlendMode::Multiply, 0.5),
+            color: Color { mode: ColorMode::Cmyk, c: [0.0, 0.0, 0.0, 1.0], alpha: 1.0 },
+        }];
+        d.layers.push(t);
+        let got = inks_at(&d, 0);
+        assert!(close(got, [0.5, 0.0, 0.0, 0.5]), "{got:?}");
+        // Pixels the layer and its effects don't reach keep the backdrop's inks.
+        assert!(close(inks_at(&d, 3), [0.0; 4]));
+    }
+
+    /// Channel Mixer mixes ink amounts (Photoshop corpus cmyk8/channel-mixer.psd: exact): here
+    /// C from 80 % C + 30 % M, K from nothing (the record is all zero).
+    #[test]
+    fn channel_mixer_mixes_inks() {
+        let mut d = doc([0.5, 0.2, 0.0, 0.7]);
+        let m = [[0.8, 0.3, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0, 0.1], [0.0; 5]];
+        d.layers.push(Layer::new("m", LayerContent::Adjustment(Adjustment::ChannelMixer { matrix: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]], monochrome: false, cmyk: Some(m) })));
+        assert!(close(inks_at(&d, 0), [0.46, 0.2, 0.1, 0.0]), "{:?}", inks_at(&d, 0));
+    }
+
     /// Blending Options › Channels: a layer that leaves K out keeps the backdrop's K.
     #[test]
     fn excluded_channels_keep_the_backdrop_ink() {
@@ -592,18 +743,18 @@ mod tests {
         assert!(close(inks_at(&d, 0), [0.9, 0.9, 0.9, 0.5]));
     }
 
-    /// A layer drawn as an RGB island (here one with a layer effect) changes only the pixels it
-    /// covers; the others keep their exact inks (pure K stays pure K, not a rich-black mix).
+    /// A layer drawn as an RGB island (here an effect in a non-separable mode) changes only the
+    /// pixels it covers; the others keep their exact inks (pure K stays pure K, not a rich-black
+    /// mix).
     #[test]
     fn rgb_islands_leave_other_pixels_exact() {
         let mut d = doc([0.0, 0.0, 0.0, 0.75]);
         let mut t = top(&d, [0.0, 1.0, 1.0, 0.0], BlendMode::Normal);
-        t.effects.items = vec![Effect::default_drop_shadow()];
-        t.effects.items.iter_mut().for_each(|e| {
-            if let Effect::DropShadow(s) = e {
-                (s.distance, s.size) = (0.0, 0.0);
-            }
-        });
+        t.effects.items = vec![Effect::ColorOverlay {
+            common: photosuite_doc::FxCommon::new(BlendMode::Color, 0.2),
+            color: Color { mode: ColorMode::Cmyk, c: [1.0, 0.0, 0.0, 0.0], alpha: 1.0 },
+        }];
+        assert!(!effects_native(&t));
         d.layers.push(t);
         assert!(close(inks_at(&d, 3), [0.0, 0.0, 0.0, 0.75]));
         let over = inks_at(&d, 0);

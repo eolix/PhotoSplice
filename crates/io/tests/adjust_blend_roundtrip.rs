@@ -77,8 +77,8 @@ fn adjustments() -> Vec<(Adjustment, bool)> {
         (Adjustment::BlackWhite { weights: [70.0, 20.0, 50.0, -10.0, 90.0, 130.0], tint: Some([0.9, 0.7, 0.5]) }, true),
         (Adjustment::PhotoFilter { color: [q16(60620), q16(35455), q16(0)], density: 0.4, preserve_luminosity: true }, true),
         (Adjustment::PhotoFilter { color: [q16(0), q16(39321), q16(65535)], density: 0.3, preserve_luminosity: false }, true),
-        (Adjustment::ChannelMixer { matrix: [[0.5, 0.3, 0.2, 0.0], [0.1, 0.8, 0.1, 0.05], [0.0, 0.2, 0.9, -0.05]], monochrome: false }, true),
-        (Adjustment::ChannelMixer { matrix: [[0.4, 0.4, 0.2, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]], monochrome: true }, true),
+        (Adjustment::ChannelMixer { matrix: [[0.5, 0.3, 0.2, 0.0], [0.1, 0.8, 0.1, 0.05], [0.0, 0.2, 0.9, -0.05]], monochrome: false, cmyk: None }, true),
+        (Adjustment::ChannelMixer { matrix: [[0.4, 0.4, 0.2, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]], monochrome: true, cmyk: None }, true),
         (Adjustment::ColorLookup { name: "Look.cube".into(), lut: Some(Arc::new(lut.data)), size: 5, tetrahedral: false, dither: false }, true),
         // No table chosen: written as an identity cube (renders the same, comes back with a table).
         (Adjustment::ColorLookup { name: String::new(), lut: None, size: 0, tetrahedral: false, dither: false }, false),
@@ -90,13 +90,14 @@ fn adjustments() -> Vec<(Adjustment, bool)> {
                 stops: vec![(0.0, [q16(6554), 0.0, q16(19661)]), (0.5, [1.0, 0.2, 0.0]), (1.0, [1.0, 1.0, 0.8])],
                 reverse: false,
                 dither: false,
+                ink_stops: Vec::new(),
             },
             true,
         ),
-        (Adjustment::GradientMap { stops: vec![(0.0, [0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 0.0])], reverse: true, dither: false }, true),
+        (Adjustment::GradientMap { stops: vec![(0.0, [0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 0.0])], reverse: true, dither: false, ink_stops: Vec::new() }, true),
         // Fewer than two stops: written as the equivalent two-stop gradient.
-        (Adjustment::GradientMap { stops: vec![], reverse: false, dither: false }, false),
-        (Adjustment::GradientMap { stops: vec![(0.4, [0.2, 0.6, 0.4])], reverse: false, dither: false }, false),
+        (Adjustment::GradientMap { stops: vec![], reverse: false, dither: false, ink_stops: Vec::new() }, false),
+        (Adjustment::GradientMap { stops: vec![(0.4, [0.2, 0.6, 0.4])], reverse: false, dither: false, ink_stops: Vec::new() }, false),
         (Adjustment::SelectiveColor { relative: true, adjustments: std::array::from_fn(|r| [r as f32 * 10.0 - 40.0, 5.0, -30.0, 20.0]) }, true),
         (Adjustment::SelectiveColor { relative: false, adjustments: std::array::from_fn(|r| [0.0, r as f32 * 5.0, 0.0, -10.0]) }, true),
         // A block this version cannot read (a truncated Selective Color) is kept verbatim.

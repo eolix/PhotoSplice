@@ -173,10 +173,11 @@ pub fn from_params(kind: &str, p: &Value, base: Option<&Adjustment>, mode: Color
             }
         }
         "channelMixer" => {
-            let (mut matrix, mono0) = match base {
-                Some(Adjustment::ChannelMixer { matrix, monochrome }) => (*matrix, *monochrome),
-                _ => ([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]], false),
+            let (mut matrix, mono0, cmyk0) = match base {
+                Some(Adjustment::ChannelMixer { matrix, monochrome, cmyk }) => (*matrix, *monochrome, *cmyk),
+                _ => ([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]], false, None),
             };
+            let matrix0 = matrix;
             let monochrome = r.boolean("monochrome", mono0)?;
             if monochrome && !mono0 && p.get("gray").is_none() {
                 // Turning Monochrome on starts from Photoshop's grey mix.
@@ -190,18 +191,22 @@ pub fn from_params(kind: &str, p: &Value, base: Option<&Adjustment>, mode: Color
             if let Some(v) = r.numbers("gray", 4)? {
                 matrix[0] = mixer_row(&v);
             }
-            Adjustment::ChannelMixer { matrix, monochrome }
+            // A file's CMYK mixer stays while the mix is the one it was read with.
+            let cmyk = if matrix == matrix0 && monochrome == mono0 { cmyk0 } else { None };
+            Adjustment::ChannelMixer { matrix, monochrome, cmyk }
         }
         "gradientMap" => {
-            let (stops0, rev0, dither0) = match base {
-                Some(Adjustment::GradientMap { stops, reverse, dither }) => (stops.clone(), *reverse, *dither),
-                _ => (vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])], false, false),
+            let (stops0, rev0, dither0, inks0) = match base {
+                Some(Adjustment::GradientMap { stops, reverse, dither, ink_stops }) => (stops.clone(), *reverse, *dither, ink_stops.clone()),
+                _ => (vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])], false, false, Vec::new()),
             };
             let stops = match p.get("stops") {
-                None | Some(Value::Null) => stops0,
+                None | Some(Value::Null) => stops0.clone(),
                 Some(v) => gradient_stops(&cmd, v)?,
             };
-            Adjustment::GradientMap { stops, reverse: r.boolean("reverse", rev0)?, dither: r.boolean("dither", dither0)? }
+            // The file's CMYK stops stay while the stops are the ones they were read with.
+            let ink_stops = if stops == stops0 { inks0 } else { Vec::new() };
+            Adjustment::GradientMap { stops, reverse: r.boolean("reverse", rev0)?, dither: r.boolean("dither", dither0)?, ink_stops }
         }
         "selectiveColor" => crate::adjust_cmds::selective_from_params(p, base.filter(|b| matches!(b, Adjustment::SelectiveColor { .. }))),
         "colorLookup" => crate::adjust_cmds::lookup_from_params(p, base.filter(|b| matches!(b, Adjustment::ColorLookup { .. })))?,
@@ -261,7 +266,7 @@ pub fn to_params(adj: &Adjustment) -> Value {
         Adjustment::PhotoFilter { color, density, preserve_luminosity } => {
             json!({"color": hex(*color), "density": (density * 1000.0).round() / 10.0, "preserveLuminosity": preserve_luminosity})
         }
-        Adjustment::ChannelMixer { matrix, monochrome } => {
+        Adjustment::ChannelMixer { matrix, monochrome, .. } => {
             let row = |r: &[f32; 4]| json!(r.map(|x| (x * 1000.0).round() / 10.0));
             let mut v = json!({"red": row(&matrix[0]), "green": row(&matrix[1]), "blue": row(&matrix[2]), "monochrome": monochrome});
             if *monochrome {
@@ -269,7 +274,7 @@ pub fn to_params(adj: &Adjustment) -> Value {
             }
             v
         }
-        Adjustment::GradientMap { stops, reverse, dither } => {
+        Adjustment::GradientMap { stops, reverse, dither, .. } => {
             json!({"stops": stops.iter().map(|(t, c)| json!([t, hex(*c)])).collect::<Vec<_>>(), "reverse": reverse, "dither": dither})
         }
         Adjustment::SelectiveColor { relative, adjustments } => {
@@ -632,13 +637,20 @@ mod tests {
         let a = from_params("colorBalance", &json!({"midtones": [50, 0, -200]}), None, ColorMode::Rgb).unwrap();
         assert_eq!(a, Adjustment::ColorBalance { shadows: [0.0; 3], midtones: [50.0, 0.0, -100.0], highlights: [0.0; 3], preserve_luminosity: true });
         let a = from_params("channelMixer", &json!({"monochrome": true}), None, ColorMode::Rgb).unwrap();
-        assert!(matches!(a, Adjustment::ChannelMixer { matrix, monochrome: true } if matrix[0] == [0.4, 0.4, 0.2, 0.0]));
+        assert!(matches!(a, Adjustment::ChannelMixer { matrix, monochrome: true, .. } if matrix[0] == [0.4, 0.4, 0.2, 0.0]));
         let a = from_params("photoFilter", &json!({"filter": "cooling80", "density": 60}), None, ColorMode::Rgb).unwrap();
         assert!(matches!(a, Adjustment::PhotoFilter { color, density, .. } if color[2] == 1.0 && (density - 0.6).abs() < 1e-6));
         let a = from_params("blackWhite", &json!({"reds": 120, "tint": true}), None, ColorMode::Rgb).unwrap();
         assert!(matches!(a, Adjustment::BlackWhite { weights, tint: Some(_) } if weights[0] == 120.0 && weights[1] == 60.0));
         let a = from_params("hueSaturation", &json!({"blues": {"hue": 40}}), None, ColorMode::Rgb).unwrap();
         assert!(matches!(&a, Adjustment::HueSaturation { ranges, .. } if ranges[4].hue == 40.0 && ranges[0].is_neutral()));
+        // A file's CMYK stops stay through a Reverse toggle and go when the stops are edited.
+        let inks = vec![(0.0, [0.0, 0.0, 0.0, 1.0]), (1.0, [0.0; 4])];
+        let base = Adjustment::GradientMap { stops: vec![(0.0, [0.1; 3]), (1.0, [1.0; 3])], reverse: false, dither: false, ink_stops: inks.clone() };
+        let a = from_params("gradientMap", &json!({"reverse": true}), Some(&base), ColorMode::Cmyk).unwrap();
+        assert!(matches!(&a, Adjustment::GradientMap { reverse: true, ink_stops, .. } if *ink_stops == inks));
+        let a = from_params("gradientMap", &json!({"stops": [[0, "#ff0000"], [1, "#ffffff"]]}), Some(&base), ColorMode::Cmyk).unwrap();
+        assert!(matches!(&a, Adjustment::GradientMap { ink_stops, .. } if ink_stops.is_empty()));
         let a = from_params("gradientMap", &json!({"stops": [[1, "#ffffff"], [0, "#000000"]], "dither": true}), None, ColorMode::Rgb).unwrap();
         assert!(matches!(&a, Adjustment::GradientMap { stops, dither: true, .. } if stops[0].0 == 0.0));
         // CMYK curves: ink channels; Lab: lightness without a composite.
