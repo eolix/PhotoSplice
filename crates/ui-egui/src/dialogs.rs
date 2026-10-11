@@ -172,6 +172,9 @@ pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
         } else if crate::color_picker_ui::owns(&d.fields) {
             min_w = crate::color_picker_ui::WIDTH;
             crate::color_picker_ui::WIDTH
+        } else if d.kind == DialogKind::About && crate::notices_ui::owns(&d.fields) {
+            min_w = crate::notices_ui::WIDTH;
+            crate::notices_ui::WIDTH
         } else if d.fields.contains_key("__export") {
             600.0
         } else {
@@ -195,6 +198,12 @@ pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
                     ui.add_space(8.0);
                     if crate::widgets::secondary_button(ui, "Copy", 84.0).clicked() {
                         ui.ctx().copy_text(lines.join("\n"));
+                    }
+                }
+                DialogKind::About if crate::notices_ui::owns(&fields) => {
+                    if let Some(url) = crate::notices_ui::body(ui, &mut fields) {
+                        let ctx = ui.ctx().clone();
+                        crate::links::open(app, &ctx, &url);
                     }
                 }
                 DialogKind::About => {
@@ -332,6 +341,7 @@ pub fn title(d: &Dialog) -> String {
     match d.kind {
         DialogKind::NewDocument => "New Document".into(),
         DialogKind::About if d.fields.get("systemInfo").and_then(Value::as_bool) == Some(true) => "System Info".into(),
+        DialogKind::About if crate::notices_ui::owns(&d.fields) => "Third-Party Notices".into(),
         DialogKind::About => "About PhotoSuite".into(),
         DialogKind::LayerStyle => "Layer Style".into(),
         DialogKind::Command => d.fields.get("__label").and_then(Value::as_str).unwrap_or("Command").trim_end_matches('…').to_string(),

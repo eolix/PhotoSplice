@@ -58,6 +58,7 @@ pub const UI_COMMANDS: &[(&str, &str, &[&str], Option<&str>)] = &[
     ("help.github", "GitHub", &["Help"], None),
     ("help.reportIssue", "Report an Issue…", &["Help"], None),
     ("help.systemInfo", "System Info…", &["Help"], None),
+    ("help.thirdPartyNotices", "Third-Party Notices…", &["Help"], None),
     ("help.about", "About PhotoSuite", &["Help"], None),
 ];
 
@@ -295,6 +296,7 @@ pub(crate) fn invoke_unguarded(app: &mut PhotosuiteApp, ctx: &egui::Context, id:
             Ok(Value::Null)
         }
         "help.about" => Ok(json!({"dialog": app.ui.open_dialog(DialogKind::About, Default::default())})),
+        "help.thirdPartyNotices" => Ok(json!({"dialog": app.ui.open_dialog(DialogKind::About, crate::notices_ui::fields())})),
         "help.systemInfo" => {
             let mut fields = serde_json::Map::new();
             fields.insert("systemInfo".into(), json!(true));
@@ -501,7 +503,7 @@ pub fn is_enabled(app: &PhotosuiteApp, id: &str) -> bool {
         return e;
     }
     match id {
-        "file.open" | "file.exit" | "file.clearRecent" | "help.about" | "help.systemInfo" | "edit.search" => true,
+        "file.open" | "file.exit" | "file.clearRecent" | "help.about" | "help.systemInfo" | "help.thirdPartyNotices" | "edit.search" => true,
         i if i.starts_with("file.openRecent.") => true,
         i if crate::links::url_for(i).is_some() => true,
         i if i.starts_with("window.theme.") => true,
