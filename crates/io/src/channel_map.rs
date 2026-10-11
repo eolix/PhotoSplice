@@ -77,6 +77,9 @@ pub(crate) fn apply_display_info(data: &[u8], versioned: bool, skip: usize, chan
         match rec[12] {
             2 => c.spot = Some((color, opacity)),
             k => {
+                // An alpha-type channel (a Multichannel import starts every channel as an ink;
+                // Photoshop shows these as "Masked / Selected Areas" channels and saves them so).
+                c.spot = None;
                 c.color = color;
                 c.opacity = opacity;
                 c.indicates = if k == 0 { ColorIndicates::SelectedAreas } else { ColorIndicates::MaskedAreas };

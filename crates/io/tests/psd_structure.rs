@@ -208,12 +208,24 @@ fn multichannel_keeps_resources_and_global_blocks() {
     f.resources.push(ImageResource::new(1011, vec![1]));
     f.resources.push(ImageResource::new(1069, vec![0, 1, 0, 0]));
     f.global_blocks.push(TaggedBlock::new(*b"FMsk", vec![0, 0, 0, 0, 0, 50]));
+    // DisplayInfo: version 1, then per channel RGB red at 50 % as Masked Areas (kind 1), as
+    // psd-tools' 4x4_16bit_multichannel.psd has it (Photoshop's Channel Options: "Alpha 1",
+    // Masked Areas, red, 50 %); it came back as black spot inks.
+    let mut info = 1u32.to_be_bytes().to_vec();
+    for _ in 0..f.header.channels {
+        info.extend_from_slice(&[0, 0, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 50, 1]);
+    }
+    f.resources.push(ImageResource::new(1077, info.clone()));
     let (d, _) = psd_to_document(&f);
+    // Shown as before: gray, the channels printed as black ink.
+    let shown = photosuite_compose::flatten(&d).px[0];
+    assert!(shown[0] < 1.0 && (shown[0] - shown[1]).abs() < 1e-6, "{shown:?}");
     let back = PsdFile::from_bytes(&export(&d, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap();
     let res = |id: u16| back.resources.iter().find(|r| r.id == id).map(|r| r.data.clone());
     assert_eq!(res(1028), Some(b"iptc".to_vec()));
     assert_eq!(res(1011), Some(vec![1]));
     assert_eq!(res(1069), None);
+    assert_eq!(res(1077), Some(info));
     assert_eq!(back.resources.iter().filter(|r| r.id == 1005).count(), 1);
     let fmsk = back.global_blocks.iter().find(|b| &b.key == b"FMsk").map(|b| b.data.clone());
     assert_eq!(fmsk, Some(vec![0, 0, 0, 0, 0, 50]));

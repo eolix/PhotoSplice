@@ -49,6 +49,14 @@ pub enum ToneSpace {
     Lab,
 }
 
+/// The CMYK Channel Mixer records an RGB-style `matrix` stands for in a CMYK document: each of
+/// C, M, Y out from the C, M, Y inputs plus the row's constant (no black input), K kept as it
+/// is. A CMYK document's mixer without its own records mixes and is saved as these.
+pub fn cmyk_mixer_records(matrix: &[[f32; 4]; 3]) -> [[f32; 5]; 4] {
+    let row = |r: &[f32; 4]| [r[0], r[1], r[2], 0.0, r[3]];
+    [row(&matrix[0]), row(&matrix[1]), row(&matrix[2]), [0.0, 0.0, 0.0, 1.0, 0.0]]
+}
+
 /// One of Hue/Saturation's six colour ranges (reds, yellows, greens, cyans, blues, magentas).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HueRange {
@@ -183,6 +191,11 @@ pub enum Adjustment {
     ChannelMixer {
         matrix: [[f32; 4]; 3],
         monochrome: bool,
+        /// A CMYK document's mixer as Photoshop stores it: per output ink (C, M, Y, K) the
+        /// fractions of the C, M, Y, K input inks and a constant. `None` elsewhere; cleared when
+        /// the RGB matrix is edited.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cmyk: Option<[[f32; 5]; 4]>,
     },
     /// A 3D LUT: `size`³ RGB triplets, red varying fastest (`((b·size + g)·size + r)·3`), in 0..=1.
     /// `lut` is None for a lookup Photoshop stores as an ICC profile (identity here).
@@ -210,6 +223,11 @@ pub enum Adjustment {
         /// Ordered dither of ±½ an 8-bit step to hide banding.
         #[serde(default)]
         dither: bool,
+        /// The same stops as CMYK inks (C, M, Y, K, 1 = full ink) when the file defined them in
+        /// CMYK: a CMYK document maps through these, exactly (RGB loses K). Empty otherwise;
+        /// cleared when the stops are edited.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ink_stops: Vec<(f32, [f32; 4])>,
     },
     /// Per range (reds, yellows, greens, cyans, blues, magentas, whites, neutrals, blacks) the
     /// cyan, magenta, yellow and black change in percent (-100..=100), as in Photoshop.

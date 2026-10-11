@@ -328,10 +328,42 @@ fn adj_lab(f: &PsdFile, bytes: &[u8], merged: &[u8], w: usize, h: usize) {
     }
 }
 
+/// `MIXR=1`: a CMYK Channel Mixer over one pixel layer: mean error per output ink for the mix on
+/// ink amounts and on complements (records: C, M, Y, K inputs and a constant, in percent).
+fn mixr(f: &PsdFile, merged: &[u8], w: usize, h: usize) {
+    let d = &f.layers()[1].blocks.iter().find(|b| &b.key == b"mixr").expect("mixr").data;
+    let v = |i: usize| f32::from(i16::from_be_bytes([d[i], d[i + 1]])) / 100.0;
+    let recs: Vec<[f32; 5]> = (0..4).map(|r| std::array::from_fn(|k| v(4 + r * 10 + k * 2))).collect();
+    println!("records {recs:?}");
+    let base = Planes::of(f, &f.layers()[0]);
+    let (mut e_ink, mut e_cmp, mut n) = ([0.0f32; 4], [0.0f32; 4], 0usize);
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let Some(s) = (0..4).map(|c| base.get(c, x, y)).collect::<Option<Vec<f32>>>() else { continue };
+            let ink: Vec<f32> = s.iter().map(|v| 1.0 - v).collect();
+            for (o, r) in recs.iter().enumerate() {
+                let want = f32::from(merged[o * w * h + y as usize * w + x as usize]) / 255.0;
+                let mi = (0..4).map(|i| r[i] * ink[i]).sum::<f32>() + r[4];
+                let mc = (0..4).map(|i| r[i] * s[i]).sum::<f32>() + r[4];
+                e_ink[o] += (1.0 - mi.clamp(0.0, 1.0) - want).abs();
+                e_cmp[o] += (mc.clamp(0.0, 1.0) - want).abs();
+            }
+            n += 1;
+        }
+    }
+    let k = n.max(1) as f32;
+    println!("on inks        {:?}\non complements {:?}", e_ink.map(|v| v / k), e_cmp.map(|v| v / k));
+}
+
 fn main() {
     let path = std::env::args().nth(1).expect("file.psd");
     let bytes = std::fs::read(&path).unwrap();
     let f = PsdFile::from_bytes(&bytes).unwrap();
+    if std::env::var_os("MIXR").is_some() {
+        let merged = f.decode_merged().unwrap();
+        mixr(&f, &merged, f.header.width as usize, f.header.height as usize);
+        return;
+    }
     if std::env::var_os("ADJ").is_some() {
         let merged = f.decode_merged().unwrap();
         if f.header.color_mode == photosuite_psd::ColorMode::Lab {
@@ -360,6 +392,8 @@ fn main() {
     let merged = f.decode_merged().unwrap();
     let (w, h) = (f.header.width as usize, f.header.height as usize);
     let m = |c: usize, x: i32, y: i32| f32::from(merged[c * w * h + y as usize * w + x as usize]) / 255.0;
+    // CMYK: four inks; Lab (and RGB): three channels.
+    let colors = if f.header.color_mode == photosuite_psd::ColorMode::Cmyk { 4 } else { 3 };
     let recs = f.layers();
     for i in 1..recs.len() {
         probe_nonsep(&f, recs, i, &m, w, h);
@@ -369,6 +403,8 @@ fn main() {
         }
         let (top, bot) = (Planes::of(&f, &recs[i]), Planes::of(&f, &recs[i - 1]));
         let (mut n, mut e_stored, mut e_ink, mut e_max) = (0usize, 0.0f32, 0.0f32, 0.0f32);
+        let (mut e_srgb, mut n_srgb) = (0.0f32, 0usize);
+        let lab = f.header.color_mode == photosuite_psd::ColorMode::Lab;
         let (t, l, b, r) = top.rect;
         for y in t.max(0)..b.min(h as i32) {
             for x in l.max(0)..r.min(w as i32) {
@@ -377,7 +413,23 @@ fn main() {
                 if ta < 1.0 || bot.get(-1, x, y).is_some_and(|a| a < 1.0) {
                     continue;
                 }
-                for c in 0..4 {
+                // Lab: the blend of the two colours' sRGB, back in Lab.
+                if lab {
+                    use photosuite_color::convert::{lab_to_srgb, srgb_to_lab};
+                    let px = |p: &Planes| (0..3).map(|c| p.get(c, x, y)).collect::<Option<Vec<f32>>>();
+                    if let (Some(sv), Some(bv)) = (px(&top), px(&bot)) {
+                        let rgb = |v: &[f32]| lab_to_srgb([v[0] * 100.0, v[1] * 255.0 - 128.0, v[2] * 255.0 - 128.0]);
+                        let (sr, br) = (rgb(&sv), rgb(&bv));
+                        let out: [f32; 3] = std::array::from_fn(|c| blend(&mode, br[c], sr[c]).unwrap());
+                        let o = srgb_to_lab(out);
+                        let o = [o[0] / 100.0, (o[1] + 128.0) / 255.0, (o[2] + 128.0) / 255.0];
+                        for (c, v) in o.iter().enumerate() {
+                            e_srgb += (v - m(c, x, y)).abs();
+                            n_srgb += 1;
+                        }
+                    }
+                }
+                for c in 0..colors {
                     let (Some(s), Some(bk)) = (top.get(c as i16, x, y), bot.get(c as i16, x, y)) else { continue };
                     let want = m(c, x, y);
                     let a = blend(&mode, bk, s).unwrap();
@@ -388,6 +440,45 @@ fn main() {
                     n += 1;
                 }
             }
+        }
+        // Lab: per channel, the error of the mode on stored values, of the source and of the
+        // backdrop (which rule a and b follow).
+        if lab {
+            let mut e = [[0.0f32; 3]; 3];
+            let mut cnt = 0usize;
+            for y in t.max(0)..b.min(h as i32) {
+                for x in l.max(0)..r.min(w as i32) {
+                    if top.get(-1, x, y) != Some(1.0) || bot.get(-1, x, y).is_some_and(|a| a < 1.0) || bot.get(0, x - 3, y - 3).is_none() || bot.get(0, x + 3, y + 3).is_none() {
+                        continue;
+                    }
+                    for (c, ec) in e.iter_mut().enumerate() {
+                        let (Some(sv), Some(bv)) = (top.get(c as i16, x, y), bot.get(c as i16, x, y)) else { continue };
+                        let want = m(c, x, y);
+                        ec[0] += (blend(&mode, bv, sv).unwrap() - want).abs();
+                        ec[1] += (sv - want).abs();
+                        ec[2] += (bv - want).abs();
+                    }
+                    cnt += 1;
+                }
+            }
+            if std::env::var_os("DUMP").is_some() && &mode == b"mul " {
+                let mut shown = 0;
+                for y in (t.max(0)..b.min(h as i32)).step_by(7) {
+                    for x in (l.max(0)..r.min(w as i32)).step_by(7) {
+                        if top.get(-1, x, y) != Some(1.0) || bot.get(-1, x, y).is_some_and(|a| a < 1.0) || shown > 24 {
+                            continue;
+                        }
+                        let g = |p: &Planes, c: i16| (p.get(c, x, y).unwrap_or(0.0) * 255.0).round();
+                        println!("  L {:>3}·{:>3}→{:>3}  a {:>3}·{:>3}→{:>3}  b {:>3}·{:>3}→{:>3}", g(&bot, 0), g(&top, 0), (m(0, x, y) * 255.0).round(), g(&bot, 1), g(&top, 1), (m(1, x, y) * 255.0).round(), g(&bot, 2), g(&top, 2), (m(2, x, y) * 255.0).round());
+                        shown += 1;
+                    }
+                }
+            }
+            let k = cnt.max(1) as f32;
+            println!("{:<20} {} per channel [mode, source, backdrop]: L {:?} a {:?} b {:?}", recs[i].name(), String::from_utf8_lossy(&mode), e[0].map(|v| v / k), e[1].map(|v| v / k), e[2].map(|v| v / k));
+        }
+        if n_srgb > 0 {
+            println!("{:<20} {} via sRGB: mean {:.4}", recs[i].name(), String::from_utf8_lossy(&mode), e_srgb / n_srgb as f32);
         }
         if n > 0 {
             println!(

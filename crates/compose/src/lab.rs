@@ -5,10 +5,11 @@
 //! - Invert and Posterize act on L, a and b alike (exact);
 //! - Brightness/Contrast (both kinds) curve L only, a and b kept (a, b exact);
 //! - Levels and Curves apply their Lab records (L, a, b curves);
-//! - Threshold splits on L alone (exact) and leaves a neutral grey (a = b = 0).
+//! - Threshold splits on L alone (exact) and leaves a neutral grey (a = b = 0);
+//! - Gradient Map is driven by L (max error 0.46 → 0.04).
 //!
 //! The composite itself is still kept in screen RGB, so these convert the backdrop to Lab and
-//! back around the adjustment; the others (Hue/Saturation, Photo Filter, Gradient Map, …) stay
+//! back around the adjustment; the others (Hue/Saturation, Photo Filter, …) stay
 //! on the screen colour, which matches Photoshop more closely than any Lab rule tried.
 
 use photosuite_color::convert::{lab_to_srgb, srgb_to_lab};
@@ -25,6 +26,7 @@ pub fn native(adj: &Adjustment) -> bool {
         Adjustment::Invert
             | Adjustment::Posterize { .. }
             | Adjustment::Threshold { .. }
+            | Adjustment::GradientMap { .. }
             | Adjustment::BrightnessContrast { .. }
             | Adjustment::Levels { space: ToneSpace::Lab, .. }
             | Adjustment::Curves { space: ToneSpace::Lab, .. }
@@ -55,6 +57,18 @@ pub(crate) fn apply(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, dept
             [r.clone(), r.clone(), r]
         }
     };
+    // Gradient Map: driven by L, the stops' colour out.
+    if let Adjustment::GradientMap { stops, reverse, .. } = adj {
+        for p in &mut buf.px {
+            if p[3] <= 0.0 {
+                continue;
+            }
+            let l = srgb_to_lab([p[0], p[1], p[2]])[0] / 100.0;
+            let t = if *reverse { 1.0 - l } else { l };
+            p[..3].copy_from_slice(&crate::adjust::gradient(stops, t.clamp(0.0, 1.0)));
+        }
+        return;
+    }
     let threshold = match adj {
         Adjustment::Threshold { level } => Some((level * 255.0).round()),
         _ => None,
@@ -103,6 +117,22 @@ mod tests {
             apply(&Adjustment::Threshold { level: 0.5 }, &mut b, Transfer::Srgb, photosuite_color::SampleType::U8);
             let p = b.px[0];
             assert!((p[0] - p[1]).abs() < 1e-3 && (p[1] - p[2]).abs() < 1e-3 && (p[0] < 0.01 || p[0] > 0.99), "{p:?}");
+        }
+    }
+
+    /// Gradient Map is driven by L: a mid-grey and a saturated colour of the same L map to the
+    /// same stop colour.
+    #[test]
+    fn gradient_map_follows_l() {
+        let stops = vec![(0.0, [0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 0.0])];
+        let gm = Adjustment::GradientMap { stops, reverse: false, dither: false, ink_stops: Vec::new() };
+        let gray = lab_to_srgb([60.0, 0.0, 0.0]);
+        let red = lab_to_srgb([60.0, 40.0, 30.0]);
+        let (mut a, mut b) = (one(gray), one(red));
+        apply(&gm, &mut a, Transfer::Srgb, photosuite_color::SampleType::U16);
+        apply(&gm, &mut b, Transfer::Srgb, photosuite_color::SampleType::U16);
+        for c in 0..3 {
+            assert!((a.px[0][c] - b.px[0][c]).abs() < 1e-3, "{:?} vs {:?}", a.px[0], b.px[0]);
         }
     }
 

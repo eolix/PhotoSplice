@@ -218,6 +218,7 @@ fn native_adjustment(a: &Adjustment) -> bool {
             | Adjustment::ColorBalance { .. }
             | Adjustment::SelectiveColor { .. }
             | Adjustment::PhotoFilter { .. }
+            | Adjustment::ChannelMixer { monochrome: false, .. }
             | Adjustment::Posterize { .. }
             | Adjustment::BrightnessContrast { .. }
             | Adjustment::Levels { space: ToneSpace::Cmyk, .. }
@@ -229,6 +230,16 @@ fn native_adjustment(a: &Adjustment) -> bool {
 /// profile): the complements of C, M, Y weighted 0.30 / 0.59 / 0.11, times 1 − K.
 fn ink_lightness(p: &Px) -> f32 {
     (0.30 * p[0] + 0.59 * p[1] + 0.11 * p[2]) * p[3]
+}
+
+/// Inks at `t` along CMYK stops (sorted by position), linearly between neighbours.
+fn ink_gradient(stops: &[(f32, [f32; 4])], t: f32) -> [f32; 4] {
+    let t = t.clamp(0.0, 1.0);
+    let Some(first) = stops.first() else { return [0.0; 4] };
+    let i = stops.iter().rposition(|s| s.0 <= t).unwrap_or(0);
+    let (a, b) = (stops.get(i).unwrap_or(first), stops.get(i + 1).unwrap_or(stops.get(i).unwrap_or(first)));
+    let k = if b.0 > a.0 { (t - a.0) / (b.0 - a.0) } else { 0.0 };
+    std::array::from_fn(|c| a.1[c] + (b.1[c] - a.1[c]) * k)
 }
 
 /// The four ink curves of a [`native_adjustment`] (on 1 − ink).
@@ -272,14 +283,26 @@ fn adjust(a: &Adjustment, buf: &mut CBuf, cx: &Ctx) {
         }
         return;
     }
-    if let Adjustment::GradientMap { stops, reverse, .. } = a {
+    // Channel Mixer: each output ink a mix of the input inks plus a constant (Photoshop corpus
+    // cmyk8/channel-mixer.psd: every ink within 0.0011); a mixer made here mixes the records
+    // its RGB matrix stands for, as it is saved.
+    if let Adjustment::ChannelMixer { matrix, cmyk, .. } = a {
+        let m = cmyk.unwrap_or_else(|| photosuite_doc::adjust::cmyk_mixer_records(matrix));
+        for p in &mut buf.px {
+            let ink = inks(p);
+            let out: [f32; 4] = std::array::from_fn(|o| (m[o][..4].iter().zip(&ink).map(|(k, v)| k * v).sum::<f32>() + m[o][4]).clamp(0.0, 1.0));
+            p[..4].copy_from_slice(&[1.0 - out[0], 1.0 - out[1], 1.0 - out[2], 1.0 - out[3]]);
+        }
+        return;
+    }
+    if let Adjustment::GradientMap { stops, reverse, ink_stops, .. } = a {
         for p in &mut buf.px {
             let mut t = ink_lightness(p);
             if *reverse {
                 t = 1.0 - t;
             }
-            let o = crate::adjust::gradient(stops, t);
-            let inks = rgb_to_cmyk(o);
+            // The file's CMYK stops interpolated in inks; else the RGB stops separated.
+            let inks = if ink_stops.len() >= 2 { ink_gradient(ink_stops, t) } else { rgb_to_cmyk(crate::adjust::gradient(stops, t)) };
             p[..4].copy_from_slice(&[1.0 - inks[0], 1.0 - inks[1], 1.0 - inks[2], 1.0 - inks[3]]);
         }
         return;
@@ -698,6 +721,16 @@ mod tests {
         assert!(close(got, [0.5, 0.0, 0.0, 0.5]), "{got:?}");
         // Pixels the layer and its effects don't reach keep the backdrop's inks.
         assert!(close(inks_at(&d, 3), [0.0; 4]));
+    }
+
+    /// Channel Mixer mixes ink amounts (Photoshop corpus cmyk8/channel-mixer.psd: exact): here
+    /// C from 80 % C + 30 % M, K from nothing (the record is all zero).
+    #[test]
+    fn channel_mixer_mixes_inks() {
+        let mut d = doc([0.5, 0.2, 0.0, 0.7]);
+        let m = [[0.8, 0.3, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0, 0.1], [0.0; 5]];
+        d.layers.push(Layer::new("m", LayerContent::Adjustment(Adjustment::ChannelMixer { matrix: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]], monochrome: false, cmyk: Some(m) })));
+        assert!(close(inks_at(&d, 0), [0.46, 0.2, 0.1, 0.0]), "{:?}", inks_at(&d, 0));
     }
 
     /// Blending Options › Channels: a layer that leaves K out keeps the backdrop's K.

@@ -1497,7 +1497,7 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photosuit
             p[0] = [vibrance / 100.0, saturation / 100.0, 0.0, 0.0];
             (9, p, None)
         }
-        Adjustment::ChannelMixer { matrix, monochrome } => {
+        Adjustment::ChannelMixer { matrix, monochrome, .. } => {
             p[0] = matrix[0];
             p[1] = matrix[1];
             p[2] = matrix[2];
@@ -1522,7 +1522,7 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photosuit
             }
             (12, p, None)
         }
-        Adjustment::GradientMap { stops, reverse, dither } => {
+        Adjustment::GradientMap { stops, reverse, dither, .. } => {
             p[0][0] = if *reverse { 1.0 } else { 0.0 };
             p[0][1] = if *dither { 1.0 } else { 0.0 };
             let s4: Vec<(f32, [f32; 4])> = stops.iter().map(|(t, c)| (*t, [c[0], c[1], c[2], 1.0])).collect();

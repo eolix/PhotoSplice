@@ -115,6 +115,28 @@ fn eval(stops: &[(f32, [f32; 3])], mids: &[f32], smooth: f32, t: f32) -> [f32; 3
 
 /// Dense linear stops reproducing Photoshop's interpolation. Returns the input unchanged when it
 /// already interpolates linearly in sRGB.
+/// CMYK stops (all of them CMYK, Classic method) baked like [`bake`] but in inks (C, M, Y, K,
+/// 1 = full ink), as Photoshop interpolates them in a CMYK document; `None` otherwise.
+pub(crate) fn bake_inks(stops: &[(f32, Color)], midpoints: &[f32], smoothness: f32, method: Method) -> Option<Vec<(f32, [f32; 4])>> {
+    if method != Method::Classic || stops.len() < 2 || !stops.iter().all(|(_, c)| c.mode == ColorMode::Cmyk) {
+        return None;
+    }
+    let mut s = stops.to_vec();
+    s.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let cmy: Vec<(f32, [f32; 3])> = s.iter().map(|(t, c)| (*t, [c.c[0], c.c[1], c.c[2]])).collect();
+    let k: Vec<(f32, [f32; 3])> = s.iter().map(|(t, c)| (*t, [c.c[3]; 3])).collect();
+    const N: usize = 96;
+    let mut out: Vec<(f32, [f32; 4])> = (0..=N)
+        .map(|i| {
+            let t = i as f32 / N as f32;
+            let (a, b) = (eval(&cmy, midpoints, smoothness.clamp(0.0, 1.0), t), eval(&k, midpoints, smoothness.clamp(0.0, 1.0), t));
+            (t, [a[0], a[1], a[2], b[0]].map(|v| v.clamp(0.0, 1.0)))
+        })
+        .collect();
+    out.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6);
+    Some(out)
+}
+
 pub(crate) fn bake(stops: Vec<(f32, Color)>, midpoints: &[f32], smoothness: f32, method: Method) -> Vec<(f32, Color)> {
     let plain_mids = midpoints.iter().all(|m| (m - 0.5).abs() < 1e-3);
     // Classic interpolates in the stops' own model: Lab stops (Lab documents) blend in L*a*b*, which the

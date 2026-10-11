@@ -133,6 +133,10 @@ pub fn parse(key: &[u8; 4], data: &[u8], cged: Option<&[u8]>, channels: Channels
             *space = ToneSpace::Lab;
             black.clear();
         }
+        // Records an RGB-style matrix stands for read back as that matrix alone.
+        (Adjustment::ChannelMixer { monochrome: false, cmyk, matrix }, Channels::Cmyk) => {
+            *cmyk = cmyk_mixer(data).filter(|m| *m != photosuite_doc::adjust::cmyk_mixer_records(matrix));
+        }
         (Adjustment::Levels { black, .. }, _) => *black = LevelsChannel::default(),
         (Adjustment::Curves { black, .. }, _) => black.clear(),
         _ => {}
@@ -269,10 +273,33 @@ fn parse_gradient_map(d: &[u8]) -> Option<Adjustment> {
     let mut order: Vec<usize> = (0..stops.len()).collect();
     order.sort_by(|a, b| stops[*a].0.total_cmp(&stops[*b].0));
     let mids: Vec<f32> = order.iter().skip(1).map(|i| mids[*i]).collect();
-    let baked = crate::gradient_bake::bake(stops, &mids, smooth, crate::gradient_bake::Method::from_code(method));
+    let method = crate::gradient_bake::Method::from_code(method);
+    // CMYK stops (CMYK documents) also kept as inks, interpolated in inks.
+    let ink_stops = crate::gradient_bake::bake_inks(&stops, &mids, smooth, method).unwrap_or_default();
+    let baked = crate::gradient_bake::bake(stops, &mids, smooth, method);
     let mut stops: Vec<(f32, [f32; 3])> = baked.iter().map(|(t, c)| (*t, c.to_rgb())).collect();
     stops.sort_by(|a, b| a.0.total_cmp(&b.0));
-    Some(Adjustment::GradientMap { stops, reverse, dither })
+    Some(Adjustment::GradientMap { stops, reverse, dither, ink_stops })
+}
+
+/// `grdm` version 1 with CMYK stops (colour space 2, stored inverted: 65535 = no ink).
+fn write_gradient_map_inks(stops: &[(f32, [f32; 4])], reverse: bool, dither: bool) -> Vec<u8> {
+    let rgb: Vec<(f32, [f32; 3])> = stops.iter().map(|(t, _)| (*t, [0.0; 3])).collect();
+    let mut v = write_gradient_map(&rgb, reverse, dither);
+    // Same layout as the RGB writer: patch each stop's colour structure.
+    let name_len = be32(&v, 4).unwrap_or(0) as usize;
+    let mut at = 4 + 4 + name_len * 2 + 2;
+    for (_, inks) in stops.iter().take(usize::from(u16::MAX)) {
+        if let Some(rec) = v.get_mut(at + 8..at + 18) {
+            rec[..2].copy_from_slice(&2u16.to_be_bytes());
+            for (k, ink) in inks.iter().enumerate() {
+                let x = ((1.0 - ink.clamp(0.0, 1.0)) * 65535.0).round() as u16;
+                rec[2 + 2 * k..4 + 2 * k].copy_from_slice(&x.to_be_bytes());
+            }
+        }
+        at += 20;
+    }
+    v
 }
 
 /// `grdm` version 1 for [`Adjustment::GradientMap`] (Classic interpolation, Smoothness 0, so
@@ -476,11 +503,24 @@ fn parse_photo_filter(d: &[u8]) -> Option<Adjustment> {
 /// per output channel: four i16 source percentages (red, green, blue, and a fourth used only by
 /// CMYK documents) and an i16 constant (percent). With monochrome on, the first record is the
 /// gray mix (as ag-psd, MIT, documents).
+/// A CMYK document's mixer: four records (C, M, Y, K out) of C, M, Y, K inputs and a constant,
+/// in percent (Photoshop corpus cmyk8/channel-mixer.psd; mixed on ink amounts, exact).
+fn cmyk_mixer(d: &[u8]) -> Option<[[f32; 5]; 4]> {
+    let mut m = [[0.0f32; 5]; 4];
+    for (r, row) in m.iter_mut().enumerate() {
+        for (k, x) in row.iter_mut().enumerate() {
+            *x = f32::from(bei16(d, 4 + r * 10 + k * 2)?).clamp(-200.0, 200.0) / 100.0;
+        }
+    }
+    Some(m)
+}
+
 fn parse_channel_mixer(d: &[u8]) -> Option<Adjustment> {
     if be16(d, 0)? != 1 {
         return None;
     }
     let monochrome = be16(d, 2)? != 0;
+    let cmyk = None;
     let rec = |r: usize| -> Option<[f32; 4]> {
         let at = 4 + r * 10;
         let v = |k: usize| bei16(d, at + k * 2).map(|x| f32::from(x).clamp(-200.0, 200.0) / 100.0);
@@ -489,7 +529,7 @@ fn parse_channel_mixer(d: &[u8]) -> Option<Adjustment> {
     let first = rec(0)?;
     // A monochrome block may carry only the gray record.
     let (g, b) = if monochrome { (rec(1).unwrap_or([0.0; 4]), rec(2).unwrap_or([0.0; 4])) } else { (rec(1)?, rec(2)?) };
-    Some(Adjustment::ChannelMixer { matrix: [first, g, b], monochrome })
+    Some(Adjustment::ChannelMixer { matrix: [first, g, b], monochrome, cmyk })
 }
 
 fn put16(v: &mut Vec<u8>, x: u16) {
@@ -513,6 +553,17 @@ fn levels_write(v: &mut Vec<u8>, c: &LevelsChannel) {
 /// Serializes an adjustment into its PSD blocks: `(key, data)` pairs
 /// (Brightness/Contrast also writes a `CgEd` descriptor). Every evaluated kind has an
 /// encoding; the result is empty only for an [`Adjustment::Unsupported`] with a malformed key.
+/// [`write`] for a document whose channels are `channels`: a CMYK document's Channel Mixer is
+/// written as CMYK records (Photoshop reads a CMYK file's mixer that way).
+pub fn write_in(adj: &Adjustment, channels: Channels) -> Vec<([u8; 4], Vec<u8>)> {
+    match adj {
+        Adjustment::ChannelMixer { matrix, monochrome: false, cmyk: None } if channels == Channels::Cmyk => {
+            write(&Adjustment::ChannelMixer { matrix: *matrix, monochrome: false, cmyk: Some(photosuite_doc::adjust::cmyk_mixer_records(matrix)) })
+        }
+        _ => write(adj),
+    }
+}
+
 pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
     let mut v = Vec::new();
     match adj {
@@ -636,7 +687,10 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
             v.extend_from_slice(&VersionedDescriptor::new(d).to_bytes());
             return vec![(*b"clrL", v)];
         }
-        Adjustment::GradientMap { stops, reverse, dither } => {
+        Adjustment::GradientMap { ink_stops, reverse, dither, .. } if ink_stops.len() >= 2 => {
+            return vec![(*b"grdm", write_gradient_map_inks(ink_stops, *reverse, *dither))];
+        }
+        Adjustment::GradientMap { stops, reverse, dither, .. } => {
             // Photoshop needs two stops; fewer are written as the gradient they render as
             // (none: black to white, i.e. the gray value itself; one: that colour throughout).
             let stops = match stops.as_slice() {
@@ -685,7 +739,17 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
             v.push(0);
             return vec![(*b"phfl", v)];
         }
-        Adjustment::ChannelMixer { matrix, monochrome } => {
+        Adjustment::ChannelMixer { cmyk: Some(m), monochrome: false, .. } => {
+            put16(&mut v, 1);
+            put16(&mut v, 0);
+            for row in m {
+                for x in row {
+                    v.extend_from_slice(&clamp_i16((x * 100.0).clamp(-200.0, 200.0)).to_be_bytes());
+                }
+            }
+            return vec![(*b"mixr", v)];
+        }
+        Adjustment::ChannelMixer { matrix, monochrome, .. } => {
             put16(&mut v, 1);
             put16(&mut v, u16::from(*monochrome));
             // Red, green, blue, then the gray record (the first row, which monochrome uses).
@@ -714,6 +778,23 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
 mod tests {
     use super::*;
 
+    /// A CMYK document's Channel Mixer keeps its four records (C, M, Y, K out, each from C, M,
+    /// Y, K and a constant) and writes them back as they were.
+    #[test]
+    fn cmyk_channel_mixer_keeps_its_records() {
+        // Photoshop corpus cmyk8/channel-mixer.psd's block.
+        let d: Vec<u8> = [1i16, 0, 80, 30, -10, 0, 0, 10, 90, 0, 0, 5, 0, 20, 70, 0, 0, 0, 0, 0, 0, 0].iter().flat_map(|v| v.to_be_bytes()).collect();
+        let a = parse(b"mixr", &d, None, Channels::Cmyk);
+        let Adjustment::ChannelMixer { cmyk: Some(m), .. } = &a else { panic!("{a:?}") };
+        assert_eq!(m[0], [0.8, 0.3, -0.1, 0.0, 0.0]);
+        assert_eq!(m[1][4], 0.05);
+        assert_eq!(m[3], [0.0; 5]);
+        let [(key, data)] = write(&a).try_into().unwrap();
+        assert_eq!((&key, &data), (b"mixr", &d));
+        // In an RGB document the same block is the RGB mix it always was.
+        assert!(matches!(parse(b"mixr", &d, None, Channels::Rgb), Adjustment::ChannelMixer { cmyk: None, .. }));
+    }
+
     /// Stops in another colour space (CMYK here, as Photoshop writes them in CMYK documents)
     /// import; they made the whole layer Unsupported (Photoshop corpus cmyk8/gradient-map.psd).
     #[test]
@@ -725,10 +806,31 @@ mod tests {
         for (k, x) in [0xffffu16, 0xffff, 0xffff, 0].into_iter().enumerate() {
             v[first + 10 + 2 * k..first + 12 + 2 * k].copy_from_slice(&x.to_be_bytes());
         }
-        let Adjustment::GradientMap { stops, .. } = parse(b"grdm", &v, None, Channels::Rgb) else { panic!("unsupported") };
+        let parsed = parse(b"grdm", &v, None, Channels::Rgb);
+        let Adjustment::GradientMap { stops, .. } = &parsed else { panic!("unsupported") };
         let dark = stops.first().unwrap().1;
         assert!(dark.iter().all(|c| *c < 0.3), "black ink reads dark: {dark:?}");
         assert!(stops.last().unwrap().1.iter().all(|c| *c > 0.99));
+        // A map with only CMYK stops keeps them as inks (black: K only) and writes them back.
+        let mut all = v.clone();
+        let second = first + 20;
+        all[second + 8..second + 10].copy_from_slice(&2u16.to_be_bytes());
+        for k in 0..4 {
+            all[second + 10 + 2 * k..second + 12 + 2 * k].copy_from_slice(&0xffffu16.to_be_bytes());
+        }
+        let cmyk = parse(b"grdm", &all, None, Channels::Cmyk);
+        let Adjustment::GradientMap { ink_stops, .. } = &cmyk else { panic!("{cmyk:?}") };
+        let (k0, k1) = (ink_stops.first().unwrap().1, ink_stops.last().unwrap().1);
+        assert!(k0[..3].iter().all(|v| *v < 1e-4) && (k0[3] - 1.0).abs() < 1e-4, "{k0:?}");
+        assert!(k1.iter().all(|v| *v < 1e-4), "{k1:?}");
+        // Written back as CMYK stops (dense, so they read back to within rounding).
+        let [(key, data)] = write(&cmyk).try_into().unwrap();
+        let Adjustment::GradientMap { ink_stops: back, .. } = parse(&key, &data, None, Channels::Cmyk) else { panic!() };
+        for t in [0.0, 0.3, 0.5, 1.0] {
+            let at = |s: &[(f32, [f32; 4])]| s.iter().min_by(|a, b| (a.0 - t).abs().total_cmp(&(b.0 - t).abs())).unwrap().1;
+            let (a, b) = (at(ink_stops), at(&back));
+            assert!(a.iter().zip(b).all(|(x, y)| (x - y).abs() < 2e-3), "{t}: {a:?} vs {b:?}");
+        }
         // An unknown colour space still leaves the layer unsupported.
         v[first + 8..first + 10].copy_from_slice(&3u16.to_be_bytes());
         assert!(matches!(parse(b"grdm", &v, None, Channels::Rgb), Adjustment::Unsupported { .. }));
@@ -819,8 +921,8 @@ mod tests {
         let b = write(&inkl);
         assert_eq!(parse(&b[0].0, &b[0].1, None, Channels::Cmyk), inkl);
         rt(Adjustment::Unsupported { psd_key: "selc".into(), raw: vec![1, 2, 3] });
-        rt(Adjustment::GradientMap { stops: vec![(0.0, [0.0, 0.0, 0.0]), (0.5, [1.0, 0.0, 0.0]), (1.0, [1.0, 1.0, 1.0])], reverse: true, dither: false });
-        rt(Adjustment::GradientMap { stops: vec![(0.0, [0.0, 0.0, 0.0]), (1.0, [1.0, 1.0, 1.0])], reverse: false, dither: true });
+        rt(Adjustment::GradientMap { stops: vec![(0.0, [0.0, 0.0, 0.0]), (0.5, [1.0, 0.0, 0.0]), (1.0, [1.0, 1.0, 1.0])], reverse: true, dither: false, ink_stops: Vec::new() });
+        rt(Adjustment::GradientMap { stops: vec![(0.0, [0.0, 0.0, 0.0]), (1.0, [1.0, 1.0, 1.0])], reverse: false, dither: true, ink_stops: Vec::new() });
         rt(Adjustment::SelectiveColor { relative: true, adjustments: std::array::from_fn(|r| [r as f32 * 10.0 - 40.0, 5.0, -100.0, 100.0]) });
         rt(Adjustment::SelectiveColor { relative: false, adjustments: [[0.0; 4]; 9] });
         rt(Adjustment::Vibrance { vibrance: 35.0, saturation: -12.0 });
@@ -832,8 +934,8 @@ mod tests {
         let q = |v: u16| f32::from(v) / 65535.0;
         rt(Adjustment::PhotoFilter { color: [q(60000), q(30000), q(0)], density: 0.25, preserve_luminosity: true });
         rt(Adjustment::PhotoFilter { color: [q(0), q(40000), q(65535)], density: 1.0, preserve_luminosity: false });
-        rt(Adjustment::ChannelMixer { matrix: [[0.5, 0.3, 0.2, 0.0], [0.1, 0.8, 0.1, 0.05], [0.0, 0.2, 0.9, -0.05]], monochrome: false });
-        rt(Adjustment::ChannelMixer { matrix: [[0.4, 0.4, 0.2, 0.1], [0.0, 1.0, 0.0, 0.0], [-2.0, 0.0, 2.0, 0.0]], monochrome: true });
+        rt(Adjustment::ChannelMixer { matrix: [[0.5, 0.3, 0.2, 0.0], [0.1, 0.8, 0.1, 0.05], [0.0, 0.2, 0.9, -0.05]], monochrome: false, cmyk: None });
+        rt(Adjustment::ChannelMixer { matrix: [[0.4, 0.4, 0.2, 0.1], [0.0, 1.0, 0.0, 0.0], [-2.0, 0.0, 2.0, 0.0]], monochrome: true, cmyk: None });
         let id = photosuite_cms::lutfile::LutFile::identity(5);
         rt(Adjustment::ColorLookup { name: "Look.cube".into(), lut: Some(std::sync::Arc::new(id.data)), size: 5, tetrahedral: false, dither: true });
     }
@@ -901,7 +1003,7 @@ mod tests {
             cmyk.extend(i16s(&std::array::from_fn::<i16, 5, _>(|k| if k == r { 100 } else { 0 })));
         }
         assert!(matches!(parse(b"mixr", &cmyk, None, Channels::Other), Adjustment::Unsupported { .. }));
-        let ours = write(&Adjustment::ChannelMixer { matrix: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]], monochrome: false });
+        let ours = write(&Adjustment::ChannelMixer { matrix: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]], monochrome: false, cmyk: None });
         assert!(matches!(parse(b"mixr", &ours[0].1, None, Channels::Other), Adjustment::ChannelMixer { .. }));
         assert!(matches!(parse(b"mixr", &[0, 1, 0, 0, 0, 100], None, Channels::Rgb), Adjustment::Unsupported { .. }));
         // Photo Filter: unknown version, HSB colour space, out-of-range version-3 Lab, truncated.
@@ -989,7 +1091,7 @@ mod tests {
         let mut d = i16s(&[1, 0]);
         d.extend(i16s(&[100, 0, 0, 0, 20, 50, 50, 0, 0, 0, 0, -50, 150, 0, -10]));
         let a = parse(b"mixr", &d, None, Channels::Rgb);
-        assert_eq!(a, Adjustment::ChannelMixer { matrix: [[1.0, 0.0, 0.0, 0.2], [0.5, 0.5, 0.0, 0.0], [0.0, -0.5, 1.5, -0.1]], monochrome: false });
+        assert_eq!(a, Adjustment::ChannelMixer { matrix: [[1.0, 0.0, 0.0, 0.2], [0.5, 0.5, 0.0, 0.0], [0.0, -0.5, 1.5, -0.1]], monochrome: false, cmyk: None });
         // Written with the trailing gray record (a copy of the first row).
         let w = write(&a);
         assert_eq!(w[0].1[..d.len()], d[..]);
@@ -997,7 +1099,7 @@ mod tests {
         // Monochrome with only the gray record: 30/59/11.
         let mut m = i16s(&[1, 1]);
         m.extend(i16s(&[30, 59, 11, 0, 0]));
-        let Adjustment::ChannelMixer { matrix, monochrome: true } = parse(b"mixr", &m, None, Channels::Rgb) else { panic!() };
+        let Adjustment::ChannelMixer { matrix, monochrome: true, .. } = parse(b"mixr", &m, None, Channels::Rgb) else { panic!() };
         assert_eq!(matrix[0], [0.3, 0.59, 0.11, 0.0]);
     }
 
@@ -1045,7 +1147,7 @@ mod tests {
         for (stops, want) in
             [(vec![], vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])]), (vec![(0.3, [0.2, 0.4, 0.6])], vec![(0.0, [0.2, 0.4, 0.6]), (1.0, [0.2, 0.4, 0.6])])]
         {
-            let b = write(&Adjustment::GradientMap { stops, reverse: true, dither: false });
+            let b = write(&Adjustment::GradientMap { stops, reverse: true, dither: false, ink_stops: Vec::new() });
             let back = parse(&b[0].0, &b[0].1, None, Channels::Rgb);
             let Adjustment::GradientMap { stops, reverse: true, .. } = back else { panic!("{back:?}") };
             assert_eq!(stops.len(), want.len());
