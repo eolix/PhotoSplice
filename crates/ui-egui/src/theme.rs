@@ -279,6 +279,23 @@ impl Tokens {
             ((self.chrome.r() as u32) << 16) | ((self.chrome.g() as u32) << 8) | self.chrome.b() as u32,
         ) < 0.5
     }
+
+    /// The Layers panel's tint for a layer colour label (Photoshop colours the eye column):
+    /// muted swatches on dark palettes, light tints on light ones. `None` for no label.
+    pub fn label_color(&self, label: photosuite_doc::LabelColor) -> Option<Color32> {
+        use photosuite_doc::LabelColor as L;
+        let rgb: u32 = match label {
+            L::None => return None,
+            L::Red => 0x9c3b3b,
+            L::Orange => 0xa8622c,
+            L::Yellow => 0x9e8a2e,
+            L::Green => 0x3f7f45,
+            L::Blue => 0x3b6699,
+            L::Violet => 0x6f4c99,
+            L::Gray => 0x6b6b6b,
+        };
+        Some(if self.dark() { mix(rgb, rgb, 0.0) } else { mix(rgb, 0xffffff, 0.55) })
+    }
 }
 
 /// Register Inter (UI) and JetBrains Mono (numbers) plus named weights.

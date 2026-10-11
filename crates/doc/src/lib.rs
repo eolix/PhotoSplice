@@ -112,6 +112,50 @@ pub enum LabelColor {
     Gray,
 }
 
+impl LabelColor {
+    /// Every label, in Photoshop's menu order.
+    pub const ALL: [LabelColor; 8] =
+        [LabelColor::None, LabelColor::Red, LabelColor::Orange, LabelColor::Yellow, LabelColor::Green, LabelColor::Blue, LabelColor::Violet, LabelColor::Gray];
+
+    /// The id used in command params (`none`, `red`, …).
+    pub fn id(self) -> &'static str {
+        match self {
+            LabelColor::None => "none",
+            LabelColor::Red => "red",
+            LabelColor::Orange => "orange",
+            LabelColor::Yellow => "yellow",
+            LabelColor::Green => "green",
+            LabelColor::Blue => "blue",
+            LabelColor::Violet => "violet",
+            LabelColor::Gray => "gray",
+        }
+    }
+
+    /// The label for an id (case-insensitive; `grey` and `no color` accepted).
+    pub fn from_id(id: &str) -> Option<LabelColor> {
+        let id = id.trim().to_ascii_lowercase();
+        match id.as_str() {
+            "grey" => Some(LabelColor::Gray),
+            "no color" | "nocolor" => Some(LabelColor::None),
+            _ => LabelColor::ALL.into_iter().find(|l| l.id() == id),
+        }
+    }
+
+    /// Photoshop's menu label (`No Color`, `Red`, …).
+    pub fn label(self) -> &'static str {
+        match self {
+            LabelColor::None => "No Color",
+            LabelColor::Red => "Red",
+            LabelColor::Orange => "Orange",
+            LabelColor::Yellow => "Yellow",
+            LabelColor::Green => "Green",
+            LabelColor::Blue => "Blue",
+            LabelColor::Violet => "Violet",
+            LabelColor::Gray => "Gray",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayerMask {
     /// Grayscale surface; untouched pixels read as `default` (0 = hide, 1 = reveal).

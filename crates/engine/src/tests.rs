@@ -690,6 +690,21 @@ fn advanced_blending_knockout() {
 }
 
 #[test]
+fn layer_label_color() {
+    let mut s = session_with_doc();
+    let id = s.execute("layer.new.layer", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setProps", json!({"color": "Violet"})).unwrap();
+    let l = s.active().unwrap().doc.layer(LayerId(id)).unwrap().clone();
+    assert_eq!(l.label, photosuite_doc::LabelColor::Violet);
+    assert_eq!(crate::inspect::layer(&l)["color"], json!("violet"));
+    for bad in [json!("pink"), json!(3), json!(null)] {
+        assert!(s.execute("layer.setProps", json!({"color": bad})).is_err(), "{bad}");
+    }
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.active().unwrap().doc.layer(LayerId(id)).unwrap().label, photosuite_doc::LabelColor::None);
+}
+
+#[test]
 fn move_document_reorders_tabs_and_keeps_the_active_one() {
     let mut s = Session::new();
     for name in ["a", "b", "c"] {

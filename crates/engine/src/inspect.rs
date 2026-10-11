@@ -82,6 +82,7 @@ fn layer_sel(l: &Layer, selected: &[photosuite_doc::LayerId]) -> Value {
         "bounds": bounds,
         "selected": selected.contains(&l.id),
         "linkGroup": l.link_group,
+        "color": l.label.id(),
     });
     match &l.content {
         LayerContent::Group(g) => {

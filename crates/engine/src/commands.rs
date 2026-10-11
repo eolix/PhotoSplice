@@ -495,7 +495,7 @@ fn build() -> Vec<CommandSpec> {
             "Layer Properties",
             [],
             None,
-            r##"{"layer":id?,"name":str?,"visible":bool?,"opacity":0..1?,"fill":0..1?,"blend":"Multiply|…"?,"clipped":bool?,"locked":bool?,"locks":{"transparency","pixels","position","artboard","all":bool}?,"channels":[bool,…]? (Advanced Blending: which colour channels blend, R G B / C M Y K / L a b),"knockout":"none|shallow|deep"?,"blendClipped":bool?,"blendInterior":bool? (Blend Clipped Layers / Interior Effects as Group),"maskHidesEffects":bool?,"vectorMaskHidesEffects":bool?}"##,
+            r##"{"layer":id?,"name":str?,"visible":bool?,"opacity":0..1?,"fill":0..1?,"blend":"Multiply|…"?,"clipped":bool?,"locked":bool?,"locks":{"transparency","pixels","position","artboard","all":bool}?,"channels":[bool,…]? (Advanced Blending: which colour channels blend, R G B / C M Y K / L a b),"knockout":"none|shallow|deep"?,"blendClipped":bool?,"blendInterior":bool? (Blend Clipped Layers / Interior Effects as Group),"maskHidesEffects":bool?,"vectorMaskHidesEffects":bool?,"color":"none|red|orange|yellow|green|blue|violet|gray"? (label colour)}"##,
             has_layer,
             |s, p| {
                 let id = layer_param(s, p)?;
@@ -543,6 +543,12 @@ fn build() -> Vec<CommandSpec> {
                     }
                     if let Some(v) = p.get("vectorMaskHidesEffects").and_then(Value::as_bool) {
                         l.vector_mask_hides_effects = v;
+                    }
+                    if let Some(v) = p.get("color") {
+                        // The Layers panel's colour label (right-click › Red, …).
+                        let id = v.as_str().ok_or_else(|| bad("layer.setProps", "`color` must be a string"))?;
+                        l.label = photosuite_doc::LabelColor::from_id(id)
+                            .ok_or_else(|| bad("layer.setProps", format!("unknown color `{id}` (none, red, orange, yellow, green, blue, violet, gray)")))?;
                     }
                     if let Some(v) = p.get("knockout").and_then(Value::as_str) {
                         // Blending Options › Advanced Blending › Knockout.

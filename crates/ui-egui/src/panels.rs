@@ -1736,6 +1736,11 @@ fn layer_row(
     } else if resp.hovered() {
         painter.rect_filled(rect, t.radius, t.hover.gamma_multiply(0.5));
     }
+    // A colour label tints the eye column, as in Photoshop.
+    if let Some(c) = t.label_color(l.label) {
+        let column = Rect::from_min_max(rect.left_top(), pos2(rect.left() + 30.0, rect.bottom() - 1.0));
+        painter.rect_filled(column, 0.0, c);
+    }
     let mut x = rect.left() + 6.0;
     let eye = Rect::from_min_size(pos2(x, rect.center().y - 11.0), vec2(22.0, 22.0));
     // The eye takes drags too (so a drag starting on it never reorders the row): dragging down

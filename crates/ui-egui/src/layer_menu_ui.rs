@@ -2,7 +2,7 @@
 //! unavailable ones are greyed using the same enablement as the main menus. Items marked as menu
 //! invocations (`Value::Null` params) go through `menus::invoke`, so dialogs open like in the menu bar.
 
-use photosuite_doc::{Layer, LayerContent};
+use photosuite_doc::{LabelColor, Layer, LayerContent};
 use serde_json::{Value, json};
 
 /// One entry: label, command id. `None` = separator.
@@ -117,7 +117,52 @@ pub fn show(app: &crate::PhotosuiteApp, ui: &mut egui::Ui, l: &Layer, on_set: bo
         rename = true;
         ui.close();
     }
+    // Colour labels (Photoshop's last block), as one row of swatches so the menu stays short:
+    // applied to every selected layer when the menu opened on the selection, as one history step.
+    ui.separator();
+    let t = crate::theme::Tokens::get(ui.ctx());
+    let mut picked = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for label in LabelColor::ALL {
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::click());
+            let name = tl!(label.label());
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+            let swatch = rect.shrink(3.0);
+            match t.label_color(label) {
+                Some(c) => {
+                    ui.painter().rect_filled(swatch, 3.0, c);
+                }
+                None => {
+                    // No Color: an empty swatch struck through.
+                    let stroke = egui::Stroke::new(1.0, t.text_faint);
+                    ui.painter().rect_stroke(swatch, 3.0, stroke, egui::StrokeKind::Inside);
+                    ui.painter().line_segment([swatch.left_bottom(), swatch.right_top()], stroke);
+                }
+            }
+            if (l.label == label && !on_set) || resp.hovered() {
+                ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(1.5, if resp.hovered() { t.text } else { t.accent }), egui::StrokeKind::Inside);
+            }
+            if resp.on_hover_text(name).clicked() {
+                picked = Some(label);
+            }
+        }
+    });
+    if let Some(label) = picked {
+        let targets: Vec<u64> = match app.session.active() {
+            Some(s) if on_set => s.selected_layers().iter().map(|id| id.0).collect(),
+            _ => vec![l.id.0],
+        };
+        actions.extend(color_actions(&targets, label, ui.ctx().cumulative_pass_nr()));
+        ui.close();
+    }
     rename
+}
+
+/// The `layer.setProps` calls that give `layers` the colour `label`, coalesced into one history
+/// step under `key`.
+pub fn color_actions(layers: &[u64], label: LabelColor, key: u64) -> Vec<(String, Value)> {
+    layers.iter().map(|id| ("layer.setProps".to_string(), json!({"layer": id, "color": label.id(), "coalesce": format!("layer-color:{key}")}))).collect()
 }
 
 #[cfg(test)]
@@ -169,6 +214,49 @@ mod tests {
             h.state_mut().session.set_active(0);
             assert_eq!(h.state().session.active().unwrap().active_layer, Some(photosuite_doc::LayerId(smart)));
         }
+    }
+
+    #[test]
+    fn color_label_from_the_context_menu() {
+        use crate::PhotosuiteApp;
+        use egui::{Event, Modifiers, PointerButton, Pos2, pos2, vec2};
+        use egui_kittest::{Harness, kittest::Queryable};
+
+        fn click(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2, button: PointerButton) {
+            h.hover_at(at);
+            h.step();
+            for pressed in [true, false] {
+                h.event(Event::PointerButton { pos: at, button, pressed, modifiers: Modifiers::NONE });
+                h.step();
+            }
+            h.run_steps(3);
+        }
+
+        let mut s = photosuite_engine::Session::new();
+        s.execute("file.new", json!({"width": 64, "height": 48})).unwrap();
+        let a = s.execute("layer.new.layer", json!({"name": "A"})).unwrap()["layer"].as_u64().unwrap();
+        let b = s.execute("layer.new.layer", json!({"name": "B"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("layer.select", json!({"layer": a, "mode": "add"})).unwrap();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_step_dt(1.0 / 60.0).with_max_steps(64).build_eframe(move |cc| {
+            PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
+            PhotosuiteApp::new(s, crate::Services::default())
+        });
+        let ctx = h.ctx.clone();
+        let (req, _rx) = crate::control::ControlRequest::new("ui.set", json!({"dock": {"collapsed": ["color", "properties", "history", "navigator"]}}));
+        crate::control::handle(h.state_mut(), &ctx, &req);
+        h.run_steps(8);
+        let row = crate::layer_row_ui::recorded(&h.ctx).into_iter().find(|r| r.layer == b).expect("layer row drawn").row;
+        click(&mut h, pos2(row.left() + 6.0 + 28.0 + 12.0, row.center().y), PointerButton::Secondary);
+        let at = h.get_by_label("Violet").rect().center();
+        click(&mut h, at, PointerButton::Primary);
+        let doc = &h.state().session.active().unwrap().doc;
+        for id in [a, b] {
+            assert_eq!(doc.layer(photosuite_doc::LayerId(id)).unwrap().label, LabelColor::Violet, "both selected layers");
+        }
+        // One history step for the whole selection.
+        h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+        let doc = &h.state().session.active().unwrap().doc;
+        assert!([a, b].iter().all(|id| doc.layer(photosuite_doc::LayerId(*id)).unwrap().label == LabelColor::None));
     }
 
     #[test]
