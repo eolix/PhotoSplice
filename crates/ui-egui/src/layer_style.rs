@@ -26,6 +26,80 @@ enum P {
 /// The Blending Options page id (not an effect).
 pub const BLENDING: &str = "blendingOptions";
 
+/// The kinds a layer can hold several of (the "+" on their rows), as in Photoshop, which allows
+/// up to [`MAX_INSTANCES`] of each.
+const MULTI: &[&str] = &["stroke", "innerShadow", "colorOverlay", "gradientOverlay", "dropShadow"];
+const MAX_INSTANCES: usize = 10;
+
+/// The effect kind of a list row: rows are keyed `stroke`, and `stroke#1`, `stroke#2`, … for
+/// further instances. Each row has `on:{row}`, `p:{row}` (its params) and, when it came from
+/// the layer or a style, `fx:{row}` (the effect as loaded, so what the dialog doesn't show is
+/// kept on OK).
+fn base_kind(row: &str) -> &str {
+    row.split('#').next().unwrap_or(row)
+}
+
+/// A kind's rows, top first (the top one paints over the others): `rows:{kind}`, else the kind's
+/// one row.
+fn rows(f: &Map<String, Value>, kind: &str) -> Vec<String> {
+    let listed: Vec<String> = f
+        .get(&format!("rows:{kind}"))
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).filter(|r| base_kind(r) == kind).map(str::to_string).collect())
+        .unwrap_or_default();
+    if listed.is_empty() { vec![kind.to_string()] } else { listed }
+}
+
+/// A kind's factory params, lit by the document's light angle when it uses the global light.
+fn fresh_params(kind: &str, light: f32) -> Value {
+    let mut params = defaults(kind);
+    if params.get("useGlobalLight").and_then(Value::as_bool) == Some(true) {
+        params["angle"] = json!(light);
+    }
+    params
+}
+
+/// Replaces the dialog's effect rows with `effects`: each kind's instances in order, or one row
+/// off at its defaults. Returns the first kind that has one.
+fn set_effects(f: &mut Map<String, Value>, effects: &[Effect], light: f32) -> Option<&'static str> {
+    let blending = format!("p:{BLENDING}");
+    f.retain(|k, _| !(k.starts_with("rows:") || k.starts_with("fx:") || k.starts_with("on:") || (k.starts_with("p:") && *k != blending)));
+    let mut first = None;
+    for &(kind, _) in KINDS {
+        let mine: Vec<&Effect> = effects.iter().filter(|e| kind_of(e) == kind).collect();
+        if mine.is_empty() {
+            f.insert(format!("on:{kind}"), json!(false));
+            f.insert(format!("p:{kind}"), fresh_params(kind, light));
+            continue;
+        }
+        first.get_or_insert(kind);
+        let keys: Vec<String> = (0..mine.len()).map(|i| if i == 0 { kind.to_string() } else { format!("{kind}#{i}") }).collect();
+        for (key, e) in keys.iter().zip(&mine) {
+            f.insert(format!("on:{key}"), json!(e.enabled()));
+            f.insert(format!("p:{key}"), values_of(e, light));
+            if let Ok(fx) = serde_json::to_value(e) {
+                f.insert(format!("fx:{key}"), fx);
+            }
+        }
+        if keys.len() > 1 {
+            f.insert(format!("rows:{kind}"), json!(keys));
+        }
+    }
+    first
+}
+
+/// The params of `p` that differ from what the dialog loaded from `fx`: only those are applied
+/// over the loaded effect, so the settings the dialog doesn't show (a bevel's technique, a
+/// stroke's gradient) survive OK. A snapshot that doesn't read as an effect gets them all (the
+/// engine then reports it).
+fn changed_params(fx: &Value, p: &Value, light: f32) -> Value {
+    let (Ok(e), Some(now)) = (serde_json::from_value::<Effect>(fx.clone()), p.as_object()) else {
+        return p.clone();
+    };
+    let was = values_of(&e, light);
+    Value::Object(now.iter().filter(|(k, v)| was.get(k.as_str()) != Some(*v)).map(|(k, v)| (k.clone(), v.clone())).collect())
+}
+
 pub const KINDS: &[(&str, &str)] = &[
     ("bevelEmboss", "Bevel & Emboss"),
     ("stroke", "Stroke"),
@@ -311,18 +385,7 @@ pub fn style_choices(app: &PhotosuiteApp, ctx: &egui::Context) -> Vec<StyleChoic
 /// blending options it was saved with replace those.
 pub fn load_style(f: &mut Map<String, Value>, st: &StyleChoice) {
     let light = f.get("globalLight").and_then(Value::as_f64).unwrap_or(120.0) as f32;
-    for &(kind, _) in KINDS {
-        let e = st.effects.iter().find(|e| kind_of(e) == kind);
-        f.insert(format!("on:{kind}"), json!(e.is_some_and(|e| e.enabled())));
-        let params = e.map(|e| values_of(e, light)).unwrap_or_else(|| {
-            let mut params = defaults(kind);
-            if params.get("useGlobalLight").and_then(Value::as_bool) == Some(true) {
-                params["angle"] = json!(light);
-            }
-            params
-        });
-        f.insert(format!("p:{kind}"), params);
-    }
+    let first = set_effects(f, &st.effects, light);
     let key = format!("p:{BLENDING}");
     if let Some(Value::Object(bo)) = f.get_mut(&key) {
         if let Some(b) = st.blend {
@@ -332,12 +395,12 @@ pub fn load_style(f: &mut Map<String, Value>, st: &StyleChoice) {
             bo.insert("fillOpacity".into(), json!((fill * 100.0).round()));
         }
     }
-    if let Some(first) = st.effects.first() {
-        f.insert("selected".into(), json!(kind_of(first)));
+    if let Some(first) = first {
+        f.insert("selected".into(), json!(first));
     }
 }
 
-/// Dialog fields for a layer: selected kind, and per kind {enabled, params}. `light` is the
+/// Dialog fields for a layer: selected row, and per row {enabled, params, loaded effect}. `light` is the
 /// document's global light angle, shown by effects that use it.
 pub fn initial_fields(layer: &Layer, mode: ColorMode, select: Option<&str>, light: f32) -> Map<String, Value> {
     let mut f = Map::new();
@@ -361,22 +424,7 @@ pub fn initial_fields(layer: &Layer, mode: ColorMode, select: Option<&str>, ligh
     }
     f.insert(format!("p:{BLENDING}"), bo);
     f.insert("__preview".into(), json!(true));
-    let mut first = None;
-    for &(kind, _) in KINDS {
-        let existing = layer.effects.items.iter().find(|e| kind_of(e) == kind);
-        if existing.is_some() && first.is_none() {
-            first = Some(kind);
-        }
-        f.insert(format!("on:{kind}"), json!(existing.is_some_and(|e| e.enabled())));
-        let params = existing.map(|e| values_of(e, light)).unwrap_or_else(|| {
-            let mut params = defaults(kind);
-            if params.get("useGlobalLight").and_then(Value::as_bool) == Some(true) {
-                params["angle"] = json!(light);
-            }
-            params
-        });
-        f.insert(format!("p:{kind}"), params);
-    }
+    let first = set_effects(&mut f, &layer.effects.items, light);
     let sel = select.or(first).unwrap_or("dropShadow");
     f.insert("selected".into(), json!(sel));
     if select.is_some() {
@@ -415,18 +463,17 @@ pub fn confirm(app: &mut PhotosuiteApp, f: &Map<String, Value>) -> Result<Value,
 /// Every parameter group is edited as an object. Validate before preview or confirmation so
 /// malformed values supplied through `ui.dialog.set` are reported before any command runs.
 fn validate_params(f: &Map<String, Value>) -> Result<(), String> {
-    for kind in std::iter::once(BLENDING).chain(KINDS.iter().map(|(kind, _)| *kind)) {
-        let key = format!("p:{kind}");
-        if let Some(value) = f.get(&key)
-            && !value.is_object()
-        {
+    for (key, value) in f {
+        if key.starts_with("p:") && !value.is_object() {
             return Err(format!("invalid layer style parameters: `{key}` must be an object"));
         }
     }
     Ok(())
 }
 
-/// Runs the dialog's commands through `run`: blending options, clear, then each enabled effect.
+/// Runs the dialog's commands through `run`: blending options, then the layer's whole effect
+/// list in one step (`layer.layerStyle.replace`): every row that is on, and the loaded effects
+/// that are off (kept, switched off, as Photoshop keeps them).
 fn apply(f: &Map<String, Value>, mut run: impl FnMut(&str, Value) -> Result<Value, String>) -> Result<Value, String> {
     validate_params(f)?;
     let layer = f.get("layer").cloned().unwrap_or(Value::Null);
@@ -438,25 +485,40 @@ fn apply(f: &Map<String, Value>, mut run: impl FnMut(&str, Value) -> Result<Valu
         }
         run("layer.layerStyle.blendingOptions", p)?;
     }
-    let _ = run("layer.layerStyle.clear", json!({"layer": layer}));
     // An effect lit by the global light follows the document's light angle, so the Angle slider
     // drives that shared angle rather than the per-effect angle the compositor ignores.
     let mut light_angle: Option<f64> = None;
+    let mut effects = Vec::new();
     for &(kind, _) in KINDS {
-        if f.get(&format!("on:{kind}")).and_then(Value::as_bool) == Some(true) {
-            let mut p = f.get(&format!("p:{kind}")).cloned().unwrap_or_else(|| json!({}));
-            if let Some(params) = p.as_object_mut() {
-                params.insert("layer".into(), layer.clone());
+        for row in rows(f, kind) {
+            let on = f.get(&format!("on:{row}")).and_then(Value::as_bool) == Some(true);
+            let loaded = f.get(&format!("fx:{row}")).filter(|v| v.is_object());
+            if !on && loaded.is_none() {
+                continue;
             }
-            if p.get("useGlobalLight").and_then(Value::as_bool) == Some(true)
+            let p = f.get(&format!("p:{row}")).cloned().unwrap_or_else(|| json!({}));
+            if on
+                && p.get("useGlobalLight").and_then(Value::as_bool) == Some(true)
                 && let Some(angle) = p.get("angle").and_then(Value::as_f64)
                 && initial_light_angle.is_none_or(|initial| angle != initial)
             {
                 light_angle = Some(angle);
             }
-            run(&format!("layer.layerStyle.{kind}"), p)?;
+            let mut params = match loaded {
+                Some(fx) => changed_params(fx, &p, initial_light_angle.unwrap_or(120.0) as f32),
+                None => p,
+            };
+            if let Some(o) = params.as_object_mut() {
+                o.insert("enabled".into(), json!(on));
+            }
+            let mut entry = json!({"kind": kind, "params": params});
+            if let Some(fx) = loaded {
+                entry["fx"] = fx.clone();
+            }
+            effects.push(entry);
         }
     }
+    run("layer.layerStyle.replace", json!({"layer": layer, "effects": effects}))?;
     if let Some(angle) = light_angle {
         run("layer.layerStyle.globalLight", json!({"angle": angle}))?;
     }
@@ -466,7 +528,7 @@ fn apply(f: &Map<String, Value>, mut run: impl FnMut(&str, Value) -> Result<Valu
 /// Hash of the fields that change the rendered style (not the selected page).
 pub fn preview_hash(f: &Map<String, Value>) -> u64 {
     f.iter()
-        .filter(|(k, _)| k.as_str() == "layer" || k.starts_with("on:") || k.starts_with("p:"))
+        .filter(|(k, _)| k.as_str() == "layer" || ["on:", "p:", "fx:", "rows:"].iter().any(|p| k.starts_with(p)))
         .flat_map(|(k, v)| k.bytes().chain(v.to_string().into_bytes()))
         .fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
 }
@@ -507,47 +569,93 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>, patterns: &photosuite
                 f.insert("selected".into(), json!(BLENDING));
             }
             ui.add_space(4.0);
-            for &(kind, label) in KINDS {
-                let (rect, resp) = ui.allocate_exact_size(vec2(190.0, 26.0), Sense::click());
-                let is_sel = kind == selected;
-                if is_sel {
-                    ui.painter().rect_filled(rect, t.radius_sm, t.row_selected.gamma_multiply(if t.pro { 1.0 } else { 0.0 }).max_alpha(t.hover));
-                } else if resp.hovered() {
-                    ui.painter().rect_filled(rect, t.radius_sm, t.hover.gamma_multiply(0.5));
+            let mut action = None;
+            // Grows with added instances; the up/down/delete buttons stay below it.
+            egui::ScrollArea::vertical().id_salt("fx-list").max_height(BODY_HEIGHT - 96.0).auto_shrink([false, true]).show(ui, |ui| {
+                for &(kind, label) in KINDS {
+                    let keys = rows(f, kind);
+                    let can_add = MULTI.contains(&kind) && keys.len() < MAX_INSTANCES;
+                    for row in &keys {
+                        let (rect, resp) = ui.allocate_exact_size(vec2(190.0, 26.0), Sense::click());
+                        let is_sel = *row == selected;
+                        if is_sel {
+                            ui.painter().rect_filled(rect, t.radius_sm, t.row_selected.gamma_multiply(if t.pro { 1.0 } else { 0.0 }).max_alpha(t.hover));
+                        } else if resp.hovered() {
+                            ui.painter().rect_filled(rect, t.radius_sm, t.hover.gamma_multiply(0.5));
+                        }
+                        let key = format!("on:{row}");
+                        let mut on = f.get(&key).and_then(Value::as_bool).unwrap_or(false);
+                        let cb = egui::Rect::from_min_size(rect.min + vec2(6.0, 6.0), vec2(14.0, 14.0));
+                        let cresp = ui.interact(cb, ui.id().with(("fxcb", row)), Sense::click());
+                        // "+": another instance of this kind, with this one's settings, above it.
+                        let plus = can_add.then(|| {
+                            let r = egui::Rect::from_center_size(rect.right_center() - vec2(14.0, 0.0), vec2(20.0, 20.0));
+                            let presp =
+                                ui.interact(r, ui.id().with(("fxadd", row)), Sense::click()).on_hover_text(format!("{} {}", tl!("Add another"), tl!(label)));
+                            if presp.hovered() {
+                                ui.painter().rect_filled(r, t.radius_sm, t.hover);
+                            }
+                            crate::icons::paint(ui, r, "ui-plus", 14.0, if presp.hovered() { t.text } else { t.text_dim });
+                            presp
+                        });
+                        if on {
+                            ui.painter().rect_filled(cb, 2.0, t.accent);
+                            ui.painter()
+                                .line_segment([cb.left_center() + vec2(3.0, 0.5), cb.center_bottom() + vec2(-1.0, -3.5)], Stroke::new(1.8, Color32::WHITE));
+                            ui.painter()
+                                .line_segment([cb.center_bottom() + vec2(-1.0, -3.5), cb.right_top() + vec2(-3.0, 3.5)], Stroke::new(1.8, Color32::WHITE));
+                        } else {
+                            ui.painter().rect_stroke(cb, 2.0, Stroke::new(1.5, t.text_faint), StrokeKind::Inside);
+                        }
+                        ui.painter().text(
+                            rect.left_center() + vec2(28.0, 0.0),
+                            egui::Align2::LEFT_CENTER,
+                            tl!(label),
+                            egui::FontId::proportional(12.5),
+                            if on || is_sel { t.text } else { t.text_dim },
+                        );
+                        if plus.is_some_and(|p| p.clicked()) {
+                            action = Some(RowAction::Add(row.clone()));
+                        } else if cresp.clicked() {
+                            on = !on;
+                            f.insert(key, json!(on));
+                            f.insert("selected".into(), json!(row));
+                        } else if resp.clicked() {
+                            f.insert("selected".into(), json!(row));
+                            f.insert(key, json!(true));
+                        }
+                    }
                 }
-                let key = format!("on:{kind}");
-                let mut on = f.get(&key).and_then(Value::as_bool).unwrap_or(false);
-                let cb = egui::Rect::from_min_size(rect.min + vec2(6.0, 6.0), vec2(14.0, 14.0));
-                let cresp = ui.interact(cb, ui.id().with(("fxcb", kind)), Sense::click());
-                if on {
-                    ui.painter().rect_filled(cb, 2.0, t.accent);
-                    ui.painter().line_segment([cb.left_center() + vec2(3.0, 0.5), cb.center_bottom() + vec2(-1.0, -3.5)], Stroke::new(1.8, Color32::WHITE));
-                    ui.painter().line_segment([cb.center_bottom() + vec2(-1.0, -3.5), cb.right_top() + vec2(-3.0, 3.5)], Stroke::new(1.8, Color32::WHITE));
-                } else {
-                    ui.painter().rect_stroke(cb, 2.0, Stroke::new(1.5, t.text_faint), StrokeKind::Inside);
+            });
+            // Photoshop's buttons under the list: move the selected instance within its kind
+            // (the top one paints over the others), or delete it while others are left.
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let keys = rows(f, base_kind(&selected));
+                let at = keys.iter().position(|k| *k == selected);
+                let buttons = [
+                    ("chevron-up", "Move Effect Up", at.is_some_and(|i| i > 0), RowAction::Up),
+                    ("chevron-down", "Move Effect Down", at.is_some_and(|i| i + 1 < keys.len()), RowAction::Down),
+                    ("trash", "Delete Effect", at.is_some() && keys.len() > 1, RowAction::Delete),
+                ];
+                for (icon, tip, enabled, act) in buttons {
+                    let r = ui.add_enabled_ui(enabled, |ui| crate::icons::button(ui, icon, 24.0, false, tl!(tip))).inner;
+                    if r.clicked() {
+                        action = Some(act);
+                    }
                 }
-                ui.painter().text(
-                    rect.left_center() + vec2(28.0, 0.0),
-                    egui::Align2::LEFT_CENTER,
-                    tl!(label),
-                    egui::FontId::proportional(12.5),
-                    if on || is_sel { t.text } else { t.text_dim },
-                );
-                if cresp.clicked() {
-                    on = !on;
-                    f.insert(key, json!(on));
-                    f.insert("selected".into(), json!(kind));
-                } else if resp.clicked() {
-                    f.insert("selected".into(), json!(kind));
-                    f.insert(key, json!(true));
-                }
+            });
+            if let Some(a) = action {
+                row_action(f, &selected, a);
             }
         });
         seps.push(gap(ui));
         // Right: parameters of the selected effect.
         ui.vertical(|ui| {
             ui.set_width(330.0);
-            let label = KINDS.iter().find(|k| k.0 == selected).map(|k| k.1).unwrap_or(if selected == BLENDING { "Blending Options" } else { "" });
+            let kind = base_kind(&selected);
+            let label = KINDS.iter().find(|k| k.0 == kind).map(|k| k.1).unwrap_or(if selected == BLENDING { "Blending Options" } else { "" });
             ui.label(RichText::new(tl!(&label)).font(crate::theme::semibold(14.0)).color(t.text));
             ui.add_space(6.0);
             let pkey = format!("p:{selected}");
@@ -555,10 +663,10 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>, patterns: &photosuite
             if let Some(error) = &invalid {
                 ui.colored_label(t.danger, error);
             }
-            let params = f.get(&pkey).cloned().unwrap_or_else(|| defaults(&selected));
+            let params = f.get(&pkey).cloned().unwrap_or_else(|| defaults(kind));
             // A group that isn't an object keeps its value and draws no controls.
             if let Some(mut p) = params.as_object().map(|o| Value::Object(o.clone())) {
-                for &(key, label, kind) in spec(&selected) {
+                for &(key, label, kind) in spec(kind) {
                     match (selected.as_str(), key) {
                         (BLENDING, "blend") => group(ui, "General Blending", false),
                         (BLENDING, "fillOpacity") => group(ui, "Advanced Blending", true),
@@ -700,6 +808,57 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>, patterns: &photosuite
     for x in seps {
         ui.painter().line_segment([egui::pos2(x, r.top()), egui::pos2(x, r.bottom())], Stroke::new(1.0, t.separator));
     }
+}
+
+/// What the effect list's "+" and its buttons below do to a row.
+#[derive(Clone, Debug, PartialEq)]
+enum RowAction {
+    /// Another instance of the row's kind, a copy of it, placed above it and selected.
+    Add(String),
+    Up,
+    Down,
+    Delete,
+}
+
+/// Applies `a` to the effect rows; `selected` is the selected row (Up, Down and Delete act on it).
+fn row_action(f: &mut Map<String, Value>, selected: &str, a: RowAction) {
+    let target = match &a {
+        RowAction::Add(row) => row.as_str(),
+        _ => selected,
+    };
+    let kind = base_kind(target).to_string();
+    let mut keys = rows(f, &kind);
+    let Some(at) = keys.iter().position(|k| k == target) else { return };
+    match a {
+        RowAction::Add(_) => {
+            if !MULTI.contains(&kind.as_str()) || keys.len() >= MAX_INSTANCES {
+                return;
+            }
+            let n = keys.iter().filter_map(|k| k.split_once('#')?.1.parse::<usize>().ok()).max().map_or(1, |n| n.saturating_add(1));
+            let new = format!("{kind}#{n}");
+            for prefix in ["p:", "fx:"] {
+                if let Some(v) = f.get(&format!("{prefix}{target}")).cloned() {
+                    f.insert(format!("{prefix}{new}"), v);
+                }
+            }
+            f.insert(format!("on:{new}"), json!(true));
+            keys.insert(at, new.clone());
+            f.insert("selected".into(), json!(new));
+        }
+        RowAction::Up if at > 0 => keys.swap(at, at - 1),
+        RowAction::Down if at + 1 < keys.len() => keys.swap(at, at + 1),
+        RowAction::Delete if keys.len() > 1 => {
+            keys.remove(at);
+            for prefix in ["on:", "p:", "fx:"] {
+                f.remove(&format!("{prefix}{target}"));
+            }
+            if let Some(next) = keys.get(at.min(keys.len() - 1)) {
+                f.insert("selected".into(), json!(next));
+            }
+        }
+        _ => return,
+    }
+    f.insert(format!("rows:{kind}"), json!(keys));
 }
 
 /// Height of the dialog body: the tallest page (Blending Options in an RGB document).
@@ -944,6 +1103,87 @@ impl MaxAlpha for Color32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn styled_session(effects: Value) -> (photosuite_engine::Session, Layer) {
+        let mut s = photosuite_engine::Session::new();
+        s.execute("file.new", json!({"width": 32, "height": 32})).unwrap();
+        s.execute("layer.new.layer", json!({})).unwrap();
+        s.execute("layer.layerStyle.replace", json!({ "effects": effects })).unwrap();
+        let d = s.active().unwrap();
+        let layer = d.doc.layer(d.active_layer.unwrap()).unwrap().clone();
+        (s, layer)
+    }
+
+    #[test]
+    fn instances_and_unshown_settings_survive_ok() {
+        let (mut s, layer) = styled_session(json!([
+            {"kind": "stroke", "params": {"size": 7}},
+            {"kind": "stroke", "params": {"size": 2, "color": "#ffffff"}},
+            {"kind": "bevelEmboss", "params": {"technique": "chiselHard"}},
+            {"kind": "dropShadow", "params": {"enabled": false}},
+        ]));
+        let mut f = initial_fields(&layer, ColorMode::Rgb, None, 120.0);
+        assert_eq!(f["rows:stroke"], json!(["stroke", "stroke#1"]));
+        assert_eq!(f["p:stroke#1"]["size"], json!(2.0));
+        assert_eq!(f["on:dropShadow"], json!(false));
+        f.get_mut("p:stroke#1").unwrap()["size"] = json!(4.0);
+        apply(&f, |id, p| s.execute(id, p).map_err(|e| e.to_string())).unwrap();
+        let d = s.active().unwrap();
+        let fx = &d.doc.layer(layer.id).unwrap().effects.items;
+        let sizes: Vec<f32> = fx.iter().filter_map(|e| if let Effect::Stroke(st) = e { Some(st.size) } else { None }).collect();
+        assert_eq!(sizes, [7.0, 4.0], "both strokes, in order, the edit applied");
+        assert!(
+            fx.iter().any(|e| matches!(e, Effect::BevelEmboss(b) if b.technique == photosuite_doc::effects::BevelTechnique::ChiselHard)),
+            "the technique the dialog doesn't show is kept: {fx:?}"
+        );
+        assert!(fx.iter().any(|e| matches!(e, Effect::DropShadow(_)) && !e.enabled()), "a switched-off effect stays, off");
+    }
+
+    #[test]
+    fn plus_copies_an_instance_above_and_the_buttons_reorder_and_delete() {
+        let (_, layer) = styled_session(json!([{"kind": "stroke", "params": {"size": 7}}]));
+        let mut f = initial_fields(&layer, ColorMode::Rgb, None, 120.0);
+        row_action(&mut f, "stroke", RowAction::Add("stroke".into()));
+        assert_eq!(f["rows:stroke"], json!(["stroke#1", "stroke"]));
+        assert_eq!((&f["selected"], &f["p:stroke#1"]["size"], &f["on:stroke#1"]), (&json!("stroke#1"), &json!(7.0), &json!(true)));
+        row_action(&mut f, "stroke#1", RowAction::Down);
+        assert_eq!(f["rows:stroke"], json!(["stroke", "stroke#1"]));
+        row_action(&mut f, "stroke#1", RowAction::Down);
+        assert_eq!(f["rows:stroke"], json!(["stroke", "stroke#1"]), "the bottom one stays");
+        row_action(&mut f, "stroke", RowAction::Delete);
+        assert_eq!((&f["rows:stroke"], &f["selected"]), (&json!(["stroke#1"]), &json!("stroke#1")));
+        assert!(!f.contains_key("p:stroke"));
+        row_action(&mut f, "stroke#1", RowAction::Delete);
+        assert_eq!(f["rows:stroke"], json!(["stroke#1"]), "the last one can't be deleted");
+        // Kinds Photoshop holds one of get no copies; the others stop at ten.
+        row_action(&mut f, "satin", RowAction::Add("satin".into()));
+        assert!(!f.contains_key("rows:satin"));
+        for _ in 0..20 {
+            row_action(&mut f, "stroke#1", RowAction::Add("stroke#1".into()));
+        }
+        assert_eq!(rows(&f, "stroke").len(), MAX_INSTANCES);
+        // Rows that don't belong to the kind, or a selection that isn't a row, change nothing.
+        f.insert("rows:dropShadow".into(), json!(["stroke", 5, "dropShadow#x"]));
+        assert_eq!(rows(&f, "dropShadow"), ["dropShadow#x"]);
+        row_action(&mut f, "nope#3", RowAction::Up);
+        row_action(&mut f, "", RowAction::Delete);
+    }
+
+    #[test]
+    fn several_instances_render_and_preview() {
+        let (s, layer) = styled_session(json!([
+            {"kind": "dropShadow", "params": {"distance": 4}},
+            {"kind": "dropShadow", "params": {"distance": 9}},
+        ]));
+        let mut f = initial_fields(&layer, ColorMode::Rgb, None, 120.0);
+        f.insert("selected".into(), json!("dropShadow#1"));
+        let ctx = egui::Context::default();
+        PhotosuiteApp::setup_context(&ctx, crate::theme::ThemeKind::ALL[0]);
+        let mut out = ctx.run_ui(Default::default(), |ui| body(ui, &mut f, &s.patterns, &[]));
+        out.textures_delta.clear();
+        let doc = preview_document(&s.active().unwrap().doc, &s.patterns, &f).unwrap();
+        assert_eq!(doc.layer(layer.id).unwrap().effects.items.len(), 2);
+    }
 
     #[test]
     fn every_kind_has_spec_and_defaults() {
