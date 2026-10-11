@@ -729,3 +729,71 @@ fn convert_to_layers_conforms_the_contents_to_the_document_mode_and_depth() {
     let fmt = s.active().unwrap().doc.pixel_format();
     assert!(matches!(&active_layer(&s).content, LayerContent::Raster(px) if px.format().mode == fmt.mode && px.format().sample == fmt.sample));
 }
+
+/// A one-page vector PDF, 144 × 72 pt: a red 72 pt square on the left.
+fn square_pdf() -> Vec<u8> {
+    let content = "1 0 0 rg 0 0 72 72 re f";
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 144 72] /Contents 4 0 R >>".to_string(),
+        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+    ];
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    out
+}
+
+#[test]
+fn a_placed_pdf_lands_at_its_printed_size_and_stays_sharp_when_scaled() {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 600, "height": 400, "resolution": 72})).unwrap();
+    let r = crate::file_cmds::place_bytes(&mut s, "logo.pdf", square_pdf(), None, &json!({})).unwrap();
+    // 144 × 72 pt at 72 ppi is 144 × 72 px, centred.
+    assert_eq!(r["bounds"], json!([228.0, 164.0, 372.0, 236.0]));
+    assert_eq!(r["scale"], json!(100.0));
+    let id = r["layer"].as_u64().unwrap();
+    let alpha = |s: &Session, x: i32, y: i32| {
+        let l = s.active().unwrap().doc.layer(LayerId(id)).unwrap();
+        let LayerContent::Smart(sm) = &l.content else { panic!() };
+        sm.cache.as_ref().unwrap().rgba(x, y)[3]
+    };
+    assert!(alpha(&s, 299, 200) > 0.99 && alpha(&s, 301, 200) < 0.01, "the square ends at x = 300");
+    // Four times larger about the square's corner: drawn again at that size, so its edge is
+    // still one pixel sharp (a resampled image would ramp over several).
+    s.execute("edit.transform", json!({"layer": id, "matrix": [4, 0, 0, 4, -3.0 * 228.0, -3.0 * 164.0]})).unwrap();
+    assert!(alpha(&s, 515, 200) > 0.99, "{}", alpha(&s, 515, 200));
+    assert!(alpha(&s, 516, 200) < 0.01, "{}", alpha(&s, 516, 200));
+}
+
+#[test]
+fn a_placed_pdf_from_photoshop_is_measured_in_its_stored_source_size() {
+    // Photoshop stored the source as 144 × 72 px (the page at 72 ppi); the transform is identity
+    // in that space, so the square spans 72 px, not 72 pt at 300 ppi.
+    let doc = Document::new("d", photosuite_geom::Size::new(300, 200), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    let spec = photosuite_io::smart_map::PlacedSpec {
+        idnt: "id",
+        placed: "pl",
+        transform: photosuite_geom::Affine::IDENTITY,
+        perspective: None,
+        size: (144.0, 72.0),
+        dpi: 72.0,
+        warp: None,
+        filter_fx: None,
+    };
+    let sold = photosuite_io::smart_map::sold_bytes(None, &spec, &mut Vec::new());
+    let mut sm = SmartObject::new(SmartSource::Embedded { file_name: "logo.pdf".into(), bytes: Arc::new(square_pdf()) }, photosuite_geom::Affine::IDENTITY, None);
+    sm.psd_raw = Some(Arc::new(sold));
+    let px = render(&doc, &sm).unwrap().unwrap();
+    assert!(px.rgba(70, 36)[3] > 0.99 && px.rgba(73, 36)[3] < 0.01, "{:?} {:?}", px.rgba(70, 36), px.rgba(73, 36));
+}

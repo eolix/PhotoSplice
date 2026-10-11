@@ -24,6 +24,7 @@ Every bundled third-party work keeps its licence text next to it:
 | `resources/brushes/` | `LICENSE-brusheezy-brushes.txt` |
 | `resources/patterns/` | `LICENSE-subtlepatterns.txt` |
 | `resources/shapes/` | `LICENSE-fontawesome.txt` |
+| `crates/io/src/pdf/render/` | `LICENSE-APACHE`, `LICENSE-MIT` (hayro's) |
 
 A new third-party file gets its licence beside it and a row below, in the same change.
 
@@ -110,6 +111,13 @@ the [Lensfun](https://github.com/lensfun/lensfun) database at commit `23e8cb8`, 
 contributors, and is distributed under the same licence, CC BY-SA 3.0. Only the data is used, not
 Lensfun's LGPL library, and PhotoSuite's code is a separate work. Licence:
 `resources/lensfun/LICENSE-CC-BY-SA-3.0.txt`; details in `resources/lensfun/README.md`.
+
+## Apache-2.0 OR MIT — hayro's renderer, vendored
+
+`crates/io/src/pdf/render/` is the renderer of [hayro](https://github.com/LaurenzV/hayro) 0.8.0
+(`hayro/src`), © Laurenz Stampfl and the hayro contributors, Apache-2.0 OR MIT, with its licence
+texts beside it. It is vendored so the PDF importer can draw parts of a page into a pixel layer;
+the changes are listed at the top of its `mod.rs`.
 
 ## BSD-3-Clause and CC0 — data inside the PDF renderer
 

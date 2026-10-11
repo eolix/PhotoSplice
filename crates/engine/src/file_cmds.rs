@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use photosuite_algo::resample::{Resample, resize_surface, translate_surface};
-use photosuite_color::{ColorMode, PixelFormat};
+use photosuite_color::{ColorMode, PixelFormat, SampleType};
 use photosuite_doc::{Affine, Document, Layer, LayerContent, LayerId, SmartObject, SmartSource};
 use photosuite_geom::Rect;
 use photosuite_raster::{Surface, from_rgba_into};
@@ -132,7 +132,7 @@ pub fn extension(path: &str) -> Option<String> {
 /// Whether a save without a new path may write back to `path`: only layered files (PSD, PSB,
 /// .pcraft). A flat file goes through Save As instead, so it is never flattened over the original.
 pub fn saves_in_place(path: &str) -> bool {
-    extension(path).is_some_and(|ext| matches!(ext.as_str(), "psd" | "psb" | "pcraft"))
+    extension(path).is_some_and(|ext| matches!(ext.as_str(), "psd" | "psb" | "pcraft" | "pdf"))
 }
 
 /// Whether `path` names a document template (.psdt). A template opens as a new untitled document
@@ -188,12 +188,18 @@ pub(crate) struct SaveOpts {
     pub quality: Option<f64>,
     /// TIFF: keep the layers. Off unless a command's params ask (`"tiffLayers": true`).
     pub tiff_layers: bool,
+    /// PDF: leave out the Photoshop editing data (`"pdfEditing": false`).
+    pub pdf_discard_editing: bool,
 }
 
 impl SaveOpts {
-    /// `quality` and `tiffLayers` from a command's params.
+    /// `quality`, `tiffLayers` and `pdfEditing` from a command's params.
     pub(crate) fn from_params(p: &Value) -> Self {
-        SaveOpts { quality: f64_param(p, "quality"), tiff_layers: p.get("tiffLayers").and_then(Value::as_bool).unwrap_or(false) }
+        SaveOpts {
+            quality: f64_param(p, "quality"),
+            tiff_layers: p.get("tiffLayers").and_then(Value::as_bool).unwrap_or(false),
+            pdf_discard_editing: p.get("pdfEditing").and_then(Value::as_bool) == Some(false),
+        }
     }
 
     pub(crate) fn or_quality(mut self, q: f64) -> Self {
@@ -211,7 +217,7 @@ impl From<Option<f64>> for SaveOpts {
 /// Encodes `doc` for `path`'s extension.
 pub(crate) fn encode(doc: &Document, path: &str, save: impl Into<SaveOpts>) -> Result<(Vec<u8>, Vec<String>)> {
     let save = save.into();
-    let mut opts = photosuite_io::ExportOptions { tiff_layers: save.tiff_layers, ..Default::default() };
+    let mut opts = photosuite_io::ExportOptions { tiff_layers: save.tiff_layers, pdf_discard_editing: save.pdf_discard_editing, ..Default::default() };
     if let Some(q) = save.quality {
         opts.encode.jpeg_quality = (q.clamp(0.0, 12.0) / 12.0 * 99.0 + 1.0).round() as u8;
     }
@@ -354,20 +360,94 @@ pub fn pdf_pages(bytes: &[u8]) -> usize {
     photosuite_io::pdf::page_count(bytes).unwrap_or(0)
 }
 
-/// File › Open on a PDF (Photoshop's Import PDF): one page, rendered at a resolution, as a new
-/// document. It opens untitled, since saving back over the PDF would flatten it.
+/// Whether a PDF's first page carries Photoshop editing data (a Photoshop PDF): it opens as its
+/// document, without Import PDF, and saves back in place, as in Photoshop.
+pub fn pdf_has_editing_data(bytes: &[u8]) -> bool {
+    photosuite_io::pdf::has_editing_data(bytes, 0)
+}
+
+/// File › Open on a PDF (Photoshop's Import PDF): pages at a resolution, each as a new document:
+/// one pixel layer (`"as": "pixels"`, the default, as in Photoshop) or editable layers (text,
+/// shapes, images; `"as": "layers"`), cropped to a page box, in a colour mode and bit depth.
+/// Documents open untitled, so saving doesn't silently replace the PDF. A Photoshop PDF opens
+/// as its document whatever the options.
 fn import_pdf(s: &mut Session, p: &Value) -> Result<Value> {
+    use photosuite_io::pdf::{CropTo, OpenOptions, PageAs};
     const CMD: &str = "file.importPdf";
+    let bad = |msg: String| EngineError::BadParams { cmd: CMD.into(), msg };
     let path = str_param(p, "path", CMD)?.to_string();
     let bytes = read_file(&path)?;
-    let page = crate::commands::int(p, "page").unwrap_or(1).clamp(1, 100_000) as usize;
-    let dpi = f64_param(p, "resolution").unwrap_or(f64::from(photosuite_io::pdf::DEFAULT_DPI)).clamp(1.0, 2400.0) as f32;
     let pages = pdf_pages(&bytes);
-    let r = photosuite_io::pdf::import_page(&file_name(&path), &bytes, page - 1, dpi).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
-    let mut doc = r.document;
-    doc.name = if pages > 1 { format!("{} (page {page})", file_name(&path)) } else { file_name(&path) };
-    let (i, color) = s.open_document(doc, None);
-    Ok(json!({"document": i, "color": color, "pages": pages, "warnings": r.warnings}))
+    // `pages` (several, 1-based) or `page`.
+    let wanted: Vec<usize> = match p.get("pages") {
+        Some(Value::Array(a)) => {
+            let v: Vec<usize> = a.iter().filter_map(Value::as_u64).filter(|&n| n >= 1).map(|n| n.min(100_000) as usize).collect();
+            if v.is_empty() || v.len() != a.len() {
+                return Err(bad("\"pages\": expected page numbers from 1".into()));
+            }
+            v
+        }
+        Some(_) => return Err(bad("\"pages\": expected an array of page numbers".into())),
+        None => vec![crate::commands::int(p, "page").unwrap_or(1).clamp(1, 100_000) as usize],
+    };
+    if wanted.len() > 500 {
+        return Err(bad(format!("{} pages at once; open at most 500", wanted.len())));
+    }
+    let dpi = f64_param(p, "resolution").unwrap_or(f64::from(photosuite_io::pdf::DEFAULT_DPI)).clamp(1.0, 2400.0) as f32;
+    let how = match p.get("as").and_then(Value::as_str).unwrap_or("pixels") {
+        "layers" => PageAs::Layers,
+        "pixels" => PageAs::Pixels,
+        other => return Err(bad(format!("\"as\": expected \"pixels\" or \"layers\", got {other:?}"))),
+    };
+    let crop_to = match p.get("cropTo").and_then(Value::as_str) {
+        None => CropTo::CropBox,
+        Some(id) => CropTo::from_id(id).ok_or_else(|| bad(format!("\"cropTo\": expected one of boundingBox, mediaBox, cropBox, bleedBox, trimBox, artBox, got {id:?}")))?,
+    };
+    let mode = match p.get("mode").and_then(Value::as_str) {
+        None => None,
+        Some("rgb") => Some(ColorMode::Rgb),
+        Some("grayscale") => Some(ColorMode::Grayscale),
+        Some("cmyk") => Some(ColorMode::Cmyk),
+        Some("lab") => Some(ColorMode::Lab),
+        Some(other) => return Err(bad(format!("\"mode\": expected rgb, grayscale, cmyk or lab, got {other:?}"))),
+    };
+    let depth = match p.get("depth") {
+        None => None,
+        Some(v) => match v.as_u64() {
+            Some(8) => Some(SampleType::U8),
+            Some(16) => Some(SampleType::U16),
+            _ => return Err(bad(format!("\"depth\": expected 8 or 16, got {v}"))),
+        },
+    };
+    let mut docs = Vec::new();
+    let mut warnings = Vec::new();
+    for &page in &wanted {
+        let o = OpenOptions { page: page - 1, dpi, how, crop_to };
+        let r = photosuite_io::pdf::open_page_with(&file_name(&path), &bytes, &o).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+        let mut doc = r.document;
+        // A Photoshop PDF opens as it was saved; the options shape an imported page only.
+        if !photosuite_io::pdf::has_editing_data(&bytes, page - 1) {
+            if let Some(m) = mode.filter(|m| *m != doc.mode) {
+                let dst = s.color.working(m);
+                crate::color_cmds::convert_document(&mut doc, &dst, s.color.settings.intent(), s.color.settings.bpc)?;
+            }
+            if let Some(d) = depth.filter(|d| *d != doc.depth) {
+                crate::image_cmds::convert_layers_depth(&mut doc.layers, d);
+                doc.depth = d;
+            }
+        }
+        doc.name = if pages > 1 { format!("{} (page {page})", file_name(&path)) } else { file_name(&path) };
+        docs.push(doc);
+        warnings.extend(r.warnings);
+    }
+    let mut opened = Vec::new();
+    let mut color = Value::Null;
+    for doc in docs {
+        let (i, c) = s.open_document(doc, None);
+        opened.push(i);
+        color = c;
+    }
+    Ok(json!({"document": opened.last(), "documents": opened, "color": color, "pages": pages, "warnings": warnings}))
 }
 
 // ---------- place ----------
@@ -383,22 +463,31 @@ pub fn place_bytes(s: &mut Session, name: &str, bytes: Vec<u8>, linked: Option<S
     let (cw, ch) = (d.doc.size.width as f64, d.doc.size.height as f64);
     let fmt = d.doc.pixel_format();
     let src = import(name, &bytes)?;
+    // A PDF lands at its printed size at the document's resolution, as in Photoshop (`scale` is
+    // a percentage of that); other files at their pixel size.
+    let vector = crate::smart_cmds::is_vector_source(&bytes);
+    let natural = if vector { (f64::from(d.doc.resolution_dpi.max(1.0)) / f64::from(crate::smart_cmds::PDF_SOURCE_DPI)).clamp(1e-4, 1e4) } else { 1.0 };
     let (w, h) = (src.size.width as f64, src.size.height as f64);
     let scale = match f64_param(p, "scale") {
-        Some(k) => (k / 100.0).max(1e-4),
-        None if p.get("fit").and_then(Value::as_bool) != Some(false) && (w > cw || h > ch) => (cw / w).min(ch / h),
-        None => 1.0,
+        Some(k) => (k / 100.0).max(1e-4) * natural,
+        None if p.get("fit").and_then(Value::as_bool) != Some(false) && (w * natural > cw || h * natural > ch) => (cw / w).min(ch / h),
+        None => natural,
     };
     let center = match p.get("center").and_then(Value::as_array) {
         Some(c) if c.len() == 2 => (c[0].as_f64().unwrap_or(cw / 2.0), c[1].as_f64().unwrap_or(ch / 2.0)),
         _ => (cw / 2.0, ch / 2.0),
     };
     let (dx, dy) = ((center.0 - w * scale / 2.0).round(), (center.1 - h * scale / 2.0).round());
-    let mut px = flattened(&src, fmt);
-    if (scale - 1.0).abs() > 1e-9 {
-        px = resize_surface(&px, scale, scale, Resample::Bicubic);
-    }
-    let px = translate_surface(&px, dx as i32, dy as i32);
+    // (A PDF is drawn from its source once placed, below.)
+    let px = if vector {
+        Surface::new(fmt)
+    } else {
+        let mut px = flattened(&src, fmt);
+        if (scale - 1.0).abs() > 1e-9 {
+            px = resize_surface(&px, scale, scale, Resample::Bicubic);
+        }
+        translate_surface(&px, dx as i32, dy as i32)
+    };
     let source = match linked {
         Some(path) => SmartSource::Linked { path },
         None => SmartSource::Embedded { file_name: file_name(name), bytes: Arc::new(bytes) },
@@ -409,9 +498,13 @@ pub fn place_bytes(s: &mut Session, name: &str, bytes: Vec<u8>, linked: Option<S
     let id = s.edit(label, |doc, active| {
         let id = doc.insert_above(*active, Layer::new(layer_name, LayerContent::Smart(so)));
         *active = Some(id);
+        // Vector contents drawn at the placed size rather than resampled.
+        if vector {
+            crate::smart_cmds::refresh(doc, id)?;
+        }
         Ok(id)
     })?;
-    Ok(json!({"layer": id.0, "scale": scale * 100.0, "bounds": [dx, dy, dx + w * scale, dy + h * scale]}))
+    Ok(json!({"layer": id.0, "scale": scale / natural * 100.0, "bounds": [dx, dy, dx + w * scale, dy + h * scale]}))
 }
 
 fn place(s: &mut Session, p: &Value, linked: bool) -> Result<Value> {
@@ -1132,7 +1225,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Save a Copy…",
             &["File"],
             Some("Cmd+Alt+S"),
-            r##"{"path":str (format from the extension),"quality":0..12? (JPEG),"layers":bool=true,"tiffLayers":bool=false (TIFF: keep the layers; flat by default)}"##,
+            r##"{"path":str (format from the extension),"quality":0..12? (JPEG),"layers":bool=true,"tiffLayers":bool=false (TIFF: keep the layers; flat by default),"pdfEditing":bool=true (PDF: Preserve Photoshop Editing Capabilities)}"##,
             native_doc,
             save_a_copy
         ),
@@ -1150,7 +1243,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Import PDF",
             &[],
             None,
-            r##"{"path":str,"page":1..=100000=1,"resolution":ppi=300}"##,
+            r##"{"path":str,"page":1..=100000=1,"pages":[n…]? (several, each its own document),"resolution":ppi=300,"as":"pixels|layers"="pixels","cropTo":"boundingBox|mediaBox|cropBox|bleedBox|trimBox|artBox"="cropBox","mode":"rgb|grayscale|cmyk|lab"?,"depth":8|16?}"##,
             native,
             import_pdf
         ),

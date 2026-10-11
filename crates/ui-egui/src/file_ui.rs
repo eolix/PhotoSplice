@@ -39,13 +39,6 @@ fn form(app: &mut PhotosuiteApp, command: &str, label: &str, fields: Value, choi
     json!({"dialog": app.ui.open_dialog(DialogKind::Command, f)})
 }
 
-/// Photoshop's Import PDF for a PDF of several pages: which page, at what resolution.
-pub fn open_pdf_dialog(app: &mut PhotosuiteApp, path: &str, pages: usize) -> u64 {
-    let label = format!("{} ({pages} pages)", tl!("Import PDF"));
-    let v = form(app, "file.importPdf", &label, json!({"path": path, "page": 1, "resolution": 300}), json!({}));
-    v["dialog"].as_u64().unwrap_or(0)
-}
-
 /// Menu items fronted here (dialogs before the engine command). `None` when not ours.
 pub fn invoke(app: &mut PhotosuiteApp, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
     if !no_params(params) {
@@ -218,13 +211,12 @@ fn ext_of(path: &str) -> String {
     }
 }
 
-/// Can File › Save write this kind of file back in place? Everything PhotoSuite writes, except
-/// a PDF: it opens one page as pixels, and saving that over a document of several pages (or of
-/// text and vectors) would lose them.
+/// Can File › Save write this kind of file back in place? Everything PhotoSuite writes. A PDF is
+/// saved layered with its document attached, so nothing is lost; one of several pages opens
+/// untitled (Import PDF), so Save can't drop the others.
 pub(crate) fn writes_in_place(path: &str) -> bool {
     let ext = ext_of(path);
-    matches!(ext.as_str(), "psd" | "psb" | "pcraft")
-        || (ext != "pdf" && photosuite_codecs::from_extension(&ext).is_some_and(|f| photosuite_codecs::caps(f).write))
+    matches!(ext.as_str(), "psd" | "psb" | "pcraft" | "pdf") || photosuite_codecs::from_extension(&ext).is_some_and(|f| photosuite_codecs::caps(f).write)
 }
 
 /// File › Save without a dialog: the document goes back to its own file, in its format and at
@@ -943,10 +935,10 @@ mod tests {
 
     #[test]
     fn writes_in_place_covers_what_photosuite_writes() {
-        for p in ["a.psd", "a.PSB", "a.pcraft", "a.png", "a.jpg", "a.jpeg", "a.tif", "a.tiff", "a.webp", "a.gif", "a.exr", "a.bmp"] {
+        for p in ["a.psd", "a.PSB", "a.pcraft", "a.pdf", "a.png", "a.jpg", "a.jpeg", "a.tif", "a.tiff", "a.webp", "a.gif", "a.exr", "a.bmp"] {
             assert!(writes_in_place(p), "{p}");
         }
-        for p in ["a.pdf", "a.nef", "a.cr3", "a", "", ".", "dir.v2/file", "a.unknown"] {
+        for p in ["a.nef", "a.cr3", "a", "", ".", "dir.v2/file", "a.unknown"] {
             assert!(!writes_in_place(p), "{p}");
         }
     }

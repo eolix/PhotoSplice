@@ -7,14 +7,13 @@
 //! `layer.translate`) moves the board with its contents. The canvas grows to the right and
 //! bottom to fit new boards, like Photoshop's auto-expanding artboard canvas.
 
-use photosuite_color::{Color, ColorMode, PixelFormat, SampleType};
+use photosuite_color::Color;
 use photosuite_doc::{Artboard, ArtboardBackground, Document, Layer, LayerContent, LayerId, Size};
 use photosuite_geom::Rect;
-use photosuite_raster::Surface;
 use serde_json::{Value, json};
 
 use crate::commands::{CommandSpec, color_param, int, int_i32};
-use crate::file_cmds::{SaveOpts, encode, f64_param, join, native_doc, sanitize, save_doc, stem, str_param, write_file};
+use crate::file_cmds::{SaveOpts, join, native_doc, sanitize, save_doc, stem, str_param, write_file};
 use crate::{EngineError, Result, Session};
 
 /// Artboard size presets (name, width, height) in pixels, Photoshop's common devices and pages.
@@ -365,31 +364,20 @@ pub fn raster_pdf(pages: &[(u32, u32, f32, Vec<u8>)]) -> Vec<u8> {
     photosuite_io::pdf::raster_pdf(pages)
 }
 
-/// File › Export › Artboards to PDF: one page per board (flattened over white, JPEG-encoded).
+/// File › Export › Artboards to PDF: one page per board, its shapes and type as PDF vectors and
+/// text (see [`photosuite_io::pdf::export::export_pages`]).
 fn artboards_to_pdf(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "file.export.artboardsToPdf";
     let path = str_param(p, "path", cmd)?.to_string();
     let d = s.active().ok_or(EngineError::NoDocument)?;
     let doc = d.doc.clone();
-    let quality = f64_param(p, "quality").or(Some(10.0));
-    let mut pages = Vec::new();
-    for id in chosen_artboards(&doc, p) {
-        let Some(one) = artboard_document(&doc, id) else { continue };
-        let buf = photosuite_compose::flatten(&one).over_background([1.0, 1.0, 1.0]);
-        let fmt = PixelFormat::new(ColorMode::Rgb, SampleType::U8, true);
-        let mut flat = Document::new(&one.name, one.size, ColorMode::Rgb, SampleType::U8);
-        let mut surf = Surface::new(fmt);
-        let vals: Vec<f32> = buf.px.iter().flat_map(|px| photosuite_raster::from_rgba(&fmt, *px)).collect();
-        surf.write_region(one.bounds(), &vals);
-        flat.layers.push(Layer::new("Background", LayerContent::Raster(surf)));
-        let (jpeg, _) = encode(&flat, "page.jpg", quality)?;
-        pages.push((one.size.width, one.size.height, doc.resolution_dpi, jpeg));
-    }
-    if pages.is_empty() {
+    let boards: Vec<Document> = chosen_artboards(&doc, p).into_iter().filter_map(|id| artboard_document(&doc, id)).collect();
+    if boards.is_empty() {
         return Err(bad(cmd, "no matching artboards"));
     }
-    write_file(&path, &raster_pdf(&pages))?;
-    Ok(json!({"path": path, "pages": pages.len()}))
+    let r = photosuite_io::pdf::export::export_pages(&boards, &doc.name).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    write_file(&path, &r.bytes)?;
+    Ok(json!({"path": path, "pages": boards.len(), "warnings": r.warnings}))
 }
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -451,7 +439,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "file.export.artboardsToPdf",
             "Artboards to PDF…",
             &["File", "Export"],
-            r##"{"path":str (.pdf),"artboards":[id]?,"quality":0..12=10} → {path, pages} (one raster page per board)"##,
+            r##"{"path":str (.pdf),"artboards":[id]?} → {path, pages, warnings} (one page per board: vectors, text and images)"##,
             export_artboards,
             artboards_to_pdf
         ),

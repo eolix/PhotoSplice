@@ -291,10 +291,66 @@ pub fn apply_smart_filters(placed: &Surface, sm: &SmartObject, canvas: Rect) -> 
     }
 }
 
+/// Pixels per inch a PDF source's pixel space is measured in (what it decodes to at scale 1).
+pub const PDF_SOURCE_DPI: f32 = photosuite_io::pdf::DEFAULT_DPI;
+
+/// Whether `bytes` are vector contents (a PDF page that isn't a Photoshop PDF): rendered afresh
+/// at the size they are placed at, so they stay sharp, as in Photoshop.
+pub fn is_vector_source(bytes: &[u8]) -> bool {
+    photosuite_io::pdf::is_pdf(bytes) && !photosuite_io::pdf::has_editing_data(bytes, 0)
+}
+
+/// A PDF source drawn at the scale `transform` places it at, and the transform that places
+/// that drawing. The source's pixel space is `width` pixels across (Photoshop's stored source
+/// size for an imported placed layer), else the page at [`PDF_SOURCE_DPI`]. `None` when the
+/// scale can't be told (degenerate) or the page can't be drawn.
+fn vector_source(name: &str, bytes: &[u8], fmt: PixelFormat, transform: &photosuite_geom::Affine, width: Option<f64>) -> Option<(SourceImage, photosuite_geom::Affine)> {
+    let s = transform.determinant().abs().sqrt();
+    let page_w = f64::from(photosuite_io::pdf::Pages::open(bytes).ok()?.size_pt(0, photosuite_io::pdf::CropTo::CropBox)?.0);
+    let base = width.filter(|w| w.is_finite() && *w > 0.0).unwrap_or_else(|| (page_w * f64::from(PDF_SOURCE_DPI) / 72.0).floor().max(1.0));
+    if !(s.is_finite() && s > 0.0 && page_w > 0.0) {
+        return None;
+    }
+    // A step of 1/8 ppi keeps the cache from filling with near-equal sizes.
+    let dpi = ((72.0 * base * s / page_w * 8.0).round() / 8.0).clamp(1.0, 2400.0) as f32;
+    let mut key = cache_key(bytes, fmt);
+    key.0 = *blake3::hash(&[&key.0[..], b"dpi:", &dpi.to_le_bytes()].concat()).as_bytes();
+    let img = match cache_get(&key) {
+        Some(img) => img,
+        None => {
+            let doc = photosuite_io::pdf::import_page(name, bytes, 0, dpi).ok()?.document;
+            let buf = photosuite_compose::flatten(&doc);
+            let img = SourceImage { surface: Arc::new(buffer_to_surface(&buf, fmt)), bounds: doc.bounds() };
+            cache_put(key, img.clone());
+            img
+        }
+    };
+    // The drawing is `k` times the source space (measured, as the page fit may have lowered it).
+    let k = f64::from(img.bounds.width()) / base;
+    (k.is_finite() && k > 0.0).then(|| (img, transform.mul(&photosuite_geom::Affine::scale(1.0 / k))))
+}
+
+/// The source width Photoshop stored for an imported placed layer (`SoLd` `Sz  `), which its
+/// transform is measured in.
+fn stored_width(sm: &SmartObject) -> Option<f64> {
+    let d = photosuite_io::smart_map::sold_descriptor(sm.psd_raw.as_deref()?)?;
+    photosuite_io::smart_map::stored_size(&d).map(|(w, _)| w)
+}
+
 /// Renders a smart object from its source. `Ok(None)` when the source is unavailable (a missing
 /// linked file, or a PSD placed layer without embedded data): callers keep the existing cache.
 pub fn render(doc: &Document, sm: &SmartObject) -> Result<Option<Surface>> {
     let Some((name, bytes)) = source_bytes(&doc.metadata, &sm.source) else { return Ok(None) };
+    // Vector contents, placed by a plain transform: drawn at the placed size.
+    if sm.stack_mode.is_none()
+        && sm.warp.is_none()
+        && sm.perspective.is_none()
+        && is_vector_source(&bytes)
+        && let Some((img, t)) = vector_source(&name, &bytes, doc.pixel_format(), &sm.transform, stored_width(sm))
+    {
+        let placed = photosuite_algo::warp::place_source(&img.surface, img.bounds, &t, None);
+        return Ok(Some(apply_smart_filters(&placed, sm, doc.bounds())));
+    }
     let img = match sm.stack_mode {
         Some(mode) => stack_image(&name, &bytes, doc.pixel_format(), mode)?,
         None => source_image(&name, &bytes, doc.pixel_format())?,

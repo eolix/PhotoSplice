@@ -134,12 +134,15 @@ fn export_to_files_and_pdf() {
     let pdf = join(&d, "boards.pdf");
     let r = s.execute("file.export.artboardsToPdf", json!({"path": pdf})).unwrap();
     assert_eq!(r["pages"], 2);
+    // A page per board, each its board's size, in the Layers panel's order.
     let bytes = std::fs::read(&pdf).unwrap();
-    assert!(bytes.starts_with(b"%PDF-1.4"));
-    assert!(bytes.ends_with(b"%%EOF\n"));
-    let text = String::from_utf8_lossy(&bytes);
-    assert_eq!(text.matches("/Type /Page ").count(), 2);
-    assert_eq!(text.matches("/DCTDecode").count(), 2);
+    assert_eq!(photosuite_io::pdf::page_count(&bytes).unwrap(), 2);
+    let page = |i| photosuite_io::pdf::open_page("b.pdf", &bytes, i, 72.0, photosuite_io::pdf::PageAs::Pixels).unwrap().document;
+    let (one, red) = (page(0), page(1));
+    assert_eq!((one.size.width, one.size.height), (30, 15));
+    assert_eq!((red.size.width, red.size.height), (10, 10));
+    let px = photosuite_compose::flatten(&red).px[5 * 10 + 5];
+    assert!(px[0] > 0.9 && px[1] < 0.1, "{px:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -22,8 +22,19 @@ photosuite-doc = { workspace = true }
 photosuite-compose = { workspace = true }
 photosuite-psd = { workspace = true }
 photosuite-codecs = { workspace = true }
-# PDF pages as pixels (pure Rust, Apache-2.0 OR MIT).
+# PDF pages (pure Rust, Apache-2.0 OR MIT): hayro-interpret walks a page's operations into the
+# importer's device; hayro's renderer is vendored in src/pdf/render and needs the rest.
 hayro = "0.8"
+fearless_simd = "1"
+pic-scale = { version = "0.7", default-features = false }
+rustc-hash = "2"
+bytemuck = { workspace = true }
+image = { workspace = true, features = ["png"] }
+# Layered PDF output (pure Rust, MIT OR Apache-2.0): paths, text in embedded subset fonts, images,
+# transparency groups. No text shaping of its own (ours is used).
+krilla = { version = "0.8", default-features = false, features = ["raster-images"] }
+# The Photoshop editing data added to a saved PDF (Flate streams).
+flate2 = { workspace = true }
 # EXIF (camera, lens, exposure) read from and written for camera raw files.
 photosuite-algo = { workspace = true }
 photosuite-raw = { workspace = true }

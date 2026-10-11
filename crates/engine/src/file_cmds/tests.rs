@@ -415,15 +415,33 @@ fn import_pdf_opens_the_chosen_page_at_a_resolution() {
     assert_eq!((st.doc.size.width, st.doc.size.height), (144, 144));
     assert_eq!(st.doc.name, "two.pdf (page 2)");
     assert!(st.path.is_none(), "opens untitled");
+    assert_eq!(st.doc.layers.len(), 1, "Photoshop's way by default: one pixel layer");
     let px = st.doc.layers[0].surface().unwrap().rgba(72, 72);
     assert!(px[2] > 0.9 && px[0] < 0.1, "page 2 is blue: {px:?}");
     assert!(s.execute("file.importPdf", json!({"path": path, "page": 5})).is_err());
+    // Or as editable layers.
+    s.execute("file.importPdf", json!({"path": path, "page": 1, "resolution": 72, "as": "layers"})).unwrap();
+    assert!(s.active().unwrap().doc.layers.iter().all(|l| l.surface().is_some()), "the page's image as a pixel layer");
+    assert!(s.execute("file.importPdf", json!({"path": path, "as": "vectors"})).is_err());
+    // Several pages, each its own document, in the mode and depth asked for.
+    let before = s.documents().len();
+    let r = s.execute("file.importPdf", json!({"path": path, "pages": [2, 1], "resolution": 72, "mode": "grayscale", "depth": 16, "cropTo": "mediaBox"})).unwrap();
+    assert_eq!(r["documents"].as_array().unwrap().len(), 2);
+    assert_eq!(s.documents().len(), before + 2);
+    let st = s.active().unwrap();
+    assert_eq!((st.doc.mode, st.doc.depth), (ColorMode::Grayscale, photosuite_color::SampleType::U16));
+    assert_eq!(st.doc.name, "two.pdf (page 1)");
+    for bad in [json!({"pages": []}), json!({"pages": [0]}), json!({"pages": "1"}), json!({"cropTo": "page"}), json!({"mode": "hsl"}), json!({"depth": 32})] {
+        let mut p = bad.clone();
+        p["path"] = json!(path);
+        assert!(s.execute("file.importPdf", p).is_err(), "{bad}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn only_layered_files_save_in_place() {
-    for path in ["a.psd", "dir/a.PSB", r"C:\w\a.pcraft", "my.dir/a.psd"] {
+    for path in ["a.psd", "dir/a.PSB", r"C:\w\a.pcraft", "my.dir/a.psd", "a.pdf"] {
         assert!(saves_in_place(path), "{path}");
     }
     // Flat formats, no extension, a dotted folder with an extensionless file, a dot file.

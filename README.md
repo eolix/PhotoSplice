@@ -147,7 +147,7 @@ each under its own licence (see [Licences](#licences)).
 |:---|:---|:---|
 | **Layered** | PSD, PSB, PhotoSuite (`.pcraft`) | PSD, PSB |
 | **Raster** | PNG, JPEG, WebP, TIFF, GIF, BMP, TGA, ICO, QOI, OpenEXR, Radiance HDR, PBM/PGM/PPM/PAM/PFM, HEIC/HEIF | PNG, JPEG, WebP (lossy and lossless), TIFF, OpenEXR, GIF, PNG-8, WBMP |
-| **Document** | PDF (a page, as pixels) | PDF (flattened) |
+| **Document** | PDF: a Photoshop PDF as its document; any other through Import PDF (pages, Crop To, resolution, mode, bit depth), as pixels or as editable layers (text as type, vectors as shapes, gradients as gradient fills, images) | Photoshop PDF: vectors, text and images, with Photoshop's editing data, so Photoshop and PhotoSuite reopen it with every layer |
 | **Camera raw** | DNG, CR2, CR3, NEF, NRW, ARW, PEF, ORF, RW2, RAF | — |
 | **Presets** | Brushes (`.abr`), gradients (`.grd`), patterns (`.pat`), custom shapes (`.csh`), 3D LUTs (`.cube`, `.3dl`, `.look`) | — |
 

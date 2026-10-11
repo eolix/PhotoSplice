@@ -112,6 +112,10 @@ pub struct ExportOptions {
     /// Save As sets it from its Layers option, which keeps them as Photoshop does. `false` is
     /// Photoshop's "Discard Layers and Save a Copy".
     pub tiff_layers: bool,
+    /// PDF: leave out Photoshop's editing data (Photoshop's "Preserve Photoshop Editing
+    /// Capabilities" off), so the PDF is only its page. Off by default: PDFs keep it, as
+    /// Photoshop's default does.
+    pub pdf_discard_editing: bool,
 }
 
 /// `true` if `bytes` start with the PSD/PSB signature.
@@ -190,7 +194,7 @@ pub fn export(doc: &Document, name_or_ext: &str, opts: &ExportOptions) -> Result
         return Ok(ExportResult { bytes, warnings });
     }
     if ext == "pdf" {
-        return pdf::export(doc, opts.encode.jpeg_quality);
+        return pdf::export::export_layered(doc, !opts.pdf_discard_editing);
     }
     let format = photosuite_codecs::from_extension(&ext).ok_or_else(|| IoError::UnknownFormat(name_or_ext.to_string()))?;
     if format == photosuite_codecs::Format::Tiff && opts.tiff_layers && tiff_layers::would_write_layers(doc) {

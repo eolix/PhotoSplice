@@ -52,12 +52,13 @@ impl PhotosuiteApp {
         if let Some(r) = crate::preset_files_ui::open(self, path, bytes) {
             return r.map(|()| Vec::new());
         }
-        // A PDF of several pages asks which one first (Import PDF), as Photoshop does.
+        // A PDF asks how to open first (Import PDF), as Photoshop does, unless it is a Photoshop
+        // PDF: that opens as its document and saves back in place.
         #[cfg(not(target_arch = "wasm32"))]
-        if path.to_ascii_lowercase().ends_with(".pdf") {
+        if path.to_ascii_lowercase().ends_with(".pdf") && !photosuite_engine::file_cmds::pdf_has_editing_data(bytes) {
             let pages = photosuite_engine::file_cmds::pdf_pages(bytes);
-            if pages > 1 && std::path::Path::new(path).is_file() {
-                crate::file_ui::open_pdf_dialog(self, path, pages);
+            if pages > 0 && std::path::Path::new(path).is_file() {
+                crate::pdf_import_ui::open(self, path, bytes);
                 self.push_recent(path);
                 return Ok(Vec::new());
             }

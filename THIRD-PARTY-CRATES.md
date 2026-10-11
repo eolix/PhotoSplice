@@ -5,7 +5,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 `packaging/notices/generate.sh` (cargo-about); don't edit it by hand. Other bundled material
 (fonts, icons, lens data, presets) is listed in `THIRD-PARTY-NOTICES.md`.
 
-## Crates (478)
+## Crates (489)
 
 | Crate | Version | Licence |
 |:---|:---|:---|
@@ -135,6 +135,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [fmv-macos-events](https://crates.io/crates/fmv-macos-events) | 0.1.0 | MIT OR Apache-2.0 |
 | [foldhash](https://crates.io/crates/foldhash) | 0.1.5 | Zlib |
 | [foldhash](https://crates.io/crates/foldhash) | 0.2.0 | Zlib |
+| [font-types](https://crates.io/crates/font-types) | 0.11.3 | MIT OR Apache-2.0 |
 | [font-types](https://crates.io/crates/font-types) | 0.12.5 | MIT OR Apache-2.0 |
 | [fontique](https://crates.io/crates/fontique) | 0.11.1 | Apache-2.0 OR MIT |
 | [foreign-types](https://crates.io/crates/foreign-types) | 0.5.0 | MIT OR Apache-2.0 |
@@ -200,6 +201,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [image](https://crates.io/crates/image) | 0.25.10 | MIT OR Apache-2.0 |
 | [image-webp](https://crates.io/crates/image-webp) | 0.2.4 | MIT OR Apache-2.0 |
 | [imagesize](https://crates.io/crates/imagesize) | 0.13.0 | MIT |
+| [imagesize](https://crates.io/crates/imagesize) | 0.14.0 | MIT |
 | [indexmap](https://crates.io/crates/indexmap) | 2.14.2 | Apache-2.0 OR MIT |
 | [io-extras](https://crates.io/crates/io-extras) | 0.19.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | [io-lifetimes](https://crates.io/crates/io-lifetimes) | 2.0.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
@@ -213,6 +215,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [js-sys](https://crates.io/crates/js-sys) | 0.3.106 | MIT OR Apache-2.0 |
 | [keyboard-types](https://crates.io/crates/keyboard-types) | 0.8.3 | MIT OR Apache-2.0 |
 | [khronos-egl](https://crates.io/crates/khronos-egl) | 6.0.0 | MIT OR Apache-2.0 |
+| [krilla](https://crates.io/crates/krilla) | 0.8.2 | MIT OR Apache-2.0 |
 | [kurbo](https://crates.io/crates/kurbo) | 0.11.3 | Apache-2.0 OR MIT |
 | [kurbo](https://crates.io/crates/kurbo) | 0.13.1 | Apache-2.0 OR MIT |
 | [lebe](https://crates.io/crates/lebe) | 0.5.3 | BSD-3-Clause |
@@ -268,6 +271,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [parley](https://crates.io/crates/parley) | 0.11.1 | Apache-2.0 OR MIT |
 | [parley_data](https://crates.io/crates/parley_data) | 0.11.1 | Apache-2.0 OR MIT |
 | [paste](https://crates.io/crates/paste) | 1.0.15 | MIT OR Apache-2.0 |
+| [pdf-writer](https://crates.io/crates/pdf-writer) | 0.15.0 | MIT OR Apache-2.0 |
 | [peniko](https://crates.io/crates/peniko) | 0.6.1 | Apache-2.0 OR MIT |
 | [percent-encoding](https://crates.io/crates/percent-encoding) | 2.3.2 | MIT OR Apache-2.0 |
 | [petgraph](https://crates.io/crates/petgraph) | 0.8.3 | MIT OR Apache-2.0 |
@@ -309,6 +313,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [raw-window-metal](https://crates.io/crates/raw-window-metal) | 1.1.0 | MIT OR Apache-2.0 |
 | [rayon](https://crates.io/crates/rayon) | 1.12.0 | MIT OR Apache-2.0 |
 | [rayon-core](https://crates.io/crates/rayon-core) | 1.13.0 | MIT OR Apache-2.0 |
+| [read-fonts](https://crates.io/crates/read-fonts) | 0.39.2 | MIT OR Apache-2.0 |
 | [read-fonts](https://crates.io/crates/read-fonts) | 0.41.0 | MIT OR Apache-2.0 |
 | [read-fonts](https://crates.io/crates/read-fonts) | 0.43.3 | MIT OR Apache-2.0 |
 | [reborrow](https://crates.io/crates/reborrow) | 0.5.5 | MIT |
@@ -324,6 +329,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [rustix](https://crates.io/crates/rustix) | 1.1.5 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | [rustix-linux-procfs](https://crates.io/crates/rustix-linux-procfs) | 0.1.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | [ruzstd](https://crates.io/crates/ruzstd) | 0.9.0 | MIT |
+| [ryu](https://crates.io/crates/ryu) | 1.0.23 | Apache-2.0 OR BSL-1.0 |
 | [scoped-tls](https://crates.io/crates/scoped-tls) | 1.0.1 | MIT OR Apache-2.0 |
 | [scopeguard](https://crates.io/crates/scopeguard) | 1.2.0 | MIT OR Apache-2.0 |
 | [sctk-adwaita](https://crates.io/crates/sctk-adwaita) | 0.10.1 | MIT |
@@ -338,6 +344,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [simd-adler32](https://crates.io/crates/simd-adler32) | 0.3.10 | MIT |
 | [simplecss](https://crates.io/crates/simplecss) | 0.2.2 | Apache-2.0 OR MIT |
 | [siphasher](https://crates.io/crates/siphasher) | 1.0.4 | MIT OR Apache-2.0 |
+| [skrifa](https://crates.io/crates/skrifa) | 0.42.1 | MIT OR Apache-2.0 |
 | [skrifa](https://crates.io/crates/skrifa) | 0.44.0 | MIT OR Apache-2.0 |
 | [skrifa](https://crates.io/crates/skrifa) | 0.46.2 | MIT OR Apache-2.0 |
 | [slab](https://crates.io/crates/slab) | 0.4.12 | MIT |
@@ -352,6 +359,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [stable_deref_trait](https://crates.io/crates/stable_deref_trait) | 1.2.1 | MIT OR Apache-2.0 |
 | [static_assertions](https://crates.io/crates/static_assertions) | 1.1.0 | MIT OR Apache-2.0 |
 | [strict-num](https://crates.io/crates/strict-num) | 0.1.1 | MIT |
+| [subsetter](https://crates.io/crates/subsetter) | 0.2.6 | MIT OR Apache-2.0 |
 | [svgtypes](https://crates.io/crates/svgtypes) | 0.15.3 | Apache-2.0 OR MIT |
 | [syn](https://crates.io/crates/syn) | 1.0.109 | MIT OR Apache-2.0 |
 | [syn](https://crates.io/crates/syn) | 2.0.119 | MIT OR Apache-2.0 |
@@ -365,6 +373,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [tiff](https://crates.io/crates/tiff) | 0.11.3 | MIT |
 | [tiny-skia](https://crates.io/crates/tiny-skia) | 0.11.4 | BSD-3-Clause |
 | [tiny-skia-path](https://crates.io/crates/tiny-skia-path) | 0.11.4 | BSD-3-Clause |
+| [tiny-skia-path](https://crates.io/crates/tiny-skia-path) | 0.12.0 | BSD-3-Clause |
 | [tinystr](https://crates.io/crates/tinystr) | 0.8.4 | Unicode-3.0 |
 | [toml](https://crates.io/crates/toml) | 1.1.6+spec-1.1.0 | MIT OR Apache-2.0 |
 | [toml_datetime](https://crates.io/crates/toml_datetime) | 0.6.3 | MIT OR Apache-2.0 |
@@ -455,6 +464,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [winsafe](https://crates.io/crates/winsafe) | 0.0.29 | MIT |
 | [winx](https://crates.io/crates/winx) | 0.36.4 | Apache-2.0 WITH LLVM-exception |
 | [wl-clipboard-rs](https://crates.io/crates/wl-clipboard-rs) | 0.9.4 | MIT OR Apache-2.0 |
+| [write-fonts](https://crates.io/crates/write-fonts) | 0.48.1 | MIT OR Apache-2.0 |
 | [writeable](https://crates.io/crates/writeable) | 0.6.4 | Unicode-3.0 |
 | [x11-dl](https://crates.io/crates/x11-dl) | 2.21.0 | MIT |
 | [x11rb](https://crates.io/crates/x11rb) | 0.13.2 | MIT OR Apache-2.0 |
@@ -463,6 +473,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [xkbcommon-dl](https://crates.io/crates/xkbcommon-dl) | 0.4.2 | MIT |
 | [xkeysym](https://crates.io/crates/xkeysym) | 0.2.1 | MIT OR Apache-2.0 OR Zlib |
 | [xmlwriter](https://crates.io/crates/xmlwriter) | 0.1.0 | MIT |
+| [xmp-writer](https://crates.io/crates/xmp-writer) | 0.3.3 | MIT OR Apache-2.0 |
 | [yoke](https://crates.io/crates/yoke) | 0.8.3 | Unicode-3.0 |
 | [yoke-derive](https://crates.io/crates/yoke-derive) | 0.8.3 | Unicode-3.0 |
 | [zbus](https://crates.io/crates/zbus) | 5.19.0 | MIT |
@@ -7038,6 +7049,80 @@ limitations under the License.
 
 ### Apache License 2.0
 
+Used by: font-types 0.11.3, read-fonts 0.39.2, skrifa 0.42.1, write-fonts 0.48.1
+
+```text
+Apache License
+
+Version 2.0, January 2004
+
+http://www.apache.org/licenses/
+
+TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+1. Definitions.
+
+"License" shall mean the terms and conditions for use, reproduction, and distribution as defined by Sections 1 through 9 of this document.
+
+"Licensor" shall mean the copyright owner or entity authorized by the copyright owner that is granting the License.
+
+"Legal Entity" shall mean the union of the acting entity and all other entities that control, are controlled by, or are under common control with that entity. For the purposes of this definition, "control" means (i) the power, direct or indirect, to cause the direction or management of such entity, whether by contract or otherwise, or (ii) ownership of fifty percent (50%) or more of the outstanding shares, or (iii) beneficial ownership of such entity.
+
+"You" (or "Your") shall mean an individual or Legal Entity exercising permissions granted by this License.
+
+"Source" form shall mean the preferred form for making modifications, including but not limited to software source code, documentation source, and configuration files.
+
+"Object" form shall mean any form resulting from mechanical transformation or translation of a Source form, including but not limited to compiled object code, generated documentation, and conversions to other media types.
+
+"Work" shall mean the work of authorship, whether in Source or Object form, made available under the License, as indicated by a copyright notice that is included in or attached to the work (an example is provided in the Appendix below).
+
+"Derivative Works" shall mean any work, whether in Source or Object form, that is based on (or derived from) the Work and for which the editorial revisions, annotations, elaborations, or other modifications represent, as a whole, an original work of authorship. For the purposes of this License, Derivative Works shall not include works that remain separable from, or merely link (or bind by name) to the interfaces of, the Work and Derivative Works thereof.
+
+"Contribution" shall mean any work of authorship, including the original version of the Work and any modifications or additions to that Work or Derivative Works thereof, that is intentionally submitted to Licensor for inclusion in the Work by the copyright owner or by an individual or Legal Entity authorized to submit on behalf of the copyright owner. For the purposes of this definition, "submitted" means any form of electronic, verbal, or written communication sent to the Licensor or its representatives, including but not limited to communication on electronic mailing lists, source code control systems, and issue tracking systems that are managed by, or on behalf of, the Licensor for the purpose of discussing and improving the Work, but excluding communication that is conspicuously marked or otherwise designated in writing by the copyright owner as "Not a Contribution."
+
+"Contributor" shall mean Licensor and any individual or Legal Entity on behalf of whom a Contribution has been received by Licensor and subsequently incorporated within the Work.
+
+2. Grant of Copyright License. Subject to the terms and conditions of this License, each Contributor hereby grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable copyright license to reproduce, prepare Derivative Works of, publicly display, publicly perform, sublicense, and distribute the Work and such Derivative Works in Source or Object form.
+
+3. Grant of Patent License. Subject to the terms and conditions of this License, each Contributor hereby grants to You a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable (except as stated in this section) patent license to make, have made, use, offer to sell, sell, import, and otherwise transfer the Work, where such license applies only to those patent claims licensable by such Contributor that are necessarily infringed by their Contribution(s) alone or by combination of their Contribution(s) with the Work to which such Contribution(s) was submitted. If You institute patent litigation against any entity (including a cross-claim or counterclaim in a lawsuit) alleging that the Work or a Contribution incorporated within the Work constitutes direct or contributory patent infringement, then any patent licenses granted to You under this License for that Work shall terminate as of the date such litigation is filed.
+
+4. Redistribution. You may reproduce and distribute copies of the Work or Derivative Works thereof in any medium, with or without modifications, and in Source or Object form, provided that You meet the following conditions:
+
+You must give any other recipients of the Work or Derivative Works a copy of this License; and
+You must cause any modified files to carry prominent notices stating that You changed the files; and
+You must retain, in the Source form of any Derivative Works that You distribute, all copyright, patent, trademark, and attribution notices from the Source form of the Work, excluding those notices that do not pertain to any part of the Derivative Works; and
+If the Work includes a "NOTICE" text file as part of its distribution, then any Derivative Works that You distribute must include a readable copy of the attribution notices contained within such NOTICE file, excluding those notices that do not pertain to any part of the Derivative Works, in at least one of the following places: within a NOTICE text file distributed as part of the Derivative Works; within the Source form or documentation, if provided along with the Derivative Works; or, within a display generated by the Derivative Works, if and wherever such third-party notices normally appear. The contents of the NOTICE file are for informational purposes only and do not modify the License. You may add Your own attribution notices within Derivative Works that You distribute, alongside or as an addendum to the NOTICE text from the Work, provided that such additional attribution notices cannot be construed as modifying the License. 
+
+You may add Your own copyright statement to Your modifications and may provide additional or different license terms and conditions for use, reproduction, or distribution of Your modifications, or for any such Derivative Works as a whole, provided Your use, reproduction, and distribution of the Work otherwise complies with the conditions stated in this License.
+5. Submission of Contributions. Unless You explicitly state otherwise, any Contribution intentionally submitted for inclusion in the Work by You to the Licensor shall be under the terms and conditions of this License, without any additional terms or conditions. Notwithstanding the above, nothing herein shall supersede or modify the terms of any separate license agreement you may have executed with Licensor regarding such Contributions.
+
+6. Trademarks. This License does not grant permission to use the trade names, trademarks, service marks, or product names of the Licensor, except as required for reasonable and customary use in describing the origin of the Work and reproducing the content of the NOTICE file.
+
+7. Disclaimer of Warranty. Unless required by applicable law or agreed to in writing, Licensor provides the Work (and each Contributor provides its Contributions) on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied, including, without limitation, any warranties or conditions of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A PARTICULAR PURPOSE. You are solely responsible for determining the appropriateness of using or redistributing the Work and assume any risks associated with Your exercise of permissions under this License.
+
+8. Limitation of Liability. In no event and under no legal theory, whether in tort (including negligence), contract, or otherwise, unless required by applicable law (such as deliberate and grossly negligent acts) or agreed to in writing, shall any Contributor be liable to You for damages, including any direct, indirect, special, incidental, or consequential damages of any character arising as a result of this License or out of the use or inability to use the Work (including but not limited to damages for loss of goodwill, work stoppage, computer failure or malfunction, or any and all other commercial damages or losses), even if such Contributor has been advised of the possibility of such damages.
+
+9. Accepting Warranty or Additional Liability. While redistributing the Work or Derivative Works thereof, You may choose to offer, and charge a fee for, acceptance of support, warranty, indemnity, or other liability obligations and/or rights consistent with this License. However, in accepting such obligations, You may act only on Your own behalf and on Your sole responsibility, not on behalf of any other Contributor, and only if You agree to indemnify, defend, and hold each Contributor harmless for any liability incurred by, or claims asserted against, such Contributor by reason of your accepting any such warranty or additional liability.
+
+END OF TERMS AND CONDITIONS
+
+Copyright 2019 Colin Rothfels
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+### Apache License 2.0
+
 Used by: atspi 0.29.0, atspi-common 0.13.0, atspi-proxies 0.13.0
 
 ```text
@@ -7730,7 +7815,7 @@ limitations under the License.
 
 ### Apache License 2.0
 
-Used by: ab_glyph 0.2.32, ab_glyph_rasterizer 0.1.10, accesskit 0.24.1, accesskit_atspi_common 0.18.1, accesskit_consumer 0.35.0, accesskit_consumer 0.36.0, accesskit_consumer 0.38.0, accesskit_macos 0.26.3, accesskit_unix 0.21.1, accesskit_windows 0.32.1, accesskit_winit 0.32.2, allocator-api2 0.2.21, arboard 3.6.1, async-trait 0.1.92, blake3 1.8.7, color 0.3.3, constant_time_eq 0.4.2, dispatch2 0.3.1, document-features 0.2.12, ecolor 0.36.2, eframe 0.36.2, egui 0.36.2, egui-wgpu 0.36.2, egui-winit 0.36.2, egui_extras 0.36.2, emath 0.36.2, enum-map 2.7.3, enum-map-derive 0.17.0, enumn 0.1.14, epaint 0.36.2, epaint_default_fonts 0.36.2, fdeflate 0.3.7, fearless_simd 0.4.1, fearless_simd 0.7.0, fearless_simd 1.0.0, field-offset 0.3.6, guillotiere 0.7.0, half 2.7.1, hayro 0.8.0, hayro-ccitt 0.4.0, hayro-cmap 0.1.0, hayro-interpret 0.8.0, hayro-jbig2 0.3.1, hayro-jpeg2000 0.4.1, hayro-postscript 0.1.0, hayro-syntax 0.8.0, image 0.25.10, image-webp 0.2.4, itoa 1.0.18, libc 0.2.189, linebender_resource_handle 0.1.1, litrs 1.0.0, miniz_oxide 0.8.9, miniz_oxide 0.9.1, naga 30.0.1, naga-types 30.0.1, objc2-app-kit 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-metal 0.3.2, objc2-quartz-core 0.3.2, owned_ttf_parser 0.25.1, paste 1.0.15, pin-project 1.1.13, pin-project-internal 1.1.13, pin-project-lite 0.2.17, proc-macro2 1.0.107, profiling 1.0.18, quote 1.0.47, range-alloc 0.1.5, raw-window-handle 0.6.2, resvg 0.45.1, rustc-hash 2.1.3, serde 1.0.229, serde_core 1.0.229, serde_derive 1.0.229, serde_json 1.0.151, serde_repr 0.1.21, spirv 0.4.0+sdk-1.4.341.0, syn 2.0.119, syn 3.0.6, thiserror 1.0.69, thiserror 2.0.21, thiserror-impl 1.0.69, thiserror-impl 2.0.21, type-map 0.5.1, typeid 1.0.3, unicode-ident 1.0.26, usvg 0.45.1, vello_common 0.1.0, vello_common 0.3.0, vello_cpu 0.1.0, vello_cpu 0.3.0, wasmi 2.0.0, wasmi_collections 2.0.0, wasmi_core 2.0.0, wasmi_ir 2.0.0, wasmparser 0.228.0, wgpu 30.0.1, wgpu-core 30.0.1, wgpu-core-deps-apple 30.0.1, wgpu-core-deps-wasm 30.0.1, wgpu-core-deps-windows-linux-android 30.0.1, wgpu-hal 30.0.1, wgpu-naga-bridge 30.0.1, wgpu-types 30.0.1, zune-inflate 0.2.54
+Used by: ab_glyph 0.2.32, ab_glyph_rasterizer 0.1.10, accesskit 0.24.1, accesskit_atspi_common 0.18.1, accesskit_consumer 0.35.0, accesskit_consumer 0.36.0, accesskit_consumer 0.38.0, accesskit_macos 0.26.3, accesskit_unix 0.21.1, accesskit_windows 0.32.1, accesskit_winit 0.32.2, allocator-api2 0.2.21, arboard 3.6.1, async-trait 0.1.92, blake3 1.8.7, color 0.3.3, constant_time_eq 0.4.2, dispatch2 0.3.1, document-features 0.2.12, ecolor 0.36.2, eframe 0.36.2, egui 0.36.2, egui-wgpu 0.36.2, egui-winit 0.36.2, egui_extras 0.36.2, emath 0.36.2, enum-map 2.7.3, enum-map-derive 0.17.0, enumn 0.1.14, epaint 0.36.2, epaint_default_fonts 0.36.2, fdeflate 0.3.7, fearless_simd 0.4.1, fearless_simd 0.7.0, fearless_simd 1.0.0, field-offset 0.3.6, guillotiere 0.7.0, half 2.7.1, hayro 0.8.0, hayro-ccitt 0.4.0, hayro-cmap 0.1.0, hayro-interpret 0.8.0, hayro-jbig2 0.3.1, hayro-jpeg2000 0.4.1, hayro-postscript 0.1.0, hayro-syntax 0.8.0, image 0.25.10, image-webp 0.2.4, itoa 1.0.18, krilla 0.8.2, libc 0.2.189, linebender_resource_handle 0.1.1, litrs 1.0.0, miniz_oxide 0.8.9, miniz_oxide 0.9.1, naga 30.0.1, naga-types 30.0.1, objc2-app-kit 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-metal 0.3.2, objc2-quartz-core 0.3.2, owned_ttf_parser 0.25.1, paste 1.0.15, pdf-writer 0.15.0, pin-project 1.1.13, pin-project-internal 1.1.13, pin-project-lite 0.2.17, proc-macro2 1.0.107, profiling 1.0.18, quote 1.0.47, range-alloc 0.1.5, raw-window-handle 0.6.2, resvg 0.45.1, rustc-hash 2.1.3, ryu 1.0.23, serde 1.0.229, serde_core 1.0.229, serde_derive 1.0.229, serde_json 1.0.151, serde_repr 0.1.21, spirv 0.4.0+sdk-1.4.341.0, subsetter 0.2.6, syn 2.0.119, syn 3.0.6, thiserror 1.0.69, thiserror 2.0.21, thiserror-impl 1.0.69, thiserror-impl 2.0.21, type-map 0.5.1, typeid 1.0.3, unicode-ident 1.0.26, usvg 0.45.1, vello_common 0.1.0, vello_common 0.3.0, vello_cpu 0.1.0, vello_cpu 0.3.0, wasmi 2.0.0, wasmi_collections 2.0.0, wasmi_core 2.0.0, wasmi_ir 2.0.0, wasmparser 0.228.0, wgpu 30.0.1, wgpu-core 30.0.1, wgpu-core-deps-apple 30.0.1, wgpu-core-deps-wasm 30.0.1, wgpu-core-deps-windows-linux-android 30.0.1, wgpu-hal 30.0.1, wgpu-naga-bridge 30.0.1, wgpu-types 30.0.1, xmp-writer 0.3.3, zune-inflate 0.2.54
 
 ```text
 Apache License
@@ -7843,7 +7928,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ### BSD 3-Clause "New" or "Revised" License
 
-Used by: tiny-skia 0.11.4, tiny-skia-path 0.11.4
+Used by: tiny-skia 0.11.4, tiny-skia-path 0.11.4, tiny-skia-path 0.12.0
 
 ```text
 Copyright (c) 2011 Google Inc. All rights reserved.
@@ -8998,7 +9083,7 @@ SOFTWARE.
 
 ### MIT License
 
-Used by: imagesize 0.13.0
+Used by: imagesize 0.13.0, imagesize 0.14.0
 
 ```text
 MIT License

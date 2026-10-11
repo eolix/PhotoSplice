@@ -665,8 +665,55 @@ fn multi_page_pdfs_ask_which_page() {
     let (mut app, _) = app_with(None, None);
     app.open_file(&path, &pdf).unwrap();
     assert!(app.session.documents().is_empty(), "nothing opened yet");
-    let d = app.ui.dialogs.last().expect("Import PDF");
-    assert_eq!(d.fields["__command"], "file.importPdf");
-    assert_eq!(d.fields["page"], 1);
+    let d = app.import_pdf.as_ref().expect("Import PDF");
+    assert_eq!((d.count, d.selected.as_slice()), (3, &[0][..]));
+    assert_eq!(d.open_as, "pixels", "Photoshop's way by default");
+    assert_eq!(d.crop_to, photosuite_io::pdf::CropTo::BoundingBox, "Photoshop's default");
+    // OK opens the picked pages, each its own document, and remembers the options.
+    app.import_pdf.as_mut().unwrap().click(2, true, false);
+    app.import_pdf.as_mut().unwrap().resolution = 72.0;
+    crate::pdf_import_ui::confirm(&mut app).unwrap();
+    assert_eq!(app.session.documents().len(), 2);
+    assert!(app.import_pdf.is_none());
+    // One page asks too (how to open it), as in Photoshop, starting from the last options.
+    let one = photosuite_io::pdf::raster_pdf(&[page()]);
+    let path = dir.join("one.pdf").to_string_lossy().into_owned();
+    std::fs::write(&path, &one).unwrap();
+    app.open_file(&path, &one).unwrap();
+    let d = app.import_pdf.as_ref().expect("Import PDF");
+    assert_eq!((d.count, d.resolution), (1, 72.0));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn photoshop_pdfs_open_as_their_document_and_save_in_place() {
+    let mut doc = photosuite_doc::Document::with_background("ps", photosuite_geom::Size::new(32, 16), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8, photosuite_doc::Color::WHITE);
+    doc.layers.push(photosuite_doc::Layer::new("Top", photosuite_doc::LayerContent::Raster(photosuite_raster::Surface::new(doc.pixel_format()))));
+    let pdf = photosuite_io::pdf::export::export_layered(&doc, true).unwrap().bytes;
+    let dir = std::env::temp_dir().join(format!("photosuite-pspdf-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("ps.pdf").to_string_lossy().into_owned();
+    std::fs::write(&path, &pdf).unwrap();
+    let (mut app, _) = app_with(None, None);
+    app.open_file(&path, &pdf).unwrap();
+    // (The test app's import service stands in for the PSD-backed import: see photosuite-io.)
+    assert!(app.import_pdf.is_none(), "no Import PDF");
+    let st = app.session.active().expect("opened");
+    assert_eq!(st.path.as_deref(), Some(path.as_str()), "File › Save writes back to it");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn saving_a_pdf_asks_for_its_options_first() {
+    let (mut app, written) = app_with(None, None);
+    app.run("file.new", json!({"width": 8, "height": 8, "name": "p"})).unwrap();
+    app.save_as(Some("/out/p.pdf".into())).unwrap();
+    assert!(written.borrow().is_empty(), "parked behind Save Adobe PDF");
+    let p = app.pdf_options.as_ref().expect("Save Adobe PDF");
+    assert!(p.preserve_editing, "Photoshop's default");
+    // The last choice is where the next PDF save starts.
+    app.pdf_options = None;
+    app.pdf_preserve_editing = false;
+    app.save_as(Some("/out/p.pdf".into())).unwrap();
+    assert!(!app.pdf_options.as_ref().unwrap().preserve_editing);
 }
