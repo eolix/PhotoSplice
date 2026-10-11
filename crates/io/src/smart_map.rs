@@ -721,6 +721,88 @@ pub fn mask_from_item(item: &FilterEffectsItem, sample: SampleType, stack: &Filt
 /// pixel format, CMYK inverted as in layer channels) and the filter mask over `bounds` (white
 /// when `mask` is `None`). Photoshop needs the planes: re-rendering the filters of an item
 /// without them crashes it. `None` when there are no unfiltered pixels.
+/// The unfiltered pixels an `FEid` item caches (the smart object's placed content before its
+/// filters; inverse of [`feid_item`]), in the document format `fmt`. `None` when the item holds
+/// no image, its depth isn't the document's, or a plane doesn't decode.
+pub fn unfiltered_from_item(item: &FilterEffectsItem, fmt: PixelFormat) -> Option<Surface> {
+    let cc = fmt.mode.color_channels();
+    let (w, h) = item.rect.size().ok()?;
+    let depth = crate::pixels::psd_depth(fmt.sample);
+    if w == 0 || h == 0 || item.depth != u32::from(depth) {
+        return None;
+    }
+    let plane = |slot: usize| item.slots.get(slot).and_then(Option::as_ref).and_then(|p| p.decode(w, h, depth).ok());
+    let mut planes = Vec::with_capacity(cc + 1);
+    for c in 0..cc {
+        planes.push(Some(plane(c)?));
+    }
+    planes.push(plane(25));
+    let refs: Vec<Option<&[u8]>> = planes.iter().map(|p| p.as_deref()).collect();
+    let mut fill: Vec<Vec<u8>> = vec![crate::pixels::zero_sample(fmt.sample); cc];
+    fill.push(crate::pixels::max_sample(fmt.sample));
+    let mut invert = vec![fmt.mode == ColorMode::Cmyk; cc];
+    invert.push(false);
+    let mut bytes = crate::pixels::interleave(&refs, &fill, w * h, fmt.sample, &invert);
+    if fmt.mode == ColorMode::Lab && fmt.sample == SampleType::U16 {
+        crate::pixels::lab16_chroma(&mut bytes, cc + 1, true);
+    }
+    let r = item.rect;
+    let mut s = Surface::from_interleaved(fmt, GeomRect::new(r.left, r.top, r.right, r.bottom), &bytes);
+    s.prune();
+    Some(s)
+}
+
+/// What Photoshop shows of a smart object with a filter mask: its `unfiltered` content and the
+/// `filtered` result mixed by the mask (premultiplied, straight-alpha surfaces). Photoshop keeps
+/// the layer's own pixels as the unmasked filter result and mixes at display time (Photoshop
+/// corpus smart-filters/sf-filter-mask-*.psd).
+pub fn filter_mask_mix(unfiltered: &Surface, filtered: &Surface, mask: &LayerMask) -> Surface {
+    mask_combine(unfiltered, filtered, mask, false)
+}
+
+/// Inverse of [`filter_mask_mix`]: the unmasked filter result a `mixed` surface came from, as a
+/// PSD stores a smart object with a filter mask. Where the mask hides the filter entirely the
+/// mixed pixels are kept (Photoshop shows the unfiltered content there whatever is stored).
+pub fn filter_mask_unmix(unfiltered: &Surface, mixed: &Surface, mask: &LayerMask) -> Surface {
+    mask_combine(unfiltered, mixed, mask, true)
+}
+
+fn mask_combine(base: &Surface, other: &Surface, mask: &LayerMask, inverse: bool) -> Surface {
+    let fmt = other.format();
+    let base = if base.format() == fmt { std::borrow::Cow::Borrowed(base) } else { std::borrow::Cow::Owned(base.convert(fmt)) };
+    let area = base.content_bounds().union(&other.content_bounds());
+    let mut out = other.clone();
+    if area.is_empty() {
+        return out;
+    }
+    let n = fmt.channels();
+    let (b, f) = (base.read_region(area), other.read_region(area));
+    let mut k = Vec::new();
+    mask.values_into(area, &mut k);
+    let mut o = vec![0.0f32; b.len()];
+    // mixed = base + m·(filtered − base), premultiplied; the inverse solves for `filtered`.
+    let solve = |b: f32, x: f32, m: f32| if inverse { if m > 1e-3 { b + (x - b) / m } else { x } } else { b + (x - b) * m };
+    for (i, ((bp, fp), op)) in b.chunks_exact(n).zip(f.chunks_exact(n)).zip(o.chunks_exact_mut(n)).enumerate() {
+        let m = k.get(i).copied().unwrap_or(1.0).clamp(0.0, 1.0);
+        if !fmt.alpha {
+            for c in 0..n {
+                op[c] = solve(bp[c], fp[c], m).clamp(0.0, 1.0);
+            }
+            continue;
+        }
+        let a = n - 1;
+        let oa = solve(bp[a], fp[a], m).clamp(0.0, 1.0);
+        op[a] = oa;
+        for c in 0..a {
+            let pm = solve(bp[c] * bp[a], fp[c] * fp[a], m);
+            op[c] = if oa > 0.0 { (pm / oa).clamp(0.0, 1.0) } else { 0.0 };
+        }
+    }
+    out.write_region(area, &o);
+    out.prune();
+    out
+}
+
 pub fn feid_item(placed: &str, unfiltered: &Surface, mask: Option<&LayerMask>, bounds: GeomRect, doc_fmt: PixelFormat) -> Option<FilterEffectsItem> {
     let sample = doc_fmt.sample;
     let px = if unfiltered.format() == doc_fmt { unfiltered.clone() } else { unfiltered.convert(doc_fmt) };

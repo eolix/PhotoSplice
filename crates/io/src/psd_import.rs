@@ -317,11 +317,19 @@ impl Ctx<'_> {
                 Some(p) if !stack.filters.is_empty() => self.filter_mask(&p.placed, &stack, &name),
                 _ => None,
             };
+            // The stored pixels are the unmasked filter result: what shows is them mixed with the
+            // unfiltered content (the `FEid` cache) by the filter mask.
+            let mut cache = self.record_surface(rec, &name);
+            if let (Some(m), Some(p)) = (filter_mask.as_ref().filter(|m| m.enabled), &placed)
+                && let Some(u) = self.filter_effects.iter().find(|i| i.id == p.placed).and_then(|i| crate::smart_map::unfiltered_from_item(i, self.fmt))
+            {
+                cache = crate::smart_map::filter_mask_mix(&u, &cache, m);
+            }
             LayerContent::Smart(SmartObject {
                 source: SmartSource::Linked { path: id },
                 transform,
                 smart_filters: stack.filters,
-                cache: Some(self.record_surface(rec, &name)),
+                cache: Some(cache),
                 psd_raw: principal(k),
                 filters_enabled: stack.enabled,
                 filter_mask,

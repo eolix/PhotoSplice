@@ -125,6 +125,9 @@ struct SmartOut {
     composites: std::collections::HashMap<String, Option<(std::sync::Arc<Surface>, photosuite_geom::Rect)>>,
     /// Preserved `FEid` items (by placed id).
     old_fx: Vec<photosuite_psd::filter_effects::FilterEffectsItem>,
+    /// The `FEid` item written for the smart object being exported (its unfiltered content: the
+    /// layer pixels are stored without the filter mask, see `smart_map::filter_mask_unmix`).
+    pixels_fx: Option<photosuite_psd::filter_effects::FilterEffectsItem>,
     /// Placed ids whose preserved `FEid` item stays.
     keep_fx: std::collections::HashSet<String>,
     /// Regenerated `FEid` items.
@@ -611,6 +614,7 @@ impl Ex {
     /// the same). Without a source that can be embedded the layer is written as pixels.
     fn smart_blocks(&mut self, l: &Layer, sm: &photosuite_doc::SmartObject, template: Option<crate::smart_map::Placed>, raw: &mut Vec<([u8; 4], Vec<u8>)>) {
         use crate::smart_map::{FilterStack, PlacedSpec, filter_fx, plld_bytes, sold_bytes, uuid_from};
+        self.smart.pixels_fx = None;
         let src = match self.smart_source(sm, template.as_ref()) {
             Ok(s) => s,
             Err(e) => {
@@ -637,6 +641,7 @@ impl Ex {
             }
             if !stack.filters.is_empty() {
                 self.smart.keep_fx.insert(t.placed.clone());
+                self.smart.pixels_fx = self.smart.old_fx.iter().find(|i| i.id == t.placed).cloned();
             }
             return;
         }
@@ -683,7 +688,10 @@ impl Ex {
                 _ => None,
             };
             match item {
-                Some(i) => self.smart.new_fx.push(i),
+                Some(i) => {
+                    self.smart.pixels_fx = Some(i.clone());
+                    self.smart.new_fx.push(i);
+                }
                 // Without the unfiltered pixels Photoshop re-renders from the source itself; only
                 // the filter mask has nowhere to go.
                 None if sm.filter_mask.is_some() => self.warnings.push(format!("layer \"{}\": the smart filter mask was not written to PSD", l.name)),
@@ -905,7 +913,16 @@ impl Ex {
                     self.records.push(r);
                 }
                 LayerContent::Smart(sm) => {
-                    let r = self.record(l, extra, sm.cache.as_ref());
+                    // With a filter mask, the pixels are stored unmasked (Photoshop mixes them
+                    // with the `FEid` content by the mask when it shows the layer).
+                    let fx = self.smart.pixels_fx.take();
+                    let unmixed = match (sm.filter_mask.as_ref().filter(|m| m.enabled), fx, sm.cache.as_ref()) {
+                        (Some(m), Some(item), Some(cache)) => {
+                            crate::smart_map::unfiltered_from_item(&item, self.fmt).map(|u| crate::smart_map::filter_mask_unmix(&u, cache, m))
+                        }
+                        _ => None,
+                    };
+                    let r = self.record(l, extra, unmixed.as_ref().or(sm.cache.as_ref()));
                     self.records.push(r);
                 }
             }

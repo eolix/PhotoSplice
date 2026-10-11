@@ -247,6 +247,20 @@ fn smart_objects_round_trip_through_psd() {
             }
             Err(e) => fail("moved", e),
         }
+        // A filter mask survives the round trip as Photoshop shows it: the stored pixels go out
+        // unmasked (Photoshop mixes them with the `FEid` content by the mask) and come back mixed.
+        if smarts(&doc).iter().any(|(_, s)| s.filter_mask.is_some()) {
+            match round_trip(&doc) {
+                Ok((back, _)) => {
+                    let (a, b) = (photosuite_compose::flatten(&doc).px, photosuite_compose::flatten(&back).px);
+                    let worst = a.iter().zip(&b).flat_map(|(p, q)| (0..4).map(move |c| (p[c] * p[3] - q[c] * q[3]).abs())).fold(0.0f32, f32::max);
+                    if worst > 3.0 / 255.0 {
+                        fail("filter mask", format!("composite moved by {worst} through PSD"));
+                    }
+                }
+                Err(e) => fail("filter mask", e),
+            }
+        }
         let mut em = doc.clone();
         if re_embed(&mut em) {
             embedded += 1;
