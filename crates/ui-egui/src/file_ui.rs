@@ -132,7 +132,7 @@ pub fn owns(f: &Map<String, Value>) -> bool {
 
 pub fn dialog_width(f: &Map<String, Value>) -> Option<f32> {
     if f.contains_key("__web") {
-        Some(900.0)
+        Some(1090.0)
     } else if f.contains_key("__print") {
         Some(720.0)
     } else {
@@ -335,8 +335,8 @@ type WebProxy = (Arc<Vec<[f32; 4]>>, u32, u32, f64);
 /// The crop of the export a zoomed-in pane shows: (signature with the crop, its texture).
 type WebCrop = (String, Arc<egui::TextureHandle>);
 
-/// Photoshop's zoom levels for the Save for Web previews (0 = Fit on Screen).
-const WEB_ZOOMS: [f32; 12] = [0.0, 12.5, 25.0, 33.3, 50.0, 66.7, 100.0, 200.0, 300.0, 400.0, 800.0, 1600.0];
+/// Photoshop's zoom levels for the Save for Web previews (its zoom menu and the −/+ steps).
+const WEB_ZOOMS: [f32; 15] = [6.25, 12.5, 25.0, 100.0 / 3.0, 50.0, 200.0 / 3.0, 100.0, 200.0, 300.0, 400.0, 600.0, 800.0, 1000.0, 1200.0, 1600.0];
 
 /// The previews' shared view, as Photoshop keeps them in step: zoom in screen points per
 /// exported pixel (`None` = fit in the pane) and the centre in exported pixels (`None` = the
@@ -385,12 +385,16 @@ fn web_layout(view: &WebView, pane: egui::Vec2, ew: f32, eh: f32) -> (f32, [f32;
     };
     (z, [keep(c[0], ew, pane.x), keep(c[1], eh, pane.y)])
 }
-type WebCache = (String, Arc<egui::TextureHandle>, Option<(usize, Option<usize>, &'static str)>);
+/// A pane's preview: (signature, texture, (estimated bytes, colours, extension), its RGBA for the
+/// pixel readout).
+type WebCache = (String, Arc<egui::TextureHandle>, Option<(usize, Option<usize>, &'static str)>, Arc<Vec<u8>>);
 
 /// Renders one preview pane: the original (`None`) or an optimised variant.
-fn web_pane(app: &PhotosuiteApp, ui: &mut egui::Ui, size: egui::Vec2, p: Option<&Value>, view: &mut WebView) {
+/// One preview pane (the original when `p` is `None`): the image at the shared view, and below
+/// it Photoshop's two columns of figures. Returns the pixel under the pointer (RGBA).
+fn web_pane(app: &PhotosuiteApp, ui: &mut egui::Ui, size: egui::Vec2, p: Option<&Value>, view: &mut WebView) -> Option<[u8; 4]> {
     let t = Tokens::get(ui.ctx());
-    let Some(st) = app.session.active() else { return };
+    let st = app.session.active()?;
     let doc = st.doc.clone();
     let rev = st.revision;
     // The proxy: the export size, at most 640 px on the long side.
@@ -405,11 +409,8 @@ fn web_pane(app: &PhotosuiteApp, ui: &mut egui::Ui, size: egui::Vec2, p: Option<
             let (fw, fh) = (f64::from(doc.size.width) * pct, f64::from(doc.size.height) * pct);
             let k = (640.0 / fw.max(fh)).min(1.0);
             let st = WebSettings::default();
-            let Ok((wd, _, _)) =
-                web_cmds::web_document(&doc, &json!({"width": (fw * k).round().max(1.0), "height": (fh * k).round().max(1.0), "resample": "bilinear"}), &st)
-            else {
-                return;
-            };
+            let (wd, _, _) =
+                web_cmds::web_document(&doc, &json!({"width": (fw * k).round().max(1.0), "height": (fh * k).round().max(1.0), "resample": "bilinear"}), &st).ok()?;
             let buf = photosuite_compose::flatten(&wd);
             let v = (Arc::new(buf.px), wd.size.width, wd.size.height, (fw * fh) / (f64::from(wd.size.width) * f64::from(wd.size.height)).max(1.0));
             ui.data_mut(|d| d.insert_temp(wkey, v.clone()));
@@ -419,8 +420,8 @@ fn web_pane(app: &PhotosuiteApp, ui: &mut egui::Ui, size: egui::Vec2, p: Option<
     let sig = format!("{}{}", size_sig, p.map(|v| v.to_string()).unwrap_or_else(|| "original".into()));
     let key = egui::Id::new(("web-pane", doc.id.0, rev, sig.clone()));
     let cached: Option<WebCache> = ui.data(|d| d.get_temp(key));
-    let (tex, info) = match cached.filter(|c| c.0 == sig) {
-        Some((_, tex, info)) => (tex, info),
+    let (tex, info, pixels) = match cached.filter(|c| c.0 == sig) {
+        Some((_, tex, info, pixels)) => (tex, info, pixels),
         None => {
             let (rgba, info) = match p {
                 None => (px.iter().flat_map(|q| q.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)).collect::<Vec<u8>>(), None),
@@ -433,15 +434,19 @@ fn web_pane(app: &PhotosuiteApp, ui: &mut egui::Ui, size: egui::Vec2, p: Option<
             };
             let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
             let tex = Arc::new(ui.ctx().load_texture("web-pane", img, egui::TextureOptions::LINEAR));
-            ui.data_mut(|d| d.insert_temp(key, (sig.clone(), tex.clone(), info)));
-            (tex, info)
+            let pixels = Arc::new(rgba);
+            ui.data_mut(|d| d.insert_temp(key, (sig.clone(), tex.clone(), info, pixels.clone())));
+            (tex, info, pixels)
         }
     };
     // The export's own size (the proxy is at most 640 px across).
     let pct = base["percent"].as_f64().unwrap_or(100.0).max(1.0) / 100.0;
     let (ew, eh) = ((f64::from(doc.size.width) * pct).round().max(1.0) as f32, (f64::from(doc.size.height) * pct).round().max(1.0) as f32);
+    let info_h = 52.0;
+    let mut hovered = None;
     ui.vertical(|ui| {
-        let (r, resp) = ui.allocate_exact_size(size - egui::vec2(0.0, 34.0), egui::Sense::click_and_drag());
+        ui.spacing_mut().item_spacing.y = 0.0;
+        let (r, resp) = ui.allocate_exact_size(size - egui::vec2(0.0, info_h), egui::Sense::click_and_drag());
         let (z, c) = web_layout(view, r.size(), ew, eh);
         // Drag or scroll pans; pinch (or ⌘-scroll) zooms about the pointer, every pane alike.
         let (zoom_by, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
@@ -458,36 +463,77 @@ fn web_pane(app: &PhotosuiteApp, ui: &mut egui::Ui, size: egui::Vec2, p: Option<
             let under = [c[0] + off.x / z, c[1] + off.y / z];
             *view = WebView { zoom: Some(nz), centre: Some([under[0] - off.x / nz, under[1] - off.y / nz]) };
         }
-        crate::widgets::checker(ui.painter(), r, 8.0);
+        ui.painter().rect_filled(r, 0.0, crate::theme::canvas_bg(&t));
         // The part of the export in view (export pixels) and where it lands.
         let (hx, hy) = (r.width() / (2.0 * z), r.height() / (2.0 * z));
         let vis = egui::Rect::from_min_max(egui::pos2((c[0] - hx).max(0.0), (c[1] - hy).max(0.0)), egui::pos2((c[0] + hx).min(ew), (c[1] + hy).min(eh)));
         let on_screen = |q: egui::Pos2| r.center() + (q - egui::pos2(c[0], c[1])) * z;
         let ppp = ui.ctx().pixels_per_point();
         let painter = ui.painter().with_clip_rect(r);
+        let shown = egui::Rect::from_min_max(on_screen(vis.min), on_screen(vis.max));
+        crate::widgets::checker(&painter, shown, 8.0);
         if w as f32 / ew >= z * ppp * 0.999 {
             // The proxy has the pixels for this zoom.
             let uv = egui::Rect::from_min_max(egui::pos2(vis.min.x / ew, vis.min.y / eh), egui::pos2(vis.max.x / ew, vis.max.y / eh));
-            painter.image(tex.id(), egui::Rect::from_min_max(on_screen(vis.min), on_screen(vis.max)), uv, egui::Color32::WHITE);
+            painter.image(tex.id(), shown, uv, egui::Color32::WHITE);
         } else if let Some((crop_tex, crop)) = web_crop(ui, &doc, rev, &size_sig, &sig, p, (ew, eh), vis) {
             painter.image(crop_tex.id(), egui::Rect::from_min_max(on_screen(crop.min), on_screen(crop.max)), egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
         }
-        ui.painter().rect_stroke(r, 0.0, egui::Stroke::new(1.0, t.separator), egui::StrokeKind::Outside);
-        let (l1, l2) = match (p, info) {
-            (None, _) => ("Original".to_string(), format!("{}  ·  {} × {} px", doc.name, doc.size.width, doc.size.height)),
-            (Some(_), Some((bytes, colors, ext))) => {
+        // The pixel under the pointer (at the proxy's resolution).
+        if let Some(at) = resp.hover_pos().filter(|a| shown.contains(*a)) {
+            let q = egui::pos2(c[0], c[1]) + (at - r.center()) / z;
+            let (x, y) = ((q.x / ew * w as f32) as usize, (q.y / eh * h as f32) as usize);
+            let i = (y.min(h as usize - 1) * w as usize + x.min(w as usize - 1)) * 4;
+            hovered = pixels.get(i..i + 4).map(|v| [v[0], v[1], v[2], v[3]]);
+        }
+        ui.painter().rect_stroke(r, 0.0, egui::Stroke::new(1.0, t.separator), egui::StrokeKind::Inside);
+        // Photoshop's figures: format, size and download time on the left; how it was reduced
+        // on the right.
+        let (ir, _) = ui.allocate_exact_size(egui::vec2(size.x, info_h), egui::Sense::hover());
+        ui.painter().rect_filled(ir, 0.0, t.field);
+        ui.painter().rect_stroke(ir, 0.0, egui::Stroke::new(1.0, t.separator), egui::StrokeKind::Inside);
+        let (left, right): (Vec<String>, Vec<String>) = match (p, info) {
+            (None, _) => (
+                vec![format!("{}: \"{}\"", tl!("Original"), doc.name), format!("{} × {} px", doc.size.width, doc.size.height)],
+                Vec::new(),
+            ),
+            (Some(p), Some((bytes, colors, ext))) => {
                 // Photoshop's download estimate at 56.6 Kbps.
                 let secs = (bytes as f64 * 8.0 / 56_600.0).ceil();
-                (
-                    format!("{}  {}", ext.to_uppercase(), crate::sizing::human_bytes(bytes as f64)),
-                    format!("{secs} sec @ 56.6 Kbps{}", colors.map(|c| format!("  ·  {c} colors")).unwrap_or_default()),
-                )
+                let mut right = Vec::new();
+                match p["format"].as_str().unwrap_or("") {
+                    "gif" | "png8" => {
+                        let dither = if p["dither"].as_str() == Some("none") { 0.0 } else { p["ditherAmount"].as_f64().unwrap_or(88.0) };
+                        right.push(crate::i18n::fmt(tl!("{n}% dither"), &[("n", &format!("{dither:.0}"))]));
+                        right.push(crate::i18n::fmt(tl!("{palette} palette"), &[("palette", &title_case(p["palette"].as_str().unwrap_or("selective")))]));
+                    }
+                    "jpeg" | "webp" => right.push(crate::i18n::fmt(tl!("{n} quality"), &[("n", &format!("{:.0}", p["quality"].as_f64().unwrap_or(60.0)))])),
+                    _ => {}
+                }
+                if let Some(c) = colors {
+                    right.push(crate::i18n::fmt(tl!("{n} colors"), &[("n", &c.to_string())]));
+                }
+                (vec![ext.to_uppercase(), crate::sizing::human_bytes(bytes as f64), format!("{secs} sec @ 56.6 Kbps")], right)
             }
-            (Some(_), None) => ("—".into(), String::new()),
+            (Some(_), None) => (vec!["—".into()], Vec::new()),
         };
-        ui.label(egui::RichText::new(l1).color(t.text).size(11.5));
-        ui.label(egui::RichText::new(l2).color(t.text_dim).size(11.0));
+        let font = egui::FontId::proportional(11.5);
+        for (i, l) in left.iter().enumerate() {
+            let at = egui::pos2(ir.left() + 8.0, ir.top() + 4.0 + i as f32 * 15.0);
+            ui.painter().with_clip_rect(ir).text(at, egui::Align2::LEFT_TOP, l, font.clone(), if i == 0 { t.text } else { t.text_dim });
+        }
+        for (i, l) in right.iter().enumerate() {
+            let at = egui::pos2(ir.right() - 8.0, ir.top() + 4.0 + i as f32 * 15.0);
+            ui.painter().with_clip_rect(ir).text(at, egui::Align2::RIGHT_TOP, l, font.clone(), t.text_dim);
+        }
     });
+    hovered
+}
+
+/// `"selective"` → `"Selective"`.
+fn title_case(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
 /// The exported pixels in `vis` (export pixels, widened to whole ones) as `p` optimises them (the
@@ -559,90 +605,199 @@ fn number(ui: &mut egui::Ui, f: &mut Map<String, Value>, key: &str, label: &str,
     });
 }
 
+/// The export size (pixels) the dialog's Image Size settings give `doc`.
+fn export_size(doc: &photosuite_doc::Document, f: &Map<String, Value>) -> (f32, f32) {
+    let pct = n(f, "percent", 100.0).max(1.0) / 100.0;
+    ((f64::from(doc.size.width) * pct).round().max(1.0) as f32, (f64::from(doc.size.height) * pct).round().max(1.0) as f32)
+}
+
+/// A label right-aligned in a `w`-wide slot, as Photoshop lines up "Colors:", "Dither:", …
+fn right_label(ui: &mut egui::Ui, text: &str, w: f32) {
+    let t = Tokens::get(ui.ctx());
+    ui.allocate_ui_with_layout(egui::vec2(w, 24.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.label(egui::RichText::new(text).color(t.text_dim));
+    });
+}
+
+/// A settings row of Photoshop's grid: a control in the left column, a labelled one in the right.
+fn web_row(
+    ui: &mut egui::Ui,
+    f: &mut Map<String, Value>,
+    left: impl FnOnce(&mut egui::Ui, &mut Map<String, Value>),
+    label: &str,
+    right: impl FnOnce(&mut egui::Ui, &mut Map<String, Value>),
+) {
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(egui::vec2(146.0, 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| left(ui, f));
+        if !label.is_empty() {
+            right_label(ui, label, 70.0);
+            right(ui, f);
+        }
+    });
+}
+
+/// A number field for `key` (no label: the row gives it).
+fn web_number(ui: &mut egui::Ui, f: &mut Map<String, Value>, key: &str, range: std::ops::RangeInclusive<f32>, unit: &str, d: f64) {
+    let mut v = n(f, key, d) as f32;
+    crate::widgets::value_field(ui, &mut v, range, unit, 64.0);
+    f.insert(key.into(), json!(v.round()));
+}
+
+fn web_dropdown(ui: &mut egui::Ui, id: &str, f: &mut Map<String, Value>, key: &str, opts: &[(&str, &str)]) {
+    dropdown_str(ui, id, f, key, opts, 140.0);
+}
+
+fn web_matte(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
+    let mut m = s(f, "matte", "#ffffff");
+    if ui.add(egui::TextEdit::singleline(&mut m).desired_width(64.0)).changed() {
+        f.insert("matte".into(), json!(m));
+    }
+}
+
+/// File › Export › Save for Web (Legacy) and File › Save As: Photoshop's layout. The previews
+/// under Original / Optimized / 2-Up / 4-Up tabs with a zoom bar and the pixel readout below,
+/// the settings in a column on the right.
 fn web_body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     let t = Tokens::get(ui.ctx());
     let Some(doc) = app.session.active().map(|d| d.doc.clone()) else { return };
     let save_as = f.contains_key("__saveAs");
     // A whole-document format has nothing to optimise: just the image.
     let doc_fmt = save_as && is_doc_format(&s(f, "format", "psd"));
-    ui.add_enabled_ui(!doc_fmt, |ui| ui.horizontal(|ui| {
-        let mut view = s(f, "__view", "2up");
-        for (k, l) in [("original", tl!("Original")), ("optimized", tl!("Optimized")), ("2up", "2-Up"), ("4up", "4-Up")] {
-            if ui.selectable_label(view == k, tl!(&l)).clicked() {
-                view = k.into();
-            }
-        }
-        f.insert("__view".into(), json!(view));
-    }));
-    ui.add_space(4.0);
     let p = params(f);
     let mut web_view = WebView::read(f);
+    let (ew, eh) = export_size(&doc, f);
+    let ppp = ui.ctx().pixels_per_point();
+    let preview = egui::vec2(760.0, 560.0);
     ui.horizontal_top(|ui| {
-        // Previews.
-        let area = egui::vec2(600.0, 470.0);
         ui.vertical(|ui| {
-            ui.set_width(area.x);
-            let view = if doc_fmt { "original".to_string() } else { s(f, "__view", "2up") };
-            match view.as_str() {
-                "original" => web_pane(app, ui, area, None, &mut web_view),
-                "optimized" => web_pane(app, ui, area, Some(&p), &mut web_view),
-                "2up" => {
-                    ui.horizontal(|ui| {
-                        web_pane(app, ui, egui::vec2(area.x / 2.0 - 4.0, area.y), None, &mut web_view);
-                        web_pane(app, ui, egui::vec2(area.x / 2.0 - 4.0, area.y), Some(&p), &mut web_view);
-                    });
-                }
-                _ => {
-                    let v = variants(&p);
-                    let cell = egui::vec2(area.x / 2.0 - 4.0, area.y / 2.0 - 2.0);
-                    ui.horizontal(|ui| {
-                        web_pane(app, ui, cell, None, &mut web_view);
-                        web_pane(app, ui, cell, Some(&v[0]), &mut web_view);
-                    });
-                    ui.horizontal(|ui| {
-                        web_pane(app, ui, cell, Some(&v[1]), &mut web_view);
-                        web_pane(app, ui, cell, Some(&v[2]), &mut web_view);
-                    });
-                }
+            ui.set_width(preview.x);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            // Tabs on a strip above the previews.
+            let keys = ["original", "optimized", "2up", "4up"];
+            let names = [tl!("Original"), tl!("Optimized"), tl!("2-Up"), tl!("4-Up")];
+            let mut sel = if doc_fmt { 0 } else { keys.iter().position(|k| *k == s(f, "__view", "2up")).unwrap_or(2) };
+            let (strip, _) = ui.allocate_exact_size(egui::vec2(preview.x, 28.0), egui::Sense::hover());
+            ui.painter().rect_filled(strip, egui::CornerRadius { nw: 3, ne: 3, sw: 0, se: 0 }, t.tab_strip);
+            ui.add_enabled_ui(!doc_fmt, |ui| {
+                crate::tab_strip::pro_tabs(ui, ui.id().with("web-tabs"), strip, strip.right(), &names, &mut sel, false);
+            });
+            if !doc_fmt {
+                f.insert("__view".into(), json!(keys[sel]));
             }
-            // Photoshop's zoom menu, below the previews: percentages of the exported pixels.
-            ui.add_space(4.0);
-            let ppp = ui.ctx().pixels_per_point();
-            let tenths = |z: f32| (z * ppp * 1000.0).round() as i32;
-            let mut current = web_view.zoom.map_or(0, tenths);
-            let mut opts: Vec<(i32, String)> =
-                WEB_ZOOMS.iter().map(|z| if *z == 0.0 { (0, tl!("Fit on Screen").to_string()) } else { ((z * 10.0).round() as i32, format!("{z}%")) }).collect();
-            if !opts.iter().any(|o| o.0 == current) {
-                opts.insert(1, (current, format!("{:.1}%", current as f32 / 10.0)));
-            }
-            let refs: Vec<(i32, &str)> = opts.iter().map(|(k, l)| (*k, l.as_str())).collect();
-            if crate::widgets::dropdown(ui, "web-zoom", &mut current, &refs, 130.0) {
-                web_view.zoom = (current > 0).then(|| current as f32 / 10.0 / 100.0 / ppp);
-                if current == 0 {
-                    web_view.centre = None;
+            // The panes.
+            let inner = egui::vec2(preview.x - 16.0, preview.y - 16.0);
+            let mut hovered = None;
+            let mut main_pane = inner;
+            egui::Frame::NONE.fill(t.card).inner_margin(8).show(ui, |ui| {
+                ui.set_width(inner.x);
+                ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+                let mut pane = |ui: &mut egui::Ui, size: egui::Vec2, p: Option<&Value>, hovered: &mut Option<[u8; 4]>| {
+                    if let Some(px) = web_pane(app, ui, size, p, &mut web_view) {
+                        *hovered = Some(px);
+                    }
+                };
+                match keys[sel] {
+                    "original" => pane(ui, inner, None, &mut hovered),
+                    "optimized" => pane(ui, inner, Some(&p), &mut hovered),
+                    "2up" => {
+                        main_pane = egui::vec2((inner.x - 8.0) / 2.0, inner.y);
+                        ui.horizontal(|ui| {
+                            pane(ui, main_pane, None, &mut hovered);
+                            pane(ui, main_pane, Some(&p), &mut hovered);
+                        });
+                    }
+                    _ => {
+                        let v = variants(&p);
+                        main_pane = egui::vec2((inner.x - 8.0) / 2.0, (inner.y - 8.0) / 2.0);
+                        ui.horizontal(|ui| {
+                            pane(ui, main_pane, None, &mut hovered);
+                            pane(ui, main_pane, Some(&v[0]), &mut hovered);
+                        });
+                        ui.horizontal(|ui| {
+                            pane(ui, main_pane, Some(&v[1]), &mut hovered);
+                            pane(ui, main_pane, Some(&v[2]), &mut hovered);
+                        });
+                    }
                 }
-            }
+            });
+            // Zoom bar and pixel readout, as at the bottom of Photoshop's previews.
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let (z, _) = web_layout(&web_view, main_pane - egui::vec2(0.0, 52.0), ew, eh);
+                let pct = z * ppp * 100.0;
+                let to = |pct: f32| Some(pct / 100.0 / ppp);
+                if crate::icons::button(ui, "minus", 22.0, false, tl!("Zoom out")).clicked() {
+                    web_view.zoom = to(WEB_ZOOMS.iter().rev().copied().find(|v| *v < pct - 0.01).unwrap_or(WEB_ZOOMS[0]));
+                }
+                if crate::icons::button(ui, "plus", 22.0, false, tl!("Zoom in")).clicked() {
+                    web_view.zoom = to(WEB_ZOOMS.iter().copied().find(|v| *v > pct + 0.01).unwrap_or(WEB_ZOOMS[WEB_ZOOMS.len() - 1]));
+                }
+                let mut typed = pct;
+                if crate::widgets::value_field(ui, &mut typed, 1.0..=3200.0, "%", 64.0).changed() {
+                    web_view.zoom = to(typed);
+                }
+                // Photoshop's zoom menu, beside the field.
+                let (cr, cresp) = ui.allocate_exact_size(egui::vec2(18.0, 24.0), egui::Sense::click());
+                crate::widgets::chevron_icon(ui, cr, ui.style().interact(&cresp), false);
+                egui::Popup::menu(&cresp).show(|ui| {
+                    ui.set_min_width(120.0);
+                    for (i, z) in WEB_ZOOMS.iter().enumerate() {
+                        if matches!(i, 6 | 7) {
+                            ui.separator();
+                        }
+                        if ui.button(format!("{}%", z.floor())).clicked() {
+                            web_view.zoom = to(*z);
+                        }
+                    }
+                    ui.separator();
+                    if ui.button(tl!("Actual Pixels")).clicked() {
+                        web_view.zoom = to(100.0);
+                    }
+                    if ui.button(tl!("Fit in View")).clicked() {
+                        // Fit, enlarging a small image too.
+                        let pane = main_pane - egui::vec2(0.0, 52.0);
+                        web_view = WebView { zoom: Some((pane.x / ew).min(pane.y / eh)), centre: None };
+                    }
+                    if ui.button(tl!("Fit on Screen")).clicked() {
+                        web_view = WebView::default();
+                    }
+                });
+                ui.add_space(14.0);
+                let hex = hovered.map(|c| format!("{:02X}{:02X}{:02X}", c[0], c[1], c[2]));
+                let v = |i: usize| hovered.map_or_else(|| "--".to_string(), |c| c[i].to_string());
+                for (label, value) in [("R", v(0)), ("G", v(1)), ("B", v(2)), ("Alpha", v(3)), ("Hex", hex.unwrap_or_else(|| "--".into()))] {
+                    ui.label(egui::RichText::new(format!("{}:", tl!(label))).color(t.text_dim));
+                    ui.add_sized(egui::vec2(if label == "Hex" { 56.0 } else { 30.0 }, 20.0), egui::Label::new(egui::RichText::new(value).font(crate::theme::mono(12.0))));
+                    ui.add_space(6.0);
+                }
+            });
         });
-        ui.add_space(10.0);
+        ui.add_space(12.0);
         // Settings.
         ui.vertical(|ui| {
-            ui.set_width(250.0);
-            ui.label(egui::RichText::new(tl!("Preset")).color(t.text_dim));
-            let mut preset = s(f, "__preset", "");
-            let mut opts: Vec<(String, &str)> = vec![("".into(), "[Unnamed]")];
-            opts.extend(web_cmds::PRESETS.iter().map(|p| (p.to_string(), *p)));
-            if crate::widgets::dropdown(ui, "web-preset", &mut preset, &opts, 230.0) && !preset.is_empty() {
-                if let Some(Value::Object(m)) = web_cmds::preset_settings(&preset).map(|st| st.to_params()) {
-                    f.extend(m);
+            ui.set_width(300.0);
+            ui.spacing_mut().item_spacing.y = 6.0;
+            ui.horizontal(|ui| {
+                right_label(ui, tl!("Preset:"), 52.0);
+                let mut preset = s(f, "__preset", "");
+                let mut opts: Vec<(String, &str)> = vec![("".into(), "[Unnamed]")];
+                opts.extend(web_cmds::PRESETS.iter().map(|p| (p.to_string(), *p)));
+                if crate::widgets::dropdown(ui, "web-preset", &mut preset, &opts, 236.0) && !preset.is_empty() {
+                    if let Some(Value::Object(m)) = web_cmds::preset_settings(&preset).map(|st| st.to_params()) {
+                        f.extend(m);
+                    }
+                    f.insert("__preset".into(), json!(preset));
                 }
-                f.insert("__preset".into(), json!(preset));
-            }
-            ui.add_space(4.0);
-            if save_as {
-                dropdown_str(ui, "web-format", f, "format", &save_as_formats(), 230.0);
-            } else {
-                dropdown_str(ui, "web-format", f, "format", &WEB_FORMATS, 230.0);
-            }
+            });
+            ui.horizontal(|ui| {
+                ui.add_space(56.0);
+                if save_as {
+                    dropdown_str(ui, "web-format", f, "format", &save_as_formats(), 236.0);
+                } else {
+                    dropdown_str(ui, "web-format", f, "format", &WEB_FORMATS, 236.0);
+                }
+            });
             ui.add_space(4.0);
             if doc_fmt {
                 // PDF: Photoshop's editing data, chosen here rather than in a dialog after Save.
@@ -653,98 +808,82 @@ fn web_body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
                 return;
             }
             let fmt = s(f, "format", "jpeg");
+            let transparency = b(f, "transparency", true);
             match fmt.as_str() {
                 "gif" | "png8" => {
-                    dropdown_str(
-                        ui,
-                        "web-palette",
-                        f,
-                        "palette",
-                        &[
-                            ("perceptual", tl!("Perceptual")),
-                            ("selective", tl!("Selective")),
-                            ("adaptive", tl!("Adaptive")),
-                            ("restrictive", tl!("Restrictive (Web)")),
-                            ("exact", tl!("Exact")),
-                        ],
-                        150.0,
-                    );
-                    number(ui, f, "colors", tl!("Colors"), 2.0..=256.0, "", 128.0);
-                    dropdown_str(
-                        ui,
-                        "web-dither",
-                        f,
-                        "dither",
-                        &[("none", tl!("No Dither")), ("diffusion", tl!("Diffusion")), ("pattern", tl!("Pattern")), ("noise", tl!("Noise"))],
-                        150.0,
-                    );
-                    number(ui, f, "ditherAmount", tl!("Dither"), 0.0..=100.0, "%", 88.0);
-                    check(ui, f, "transparency", tl!("Transparency"), true);
-                    check(ui, f, "interlaced", tl!("Interlaced"), false);
-                    number(ui, f, "webSnap", tl!("Web Snap"), 0.0..=100.0, "%", 0.0);
-                }
-                "webp" | "webpLossless" => {
-                    if fmt == "webp" {
-                        number(ui, f, "quality", tl!("Quality"), 0.0..=100.0, "", 60.0);
-                    }
-                    check(ui, f, "transparency", tl!("Transparency"), true);
-                    check(ui, f, "embedIcc", tl!("Embed Color Profile"), false);
+                    let palettes = [
+                        ("perceptual", tl!("Perceptual")),
+                        ("selective", tl!("Selective")),
+                        ("adaptive", tl!("Adaptive")),
+                        ("restrictive", tl!("Restrictive (Web)")),
+                        ("exact", tl!("Exact")),
+                    ];
+                    web_row(ui, f, |ui, f| web_dropdown(ui, "web-palette", f, "palette", &palettes), tl!("Colors:"), |ui, f| web_number(ui, f, "colors", 2.0..=256.0, "", 128.0));
+                    let dithers = [("none", tl!("No Dither")), ("diffusion", tl!("Diffusion")), ("pattern", tl!("Pattern")), ("noise", tl!("Noise"))];
+                    web_row(ui, f, |ui, f| web_dropdown(ui, "web-dither", f, "dither", &dithers), tl!("Dither:"), |ui, f| web_number(ui, f, "ditherAmount", 0.0..=100.0, "%", 88.0));
+                    web_row(ui, f, |ui, f| check(ui, f, "transparency", tl!("Transparency"), true), tl!("Matte:"), web_matte);
+                    web_row(ui, f, |ui, f| check(ui, f, "interlaced", tl!("Interlaced"), false), tl!("Web Snap:"), |ui, f| web_number(ui, f, "webSnap", 0.0..=100.0, "%", 0.0));
                 }
                 "jpeg" => {
-                    number(ui, f, "quality", tl!("Quality"), 0.0..=100.0, "", 60.0);
-                    check(ui, f, "progressive", tl!("Progressive"), false);
-                    check(ui, f, "optimized", tl!("Optimized"), true);
-                    check(ui, f, "embedIcc", tl!("Embed Color Profile"), false);
+                    web_row(ui, f, |ui, f| check(ui, f, "progressive", tl!("Progressive"), false), tl!("Quality:"), |ui, f| web_number(ui, f, "quality", 0.0..=100.0, "", 60.0));
+                    web_row(ui, f, |ui, f| check(ui, f, "optimized", tl!("Optimized"), true), tl!("Matte:"), web_matte);
+                    web_row(ui, f, |ui, f| check(ui, f, "embedIcc", tl!("Embed Color Profile"), false), "", |_, _| {});
+                }
+                "webp" | "webpLossless" => {
+                    let lossy = fmt == "webp";
+                    web_row(ui, f, |ui, f| check(ui, f, "transparency", tl!("Transparency"), true), if lossy { tl!("Quality:") } else { "" }, |ui, f| web_number(ui, f, "quality", 0.0..=100.0, "", 60.0));
+                    web_row(ui, f, |ui, f| check(ui, f, "embedIcc", tl!("Embed Color Profile"), false), if transparency { "" } else { tl!("Matte:") }, web_matte);
                 }
                 "wbmp" => {
-                    dropdown_str(
-                        ui,
-                        "web-dither",
-                        f,
-                        "dither",
-                        &[("none", tl!("No Dither")), ("diffusion", tl!("Diffusion")), ("pattern", tl!("Pattern"))],
-                        150.0,
-                    );
+                    let dithers = [("none", tl!("No Dither")), ("diffusion", tl!("Diffusion")), ("pattern", tl!("Pattern"))];
+                    web_row(ui, f, |ui, f| web_dropdown(ui, "web-dither", f, "dither", &dithers), "", |_, _| {});
                 }
                 _ => {
-                    check(ui, f, "transparency", tl!("Transparency"), true);
-                    check(ui, f, "interlaced", tl!("Interlaced"), false);
+                    web_row(ui, f, |ui, f| check(ui, f, "transparency", tl!("Transparency"), true), if transparency { "" } else { tl!("Matte:") }, web_matte);
+                    web_row(ui, f, |ui, f| check(ui, f, "interlaced", tl!("Interlaced"), false), "", |_, _| {});
                 }
             }
-            if !matches!(fmt.as_str(), "png24" | "webp" | "webpLossless") || !b(f, "transparency", true) {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(tl!("Matte")).color(t.text_dim));
-                    let mut m = s(f, "matte", "#ffffff");
-                    if ui.add(egui::TextEdit::singleline(&mut m).desired_width(80.0)).changed() {
-                        f.insert("matte".into(), json!(m));
-                    }
-                });
-            }
-            ui.add_space(6.0);
+            ui.add_space(4.0);
+            crate::widgets::hairline(ui);
             check(ui, f, "convertToSrgb", tl!("Convert to sRGB"), true);
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(tl!("Metadata")).color(t.text_dim));
+                right_label(ui, tl!("Metadata:"), 64.0);
                 dropdown_str(
                     ui,
                     "web-meta",
                     f,
                     "metadata",
                     &[("none", tl!("None")), ("copyright", tl!("Copyright")), ("copyrightAndContact", tl!("Copyright and Contact Info")), ("all", tl!("All"))],
-                    160.0,
+                    224.0,
                 );
             });
-            ui.add_space(8.0);
+            ui.add_space(4.0);
+            crate::widgets::hairline(ui);
             ui.label(egui::RichText::new(tl!("Image Size")).font(crate::theme::semibold(12.0)).color(t.text));
-            number(ui, f, "percent", tl!("Percent"), 1.0..=1000.0, "%", 100.0);
-            let pct = n(f, "percent", 100.0) / 100.0;
-            ui.label(
-                egui::RichText::new(format!("W: {} px   H: {} px", (f64::from(doc.size.width) * pct).round(), (f64::from(doc.size.height) * pct).round()))
-                    .color(t.text_dim)
-                    .size(11.5),
-            );
+            // W and H stay in proportion (Photoshop's link); both set the percentage.
+            let (dw, dh) = (doc.size.width.max(1) as f32, doc.size.height.max(1) as f32);
+            ui.horizontal(|ui| {
+                right_label(ui, tl!("W:"), 20.0);
+                let mut w = ew;
+                if crate::widgets::value_field(ui, &mut w, 1.0..=300_000.0, "px", 78.0).changed() {
+                    f.insert("percent".into(), json!((w / dw * 100.0).clamp(1.0, 1000.0)));
+                }
+                right_label(ui, tl!("Percent:"), 90.0);
+                web_number(ui, f, "percent", 1.0..=1000.0, "%", 100.0);
+            });
+            ui.horizontal(|ui| {
+                right_label(ui, tl!("H:"), 20.0);
+                let mut h = eh;
+                if crate::widgets::value_field(ui, &mut h, 1.0..=300_000.0, "px", 78.0).changed() {
+                    f.insert("percent".into(), json!((h / dh * 100.0).clamp(1.0, 1000.0)));
+                }
+                right_label(ui, tl!("Quality:"), 90.0);
+                dropdown_str(ui, "web-resample", f, "resample", &[("bicubic", tl!("Bicubic")), ("bilinear", tl!("Bilinear")), ("nearest", tl!("Nearest Neighbor"))], 110.0);
+            });
             let nslices = photosuite_doc::slices::resolve(&doc).len();
             if !doc.slices.is_empty() {
-                ui.add_space(6.0);
+                ui.add_space(4.0);
+                crate::widgets::hairline(ui);
                 ui.label(egui::RichText::new(format!("{nslices} slices")).color(t.text_dim));
                 check(ui, f, "html", tl!("Save HTML and Images"), true);
                 dropdown_str(ui, "web-slices", f, "slices", &[("all", tl!("All Slices")), ("user", tl!("All User Slices"))], 150.0);
