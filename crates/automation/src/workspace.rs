@@ -260,7 +260,7 @@ fn preference_uses_ambient_filesystem(path: &str) -> bool {
 
 fn command_uses_ambient_path(id: &str, params: &Value) -> bool {
     match id {
-        "brush.presets.importAbr" | "gradient.presets.importGrd" | "plugin.install" => {
+        "brush.presets.importAbr" | "gradient.presets.importGrd" | "style.presets.importAsl" | "plugin.install" => {
             // `data` wins over `path` in these commands; any `path` without it reads the filesystem.
             params.get("data").is_none() && params.get("path").is_some()
         }
@@ -518,6 +518,7 @@ mod tests {
         for (id, params) in [
             ("brush.presets.importAbr", serde_json::json!({"path": "/outside/set.abr"})),
             ("gradient.presets.importGrd", serde_json::json!({"path": "/outside/set.grd"})),
+            ("style.presets.importAsl", serde_json::json!({"path": "/outside/set.asl"})),
             ("plugin.install", serde_json::json!({"path": "/outside/plugin.wasm"})),
             ("plugin.reload", serde_json::json!({"path": "/outside/plugins"})),
             ("plugin.reload", serde_json::json!({})),
@@ -528,6 +529,7 @@ mod tests {
         for (id, params) in [
             ("brush.presets.importAbr", serde_json::json!({"data": "QUJD"})),
             ("gradient.presets.importGrd", serde_json::json!({"data": "QUJD"})),
+            ("style.presets.importAsl", serde_json::json!({"data": "QUJD"})),
             ("plugin.install", serde_json::json!({"data": "QUJD"})),
         ] {
             assert!(authorize_engine_command(id, &params).is_ok(), "{id}: {params}");
