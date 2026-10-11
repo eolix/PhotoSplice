@@ -313,6 +313,10 @@ pub fn plan(doc: &Document) -> Result<Plan<'_>, Unsupported> {
     if doc.mode == photosuite_color::ColorMode::Multichannel {
         return Err(Unsupported("Multichannel inks (printed on the CPU)".into()));
     }
+    // Knockout is composited on the CPU (`photosuite_compose`'s knockout frames).
+    if doc.walk().into_iter().any(|(_, _, l)| l.visible && l.knockout != photosuite_doc::Knockout::None) {
+        return Err(Unsupported("knockout (composited on the CPU)".into()));
+    }
     // CMYK documents blend in CMYK (`photosuite_compose`'s CMYK compositor); one visible layer
     // without effects converts the same either way.
     if doc.mode == photosuite_color::ColorMode::Cmyk {

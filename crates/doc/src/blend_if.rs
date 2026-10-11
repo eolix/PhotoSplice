@@ -147,3 +147,37 @@ mod tests {
         assert_eq!(b, BlendIf::default());
     }
 }
+
+/// Blending Options › Advanced Blending › Knockout: where the layer's shape "punches through"
+/// to. Inside it the layers in between are removed and the layer's content (at its fill
+/// opacity) lands on what is there. PSD `knko`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Knockout {
+    #[default]
+    None,
+    /// To the start of the layer's own group.
+    Shallow,
+    /// Out through pass-through groups to the Background layer (or transparency without one),
+    /// stopping at an isolated group's start.
+    Deep,
+}
+
+impl Knockout {
+    /// From the `knko` block's first byte (0 none, 1 shallow, 2 deep).
+    pub fn from_psd(v: u8) -> Knockout {
+        match v {
+            1 => Knockout::Shallow,
+            2 => Knockout::Deep,
+            _ => Knockout::None,
+        }
+    }
+
+    /// The `knko` byte.
+    pub fn psd(self) -> u8 {
+        match self {
+            Knockout::None => 0,
+            Knockout::Shallow => 1,
+            Knockout::Deep => 2,
+        }
+    }
+}

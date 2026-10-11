@@ -150,16 +150,103 @@ fn effects_native(l: &Layer) -> bool {
     })
 }
 
-/// The composite of `layers` over `rect` (transparent backdrop) in CMYK.
-pub(crate) fn composite(layers: &[Layer], rect: Rect, cx: &Ctx) -> CBuf {
+thread_local! {
+    /// Knockout frames, as `knockout` keeps them for the RGB compositor: per group entered its
+    /// starting backdrop and whether it is isolated, over the document's (Background or
+    /// transparency). Empty when no layer knocks out.
+    static KNOCKOUT: std::cell::RefCell<Vec<(Vec<Px>, Rect, bool)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn ko_enter(start: &CBuf, isolated: bool) -> bool {
+    KNOCKOUT.with(|k| {
+        let mut k = k.borrow_mut();
+        if k.is_empty() || k.len() >= 64 {
+            return false;
+        }
+        k.push((start.px.clone(), start.rect, isolated));
+        true
+    })
+}
+
+fn ko_leave() {
+    KNOCKOUT.with(|k| {
+        k.borrow_mut().pop();
+    });
+}
+
+/// What a knockout of `kind` reveals over `rect` (see `knockout::backdrop`).
+fn ko_backdrop(kind: photosuite_doc::Knockout, rect: Rect) -> Option<CBuf> {
+    use photosuite_doc::Knockout;
+    KNOCKOUT.with(|k| {
+        let k = k.borrow();
+        let (px, r, _) = match kind {
+            Knockout::None => return None,
+            Knockout::Shallow => k.last(),
+            Knockout::Deep => k.iter().rev().find(|f| f.2),
+        }?;
+        let mut out = CBuf::transparent(rect);
+        let both = r.intersect(&rect);
+        let (bw, ow) = (r.width() as usize, rect.width() as usize);
+        for y in both.y0..both.y1 {
+            for x in both.x0..both.x1 {
+                let (i, o) = ((y - r.y0) as usize * bw + (x - r.x0) as usize, (y - rect.y0) as usize * ow + (x - rect.x0) as usize);
+                if let (Some(s), Some(d)) = (px.get(i), out.px.get_mut(o)) {
+                    *d = *s;
+                }
+            }
+        }
+        Some(out)
+    })
+}
+
+/// `a` replaced by `b` over coverage `k` (premultiplied mix, straight-alpha buffers).
+fn ko_mix(a: Px, b: Px, k: f32) -> Px {
+    let k = k.clamp(0.0, 1.0);
+    let (wa, wb) = (a[4] * (1.0 - k), b[4] * k);
+    let alpha = wa + wb;
+    if alpha <= 0.0 {
+        return [0.0; 5];
+    }
+    let mut o = [0.0; 5];
+    for c in 0..4 {
+        o[c] = (a[c] * wa + b[c] * wb) / alpha;
+    }
+    o[4] = alpha;
+    o
+}
+
+/// The composite of a document's `layers` over `rect` in CMYK (its knockout frame included).
+pub(crate) fn composite_document(layers: &[Layer], rect: Rect, cx: &Ctx) -> CBuf {
+    let ko = crate::knockout::any(layers, 0);
+    if ko {
+        let mut base = CBuf::transparent(rect);
+        if let Some(bg) = crate::knockout::background(layers) {
+            stack(std::slice::from_ref(bg), &mut base, cx);
+        }
+        KNOCKOUT.with(|k| k.borrow_mut().push((base.px, rect, true)));
+    }
     let mut b = CBuf::transparent(rect);
     stack(layers, &mut b, cx);
+    if ko {
+        ko_leave();
+    }
     b
 }
 
-/// The composite of `layers` over `rect` as screen RGB.
+/// The composite of `layers` over `rect` (transparent backdrop) in CMYK: an isolated group.
+pub(crate) fn composite(layers: &[Layer], rect: Rect, cx: &Ctx) -> CBuf {
+    let mut b = CBuf::transparent(rect);
+    let ko = ko_enter(&b, true);
+    stack(layers, &mut b, cx);
+    if ko {
+        ko_leave();
+    }
+    b
+}
+
+/// The composite of a document's `layers` over `rect` as screen RGB.
 pub(crate) fn render(layers: &[Layer], rect: Rect, cx: &Ctx) -> Buffer {
-    let c = composite(layers, rect, cx);
+    let c = composite_document(layers, rect, cx);
     Buffer { rect, px: c.px.iter().map(to_rgba).collect() }
 }
 
@@ -379,7 +466,11 @@ fn plain(l: &Layer, clipped: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
         LayerContent::Group(g) if l.blend == BlendMode::PassThrough && l.fill_opacity >= 1.0 && !crate::effects::has_effects(l) => {
             let needs_mix = opacity < 1.0 || l.mask.is_some() || l.vector_mask.is_some();
             let before = needs_mix.then(|| backdrop.px.clone());
+            let ko = ko_enter(backdrop, false);
             stack(&g.children, backdrop, cx);
+            if ko {
+                ko_leave();
+            }
             if let Some(before) = before {
                 let mv = crate::mask_vals(l, rect, cx);
                 for (i, (p, a)) in backdrop.px.iter_mut().zip(&before).enumerate() {
@@ -438,6 +529,14 @@ fn plain(l: &Layer, clipped: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
                     crate::effects::composite_with_effects_prepared(l, content, b, &maps, bounds, cx.patterns, None);
                 });
                 return;
+            }
+            // Knockout (see `knockout`): the shape first reveals what it knocks out to.
+            if l.knockout != photosuite_doc::Knockout::None
+                && let Some(kb) = ko_backdrop(l.knockout, rect)
+            {
+                for ((b, s), k) in backdrop.px.iter_mut().zip(&src.px).zip(&kb.px) {
+                    *b = ko_mix(*b, *k, s[4] * l.opacity);
+                }
             }
             blend_into(backdrop, &src, l.blend, opacity);
         }

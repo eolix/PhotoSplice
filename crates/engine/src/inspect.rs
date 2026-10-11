@@ -109,6 +109,9 @@ fn layer_sel(l: &Layer, selected: &[photosuite_doc::LayerId]) -> Value {
         _ => {}
     }
     // Advanced Blending › Channels (only when some channel is left out).
+    if l.knockout != photosuite_doc::Knockout::None {
+        v["knockout"] = json!(if l.knockout == photosuite_doc::Knockout::Shallow { "shallow" } else { "deep" });
+    }
     if l.excluded_channels != 0 {
         v["channels"] = json!((0..4).map(|i| l.excluded_channels & (1 << i) == 0).collect::<Vec<_>>());
     }

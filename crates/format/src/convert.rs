@@ -196,6 +196,7 @@ fn layer_m(l: &Layer, sink: &mut dyn Sink) -> LayerM {
         fill_cache: l.fill_cache.as_ref().map(|fc| FillCacheM { fill: fc.fill.clone(), surface: surface_m(&fc.surface, sink) }),
         link_group: l.link_group,
         excluded_channels: l.excluded_channels,
+        knockout: l.knockout,
         blend_if: l.blend_if.clone(),
         video: l.video.as_ref().map(|v| video_m(v, sink)),
     }
@@ -487,6 +488,7 @@ impl Loader<'_> {
             fill_cache,
             link_group: m.link_group,
             excluded_channels: m.excluded_channels,
+            knockout: m.knockout,
             blend_if: m.blend_if.clone(),
             video: m.video.as_ref().map(|v| self.video(v)).transpose()?,
         })

@@ -223,6 +223,9 @@ pub struct LayerM {
     /// Blend If ranges (empty = everything blends).
     #[serde(default, skip_serializing_if = "photosuite_doc::BlendIf::is_default")]
     pub blend_if: photosuite_doc::BlendIf,
+    /// Advanced Blending knockout (default none).
+    #[serde(default, skip_serializing_if = "is_no_knockout")]
+    pub knockout: photosuite_doc::Knockout,
     #[serde(default)]
     pub video: Option<VideoDataM>,
 }
@@ -325,6 +328,10 @@ pub struct ChannelM {
 
 fn is_zero_u32(v: &u32) -> bool {
     *v == 0
+}
+
+fn is_no_knockout(k: &photosuite_doc::Knockout) -> bool {
+    *k == photosuite_doc::Knockout::None
 }
 
 fn default_channel_color() -> Color {

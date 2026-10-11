@@ -22,6 +22,7 @@ mod cmyk;
 pub mod effects;
 pub mod fill_layout;
 pub mod gradient_fill;
+mod knockout;
 pub mod lab;
 pub mod masks;
 pub mod multichannel;
@@ -222,7 +223,7 @@ pub fn render_ink_bands<E>(doc: &Document, rect: Rect, band_rows: i32, mut sink:
         prepare_effects(&doc.layers, band, &cx, |f| photosuite_color::convert::with_cmyk_space(space, &mut *f));
         let px = tiled(band, RENDER_TILE, [0.0; 5], |t| {
             photosuite_color::convert::with_cmyk_space(space, || {
-                cmyk::composite(&doc.layers, t, &cx).px.iter().map(|p| [1.0 - p[0], 1.0 - p[1], 1.0 - p[2], 1.0 - p[3], p[4]]).collect()
+                cmyk::composite_document(&doc.layers, t, &cx).px.iter().map(|p| [1.0 - p[0], 1.0 - p[1], 1.0 - p[2], 1.0 - p[3], p[4]]).collect()
             })
         });
         sink(InkBuffer { rect: band, px })?;
@@ -238,7 +239,11 @@ fn composite_doc(doc: &Document, rect: Rect, cx: &Ctx) -> Buffer {
         return cmyk::render(&doc.layers, rect, cx);
     }
     let mut b = multichannel::backdrop(doc, rect);
+    let ko = knockout::enter_document(doc, rect, cx);
     composite_stack(&doc.layers, &mut b, cx);
+    if ko {
+        knockout::leave();
+    }
     b
 }
 
@@ -772,7 +777,12 @@ fn render_content(layer: &Layer, rect: Rect, cx: &Ctx) -> Option<Buffer> {
     let mut buf = match &layer.content {
         LayerContent::Group(g) => {
             let mut b = Buffer::transparent(rect);
+            // An isolated group: knockouts inside stop at its (transparent) start.
+            let ko = knockout::enter(&b, true);
             composite_stack(&g.children, &mut b, cx);
+            if ko {
+                knockout::leave();
+            }
             b
         }
         LayerContent::Fill(f) => match &layer.fill_cache {
@@ -1158,7 +1168,13 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
         let has_clipped = clipped.iter().any(|c| c.visible);
         // Children can draw directly unless mixing or clipping needs the original backdrop.
         let before = (needs_mix || has_clipped).then(|| backdrop.clone());
+        // A pass-through group: shallow knockouts inside reach its starting backdrop, deep
+        // ones go on through it.
+        let ko = knockout::enter(backdrop, false);
         composite_stack(&g.children, backdrop, cx);
+        if ko {
+            knockout::leave();
+        }
         if needs_mix && let Some(before) = &before {
             let mv = mask_vals(layer, rect, cx);
             for (i, (p, a)) in backdrop.px.iter_mut().zip(&before.px).enumerate() {
@@ -1272,6 +1288,15 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
     let Some(mut content) = render_content(layer, rect, cx) else { return };
     for c in clipped.iter().filter(|c| c.visible) {
         composite_atop(c, &mut content, cx);
+    }
+    // Knockout: the layer's shape (its alpha, at the layer's opacity) first replaces the
+    // backdrop with what it knocks out to; the content then lands there at its fill opacity.
+    if layer.knockout != photosuite_doc::Knockout::None
+        && let Some(kb) = knockout::backdrop(layer.knockout, rect)
+    {
+        for ((b, c), k) in backdrop.px.iter_mut().zip(&content.px).zip(&kb.px) {
+            *b = knockout::mix(*b, *k, c[3] * layer.opacity);
+        }
     }
     blend_into_g(backdrop, &content, layer.blend, opacity, text_gamma(layer));
 }

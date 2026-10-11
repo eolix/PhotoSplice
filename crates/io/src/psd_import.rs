@@ -243,6 +243,11 @@ impl Ctx<'_> {
         if let Some(b) = rec.block(b"brst") {
             l.excluded_channels = crate::blocks::parse_brst(&b.data);
         }
+        // Knockout (`knko`: none / shallow / deep); kept in `psd_blocks` too, rewritten from the
+        // field on export.
+        if let Some(v) = rec.block(b"knko").and_then(|b| b.data.first().copied()) {
+            l.knockout = photosuite_doc::Knockout::from_psd(v);
+        }
         // Blend If lives in the layer record's blending ranges.
         l.blend_if = crate::blocks::blend_if_from_ranges(&rec.blending_ranges);
         l.psd_id = rec.layer_id();

@@ -669,6 +669,20 @@ fn advanced_blending_channels() {
 }
 
 #[test]
+fn advanced_blending_knockout() {
+    let mut s = session_with_doc();
+    let r = s.execute("layer.new.layer", json!({})).unwrap();
+    let id = r["layer"].as_u64().unwrap();
+    s.execute("layer.setProps", json!({"knockout": "deep"})).unwrap();
+    assert_eq!(s.active().unwrap().doc.layer(LayerId(id)).unwrap().knockout, photosuite_doc::Knockout::Deep);
+    let ins = crate::inspect::layer(s.active().unwrap().doc.layer(LayerId(id)).unwrap());
+    assert_eq!(ins["knockout"], json!("deep"));
+    assert!(s.execute("layer.setProps", json!({"knockout": "sideways"})).is_err());
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.active().unwrap().doc.layer(LayerId(id)).unwrap().knockout, photosuite_doc::Knockout::None);
+}
+
+#[test]
 fn move_document_reorders_tabs_and_keeps_the_active_one() {
     let mut s = Session::new();
     for name in ["a", "b", "c"] {

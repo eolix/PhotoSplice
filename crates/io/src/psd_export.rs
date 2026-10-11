@@ -552,6 +552,13 @@ impl Ex {
             }
             None => raw.retain(|(k, _)| k != b"fxrp"),
         }
+        // Knockout: written from the field (in place); a non-default one also on groups.
+        let knko = vec![l.knockout.psd(), 0, 0, 0];
+        match raw.iter_mut().find(|(k, _)| k == b"knko") {
+            Some(e) => e.1 = knko,
+            None if l.knockout != photosuite_doc::Knockout::None => raw.push((*b"knko", knko)),
+            None => {}
+        }
         // Advanced Blending channel restrictions: written from the field (in place).
         match crate::blocks::brst_data(l.excluded_channels) {
             Some(data) => match raw.iter_mut().find(|(k, _)| k == b"brst") {

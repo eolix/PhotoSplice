@@ -735,3 +735,23 @@ fn indexed_and_bitmap_keep_their_mode() {
         assert!(w2.iter().any(|w| w.contains("written as")));
     }
 }
+
+/// Knockout (`knko`) reads into the layer and is written back from it (groups too).
+#[test]
+fn knockout_round_trips() {
+    use photosuite_doc::{Document, Knockout, Layer, Size};
+    let mut d = Document::new("k", Size::new(4, 4), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    let mut a = Layer::raster("a", d.pixel_format());
+    a.knockout = Knockout::Shallow;
+    let mut g = Layer::group("g", vec![Layer::raster("in", d.pixel_format())]);
+    g.knockout = Knockout::Deep;
+    d.layers = vec![a, g];
+    let back = import("x.psd", &export(&d, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap().document;
+    assert_eq!(back.layers[0].knockout, Knockout::Shallow);
+    assert_eq!(back.layers[1].knockout, Knockout::Deep);
+    // Turned off, it is written as off.
+    let mut off = back.clone();
+    off.layers[0].knockout = Knockout::None;
+    let again = import("x.psd", &export(&off, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap().document;
+    assert_eq!(again.layers[0].knockout, Knockout::None);
+}

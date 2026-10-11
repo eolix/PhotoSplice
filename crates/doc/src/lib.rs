@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use adjust::Adjustment;
 pub use analysis::{CountGroup, Measurement, MeasurementScale, Note, Ruler};
-pub use blend_if::{BlendIf, BlendRange};
+pub use blend_if::{BlendIf, BlendRange, Knockout};
 pub use comps::{Artboard, ArtboardBackground, CompAppearance, CompLayerState, LayerComp};
 pub use effects::{
     Bevel, BevelContour, BevelStyle, BevelTechnique, BevelTexture, Contour, Effect, FxCommon, FxPaint, GlobalLight, Glow, GlowSource, GlowTechnique, Gradient,
@@ -495,6 +495,8 @@ pub struct Layer {
     /// outside which the layer's pixels are hidden. Default = everything blends. PSD layer-record
     /// blending ranges.
     pub blend_if: BlendIf,
+    /// Blending Options › Advanced Blending › Knockout. PSD `knko`.
+    pub knockout: Knockout,
     /// Layer › Video Layers frame stack (None for a normal layer).
     pub video: Option<VideoData>,
 }
@@ -521,6 +523,7 @@ impl Layer {
             link_group: None,
             excluded_channels: 0,
             blend_if: BlendIf::default(),
+            knockout: Knockout::None,
             video: None,
         }
     }
