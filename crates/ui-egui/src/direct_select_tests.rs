@@ -122,16 +122,18 @@ fn pen_with_command_edits_paths_and_ends_the_one_being_drawn() {
     for p in [[30.0, 30.0], [90.0, 30.0]] {
         click(&mut app, p, Modifiers::NONE);
     }
-    assert_eq!(app.ui.pen.as_ref().map(|p| p.knots.len()), Some(2));
+    assert!(app.ui.pen.drawing());
+    assert_eq!(work(&app).subpaths[0].knots.len(), 2, "drawn on the work path as it goes");
     // ⌘-drag (Ctrl-drag off the Mac) on the second anchor: the path is finished and edited.
     drag(&mut app, [90.0, 30.0], [90.0, 70.0], Modifiers::COMMAND);
-    assert!(app.ui.pen.is_none());
+    assert!(!app.ui.pen.drawing());
     assert_eq!(app.ui.tool, Tool::Pen, "the Pen stays the tool");
     let wp = work(&app);
     assert_eq!((wp.subpaths[0].closed, wp.subpaths[0].knots[1].anchor), (false, Point::new(90.0, 70.0)));
-    // Without ⌘ the Pen draws again.
+    // Without ⌘ the Pen draws again: a new subpath.
     click(&mut app, [150.0, 150.0], Modifiers::NONE);
-    assert_eq!(app.ui.pen.as_ref().map(|p| p.knots.len()), Some(1));
+    assert!(app.ui.pen.drawing());
+    assert_eq!(work(&app).subpaths.last().map(|s| s.knots.len()), Some(1));
 }
 
 #[test]
@@ -143,10 +145,10 @@ fn pen_with_alt_converts_points() {
     drag(&mut app, [40.0, 120.0], [40.0, 140.0], Modifiers::ALT);
     let k = work(&app).subpaths[0].knots[3];
     assert_eq!((k.in_ctrl, k.out_ctrl, k.smooth), (Point::new(40.0, 100.0), Point::new(40.0, 140.0), true), "⌥-drag pulls out smooth handles");
-    assert!(app.ui.pen.is_none(), "no pen path was started");
+    assert!(!app.ui.pen.drawing(), "no pen path was started");
     // ⌥ off the path is a plain Pen click.
     click(&mut app, [170.0, 170.0], Modifiers::ALT);
-    assert!(app.ui.pen.is_some());
+    assert!(app.ui.pen.drawing());
 }
 
 #[test]

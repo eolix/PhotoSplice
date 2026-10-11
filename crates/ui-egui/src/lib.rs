@@ -123,6 +123,7 @@ mod tab_strip;
 pub mod theme;
 pub mod tiff_options_ui;
 pub mod pdf_import_ui;
+pub mod pen_tool;
 mod timeline_ui;
 pub mod tone;
 pub mod tool_feedback;
@@ -1057,8 +1058,8 @@ impl eframe::App for PhotosuiteApp {
         if self.ui.text_edit.is_some() && !self.ui.tool.is_type() {
             type_tool::commit(self);
         }
-        if self.ui.pen.is_some() && self.ui.tool != state::Tool::Pen {
-            vector_ui::pen_commit(self, false);
+        if self.ui.pen.drawing() && !self.ui.tool.is_pen() {
+            pen_tool::end(self);
         }
         transform_tool::end_if_left(self);
         self.collect_screenshots(ctx);

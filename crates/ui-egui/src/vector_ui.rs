@@ -6,21 +6,13 @@ use egui::{Color32, Pos2, Rect, Sense, Stroke, pos2, vec2};
 use photosuite_doc::vector::Path;
 use photosuite_doc::{Document, LayerContent};
 use photosuite_geom::Affine;
-use serde::{Deserialize, Serialize};
+
 use serde_json::{Value, json};
 
 use crate::PhotosuiteApp;
 use crate::canvas::ViewXform;
 use crate::state::{Tool, ToolOptions};
 use crate::theme::Tokens;
-
-/// Pen tool path under construction: knots as [anchor, in, out] (document px).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct PenPath {
-    pub knots: Vec<[[f64; 2]; 3]>,
-    #[serde(skip)]
-    pub dragging: bool,
-}
 
 pub fn is_shape_tool(t: Tool) -> bool {
     matches!(t, Tool::Rectangle | Tool::EllipseShape | Tool::Triangle | Tool::Polygon | Tool::Line | Tool::CustomShape)
@@ -119,70 +111,6 @@ pub fn draw_shape_preview(app: &PhotosuiteApp, painter: &egui::Painter, xf: &Vie
 // ---------------------------------------------------------------------------------------------
 // Pen
 
-fn pen_to_json(pen: &PenPath, closed: bool) -> Value {
-    json!({"subpaths": [{"closed": closed, "knots": pen.knots.iter().map(|k| json!({"anchor": k[0], "in": k[1], "out": k[2], "smooth": k[1] != k[0] || k[2] != k[0]})).collect::<Vec<_>>()}]})
-}
-
-/// Pen press: close on the first anchor, else add an anchor (dragging pulls smooth handles).
-pub fn pen_down(app: &mut PhotosuiteApp, x: f64, y: f64) {
-    let tol = 6.0 / app.current_zoom().max(0.01) as f64;
-    let pen = app.ui.pen.get_or_insert_with(PenPath::default);
-    if let Some(first) = pen.knots.first().map(|k| k[0])
-        && pen.knots.len() >= 2
-        && (first[0] - x).hypot(first[1] - y) < tol
-    {
-        pen_commit(app, true);
-        return;
-    }
-    pen.knots.push([[x, y]; 3]);
-    pen.dragging = true;
-}
-
-pub fn pen_move(app: &mut PhotosuiteApp, x: f64, y: f64) {
-    if let Some(pen) = app.ui.pen.as_mut()
-        && pen.dragging
-        && let Some(k) = pen.knots.last_mut()
-    {
-        let a = k[0];
-        k[2] = [x, y];
-        k[1] = [2.0 * a[0] - x, 2.0 * a[1] - y];
-    }
-}
-
-pub fn pen_up(app: &mut PhotosuiteApp) {
-    if let Some(pen) = app.ui.pen.as_mut() {
-        pen.dragging = false;
-    }
-}
-
-/// Finish the pen path: a work path (Path mode) or a new shape layer (Shape mode).
-pub fn pen_commit(app: &mut PhotosuiteApp, closed: bool) {
-    let Some(pen) = app.ui.pen.take() else { return };
-    if pen.knots.len() < 2 {
-        return;
-    }
-    let path = pen_to_json(&pen, closed);
-    let r = if app.ui.tool_options.vector_mode == "shape" {
-        let fill = if closed && app.ui.tool_options.shape_fill { json!(hex(app.session.tools.foreground)) } else { Value::Null };
-        let stroke =
-            if closed { stroke_param(app) } else { json!({"width": app.ui.tool_options.stroke_width.max(1.0), "color": hex(app.session.tools.foreground)}) };
-        app.run("shape.create", json!({"kind": "path", "path": path, "fill": fill, "stroke": stroke}))
-    } else if let Some((id, existing)) = targeted_vector_mask(app) {
-        // A targeted vector mask takes the new subpath (#196), as in Photoshop.
-        let mut p = photosuite_engine::vector_cmds::path_json(&existing);
-        if let (Some(subs), Some(new)) = (p.get_mut("subpaths").and_then(Value::as_array_mut), path.get("subpaths").and_then(Value::as_array)) {
-            subs.extend(new.iter().cloned());
-        }
-        app.run("layer.vectorMask.edit", json!({"layer": id, "path": p}))
-    } else {
-        app.run("path.set", json!({"name": "work", "path": path}))
-    };
-    if let Err(e) = r {
-        app.ui.status = e;
-        app.ui.status_error = true;
-    }
-}
-
 /// The path that path commands act on without a name: the one selected in the Paths panel, else
 /// the work path, else the selected layer's shape path or vector mask; `None` when there's none.
 pub fn active_path_name(app: &PhotosuiteApp) -> Option<String> {
@@ -201,11 +129,10 @@ pub fn active_path_name(app: &PhotosuiteApp) -> Option<String> {
 /// Selection tool or a path selected in the Paths panel. A path being drawn with the Pen is
 /// finished first and loads; otherwise [`active_path_name`]. `params` may set feather, mode…
 pub fn path_to_selection(app: &mut PhotosuiteApp, params: Value) -> Result<Value, String> {
-    if app.ui.pen.as_ref().is_some_and(|p| p.knots.len() >= 2) {
-        // The finished path becomes the work path, or a shape layer's path or a vector mask.
-        let on_layer = app.ui.tool_options.vector_mode == "shape" || targeted_vector_mask(app).is_some();
-        pen_commit(app, false);
-        app.ui.selected_path = Some(if on_layer { "layer" } else { "work" }.into());
+    // The path being drawn with the Pen is the one that loads.
+    if let Some(a) = app.ui.pen.active {
+        app.ui.selected_path = Some(if matches!(a.target, crate::direct_select::PathRef::Work) { "work" } else { "layer" }.into());
+        crate::pen_tool::end(app);
     }
     let name = active_path_name(app)
         .ok_or_else(|| tl!("No path to make a selection from: draw one with the Pen tool or select one in the Paths panel.").to_string())?;
@@ -336,7 +263,7 @@ pub(crate) fn draw_handle(painter: &egui::Painter, anchor: Pos2, handle: Pos2, a
 /// Work path / active shape path outlines, anchors, and the pen path in progress.
 pub fn draw_overlay(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform, doc: &Document) {
     let tool = app.ui.tool;
-    let vector_tool = matches!(tool, Tool::Pen | Tool::PathSelection) || is_shape_tool(tool);
+    let vector_tool = tool.is_pen() || tool == Tool::PathSelection || is_shape_tool(tool);
     let accent = Tokens::get(painter.ctx()).accent;
     let to_scr = |q: [f64; 2]| xf.to_screen(q[0] as f32, q[1] as f32);
     let draw_path = |p: &Path, anchors: bool| {
@@ -367,30 +294,9 @@ pub fn draw_overlay(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform
             draw_path(&p, tool == Tool::PathSelection);
         }
     }
-    // Pen path in progress, with handles of the last knot and a rubber band to the pointer.
-    if let Some(pen) = &app.ui.pen {
-        let mut pts = Vec::new();
-        for w in pen.knots.windows(2) {
-            for k in 0..=16 {
-                pts.push(to_scr(bezier(w[0][0], w[0][2], w[1][1], w[1][0], k as f64 / 16.0)));
-            }
-        }
-        painter.add(egui::Shape::line(pts, Stroke::new(1.5, accent)));
-        if let (Some(last), Some(h)) = (pen.knots.last(), app.hover_doc)
-            && !pen.dragging
-        {
-            painter.add(egui::Shape::dashed_line(&[to_scr(last[0]), to_scr(h)], Stroke::new(1.0, accent), 4.0, 3.0));
-        }
-        for (i, k) in pen.knots.iter().enumerate() {
-            let c = to_scr(k[0]);
-            let last = i + 1 == pen.knots.len();
-            if last && k[2] != k[0] {
-                for hnd in [k[1], k[2]] {
-                    draw_handle(painter, c, to_scr(hnd), accent);
-                }
-            }
-            draw_anchor(painter, c, last, accent);
-        }
+    // The Pen: the path it draws on, the end new points join, and what a click would do.
+    if matches!(tool, Tool::Pen | Tool::CurvaturePen | Tool::FreeformPen) {
+        crate::pen_tool::draw_overlay(app, painter, &to_scr, accent);
     }
 }
 
@@ -399,7 +305,7 @@ pub fn draw_overlay(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform
 
 /// Options bar for vector tools; false for other tools.
 pub fn options_bar(app: &mut PhotosuiteApp, ui: &mut egui::Ui, tool: Tool) -> bool {
-    if !(is_shape_tool(tool) || matches!(tool, Tool::Pen | Tool::PathSelection | Tool::DirectSelection)) {
+    if !(is_shape_tool(tool) || tool.is_pen() || matches!(tool, Tool::PathSelection | Tool::DirectSelection)) {
         return false;
     }
     let t = Tokens::get(ui.ctx());
@@ -422,17 +328,44 @@ pub fn options_bar(app: &mut PhotosuiteApp, ui: &mut egui::Ui, tool: Tool) -> bo
         );
         return true;
     }
-    if tool == Tool::Pen {
+    match tool {
+        Tool::AddAnchorPoint => {
+            lbl(ui, tl!("Click a segment to add a point · Drag to move it"));
+            return true;
+        }
+        Tool::DeleteAnchorPoint => {
+            lbl(ui, tl!("Click a point to delete it"));
+            return true;
+        }
+        Tool::ConvertPoint => {
+            lbl(ui, tl!("Click a point: corner · Drag from a point: smooth · Drag a handle: move it alone"));
+            return true;
+        }
+        _ => {}
+    }
+    if matches!(tool, Tool::Pen | Tool::CurvaturePen | Tool::FreeformPen) {
         let opts = [("path".to_string(), tl!("Path")), ("shape".to_string(), tl!("Shape"))];
         crate::widgets::dropdown(ui, "pen-mode", &mut o.vector_mode, &opts, 80.0);
         crate::widgets::vline(ui, 22.0);
-        lbl(
-            ui,
-            &crate::i18n::fmt(
-                tl!("Click: corner · Drag: smooth · Click first point: close · {key} finish · Esc cancel"),
-                &[("key", &crate::shortcuts::pretty("Enter"))],
-            ),
-        );
+        // Path operations: how a new subpath combines with the path (Shape mode: New Layer first).
+        let mut ops = vec![("combine".to_string(), tl!("Combine Shapes")), ("subtract".to_string(), tl!("Subtract Front Shape")), ("intersect".to_string(), tl!("Intersect Shape Areas")), ("exclude".to_string(), tl!("Exclude Overlapping Shapes"))];
+        if o.vector_mode == "shape" {
+            ops.insert(0, ("new".to_string(), tl!("New Layer")));
+        } else if o.pen_op == "new" {
+            o.pen_op = "combine".into();
+        }
+        crate::widgets::dropdown(ui, "pen-op", &mut o.pen_op, &ops, 170.0);
+        if tool == Tool::Pen {
+            crate::widgets::vline(ui, 22.0);
+            crate::widgets::checkbox(ui, &mut o.auto_add_delete, tl!("Auto Add/Delete"));
+        }
+        crate::widgets::vline(ui, 22.0);
+        let hint = match tool {
+            Tool::CurvaturePen => tl!("Click: smooth point · {alt}-click: corner · Drag a point to move it · Click first point: close · {key} finish"),
+            Tool::FreeformPen => tl!("Drag to draw a path · {key} finish"),
+            _ => tl!("Click: corner · Drag: smooth ({alt}: cusp) · Click first point: close · {key} finish"),
+        };
+        lbl(ui, &crate::i18n::fmt(hint, &[("key", &crate::shortcuts::pretty("Enter")), ("alt", &crate::shortcuts::pretty("Alt"))]));
         return true;
     }
     let mut mode = "shape".to_string();
@@ -954,28 +887,6 @@ mod tests {
         assert!(preview(&app, Tool::Rectangle, [10.2, 40.0]).is_none(), "too thin to draw");
         assert!(photosuite_engine::vector_cmds::shape_path(&json!({"kind": "nope", "rect": [0, 0, 5, 5]})).is_err());
         assert!(photosuite_engine::vector_cmds::shape_path(&json!({"kind": "rect"})).is_err());
-    }
-
-    #[test]
-    fn pen_builds_and_closes_a_work_path() {
-        let mut app = app();
-        app.ui.tool = Tool::Pen;
-        for (x, y) in [(20.0, 20.0), (120.0, 20.0)] {
-            pen_down(&mut app, x, y);
-            pen_up(&mut app);
-        }
-        pen_down(&mut app, 120.0, 120.0);
-        pen_move(&mut app, 140.0, 140.0); // smooth knot
-        pen_up(&mut app);
-        pen_down(&mut app, 20.5, 20.5); // click the first anchor: close
-        assert!(app.ui.pen.is_none());
-        let wp = app.session.active().unwrap().doc.work_path.clone().unwrap();
-        assert!(wp.subpaths[0].closed && wp.subpaths[0].knots.len() == 3);
-        assert!(wp.subpaths[0].knots[2].smooth);
-        // Path Selection moves it.
-        path_selection_finish(&mut app, [50.0, 50.0], [60.0, 55.0]);
-        let wp = app.session.active().unwrap().doc.work_path.clone().unwrap();
-        assert_eq!((wp.subpaths[0].knots[0].anchor.x, wp.subpaths[0].knots[0].anchor.y), (30.0, 25.0));
     }
 
     /// #534: dragging in a shape's fill picker, opened from the Properties panel at the right edge

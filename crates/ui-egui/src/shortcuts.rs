@@ -275,15 +275,9 @@ pub fn handle(app: &mut PhotosuiteApp, ctx: &egui::Context) {
         return;
     }
     // Pen path in progress: ↩ finishes (open path), Esc cancels.
-    if app.ui.pen.is_some() {
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
-            crate::vector_ui::pen_commit(app, false);
-            return;
-        }
-        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
-            app.ui.pen = None;
-            return;
-        }
+    if app.ui.pen.drawing() && (ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) || ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape))) {
+        crate::pen_tool::end(app);
+        return;
     }
     // Inline type editing eats text and navigation keys; ⌘-shortcuts still reach the menus.
     let editing = crate::type_tool::handle_keys(app, ctx);

@@ -2454,8 +2454,8 @@ fn tool_move(app: &mut PhotosuiteApp, x: f64, y: f64, pressure: f32, mods: egui:
     if tool.is_type() && app.drag.is_none() {
         crate::type_tool::pointer_move(app, x, y);
     }
-    if tool == Tool::Pen {
-        crate::vector_ui::pen_move(app, x, y);
+    if tool.is_pen() {
+        crate::pen_tool::moved(app, x, y, mods);
     }
     let zoom = app.current_zoom();
     if let Some(d) = app.drag.as_mut().filter(|d| d.reposition) {
@@ -2604,8 +2604,12 @@ pub fn tool_event(app: &mut PhotosuiteApp, ev: ToolEvent, mods: egui::Modifiers)
                 return;
             }
             match tool {
-                Tool::Pen => {
-                    crate::vector_ui::pen_down(app, x, y);
+                Tool::Pen | Tool::CurvaturePen | Tool::FreeformPen => {
+                    crate::pen_tool::down(app, x, y, mods);
+                    return;
+                }
+                Tool::AddAnchorPoint | Tool::DeleteAnchorPoint => {
+                    crate::pen_tool::anchor_down(app, x, y, tool == Tool::AddAnchorPoint);
                     return;
                 }
                 Tool::CloneStamp | Tool::Healing if mods.alt => {
@@ -2667,8 +2671,8 @@ pub fn tool_event(app: &mut PhotosuiteApp, ev: ToolEvent, mods: egui::Modifiers)
                 e.dragging = false;
                 e.resize = None;
             }
-            if tool == Tool::Pen {
-                crate::vector_ui::pen_up(app);
+            if tool.is_pen() {
+                crate::pen_tool::up(app);
             }
             let zoom = app.current_zoom();
             let Some(mut d) = app.drag.take() else { return };

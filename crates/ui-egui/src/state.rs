@@ -44,6 +44,11 @@ pub enum Tool {
     QuickSelection,
     ObjectSelection,
     Pen,
+    FreeformPen,
+    CurvaturePen,
+    AddAnchorPoint,
+    DeleteAnchorPoint,
+    ConvertPoint,
     PathSelection,
     DirectSelection,
     Rectangle,
@@ -57,7 +62,7 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Tool; 49] = [
+    pub const ALL: [Tool; 54] = [
         Tool::Move,
         Tool::RectMarquee,
         Tool::EllipseMarquee,
@@ -97,6 +102,11 @@ impl Tool {
         Tool::QuickSelection,
         Tool::ObjectSelection,
         Tool::Pen,
+        Tool::FreeformPen,
+        Tool::CurvaturePen,
+        Tool::AddAnchorPoint,
+        Tool::DeleteAnchorPoint,
+        Tool::ConvertPoint,
         Tool::PathSelection,
         Tool::DirectSelection,
         Tool::Rectangle,
@@ -152,6 +162,11 @@ impl Tool {
             Tool::QuickSelection => "Quick Selection Tool",
             Tool::ObjectSelection => "Object Selection Tool",
             Tool::Pen => "Pen Tool",
+            Tool::FreeformPen => "Freeform Pen Tool",
+            Tool::CurvaturePen => "Curvature Pen Tool",
+            Tool::AddAnchorPoint => "Add Anchor Point Tool",
+            Tool::DeleteAnchorPoint => "Delete Anchor Point Tool",
+            Tool::ConvertPoint => "Convert Point Tool",
             Tool::PathSelection => "Path Selection Tool",
             Tool::DirectSelection => "Direct Selection Tool",
             Tool::Rectangle => "Rectangle Tool",
@@ -161,6 +176,10 @@ impl Tool {
             Tool::Line => "Line Tool",
             Tool::CustomShape => "Custom Shape Tool",
         }
+    }
+    /// The Pen group: tools that draw or edit paths point by point.
+    pub fn is_pen(self) -> bool {
+        matches!(self, Tool::Pen | Tool::FreeformPen | Tool::CurvaturePen | Tool::AddAnchorPoint | Tool::DeleteAnchorPoint | Tool::ConvertPoint)
     }
     pub fn is_type(self) -> bool {
         matches!(self, Self::Type | Self::VerticalType)
@@ -208,7 +227,8 @@ impl Tool {
             Tool::Blur | Tool::Sharpen | Tool::Smudge => '\0',
             Tool::Dodge | Tool::Burn | Tool::Sponge => 'O',
             Tool::QuickSelection | Tool::ObjectSelection => 'W',
-            Tool::Pen => 'P',
+            Tool::Pen | Tool::FreeformPen | Tool::CurvaturePen => 'P',
+            Tool::AddAnchorPoint | Tool::DeleteAnchorPoint | Tool::ConvertPoint => '\0',
             Tool::PathSelection | Tool::DirectSelection => 'A',
             Tool::Rectangle | Tool::EllipseShape | Tool::Triangle | Tool::Polygon | Tool::Line | Tool::CustomShape => 'U',
         }
@@ -386,6 +406,13 @@ pub struct ToolOptions {
     pub enhance_edge: bool,
     /// Pen: "path" (work path) or "shape" (shape layer).
     pub vector_mode: String,
+    /// Pen: the path operation of a new subpath: "new" (Shape mode: New Layer; Path mode:
+    /// Combine), "combine", "subtract", "intersect", "exclude".
+    #[serde(default = "default_pen_op")]
+    pub pen_op: String,
+    /// Pen: Auto Add/Delete (click a segment to add a point, a point to delete it).
+    #[serde(default = "crate::state::yes")]
+    pub auto_add_delete: bool,
     /// Shape tools: fill with the foreground colour, stroke width (0 = none), rectangle corner
     /// radius, polygon sides, line weight.
     pub shape_fill: bool,
@@ -439,6 +466,10 @@ fn default_move_target() -> String {
     "layer".into()
 }
 
+fn default_pen_op() -> String {
+    "new".into()
+}
+
 fn default_marquee_style() -> String {
     "normal".into()
 }
@@ -487,6 +518,8 @@ impl Default for ToolOptions {
             finger_painting: false,
             enhance_edge: false,
             vector_mode: "path".into(),
+            pen_op: default_pen_op(),
+            auto_add_delete: true,
             shape_fill: true,
             stroke_width: 0.0,
             corner_radius: 0.0,
@@ -680,9 +713,9 @@ pub struct UiState {
     pub smoothing_tool: Option<Tool>,
     #[serde(default)]
     pub tool_smoothing: Vec<(Tool, photosuite_engine::paint::brush::Smoothing)>,
-    /// Pen path under construction.
+    /// The Pen: the subpath being drawn and the press in progress (see `pen_tool`).
     #[serde(default)]
-    pub pen: Option<crate::vector_ui::PenPath>,
+    pub pen: crate::pen_tool::Pen,
     /// Direct Selection tool: selected anchors and the drag in progress (#790).
     #[serde(default)]
     pub direct_selection: crate::direct_select::DirectSelection,
@@ -802,7 +835,7 @@ impl Default for UiState {
             slices: Default::default(),
             shell: Default::default(),
             layer_filter: Vec::new(),
-            pen: None,
+            pen: Default::default(),
             direct_selection: Default::default(),
             selected_path: None,
             panels: Panels::default(),

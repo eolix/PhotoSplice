@@ -109,6 +109,51 @@ fn convert_point(s: &mut Session, p: &Value) -> Result<Value> {
     edit_path(s, CMD, p, "Convert Point", |path| edit::convert_point(path, k, out))
 }
 
+fn add_anchor(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "path.addAnchor";
+    let k = knot(CMD, p)?;
+    let t = p.get("t").and_then(Value::as_f64).unwrap_or(0.5);
+    edit_path(s, CMD, p, "Add Anchor Point", |path| edit::insert_anchor(path, k, t).map(|_| ()))
+}
+
+fn delete_anchor(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "path.deleteAnchor";
+    let k = knot(CMD, p)?;
+    edit_path(s, CMD, p, "Delete Anchor Point", |path| edit::delete_anchor(path, k))
+}
+
+/// History labels of the Pen's edits, as Photoshop names them.
+const PEN_ACTIONS: [(&str, &str); 6] = [
+    ("add", "Add Anchor Point"),
+    ("close", "Close Path"),
+    ("new", "New Work Path"),
+    ("insert", "Add Anchor Point"),
+    ("delete", "Delete Anchor Point"),
+    ("move", "Drag Anchor Points"),
+];
+
+/// The Pen tool's edit: the targeted path becomes `path` (the work path is made when there is
+/// none), recorded under the Photoshop name of `action`.
+fn pen(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "path.pen";
+    let path = crate::vector_cmds::parse_path(p.get("path").ok_or_else(|| bad(CMD, "missing `path`"))?).map_err(|e| bad(CMD, e))?;
+    let action = p.get("action").and_then(Value::as_str).unwrap_or("add");
+    let label = PEN_ACTIONS.iter().find(|(a, _)| *a == action).map(|(_, l)| *l).ok_or_else(|| bad(CMD, format!("unknown action `{action}` (add|close|new|insert|delete|move)")))?;
+    let name = p.get("name").and_then(Value::as_str).unwrap_or("work");
+    if name == "work" && s.active().is_some_and(|d| d.doc.work_path.is_none()) {
+        let made = path.clone();
+        s.edit(if action == "new" || action == "add" { "New Work Path" } else { label }, |doc, _| {
+            doc.work_path = Some(made);
+            Ok(())
+        })?;
+        return Ok(json!({ "name": "work", "path": path_json(&path) }));
+    }
+    edit_path(s, CMD, p, label, |target| {
+        *target = path;
+        Ok(())
+    })
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     const TARGET: &str = r#""name":str|"work"|"layer"="work","layer":id? (with "layer": a shape layer's path or a vector mask)"#;
     let spec = |id: &'static str, label: &'static str, params: String, run: fn(&mut Session, &Value) -> Result<Value>| CommandSpec {
@@ -134,6 +179,14 @@ pub fn specs() -> Vec<CommandSpec> {
             "Drag Segment",
             r#""subpath":i,"knot":j (the segment leaving it),"t":0..1=0.5 (where it was grabbed),"move":[dx,dy] (a straight segment moves with its anchors; a curve reshapes through the dragged point)"#.into(),
             bend_segment,
+        ),
+        spec("path.addAnchor", "Add Anchor Point", r#""subpath":i,"knot":j (the segment leaving it),"t":0..1=0.5 (where on it; the curve keeps its shape)"#.into(), add_anchor),
+        spec("path.deleteAnchor", "Delete Anchor Point", r#""subpath":i,"knot":j (its segments join; an emptied subpath goes)"#.into(), delete_anchor),
+        spec(
+            "path.pen",
+            "Pen",
+            r#""path":{…} (the whole path after the edit),"action":"add|close|new|insert|delete|move"="add" (the history name: Add Anchor Point, Close Path, New Work Path, Delete Anchor Point, Drag Anchor Points). Makes the work path when there is none"#.into(),
+            pen,
         ),
         spec(
             "path.convertPoint",
@@ -258,5 +311,26 @@ mod tests {
             assert!(s.execute(id, p.clone()).is_err(), "{id} {p}");
         }
         assert_eq!(s.active().unwrap().history.entries().len(), steps);
+    }
+
+    #[test]
+    fn pen_edits_add_and_delete_anchors_under_photoshop_names() {
+        let mut s = session();
+        // The work path is made by the Pen's first edit.
+        s.execute("path.pen", json!({"path": {"subpaths": [{"closed": false, "knots": [[10, 10]]}]}, "action": "new"})).unwrap();
+        s.execute("path.pen", json!({"path": {"subpaths": [{"closed": false, "knots": [[10, 10], [60, 10]]}]}})).unwrap();
+        assert_eq!(work(&s).subpaths[0].knots.len(), 2);
+        let r = s.execute("path.addAnchor", json!({"subpath": 0, "knot": 0, "t": 0.5})).unwrap();
+        assert_eq!(anchor(&r, 1), [35.0, 10.0]);
+        s.execute("path.deleteAnchor", json!({"subpath": 0, "knot": 1})).unwrap();
+        assert_eq!(work(&s).subpaths[0].knots.len(), 2);
+        let names: Vec<String> = s.active().unwrap().history.entries().iter().map(|e| e.to_string()).collect();
+        assert!(names.ends_with(&["New Work Path".into(), "Add Anchor Point".into(), "Add Anchor Point".into(), "Delete Anchor Point".into()]), "{names:?}");
+        // Bad params are errors.
+        for p in [json!({}), json!({"path": {"subpaths": []}, "action": "jump"}), json!({"path": 3})] {
+            assert!(s.execute("path.pen", p.clone()).is_err(), "{p}");
+        }
+        assert!(s.execute("path.addAnchor", json!({"subpath": 4, "knot": 0})).is_err());
+        assert!(s.execute("path.deleteAnchor", json!({"subpath": 0, "knot": 99})).is_err());
     }
 }

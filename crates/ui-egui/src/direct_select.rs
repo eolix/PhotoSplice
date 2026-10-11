@@ -111,12 +111,13 @@ fn direct(tool: Tool, mods: Modifiers) -> bool {
 
 /// Does the canvas draw Direct Selection's overlay instead of the plain path outlines?
 pub fn shows(app: &PhotosuiteApp, mods: Modifiers) -> bool {
-    direct(app.ui.tool, mods) || app.ui.direct_selection.drag.is_some()
+    let anchors = matches!(app.ui.tool, Tool::ConvertPoint | Tool::AddAnchorPoint | Tool::DeleteAnchorPoint);
+    direct(app.ui.tool, mods) || anchors || app.ui.direct_selection.drag.is_some()
 }
 
 /// The paths Direct Selection edits, front first: the targeted vector mask or the active shape
 /// layer's path, then the work path.
-fn candidates(app: &PhotosuiteApp) -> Vec<(PathRef, Path)> {
+pub(crate) fn candidates(app: &PhotosuiteApp) -> Vec<(PathRef, Path)> {
     let layer = crate::vector_ui::targeted_vector_mask(app).or_else(|| crate::vector_ui::active_shape_path(app));
     let work = app.session.active().and_then(|st| st.doc.work_path.clone());
     layer.map(|(id, p)| (PathRef::Layer(id), p)).into_iter().chain(work.map(|p| (PathRef::Work, p))).collect()
@@ -150,15 +151,16 @@ pub fn pointer(app: &mut PhotosuiteApp, ev: ToolEvent, mods: Modifiers) -> bool 
     let tool = app.ui.tool;
     match ev {
         ToolEvent::Down { x, y, .. } => {
-            let pen_idle = app.ui.pen.is_none();
-            // Pen + ⌥ is Convert Point only while no path is being drawn.
-            let convert = tool == Tool::Pen && mods.alt && !mods.command && pen_idle;
+            let pen_idle = !app.ui.pen.drawing();
+            // Pen + ⌥ is Convert Point only while no path is being drawn; the Convert Point tool is
+            // it always.
+            let convert = (tool == Tool::Pen && mods.alt && !mods.command && pen_idle) || (tool == Tool::ConvertPoint && !mods.command);
             if !(direct(tool, mods) || convert) {
                 return false;
             }
             if tool == Tool::Pen && !pen_idle {
                 // ⌘-click ends the path being drawn, which becomes editable, as in Photoshop.
-                crate::vector_ui::pen_commit(app, false);
+                crate::pen_tool::end(app);
             }
             press(app, [x, y], mods, convert)
         }
@@ -170,7 +172,7 @@ pub fn pointer(app: &mut PhotosuiteApp, ev: ToolEvent, mods: Modifiers) -> bool 
                     *preview = edit.preview(base, *start, *end);
                 }
                 Some(Drag::Marquee { end, .. }) => *end = [x, y],
-                None => return tool == Tool::DirectSelection,
+                None => return matches!(tool, Tool::DirectSelection | Tool::ConvertPoint),
             }
             true
         }
@@ -183,7 +185,7 @@ pub fn pointer(app: &mut PhotosuiteApp, ev: ToolEvent, mods: Modifiers) -> bool 
                 marquee(app, start, [x, y], add);
                 true
             }
-            None => tool == Tool::DirectSelection,
+            None => matches!(tool, Tool::DirectSelection | Tool::ConvertPoint),
         },
     }
 }
@@ -212,7 +214,8 @@ fn press(app: &mut PhotosuiteApp, p: [f64; 2], mods: Modifiers, convert: bool) -
         Hit::Handle(k, h) => {
             let kn = base.subpaths.get(k[0]).and_then(|s| s.knots.get(k[1]));
             let from = kn.map_or(Point::new(p[0], p[1]), |kn| if h == Handle::In { kn.in_ctrl } else { kn.out_ctrl });
-            Edit::Handle(k, h, from, mods.alt)
+            // Convert Point (or ⌥) moves a handle alone: the point becomes a corner.
+            Edit::Handle(k, h, from, mods.alt || convert)
         }
         Hit::Anchor(k) if convert => Edit::Convert(k),
         // Pen + ⌥ on a segment does nothing.

@@ -268,6 +268,43 @@ fn fit_closed(lp: &[P], tol: f64) -> Subpath {
     Subpath { closed: true, knots, op: PathOp::Combine }
 }
 
+/// A freehand stroke (the Freeform Pen's) as an open subpath of smooth cubic Béziers within
+/// `tolerance` px of the points (Photoshop's Curve Fit). `None` for fewer than two distinct points.
+pub fn fit_open(points: &[(f64, f64)], tolerance: f64) -> Option<Subpath> {
+    // Drop repeats: the fit needs distinct samples.
+    let mut pts: Vec<P> = Vec::with_capacity(points.len());
+    for &p in points {
+        if p.0.is_finite() && p.1.is_finite() && pts.last().is_none_or(|q| len(sub(p, *q)) > 0.25) {
+            pts.push(p);
+        }
+    }
+    let n = pts.len();
+    if n < 2 {
+        return None;
+    }
+    let t1 = norm(sub(pts[1], pts[0]));
+    let t2 = norm(sub(pts[n - 2], pts[n - 1]));
+    let mut segs: Vec<[P; 4]> = Vec::new();
+    let tol = tolerance.clamp(0.5, 10.0);
+    fit_cubic(&pts, t1, t2, tol * tol, &mut segs, 0);
+    let pt = |p: P| Point::new(p.0, p.1);
+    let mut knots: Vec<Knot> = segs.iter().map(|s| Knot { anchor: pt(s[0]), in_ctrl: pt(s[0]), out_ctrl: pt(s[1]), smooth: true }).collect();
+    for (i, s) in segs.iter().enumerate() {
+        if let Some(k) = knots.get_mut(i + 1) {
+            k.in_ctrl = pt(s[2]);
+        }
+    }
+    let last = segs.last()?;
+    knots.push(Knot { anchor: pt(last[3]), in_ctrl: pt(last[2]), out_ctrl: pt(last[3]), smooth: true });
+    if let Some(k) = knots.first_mut() {
+        k.smooth = false;
+    }
+    if let Some(k) = knots.last_mut() {
+        k.smooth = false;
+    }
+    Some(Subpath { closed: false, knots, op: PathOp::Combine })
+}
+
 fn bezier(b: &[P; 4], t: f64) -> P {
     let mt = 1.0 - t;
     let (a, bb, c, d) = (mt * mt * mt, 3.0 * mt * mt * t, 3.0 * mt * t * t, t * t * t);
@@ -442,5 +479,17 @@ mod tests {
         let k = &p.subpaths[0].knots;
         assert!(k.len() >= 4 && k.len() <= 12, "{} knots", k.len());
         assert!(k.iter().filter(|k| !k.smooth).count() >= 4);
+    }
+
+    #[test]
+    fn a_freehand_stroke_fits_within_tolerance() {
+        // A quarter circle of radius 100, sampled every degree.
+        let pts: Vec<(f64, f64)> = (0..=90).map(|d| f64::from(d).to_radians()).map(|a| (100.0 * a.cos(), 100.0 * a.sin())).collect();
+        let sp = fit_open(&pts, 1.0).unwrap();
+        assert!(!sp.closed && sp.knots.len() >= 2 && sp.knots.len() <= 4, "{} knots", sp.knots.len());
+        let (a, z) = (sp.knots[0].anchor, sp.knots.last().unwrap().anchor);
+        assert!((a.x - 100.0).abs() < 1e-6 && a.y.abs() < 1e-6 && z.x.abs() < 1e-6 && (z.y - 100.0).abs() < 1e-6);
+        assert!(fit_open(&[(1.0, 1.0), (1.0, 1.0)], 1.0).is_none());
+        assert!(fit_open(&[], 1.0).is_none());
     }
 }

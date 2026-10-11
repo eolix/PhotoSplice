@@ -168,23 +168,21 @@ pub fn entry_enabled(app: &PhotosuiteApp, menu: &CanvasToolMenu, command: &str) 
     let can_mask = layer.is_some_and(|l| !matches!(l.content, LayerContent::Shape(_))) && !locked;
     let saved = menu.path_name.as_deref().is_some_and(|n| n != "work" && n != "layer");
     let has_path = menu.has_path;
-    let pending = app.ui.pen.as_ref().is_some_and(|p| p.knots.len() >= 2);
-    let pending_layer = pending && (app.ui.tool_options.vector_mode == "shape" || app.ui.vector_mask_target);
     match command {
-        "layer.vectorMask.fromPath" => has_path && can_mask && !pending_layer,
-        "path.delete" => has_path && !pending_layer && (pending || menu.path_name.as_deref() != Some("layer")),
+        "layer.vectorMask.fromPath" => has_path && can_mask,
+        "path.delete" => has_path && menu.path_name.as_deref() != Some("layer"),
         "edit.defineCustomShape" | "path.toSelection" | "path.transform" | "paint.symmetryFromPath" => has_path,
-        "view.newGuidesFromShape" => shape && !pending,
-        "path.fill" | "path.stroke" => has_path && can_paint && !pending_layer,
-        "path.clippingPath.set" => saved && !pending,
+        "view.newGuidesFromShape" => shape,
+        "path.fill" | "path.stroke" => has_path && can_paint,
+        "path.clippingPath.set" => saved,
         "layer.combineShapes.unite"
         | "layer.combineShapes.subtractFrontShape"
         | "layer.combineShapes.intersectShapeAreas"
-        | "layer.combineShapes.excludeOverlappingShapes" => !pending && shape_layer.is_some_and(|sh| sh.path.subpaths.len() > 1),
-        "path.style.copyFill" => !pending && shape_layer.is_some_and(|sh| sh.fill.is_some()),
-        "path.style.copyStroke" => !pending && shape_layer.is_some_and(|sh| sh.stroke.is_some()),
-        "path.style.pasteFill" => !pending && shape && app.session.path_fill_clipboard.is_some(),
-        "path.style.pasteStroke" => !pending && shape && app.session.path_stroke_clipboard.is_some(),
+        | "layer.combineShapes.excludeOverlappingShapes" => shape_layer.is_some_and(|sh| sh.path.subpaths.len() > 1),
+        "path.style.copyFill" => shape_layer.is_some_and(|sh| sh.fill.is_some()),
+        "path.style.copyStroke" => shape_layer.is_some_and(|sh| sh.stroke.is_some()),
+        "path.style.pasteFill" => shape && app.session.path_fill_clipboard.is_some(),
+        "path.style.pasteStroke" => shape && app.session.path_stroke_clipboard.is_some(),
         "select.isolateLayers" => layer.is_some(),
         "paint.symmetryDisable" => st.symmetry_path.is_some(),
         _ => false,
@@ -198,7 +196,7 @@ pub fn open(app: &mut PhotosuiteApp, tool: Tool, pos: [f32; 2]) -> bool {
     app.ui.brush_picker = None;
     app.ui.layer_menu = None;
     let has_selection = app.session.active().is_some_and(|s| s.doc.selection.is_some());
-    let has_path = crate::vector_ui::active_path_name(app).is_some() || app.ui.pen.as_ref().is_some_and(|p| p.knots.len() >= 2);
+    let has_path = crate::vector_ui::active_path_name(app).is_some();
     let path_name = crate::vector_ui::active_path_name(app);
     app.ui.canvas_tool_menu = Some(CanvasToolMenu { pos, tool, has_selection, has_path, path_name, transform: false });
     true
@@ -272,13 +270,9 @@ fn choose_pen(app: &mut PhotosuiteApp, ctx: &Context, menu: &CanvasToolMenu, com
         app.run(command, json!({}))?;
         return Ok(());
     }
-    let pending = app.ui.pen.as_ref().is_some_and(|p| p.knots.len() >= 2);
-    let pending_layer = pending && (app.ui.tool_options.vector_mode == "shape" || app.ui.vector_mask_target);
-    if pending {
-        crate::vector_ui::pen_commit(app, false);
-    }
-    let name = if pending { Some(if pending_layer { "layer" } else { "work" }.to_string()) } else { menu.path_name.clone() }
-        .ok_or_else(|| "No path is available for this action".to_string())?;
+    // The path being drawn is already the document's: it ends here.
+    crate::pen_tool::end(app);
+    let name = menu.path_name.clone().ok_or_else(|| "No path is available for this action".to_string())?;
     match command {
         "edit.defineCustomShape" | "path.toSelection" | "path.fill" | "path.stroke" | "path.clippingPath.set" | "path.transform" => {
             let label = PEN_MENU.iter().flatten().find(|(_, id)| *id == command).map_or(command, |(label, _)| *label);
@@ -541,12 +535,12 @@ mod tests {
     fn completed_pen_path_right_click_makes_selection() {
         let mut app = app();
         app.ui.tool = Tool::Pen;
-        for (x, y) in [(2.0, 2.0), (20.0, 2.0), (20.0, 20.0)] {
-            crate::vector_ui::pen_down(&mut app, x, y);
-            crate::vector_ui::pen_up(&mut app);
+        // Three points, then the first again: closed.
+        for (x, y) in [(2.0, 2.0), (20.0, 2.0), (20.0, 20.0), (2.0, 2.0)] {
+            crate::pen_tool::down(&mut app, x, y, egui::Modifiers::NONE);
+            crate::pen_tool::up(&mut app);
         }
-        crate::vector_ui::pen_commit(&mut app, true);
-        assert!(app.session.active().unwrap().doc.work_path.is_some());
+        assert!(app.session.active().unwrap().doc.work_path.as_ref().is_some_and(|p| p.subpaths[0].closed));
         let mut h = harness(app);
         let center = h.state().last_canvas_rect.center();
         right_click(&mut h, center, Modifiers::NONE);
@@ -560,22 +554,23 @@ mod tests {
     }
 
     #[test]
-    fn pen_menu_finishes_in_progress_path_before_selection() {
+    fn pen_menu_acts_on_the_path_being_drawn() {
         let mut app = app();
         app.ui.tool = Tool::Pen;
         for (x, y) in [(2.0, 2.0), (20.0, 2.0), (20.0, 20.0)] {
-            crate::vector_ui::pen_down(&mut app, x, y);
-            crate::vector_ui::pen_up(&mut app);
+            crate::pen_tool::down(&mut app, x, y, egui::Modifiers::NONE);
+            crate::pen_tool::up(&mut app);
         }
-        assert!(app.session.active().unwrap().doc.work_path.is_none());
+        // The Pen draws on the work path as it goes.
+        assert!(app.session.active().unwrap().doc.work_path.is_some());
         assert!(open(&mut app, Tool::Pen, [10.0, 10.0]));
         let menu = app.ui.canvas_tool_menu.as_ref().unwrap();
         assert!(entry_enabled(&app, menu, "path.toSelection"));
         choose(&mut app, &Context::default(), "path.toSelection");
         let dialog = app.ui.dialogs.last().map(|d| d.id).unwrap();
         crate::dialogs::confirm(&mut app, dialog).unwrap();
-        assert!(app.session.active().unwrap().doc.work_path.is_some());
         assert!(app.session.active().unwrap().doc.selection.is_some());
+        assert!(!app.ui.pen.drawing(), "the subpath ended");
     }
 
     #[test]
@@ -696,19 +691,23 @@ mod tests {
     }
 
     #[test]
-    fn unfinished_shape_path_disables_actions_that_would_target_the_previous_layer() {
+    fn shape_mode_pen_draws_one_shape_layer_the_menu_acts_on() {
         let mut app = app();
         app.ui.tool = Tool::Pen;
         app.ui.tool_options.vector_mode = "shape".into();
+        let layers = app.session.active().unwrap().doc.layers.len();
         for (x, y) in [(2.0, 2.0), (20.0, 2.0), (20.0, 20.0)] {
-            crate::vector_ui::pen_down(&mut app, x, y);
-            crate::vector_ui::pen_up(&mut app);
+            crate::pen_tool::down(&mut app, x, y, egui::Modifiers::NONE);
+            crate::pen_tool::up(&mut app);
         }
+        let st = app.session.active().unwrap();
+        assert_eq!(st.doc.layers.len(), layers + 1, "the first point made the shape layer, the rest went on it");
+        let l = st.doc.layer(st.active_layer.unwrap()).unwrap();
+        let LayerContent::Shape(sh) = &l.content else { panic!("not a shape layer") };
+        assert_eq!(sh.path.subpaths[0].knots.len(), 3);
         assert!(open(&mut app, Tool::Pen, [10.0, 10.0]));
         let menu = app.ui.canvas_tool_menu.as_ref().unwrap();
-        for id in ["layer.vectorMask.fromPath", "path.delete", "path.fill", "path.stroke", "path.clippingPath.set", "view.newGuidesFromShape"] {
-            assert!(!entry_enabled(&app, menu, id), "{id} must not act on the layer replaced by the pending shape");
-        }
         assert!(entry_enabled(&app, menu, "path.toSelection"));
+        assert!(!entry_enabled(&app, menu, "layer.vectorMask.fromPath"), "a shape layer takes no vector mask");
     }
 }

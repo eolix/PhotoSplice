@@ -8,7 +8,6 @@ use serde_json::json;
 
 use crate::PhotosuiteApp;
 use crate::state::Tool;
-use crate::vector_ui::PenPath;
 
 fn harness() -> Harness<'static, PhotosuiteApp> {
     let mut s = photosuite_engine::Session::new();
@@ -65,20 +64,26 @@ fn cmd_enter_with_the_pen_loads_the_work_path() {
 fn cmd_enter_while_drawing_finishes_the_path_and_loads_it() {
     let mut h = harness();
     h.state_mut().ui.tool = Tool::Pen;
-    let p = |x: f64, y: f64| [[x, y], [x, y], [x, y]];
-    h.state_mut().ui.pen = Some(PenPath { knots: vec![p(20.0, 20.0), p(120.0, 20.0), p(120.0, 80.0)], dragging: false });
+    let draw = |h: &mut Harness<'_, PhotosuiteApp>| {
+        for (x, y) in [(20.0, 20.0), (120.0, 20.0), (120.0, 80.0)] {
+            crate::pen_tool::down(h.state_mut(), x, y, Modifiers::NONE);
+            crate::pen_tool::up(h.state_mut());
+        }
+    };
+    draw(&mut h);
     h.run_steps(2);
     press(&mut h, Key::Enter, command());
     let app = h.state();
-    assert!(app.ui.pen.is_none(), "the pen path was finished");
+    assert!(!app.ui.pen.drawing(), "the pen path was finished");
     assert!(app.session.active().unwrap().doc.work_path.is_some(), "into the work path");
     assert!(app.session.active().unwrap().doc.selection.is_some(), "and loaded as a selection: {}", app.ui.status);
     // Plain ↩ still only finishes a path.
     let mut h = harness();
     h.state_mut().ui.tool = Tool::Pen;
-    h.state_mut().ui.pen = Some(PenPath { knots: vec![p(20.0, 20.0), p(120.0, 20.0), p(120.0, 80.0)], dragging: false });
+    draw(&mut h);
     h.run_steps(2);
     press(&mut h, Key::Enter, Modifiers::NONE);
+    assert!(!h.state().ui.pen.drawing());
     assert!(h.state().session.active().unwrap().doc.work_path.is_some());
     assert!(h.state().session.active().unwrap().doc.selection.is_none());
 }

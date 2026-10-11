@@ -336,8 +336,11 @@ fn clicking_the_vector_mask_targets_it_for_the_path_tools() {
     let k = layer(&h, masked).vector_mask.unwrap().path.subpaths[0].knots[0].anchor;
     assert_eq!((k.x, k.y), (25.0, 12.0));
     // The Pen adds a subpath to it.
-    h.state_mut().ui.pen = Some(crate::vector_ui::PenPath { knots: vec![[[150.0, 10.0]; 3], [[190.0, 10.0]; 3], [[190.0, 40.0]; 3]], dragging: false });
-    crate::vector_ui::pen_commit(h.state_mut(), true);
+    h.state_mut().ui.tool = crate::state::Tool::Pen;
+    for (x, y) in [(150.0, 10.0), (190.0, 10.0), (190.0, 40.0), (150.0, 10.0)] {
+        crate::pen_tool::down(h.state_mut(), x, y, Modifiers::NONE);
+        crate::pen_tool::up(h.state_mut());
+    }
     assert_eq!(layer(&h, masked).vector_mask.unwrap().path.subpaths.len(), 2);
     assert!(h.state().session.active().unwrap().doc.work_path.is_none(), "not a work path");
     h.run_steps(2);
