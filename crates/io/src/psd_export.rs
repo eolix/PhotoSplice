@@ -66,6 +66,30 @@ struct Ex {
     smart: SmartOut,
     /// The layer that may be written as Photoshop's Background (see [`background_candidate`]).
     background: Option<photosuite_doc::LayerId>,
+    /// Whether the document's `Txt2` still describes the type layers (see [`TextSync`]).
+    text: TextSync,
+}
+
+/// The type layers as written, against the document's `Txt2` (Photoshop's document-wide copy
+/// of every type layer, which it reads in preference to each layer's `TySh`: a text edit left
+/// with a stale `Txt2` reverts in Photoshop; Photoshop-verified 2026-10-12). Without `Txt2`,
+/// Photoshop rebuilds it from the layers' `TySh`.
+#[derive(Default)]
+struct TextSync {
+    /// A type layer's `TySh` differs from the one it was read with (edited or new).
+    changed: bool,
+    /// Each written type layer's `TextIndex` (its object in `Txt2`).
+    indices: Vec<i64>,
+}
+
+impl TextSync {
+    /// Is `Txt2` (with `objects` text objects, when its layout is the one we know) still true to
+    /// the layers? Each layer must keep its own object: none edited or new, no index out of range
+    /// or shared by two layers.
+    fn txt2_valid(&self, objects: Option<usize>) -> bool {
+        let mut seen = std::collections::HashSet::new();
+        !self.changed && self.indices.iter().all(|i| usize::try_from(*i).is_ok_and(|i| objects.is_none_or(|n| i < n)) && seen.insert(*i))
+    }
 }
 
 /// The layer to write as Photoshop's Background: a pixel layer with no transparency channel
@@ -527,7 +551,13 @@ impl Ex {
                 let src = t.psd_raw.as_ref().or(generated.as_ref());
                 // Character/paragraph style sheets from the document's styles.
                 let styled = src.and_then(|d| crate::text_styles_map::export_tysh(d, t, &self.text_styles, self.dpi)).map(std::sync::Arc::new);
-                set_principal(&mut raw, &[b"TySh"], styled.as_ref().or(src));
+                let out = styled.as_ref().or(src);
+                let read_with = raw.iter().find(|(k, _)| k == b"TySh").map(|(_, d)| d.as_slice());
+                self.text.changed |= out.map(|d| d.as_slice()) != read_with;
+                if let Some(i) = out.and_then(|d| photosuite_text::psd::text_index(d)) {
+                    self.text.indices.push(i);
+                }
+                set_principal(&mut raw, &[b"TySh"], out);
                 if !raw.iter().any(|(k, _)| k == b"TySh") {
                     self.warnings.push(format!("layer \"{}\": text layer written as pixels (no TySh data)", l.name));
                 }
@@ -1449,6 +1479,7 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         comps: (!crate::comps_map::comps_unchanged(doc)).then(|| (doc.layer_comps.clone(), doc.last_document_state.clone())),
         smart: SmartOut::new(doc, depth),
         background: background_candidate(doc),
+        text: TextSync::default(),
     };
     if big && !opts.force_psb {
         ex.warnings.push("document exceeds 30000 px; written as PSB".into());
@@ -1578,6 +1609,10 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     }
     let mut global_blocks = Vec::new();
     for (sig, key, data) in &ex.smart.finish(crate::annotations_map::export_blocks(doc, crate::pattern_map::export_global_blocks(doc))) {
+        // A stale Txt2 would override the type layers in Photoshop: dropped, Photoshop rebuilds it.
+        if key == b"Txt2" && !ex.text.txt2_valid(photosuite_text::psd::txt2_object_count(data)) {
+            continue;
+        }
         let mut tb = TaggedBlock::new(*key, data.to_vec());
         tb.signature = *sig;
         // Photoshop pads document-level (global) blocks to a multiple of 4, and readers such as

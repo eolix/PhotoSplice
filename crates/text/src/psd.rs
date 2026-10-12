@@ -117,6 +117,20 @@ pub fn parse_txt2(data: &[u8]) -> Option<E> {
     ed::parse(&wrapped).ok().filter(|v| matches!(v, E::Dict(_)))
 }
 
+/// The number of text objects in a `Txt2` block (`/1 /1`, one per type layer, indexed by each
+/// layer's `TextIndex`). `None` when the block doesn't parse.
+pub fn txt2_object_count(data: &[u8]) -> Option<usize> {
+    parse_txt2(data)?.path(&["1", "1"]).and_then(E::as_array).map(<[E]>::len)
+}
+
+/// A `TySh` block's `TextIndex`: its text object in the document's `Txt2`.
+pub fn text_index(tysh: &[u8]) -> Option<i64> {
+    match parse_tysh(tysh)?.text.get("TextIndex") {
+        Some(D::Integer(i)) => Some(i64::from(*i)),
+        _ => None,
+    }
+}
+
 /// Applies the automatic kerning modes that Photoshop keeps only in `Txt2` (EngineData writes
 /// Optical and "0" alike as `AutoKerning true`) to `layer`, read from `tysh`. Only when the
 /// layer's `TextIndex` entry still holds the layer's text (an edit elsewhere leaves `Txt2`
