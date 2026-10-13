@@ -5,7 +5,8 @@
 <h1 align="center">PhotoSuite</h1>
 
 <p align="center">
-  <strong>A desktop image editor faithfully replicating classic Adobe Photoshop with 1:1 native PSD/PSB compatibility.</strong>
+  <strong>A desktop image editor faithfully replicating classic Adobe Photoshop with 1:1 native PSD/PSB compatibility.</strong><br>
+  <strong>Live WebApp at https://photosuite.app/web</strong>
 </p>
 
 <p align="center">
