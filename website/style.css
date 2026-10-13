@@ -148,6 +148,54 @@ code {
 }
 
 /* ---------------------------------------------------------
+   Web app banner
+   --------------------------------------------------------- */
+
+.banner {
+    position: relative;
+    z-index: 51;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 6px 12px;
+    padding: 9px 16px;
+    font-size: 0.875rem;
+    color: var(--text);
+    text-align: center;
+    text-decoration: none;
+    background: linear-gradient(90deg, rgba(34, 201, 255, 0.16) 0%, rgba(47, 107, 255, 0.2) 50%, rgba(255, 77, 141, 0.16) 100%);
+    border-bottom: 1px solid var(--line);
+    transition: background 0.25s var(--ease);
+}
+.banner:hover {
+    background: linear-gradient(90deg, rgba(34, 201, 255, 0.24) 0%, rgba(47, 107, 255, 0.3) 50%, rgba(255, 77, 141, 0.24) 100%);
+}
+
+.banner__tag {
+    padding: 2px 9px;
+    font-size: 0.72rem;
+    font-weight: 650;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #fff;
+    border-radius: 999px;
+    background: var(--grad-cool);
+}
+
+.banner__text { color: var(--text-muted); }
+
+.banner__cta {
+    font-weight: 600;
+    white-space: nowrap;
+}
+.banner__cta span {
+    display: inline-block;
+    transition: transform 0.25s var(--ease);
+}
+.banner:hover .banner__cta span { transform: translateX(3px); }
+
+/* ---------------------------------------------------------
    Navigation
    --------------------------------------------------------- */
 
@@ -941,6 +989,7 @@ body.is-locked { overflow: hidden; }
 @media (max-width: 460px) {
     .cards { grid-template-columns: 1fr; }
     .orb { opacity: 0.35; }
+    .banner__text { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
