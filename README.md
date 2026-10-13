@@ -27,15 +27,14 @@
 
 ---
 
-PhotoSuite is built upon [PhotoCraft](https://github.com/storytold/photocraft), an open-source
-Rust image-editing engine (MIT OR Apache-2.0): its document model, compositor and command system 
-are the foundation, with PhotoSuite's interface, PSD reader and writer, tools and features
-on top.
+PhotoSuite is built upon PhotoCraft, as an open-source Rust image-editing engine (MIT OR Apache-2.0). 
+Its main focus areas are **compatibility, simplicity and speed**. Aiming for a full PSD round-trip 
+between Photoshop and PhotoSuite, classic Photoshop 'feel' (circa version CS6), and GPU optimisation for
+all Operating Systems. PhotoSuite's cleaner and leaner interface, interface, PSD and PDF reader and writer, 
+and comprehensive EXR/HDR tools and features on top.
 
-> PhotoSuite's intention is to fully suppport Photoshop-PhotoSuite PSD round trips, with 
-> all effects and smart objects/filters. It's a work in progress.
-> It was originally clean-room written in JS with a Rust engine (Tauri), but it has since
-> taken a more modern, performant approach. The Javascript version still lives in many forks.
+> PhotoSuite was originally clean-room written in JavsScript with a Rust engine (Tauri), but it has since
+> taken a more modern, performant approach. The JS version still lives in many early forks.
 
 ## Downloads
 
