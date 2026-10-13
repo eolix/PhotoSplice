@@ -2,13 +2,15 @@
 <!--
   PhotoSuite MSI (WiX Toolset v5: `dotnet tool install -g wix`). Built by package.ps1:
 
-    wix build photosuite.wxs -arch x64 -d Version=1.2.3 -d BinDir=... -d IconPath=... -o out.msi
+    wix build photosuite.wxs -arch x64 -ext WixToolset.UI.wixext -d Version=1.2.3 -d BinDir=... -d IconPath=... -o out.msi
 
-  Per-machine install into Program Files, a Start Menu shortcut, `.pcraft` owned by PhotoSuite,
-  and PhotoSuite offered under "Open with" for PSD/PSB and the image formats it reads (without
-  taking over the user's default app for them).
+  A setup wizard (WiX's InstallDir dialogs: Welcome, Destination Folder, our Shortcuts page,
+  Ready to Install, progress, Completed); per-machine install, into Program Files unless another
+  folder is chosen (remembered for upgrades); a Start Menu shortcut, and a desktop one unless it
+  is unticked; `.pcraft` owned by PhotoSuite, and PhotoSuite offered under "Open with" for
+  PSD/PSB and the image formats it reads (without taking over the user's default app for them).
 -->
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
   <Package
       Name="PhotoSuite"
       Manufacturer="PhotoSuite"
@@ -32,12 +34,24 @@
     <Property Id="ARPURLUPDATEINFO" Value="https://photosuite.app" />
     <Property Id="ARPHELPLINK" Value="https://github.com/eolix/photosuite/issues" />
 
+    <!-- The wizard. No licence page: MIT OR Apache-2.0 asks nothing of someone installing it. -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <UIRef Id="PhotosuiteShortcutsUI" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT" Value="PhotoSuite is installed. Start it from the Start menu or the desktop shortcut." />
+    <!-- Ticked unless unticked on the Shortcuts page (an unticked checkbox clears the property). -->
+    <Property Id="INSTALLDESKTOPSHORTCUT" Value="1" />
+    <!-- An upgrade goes where the last install went. -->
+    <Property Id="INSTALLFOLDER">
+      <RegistrySearch Id="PreviousInstallFolder" Root="HKLM" Key="Software\PhotoSuite" Name="InstallDir" Type="raw" />
+    </Property>
+
     <StandardDirectory Id="ProgramFiles6432Folder">
       <Directory Id="INSTALLFOLDER" Name="PhotoSuite">
         <Directory Id="RESOURCESFOLDER" Name="resources" />
       </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder" />
+    <StandardDirectory Id="DesktopFolder" />
 
     <Feature Id="Main" Title="PhotoSuite" Level="1">
       <ComponentGroupRef Id="PhotosuiteFiles" />
@@ -108,9 +122,47 @@
         <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosuite.exe\SupportedTypes" Name=".qoi" Value="" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosuite.exe\SupportedTypes" Name=".ico" Value="" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\photosuite.exe" Value="[#PhotosuiteExe]" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\PhotoSuite" Name="InstallDir" Value="[INSTALLFOLDER]" Type="string" />
+      </Component>
+
+      <!-- On the all-users desktop (a per-machine install), when ticked on the Shortcuts page. -->
+      <Component Id="PhotosuiteDesktopShortcut" Directory="DesktopFolder" Guid="5C2E8F0A-3D71-4B6E-9A54-7E1F2B9C0D43" Condition="INSTALLDESKTOPSHORTCUT">
+        <Shortcut Id="DesktopShortcut" Name="PhotoSuite" Description="PhotoSuite image editor" Target="[#PhotosuiteExe]"
+            WorkingDirectory="INSTALLFOLDER" Icon="PhotosuiteIcon.exe" IconIndex="0" />
+        <RegistryValue Root="HKLM" Key="Software\PhotoSuite" Name="DesktopShortcut" Value="1" Type="integer" KeyPath="yes" />
       </Component>
 
     </ComponentGroup>
+  </Fragment>
+  <Fragment>
+    <!-- The Shortcuts page, between Destination Folder and Ready to Install. The Publish orders
+         override WixUI_InstallDir's own (the last NewDialog of a button wins): Welcome goes
+         straight to Destination Folder (no licence page), and Destination Folder's Next to here
+         once the folder is valid. Dialog units and button places are those of the other pages. -->
+    <UI Id="PhotosuiteShortcutsUI">
+      <Dialog Id="ShortcutsDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Shortcuts" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes" Text="Choose where to start [ProductName] from." />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="StartMenuNote" Type="Text" X="20" Y="60" Width="330" Height="15" NoPrefix="yes" Text="[ProductName] is always added to the Start menu." />
+        <Control Id="DesktopShortcut" Type="CheckBox" X="20" Y="82" Width="330" Height="17" Property="INSTALLDESKTOPSHORTCUT" CheckBoxValue="1" Text="Create a &amp;desktop shortcut" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)">
+          <Publish Event="NewDialog" Value="InstallDirDlg" />
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)">
+          <Publish Event="NewDialog" Value="VerifyReadyDlg" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="2" Condition="NOT Installed" />
+      <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2" />
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="ShortcutsDlg" Order="5" Condition="WIXUI_DONTVALIDATEPATH OR WIXUI_INSTALLDIR_VALID=&quot;1&quot;" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="ShortcutsDlg" Order="3" Condition="NOT Installed" />
+    </UI>
   </Fragment>
   <Fragment>
     <!-- LUTs, lens profiles and preset libraries (the app reads them from resources\ beside the exe),

@@ -53,6 +53,10 @@
     <control>pointing</control>
     <control>tablet</control>
   </supports>
+  <!-- The Tauri build's id: software centres show this app as its successor. -->
+  <replaces>
+    <id>app.photosuite.PhotoSuite</id>
+  </replaces>
   <provides>
     <binary>photosuite</binary>
     <mediatype>application/x-photosuite</mediatype>

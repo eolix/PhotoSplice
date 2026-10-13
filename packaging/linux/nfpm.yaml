@@ -32,8 +32,18 @@ description: |-
 # libvulkan or libEGL. RandR goes through x11rb's protocol code and fonts are found by scanning
 # directories, so libXrandr and fontconfig aren't loaded. The app also checks for these at start
 # (apps/photosuite/src/linux_libs.rs) and names the missing package instead of crashing.
+# Up to 0.9.16 (the Tauri build) the .deb and .rpm were called photo-suite (Tauri made the name
+# from "PhotoSuite"), with the same /usr/bin/photosuite. Without these the new package can't be
+# installed over it: dpkg refuses to overwrite a file another package owns. Debian: Conflicts with
+# Replaces makes dpkg and apt remove photo-suite as photosuite goes in (Policy 7.6.2). RPM:
+# Obsoletes (nfpm's `replaces`) makes dnf and zypper upgrade photo-suite to photosuite. The Arch
+# package was already called photosuite, and the AppImage and Flatpak have no package to replace.
 overrides:
   deb:
+    conflicts:
+      - photo-suite
+    replaces:
+      - photo-suite
     depends:
       - libc6 (>= 2.35)
       - libgcc-s1
@@ -67,6 +77,10 @@ overrides:
       - vulkan-icd-loader
       - libglvnd
   rpm:
+    replaces:
+      - photo-suite < 0.9.17
+    provides:
+      - photo-suite
     # Soname provides rather than package names, so the same requirements resolve on Fedora/RHEL
     # (libxkbcommon-x11, libX11-xcb, ...) and openSUSE (libxkbcommon-x11-0, libX11-xcb1, ...).
     depends:

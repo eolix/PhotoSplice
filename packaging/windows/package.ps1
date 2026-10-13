@@ -12,7 +12,9 @@
   warning when no signing secrets are set).
 
   Needs: Rust (MSVC toolchain + the target), the Windows SDK (rc.exe, signtool.exe),
-  and WiX v5: dotnet tool install --global wix --version 5.0.2
+  and WiX v5 with its UI extension (added below when missing):
+    dotnet tool install --global wix --version 5.0.2
+    wix extension add -g WixToolset.UI.wixext/5.0.2
 
 .EXAMPLE
   pwsh packaging/windows/package.ps1 -Arch x64
@@ -88,8 +90,12 @@ foreach ($f in 'README.md', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE', 'THIRD-PA
 # ---- MSI ---------------------------------------------------------------------------------------
 $Msi = Join-Path $Dist "photosuite-$Version-windows-$Arch.msi"
 & (Join-Path $PSScriptRoot 'check-icons.ps1')
+# The setup wizard's dialogs come from WiX's UI extension.
+if (-not (wix extension list -g | Select-String -SimpleMatch 'WixToolset.UI.wixext')) {
+  Invoke-Native 'wix extension add' { wix extension add -g WixToolset.UI.wixext/5.0.2 }
+}
 Invoke-Native 'wix build' {
-  wix build (Join-Path $PSScriptRoot 'photosuite.wxs') -arch $Arch `
+  wix build (Join-Path $PSScriptRoot 'photosuite.wxs') -arch $Arch -ext WixToolset.UI.wixext `
     -d "Version=$MsiVersion" -d "BinDir=$Stage" -d "IconPath=$(Join-Path $Root 'assets\app-icon\photosuite.ico')" `
     -o $Msi
 }
