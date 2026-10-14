@@ -76,8 +76,10 @@ pub struct GalleryDialog {
     center: [f32; 2],
     tex: Option<TextureHandle>,
     shown: Option<(u64, ERect)>,
-    /// The whole layer filtered (one-piece stacks such as Cutout), keyed by the stack.
+    /// The whole layer filtered (gallery effects work on the whole image), keyed by the stack.
     full: Option<(u64, Surface)>,
+    /// A whole-layer render running in the background, keyed by its stack.
+    job: Option<(u64, std::sync::mpsc::Receiver<Surface>)>,
     /// Textures of the shared thumbnail set ([`crate::gallery_thumbs`]) and the set's signature.
     thumbs: Vec<Option<TextureHandle>>,
     thumb_sig: String,
@@ -175,7 +177,8 @@ pub(crate) fn image(surf: &Surface, w: usize, h: usize) -> egui::ColorImage {
 }
 
 /// The preview of `vis` shown at 1 / `k`: filtered at full size, only the result scaled down.
-/// A stack that works on the whole image (Cutout) is run on the whole layer, once per stack.
+/// A stack that works on the whole image is run on the whole layer, once per stack, in the
+/// background on native targets: `None` while that render runs (the last preview stays up).
 fn preview_image(d: &mut GalleryDialog, params: &Value, vis: Rect, k: u32) -> Option<egui::ColorImage> {
     let effects = photosuite_engine::gallery_cmds::effects_from_json(params).unwrap_or_default();
     if (FilterParams::FilterGallery { effects }).one_piece() {
@@ -183,13 +186,58 @@ fn preview_image(d: &mut GalleryDialog, params: &Value, vis: Rect, k: u32) -> Op
         params.to_string().hash(&mut ph);
         let key = ph.finish();
         if d.full.as_ref().is_none_or(|(k0, _)| *k0 != key) {
-            d.full = Some((key, render(&d.src, params)));
+            full_render(d, params, key)?;
         }
         return d.full.as_ref().map(|(_, full)| shrink(full, vis, k));
     }
     let crop = sample(&d.src, vis, 1);
     let out = render(&crop, params);
     Some(shrink(&out, Rect::new(0, 0, vis.width() as i32, vis.height() as i32), k))
+}
+
+/// Brings `d.full` to the stack `key`, rendering the whole layer on a worker thread: `None` while
+/// a render is still running. A render for an older stack is let finish first, so dragging a
+/// slider never queues more than one.
+#[cfg(not(any(test, target_arch = "wasm32")))]
+fn full_render(d: &mut GalleryDialog, params: &Value, key: u64) -> Option<()> {
+    if let Some((jk, rx)) = &d.job {
+        match rx.try_recv() {
+            Ok(done) => {
+                let jk = *jk;
+                d.job = None;
+                d.full = Some((jk, done));
+                if jk == key {
+                    return Some(());
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+            // The worker died (it never should): render here instead.
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                d.job = None;
+                d.full = Some((key, render(&d.src, params)));
+                return Some(());
+            }
+        }
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (src, p) = (d.src.clone(), params.clone());
+    let spawned = std::thread::Builder::new().name("gallery-preview".into()).spawn(move || {
+        let _ = tx.send(render(&src, &p));
+    });
+    if spawned.is_err() {
+        d.full = Some((key, render(&d.src, params)));
+        return Some(());
+    }
+    d.job = Some((key, rx));
+    None
+}
+
+/// Brings `d.full` to the stack `key` (single-threaded builds and tests: synchronously).
+#[cfg(any(test, target_arch = "wasm32"))]
+fn full_render(d: &mut GalleryDialog, params: &Value, key: u64) -> Option<()> {
+    d.job = None;
+    d.full = Some((key, render(&d.src, params)));
+    Some(())
 }
 
 /// `r` of `surf` scaled down by `k` for display, each displayed pixel the mean of its k × k block.
@@ -264,6 +312,7 @@ pub fn open(app: &mut PhotosuiteApp) -> Result<(), String> {
         tex: None,
         shown: None,
         full: None,
+        job: None,
         thumbs: vec![None; GalleryFilter::ALL.len()],
         thumb_sig: String::new(),
         preview_ms: 0.0,
@@ -358,7 +407,12 @@ fn update_preview(d: &mut GalleryDialog, ctx: &egui::Context, area: ERect) {
         return;
     }
     let t0 = crate::gpu_canvas::now_ms();
-    let Some(img) = preview_image(d, &params, vis, k) else { return };
+    let Some(img) = preview_image(d, &params, vis, k) else {
+        if d.job.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        }
+        return;
+    };
     match &mut d.tex {
         Some(t) => t.set(img, egui::TextureOptions::LINEAR),
         None => d.tex = Some(ctx.load_texture("gallery-preview", img, egui::TextureOptions::LINEAR)),

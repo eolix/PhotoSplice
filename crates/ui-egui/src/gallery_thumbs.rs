@@ -18,7 +18,7 @@ const SAMPLE_JPG: &[u8] = include_bytes!("../../../assets/img/beach.jpg");
 
 /// Bump when a gallery filter's output changes without the app version changing (a dev build),
 /// so a stored set rendered by the old filter isn't reused.
-const REVISION: u32 = 1;
+const REVISION: u32 = 2;
 
 /// One cell's thumbnail size, in points.
 pub const THUMB_PT: [usize; 2] = [80, 56];
