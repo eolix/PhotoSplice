@@ -1387,27 +1387,28 @@ fn start_screen(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
     home_main(app, ui, main);
 }
 
-/// Logo, then the actions that start work: a new document, or one from disk.
+/// Logo, then the actions that start work: a new document, or one from disk. Two buttons of one
+/// width, centred in the sidebar, their labels bare (the shortcuts are in the tooltips).
 fn home_sidebar(app: &mut PhotosuiteApp, ui: &mut egui::Ui, rect: Rect) {
     let t = crate::theme::Tokens::get(ui.ctx());
     ui.painter().rect_filled(rect, 0.0, t.chrome);
-    let new_label = crate::shortcuts::command_label(app, "New document…", "file.new");
-    let open_label = crate::shortcuts::command_label(app, "Open…", "file.open");
-    let inner = Rect::from_min_max(rect.min + egui::vec2(24.0, 28.0), rect.max - egui::vec2(24.0, 28.0));
+    let new_tip = crate::shortcuts::tip_label(app, "New document…", "file.new");
+    let open_tip = crate::shortcuts::tip_label(app, "Open…", "file.open");
+    let inner = Rect::from_min_max(rect.min + egui::vec2(24.0, 32.0), rect.max - egui::vec2(24.0, 32.0));
     ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
-        ui.vertical(|ui| {
+        ui.vertical_centered(|ui| {
             let logo = Rect::from_center_size(pos2(inner.center().x, inner.top() + HOME_LOGO_PT / 2.0), egui::vec2(HOME_LOGO_PT, HOME_LOGO_PT));
             egui::Image::from_bytes("bytes://home-logo.svg", egui::load::Bytes::Static(HOME_LOGO_SVG))
                 .fit_to_exact_size(egui::vec2(HOME_LOGO_PT, HOME_LOGO_PT))
                 .paint_at(ui, logo);
-            ui.add_space(HOME_LOGO_PT + 36.0);
+            ui.add_space(HOME_LOGO_PT + 40.0);
+            ui.spacing_mut().item_spacing.y = 12.0;
             let w = inner.width();
-            if crate::widgets::primary_button(ui, &new_label, w).clicked() {
+            if crate::widgets::secondary_button(ui, tl!("New"), w).on_hover_text(new_tip).clicked() {
                 let fields = crate::new_doc_ui::initial_fields(app);
                 app.ui.open_dialog(crate::state::DialogKind::NewDocument, fields);
             }
-            ui.add_space(12.0);
-            if crate::widgets::secondary_button(ui, &open_label, w).clicked() {
+            if crate::widgets::secondary_button(ui, tl!("Open"), w).on_hover_text(open_tip).clicked() {
                 app.open_dialog_file();
             }
         });
