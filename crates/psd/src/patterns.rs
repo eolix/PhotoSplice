@@ -26,6 +26,11 @@ use crate::header::Version;
 
 /// Largest pattern edge accepted (Photoshop's own limit is far lower).
 const MAX_EDGE: u32 = 30_000;
+/// Budget for zero-padded channel planes summed over one pattern. Reference writes every channel
+/// at the pattern rectangle, so a smaller channel rectangle is only padding; without this cap a
+/// few hundred bytes (1x1 channels, a huge pattern rectangle) would allocate up to
+/// `MAX_DECODED_BYTES` of zeros (storytold/photocraft@16341720).
+const MAX_PADDED_PATTERN_BYTES: u64 = 512 << 20;
 // A PackBits run packet emits at most 128 bytes from a 2-byte packet.
 const MAX_RLE_EXPANSION: u64 = 64;
 
@@ -142,6 +147,7 @@ fn read_pattern(r: &mut Rd) -> Result<PsdPattern> {
     let mut planes = Vec::new();
     let mut depth = 8u16;
     let mut decoded_bytes = 0u64;
+    let mut padded_bytes = 0u64;
     for _ in 0..count + 2 {
         if v.p >= body.len() {
             break;
@@ -180,6 +186,12 @@ fn read_pattern(r: &mut Rd) -> Result<PsdPattern> {
         decoded_bytes = decoded_bytes.checked_add(plane_bytes).ok_or(PsdError::LimitExceeded("pattern decoded size overflow"))?;
         if decoded_bytes > MAX_DECODED_BYTES {
             return Err(PsdError::LimitExceeded("pattern data exceeds MAX_DECODED_BYTES"));
+        }
+        if cw != w as usize || ch != h as usize {
+            padded_bytes = padded_bytes.checked_add(plane_bytes).ok_or(PsdError::LimitExceeded("pattern padded size overflow"))?;
+            if padded_bytes > MAX_PADDED_PATTERN_BYTES {
+                return Err(PsdError::LimitExceeded("padded pattern channels exceed MAX_PADDED_PATTERN_BYTES"));
+            }
         }
         let _ = layout.decoded_len()?;
         let compression = if comp == 1 {
@@ -464,6 +476,17 @@ mod tests {
 
     fn set_i32(bytes: &mut [u8], offset: usize, value: i32) {
         bytes[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+    }
+
+    /// 3 channels of 5x3 padded to a 30000x30000 pattern would allocate 2.7 GB of zeros.
+    #[test]
+    fn tiny_channels_in_a_huge_pattern_rect_are_not_zero_padded_without_bound() {
+        let p = pat(8, false);
+        let mut global = write_pattern_block(std::slice::from_ref(&p)).unwrap();
+        let vma = pattern_vma_rect_offset(4, &p);
+        set_i32(&mut global, vma + 8, 30_000);
+        set_i32(&mut global, vma + 12, 30_000);
+        assert!(matches!(parse_pattern_block(&global), Err(PsdError::LimitExceeded("padded pattern channels exceed MAX_PADDED_PATTERN_BYTES"))));
     }
 
     #[test]

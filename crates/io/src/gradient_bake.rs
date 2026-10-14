@@ -15,6 +15,9 @@ pub(crate) enum Method {
     Classic,
     Perceptual,
     Linear,
+    /// Reference's default since 2024: straight across each segment in Oklab with its own easing
+    /// ([`SMOOTH_EASE`]).
+    Smooth,
 }
 
 impl Method {
@@ -22,6 +25,7 @@ impl Method {
         match code {
             Some(b"Perc") => Method::Perceptual,
             Some(b"Lnr ") => Method::Linear,
+            Some(b"Smoo") => Method::Smooth,
             _ => Method::Classic,
         }
     }
@@ -63,7 +67,7 @@ fn into_space(m: Method, rgb: [f32; 3]) -> [f32; 3] {
     match m {
         Method::Classic => rgb,
         Method::Linear => rgb.map(lin),
-        Method::Perceptual => to_oklab(rgb),
+        Method::Perceptual | Method::Smooth => to_oklab(rgb),
     }
 }
 
@@ -71,12 +75,25 @@ fn out_of_space(m: Method, p: [f32; 3]) -> [f32; 3] {
     match m {
         Method::Classic => p.map(|v| v.clamp(0.0, 1.0)),
         Method::Linear => p.map(enc),
-        Method::Perceptual => from_oklab(p),
+        Method::Perceptual | Method::Smooth => from_oklab(p),
     }
 }
 
+/// Smooth's progress across a segment at u = 0, 1/16, …, 1: measured upstream on Reference 27.11
+/// as the position along the Oklab line between two stop colours (scripted gradients on three
+/// colour pairs, the same curve for each; Smoothness doesn't change it). It fits no simple
+/// formula (storytold/photocraft@9237a8bd).
+const SMOOTH_EASE: [f32; 17] = [0.0, 0.0438, 0.099, 0.1644, 0.2303, 0.2988, 0.3667, 0.433, 0.4974, 0.5642, 0.6302, 0.6985, 0.7656, 0.8333, 0.8945, 0.9517, 1.0];
+
+fn smooth_ease(u: f32) -> f32 {
+    let x = u.clamp(0.0, 1.0) * 16.0;
+    let i = (x.floor() as usize).min(15);
+    let (a, b) = (SMOOTH_EASE.get(i).copied().unwrap_or(0.0), SMOOTH_EASE.get(i + 1).copied().unwrap_or(1.0));
+    a + (b - a) * (x - i as f32)
+}
+
 /// Colour at `t` for sorted stops (positions in 0..1) in `m`'s space.
-fn eval(stops: &[(f32, [f32; 3])], mids: &[f32], smooth: f32, t: f32) -> [f32; 3] {
+fn eval(stops: &[(f32, [f32; 3])], mids: &[f32], smooth: f32, t: f32, m: Method) -> [f32; 3] {
     let n = stops.len();
     if t <= stops[0].0 {
         return stops[0].1;
@@ -92,6 +109,10 @@ fn eval(stops: &[(f32, [f32; 3])], mids: &[f32], smooth: f32, t: f32) -> [f32; 3
     let mid = mids.get(i).copied().unwrap_or(0.5).clamp(0.05, 0.95);
     u = if u <= mid { 0.5 * u / mid } else { 0.5 + 0.5 * (u - mid) / (1.0 - mid) };
     let (p0, p1) = (stops[i].1, stops[i + 1].1);
+    if m == Method::Smooth {
+        let e = smooth_ease(u);
+        return std::array::from_fn(|c| p0[c] + (p1[c] - p0[c]) * e);
+    }
     // Catmull-Rom tangents per unit t; the ends use half the chord slope.
     let tangent = |k: usize| -> [f32; 3] {
         let (a, b) = match k {
@@ -108,7 +129,9 @@ fn eval(stops: &[(f32, [f32; 3])], mids: &[f32], smooth: f32, t: f32) -> [f32; 3
     let (h00, h10, h01, h11) = (2.0 * u3 - 3.0 * u2 + 1.0, u3 - 2.0 * u2 + u, -2.0 * u3 + 3.0 * u2, u3 - u2);
     std::array::from_fn(|c| {
         let linear = p0[c] + (p1[c] - p0[c]) * u;
-        let spline = h00 * p0[c] + h10 * h * m0[c] + h01 * p1[c] + h11 * h * m1[c];
+        // Kept between the segment's two stop colours (Reference corpus gradient-map.psd: blue
+        // 80 → 60 → 160 holds 60 before the middle stop, where the spline dips to 57).
+        let spline = (h00 * p0[c] + h10 * h * m0[c] + h01 * p1[c] + h11 * h * m1[c]).clamp(p0[c].min(p1[c]), p0[c].max(p1[c]));
         linear + (spline - linear) * smooth
     })
 }
@@ -129,12 +152,21 @@ pub(crate) fn bake_inks(stops: &[(f32, Color)], midpoints: &[f32], smoothness: f
     let mut out: Vec<(f32, [f32; 4])> = (0..=N)
         .map(|i| {
             let t = i as f32 / N as f32;
-            let (a, b) = (eval(&cmy, midpoints, smoothness.clamp(0.0, 1.0), t), eval(&k, midpoints, smoothness.clamp(0.0, 1.0), t));
+            let (a, b) = (eval(&cmy, midpoints, smoothness.clamp(0.0, 1.0), t, method), eval(&k, midpoints, smoothness.clamp(0.0, 1.0), t, method));
             (t, [a[0], a[1], a[2], b[0]].map(|v| v.clamp(0.0, 1.0)))
         })
         .collect();
     out.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6);
     Some(out)
+}
+
+/// [`bake`], but CMYK stops (Classic method) stay CMYK, their inks interpolated as the CMYK
+/// compositor interpolates a fill's stops, so a gradient fill keeps its colour model when it is
+/// written back.
+pub(crate) fn bake_keeping_inks(stops: Vec<(f32, Color)>, midpoints: &[f32], smoothness: f32, method: Method) -> Vec<(f32, Color)> {
+    let Some(inks) = bake_inks(&stops, midpoints, smoothness, method) else { return bake(stops, midpoints, smoothness, method) };
+    let alpha = |t: f32| stops.iter().min_by(|a, b| (a.0 - t).abs().total_cmp(&(b.0 - t).abs())).map_or(1.0, |x| x.1.alpha);
+    inks.into_iter().map(|(t, c)| (t, Color { mode: ColorMode::Cmyk, c, alpha: alpha(t) })).collect()
 }
 
 pub(crate) fn bake(stops: Vec<(f32, Color)>, midpoints: &[f32], smoothness: f32, method: Method) -> Vec<(f32, Color)> {
@@ -151,12 +183,13 @@ pub(crate) fn bake(stops: Vec<(f32, Color)>, midpoints: &[f32], smoothness: f32,
         // Stop colours carry no alpha in Photoshop (opacity has its own stops); keep the nearest.
         s.iter().min_by(|a, b| (a.0 - t).abs().total_cmp(&(b.0 - t).abs())).map_or(1.0, |x| x.1.alpha)
     };
+
     let pts: Vec<(f32, [f32; 3])> = s.iter().map(|(t, c)| (*t, if lab { [c.c[0], c.c[1], c.c[2]] } else { into_space(method, c.to_rgb()) })).collect();
     const N: usize = 96;
     let mut out: Vec<(f32, Color)> = (0..=N)
         .map(|k| {
             let t = k as f32 / N as f32;
-            let v = eval(&pts, midpoints, smoothness.clamp(0.0, 1.0), t);
+            let v = eval(&pts, midpoints, smoothness.clamp(0.0, 1.0), t, method);
             if lab {
                 return (t, Color { mode: ColorMode::Lab, c: [v[0].clamp(0.0, 1.0), v[1].clamp(0.0, 1.0), v[2].clamp(0.0, 1.0), 0.0], alpha: alpha(t) });
             }
@@ -180,6 +213,19 @@ mod tests {
         std::array::from_fn(|c| x[c] + (y[c] - x[c]) * u)
     }
 
+    /// Smoothed CMYK stops bake to CMYK stops (their inks interpolated), not to RGB.
+    #[test]
+    fn cmyk_stops_bake_to_inks() {
+        let cmyk = |c: [f32; 4]| Color { mode: ColorMode::Cmyk, c, alpha: 1.0 };
+        let s = vec![(0.0, cmyk([1.0, 0.0, 0.0, 0.0])), (1.0, cmyk([0.0, 0.0, 0.0, 1.0]))];
+        let out = bake_keeping_inks(s, &[0.5], 1.0, Method::Classic);
+        assert!(out.len() > 2);
+        assert!(out.iter().all(|(_, c)| c.mode == ColorMode::Cmyk));
+        let (first, last) = (out[0].1.c, out[out.len() - 1].1.c);
+        assert!((first[0] - 1.0).abs() < 1e-4 && first[3].abs() < 1e-4, "{first:?}");
+        assert!(last[0].abs() < 1e-4 && (last[3] - 1.0).abs() < 1e-4, "{last:?}");
+    }
+
     #[test]
     fn classic_without_smoothness_is_untouched() {
         let s = vec![(0.0, Color::BLACK), (1.0, Color::WHITE)];
@@ -195,6 +241,19 @@ mod tests {
             let want = t + 0.5 * (ss - t);
             assert!((at(&s, t)[0] - want).abs() < 2e-3, "{t}: {} vs {want}", at(&s, t)[0]);
         }
+    }
+
+    #[test]
+    fn smoothness_does_not_overshoot_a_stop() {
+        // Reference corpus gradient-map.psd: blue 80 → 60 → 160 at 100 % smoothness holds 60
+        // before the middle stop (the plain spline dips to 57).
+        let c = |b: f32| Color::rgb(0.5, 0.5, b / 255.0);
+        let s = bake(vec![(0.0, c(80.0)), (0.5, c(60.0)), (1.0, c(160.0))], &[0.5, 0.5], 1.0, Method::Classic);
+        for t in [0.3f32, 0.35, 0.4, 0.45, 0.49] {
+            let b = at(&s, t)[2] * 255.0;
+            assert!(b >= 60.0 - 1e-3, "{t}: {b}");
+        }
+        assert!((at(&s, 0.2)[2] * 255.0 - 68.0).abs() < 1.0);
     }
 
     #[test]

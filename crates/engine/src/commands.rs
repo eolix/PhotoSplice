@@ -455,7 +455,7 @@ fn build() -> Vec<CommandSpec> {
             let nid = s.edit("Duplicate Layer", |doc, active| {
                 let src = doc.layer(id).ok_or(EngineError::NoLayer(id))?;
                 // A copy of the Background layer is an ordinary, unlocked layer (Photoshop).
-                let from_background = src.name == "Background" && src.locks.transparency && doc.layers.first().is_some_and(|b| b.id == id);
+                let from_background = doc.is_background(id);
                 let mut dup = src.duplicate();
                 dup.name = format!("{} copy", dup.name);
                 if from_background {
@@ -656,6 +656,7 @@ fn build() -> Vec<CommandSpec> {
                 let fmt = doc.pixel_format();
                 let mut bg = Layer::raster("Background", fmt);
                 bg.locks.transparency = true;
+                bg.locks.position = true;
                 *crate::pixels_mut(&mut bg)? = photosuite_compose::flatten_to_surface(doc, fmt, Some([1.0, 1.0, 1.0]));
                 *active = Some(bg.id);
                 doc.layers = vec![bg];

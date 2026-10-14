@@ -269,6 +269,9 @@ pub(crate) fn validate_planes(compression: Compression, data: &[u8], layout: &Pl
             }
             Ok(())
         }
+        // Over the decode budget: decoding refuses it later, so it isn't inflated here just to be
+        // checked (storytold/photocraft@0fb4bbf1).
+        Compression::Zip | Compression::ZipPrediction if total > MAX_DECODED_BYTES => Ok(()),
         Compression::Zip | Compression::ZipPrediction => {
             // Decompress without keeping the output, through the end of the
             // stream so the Adler-32 checksum is verified too.
@@ -471,6 +474,21 @@ pub fn unpredict(buf: &mut [u8], layout: &PlaneLayout) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    /// A ZIP stream past the decode budget isn't inflated while parsing; decoding it refuses
+    /// (storytold/photocraft@0fb4bbf1).
+    #[test]
+    fn zip_over_budget_is_not_decompressed_at_parse() {
+        let l = PlaneLayout { planes: 4, width: 300_000, height: 300_000, depth: 8, version: Version::Psb };
+        assert!(l.total_bytes().unwrap() > MAX_DECODED_BYTES);
+        let garbage = [0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03];
+        for c in [Compression::Zip, Compression::ZipPrediction] {
+            validate_planes(c, &garbage, &l).unwrap();
+            assert!(matches!(decode_planes(c, &garbage, &l), Err(PsdError::LimitExceeded(_))), "{c:?}");
+        }
+        let small = PlaneLayout { planes: 1, width: 4, height: 4, depth: 8, version: Version::Psd };
+        assert!(validate_planes(Compression::Zip, &garbage, &small).is_err());
+    }
+
     use super::*;
 
     fn layout(planes: usize, width: usize, height: usize, depth: u16, version: Version) -> PlaneLayout {

@@ -31,9 +31,10 @@ fn contents(doc: &Document, sm: &SmartObject, intent: Intent, bpc: bool) -> Resu
     if src.depth != doc.depth {
         crate::image_cmds::convert_layers_depth(&mut src.layers, doc.depth);
     }
+    let background_id = src.background().map(|l| l.id);
     let mut layers = std::mem::take(&mut src.layers);
     for l in &mut layers {
-        if crate::extra_cmds::is_background(l) {
+        if Some(l.id) == background_id {
             l.name = "Layer 0".into();
             l.locks = Default::default();
         }
@@ -148,7 +149,7 @@ fn unpacked(so: &Layer, mut layers: Vec<Layer>) -> Layer {
     g.id = LayerId::fresh();
     g.psd_id = None;
     g.blend = blend;
-    g.content = LayerContent::Group(Group { children: layers, expanded: true, artboard: None });
+    g.content = LayerContent::Group(Group { children: layers, expanded: true, artboard: None, divider_blocks: Vec::new() });
     detach_psd(&mut g);
     g
 }

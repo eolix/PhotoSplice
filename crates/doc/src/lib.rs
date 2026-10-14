@@ -233,6 +233,9 @@ pub struct Group {
     pub expanded: bool,
     /// Set when this (top-level) group is an artboard: children are clipped to its rect.
     pub artboard: Option<Artboard>,
+    /// A PSD's group-end divider record blocks the model doesn't regenerate (`shmd` with its
+    /// comp settings and layer time, `fxrp`, `lnsr`…), written back on that record.
+    pub divider_blocks: Vec<([u8; 4], Arc<Vec<u8>>)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -313,6 +316,8 @@ pub struct TextLayer {
     pub antialias: text::AntiAlias,
     /// Warp Text settings (applied to the glyph outlines when rendering).
     pub warp: Option<text::TextWarp>,
+    /// Type on a path: the text runs along this path instead of a straight baseline.
+    pub path: Option<text::TextPath>,
 }
 
 impl Default for TextLayer {
@@ -331,6 +336,7 @@ impl Default for TextLayer {
             orientation: text::Orientation::Horizontal,
             antialias: text::AntiAlias::Smooth,
             warp: None,
+            path: None,
         }
     }
 }
@@ -560,6 +566,13 @@ pub struct Layer {
 }
 
 impl Layer {
+    /// Whether the layer has the Background's own properties: an unclipped pixel layer with
+    /// transparency and position locked. Only the bottom layer of a document with them is the
+    /// Background: use [`Document::background`] / [`Document::is_background`] to identify it.
+    pub fn has_background_traits(&self) -> bool {
+        self.locks.transparency && self.locks.position && !self.clipped && matches!(self.content, LayerContent::Raster(_))
+    }
+
     pub fn new(name: impl Into<String>, content: LayerContent) -> Self {
         Layer {
             id: LayerId::fresh(),
@@ -593,7 +606,7 @@ impl Layer {
         Self::new(name, LayerContent::Raster(Surface::new(format)))
     }
     pub fn group(name: impl Into<String>, children: Vec<Layer>) -> Self {
-        let mut l = Self::new(name, LayerContent::Group(Group { children, expanded: true, artboard: None }));
+        let mut l = Self::new(name, LayerContent::Group(Group { children, expanded: true, artboard: None, divider_blocks: Vec::new() }));
         l.blend = BlendMode::PassThrough;
         l
     }
@@ -885,6 +898,24 @@ impl Document {
         self.path_of(id).map_or_else(Locks::default, |p| self.locks_at(&p))
     }
 
+    /// The Background layer, identified by its structure, never by its name (a file from a
+    /// German or Japanese Reference names it "Hintergrund" or "背景"): the bottom layer of the
+    /// stack, an unclipped pixel layer with transparency and position locked (a PSD stores it
+    /// without a transparency channel; File › New and opaque flat files create it the same way).
+    pub fn background(&self) -> Option<&Layer> {
+        self.layers.first().filter(|l| Layer::has_background_traits(l))
+    }
+
+    /// [`Self::background`], mutably.
+    pub fn background_mut(&mut self) -> Option<&mut Layer> {
+        self.layers.first_mut().filter(|l| Layer::has_background_traits(l))
+    }
+
+    /// Whether `id` is the document's Background layer ([`Self::background`]).
+    pub fn is_background(&self, id: LayerId) -> bool {
+        self.background().is_some_and(|b| b.id == id)
+    }
+
     pub fn layer(&self, id: LayerId) -> Option<&Layer> {
         let path = self.path_of(id)?;
         self.layer_at(&path)
@@ -984,6 +1015,30 @@ mod tests {
         assert_eq!(s.pixel(0, 0), vec![1.0, 1.0, 1.0, 1.0]);
         assert_eq!(s.pixel(99, 49), vec![1.0, 1.0, 1.0, 1.0]);
         assert_eq!(s.pixel(100, 0), vec![0.0; 4]);
+    }
+
+    /// The Background is the locked bottom pixel layer, whatever it is called.
+    #[test]
+    fn background_is_structural_not_named() {
+        let mut d = doc();
+        let id = d.layers[0].id;
+        assert!(d.is_background(id));
+        for name in ["Hintergrund", "背景", "Arrière-plan"] {
+            d.layers[0].name = name.into();
+            assert_eq!(d.background().map(|l| l.id), Some(id), "{name}");
+        }
+        // A layer called "Background" without the locks, or above the bottom, is not it.
+        let mut top = Layer::raster("Background", d.pixel_format());
+        top.locks.transparency = true;
+        top.locks.position = true;
+        let top_id = top.id;
+        d.layers.push(top);
+        assert!(!d.is_background(top_id));
+        d.layers[0].locks.position = false;
+        assert!(d.background().is_none());
+        d.layers[0].locks.position = true;
+        d.layers[0].clipped = true;
+        assert!(d.background_mut().is_none());
     }
 
     #[test]

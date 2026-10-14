@@ -6,7 +6,7 @@
 use photosuite_color::SampleType;
 use photosuite_color::convert::{D50, SRGB_TO_XYZ_D50, XYZ_D50_TO_SRGB, mat3_mul, rgb_to_gray, srgb_to_linear};
 use photosuite_doc::Adjustment;
-use photosuite_doc::adjust::{CurvePoint, HueRange, LevelsChannel, ToneSpace};
+use photosuite_doc::adjust::{CurvePoint, HueRange, LevelsChannel, ToneSpace, lut3d_len};
 
 use crate::Buffer;
 
@@ -89,9 +89,8 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
             map_rgb(buf, |px| px.map(|v| f(v).clamp(0.0, 1.0)))
         }
         Adjustment::BrightnessContrast { brightness, contrast, .. } => {
-            // Modern (CS3+) Brightness/Contrast: smooth curves that pin pure black and white,
-            // brightness then contrast. Brightness interpolates curves measured from Photoshop
-            // (`modern_brightness`); contrast is a symmetric Hermite S-curve (≤0.5/255).
+            // Modern Brightness/Contrast: smooth curves that pin pure black and white, brightness
+            // then contrast (`modern_brightness`, `modern_contrast`; both exact to Reference).
             let t = brightness_contrast_lut(*brightness, *contrast, false);
             map_rgb(buf, |px| px.map(|v| lut(&t, v)))
         }
@@ -120,24 +119,28 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
             map_rgb(buf, |c| {
                 let (dh, ds, dl) = match &table {
                     Some(t) => {
-                        // Range edits follow the pixel's original hue, faded out towards grey (greys have no hue).
-                        let h0 = rgb_to_hsl(c).0;
+                        // Range edits follow the pixel's original hue (on Reference's hue scale),
+                        // faded out towards grey (greys have no hue).
+                        let h0 = range_hue(rgb_to_hsl(c).0);
                         let chroma = ((c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])) * 4.0).min(1.0);
                         (lut(&t[0], h0) * chroma, lut(&t[1], h0) * chroma, lut(&t[2], h0) * chroma)
                     }
                     None => (0.0, 0.0, 0.0),
                 };
-                hue_saturation(c, *hue + dh, (*saturation / 100.0 + ds).clamp(-1.0, 1.0), (*lightness / 100.0 + dl).clamp(-1.0, 1.0), *colorize)
+                if *colorize {
+                    let s = (*saturation / 100.0).clamp(-1.0, 1.0);
+                    return hue_saturation_in(c, *hue + dh, s, (*lightness / 100.0 + dl).clamp(-1.0, 1.0), true, false);
+                }
+                // The master's saturation factor times the ranges' (Reference 16-bit master ±50 %
+                // with Reds ∓50 %: unchanged in the core; adding the sliders was 31/255 off).
+                let s = master_and_range_saturation(*saturation / 100.0, ds);
+                hue_saturation_ranged(c, *hue + dh, s, (*lightness / 100.0).clamp(-1.0, 1.0), dl.clamp(-1.0, 1.0), depth == Some(SampleType::F32), table.is_some())
             })
         }
         Adjustment::Vibrance { vibrance, saturation } => {
-            let (v, s) = (*vibrance / 100.0, *saturation / 100.0);
-            map_rgb(buf, |c| {
-                let (h, sat, l) = rgb_to_hsl(c);
-                let boost = v * (1.0 - sat); // less saturated colours move more
-                let ns = (sat * (1.0 + s) + boost * sat.max(0.1)).clamp(0.0, 1.0);
-                hsl_to_rgb(h, ns, l)
-            })
+            let table = vibrance_lut(*vibrance);
+            let k = 1.0 + (saturation / 100.0).clamp(-1.0, 1.0);
+            map_rgb(buf, |c| vibrance_px(c, &table, k, transfer))
         }
         Adjustment::ChannelMixer { matrix, monochrome, .. } => map_rgb(buf, |c| {
             let mix = |row: &[f32; 4]| (row[0] * c[0] + row[1] * c[1] + row[2] * c[2] + row[3]).clamp(0.0, 1.0);
@@ -156,7 +159,9 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
         Adjustment::BlackWhite { weights, tint } => map_rgb(buf, |c| {
             let g = black_white_gray(c, weights);
             match tint {
-                Some(t) => std::array::from_fn(|i| (g * t[i] * 2.0).clamp(0.0, 1.0) * 0.5 + g * 0.5),
+                // The tint colour at the grey's luminosity, as the Color blend mode does
+                // (Photoshop corpus black-white-tint.psd, rgb16).
+                Some(t) => photosuite_color::blend::set_lum(*t, g).map(|v| v.clamp(0.0, 1.0)),
                 None => [g; 3],
             }
         }),
@@ -167,7 +172,7 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
                 if p[3] <= 0.0 {
                     continue;
                 }
-                let mut t = rgb_to_gray([p[0], p[1], p[2]]);
+                let mut t = gradient_map_level([p[0], p[1], p[2]]);
                 if *reverse {
                     t = 1.0 - t;
                 }
@@ -179,21 +184,12 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
                 p[..3].copy_from_slice(&o);
             }
         }
-        Adjustment::ColorBalance { shadows, midtones, highlights, preserve_luminosity } => map_rgb(buf, |c| {
-            let l = rgb_to_gray(c);
-            let ws = (1.0 - l * 2.0).clamp(0.0, 1.0);
-            let wh = (l * 2.0 - 1.0).clamp(0.0, 1.0);
-            let wm = 1.0 - ws - wh;
-            let out: [f32; 3] = std::array::from_fn(|i| (c[i] + (shadows[i] * ws + midtones[i] * wm + highlights[i] * wh) / 100.0 * 0.5).clamp(0.0, 1.0));
-            if *preserve_luminosity {
-                let l1 = rgb_to_gray(out).max(1e-6);
-                out.map(|v| (v * l / l1).clamp(0.0, 1.0))
-            } else {
-                out
-            }
-        }),
+        Adjustment::ColorBalance { shadows, midtones, highlights, preserve_luminosity } => {
+            let t = color_balance_luts(shadows, midtones, highlights, *preserve_luminosity);
+            map_rgb(buf, |c| std::array::from_fn(|i| t.get(i).map_or(c[i], |row| lut(row, c[i]))))
+        }
         Adjustment::SelectiveColor { relative, adjustments } => map_rgb(buf, |c| selective_color(c, *relative, adjustments)),
-        Adjustment::ColorLookup { lut: Some(table), size, tetrahedral, dither, .. } if *size >= 2 && table.len() >= (*size as usize).pow(3) * 3 => {
+        Adjustment::ColorLookup { lut: Some(table), size, tetrahedral, dither, .. } if lut3d_len(*size).is_some_and(|len| table.len() >= len) => {
             let (n, w, x0, y0) = (*size as usize, buf.rect.width().max(1) as usize, buf.rect.x0, buf.rect.y0);
             for (i, p) in buf.px.iter_mut().enumerate() {
                 if p[3] <= 0.0 {
@@ -213,7 +209,9 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
 }
 
 /// Per-channel LUTs of a Levels or Curves adjustment, each channel's record composed with the
-/// master (Photoshop applies the channel curve first, then the composite). Four rows: the three
+/// master. Photoshop's two differ: Levels applies the channel first, then the composite (psd-tools
+/// levels_rgb.psd: 114/255 off the other way round), Curves the composite first, then the channel
+/// (psd-tools curves_rgb.psd, Photoshop corpus curves-per-channel.psd). Four rows: the three
 /// `per_channel` channels then black (identity unless the space is CMYK). In Lab there is no
 /// composite record, so the master is ignored.
 pub fn tone_luts(adj: &Adjustment) -> [Vec<f32>; 4] {
@@ -228,7 +226,7 @@ pub fn tone_luts_q(adj: &Adjustment, quantum: Option<f32>) -> [Vec<f32>; 4] {
         Adjustment::Levels { master, per_channel, space, black } => {
             let ident = LevelsChannel::default();
             let m = if *space == ToneSpace::Lab { &ident } else { master };
-            let row = |c: &LevelsChannel| (0..LUT_SIZE).map(|k| levels_q(c, levels_q(m, x(k), quantum), quantum)).collect();
+            let row = |c: &LevelsChannel| (0..LUT_SIZE).map(|k| levels_q(m, levels_q(c, x(k), quantum), quantum)).collect();
             [row(&per_channel[0]), row(&per_channel[1]), row(&per_channel[2]), row(if *space == ToneSpace::Cmyk { black } else { &ident })]
         }
         Adjustment::Curves { master, per_channel, space, black } => {
@@ -246,7 +244,7 @@ pub fn tone_luts_depth(adj: &Adjustment, depth: Option<SampleType>) -> [Vec<f32>
     match (adj, depth) {
         (Adjustment::Levels { master, per_channel, space: ToneSpace::Rgb, .. }, Some(SampleType::F32)) => {
             let x = |k: usize| k as f32 / (LUT_SIZE - 1) as f32;
-            let row = |c: &LevelsChannel| (0..LUT_SIZE).map(|k| levels_float(c, levels_float(master, x(k))).clamp(0.0, 1.0)).collect();
+            let row = |c: &LevelsChannel| (0..LUT_SIZE).map(|k| levels_float(master, levels_float(c, x(k))).clamp(0.0, 1.0)).collect();
             [row(&per_channel[0]), row(&per_channel[1]), row(&per_channel[2]), (0..LUT_SIZE).map(x).collect()]
         }
         _ => tone_luts_q(adj, depth.and_then(crate::adjustment_quantum)),
@@ -282,38 +280,262 @@ fn tone_in_space(space: ToneSpace, luts: &[Vec<f32>; 4], c: [f32; 3]) -> [f32; 3
     std::array::from_fn(|i| (c[i] + after[i] - before[i]).clamp(0.0, 1.0))
 }
 
-/// Hue/Saturation's range edits as three hue-indexed tables (hue shift in degrees, saturation and
-/// lightness as fractions), sampled at hue `k / (len - 1)` turns. Ranges add up where they overlap.
+/// Where a hue (in turns) falls among Hue/Saturation's colour ranges, in turns. Reference's hue
+/// runs 60/255° short per sextant: steady 1, 2, 3 and 4 steps behind in the sextants whose middle
+/// channel is red or blue, sliding by one step across the two where it is green (0–60°,
+/// 180–240°), whatever the saturation and lightness (16-bit Lightness +40 curves of all six
+/// ranges: the falloffs move by up to 0.94°).
+pub fn range_hue(h: f32) -> f32 {
+    let deg = h.rem_euclid(1.0) * 360.0;
+    let k = ((deg / 60.0).floor() as usize).min(5);
+    let f = deg / 60.0 - k as f32;
+    let steps = [f, 1.0, 2.0, 2.0 + f, 3.0, 4.0][k];
+    (deg - steps * 60.0 / 255.0).rem_euclid(360.0) / 360.0
+}
+
+/// Hue/Saturation's range edits as three hue-indexed tables (hue shift in degrees, saturation as
+/// its factor's excess `k − 1`, lightness as a fraction), sampled at hue `k / (len - 1)` turns of
+/// [`range_hue`]. A range's weight scales the saturation factor's excess, not the slider: +40 %
+/// at half weight is 1 + ½ · (1/0.6 − 1), not 1/0.8 (Reference 16-bit Reds falloffs: 6/255 →
+/// 0.9/255). Ranges add up where they overlap.
 pub fn hue_range_tables(ranges: &[HueRange; 6]) -> [Vec<f32>; 3] {
     let at = |k: usize| {
         let deg = k as f32 / (LUT_SIZE - 1) as f32 * 360.0;
         ranges.iter().filter(|r| !r.is_neutral()).fold([0.0f32; 3], |acc, r| {
             let w = r.weight(deg);
-            [acc[0] + w * r.hue, acc[1] + w * r.saturation / 100.0, acc[2] + w * r.lightness / 100.0]
+            [acc[0] + w * r.hue, acc[1] + w * saturation_excess(r.saturation / 100.0), acc[2] + w * r.lightness / 100.0]
         })
     };
     let rows: Vec<[f32; 3]> = (0..LUT_SIZE).map(at).collect();
     std::array::from_fn(|i| rows.iter().map(|r| r[i]).collect())
 }
 
+/// A saturation slider (−1..=1) as its factor's excess `k − 1` ([`hue_saturation_scale`]).
+fn saturation_excess(s: f32) -> f32 {
+    let s = if s.is_finite() { s.clamp(-1.0, 0.999) } else { 0.0 };
+    if s > 0.0 { s / (1.0 - s) } else { s }
+}
+
+/// The saturation slider equivalent to the master slider `master` (−1..=1) combined with the
+/// ranges' factor excess `range_excess`: their factors multiply.
+pub fn master_and_range_saturation(master: f32, range_excess: f32) -> f32 {
+    saturation_of_excess((1.0 + saturation_excess(master)) * (1.0 + range_excess.max(-1.0)) - 1.0)
+}
+
+/// The saturation slider whose factor's excess is `e` (inverse of [`saturation_excess`]).
+pub fn saturation_of_excess(e: f32) -> f32 {
+    if e > 0.0 { 1.0 - 1.0 / (1.0 + e) } else { e.max(-1.0) }
+}
+
 /// One Hue/Saturation evaluation: hue shift in degrees, saturation and lightness in -1..=1.
 /// Colorize sets the hue and saturation instead of shifting them.
 pub fn hue_saturation(c: [f32; 3], hue: f32, s: f32, l: f32, colorize: bool) -> [f32; 3] {
-    let (mut hh, mut ss, ll) = rgb_to_hsl(c);
+    hue_saturation_in(c, hue, s, l, colorize, false)
+}
+
+/// [`hue_saturation`] in an 8/16-bit or a 32-bit (`float`) document.
+pub fn hue_saturation_in(c: [f32; 3], hue: f32, s: f32, l: f32, colorize: bool, float: bool) -> [f32; 3] {
     if colorize {
-        hh = hue.rem_euclid(360.0) / 360.0;
-        ss = s.abs().max(0.25);
-    } else {
-        hh = (hh + hue / 360.0).rem_euclid(1.0);
-        ss = (ss * (1.0 + s)).clamp(0.0, 1.0);
+        // Colorize: the hue and saturation as set, on the pixel's HSL lightness moved by the
+        // Lightness slider (Photoshop corpus hue-saturation-colorize.psd, rgb16: within 0.5/255).
+        let (_, _, ll) = rgb_to_hsl(c);
+        let ll = if l > 0.0 { ll + (1.0 - ll) * l } else { ll * (1.0 + l) };
+        return hsl_to_rgb(hue.rem_euclid(360.0) / 360.0, s.abs().min(1.0), ll).map(|v| v.clamp(0.0, 1.0));
     }
-    let mut rgb = hsl_to_rgb(hh, ss, ll);
+    hue_saturation_ranged(c, hue, s, l, 0.0, float, false)
+}
+
+/// [`hue_saturation_in`] (not colorized) with a range edit's lightness `range_l` (already
+/// weighted by the pixel's membership): a raise moves the channels towards the brightest one,
+/// not towards white like the master slider (Photoshop corpus hs-blues-light40.psd: the blue
+/// square 20 90 200 → 71 121 200; 17/255 → 2/255), a cut towards the darkest one.
+/// `ranges`: colour ranges are in use, which also holds the largest channel at 1.
+pub fn hue_saturation_ranged(c: [f32; 3], hue: f32, s: f32, l: f32, range_l: f32, float: bool, ranges: bool) -> [f32; 3] {
+    // Hue turns the HSL hue; saturation then scales each channel about the HSL lightness by
+    // 1 / (1 − s) (s > 0) or 1 + s, held only where the smallest channel would go below 0: the
+    // largest may overshoot 1 until the lightness step (Photoshop corpus hue-saturation.psd,
+    // rgb16: within 0.9/255; was 17/255 with a clamped HSL saturation).
+    let (hh, ss, ll) = rgb_to_hsl(c);
+    let mut rgb = hsl_to_rgb((hh + hue / 360.0).rem_euclid(1.0), ss, ll);
+    // A range's lightness comes before the saturation step: a raise pulls the channels towards
+    // the brightest one, a cut towards the darkest (Reference 16-bit Reds −30 with hue −90 and
+    // saturation +40: within 1/255; scaling towards black after saturating was 39/255 off).
+    let (max, min) = (rgb[0].max(rgb[1]).max(rgb[2]), rgb[0].min(rgb[1]).min(rgb[2]));
+    if range_l > 0.0 {
+        rgb = rgb.map(|v| v + (max - v) * range_l);
+    } else if range_l < 0.0 {
+        rgb = rgb.map(|v| v + (min - v) * -range_l);
+    }
+    let mut rgb = hue_saturation_scale(rgb, s, float, ranges);
     if l > 0.0 {
         rgb = rgb.map(|v| v + (1.0 - v) * l);
     } else if l < 0.0 {
         rgb = rgb.map(|v| v * (1.0 + l));
     }
-    rgb
+    rgb.map(|v| v.clamp(0.0, 1.0))
+}
+
+/// Hue/Saturation's saturation step on `rgb` (see [`hue_saturation`]). 32-bit documents don't
+/// hold the smallest channel at 0: it may go below and is clipped at the end (Photoshop corpus
+/// rgb32 hue-saturation.psd: within 1/255, was 34/255 held).
+fn hue_saturation_scale(rgb: [f32; 3], s: f32, float: bool, hold_white: bool) -> [f32; 3] {
+    let (max, min) = (rgb[0].max(rgb[1]).max(rgb[2]), rgb[0].min(rgb[1]).min(rgb[2]));
+    let mid = (max + min) / 2.0;
+    let mut k = if s > 0.0 { 1.0 / (1.0 - s).max(1e-6) } else { 1.0 + s };
+    if s > 0.0 && !float && min < mid {
+        k = k.min(mid / (mid - min));
+    }
+    if s > 0.0 && !float && hold_white && max > mid {
+        // With colour ranges in use, nor the largest above 1: a colour at full HSL saturation
+        // stays as it is (Reference 16-bit Reds +100 %, master +30 % with Reds +40 %); the
+        // master alone lets it overshoot until the lightness step.
+        k = k.max(1.0).min(((1.0 - mid) / (max - mid)).max(1.0));
+    }
+    rgb.map(|v| mid + (v - mid) * k)
+}
+
+/// Color Balance as one curve per channel (each output channel depends only on its own value;
+/// [`LUT_SIZE`] samples): a Levels per channel. Each slider value `s` (−100..100: Cyan–Red,
+/// Magenta–Green, Yellow–Blue) moves its channel against the other two:
+/// * Shadows: `s > 0` raises the input black of the other two channels by `s`/255 (they darken),
+///   `s < 0` that of the slider's own channel.
+/// * Highlights: `s > 0` lowers the input white of the slider's channel by `s`/255 (it
+///   brightens), `s < 0` that of the other two.
+/// * Midtones: the channel's gamma (see the midtones step below).
+///
+/// That is with Preserve Luminosity; without it see the code. Sliders add up per channel. Exact
+/// (within 0.1 levels) on Reference's 16-bit curves, both ways (143 settings).
+pub fn color_balance_luts(shadows: &[f32; 3], midtones: &[f32; 3], highlights: &[f32; 3], preserve_luminosity: bool) -> [Vec<f32>; 3] {
+    let amount = |s: f32| if s.is_finite() { s.clamp(-100.0, 100.0) } else { 0.0 };
+    let (sh, mids, hi) = (shadows.map(amount), midtones.map(amount), highlights.map(amount));
+    let (mut black, mut white) = ([0.0f32; 3], [0.0f32; 3]);
+    // Midtones: a Levels gamma per channel, `2^(s/100)` rounded to hundredths as Levels keeps it.
+    // Preserve Luminosity measures each slider from the middle of the three, (max + min) / 2, so
+    // equal sliders cancel.
+    let gamma = if preserve_luminosity {
+        for ch in 0..3 {
+            let others = [(ch + 1) % 3, (ch + 2) % 3];
+            if sh[ch] > 0.0 {
+                others.iter().for_each(|&k| black[k] += sh[ch] / 255.0);
+            } else {
+                black[ch] -= sh[ch] / 255.0;
+            }
+            if hi[ch] > 0.0 {
+                white[ch] += hi[ch] / 255.0;
+            } else {
+                others.iter().for_each(|&k| white[k] -= hi[ch] / 255.0);
+            }
+        }
+        let shift = (mids.iter().copied().fold(f32::MIN, f32::max) + mids.iter().copied().fold(f32::MAX, f32::min)) / 2.0;
+        mids.map(|s| (s - shift) / 100.0)
+    } else {
+        // Without it every slider stays on its own channel: a shadows cut and a highlights raise
+        // still move the black and white points, and each shadows and highlights slider also
+        // bends the gamma by half a midtones step; the exponents add before the rounding.
+        for ch in 0..3 {
+            black[ch] = (-sh[ch]).max(0.0) / 255.0;
+            white[ch] = hi[ch].max(0.0) / 255.0;
+        }
+        std::array::from_fn(|ch| mids[ch] / 100.0 + (sh[ch] + hi[ch]) / 200.0)
+    }
+    .map(|e: f32| (e.exp2() * 100.0).round() / 100.0);
+    std::array::from_fn(|k| {
+        // Shadows and highlights set the input black and white points, as in Levels.
+        let (b, w) = (black[k].min(0.99), white[k].min(0.99));
+        let range = (1.0 - w - b).max(1e-3);
+        (0..LUT_SIZE)
+            .map(|i| {
+                let v = i as f32 / (LUT_SIZE - 1) as f32;
+                midtone_gamma(((v - b) / range).clamp(0.0, 1.0), gamma[k]).clamp(0.0, 1.0)
+            })
+            .collect()
+    })
+}
+
+/// Saturation measured on the Vibrance factor tables ([`VIB_ROWS`]): `1 − min / max` of the
+/// linear-light channels.
+const VIB_S: [f32; 31] = [
+    0.0000, 0.1537, 0.2639, 0.2788, 0.2946, 0.3092, 0.3520, 0.4013, 0.5812, 0.6238, 0.6557, 0.6938, 0.7268, 0.7600, 0.7813, 0.8174,
+    0.8259, 0.8575, 0.8707, 0.9194, 0.9277, 0.9440, 0.9555, 0.9599, 0.9664, 0.9788, 0.9816, 0.9834, 0.9851, 0.9879, 1.0000,
+];
+/// Photoshop's Vibrance factor `f` at each [`VIB_S`], per slider value: the channels move away
+/// from (`f > 1`) or towards (`f < 1`) the brightest one. Measured on the Photoshop corpus
+/// vibrance-*.psd (±50, +100; −100 extrapolated from −50).
+const VIB_ROWS: [(f32, [f32; 31]); 5] = [
+    (
+        -100.0,
+        [
+            0.0000, 0.0000, 0.0446, 0.0476, 0.0000, 0.0000, 0.0572, 0.0879, 0.2644, 0.3087, 0.3490, 0.3844, 0.4095, 0.4552, 0.4771, 0.5165,
+            0.5175, 0.5544, 0.5783, 0.6312, 0.6425, 0.6586, 0.6770, 0.7033, 0.7097, 0.7253, 0.7267, 0.7300, 0.7333, 0.7361, 0.7504,
+        ],
+    ),
+    (
+        -50.0,
+        [
+            0.4032, 0.4565, 0.5223, 0.5238, 0.4948, 0.4978, 0.5286, 0.5440, 0.6322, 0.6544, 0.6745, 0.6922, 0.7047, 0.7276, 0.7385, 0.7582,
+            0.7588, 0.7772, 0.7891, 0.8156, 0.8213, 0.8293, 0.8385, 0.8517, 0.8549, 0.8627, 0.8634, 0.8650, 0.8667, 0.8681, 0.8752,
+        ],
+    ),
+    (0.0, [1.0; 31]),
+    (
+        50.0,
+        [
+            1.0000, 1.0527, 1.0284, 1.0530, 1.0497, 1.0467, 1.0591, 1.0661, 1.0644, 1.0641, 1.0650, 1.0572, 1.0566, 1.0548, 1.0506, 1.0470,
+            1.0453, 1.0416, 1.0387, 1.0274, 1.0253, 1.0198, 1.0169, 1.0146, 1.0130, 1.0081, 1.0073, 1.0069, 1.0058, 1.0052, 1.0000,
+        ],
+    ),
+    (
+        100.0,
+        [
+            1.0000, 1.1051, 1.1126, 1.1312, 1.1472, 1.1385, 1.1552, 1.1775, 1.2064, 1.1945, 1.1942, 1.1764, 1.1668, 1.1551, 1.1465, 1.1309,
+            1.1262, 1.1095, 1.1018, 1.0608, 1.0557, 1.0438, 1.0352, 1.0317, 1.0271, 1.0174, 1.0152, 1.0137, 1.0123, 1.0101, 1.0000,
+        ],
+    ),
+];
+
+/// Luminance weights of Vibrance's Saturation slider (linear light; fitted on the Photoshop
+/// corpus vibrance-0-±50.psd: within 0.8/255 at −50).
+const VIB_LUMA: [f32; 3] = [0.29, 0.71, 0.0];
+
+/// The Vibrance factor over saturation `S` (`0..=1`, [`LUT_SIZE`] samples) for slider `vibrance`
+/// (−100..100), interpolated between the measured sliders. The CPU reads it with [`lut`]; the GPU
+/// uploads it as a LUT row.
+pub fn vibrance_lut(vibrance: f32) -> Vec<f32> {
+    let v = if vibrance.is_finite() { vibrance.clamp(-100.0, 100.0) } else { 0.0 };
+    let row = |r: &[f32; 31], s: f32| {
+        let i = VIB_S.iter().take(VIB_S.len() - 1).rposition(|&k| k <= s).unwrap_or(0);
+        let (s0, s1) = (VIB_S.get(i).copied().unwrap_or(0.0), VIB_S.get(i + 1).copied().unwrap_or(1.0));
+        let (f0, f1) = (r.get(i).copied().unwrap_or(1.0), r.get(i + 1).copied().unwrap_or(1.0));
+        f0 + (f1 - f0) * ((s - s0) / (s1 - s0).max(1e-6)).clamp(0.0, 1.0)
+    };
+    let pair = VIB_ROWS.windows(2).find(|w| matches!(w, [a, b] if v >= a.0 && v <= b.0));
+    (0..LUT_SIZE)
+        .map(|k| {
+            let s = k as f32 / (LUT_SIZE - 1) as f32;
+            match pair {
+                Some([a, b]) => {
+                    let t = (v - a.0) / (b.0 - a.0);
+                    row(&a.1, s) * (1.0 - t) + row(&b.1, s) * t
+                }
+                _ => 1.0,
+            }
+        })
+        .collect()
+}
+
+/// Vibrance on one colour, in linear light: the channels move from the brightest by the factor
+/// for their saturation (`table`, see [`vibrance_lut`]), then Saturation blends them with the
+/// luminance by `k` (`1 + saturation`). Photoshop corpus vibrance-*.psd: within 1.5/255 at
+/// ±50, 6/255 at +100 (the old HSL guess was 89/255 off).
+fn vibrance_px(c: [f32; 3], table: &[f32], k: f32, transfer: Transfer) -> [f32; 3] {
+    let mut l = c.map(|v| transfer.decode(v));
+    let (max, min) = (l[0].max(l[1]).max(l[2]), l[0].min(l[1]).min(l[2]));
+    if max > 0.0 {
+        let f = lut(table, 1.0 - min / max);
+        l = l.map(|x| (max - (max - x) * f).max(0.0));
+    }
+    let y = VIB_LUMA[0] * l[0] + VIB_LUMA[1] * l[1] + VIB_LUMA[2] * l[2];
+    l.map(|x| transfer.encode(y + (x - y) * k).clamp(0.0, 1.0))
 }
 
 /// Black & White grey value. Each colour is the sum of a grey part (its smallest channel), a
@@ -408,10 +630,11 @@ pub fn selective_color_weights(c: [f32; 3]) -> [f32; 9] {
     ]
 }
 
-/// Photoshop Selective Color (approximation): each range shifts the cyan, magenta and yellow ink
-/// (1 − R, G, B) by its percentage, plus its black percentage on every ink, weighted by how much
-/// the colour belongs to the range. Relative mode scales the shift by the ink already present
-/// (so it can't tint pure white); absolute adds it outright.
+/// Photoshop Selective Color: each range moves the cyan, magenta and yellow ink (1 − R, G, B)
+/// to a target, clamped to 0..100 %, and the colour moves towards it by how much it belongs to
+/// the range. Relative mode scales the ink by its percentage, then by the black percentage
+/// (`ink · (1 + a) · (1 + k)`, so it can't tint pure white); absolute adds both outright.
+/// Fitted on Photoshop corpus selective-color.psd (relative), rgb16: within 1/255, was 11/255.
 pub fn selective_color(c: [f32; 3], relative: bool, adj: &[[f32; 4]; 9]) -> [f32; 3] {
     let w = selective_color_weights(c);
     let mut delta = [0.0f32; 3];
@@ -422,8 +645,8 @@ pub fn selective_color(c: [f32; 3], relative: bool, adj: &[[f32; 4]; 9]) -> [f32
         let a = adj[r].map(|v| v / 100.0);
         for i in 0..3 {
             let ink = 1.0 - c[i];
-            let d = if relative { (a[i] + a[3]) * ink } else { a[i] + a[3] };
-            delta[i] += d * wr;
+            let target = if relative { ink * (1.0 + a[i]) * (1.0 + a[3]) } else { ink + a[i] + a[3] };
+            delta[i] += (target.clamp(0.0, 1.0) - ink) * wr;
         }
     }
     std::array::from_fn(|i| (c[i] - delta[i]).clamp(0.0, 1.0))
@@ -469,94 +692,67 @@ pub fn photo_filter_matrix(color: [f32; 3], density: f32, normalize_y: bool) -> 
     std::array::from_fn(|r| std::array::from_fn(|c| (0..3).map(|k| XYZ_D50_TO_SRGB[r][k] * s[k] * SRGB_TO_XYZ_D50[k][c]).sum()))
 }
 
-/// Photoshop posterize: `n` equal input bins over 0..=255, output levels
-/// `floor(k * 255 / (n - 1))` (exact on the corpus for 3, 7, 13 and 21 levels).
-/// Input levels (0..255) of the measured modern Brightness knots: every 8 levels, denser near
-/// white where the curves bend hardest.
-const BRIGHT_X: [f32; 37] = [
-    0.0, 8.0, 16.0, 24.0, 32.0, 40.0, 48.0, 56.0, 64.0, 72.0, 80.0, 88.0, 96.0, 104.0, 112.0, 120.0, 128.0, 136.0, 144.0, 152.0, 160.0, 168.0, 176.0,
-    184.0, 192.0, 200.0, 208.0, 216.0, 224.0, 232.0, 240.0, 244.0, 248.0, 250.0, 252.0, 254.0, 255.0,
-];
-/// Slider values of the measured curves in [`BRIGHT_Y`].
-const BRIGHT_B: [f32; 5] = [-150.0, -50.0, 50.0, 100.0, 150.0];
-/// Photoshop's modern Brightness curves at [`BRIGHT_B`], output levels at [`BRIGHT_X`]. Measured
-/// by pushing a 0..255 ramp through the real app (smoothed over ±2 levels).
-const BRIGHT_Y: [[f32; 37]; 5] = [
-    [
-        0.0, 3.0, 6.1, 9.6, 12.5, 15.6, 18.4, 22.0, 24.6, 28.2, 30.8, 34.3, 37.1, 40.5, 43.8, 46.7, 49.6, 53.0, 56.1, 59.7, 62.8, 66.7, 71.0, 74.9, 79.4,
-        84.5, 90.5, 97.0, 106.3, 116.0, 132.0, 143.0, 156.5, 164.0, 178.5, 214.0, 255.0,
-    ],
-    [
-        0.0, 6.0, 11.6, 17.4, 23.4, 29.3, 35.3, 40.8, 46.3, 52.6, 58.4, 64.3, 70.2, 75.8, 81.7, 88.0, 93.3, 99.4, 105.0, 112.0, 118.2, 124.7, 132.8,
-        140.3, 148.0, 155.8, 165.5, 175.0, 186.0, 198.0, 213.0, 219.0, 230.0, 234.5, 242.0, 252.5, 255.0,
-    ],
-    [
-        0.0, 11.2, 21.8, 33.2, 43.6, 54.8, 66.2, 77.2, 87.6, 99.0, 109.0, 121.0, 131.4, 141.8, 152.0, 162.0, 171.0, 180.2, 187.8, 196.2, 203.2, 210.0,
-        216.8, 223.0, 228.2, 233.2, 237.6, 242.0, 245.8, 249.0, 252.0, 252.0, 254.0, 254.0, 254.0, 255.0, 255.0,
-    ],
-    [
-        0.0, 15.2, 29.6, 44.6, 60.8, 75.0, 90.0, 105.2, 119.6, 135.6, 148.8, 161.8, 172.4, 183.2, 193.2, 201.6, 208.6, 216.0, 221.6, 227.4, 232.2, 236.0,
-        239.6, 242.8, 244.8, 247.2, 248.8, 250.2, 251.8, 253.0, 254.0, 254.0, 254.0, 254.0, 255.0, 255.0, 255.0,
-    ],
-    [
-        0.0, 21.4, 41.2, 62.8, 81.0, 103.4, 124.4, 144.4, 162.2, 179.8, 192.4, 205.0, 214.0, 222.0, 229.4, 234.4, 238.6, 242.4, 244.4, 247.2, 248.8, 250.0,
-        251.2, 252.0, 253.0, 253.0, 254.0, 254.0, 254.0, 255.0, 255.0, 255.0, 255.0, 255.0, 255.0, 255.0, 255.0,
-    ],
-];
-
-/// Monotone cubic (Fritsch–Carlson PCHIP) through the knots `(xs, ys)` at `x`, clamped to the ends.
-fn pchip(xs: &[f32], ys: &[f32], x: f32) -> f32 {
-    let n = xs.len().min(ys.len());
-    let (Some(&x0), Some(&xn), Some(&y0), Some(&yn)) = (xs.first(), xs.get(n.wrapping_sub(1)), ys.first(), ys.get(n.wrapping_sub(1))) else {
-        return x;
-    };
-    if n < 2 || x <= x0 {
-        return y0;
+/// Modern Brightness's base curve for `b` in [0, 100] (`x`, output in 0..=1): a line of slope
+/// `s = 2^(b/110)` from black up to mid grey, then a cubic Hermite to white leaving at slope `s`
+/// and arriving at `max(1 / (1 + 12 (s − 1)), 0.1)`. Fitted on Reference's exact 16-bit curves
+/// (a 4096-step ramp at every 10 from −150 to 150): within 0.011 levels of all of them.
+fn brightness_base(x: f32, b: f32) -> f32 {
+    let s = (b / 110.0).exp2();
+    let knee = 0.5 / s;
+    if x <= knee {
+        return s * x;
     }
-    if x >= xn {
-        return yn;
-    }
-    let i = xs.iter().take(n - 1).rposition(|&k| k <= x).unwrap_or(0);
-    let h = |k: usize| xs.get(k + 1).zip(xs.get(k)).map_or(1.0, |(a, b)| a - b);
-    let d = |k: usize| ys.get(k + 1).zip(ys.get(k)).map_or(0.0, |(a, b)| a - b) / h(k);
-    let slope = |k: usize| {
-        if k == 0 {
-            return d(0);
-        }
-        if k >= n - 1 {
-            return d(n - 2);
-        }
-        let (d0, d1) = (d(k - 1), d(k));
-        if d0 * d1 <= 0.0 {
-            return 0.0;
-        }
-        let (w1, w2) = (2.0 * h(k) + h(k - 1), h(k) + 2.0 * h(k - 1));
-        (w1 + w2) / (w1 / d0 + w2 / d1)
-    };
-    let (hi, t) = (h(i), (x - xs.get(i).copied().unwrap_or(x0)) / h(i));
+    let end = (1.0 / (1.0 + 12.0 * (s - 1.0))).max(0.1);
+    let span = 1.0 - knee;
+    let t = (x - knee) / span;
     let (t2, t3) = (t * t, t * t * t);
-    let (ya, yb) = (ys.get(i).copied().unwrap_or(y0), ys.get(i + 1).copied().unwrap_or(yn));
-    (2.0 * t3 - 3.0 * t2 + 1.0) * ya + (t3 - 2.0 * t2 + t) * hi * slope(i) + (-2.0 * t3 + 3.0 * t2) * yb + (t3 - t2) * hi * slope(i + 1)
+    (2.0 * t3 - 3.0 * t2 + 1.0) * 0.5 + (t3 - 2.0 * t2 + t) * span * s + (-2.0 * t3 + 3.0 * t2) + (t3 - t2) * span * end
 }
 
-/// Modern Brightness curve (one channel, `brightness` in [-150, 150]). Photoshop's curve is a
-/// spline we don't have the formula for, so this interpolates curves measured from the real app
-/// at -150, -50, 50, 100 and 150 (identity at 0), with a monotone cubic across the sliders.
-/// Pins pure black and white; at most 2–5/255 off Photoshop at the measured sliders (the old fitted
-/// formula was up to 53/255 off at -150), about 4/255 between them.
+/// The inverse of [`brightness_base`] (it rises strictly), by bisection.
+fn brightness_base_inverse(y: f32, b: f32) -> f32 {
+    if y <= 0.0 || y >= 1.0 {
+        return y.clamp(0.0, 1.0);
+    }
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..32 {
+        let mid = 0.5 * (lo + hi);
+        if brightness_base(mid, b) < y {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// Modern Brightness curve (one channel, `brightness` in [-150, 150]). Reference builds it from
+/// one family ([`brightness_base`], 0..=100): past 100 it applies the 100 curve and then the
+/// rest, and a negative slider is the exact inverse of the positive one (both checked on its
+/// curves to 0.03 levels). Pins black and white.
 pub fn modern_brightness(v: f32, brightness: f32) -> f32 {
     if brightness == 0.0 || !brightness.is_finite() {
         return v;
     }
     let b = brightness.clamp(-150.0, 150.0);
-    let x = v.clamp(0.0, 1.0) * 255.0;
-    let curve = |k: usize| BRIGHT_Y.get(k).map_or(x, |ys| pchip(&BRIGHT_X, ys, x));
-    // Output across the sliders at this level (identity at 0), then a monotone cubic in `b`: near
-    // white, Photoshop's output rises much faster over the first slider steps than a linear blend
-    // (b = 25 lands ~3/4 of the way to the b = 50 curve).
-    let [n0, n1, p0, p1, p2] = BRIGHT_B;
-    let y = pchip(&[n0, n1, 0.0, p0, p1, p2], &[curve(0), curve(1), x, curve(2), curve(3), curve(4)], b);
-    (y / 255.0).clamp(0.0, 1.0)
+    let x = v.clamp(0.0, 1.0);
+    let y = if b > 100.0 {
+        brightness_base(brightness_base(x, 100.0), b - 100.0)
+    } else if b >= 0.0 {
+        brightness_base(x, b)
+    } else if b < -100.0 {
+        brightness_base_inverse(brightness_base_inverse(x, -b - 100.0), 100.0)
+    } else {
+        brightness_base_inverse(x, -b)
+    };
+    y.clamp(0.0, 1.0)
+}
+
+/// Where a colour falls on a Gradient Map: 0.30 R + 0.59 G + 0.11 B (fitted on the Reference
+/// corpus rgb8/gradient-map.psd, 130 colours: the Rec.601 weights were up to 2 levels off on
+/// saturated blues and yellows).
+pub fn gradient_map_level(c: [f32; 3]) -> f32 {
+    0.30 * c[0] + 0.59 * c[1] + 0.11 * c[2]
 }
 
 /// The Brightness/Contrast transfer curve sampled at [`LUT_SIZE`] points: the CPU applies it
@@ -567,15 +763,7 @@ pub fn brightness_contrast_lut(brightness: f32, contrast: f32, legacy: bool) -> 
         let f = legacy_brightness_contrast(brightness, contrast);
         (0..LUT_SIZE).map(|k| f(x(k)).clamp(0.0, 1.0)).collect()
     } else {
-        // Blending the measured curves can dip by a few thousandths of a level where they flatten
-        // near white; a running max keeps the curve monotone.
-        let mut top = 0.0f32;
-        (0..LUT_SIZE)
-            .map(|k| {
-                top = top.max(modern_brightness(x(k), brightness));
-                modern_contrast(top, contrast).clamp(0.0, 1.0)
-            })
-            .collect()
+        (0..LUT_SIZE).map(|k| modern_contrast(modern_brightness(x(k), brightness), contrast).clamp(0.0, 1.0)).collect()
     }
 }
 
@@ -591,14 +779,15 @@ fn legacy_brightness_contrast(brightness: f32, contrast: f32) -> impl Fn(f32) ->
     move |v: f32| if c >= 0.0 { (v + b - 0.5) * k + 0.5 } else { (v - 0.5) * k + 0.5 + b }
 }
 
-/// Modern Contrast curve (one channel, `contrast` in [-50, 100]). A symmetric cubic-Hermite S-curve
-/// pivoting at 0.5: endpoint slope `1 - c/128`, centre slope `1 + c/128`. Near-exact vs Photoshop
-/// (≤0.5/255). `c = 0` is the identity; pins 0, 0.5 and 1.
+/// Modern Contrast curve (one channel, `contrast` in [-50, 100]), applied after Brightness. A
+/// symmetric cubic-Hermite S-curve pivoting at 0.5: endpoint slope `1 − 0.0076 c`, centre slope
+/// `1 + 0.0076 c` (Reference's 16-bit curves at every 10 from −50 to 100, and seven brightness and
+/// contrast pairs: within 0.01 levels). `c = 0` is the identity; pins 0, 0.5 and 1.
 pub fn modern_contrast(v: f32, contrast: f32) -> f32 {
-    if contrast == 0.0 {
+    if contrast == 0.0 || !contrast.is_finite() {
         return v;
     }
-    let k = contrast / 128.0;
+    let k = contrast.clamp(-50.0, 100.0) * 0.0076;
     let (end, mid) = (1.0 - k, 1.0 + k);
     // Cubic Hermite on [0, 0.5]: pinned (0,0) slope `end`, (0.5,0.5) slope `mid`. `t` in [0,1].
     let half = |t: f32| end * 0.5 * (t * t * t - 2.0 * t * t + t) + (-2.0 * t * t * t + 3.0 * t * t) * 0.5 + mid * 0.5 * (t * t * t - t * t);
@@ -606,6 +795,8 @@ pub fn modern_contrast(v: f32, contrast: f32) -> f32 {
     if v <= 0.5 { half(v / 0.5) } else { 1.0 - half((1.0 - v) / 0.5) }
 }
 
+/// Reference's Posterize: `n` equal input bins over 0..=255, output levels
+/// `floor(k * 255 / (n - 1))` (exact on the corpus for 3, 7, 13 and 21 levels).
 pub fn posterize(v: f32, levels: u32) -> f32 {
     let n = levels.clamp(2, 255) as f32;
     let x = (v.clamp(0.0, 1.0) * 255.0).round();
@@ -631,26 +822,29 @@ pub fn levels_q(ch: &LevelsChannel, v: f32, quantum: Option<f32>) -> f32 {
         }
         None => ((v - ch.in_black) / range).clamp(0.0, 1.0),
     };
-    let g = ch.gamma.max(0.01);
-    let t = if g > 1.0 {
-        // A midtone gamma > 1 lifts shadows, and a pure `u^(1/g)` has infinite slope at black —
-        // which Photoshop bounds, giving a soft shadow toe (initial slope ≈ 2^gamma, verified against
-        // the real app). Soft-min (p-norm) of the power curve with that line; reduces to the exact
-        // power curve in the body, so highlights are unchanged. gamma <= 1 is untouched. Slope and
-        // sharpness fitted on whole-level input (`levels_q`): a 0..255 ramp at gamma 2.0 and
-        // psd-tools levels_grayscale's gamma 1.78 (within one level of Photoshop on both).
-        let power = u.powf(1.0 / g);
-        let line = 0.93 * 2.0f32.powf(g) * u;
-        if power <= 1e-6 || line <= 1e-6 {
-            power.min(line)
-        } else {
-            let p = 10.0; // p-norm sharpness, fit to Photoshop ground truth
-            (power.powf(-p) + line.powf(-p)).powf(-1.0 / p)
-        }
-    } else {
-        u.powf(1.0 / g)
-    };
+    let t = midtone_gamma(u, ch.gamma);
     ch.out_black + t * (ch.out_white - ch.out_black)
+}
+
+/// Reference's midtone gamma curve (Levels, Color Balance midtones): `u^(1/g)`, except that a
+/// gamma above 1 starts at slope `2^g` instead of an infinite one and joins the power curve with
+/// a cubic Hermite at `x0 = 2 · (2^g)^(−g/(g−1))`, twice where that line crosses it (16-bit
+/// Color Balance curves at gammas 1.19, 1.23, 1.41 and 2.0: within 0.015 levels).
+pub fn midtone_gamma(u: f32, gamma: f32) -> f32 {
+    let g = if gamma.is_finite() { gamma.max(0.01) } else { 1.0 };
+    let u = u.clamp(0.0, 1.0);
+    if g <= 1.0 + 1e-4 {
+        return u.powf(1.0 / g);
+    }
+    let s0 = g.exp2();
+    let x0 = 2.0 * s0.powf(-g / (g - 1.0));
+    if u >= x0 || x0 <= 0.0 {
+        return u.powf(1.0 / g);
+    }
+    let (y0, s1) = (x0.powf(1.0 / g), x0.powf(1.0 / g - 1.0) / g);
+    let t = u / x0;
+    let (t2, t3) = (t * t, t * t * t);
+    (t3 - 2.0 * t2 + t) * x0 * s0 + (-2.0 * t3 + 3.0 * t2) * y0 + (t3 - t2) * x0 * s1
 }
 
 /// [`levels`] in a 32-bit document. Neither the input is clipped to the input range nor the result
@@ -924,6 +1118,56 @@ mod tone_tests {
         assert!(p[0] > 0.3 && (p[0] - p[2]).abs() < 0.02, "{p:?}");
     }
 
+    /// Range edits against Reference's 16-bit composites of a hue sweep (temp kit
+    /// `psd-verify-adjust`): Reds with hue −90, saturation +40, lightness −30 on pale and capped
+    /// colours, in the core and both falloffs, and Reds lightness +40 in each falloff.
+    #[test]
+    fn hue_ranges_match_reference() {
+        let reds = |h: f32, s: f32, l: f32| {
+            let mut r = HueRange::defaults();
+            r[0] = HueRange { hue: h, saturation: s, lightness: l, ..r[0] };
+            Adjustment::HueSaturation { hue: 0.0, saturation: 0.0, lightness: 0.0, colorize: false, ranges: r }
+        };
+        let cases: [(Adjustment, [f32; 3], [f32; 3]); 11] = [
+            (reds(-90.0, 40.0, -30.0), [0.874998, 0.125002, 0.125002], [98.87, 0.0, 197.65]),
+            (reds(-90.0, 40.0, -30.0), [0.874998, 0.500008, 0.125002], [220.87, 5.24, 60.36]),
+            (reds(-90.0, 40.0, -30.0), [0.874998, 0.125002, 0.500008], [177.72, 6.83, 221.27]),
+            (reds(-90.0, 40.0, -30.0), [0.749996, 0.250004, 0.250004], [108.42, 34.63, 182.13]),
+            (reds(-90.0, 40.0, -30.0), [0.749996, 0.500008, 0.250004], [189.75, 45.99, 82.74]),
+            (reds(-90.0, 40.0, -30.0), [0.749996, 0.250004, 0.500008], [160.98, 47.06, 190.02]),
+            (reds(-90.0, 40.0, -30.0), [1.0, 0.500008, 0.500008], [172.17, 98.38, 245.88]),
+            (reds(-90.0, 40.0, -30.0), [1.0, 0.749996, 0.500008], [253.5, 109.74, 146.49]),
+            (reds(-90.0, 40.0, -30.0), [1.0, 0.500008, 0.749996], [224.73, 110.81, 253.77]),
+            (reds(0.0, 0.0, 40.0), [1.0, 0.333349, 0.0], [255.0, 141.76, 85.17]),
+            (reds(0.0, 0.0, 40.0), [1.0, 0.0, 0.500008], [255.0, 47.81, 151.4]),
+        ];
+        // Two edits on one range, the master with a range, and +100 % on a colour already at
+        // full HSL saturation (round 2 of the kit).
+        let mut two = HueRange::defaults();
+        two[0] = HueRange { saturation: 60.0, ..two[0] };
+        two[1] = HueRange { saturation: 60.0, bounds: two[0].bounds, ..two[1] };
+        let with_master = |m: f32, r: f32| {
+            let mut ranges = HueRange::defaults();
+            ranges[0] = HueRange { saturation: r, ..ranges[0] };
+            Adjustment::HueSaturation { hue: 0.0, saturation: m, lightness: 0.0, colorize: false, ranges }
+        };
+        let more: [(Adjustment, [f32; 3], [f32; 3]); 4] = [
+            (Adjustment::HueSaturation { hue: 0.0, saturation: 0.0, lightness: 0.0, colorize: false, ranges: two }, [0.624994, 0.375006, 0.375006], [253.26, 1.74, 1.74]),
+            (with_master(-50.0, 50.0), [1.0, 0.533318, 0.0], [218.64, 133.59, 36.36]),
+            (with_master(30.0, 40.0), [0.624994, 0.375006, 0.375006], [202.33, 52.67, 52.67]),
+            (reds(0.0, 100.0, 0.0), [1.0, 0.500008, 0.500008], [255.0, 127.5, 127.5]),
+        ];
+        // The overlap and the master pair sit within 2/255 of Reference, the rest within 1.
+        for (k, (a, c, want)) in cases.into_iter().chain(more).enumerate() {
+            let tol = if k == 11 || k == 13 { 2.0 } else { 1.0 };
+            let mut b = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![[c[0], c[1], c[2], 1.0]] };
+            apply(&a, &mut b);
+            for i in 0..3 {
+                assert!((b.px[0][i] * 255.0 - want[i]).abs() < tol, "{c:?}: {:?} vs {want:?}", b.px[0].map(|v| v * 255.0));
+            }
+        }
+    }
+
     #[test]
     fn hue_ranges_only_touch_their_colours() {
         let mut ranges = HueRange::defaults();
@@ -946,6 +1190,15 @@ mod tone_tests {
         let mut w = d;
         w[0] = 100.0;
         assert!(black_white_gray([1.0, 0.0, 0.0], &w) > black_white_gray([1.0, 0.0, 0.0], &d));
+    }
+
+    /// Gradient Map places colours at 0.30 R + 0.59 G + 0.11 B (Reference corpus
+    /// rgb8/gradient-map.psd: pure blue at 28/255 on the black → white map, not Rec.601's 29).
+    #[test]
+    fn gradient_map_level_weights() {
+        let mut b = Buffer { rect: photosuite_geom::Rect::new(0, 0, 1, 1), px: vec![[0.0, 0.0, 1.0, 1.0]] };
+        apply(&Adjustment::GradientMap { stops: vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])], reverse: false, dither: false, ink_stops: Vec::new() }, &mut b);
+        assert!((b.px[0][0] - 0.11).abs() < 1e-3, "{:?}", b.px[0]);
     }
 
     #[test]

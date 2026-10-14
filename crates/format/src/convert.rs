@@ -117,7 +117,12 @@ fn layer_m(l: &Layer, sink: &mut dyn Sink) -> LayerM {
     let content = match &l.content {
         LayerContent::Raster(s) => ContentM::Raster { surface: surface_m(s, sink) },
         LayerContent::Group(g) => {
-            ContentM::Group { children: g.children.iter().map(|c| layer_m(c, sink)).collect(), expanded: g.expanded, artboard: g.artboard.clone() }
+            ContentM::Group {
+                children: g.children.iter().map(|c| layer_m(c, sink)).collect(),
+                expanded: g.expanded,
+                artboard: g.artboard.clone(),
+                divider_blocks: g.divider_blocks.iter().map(|(k, d)| (hex(k), sink.blob(d))).collect(),
+            }
         }
         LayerContent::Adjustment(a) => ContentM::Adjustment { adjustment: a.clone() },
         LayerContent::Fill(f) => ContentM::Fill { fill: f.clone() },
@@ -135,6 +140,7 @@ fn layer_m(l: &Layer, sink: &mut dyn Sink) -> LayerM {
             orientation: t.orientation,
             antialias: t.antialias,
             warp: t.warp.clone(),
+            path: t.path.clone(),
         },
         LayerContent::Shape(s) => ContentM::Shape {
             fill: s.fill.clone(),
@@ -399,10 +405,16 @@ impl Loader<'_> {
     fn layer_with(&mut self, m: &LayerM, children: Vec<Layer>) -> Result<Layer> {
         let content = match &m.content {
             ContentM::Raster { surface } => LayerContent::Raster(self.surface(surface)?),
-            ContentM::Group { expanded, artboard, .. } => LayerContent::Group(Group { artboard: artboard.clone(), children, expanded: *expanded }),
+            ContentM::Group { expanded, artboard, divider_blocks, .. } => {
+                let mut blocks = Vec::with_capacity(divider_blocks.len());
+                for (k, h) in divider_blocks {
+                    blocks.push((key4(k)?, self.fetch.blob(h)?));
+                }
+                LayerContent::Group(Group { artboard: artboard.clone(), children, expanded: *expanded, divider_blocks: blocks })
+            }
             ContentM::Adjustment { adjustment } => LayerContent::Adjustment(adjustment.clone()),
             ContentM::Fill { fill } => LayerContent::Fill(fill.clone()),
-            ContentM::Text { text, font_family, size_pt, color, transform, cache, psd_raw, runs, paragraphs, shape, orientation, antialias, warp } => {
+            ContentM::Text { text, font_family, size_pt, color, transform, cache, psd_raw, runs, paragraphs, shape, orientation, antialias, warp, path } => {
                 LayerContent::Text(TextLayer {
                     text: text.clone(),
                     font_family: font_family.clone(),
@@ -417,6 +429,7 @@ impl Loader<'_> {
                     orientation: *orientation,
                     antialias: *antialias,
                     warp: warp.clone(),
+                    path: path.clone(),
                 })
             }
             ContentM::Shape { fill, cache, psd_raw, path, stroke, live } => LayerContent::Shape(ShapeLayer {

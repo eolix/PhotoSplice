@@ -11,8 +11,8 @@
 
 use photosuite_color::{Color, ColorMode};
 use photosuite_doc::TextLayer;
-use photosuite_doc::text::{AntiAlias, Caps, CharStyle, Kerning, Orientation, ParagraphRun, ParagraphStyle, TextAlign, TextRun, TextShape, TextWarp};
-use photosuite_geom::Affine;
+use photosuite_doc::text::{AntiAlias, Caps, CharStyle, Kerning, Orientation, ParagraphRun, ParagraphStyle, TextAlign, TextPath, TextRun, TextShape, TextWarp};
+use photosuite_geom::{Affine, Point};
 use photosuite_psd::descriptor::{Descriptor, Id, UnicodeString, Value as D, VersionedDescriptor};
 
 use crate::engine_data::{self as ed, Value as E};
@@ -107,6 +107,17 @@ pub fn engine_data(text: &Descriptor) -> Option<E> {
     }
 }
 
+/// Whether the text engine of a `TySh` block has nothing to draw: its EngineData text
+/// (`EngineDict/Editor/Text`, what Reference lays out) is present and only whitespace. Some
+/// layers carry their characters only in the descriptor's `Txt ` and render nothing
+/// (storytold/photocraft@d2ad238e).
+pub fn engine_text_is_blank(tysh: &[u8]) -> bool {
+    parse_tysh(tysh)
+        .and_then(|t| engine_data(&t.text))
+        .and_then(|e| e.path(&["EngineDict", "Editor", "Text"]).and_then(E::as_str).map(|s| s.trim().is_empty()))
+        .unwrap_or(false)
+}
+
 /// Parses the document's `Txt2` block (Photoshop's text engine data for all type layers).
 pub fn parse_txt2(data: &[u8]) -> Option<E> {
     // Txt2 is a bare sequence of `/key value` pairs (no enclosing `<< >>`).
@@ -129,6 +140,719 @@ pub fn text_index(tysh: &[u8]) -> Option<i64> {
         Some(D::Integer(i)) => Some(i64::from(*i)),
         _ => None,
     }
+}
+
+/// `tysh` with its `TextIndex` set to `index`: the integer patched in place (the block keeps
+/// every other byte), else the block rewritten. `None` when it doesn't parse.
+pub fn set_text_index(tysh: &[u8], index: i64) -> Option<Vec<u8>> {
+    let value = i32::try_from(index).ok()?;
+    const KEY: &[u8] = b"\0\0\0\x09TextIndexlong";
+    let mut hits = tysh.windows(KEY.len()).enumerate().filter(|(_, w)| *w == KEY).map(|(i, _)| i);
+    if let (Some(at), None) = (hits.next(), hits.next()) {
+        let mut out = tysh.to_vec();
+        let slot = out.get_mut(at + KEY.len()..at + KEY.len() + 4)?;
+        slot.copy_from_slice(&value.to_be_bytes());
+        return Some(out);
+    }
+    let mut t = parse_tysh(tysh)?;
+    match t.text.items.iter_mut().find(|(k, _)| k.is("TextIndex")) {
+        Some(item) => item.1 = D::Integer(value),
+        None => t.text.items.push((photosuite_psd::descriptor::Id::new("TextIndex"), D::Integer(value))),
+    }
+    Some(write_tysh(&t))
+}
+
+/// A box type layer's box (`BoxBounds`: left, top, right, bottom in text space) from its `TySh`
+/// EngineData; `None` for point and path text.
+fn box_bounds(tysh: &[u8]) -> Option<[f64; 4]> {
+    let e = engine_data(&parse_tysh(tysh)?.text)?;
+    let shape = e.path(&["EngineDict", "Rendered", "Shapes", "Children"]).and_then(E::as_array)?.first()?;
+    if shape.get("ShapeType").and_then(E::as_i64) != Some(1) {
+        return None;
+    }
+    let b = arr_f(shape.path(&["Cookie", "Photoshop", "BoxBounds"]));
+    let r = <[f64; 4]>::try_from(b.as_slice()).ok()?;
+    (r.iter().all(|v| v.is_finite()) && r[2] > r[0] && r[3] > r[1]).then_some(r)
+}
+
+/// A box frame's outline (`/0 /1 /0`) for the box `[l, t, r, b]`, as Reference writes it: four
+/// straight cubic segments, each with its control points on its ends, clockwise from the top
+/// left.
+fn box_frame_points([l, t, r, b]: [f64; 4]) -> E {
+    let corners = [[l, t], [r, t], [r, b], [l, b]];
+    let mut v = Vec::with_capacity(32);
+    for i in 0..4 {
+        let (p, q) = (corners[i], corners[(i + 1) % 4]);
+        for c in [p, p, q, q] {
+            v.extend(c.map(E::Real));
+        }
+    }
+    E::Array(v)
+}
+
+/// The frame index (into `Txt2 /0 /8 /0`) text object `object` uses: its view's frame record.
+fn object_frame(object: &E) -> Option<usize> {
+    let f = object.path(&["1", "2"]).and_then(E::as_array)?.first()?.get("6").and_then(E::as_array)?.first()?.get("10").and_then(E::as_i64)?;
+    usize::try_from(f).ok()
+}
+
+/// Points text object `object` at frame `frame`: its frame list (`/1 /0`) and its view's frame
+/// record (`/1 /2 [0] /6 [0] /10`).
+fn set_object_frame(object: &mut E, frame: usize) -> Option<()> {
+    let f = E::Int(i64::try_from(frame).ok()?);
+    let model = object.get_mut("1")?;
+    model.set("0", E::Array(vec![E::Dict(vec![("0".into(), f.clone())])]));
+    let view = match model.get_mut("2")? {
+        E::Array(v) => v.first_mut()?,
+        _ => return None,
+    };
+    match view.get_mut("6")? {
+        E::Array(rows) => rows.first_mut()?.set("10", f),
+        _ => return None,
+    }
+    Some(())
+}
+
+/// Moves a path frame (a `Txt2 /0 /8 /0` entry of kind 2) with its layer: its points, in
+/// document space, go through `delta` (the layer's new transform after its old one's inverse),
+/// and its document → text matrix (`/0 /2 /2`, the old transform's inverse) takes `delta`'s
+/// inverse, so the path stays where it is in text space. Other frames are left as they are.
+fn move_path_frame(frame: &mut E, delta: Affine) -> Option<()> {
+    if delta == Affine::IDENTITY || frame.path(&["0", "2", "0"]).and_then(E::as_i64) != Some(2) {
+        return Some(());
+    }
+    let undo = delta.inverse()?;
+    let f = frame.get_mut("0")?;
+    let pts = reals(f.path(&["1", "0"]));
+    if !pts.len().is_multiple_of(2) {
+        return None;
+    }
+    let moved: Vec<E> = pts.chunks_exact(2).flat_map(|p| {
+        let q = delta.apply(Point::new(p[0], p[1]));
+        [E::Real(q.x), E::Real(q.y)]
+    }).collect();
+    f.get_mut("1")?.set("0", E::Array(moved));
+    let m = reals(f.path(&["2", "2"]));
+    if let Ok([a, b, c, d, e, g]) = <[f64; 6]>::try_from(m.as_slice()) {
+        let m2 = Affine { m: [a, b, c, d, e, g] }.mul(&undo);
+        f.get_mut("2")?.set("2", E::Array(m2.m.iter().map(|v| E::Real(*v)).collect()));
+    }
+    Some(())
+}
+
+/// The transform change between two `TySh`s: `written`'s transform after `original`'s inverse.
+fn tysh_delta(original: &[u8], written: &[u8]) -> Option<Affine> {
+    let (a, b) = (parse_tysh(original)?.transform, parse_tysh(written)?.transform);
+    Some(b.mul(&a.inverse()?))
+}
+
+/// Sets the outline of box text object `index`'s frame to the box `written` has, when it differs
+/// from the one `original` had (a resized text box keeps a stale frame otherwise).
+fn refresh_box_frame(txt2: &mut E, index: usize, original: &[u8], written: &[u8]) -> Option<()> {
+    let (Some(was), Some(now)) = (box_bounds(original), box_bounds(written)) else { return Some(()) };
+    if was == now {
+        return Some(());
+    }
+    let frame = object_frame(txt2.path(&["1", "1"]).and_then(E::as_array)?.get(index)?)?;
+    let frames = match txt2.get_mut("0")?.get_mut("8")?.get_mut("0")? {
+        E::Array(f) => f,
+        _ => return None,
+    };
+    let f = frames.get_mut(frame)?.get_mut("0")?;
+    if f.path(&["2", "0"]).and_then(E::as_i64) != Some(1) {
+        return None;
+    }
+    match f.get_mut("1") {
+        Some(outline) => outline.set("0", box_frame_points(now)),
+        None => return None,
+    }
+    Some(())
+}
+
+/// Appends a text object to `Txt2` (parsed) for a type layer that has none of its own yet: one
+/// made here, or a duplicate sharing its source's `TextIndex`. The object is cloned from a
+/// `template` (the `TySh`, as read, of a layer whose object `pristine` holds: `pristine` is the
+/// `Txt2` as read, `txt2` the one being written) and patched like an edit ([`patch_txt2`]), with
+/// a frame of its own: a point stub as the template's, a box outlining the layer's box, a path
+/// only for an unedited copy of a path-text layer. The caller writes the returned index as the
+/// layer's `TextIndex` (`written` already holds it). `None`, with `txt2` untouched, when no
+/// template fits.
+pub fn append_txt2(txt2: &mut E, pristine: &E, layer: &TextLayer, templates: &[&[u8]], written: &[u8], dpi: f32) -> Option<usize> {
+    let index = txt2.path(&["1", "1"]).and_then(E::as_array)?.len();
+    if text_index(written) != Some(i64::try_from(index).ok()?) {
+        return None;
+    }
+    let boxed = matches!(layer.shape, TextShape::Box { .. });
+    let want = if layer.path.is_some() { 2 } else { i64::from(boxed) };
+    // Templates of the layer's own kind first; then any object, given a new frame.
+    let candidates = [true, false].into_iter().flat_map(|same| templates.iter().map(move |t| (same, *t)));
+    for (same, template) in candidates {
+        let Some(t_index) = text_index(template).and_then(|i| usize::try_from(i).ok()) else { continue };
+        let Some(t_obj) = pristine.path(&["1", "1"]).and_then(E::as_array).and_then(|o| o.get(t_index)) else { continue };
+        let Some(frame) = object_frame(t_obj).and_then(|f| pristine.path(&["0", "8", "0"]).and_then(E::as_array)?.get(f).cloned()) else { continue };
+        let kind = frame.path(&["0", "2", "0"]).and_then(E::as_i64).unwrap_or(0);
+        if (kind == want) != same {
+            continue;
+        }
+        // A path frame holds the path in document space: only a copy of a path layer can reuse
+        // it (moved along with the copy), and none can be made.
+        if want == 2 && !same {
+            continue;
+        }
+        let mut frame = if same { frame } else { new_frame(boxed) };
+        if want == 2 {
+            let Some(delta) = tysh_delta(template, written) else { continue };
+            if move_path_frame(&mut frame, delta).is_none() {
+                continue;
+            }
+        }
+        let mut next = txt2.clone();
+        add_txt2_fonts(&mut next, written)?;
+        // The template's object, patched as if the template had been edited into this layer.
+        let mut scratch = pristine.clone();
+        if let Some(fonts) = next.path(&["0", "1"]).cloned() {
+            scratch.get_mut("0")?.set("1", fonts);
+        }
+        let Some((_, mut obj)) = patched_object(&scratch, layer, template, written, dpi) else { continue };
+        if want == 1 {
+            let bounds = box_bounds(written)?;
+            frame.get_mut("0")?.get_mut("1")?.set("0", box_frame_points(bounds));
+        }
+        let frames = match next.get_mut("0")?.get_mut("8")?.get_mut("0")? {
+            E::Array(f) => f,
+            _ => return None,
+        };
+        frames.push(frame);
+        let frame_index = frames.len() - 1;
+        set_object_frame(&mut obj, frame_index)?;
+        match next.get_mut("1")?.get_mut("1")? {
+            E::Array(objects) => objects.push(obj),
+            _ => return None,
+        }
+        *txt2 = next;
+        return Some(index);
+    }
+    None
+}
+
+/// A frame (`Txt2 /0 /8 /0` entry) as Reference 2026 writes it for point text (a stub) or box
+/// text (kind 1; its outline is set from the layer's box).
+fn new_frame(boxed: bool) -> E {
+    let (kind, flag) = if boxed { (Some(1), -2) } else { (None, -1) };
+    let mut settings: Vec<(String, E)> = kind.map(|k| ("0".to_string(), E::Int(k))).into_iter().collect();
+    settings.push(("6".into(), E::Array(vec![E::Real(flag as f64); 2])));
+    settings.push(("11".into(), E::Dict(vec![("4".into(), E::Int(flag)), ("18".into(), E::Real(flag as f64)), ("22".into(), E::Real(0.025))])));
+    let mut f = Vec::new();
+    if boxed {
+        f.push(("1".to_string(), E::Dict(vec![("0".into(), E::Array(Vec::new()))])));
+    }
+    f.push(("2".into(), E::Dict(settings)));
+    E::Dict(vec![("0".into(), E::Dict(f))])
+}
+
+/// The point or box frame (a `Txt2 /0 /8 /0` entry's `/0`) of text object `index`: its view's
+/// frame record `/10` names it. Path frames (kind 2) are [`txt2_text_path`]'s.
+fn txt2_frame(txt2: &E, index: usize) -> Option<&E> {
+    let object = txt2.path(&["1", "1"]).and_then(E::as_array)?.get(index)?;
+    let frame = object.path(&["1", "2"]).and_then(E::as_array)?.first()?.get("6").and_then(E::as_array)?.iter().find_map(|f| f.get("10").and_then(E::as_i64))?;
+    let f = txt2.path(&["0", "8", "0"]).and_then(E::as_array)?.get(usize::try_from(frame).ok()?)?.get("0")?;
+    (f.path(&["2", "0"]).and_then(E::as_i64) != Some(2)).then_some(f)
+}
+
+/// Places `layer` where Reference draws it when its text object's frame in `Txt2` moved it
+/// (storytold/photocraft@73ed08dd). Recent Reference keeps a type layer's position partly in its
+/// frame: a matrix (`/2 /2`) from the frame's space to the `TySh` text space and, for point
+/// text, the anchor (`/0`), while EngineData's `PointBase` stays at the origin and `BoxBounds`
+/// stays in the frame's space. Ignoring them put box text far off the canvas once an edit
+/// started, and point text a line too high and off its alignment anchor. Only when the layer's
+/// `TextIndex` entry still holds the layer's text, and the frame agrees with the `TySh` `bounds`
+/// (a `TySh` we rewrote already has the frame folded into its transform).
+pub fn apply_txt2_frame(layer: &mut TextLayer, tysh: &[u8], txt2: &E) {
+    let Some(t) = parse_tysh(tysh) else { return };
+    let Some(index) = (match t.text.get("TextIndex") {
+        Some(D::Integer(i)) => usize::try_from(*i).ok(),
+        _ => None,
+    }) else {
+        return;
+    };
+    let text = txt2.path(&["1", "1"]).and_then(E::as_array).and_then(|a| a.get(index)).and_then(|o| o.path(&["0", "0"])).and_then(E::as_str);
+    if text.is_none_or(|t| t.strip_suffix('\r').unwrap_or(t).replace('\r', "\n") != layer.text) || layer.path.is_some() {
+        return;
+    }
+    let Some(frame) = txt2_frame(txt2, index) else { return };
+    let m = arr_f(frame.path(&["2", "2"]));
+    let matrix = if m.len() == 6 && m.iter().all(|v| v.is_finite()) { Affine { m: [m[0], m[1], m[2], m[3], m[4], m[5]] } } else { Affine::IDENTITY };
+    let at = match layer.shape {
+        TextShape::Point => {
+            let p = arr_f(frame.get("0"));
+            if p.len() == 2 && p.iter().all(|v| v.is_finite()) { Affine::translate(p[0], p[1]) } else { Affine::IDENTITY }
+        }
+        TextShape::Box { .. } => Affine::IDENTITY,
+    };
+    let to_text = matrix.mul(&at);
+    if to_text == Affine::IDENTITY || to_text.determinant().abs() <= 1e-9 {
+        return;
+    }
+    // The frame's origin (point text: the anchor; box text: the box's top left) must land in the
+    // text-space `bounds` beside it, and not already be there without the frame.
+    let origin = match layer.shape {
+        TextShape::Point => Point::new(0.0, 0.0),
+        TextShape::Box { .. } => {
+            let b = engine_data(&t.text)
+                .map(|e| {
+                    arr_f(
+                        e.path(&["EngineDict", "Rendered", "Shapes", "Children"])
+                            .and_then(E::as_array)
+                            .and_then(|c| c.first())
+                            .and_then(|s| s.path(&["Cookie", "Photoshop", "BoxBounds"])),
+                    )
+                })
+                .unwrap_or_default();
+            let [x, y, ..] = b[..] else { return };
+            Point::new(x, y)
+        }
+    };
+    let Some([l, top, r, bottom]) = descriptor_rect(&t.text, "bounds") else { return };
+    let inside = |p: Point| p.x >= l - 1.0 && p.x <= r + 1.0 && p.y >= top - 1.0 && p.y <= bottom + 1.0;
+    if inside(origin) || !inside(to_text.apply(origin)) {
+        return;
+    }
+    layer.transform = t.transform.mul(&to_text);
+}
+
+/// Depth limit for searching a text object's view tree.
+const VIEW_DEPTH: usize = 24;
+
+/// The first dictionary under `v` (depth-first, bounded) that holds `key`.
+fn find_with<'a>(v: &'a E, key: &str, depth: usize) -> Option<&'a E> {
+    if depth > VIEW_DEPTH {
+        return None;
+    }
+    match v {
+        E::Dict(d) => d.iter().find(|(k, _)| k == key).map(|_| v).or_else(|| d.iter().find_map(|(_, x)| find_with(x, key, depth + 1))),
+        E::Array(a) => a.iter().find_map(|x| find_with(x, key, depth + 1)),
+        _ => None,
+    }
+}
+
+fn reals(v: Option<&E>) -> Vec<f64> {
+    v.and_then(E::as_array).map(|a| a.iter().filter_map(E::as_f64).collect()).unwrap_or_default()
+}
+
+/// Type on a path, which Photoshop keeps only in `Txt2`: the frame list `/0 /8 /0` holds each
+/// frame's points (`/0 /1 /0`, flat x,y pairs in document space, four per cubic segment), its
+/// kind (`/0 /2 /0`: 0 point, 1 box, 2 path) and its document → text matrix (`/0 /2 /2`). The
+/// object's view (`/1 /2 [0] /6 [0]`, an `F` record) names its frame (`/10`) and, deeper, the
+/// laid-out glyph positions (`/21 /1`, `/21 /2`), from which the start point is found.
+fn txt2_text_path(txt2: &E, object: &E) -> Option<TextPath> {
+    let frames = txt2.path(&["0", "8", "0"]).and_then(E::as_array)?;
+    let view = object.path(&["1", "2"]).and_then(E::as_array).and_then(|a| a.first());
+    let frame_index = view.and_then(|v| v.get("6")).and_then(E::as_array).and_then(|a| a.first()).and_then(|f| f.get("10")).and_then(E::as_i64);
+    let is_path = |f: &&E| f.path(&["0", "2", "0"]).and_then(E::as_i64) == Some(2);
+    let frame = match frame_index {
+        Some(i) => frames.get(usize::try_from(i).ok()?).filter(is_path)?,
+        // No view (Photoshop omits it at times): only an unambiguous path frame.
+        None => {
+            let mut paths = frames.iter().filter(is_path);
+            let f = paths.next()?;
+            if paths.next().is_some() {
+                return None;
+            }
+            f
+        }
+    };
+    let pts = reals(frame.path(&["0", "1", "0"]));
+    if pts.len() < 8 || !pts.len().is_multiple_of(8) {
+        return None;
+    }
+    let m = reals(frame.path(&["0", "2", "2"]));
+    let [a, b, c, d, e, f] = <[f64; 6]>::try_from(m.as_slice()).unwrap_or([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    let to_text = |x: f64, y: f64| [(a * x + c * y + e) as f32, (b * x + d * y + f) as f32];
+    let segments: Vec<[[f32; 2]; 4]> = pts
+        .chunks_exact(8)
+        .map(|s| [to_text(s[0], s[1]), to_text(s[2], s[3]), to_text(s[4], s[5]), to_text(s[6], s[7])])
+        .collect();
+    let (first, last) = (segments.first()?[0], segments.last()?[3]);
+    let closed = (first[0] - last[0]).abs() < 1e-3 && (first[1] - last[1]).abs() < 1e-3;
+    let mut path = TextPath { segments, closed, start: 0.0 };
+    // The first glyph's position, projected onto the path. Positions are offset by the line's
+    // ascent on both axes in the files seen (path-circle.psd); the nearer reading wins.
+    if let (Some(sampler), Some(glyphs)) = (crate::path::PathSampler::new(&path), view.and_then(|v| find_with(v, "21", 0)).and_then(|g| g.get("21"))) {
+        let (xs, ys) = (reals(glyphs.get("1")), reals(glyphs.get("2")));
+        let ascent = view.and_then(|v| find_with(v, "14", 0)).and_then(|l| l.get("14")).and_then(E::as_f64).unwrap_or(0.0);
+        if let (Some(&x), Some(&y)) = (xs.first(), ys.first()) {
+            let best = [0.0, ascent]
+                .iter()
+                .filter_map(|o| sampler.project((x + o) as f32, (y + o) as f32))
+                .min_by(|p, q| p.1.total_cmp(&q.1));
+            if let Some((s, _)) = best {
+                path.start = s / sampler.length();
+            }
+        }
+    }
+    Some(path)
+}
+
+/// Updates the document's `Txt2` (parsed) for a type layer edited since it was read as
+/// `original` (its `TySh` then) and now `written`, so Reference keeps what only `Txt2` holds
+/// (text on a path, optical kerning…) instead of rebuilding the layer from `TySh`: the object's
+/// text, its style runs (each from Reference's closest run, with the changed attributes set, see
+/// [`TXT2_STYLE_KEYS`]), its paragraph runs (each from Reference's run with the same style) and
+/// its view's length. Reference's cached layout stays: with it the file opens as edited and the
+/// text stays on its path while typing; without it Reference asks to update the layer
+/// (Reference-verified 2026-10-13). `false`, with `txt2` untouched, when the object can't be
+/// matched: not the layer's text as read, a changed attribute `Txt2` keys aren't known for, a
+/// font not in its font list, a paragraph style its runs don't have, several views.
+pub fn patch_txt2(txt2: &mut E, layer: &TextLayer, original: &[u8], written: &[u8], dpi: f32) -> bool {
+    let mut next = txt2.clone();
+    if add_txt2_fonts(&mut next, written).is_none() {
+        return false;
+    }
+    let Some((index, obj)) = patched_object(&next, layer, original, written, dpi) else {
+        return false;
+    };
+    if refresh_box_frame(&mut next, index, original, written).is_none() {
+        return false;
+    }
+    // A moved path-text layer takes its path with it.
+    let frame = next.path(&["1", "1"]).and_then(E::as_array).and_then(|o| o.get(index)).and_then(object_frame);
+    let moved = match (frame, tysh_delta(original, written)) {
+        (Some(f), Some(delta)) => match next.get_mut("0").and_then(|v| v.get_mut("8")).and_then(|v| v.get_mut("0")) {
+            Some(E::Array(frames)) => frames.get_mut(f).and_then(|fr| move_path_frame(fr, delta)),
+            _ => None,
+        },
+        (None, _) => Some(()),
+        (Some(_), None) => None,
+    };
+    if moved.is_none() {
+        return false;
+    }
+    match next.get_mut("1").and_then(|v| v.get_mut("1")) {
+        Some(E::Array(objects)) => match objects.get_mut(index) {
+            Some(slot) => *slot = obj,
+            None => return false,
+        },
+        _ => return false,
+    }
+    *txt2 = next;
+    true
+}
+
+/// Adds to `Txt2`'s font list (`/0 /1 /0`) the fonts the `written` type layer's runs use that it
+/// doesn't list yet: an entry in Reference's form (`<< /0 << /99 /CoolTypeFont /0 << /0 name /2
+/// font type >> >> >>`, the type from the layer's `FontSet`), without the version string the
+/// listed fonts carry, which we don't know.
+fn add_txt2_fonts(txt2: &mut E, written: &[u8]) -> Option<()> {
+    let e = engine_data(&parse_tysh(written)?.text)?;
+    let set = e.path(&["ResourceDict", "FontSet"]).and_then(E::as_array).map(<[E]>::to_vec).unwrap_or_default();
+    let used: Vec<String> = ed_runs(written, RunKind::Style)?
+        .into_iter()
+        .filter_map(|(_, a)| a.into_iter().find(|x| x.0 == "FontName").and_then(|x| x.1.as_str().map(str::to_string)))
+        .collect();
+    let list = match txt2.get_mut("0").and_then(|v| v.get_mut("1")).and_then(|v| v.get_mut("0")) {
+        Some(E::Array(l)) => l,
+        _ => return None,
+    };
+    for name in used {
+        if name.is_empty() || list.iter().any(|f| f.path(&["0", "0", "0"]).and_then(E::as_str) == Some(name.as_str())) {
+            continue;
+        }
+        let kind = set.iter().find(|f| f.get("Name").and_then(E::as_str) == Some(name.as_str())).and_then(|f| f.get("FontType")).and_then(E::as_i64).unwrap_or(1);
+        let font = E::Dict(vec![("0".into(), E::String(name)), ("2".into(), E::Int(kind))]);
+        list.push(E::Dict(vec![("0".into(), E::Dict(vec![("99".into(), E::Name("CoolTypeFont".into())), ("0".into(), font)]))]));
+    }
+    Some(())
+}
+
+fn patched_object(txt2: &E, layer: &TextLayer, original: &[u8], written: &[u8], dpi: f32) -> Option<(usize, E)> {
+    let index = usize::try_from(text_index(original)?).ok()?;
+    let mut was = text_layer_from_tysh(original, dpi)?;
+    apply_txt2(&mut was, original, txt2);
+    let mut obj = txt2.path(&["1", "1"])?.as_array()?.get(index)?.clone();
+    let text = obj.path(&["0", "0"])?.as_str()?;
+    if text.strip_suffix('\r').unwrap_or(text).replace('\r', "\n") != was.text {
+        return None;
+    }
+    let total = i64::try_from(layer.text.encode_utf16().count()).ok()?.checked_add(1)?;
+    // Paragraph runs and the view hold one entry per paragraph, even where paragraphs share a
+    // style (one run over several made them one line when Reference updated the layer).
+    let para_lens: Vec<usize> = layer.text.split('\n').map(|p| p.encode_utf16().count() + 1).collect();
+    let style_runs = txt2_runs(txt2, obj.path(&["0", "6", "0"])?.as_array()?, RunKind::Style, original, written, None, total)?;
+    let para_runs = txt2_runs(txt2, obj.path(&["0", "5", "0"])?.as_array()?, RunKind::Paragraph, original, written, Some(&para_lens), total)?;
+    let model = obj.get_mut("0")?;
+    model.set("0", E::String(format!("{}\r", layer.text.replace('\n', "\r"))));
+    model.get_mut("6")?.set("0", E::Array(style_runs));
+    model.get_mut("5")?.set("0", E::Array(para_runs));
+    // The n-th new paragraph's view takes the n-th one's entry (the last's past them). Older
+    // files (Reference CC 2015-era objects) have no per-paragraph view list.
+    let Some(views) = obj.get_mut("1")?.get_mut("1").and_then(|v| v.get_mut("0")) else { return Some((index, obj)) };
+    let E::Array(views) = views else { return None };
+    if views.len() != was.text.split('\n').count() {
+        return None;
+    }
+    let mut runs = Vec::with_capacity(para_lens.len());
+    for (i, len) in para_lens.iter().enumerate() {
+        let mut v = views.get(i).or(views.last())?.clone();
+        v.set("1", E::Int(i64::try_from(*len).ok()?));
+        runs.push(v);
+    }
+    *views = runs;
+    Some((index, obj))
+}
+
+/// `TySh` style attributes and the `Txt2` style keys holding the same values (fitted on every
+/// type layer of the corpora whose `Txt2` describes it: each pair agrees on all of 110-166 runs,
+/// the rarer values included). Underline (`16`: 2 on, 0 off), fill and stroke colour (`53`,
+/// `54`), the font (`0`, an index into `Txt2`'s font list) and automatic kerning (`11`: 0 off,
+/// 1 metrics, 2 optical) are set apart.
+pub const TXT2_STYLE_KEYS: [(&str, &str); 23] = [
+    ("FontSize", "1"),
+    ("FauxBold", "2"),
+    ("FauxItalic", "3"),
+    ("AutoLeading", "4"),
+    ("Leading", "5"),
+    ("HorizontalScale", "6"),
+    ("VerticalScale", "7"),
+    ("Tracking", "8"),
+    ("BaselineShift", "9"),
+    ("FontCaps", "12"),
+    ("FontBaseline", "13"),
+    ("Strikethrough", "15"),
+    ("Ligatures", "18"),
+    ("DLigatures", "19"),
+    ("BaselineDirection", "35"),
+    ("StyleRunAlignment", "37"),
+    // The OpenType flags EngineData can also carry ([`TXT2_FEATURES`]).
+    ("ContextualLigatures", "20"),
+    ("Fractions", "23"),
+    ("Ordinals", "24"),
+    ("Swash", "25"),
+    ("Titling", "26"),
+    ("StylisticAlternates", "28"),
+    ("Ornaments", "29"),
+];
+
+/// `TySh` paragraph properties and the `Txt2` paragraph keys holding the same values (fitted as
+/// [`TXT2_STYLE_KEYS`] on the corpora's paragraph runs; Reference writes only some of them per
+/// run, the rest default).
+pub const TXT2_PARAGRAPH_KEYS: [(&str, &str); 16] = [
+    ("Justification", "0"),
+    ("FirstLineIndent", "1"),
+    ("StartIndent", "2"),
+    ("EndIndent", "3"),
+    ("SpaceBefore", "4"),
+    ("SpaceAfter", "5"),
+    ("AutoLeading", "7"),
+    ("AutoHyphenate", "9"),
+    ("HyphenatedWordSize", "10"),
+    ("PreHyphen", "11"),
+    ("PostHyphen", "12"),
+    ("ConsecutiveHyphens", "13"),
+    ("Zone", "14"),
+    ("WordSpacing", "17"),
+    ("LetterSpacing", "18"),
+    ("GlyphSpacing", "19"),
+];
+
+type Attrs = Vec<(String, E)>;
+
+/// Character style runs or paragraph runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunKind {
+    Style,
+    Paragraph,
+}
+
+/// A `TySh`'s runs as EngineData resolves them: each run's UTF-16 length (the last with the
+/// trailing `\r`) and its attributes (the normal style or paragraph sheet, the run's own over
+/// it); a style's font as `FontName`.
+fn ed_runs(tysh: &[u8], kind: RunKind) -> Option<Vec<(usize, Attrs)>> {
+    let e = engine_data(&parse_tysh(tysh)?.text)?;
+    let res = e.get("ResourceDict").or_else(|| e.get("DocumentResources"));
+    let (normal, set, run, sheet, data) = match kind {
+        RunKind::Style => ("TheNormalStyleSheet", "StyleSheetSet", "StyleRun", "StyleSheet", "StyleSheetData"),
+        RunKind::Paragraph => ("TheNormalParagraphSheet", "ParagraphSheetSet", "ParagraphRun", "ParagraphSheet", "Properties"),
+    };
+    let fonts: Vec<&str> =
+        res.and_then(|r| r.get("FontSet")).and_then(E::as_array).map(|a| a.iter().map(|f| f.get("Name").and_then(E::as_str).unwrap_or("")).collect()).unwrap_or_default();
+    let n = usize::try_from(res.and_then(|r| r.get(normal)).and_then(E::as_i64).unwrap_or(0)).unwrap_or(0);
+    let base = res.and_then(|r| r.get(set)).and_then(E::as_array).and_then(|a| a.get(n).or(a.first())).and_then(|s| s.get(data));
+    let runs = e.path(&["EngineDict", run])?;
+    let lens = runs.get("RunLengthArray")?.as_array()?;
+    let items = runs.get("RunArray")?.as_array()?;
+    let mut out = Vec::with_capacity(lens.len());
+    for (len, d) in lens.iter().zip(items) {
+        let mut attrs: Attrs = match base {
+            Some(E::Dict(b)) => b.clone(),
+            _ => Vec::new(),
+        };
+        if let Some(E::Dict(own)) = d.path(&[sheet, data]) {
+            for (k, v) in own {
+                match attrs.iter_mut().find(|a| a.0 == *k) {
+                    Some(a) => a.1 = v.clone(),
+                    None => attrs.push((k.clone(), v.clone())),
+                }
+            }
+        }
+        if kind == RunKind::Style
+            && let Some(i) = attrs.iter().position(|a| a.0 == "Font")
+        {
+            let name = attrs.get(i).and_then(|a| a.1.as_i64()).and_then(|f| fonts.get(usize::try_from(f).ok()?).copied()).unwrap_or("").to_string();
+            attrs.remove(i);
+            attrs.push(("FontName".into(), E::String(name)));
+        }
+        let n = len.as_f64()?;
+        if !(0.0..=1e9).contains(&n) {
+            return None;
+        }
+        out.push((n as usize, attrs));
+    }
+    Some(out)
+}
+
+/// Equal attribute values, reals within float noise (a style regenerated from our model reads
+/// 14.4 back as 14.399999…).
+fn same_value(a: &E, b: &E) -> bool {
+    match (a, b) {
+        (E::Real(_) | E::Int(_), E::Real(_) | E::Int(_)) => match (a.as_f64(), b.as_f64()) {
+            (Some(x), Some(y)) => (x - y).abs() <= 1e-4 * x.abs().max(y.abs()).max(1.0),
+            _ => false,
+        },
+        (E::Array(x), E::Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same_value(p, q)),
+        (E::Dict(x), E::Dict(y)) => x.len() == y.len() && x.iter().all(|(k, v)| y.iter().any(|(k2, v2)| k == k2 && same_value(v, v2))),
+        _ => a == b,
+    }
+}
+
+/// `v` as the type `like` has in `Txt2` (`Bool`, `Int` or `Real`).
+fn typed_like(v: &E, like: Option<&E>) -> Option<E> {
+    let f = v.as_f64().or_else(|| v.as_bool().map(|b| f64::from(u8::from(b))))?;
+    if !f.is_finite() {
+        return None;
+    }
+    Some(match like {
+        Some(E::Bool(_)) => E::Bool(f != 0.0),
+        Some(E::Int(_)) => E::Int(f.round().clamp(-1e15, 1e15) as i64),
+        Some(E::Real(_)) => E::Real(f),
+        _ => v.clone(),
+    })
+}
+
+/// Sets one changed attribute on a `Txt2` run (`<< /0 << /0 << … /6 style >> >> /1 len >>`, a
+/// paragraph's properties under `/5`).
+fn set_txt2_attr(txt2: &E, entry: &mut E, kind: RunKind, key: &str, v: &E) -> Option<()> {
+    let (props, table): (&str, &[(&str, &str)]) = match kind {
+        RunKind::Style => ("6", &TXT2_STYLE_KEYS),
+        RunKind::Paragraph => ("5", &TXT2_PARAGRAPH_KEYS),
+    };
+    let inner = entry.get_mut("0")?.get_mut("0")?;
+    if inner.get(props).is_none() {
+        inner.set(props, E::dict());
+    }
+    let style = inner.get_mut(props)?;
+    if let Some((_, num)) = table.iter().find(|(k, _)| *k == key) {
+        let typed = match v {
+            E::Array(_) => v.clone(),
+            _ => typed_like(v, style.get(num))?,
+        };
+        style.set(num, typed);
+        return Some(());
+    }
+    if kind == RunKind::Paragraph {
+        return None;
+    }
+    match key {
+        "Underline" => {
+            let typed = typed_like(&E::Int(if v.as_bool()? { 2 } else { 0 }), style.get("16"))?;
+            style.set("16", typed);
+        }
+        "FillColor" | "StrokeColor" => {
+            let paint = style.get_mut(if key == "FillColor" { "53" } else { "54" })?.get_mut("0")?;
+            paint.set("1", v.get("Values")?.clone());
+            if let Some(t) = v.get("Type") {
+                paint.set("0", t.clone());
+            }
+        }
+        "FontName" => {
+            let name = v.as_str()?;
+            let i = txt2.path(&["0", "1", "0"])?.as_array()?.iter().position(|f| f.path(&["0", "0", "0"]).and_then(E::as_str) == Some(name))?;
+            style.set("0", E::Int(i64::try_from(i).ok()?));
+        }
+        "AutoKerning" => {
+            // On keeps the run's mode (metrics or optical, which EngineData doesn't tell apart).
+            let now = style.get("11").and_then(E::as_i64).unwrap_or(1);
+            style.set("11", E::Int(if !v.as_bool()? { 0 } else if now == 0 { 1 } else { now }));
+        }
+        _ => return None,
+    }
+    Some(())
+}
+
+/// The `Txt2` runs of `kind` for the layer as `written`: each starts from Reference's run (of the
+/// layer as it was read, `original`) whose attributes differ least, with the differing ones set;
+/// with `split`, one run per paragraph of those UTF-16 lengths. `None` when an attribute can't be
+/// set or the lengths don't add up to `total`.
+fn txt2_runs(txt2: &E, entries: &[E], kind: RunKind, original: &[u8], written: &[u8], split: Option<&[usize]>, total: i64) -> Option<Vec<E>> {
+    let was = ed_runs(original, kind)?;
+    // Reference's runs, each with the attributes of the `TySh` run it starts in.
+    let covering = |runs: &[(usize, Attrs)], at: usize| -> Option<usize> {
+        let mut end = 0usize;
+        runs.iter()
+            .position(|(len, _)| {
+                end += len;
+                at < end
+            })
+            .or_else(|| runs.len().checked_sub(1))
+    };
+    let mut templates: Vec<(&[(String, E)], &E)> = Vec::with_capacity(entries.len());
+    let mut at = 0usize;
+    for e in entries {
+        templates.push((was.get(covering(&was, at)?)?.1.as_slice(), e));
+        at = at.checked_add(usize::try_from(e.get("1")?.as_i64()?).ok()?)?;
+    }
+    let runs = ed_runs(written, kind)?;
+    let runs: Vec<(usize, Attrs)> = match split {
+        None => runs,
+        Some(lens) => {
+            let mut out = Vec::with_capacity(lens.len());
+            let mut at = 0usize;
+            for len in lens {
+                out.push((*len, runs.get(covering(&runs, at)?)?.1.clone()));
+                at += len;
+            }
+            out
+        }
+    };
+    let differing = |a: &[(String, E)], b: &[(String, E)]| -> Vec<String> {
+        let mut keys: Vec<String> = a.iter().chain(b).map(|x| x.0.clone()).collect();
+        keys.sort();
+        keys.dedup();
+        keys.into_iter()
+            .filter(|k| match (a.iter().find(|x| x.0 == *k), b.iter().find(|x| x.0 == *k)) {
+                (Some(x), Some(y)) => !same_value(&x.1, &y.1),
+                _ => true,
+            })
+            .collect()
+    };
+    let mut out = Vec::new();
+    let mut sum = 0i64;
+    for (len, attrs) in runs {
+        if len == 0 {
+            continue;
+        }
+        let (base, entry) = templates.iter().min_by_key(|(t, _)| differing(t, &attrs).len())?;
+        let mut e = (*entry).clone();
+        for key in differing(base, &attrs) {
+            // An attribute the layer doesn't state keeps the template run's value.
+            let Some((_, v)) = attrs.iter().find(|a| a.0 == key) else { continue };
+            set_txt2_attr(txt2, &mut e, kind, &key, v)?;
+        }
+        let n = i64::try_from(len).ok()?;
+        e.set("1", E::Int(n));
+        sum = sum.checked_add(n)?;
+        out.push(e);
+    }
+    (sum == total).then_some(out)
 }
 
 /// Applies the automatic kerning modes that Photoshop keeps only in `Txt2` (EngineData writes
@@ -156,14 +880,16 @@ pub fn apply_txt2(layer: &mut TextLayer, tysh: &[u8], txt2: &E) {
     if text.strip_suffix('\r').unwrap_or(text).replace('\r', "\n") != layer.text {
         return;
     }
+    if let Some(object) = txt2.path(&["1", "1"]).and_then(E::as_array).and_then(|a| a.get(index)) {
+        layer.path = txt2_text_path(txt2, object);
+    }
     let Some(style_runs) = model.path(&["6", "0"]).and_then(E::as_array) else {
         return;
     };
-    let modes: Vec<(f64, Option<i64>)> =
-        style_runs.iter().map(|r| (r.get("1").and_then(E::as_f64).unwrap_or(0.0), r.path(&["0", "0", "6", "11"]).and_then(E::as_i64))).collect();
-    let lens = utf16_to_byte_lengths(text, &modes.iter().map(|m| m.0).collect::<Vec<_>>());
-    // Auto-kern mode per byte segment, then split the model runs at segment boundaries.
-    let mut segs: Vec<(usize, Option<i64>)> = lens.into_iter().zip(modes.iter().map(|m| m.1)).collect();
+    let styles: Vec<(f64, Option<&E>)> = style_runs.iter().map(|r| (r.get("1").and_then(E::as_f64).unwrap_or(0.0), r.path(&["0", "0", "6"]))).collect();
+    let lens = utf16_to_byte_lengths(text, &styles.iter().map(|m| m.0).collect::<Vec<_>>());
+    // Txt2 style per byte segment, then split the model runs at segment boundaries.
+    let mut segs: Vec<(usize, Option<&E>)> = lens.into_iter().zip(styles.iter().map(|m| m.1)).collect();
     segs.retain(|s| s.0 > 0);
     let runs = layer.char_runs();
     let mut out: Vec<TextRun> = Vec::new();
@@ -178,13 +904,17 @@ pub fn apply_txt2(layer: &mut TextLayer, tysh: &[u8], txt2: &E) {
             }
             let piece_end = if at < seg_end { end.min(seg_end) } else { end };
             let mut style = r.style.clone();
+            let txt2_style = segs.get(si).and_then(|s| s.1).filter(|_| at < seg_end);
             // Txt2 has the exact mode (EngineData's reading also marks neighbours of manual
             // kerns manual, like Photoshop's legacy reader).
-            match segs.get(si).and_then(|s| s.1).filter(|_| at < seg_end) {
+            match txt2_style.and_then(|st| st.get("11")).and_then(E::as_i64) {
                 Some(0) => style.kerning = Kerning::Off,
                 Some(1) => style.kerning = Kerning::Metrics,
                 Some(2) => style.kerning = Kerning::Optical,
                 _ => {}
+            }
+            if let Some(st) = txt2_style {
+                add_txt2_features(&mut style, st);
             }
             let len = piece_end - at;
             match out.last_mut() {
@@ -196,6 +926,42 @@ pub fn apply_txt2(layer: &mut TextLayer, tysh: &[u8], txt2: &E) {
     }
     layer.runs = out;
     layer.sync_summary();
+}
+
+/// OpenType settings of a `Txt2` style that are on/off flags, by style key: `/20` Contextual
+/// Alternates, `/23` Fractions, `/24` Ordinals, `/25` Swash, `/26` Titling Alternates, `/28`
+/// Stylistic Alternates, `/29` Ornaments. Reference keeps them only in `Txt2`, so an edit drew
+/// the default glyphs (storytold/photocraft@b071929e).
+pub const TXT2_FEATURES: [(&str, &str); 7] = [("20", "calt"), ("23", "frac"), ("24", "ordn"), ("25", "swsh"), ("26", "titl"), ("28", "salt"), ("29", "ornm")];
+
+/// The `Txt2` style key holding the Stylistic Sets as a bit mask: bit n is set n + 1
+/// (`ss01`..`ss20`).
+pub const TXT2_STYLISTIC_SETS: &str = "85";
+
+/// Sets in `style` the OpenType features a `Txt2` style turns on ([`TXT2_FEATURES`] and the
+/// Stylistic Sets mask). A feature the style already sets keeps its value. A flag that is off
+/// changes nothing, except Contextual Alternates: shapers apply `calt` by default, Reference only
+/// when it is on (its default is off), so off is written as `calt` 0.
+fn add_txt2_features(style: &mut CharStyle, txt2_style: &E) {
+    let mut set = |tag: String, value: u16| {
+        if !style.features.iter().any(|f| f.tag == tag) {
+            style.features.push(photosuite_doc::text::FontFeature { tag, value });
+        }
+    };
+    for (key, tag) in TXT2_FEATURES {
+        match txt2_style.get(key).and_then(E::as_bool) {
+            Some(true) => set(tag.to_string(), 1),
+            Some(false) if tag == "calt" => set(tag.to_string(), 0),
+            _ => {}
+        }
+    }
+    // A mask beyond the 20 sets is not Reference's: ignored.
+    let sets = txt2_style.get(TXT2_STYLISTIC_SETS).and_then(E::as_i64).filter(|m| (0..1 << 20).contains(m)).unwrap_or(0);
+    for n in 0..20 {
+        if sets & (1 << n) != 0 {
+            set(format!("ss{:02}", n + 1), 1);
+        }
+    }
 }
 
 /// Builds a [`TextLayer`] (model, text and transform; no cache, no `psd_raw`) from `TySh` data.
@@ -238,8 +1004,68 @@ pub fn text_layer_from_tysh(data: &[u8], dpi: f32) -> Option<TextLayer> {
     } else {
         layer.text = txt.unwrap_or_default().replace('\r', "\n");
     }
+    // Some legacy PSDs store point text at a large local origin with a zero PointBase: their
+    // transform maps that origin onto the canvas, and our zero-based layout far away. The layout
+    // moves to the descriptor's ink origin, so editing, commands and the written TySh agree on the
+    // visible position (storytold/photocraft@9b7349d0).
+    if let Some([x, y]) = legacy_point_origin(&t) {
+        let [a, b, c, d, e, f] = layer.transform.m;
+        layer.transform.m = [a, b, c, d, a * x + c * y + e, b * x + d * y + f];
+    }
     layer.sync_summary();
     Some(layer)
+}
+
+/// The local origin to fold into a legacy point-text transform, if any. Reference keeps point
+/// text near its PointBase; the affected legacy files use a zero PointBase plus a very large
+/// `boundingBox` origin, with an equally remote transform translation that cancels it out.
+/// Ordinary point text is left alone: its transform origin already is the layout origin.
+fn legacy_point_origin(t: &TySh) -> Option<[f64; 2]> {
+    let e = engine_data(&t.text)?;
+    let point_base = e
+        .path(&["EngineDict", "Rendered", "Shapes", "Children"])
+        .and_then(E::as_array)
+        .and_then(|children| children.first())
+        .and_then(|shape| shape.path(&["Cookie", "Photoshop", "PointBase"]))
+        .and_then(E::as_array)?;
+    let [px, py] = point_base else { return None };
+    if px.as_f64() != Some(0.0) || py.as_f64() != Some(0.0) {
+        return None;
+    }
+    let bounds = descriptor_rect(&t.text, "boundingBox")?;
+    let [a, b, c, d, e, f] = t.transform.m;
+    if ![a, b, c, d, e, f, bounds[0], bounds[1]].iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let shifted = [a * bounds[0] + c * bounds[1] + e, b * bounds[0] + d * bounds[1] + f];
+    let origin_distance = e.abs().max(f.abs());
+    let shifted_distance = shifted[0].abs().max(shifted[1].abs());
+    // A local origin in the thousands and a transform origin beyond any normal canvas are the
+    // signature of this old writer; the shifted origin being nearer keeps a re-import from
+    // applying it twice.
+    (bounds[0].abs().max(bounds[1].abs()) > 1024.0 && origin_distance > 4096.0 && shifted_distance < origin_distance).then_some([bounds[0], bounds[1]])
+}
+
+/// The `[left, top, right, bottom]` of a `TySh` text-descriptor rectangle (`bounds`).
+/// The text-space box (`bounds`: left, top, right, bottom) a `TySh` records for its text, while
+/// that text is still `text` (`None` once the layer's text differs, or without a box). Reference
+/// warps type over this box: the advance width across, and down from a font-wide ascent to the
+/// font's lowest point (its `head.yMin`), not the line's hhea ascent and descent.
+pub fn tysh_text_box(tysh: &[u8], text: &str) -> Option<[f32; 4]> {
+    let t = parse_tysh(tysh)?;
+    let Some(D::Text(s)) = t.text.get("Txt ") else { return None };
+    let stored = s.to_string_lossy();
+    let stored = stored.trim_end_matches('\0');
+    if stored.strip_suffix('\r').unwrap_or(stored).replace('\r', "\n") != text {
+        return None;
+    }
+    descriptor_rect(&t.text, "bounds").map(|b| b.map(|v| v as f32))
+}
+
+fn descriptor_rect(text: &Descriptor, key: &str) -> Option<[f64; 4]> {
+    let D::Descriptor(rect) = text.get(key)? else { return None };
+    let b = [dnum(rect.get("Left"))?, dnum(rect.get("Top "))?, dnum(rect.get("Rght"))?, dnum(rect.get("Btom"))?];
+    (b.iter().all(|v| v.is_finite()) && b[2] > b[0] && b[3] > b[1]).then_some(b)
 }
 
 pub(crate) fn arr_f(v: Option<&E>) -> Vec<f64> {
@@ -278,45 +1104,97 @@ fn apply_engine_data(layer: &mut TextLayer, e: &E, txt: Option<&str>, k: f32) {
         .and_then(E::as_array)
         .map(|a| a.iter().map(|f| f.get("Name").and_then(E::as_str).unwrap_or("").to_string()).collect())
         .unwrap_or_default();
-    let default_sheet = res.and_then(|r| r.get("TheNormalStyleSheet")).and_then(E::as_i64).unwrap_or(0) as usize;
-    let base_style =
-        res.and_then(|r| r.get("StyleSheetSet")).and_then(E::as_array).and_then(|a| a.get(default_sheet).or(a.first())).and_then(|s| s.get("StyleSheetData"));
-    let default_para_sheet = res.and_then(|r| r.get("TheNormalParagraphSheet")).and_then(E::as_i64).unwrap_or(0) as usize;
-    let base_para = res
-        .and_then(|r| r.get("ParagraphSheetSet"))
-        .and_then(E::as_array)
-        .and_then(|a| a.get(default_para_sheet).or(a.first()))
-        .and_then(|s| s.get("Properties"));
+    // Style resolution (storytold/photocraft@73ed08dd). A run's own `StyleSheetData` /
+    // `Properties` hold only what it overrides; the rest comes from its sheets, as in Reference:
+    // - a paragraph run: its `Properties` → the `ParagraphSheetSet` entry its `Name` names (a
+    //   paragraph style; or its `Parent` index) → `TheNormalParagraphSheet`;
+    // - a character run: its `StyleSheetData` → the `StyleSheetSet` entry its `Parent` or `Name`
+    //   names (a character style) → the default character style of its paragraph (the paragraph
+    //   run's `DefaultStyleSheet`, else its paragraph style's) → `TheNormalStyleSheet`.
+    // Missing or out-of-range indices fall through to the next level. Only the Normal sheets were
+    // read, so a centred paragraph style came back Left and an edit re-laid the text.
+    let style_set: &[E] = res.and_then(|r| r.get("StyleSheetSet")).and_then(E::as_array).unwrap_or(&[]);
+    let para_set: &[E] = res.and_then(|r| r.get("ParagraphSheetSet")).and_then(E::as_array).unwrap_or(&[]);
+    let index = |key: &str| res.and_then(|r| r.get(key)).and_then(E::as_i64).and_then(|i| usize::try_from(i).ok());
+    let normal_style = index("TheNormalStyleSheet").and_then(|i| style_set.get(i)).or(style_set.first());
+    let normal_para = index("TheNormalParagraphSheet").and_then(|i| para_set.get(i)).or(para_set.first());
+    // A run names its sheet by a `Parent` index or by `Name` (see `psd_styles::reference`).
+    let named = |set: &'_ [E], sheet: &E| -> Option<usize> {
+        if let Some(i) = sheet.get("Parent").and_then(E::as_i64).and_then(|i| usize::try_from(i).ok()).filter(|i| *i < set.len()) {
+            return Some(i);
+        }
+        let name = sheet.get("Name").and_then(E::as_str)?;
+        set.iter().position(|s| s.get("Name").and_then(E::as_str) == Some(name))
+    };
+
+    // Paragraph runs first: a character run's defaults depend on its paragraph.
+    let prun = e.path(&["EngineDict", "ParagraphRun"]);
+    let psheets: Vec<&E> =
+        prun.and_then(|r| r.get("RunArray")).and_then(E::as_array).map(|a| a.iter().filter_map(|x| x.get("ParagraphSheet")).collect()).unwrap_or_default();
+    let plens16 = arr_f(prun.and_then(|r| r.get("RunLengthArray")));
+    let plens = utf16_to_byte_lengths(&ed_text, &plens16);
+    let empty = E::Dict(Vec::new());
+    // Per paragraph run: its merged base properties and its default character style.
+    let para_bases: Vec<(E, Option<&E>)> = psheets
+        .iter()
+        .map(|sheet| {
+            let style = named(para_set, sheet).and_then(|i| para_set.get(i));
+            let base = merged(&[style.and_then(|s| s.get("Properties")), normal_para.and_then(|s| s.get("Properties"))]);
+            let char_default = [Some(*sheet), style]
+                .into_iter()
+                .flatten()
+                .find_map(|s| s.get("DefaultStyleSheet").and_then(E::as_i64).and_then(|i| usize::try_from(i).ok()).and_then(|i| style_set.get(i)));
+            (base, char_default)
+        })
+        .collect();
+    layer.paragraphs = psheets
+        .iter()
+        .zip(&para_bases)
+        .zip(plens)
+        .map(|((sheet, (base, _)), len)| ParagraphRun { len, style: para_style(Some(base), sheet.get("Properties").unwrap_or(&empty), k) })
+        .collect();
 
     // Character runs.
     let srun = e.path(&["EngineDict", "StyleRun"]);
-    let sdata: Vec<&E> = srun
-        .and_then(|r| r.get("RunArray"))
-        .and_then(E::as_array)
-        .map(|a| a.iter().filter_map(|x| x.path(&["StyleSheet", "StyleSheetData"])).collect())
-        .unwrap_or_default();
-    let slens = utf16_to_byte_lengths(&ed_text, &arr_f(srun.and_then(|r| r.get("RunLengthArray"))));
+    let ssheets: Vec<&E> =
+        srun.and_then(|r| r.get("RunArray")).and_then(E::as_array).map(|a| a.iter().filter_map(|x| x.get("StyleSheet")).collect()).unwrap_or_default();
+    let slens16 = arr_f(srun.and_then(|r| r.get("RunLengthArray")));
+    let slens = utf16_to_byte_lengths(&ed_text, &slens16);
+    // The paragraph run each character run starts in (UTF-16 offsets).
+    let para_of = |at: f64| -> Option<usize> {
+        let mut end = 0.0;
+        for (i, n) in plens16.iter().enumerate() {
+            end += n;
+            if at < end {
+                return Some(i);
+            }
+        }
+        plens16.len().checked_sub(1)
+    };
+    let mut at16 = 0.0;
+    let bases: Vec<E> = ssheets
+        .iter()
+        .enumerate()
+        .map(|(i, sheet)| {
+            let own = named(style_set, sheet).and_then(|i| style_set.get(i));
+            let para_default = para_of(at16).and_then(|p| para_bases.get(p)).and_then(|(_, c)| *c);
+            at16 += slens16.get(i).copied().unwrap_or(0.0);
+            merged(&[own, para_default, normal_style].map(|s| s.and_then(|s| s.get("StyleSheetData"))))
+        })
+        .collect();
+    let sdata: Vec<&E> = ssheets.iter().map(|s| s.get("StyleSheetData").unwrap_or(&empty)).collect();
     let incoming: Vec<(usize, bool, f32)> = sdata
         .iter()
+        .zip(&bases)
         .zip(&slens)
-        .map(|(d, len)| {
-            let auto = lookup(d, base_style, "AutoKerning").and_then(E::as_bool) != Some(false);
-            let kern = lookup(d, base_style, "Kerning").and_then(E::as_f64).filter(|v| v.is_finite()).unwrap_or(0.0) as f32;
+        .map(|((d, base), len)| {
+            let auto = lookup(d, Some(base), "AutoKerning").and_then(E::as_bool) != Some(false);
+            let kern = lookup(d, Some(base), "Kerning").and_then(E::as_f64).filter(|v| v.is_finite()).unwrap_or(0.0) as f32;
             (*len, auto, kern)
         })
         .collect();
-    layer.runs = sdata.iter().zip(slens).map(|(d, len)| TextRun { len, style: char_style(base_style, d, &fonts, k) }).collect();
+    layer.runs = sdata.iter().zip(&bases).zip(slens).map(|((d, base), len)| TextRun { len, style: char_style(Some(base), d, &fonts, k) }).collect();
     layer.runs = kerning_from_pairs(&layer.text, layer.char_runs(), &incoming);
-
-    // Paragraph runs.
-    let prun = e.path(&["EngineDict", "ParagraphRun"]);
-    let pdata: Vec<&E> = prun
-        .and_then(|r| r.get("RunArray"))
-        .and_then(E::as_array)
-        .map(|a| a.iter().filter_map(|x| x.path(&["ParagraphSheet", "Properties"])).collect())
-        .unwrap_or_default();
-    let plens = utf16_to_byte_lengths(&ed_text, &arr_f(prun.and_then(|r| r.get("RunLengthArray"))));
-    layer.paragraphs = pdata.iter().zip(plens).map(|(d, len)| ParagraphRun { len, style: para_style(base_para, d, k) }).collect();
 
     // Shape.
     let shape = e.path(&["EngineDict", "Rendered", "Shapes", "Children"]).and_then(E::as_array).and_then(|a| a.first());
@@ -330,6 +1208,21 @@ fn apply_engine_data(layer: &mut TextLayer, e: &E, txt: Option<&str>, k: f32) {
     }
 }
 
+/// The dictionaries in `levels` as one: a key comes from the first level that has it.
+fn merged(levels: &[Option<&E>]) -> E {
+    let mut out: Vec<(String, E)> = Vec::new();
+    for level in levels.iter().flatten() {
+        if let E::Dict(kv) = level {
+            for (k, v) in kv {
+                if !out.iter().any(|(o, _)| o == k) {
+                    out.push((k.clone(), v.clone()));
+                }
+            }
+        }
+    }
+    E::Dict(out)
+}
+
 fn lookup<'a>(run: &'a E, base: Option<&'a E>, key: &str) -> Option<&'a E> {
     run.get(key).or_else(|| base.and_then(|b| b.get(key)))
 }
@@ -339,7 +1232,7 @@ pub(crate) fn char_style(base: Option<&E>, d: &E, fonts: &[String], k: f32) -> C
     let num = |key: &str| g(key).and_then(E::as_f64);
     let flag = |key: &str| g(key).and_then(E::as_bool);
     let mut s = CharStyle::default();
-    if let Some(ps) = g("Font").and_then(E::as_i64).and_then(|i| fonts.get(i as usize)) {
+    if let Some(ps) = g("Font").and_then(E::as_i64).and_then(|i| usize::try_from(i).ok()).and_then(|i| fonts.get(i)) {
         let r = guess_from_postscript(ps);
         s.font_family = r.family;
         s.weight = r.weight;
@@ -376,6 +1269,12 @@ pub(crate) fn char_style(base: Option<&E>, d: &E, fonts: &[String], k: f32) -> C
         Some(2) => Caps::AllCaps,
         _ => Caps::Normal,
     };
+    // FontBaseline: 1 superscript, 2 subscript.
+    s.position = match g("FontBaseline").and_then(E::as_i64) {
+        Some(1) => photosuite_doc::text::BaselinePosition::Superscript,
+        Some(2) => photosuite_doc::text::BaselinePosition::Subscript,
+        _ => photosuite_doc::text::BaselinePosition::Normal,
+    };
     if let Some(c) = g("FillColor") {
         let v = arr_f(c.get("Values"));
         let a = v.first().copied().unwrap_or(1.0) as f32;
@@ -408,6 +1307,7 @@ pub(crate) fn para_style(base: Option<&E>, d: &E, k: f32) -> ParagraphStyle {
         space_after_pt: num("SpaceAfter").unwrap_or(0.0) as f32 * k,
         auto_leading: num("AutoLeading").unwrap_or(1.2) as f32,
         hyphenate: lookup(d, base, "AutoHyphenate").and_then(E::as_bool).unwrap_or(false),
+        every_line_composer: lookup(d, base, "EveryLineComposer").and_then(E::as_bool).unwrap_or(true),
         ..Default::default()
     }
 }
@@ -608,11 +1508,22 @@ pub(crate) fn style_sheet_data(s: &CharStyle, font: usize, k: f32) -> E {
                 Caps::AllCaps => 2,
             }),
         ),
+        (
+            "FontBaseline".into(),
+            E::Int(match s.position {
+                photosuite_doc::text::BaselinePosition::Normal => 0,
+                photosuite_doc::text::BaselinePosition::Superscript => 1,
+                photosuite_doc::text::BaselinePosition::Subscript => 2,
+            }),
+        ),
         ("Underline".into(), E::Bool(s.underline)),
         ("Strikethrough".into(), E::Bool(s.strikethrough)),
         ("Ligatures".into(), E::Bool(s.ligatures)),
         ("DLigatures".into(), E::Bool(s.discretionary_ligatures)),
         ("FillColor".into(), E::Dict(vec![("Type".into(), E::Int(color_type)), ("Values".into(), E::Array(values))])),
+        // Some readers lay edited text out without painting it unless its fill is on
+        // (storytold/photocraft@7bb971f7).
+        ("FillFlag".into(), E::Bool(true)),
     ];
     if let Some(l) = s.leading_pt {
         dict.insert(5, ("Leading".into(), real(l / k)));
@@ -641,6 +1552,7 @@ pub(crate) fn paragraph_properties(p: &ParagraphStyle, k: f32) -> E {
         ("AutoHyphenate".into(), E::Bool(p.hyphenate)),
         ("AutoLeading".into(), real(p.auto_leading)),
         ("LeadingType".into(), E::Int(0)),
+        ("EveryLineComposer".into(), E::Bool(p.every_line_composer)),
     ])
 }
 
@@ -737,10 +1649,13 @@ pub fn build_engine_data(layer: &TextLayer, template: Option<E>, dpi: f32) -> E 
         if i + 1 == paras.len() {
             n += 1;
         }
-        let run = E::Dict(vec![(
-            "ParagraphSheet".into(),
-            E::Dict(vec![("DefaultStyleSheet".into(), E::Int(0)), ("Properties".into(), paragraph_properties(&p.style, k))]),
-        )]);
+        // The model has no leading type: a run keeps the one it was read with (older files use
+        // 1, top-to-top), else the normal sheet's.
+        let mut props = paragraph_properties(&p.style, k);
+        if let E::Dict(d) = &mut props {
+            d.retain(|(key, _)| key != "LeadingType");
+        }
+        let run = E::Dict(vec![("ParagraphSheet".into(), E::Dict(vec![("DefaultStyleSheet".into(), E::Int(0)), ("Properties".into(), props)]))]);
         let start = plens.iter().filter_map(E::as_i64).sum::<i64>();
         pruns.push(match run_at(&old_paras, start) {
             Some(old) => ed::merge(&old, run),

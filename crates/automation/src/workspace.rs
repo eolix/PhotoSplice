@@ -593,6 +593,7 @@ mod tests {
             id,
             "filter.blurGallery.pathBlur"
                 | "filter.render.flame"
+                | "type.info"
                 | "shape.create"
                 | "shape.edit"
                 | "shape.info"

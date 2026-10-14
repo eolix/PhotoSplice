@@ -236,9 +236,7 @@ fn canvas_size(s: &mut Session, p: &Value) -> Result<Value> {
         let old = Rect::from_xywh(dx, dy, ow as u32, oh as u32);
         // The locked Background layer is extended with the extension colour.
         if ext[3] > 0.0
-            && let Some(bg) = doc.layers.first_mut()
-            && bg.name == "Background"
-            && bg.locks.transparency
+            && let Some(bg) = doc.background_mut()
             && let LayerContent::Raster(surf) = &mut bg.content
         {
             let fmt = surf.format();

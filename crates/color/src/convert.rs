@@ -188,15 +188,25 @@ pub fn mat3_mul(m: &[[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
     m.map(|r| r[0] * v[0] + r[1] * v[1] + r[2] * v[2])
 }
 
-/// CIE L*a*b* (D50) → encoded sRGB (Bradford-adapted to D65).
+/// CIE L*a*b* (D50) → encoded sRGB (Bradford-adapted to D65), clipped to the sRGB gamut.
 pub fn lab_to_srgb(lab: [f32; 3]) -> [f32; 3] {
+    lab_to_linear_srgb(lab).map(|lin| linear_to_srgb(lin.clamp(0.0, 1.0)))
+}
+
+/// [`lab_to_srgb`] without the clip: a colour outside sRGB comes out below 0 or above 1 (the
+/// transfer curve's linear segment carries on below 0), so [`srgb_to_lab`] gives it back.
+pub fn lab_to_srgb_unclamped(lab: [f32; 3]) -> [f32; 3] {
+    lab_to_linear_srgb(lab).map(|lin| if lin.is_finite() { linear_to_srgb(lin) } else { 0.0 })
+}
+
+fn lab_to_linear_srgb(lab: [f32; 3]) -> [f32; 3] {
     let [l, a, b] = lab;
     let fy = (l + 16.0) / 116.0;
     let fx = fy + a / 500.0;
     let fz = fy - b / 200.0;
     let finv = |t: f32| if t > 6.0 / 29.0 { t * t * t } else { 3.0 * (6.0f32 / 29.0).powi(2) * (t - 4.0 / 29.0) };
     let xyz = [finv(fx) * D50[0], finv(fy) * D50[1], finv(fz) * D50[2]];
-    mat3_mul(&XYZ_D50_TO_SRGB, xyz).map(|lin| linear_to_srgb(lin.clamp(0.0, 1.0)))
+    mat3_mul(&XYZ_D50_TO_SRGB, xyz)
 }
 
 /// Encoded sRGB → CIE L*a*b* (D50).
@@ -306,5 +316,20 @@ mod tests {
                 assert!((back[i] - rgb[i]).abs() < 2e-3, "{rgb:?} -> {back:?}");
             }
         }
+    }
+
+    /// Out-of-gamut Lab colours survive the unclamped round trip (Lab documents composite
+    /// through it) and are clipped by the plain conversion.
+    #[test]
+    fn unclamped_lab_round_trips_outside_srgb() {
+        for lab in [[46.0, 80.0, -110.0], [88.0, -90.0, 80.0], [5.0, 40.0, 60.0], [100.0, 0.0, 0.0]] {
+            let rgb = lab_to_srgb_unclamped(lab);
+            let back = srgb_to_lab(rgb);
+            for i in 0..3 {
+                assert!((back[i] - lab[i]).abs() < 0.05, "{lab:?} -> {rgb:?} -> {back:?}");
+            }
+            assert!(lab_to_srgb(lab).iter().all(|v| (0.0..=1.0).contains(v)));
+        }
+        assert!(lab_to_srgb_unclamped([46.0, 80.0, -110.0]).iter().any(|v| !(0.0..=1.0).contains(v)));
     }
 }

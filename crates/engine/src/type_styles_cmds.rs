@@ -84,7 +84,7 @@ fn id_param(cmd: &str, p: &Value) -> Result<Option<u32>> {
 /// A character style with every field changed from the default, to see which fields a set of
 /// Character-panel keys touches.
 fn perturbed_char() -> CharStyle {
-    use photosuite_doc::text::{Caps, FontFeature, FontVariation, Kerning};
+    use photosuite_doc::text::{BaselinePosition, Caps, FontFeature, FontVariation, Kerning};
     CharStyle {
         font_family: "\u{1}".into(),
         font_style: "\u{1}".into(),
@@ -105,6 +105,7 @@ fn perturbed_char() -> CharStyle {
         kerning: Kerning::Off,
         kern: -12345.0,
         caps: Caps::AllCaps,
+        position: BaselinePosition::Subscript,
         ligatures: false,
         discretionary_ligatures: true,
         features: vec![FontFeature { tag: "\u{1}".into(), value: 9 }],
@@ -126,6 +127,7 @@ fn perturbed_para() -> ParagraphStyle {
         auto_leading: -1.0,
         direction: TextDirection::Rtl,
         hyphenate: true,
+        every_line_composer: false,
         style_sheet: None,
     }
 }

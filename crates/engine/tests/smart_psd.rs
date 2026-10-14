@@ -403,3 +403,205 @@ fn edited_psd_smart_objects_drop_their_old_file() {
     let SmartSource::Linked { path } = &sm.source else { panic!() };
     assert_eq!(uuids, vec![path.clone()]);
 }
+
+/// Duplicated smart objects share their file in the PSD (Photoshop updates both when one is
+/// edited); a "New Smart Object via Copy" gets a file of its own even with equal contents. After
+/// re-opening, editing one duplicate updates the other and leaves the copy alone.
+#[test]
+fn shared_and_independent_smart_objects_through_psd() {
+    let mut s = session(8);
+    let a = s.execute("layer.smartObjects.convertToSmartObject", json!({})).unwrap()["layer"].as_u64().unwrap();
+    let b = s.execute("layer.duplicate", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.select_layer(photosuite_doc::LayerId(a)).unwrap();
+    let c = s.execute("layer.smartObjects.newSmartObjectViaCopy", json!({})).unwrap()["layer"].as_u64().unwrap();
+    for (id, name) in [(a, "original"), (b, "duplicate"), (c, "via copy")] {
+        s.execute("layer.setProps", json!({"layer": id, "name": name})).unwrap();
+    }
+    let doc = s.active().unwrap().doc.clone();
+    let bytes = photosuite_io::export(&doc, "psd", &Default::default()).unwrap().bytes;
+    let back = photosuite_io::import("a.psd", &bytes).unwrap().document;
+    let path = |doc: &Document, name_of: u64| -> String {
+        let name = &s.active().unwrap().doc.layer(photosuite_doc::LayerId(name_of)).unwrap().name;
+        let l = doc.walk().into_iter().map(|(_, _, l)| l).find(|l| &l.name == name).unwrap().clone();
+        match &l.content {
+            LayerContent::Smart(SmartObject { source: SmartSource::Linked { path }, .. }) => path.clone(),
+            _ => panic!("{name}: not a placed smart object"),
+        }
+    };
+    let (pa, pb, pc) = (path(&back, a), path(&back, b), path(&back, c));
+    assert_eq!(pa, pb, "the duplicate shares the file");
+    assert_ne!(pa, pc, "the copy has its own file");
+}
+
+/// A duplicated placed layer (arriving with its source's `placed` id) is written with an id of
+/// its own, as Photoshop gives every instance.
+#[test]
+fn duplicated_placed_layers_get_their_own_placed_id() {
+    let mut s = session(8);
+    s.execute("layer.smartObjects.convertToSmartObject", json!({})).unwrap();
+    let doc = s.active().unwrap().doc.clone();
+    let first = photosuite_io::export(&doc, "psd", &Default::default()).unwrap().bytes;
+    let mut s2 = Session::new();
+    s2.add_document(photosuite_io::import("a.psd", &first).unwrap().document, None);
+    let (id, _) = smart(&s2.active().unwrap().doc);
+    s2.select_layer(photosuite_doc::LayerId(id)).unwrap();
+    s2.execute("layer.duplicate", json!({})).unwrap();
+    let second = photosuite_io::export(&s2.active().unwrap().doc, "psd", &Default::default()).unwrap().bytes;
+    let f = photosuite_psd::PsdFile::from_bytes(&second).unwrap();
+    let placed: Vec<(String, String)> = f
+        .layers()
+        .iter()
+        .filter_map(|r| r.blocks.iter().find(|b| &b.key == b"SoLd").and_then(|b| photosuite_io::smart_map::parse_sold(&b.data)))
+        .map(|p| (p.placed, p.idnt))
+        .collect();
+    assert_eq!(placed.len(), 2);
+    assert_ne!(placed[0].0, placed[1].0, "own placed ids");
+    assert_eq!(placed[0].1, placed[1].1, "one shared file");
+}
+
+/// A version-2 `liFD` item, as in CS2's `lnkD` block: the fields every version has, and
+/// none of the version 5–7 fields after the file data.
+fn lifd_v2(f: &photosuite_io::linked::LinkedFile) -> Vec<u8> {
+    let mut item = b"liFD".to_vec();
+    item.extend_from_slice(&2u32.to_be_bytes());
+    item.push(f.uuid.len() as u8);
+    item.extend_from_slice(f.uuid.as_bytes());
+    let name: Vec<u16> = f.file_name.encode_utf16().collect();
+    item.extend_from_slice(&(name.len() as u32).to_be_bytes());
+    item.extend(name.iter().flat_map(|u| u.to_be_bytes()));
+    item.extend_from_slice(&photosuite_io::linked::file_type(&f.bytes));
+    item.extend_from_slice(b"8BIM");
+    item.extend_from_slice(&(f.bytes.len() as u64).to_be_bytes());
+    item.push(0); // no open-file descriptor
+    item.extend_from_slice(&f.bytes);
+    let mut out = (item.len() as u64).to_be_bytes().to_vec();
+    out.extend(item);
+    out.resize(out.len().next_multiple_of(4), 0);
+    out
+}
+
+/// `doc` saved as PSD, then rewritten into CS2's layout: no `SoLd`, and `lnkD` with
+/// version-2 items.
+fn cs2_layout(doc: &Document) -> Vec<u8> {
+    let out = photosuite_io::export(doc, "psd", &Default::default()).unwrap();
+    let mut file = photosuite_psd::PsdFile::from_bytes(&out.bytes).unwrap();
+    for rec in file.layers_mut() {
+        rec.blocks.retain(|b| !matches!(&b.key, b"SoLd" | b"SoLE"));
+    }
+    assert!(file.layers().iter().any(|l| l.block(b"PlLd").is_some()));
+    let links = file.global_blocks.iter_mut().find(|b| &b.key == b"lnk2").unwrap();
+    let files = photosuite_io::linked::parse_linked_files(&links.data);
+    assert_eq!(files.len(), 1);
+    links.key = *b"lnkD";
+    links.data = files.iter().flat_map(lifd_v2).collect();
+    file.to_bytes().unwrap()
+}
+
+/// CS2 predates `SoLd`: its placed layers carry a `PlLd` block alone, and the embedded
+/// file sits in a global `lnkD` block of older `liFD` items. Such a smart object's contents open
+/// (they were "unavailable") and it re-renders in place from them.
+#[test]
+fn cs2_plld_only_smart_object_opens_its_contents() {
+    let mut s = session(8);
+    s.execute("layer.smartObjects.convertToSmartObject", json!({})).unwrap();
+    let id = s.active().unwrap().active_layer.unwrap().0;
+    s.execute("edit.transform", json!({"layer": id, "matrix": [0.75, 0, 0, 0.75, 10, 4]})).unwrap();
+    let doc = s.active().unwrap().doc.clone();
+    let (_, before) = smart(&doc);
+    let (name, src) = source_bytes(&doc.metadata, &before.source).unwrap();
+    let nested = decode_source(&name, &src).unwrap();
+
+    let back = photosuite_io::import("cs2.psd", &cs2_layout(&doc)).unwrap().document;
+    let (bid, after) = smart(&back);
+    for (a, b) in after.transform.m.iter().zip(before.transform.m) {
+        assert!((a - b).abs() < 1e-9, "transform {:?} vs {:?}", after.transform, before.transform);
+    }
+    let (name, src) = source_bytes(&back.metadata, &after.source).expect("the contents are available");
+    let inner = decode_source(&name, &src).unwrap();
+    assert_eq!((inner.size, inner.layers.len()), (nested.size, nested.layers.len()));
+    // It re-renders where it was placed.
+    let mut l = back.layer(photosuite_doc::LayerId(bid)).unwrap().clone();
+    assert!(refresh_layer(&back, &mut l).unwrap());
+    let mut rerendered = back.clone();
+    *rerendered.layer_mut(photosuite_doc::LayerId(bid)).unwrap() = l;
+    let d = max_diff(&photosuite_compose::flatten(&rerendered).px, &photosuite_compose::flatten(&doc).px);
+    assert!(d <= 2.0 / 255.0, "re-render differs by {d}");
+    // And Edit Contents (the double-click) opens the nested document.
+    let mut s2 = Session::new();
+    s2.add_document(back, None);
+    s2.select_layer(photosuite_doc::LayerId(bid)).unwrap();
+    s2.execute("layer.smartObjects.editContents", json!({})).unwrap();
+    assert_eq!(s2.active().unwrap().doc.size, nested.size);
+}
+
+/// CS2 can warp a smart object, and `PlLd` keeps the warp after the corners. Now that a
+/// `PlLd`-only layer's contents are available, Free Transform, Image Size and mode changes
+/// re-render it from them: it must come back warped, not silently unwarped.
+#[test]
+fn cs2_plld_only_warped_smart_object_stays_warped() {
+    let mut s = session(8);
+    s.execute("layer.smartObjects.convertToSmartObject", json!({})).unwrap();
+    let id = s.active().unwrap().active_layer.unwrap().0;
+    s.execute("edit.transform", json!({"layer": id, "matrix": [0.75, 0, 0, 0.75, 10, 4]})).unwrap();
+    s.execute("layer.smartObjects.warp", json!({"style": "wave", "bend": 60})).unwrap();
+    let doc = s.active().unwrap().doc.clone();
+    let (_, before) = smart(&doc);
+    assert!(before.warp.is_some());
+
+    let back = photosuite_io::import("cs2.psd", &cs2_layout(&doc)).unwrap().document;
+    let (bid, after) = smart(&back);
+    assert_eq!(after.warp, before.warp);
+    assert!(source_bytes(&back.metadata, &after.source).is_some(), "the contents are available");
+    // Re-rendered from its source, it is still warped where it was placed.
+    let rerender = |warp| {
+        let mut l = back.layer(photosuite_doc::LayerId(bid)).unwrap().clone();
+        let LayerContent::Smart(sm) = &mut l.content else { panic!() };
+        sm.warp = warp;
+        assert!(refresh_layer(&back, &mut l).unwrap());
+        let mut d = back.clone();
+        *d.layer_mut(photosuite_doc::LayerId(bid)).unwrap() = l;
+        max_diff(&photosuite_compose::flatten(&d).px, &photosuite_compose::flatten(&doc).px)
+    };
+    let d = rerender(after.warp.clone());
+    assert!(d <= 2.0 / 255.0, "re-render differs by {d}");
+    assert!(rerender(None) > 0.1, "an unwarped re-render would differ visibly");
+}
+
+/// A CS2 `PlLd`-only smart object is saved as it was while nothing changed it, and with its
+/// current placement once it is moved: the old record was written back unchanged, so the save
+/// reopened at the old place.
+#[test]
+fn cs2_plld_only_smart_object_saves_its_new_transform() {
+    let mut s = session(8);
+    s.execute("layer.smartObjects.convertToSmartObject", json!({})).unwrap();
+    let id = s.active().unwrap().active_layer.unwrap().0;
+    s.execute("edit.transform", json!({"layer": id, "matrix": [0.75, 0, 0, 0.75, 10, 4]})).unwrap();
+    let cs2 = cs2_layout(&s.active().unwrap().doc);
+    let plld = |bytes: &[u8]| {
+        let f = photosuite_psd::PsdFile::from_bytes(bytes).unwrap();
+        let rec = f.layers().iter().find(|l| l.block(b"PlLd").is_some()).cloned().expect("a placed layer");
+        (rec.block(b"PlLd").unwrap().data.clone(), rec.block(b"SoLd").is_some())
+    };
+    let back = photosuite_io::import("cs2.psd", &cs2).unwrap().document;
+    let (bid, _) = smart(&back);
+
+    // Unedited: the CS2 record is written back as it was.
+    let same = photosuite_io::export(&back, "psd", &Default::default()).unwrap().bytes;
+    assert_eq!(plld(&same), (plld(&cs2).0, false));
+
+    // Moved and scaled: written with the new placement, and it reopens there.
+    let mut s2 = Session::new();
+    s2.add_document(back, None);
+    s2.execute("edit.transform", json!({"layer": bid, "matrix": [0.5, 0, 0, 0.5, 20, 12]})).unwrap();
+    let edited = s2.active().unwrap().doc.clone();
+    let (_, want) = smart(&edited);
+    let saved = photosuite_io::export(&edited, "psd", &Default::default()).unwrap().bytes;
+    assert!(structure_errors(&saved).is_empty(), "{:?}", structure_errors(&saved));
+    assert_ne!(plld(&saved).0, plld(&cs2).0, "the old PlLd record was written back");
+    let again = photosuite_io::import("again.psd", &saved).unwrap().document;
+    let (_, got) = smart(&again);
+    for (a, b) in got.transform.m.iter().zip(want.transform.m) {
+        assert!((a - b).abs() < 1e-9, "transform {:?} vs {:?}", got.transform, want.transform);
+    }
+    assert!(source_bytes(&again.metadata, &got.source).is_some(), "the contents are available");
+}

@@ -766,3 +766,286 @@ fn knockout_round_trips() {
     let again = import("x.psd", &export(&off, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap().document;
     assert_eq!(again.layers[0].knockout, Knockout::None);
 }
+
+/// A group's end-divider record keeps the blocks Photoshop wrote on it (`shmd` layer time,
+/// `fxrp`): through import, PSD export and the native format.
+#[test]
+fn group_divider_blocks_round_trip() {
+    use std::sync::Arc;
+    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    let mut g = photosuite_doc::Layer::group("G", vec![photosuite_doc::Layer::raster("A", photosuite_color::PixelFormat::RGBA8)]);
+    let fxrp = vec![0u8; 16];
+    if let LayerContent::Group(grp) = &mut g.content {
+        grp.divider_blocks = vec![(*b"fxrp", Arc::new(fxrp.clone()))];
+    }
+    d.layers.push(g);
+    let bytes = export(&d, "t.psd", &Default::default()).unwrap().bytes;
+    let f = PsdFile::from_bytes(&bytes).unwrap();
+    let divider = f.layers().iter().find(|r| r.section_type() == SectionType::BoundingDivider).expect("divider record");
+    assert_eq!(divider.blocks.iter().find(|b| &b.key == b"fxrp").map(|b| b.data.clone()), Some(fxrp.clone()));
+    // Import reads them back; the native format keeps them.
+    let back = import("t.psd", &bytes).unwrap().document;
+    let LayerContent::Group(gb) = &back.layers[0].content else { panic!("group") };
+    assert_eq!(gb.divider_blocks.iter().find(|b| &b.0 == b"fxrp").map(|b| b.1.to_vec()), Some(fxrp.clone()));
+    let pc = photosuite_format::save_to_bytes(&back, &Default::default()).unwrap();
+    let again = photosuite_format::load_from_bytes(&pc).unwrap();
+    let LayerContent::Group(ga) = &again.layers[0].content else { panic!("group") };
+    assert_eq!(ga.divider_blocks, gb.divider_blocks);
+}
+
+/// A group's end divider keeps its layer id (`lyid`) through a round trip; a copy of the group
+/// (same divider blocks) and the layers get ids of their own, all unique.
+#[test]
+fn group_divider_ids_round_trip() {
+    use std::sync::Arc;
+    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    let group = |psd_id: u32| {
+        let mut g = photosuite_doc::Layer::group("G", vec![photosuite_doc::Layer::raster("A", photosuite_color::PixelFormat::RGBA8)]);
+        g.psd_id = Some(psd_id);
+        if let LayerContent::Group(grp) = &mut g.content {
+            grp.divider_blocks = vec![(*b"lyid", Arc::new(9u32.to_be_bytes().to_vec()))];
+        }
+        g
+    };
+    d.layers.push(group(4));
+    d.layers.push(group(9));
+    let ids = |bytes: &[u8]| -> Vec<(bool, u32)> {
+        let f = PsdFile::from_bytes(bytes).unwrap();
+        f.layers().iter().map(|r| (r.section_type() == SectionType::BoundingDivider, r.layer_id().unwrap())).collect()
+    };
+    let bytes = export(&d, "t.psd", &Default::default()).unwrap().bytes;
+    let first = ids(&bytes);
+    let mut all: Vec<u32> = first.iter().map(|i| i.1).collect();
+    all.sort_unstable();
+    all.dedup();
+    assert_eq!(all.len(), first.len(), "unique ids: {first:?}");
+    // The second group's own id (9) wins over the dividers' kept 9.
+    assert!(first.iter().any(|&(div, id)| !div && id == 9) && !first.iter().any(|&(div, id)| div && id == 9), "{first:?}");
+    // Without the clash, the divider keeps its id.
+    let mut one = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    one.layers.push(group(4));
+    assert!(ids(&export(&one, "t.psd", &Default::default()).unwrap().bytes).contains(&(true, 9)));
+    // What was written comes back the same.
+    let back = import("t.psd", &bytes).unwrap().document;
+    assert_eq!(ids(&export(&back, "t.psd", &Default::default()).unwrap().bytes), first);
+}
+
+/// The resolution keeps the file's units (pixels/cm, width and height shown in cm): verbatim
+/// while unchanged, else the new resolution in those units.
+#[test]
+fn resolution_keeps_its_units() {
+    use photosuite_psd::ResolutionInfo;
+    let d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    let mut f = PsdFile::from_bytes(&export(&d, "t.psd", &Default::default()).unwrap().bytes).unwrap();
+    // 72 dpi as Photoshop writes it for a document set up in centimetres.
+    let cm = ResolutionInfo { h_res_fixed: 0x001C_58AF, h_res_unit: 2, width_unit: 2, v_res_fixed: 0x001C_58AF, v_res_unit: 2, height_unit: 2 };
+    let r = f.resources.iter_mut().find(|r| r.id == 1005).unwrap();
+    r.data = cm.to_bytes();
+    let mut doc = import("t.psd", &f.to_bytes().unwrap()).unwrap().document;
+    assert!((doc.resolution_dpi - 72.0).abs() < 0.01, "{}", doc.resolution_dpi);
+    let written = |doc: &photosuite_doc::Document| {
+        let f = PsdFile::from_bytes(&export(doc, "t.psd", &Default::default()).unwrap().bytes).unwrap();
+        assert_eq!(f.resources.iter().filter(|r| r.id == 1005).count(), 1);
+        ResolutionInfo::from_bytes(&f.resource(1005).unwrap().data).unwrap()
+    };
+    assert_eq!(written(&doc), cm);
+    doc.resolution_dpi = 254.0;
+    let w = written(&doc);
+    assert_eq!((w.h_res_unit, w.width_unit, w.v_res_unit, w.height_unit), (2, 2, 2, 2));
+    assert!((w.h_res() - 100.0).abs() < 1e-3 && (w.v_res() - 100.0).abs() < 1e-3, "{w:?}");
+}
+
+/// A layer added to an imported document gets an id past the file's seed (1044) and every id in
+/// use, never a free lower one a deleted layer may have had.
+#[test]
+fn new_layer_ids_follow_the_seed() {
+    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    let mut a = photosuite_doc::Layer::raster("A", photosuite_color::PixelFormat::RGBA8);
+    a.psd_id = Some(7);
+    d.layers.push(a);
+    d.layers.push(photosuite_doc::Layer::raster("new", photosuite_color::PixelFormat::RGBA8));
+    let ids = |d: &photosuite_doc::Document| -> Vec<u32> { PsdFile::from_bytes(&export(d, "t.psd", &Default::default()).unwrap().bytes).unwrap().layers().iter().map(|r| r.layer_id().unwrap()).collect() };
+    assert_eq!(ids(&d), vec![7, 8]);
+    d.metadata.psd_resources.push((1044, String::new(), std::sync::Arc::new(20u32.to_be_bytes().to_vec())));
+    assert_eq!(ids(&d), vec![7, 21]);
+}
+
+#[test]
+fn layer_bounds_without_channel_data_allocate_nothing() {
+    // A record can declare a 300000x300000 rectangle in a few bytes. With no channel data to
+    // back it, import used to interleave a ~360 GB buffer and abort on the allocation
+    // (storytold/photocraft@dc256b8b).
+    use photosuite_psd::LayerRecord;
+    let mut f = testgen::small(Version::Psd, Compression::Raw);
+    f.layers_mut().push(LayerRecord { rect: photosuite_psd::Rect::from_xywh(0, 0, 300_000, 300_000), name: b"huge".to_vec(), ..Default::default() });
+    let (d, warnings) = psd_to_document(&f);
+    let l = d.layers.last().unwrap();
+    assert!(matches!(&l.content, LayerContent::Raster(s) if s.tile_count() == 0));
+    assert!(warnings.iter().any(|w| w.contains("\"huge\"")), "{warnings:?}");
+}
+
+/// A group keeping the id u32::MAX: the ids given to its child and its end divider wrap to the
+/// smallest free ones instead of overflowing, and none collides (storytold/photocraft@ccb33741).
+#[test]
+fn layer_ids_wrap_without_colliding() {
+    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    let mut g = photosuite_doc::Layer::group("G", vec![photosuite_doc::Layer::raster("A", photosuite_color::PixelFormat::RGBA8)]);
+    g.psd_id = Some(u32::MAX);
+    d.layers.push(g);
+    let f = PsdFile::from_bytes(&export(&d, "t.psd", &Default::default()).unwrap().bytes).unwrap();
+    let ids: Vec<u32> = f.layers().iter().filter_map(|r| r.layer_id()).collect();
+    let unique: std::collections::HashSet<u32> = ids.iter().copied().collect();
+    assert_eq!((ids.len(), unique.len()), (3, 3), "{ids:?}");
+    assert!(unique.contains(&u32::MAX) && unique.contains(&1), "{ids:?}");
+}
+
+/// Blocks kept with the PSB-only `8B64` signature are written as `8BIM` in a PSD (Reference
+/// refuses the file otherwise) and stay `8B64` in a PSB (storytold/photocraft@3f72158f).
+#[test]
+fn kept_psb_blocks_are_written_as_8bim_in_a_psd() {
+    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(4, 4), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    d.metadata.psd_global_blocks = vec![(*b"8B64", *b"FMsk", std::sync::Arc::new(vec![0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 50])), (*b"8BIM", *b"Patt", std::sync::Arc::new(Vec::new()))];
+    let sigs = |force_psb| {
+        let bytes = export(&d, "t.psd", &ExportOptions { force_psb, ..Default::default() }).unwrap().bytes;
+        PsdFile::from_bytes(&bytes).unwrap().global_blocks.iter().filter(|b| matches!(&b.key, b"FMsk" | b"Patt")).map(|b| (b.signature, b.key)).collect::<Vec<_>>()
+    };
+    assert_eq!(sigs(false), vec![(*b"8BIM", *b"FMsk"), (*b"8BIM", *b"Patt")]);
+    assert_eq!(sigs(true), vec![(*b"8B64", *b"FMsk"), (*b"8BIM", *b"Patt")], "a PSB keeps 8B64");
+}
+
+/// A 16-bit file's layers go in a global `Lr16` block whose length is the data's own, padded to 4
+/// after it (storytold/photocraft@481b939f).
+#[test]
+fn lr16_padding_follows_the_block() {
+    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(5, 3), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U16);
+    d.layers.push(photosuite_doc::Layer::raster("A", photosuite_color::PixelFormat::new(photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U16, true)));
+    let f = PsdFile::from_bytes(&export(&d, "t.psd", &Default::default()).unwrap().bytes).unwrap();
+    let photosuite_psd::file::LayerInfoPlacement::GlobalBlock { key, padding, .. } = &f.layer_info_placement else { panic!("Lr16 block") };
+    assert_eq!(key, b"Lr16");
+    let body = f.layer_info.as_ref().unwrap().unpadded_len(Version::Psd).unwrap();
+    assert_eq!(padding.as_ref().map_or(body % 2, |p| p.len() as u64), (4 - body % 4) % 4, "padding after the block, to 4");
+}
+
+/// A type layer saved without pixels (ag-psd, GIMP and other writers leave them to Reference to
+/// draw) opens rendered from its model, not blank (storytold/photocraft@d2ad238e).
+#[test]
+fn type_layers_without_pixels_open_rendered() {
+    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(120, 40), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    let mut t = photosuite_doc::TextLayer { text: "Hello".into(), size_pt: 24.0, transform: photosuite_geom::Affine::translate(4.0, 30.0), ..Default::default() };
+    t.runs = vec![photosuite_doc::text::TextRun { len: 5, style: photosuite_doc::text::CharStyle { font_family: "Inter".into(), size_pt: 24.0, ..Default::default() } }];
+    t.sync_summary();
+    d.layers.push(photosuite_doc::Layer::new("Hello", LayerContent::Text(t)));
+    let bytes = export(&d, "t.psd", &Default::default()).unwrap().bytes;
+    let back = import("t.psd", &bytes).unwrap().document;
+    let LayerContent::Text(b) = &back.layers[0].content else { panic!("text layer") };
+    assert!(b.cache.as_ref().is_some_and(|c| !c.content_bounds().is_empty()), "rendered on open");
+}
+
+/// The render on open is capped: an absurd type size or scale in a hostile file keeps the layer
+/// empty instead of allocating gigabytes (storytold/photocraft@d2ad238e).
+#[test]
+fn hostile_type_sizes_without_pixels_open_without_a_huge_render() {
+    for (size, scale) in [(6000.0f32, 1.0f64), (1e30, 1.0), (24.0, 1e12)] {
+        let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(64, 64), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+        let mut t = photosuite_doc::TextLayer { text: "Hostile".into(), size_pt: size, transform: photosuite_geom::Affine { m: [scale, 0.0, 0.0, scale, 0.0, 30.0] }, ..Default::default() };
+        t.runs = vec![photosuite_doc::text::TextRun { len: 7, style: photosuite_doc::text::CharStyle { font_family: "Inter".into(), size_pt: size, ..Default::default() } }];
+        t.sync_summary();
+        d.layers.push(photosuite_doc::Layer::new("Hostile", LayerContent::Text(t)));
+        let Ok(r) = export(&d, "t.psd", &Default::default()) else { continue };
+        let started = std::time::Instant::now();
+        let _ = import("t.psd", &r.bytes);
+        assert!(started.elapsed().as_secs() < 20, "{size} pt × {scale}");
+    }
+}
+
+/// Empty layer channels are written raw, as Reference does: a ZIP stream for a zero-sized channel
+/// made readers decompress an invalid extent (storytold/photocraft@c833294e).
+#[test]
+fn empty_channels_are_written_raw() {
+    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::F32);
+    d.layers.push(photosuite_doc::Layer::raster("empty", d.pixel_format()));
+    let f = PsdFile::from_bytes(&export(&d, "t.psd", &Default::default()).unwrap().bytes).unwrap();
+    let rec = f.layers().iter().find(|r| r.name() == "empty").unwrap();
+    assert!(rec.channels.iter().all(|c| c.compression.unwrap_or(Compression::Raw) == Compression::Raw), "{:?}", rec.channels.iter().map(|c| c.compression).collect::<Vec<_>>());
+}
+
+/// A regenerated fill block is padded to a multiple of 4 inside its length, as Reference pads
+/// layer blocks (storytold/photocraft@e2aa1934).
+#[test]
+fn regenerated_fill_blocks_are_padded_to_four() {
+    for name in ["P", "Pa", "Pat", "Patt"] {
+        let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+        let fill = photosuite_doc::Fill::Pattern { name: name.into(), scale: 1.0, id: String::new(), angle: 0.0, link: true, phase: (0.0, 0.0) };
+        d.layers.push(photosuite_doc::Layer::new("fill", LayerContent::Fill(fill)));
+        let f = PsdFile::from_bytes(&export(&d, "t.psd", &Default::default()).unwrap().bytes).unwrap();
+        let b = f.layers().iter().flat_map(|r| &r.blocks).find(|b| &b.key == b"PtFl").expect("PtFl");
+        assert_eq!(b.data.len() % 4, 0, "{name}: {}", b.data.len());
+    }
+}
+
+/// A bottom layer stored without a transparency channel opens as the locked Background, whatever
+/// its name and even without lock data (other writers' files; storytold/photocraft@57624bd0).
+#[test]
+fn a_bottom_record_without_transparency_opens_as_the_background() {
+    let d = photosuite_doc::Document::with_background("bg", photosuite_geom::Size::new(6, 4), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8, photosuite_color::Color::rgb(0.2, 0.4, 0.6));
+    let mut f = PsdFile::from_bytes(&export(&d, "t.psd", &Default::default()).unwrap().bytes).unwrap();
+    let rec = &mut f.layers_mut()[0];
+    assert!(rec.channels.iter().all(|c| c.id >= 0), "written as Reference's Background");
+    rec.blocks.retain(|b| &b.key != b"lspf");
+    rec.flags = photosuite_psd::LayerFlags(photosuite_psd::LayerFlags::BIT4_USEFUL);
+    rec.name = b"Layer 1".to_vec();
+    let back = import("t.psd", &f.to_bytes().unwrap()).unwrap().document;
+    let bg = &back.layers[0];
+    assert!(bg.locks.transparency && bg.locks.position, "{:?}", bg.locks);
+}
+
+/// Flag bit 5 (undocumented) is set on a layer with effects or smart filters and on no other, as
+/// the reference editor writes it (every such layer of its corpus files).
+#[test]
+fn effects_set_layer_flag_bit_5() {
+    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    let fmt = d.pixel_format();
+    let mut fx = photosuite_doc::Layer::raster("fx", fmt);
+    fx.effects.items.push(photosuite_doc::Effect::default_drop_shadow());
+    d.layers.push(photosuite_doc::Layer::raster("plain", fmt));
+    d.layers.push(fx);
+    let bytes = export(&d, "t.psd", &ExportOptions::default()).unwrap().bytes;
+    let f = PsdFile::from_bytes(&bytes).unwrap();
+    let bit5 = |i: usize| f.layers()[i].flags.0 & photosuite_psd::LayerFlags::EFFECTS != 0;
+    assert_eq!((bit5(0), bit5(1)), (false, true));
+}
+
+/// The selected layers go into resources 1024 (target record) and 1069 (layer ids) and come back
+/// on import, the target first; a selected group is its own record, not its closing divider.
+/// Without a selection the top record is the target, as before.
+#[test]
+fn selected_layers_round_trip() {
+    use photosuite_doc::{Document, Layer};
+    let mut d = Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    let fmt = d.pixel_format();
+    let (a, b) = (Layer::raster("A", fmt), Layer::raster("B", fmt));
+    let inner = Layer::raster("inner", fmt);
+    let group = Layer::group("G", vec![inner]);
+    let (ia, ib, ig) = (a.id, b.id, group.id);
+    d.layers.extend([a, b, group]);
+    let names = |r: &ImportResult| -> Vec<String> { r.selected.iter().map(|id| r.document.layer(*id).unwrap().name.clone()).collect() };
+    for (sel, want) in [(vec![ib, ia], vec!["B", "A"]), (vec![ig], vec!["G"]), (vec![], vec!["G"])] {
+        let opts = ExportOptions { selected_layers: sel.clone(), ..Default::default() };
+        let bytes = export(&d, "t.psd", &opts).unwrap().bytes;
+        let back = import("t.psd", &bytes).unwrap();
+        assert_eq!(names(&back), want, "{sel:?}");
+        let f = PsdFile::from_bytes(&bytes).unwrap();
+        let target = f.resource(1024).map(|r| u16::from_be_bytes([r.data[0], r.data[1]]) as usize).unwrap();
+        assert_ne!(f.layers()[target].section_type(), SectionType::BoundingDivider);
+    }
+    // Ids the file names that aren't layers, or a target past the records: no selection, no panic.
+    let mut f = PsdFile::from_bytes(&export(&d, "t.psd", &ExportOptions::default()).unwrap().bytes).unwrap();
+    for r in &mut f.resources {
+        match r.id {
+            1024 => r.data = vec![0xFF, 0xFF],
+            1069 => r.data = vec![0, 9, 0, 0, 0, 77],
+            _ => {}
+        }
+    }
+    assert!(import("t.psd", &f.to_bytes().unwrap()).unwrap().selected.is_empty());
+}

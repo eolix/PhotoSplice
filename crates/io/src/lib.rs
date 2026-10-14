@@ -46,6 +46,7 @@ pub mod raw;
 pub mod slices_map;
 pub mod smart_map;
 pub mod text_styles_map;
+mod text_import;
 pub mod tiff_layers;
 pub mod vector_map;
 
@@ -91,6 +92,9 @@ pub struct ImportResult {
     pub document: Document,
     /// Human-readable notes about anything approximated or dropped.
     pub warnings: Vec<String>,
+    /// The layers the file had selected, its target layer first (PSD resources 1024 and 1069);
+    /// empty when the file doesn't say.
+    pub selected: Vec<photosuite_doc::LayerId>,
 }
 
 /// Result of [`export`].
@@ -118,6 +122,9 @@ pub struct ExportOptions {
     /// Capabilities" off), so the PDF is only its page. Off by default: PDFs keep it, as
     /// Photoshop's default does.
     pub pdf_discard_editing: bool,
+    /// PSD: the selected layers, the target (active) layer first, written so the file reopens
+    /// with them selected. Empty: the top layer, as in a file just opened.
+    pub selected_layers: Vec<photosuite_doc::LayerId>,
 }
 
 /// `true` if `bytes` start with the PSD/PSB signature.
@@ -144,7 +151,7 @@ pub fn import_with(name: &str, bytes: &[u8], ctl: &photosuite_raster::Interrupt)
 fn import_stages(name: &str, bytes: &[u8], ctl: &photosuite_raster::Interrupt) -> Result<ImportResult, IoError> {
     // A declared native extension must reach its loader so malformed bundles retain format errors.
     if has_extension(name, photosuite_format::EXTENSION) || photosuite_format::is_pcraft(bytes) {
-        return Ok(ImportResult { document: photosuite_format::load_from_bytes(bytes)?, warnings: Vec::new() });
+        return Ok(ImportResult { document: photosuite_format::load_from_bytes(bytes)?, warnings: Vec::new(), selected: Vec::new() });
     }
     if is_psd(bytes) {
         let file = PsdFile::from_bytes(bytes)?;
@@ -156,8 +163,10 @@ fn import_stages(name: &str, bytes: &[u8], ctl: &photosuite_raster::Interrupt) -
         ctl.check().map_err(|_| IoError::Cancelled)?;
         ctl.progress(0.05);
         let (mut document, warnings) = psd_import::psd_to_document_with(&file, ctl).ok_or(IoError::Cancelled)?;
+        text_import::prepare(&mut document);
         document.name = name.to_string();
-        return Ok(ImportResult { document, warnings });
+        let selected = psd_import::selection(&file, &document);
+        return Ok(ImportResult { document, warnings, selected });
     }
     if raw::is_raw(bytes) {
         return raw::import_raw(name, bytes);
@@ -188,7 +197,7 @@ pub fn export(doc: &Document, name_or_ext: &str, opts: &ExportOptions) -> Result
         return Ok(ExportResult { bytes: photosuite_format::save_to_bytes(doc, &previews)?, warnings: Vec::new() });
     }
     if ext == "psd" || ext == "psb" {
-        let o = PsdExportOptions { force_psb: opts.force_psb || ext == "psb", ..Default::default() };
+        let o = PsdExportOptions { force_psb: opts.force_psb || ext == "psb", selected_layers: opts.selected_layers.clone(), ..Default::default() };
         let (file, warnings) = document_to_psd_with(doc, &o);
         // Never write a header the reader would refuse (e.g. a zero-sized canvas).
         file.header.validate()?;

@@ -4,7 +4,7 @@
 //! typing session is one "Edit Type" history step and automation sees exactly what the user does.
 //! Offsets in [`TextEdit`] are character indices (the engine's unit); the layout works in bytes.
 
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 
 use egui::{Color32, Pos2, Stroke};
 use photosuite_doc::{Document, LayerContent, LayerId, TextLayer};
@@ -75,7 +75,7 @@ fn hit_layer(app: &mut PhotosuiteApp, x: f64, y: f64) -> Option<LayerId> {
 /// they sit somewhere else than the glyphs the caret and selection are placed on.
 fn shows_own_layout(doc: &Document, t: &TextLayer) -> bool {
     let Some(cache) = &t.cache else { return false };
-    let Ok(mut eng) = photosuite_text::shared().lock() else { return true };
+    let mut eng = photosuite_text::shared().lock().unwrap_or_else(PoisonError::into_inner);
     let ours = eng.render(t, doc.resolution_dpi, doc.pixel_format()).1.surface.content_bounds();
     let have = cache.content_bounds();
     [(ours.x0, have.x0), (ours.y0, have.y0), (ours.x1, have.x1), (ours.y1, have.y1)].iter().all(|(a, b)| (a - b).abs() <= 1)
@@ -1163,9 +1163,13 @@ fn type_sections(app: &mut PhotosuiteApp, ui: &mut egui::Ui, character: bool, pa
                 });
             });
         });
-        // Faux styles: T (bold)  T (italic)  TT  Tᴛ  T̲  T̶, sharing the row evenly.
+        // Faux styles: T (bold)  T (italic)  TT  Tᴛ  T¹  T₁  T̲  T̶, sharing the row evenly.
         let caps = c.caps;
-        let toggles: [(&str, &str, bool, serde_json::Value); 6] = [
+        let pos = c.position;
+        let toggle_pos = |p: photosuite_doc::text::BaselinePosition, name: &str| {
+            json!({"baseline": if pos == p { "normal" } else { name }})
+        };
+        let toggles: [(&str, &str, bool, serde_json::Value); 8] = [
             ("T", "Faux Bold", c.faux_bold, json!({"fauxBold": !c.faux_bold})),
             ("T", "Faux Italic", c.faux_italic, json!({"fauxItalic": !c.faux_italic})),
             (
@@ -1180,6 +1184,8 @@ fn type_sections(app: &mut PhotosuiteApp, ui: &mut egui::Ui, character: bool, pa
                 caps == photosuite_doc::text::Caps::SmallCaps,
                 json!({"caps": if caps == photosuite_doc::text::Caps::SmallCaps { "normal" } else { "smallCaps" }}),
             ),
+            ("T", tl!("Superscript"), pos == photosuite_doc::text::BaselinePosition::Superscript, toggle_pos(photosuite_doc::text::BaselinePosition::Superscript, "superscript")),
+            ("T", tl!("Subscript"), pos == photosuite_doc::text::BaselinePosition::Subscript, toggle_pos(photosuite_doc::text::BaselinePosition::Subscript, "subscript")),
             ("T", "Underline", c.underline, json!({"underline": !c.underline})),
             ("T", "Strikethrough", c.strikethrough, json!({"strikethrough": !c.strikethrough})),
         ];
@@ -1201,10 +1207,16 @@ fn type_sections(app: &mut PhotosuiteApp, ui: &mut egui::Ui, character: bool, pa
                     } else {
                         ui.painter().galley(pos, g, col);
                     }
-                    if i == 4 {
+                    if i == 4 || i == 5 {
+                        // Superscript / subscript: a small 1 beside the T, raised or lowered.
+                        let one = ui.painter().layout_no_wrap("1".to_string(), egui::FontId::proportional(8.0), col);
+                        let y = if i == 4 { gr.top() } else { gr.bottom() - one.size().y };
+                        ui.painter().galley(egui::pos2(gr.right(), y), one, col);
+                    }
+                    if i == 6 {
                         ui.painter().line_segment([egui::pos2(gr.left(), gr.bottom() - 2.0), egui::pos2(gr.right(), gr.bottom() - 2.0)], Stroke::new(1.0, col));
                     }
-                    if i == 5 {
+                    if i == 7 {
                         ui.painter()
                             .line_segment([egui::pos2(gr.left() - 1.0, gr.center().y), egui::pos2(gr.right() + 1.0, gr.center().y)], Stroke::new(1.0, col));
                     }

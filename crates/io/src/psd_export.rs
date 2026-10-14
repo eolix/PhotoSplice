@@ -34,11 +34,13 @@ pub struct PsdExportOptions {
     /// `flat_modes`); `false` writes them as RGB / Grayscale layers, for containers that hold
     /// those only (a layered TIFF's layer data).
     pub native_modes: bool,
+    /// The selected layers, the target first (resources 1024 and 1069). Empty: the top layer.
+    pub selected_layers: Vec<photosuite_doc::LayerId>,
 }
 
 impl Default for PsdExportOptions {
     fn default() -> Self {
-        PsdExportOptions { force_psb: false, merged_matte: true, merged_compression: Compression::Rle, native_modes: true }
+        PsdExportOptions { force_psb: false, merged_matte: true, merged_compression: Compression::Rle, native_modes: true, selected_layers: Vec::new() }
     }
 }
 
@@ -48,6 +50,8 @@ struct Ex {
     dpi: f32,
     /// Character/paragraph styles written into every type layer's engine data.
     text_styles: photosuite_doc::TextStyles,
+    /// The document's patterns, which pattern fill layers are rendered from.
+    patterns: Vec<photosuite_doc::Pattern>,
     mask_fmt: PixelFormat,
     cc: usize,
     cmyk: bool,
@@ -55,6 +59,10 @@ struct Ex {
     next_id: u32,
     /// PSD ids assigned to document layers (kept from `psd_id` when unique).
     layer_ids: std::collections::HashMap<photosuite_doc::LayerId, u32>,
+    /// PSD ids of groups' end dividers, kept from the file when unique.
+    divider_ids: std::collections::HashMap<photosuite_doc::LayerId, u32>,
+    /// Every layer id given out.
+    used_ids: std::collections::HashSet<u32>,
     canvas: photosuite_geom::Rect,
     records: Vec<LayerRecord>,
     warnings: Vec<String>,
@@ -72,23 +80,89 @@ struct Ex {
 
 /// The type layers as written, against the document's `Txt2` (Photoshop's document-wide copy
 /// of every type layer, which it reads in preference to each layer's `TySh`: a text edit left
-/// with a stale `Txt2` reverts in Photoshop; Photoshop-verified 2026-10-12). Without `Txt2`,
-/// Photoshop rebuilds it from the layers' `TySh`.
+/// with a stale `Txt2` reverts in Photoshop; Photoshop-verified 2026-10-12). Edited layers get
+/// their objects updated ([`photosuite_text::psd::patch_txt2`]); when that can't be done, `Txt2`
+/// is dropped and Photoshop rebuilds it from the layers' `TySh`, losing what only `Txt2` holds
+/// (text on a path becomes box text, optical kerning metrics).
 #[derive(Default)]
 struct TextSync {
-    /// A type layer's `TySh` differs from the one it was read with (edited or new).
-    changed: bool,
+    /// Type layers whose `TySh` differs from the one they were read with (edited).
+    edits: Vec<TextEdit>,
     /// Each written type layer's `TextIndex` (its object in `Txt2`).
     indices: Vec<i64>,
+    /// The number of text objects in the document's `Txt2` (`None` without one).
+    objects: Option<usize>,
+    /// Which layer owns each object of `Txt2`: of the layers read with that `TextIndex`, the
+    /// first created (a duplicate shares its source's index and gets an object of its own).
+    owners: std::collections::HashMap<i64, photosuite_doc::LayerId>,
+    /// Type layers with no object of their own (new or duplicated), each written with the next
+    /// index past `objects`, in that order.
+    appends: Vec<TextAppend>,
+    /// The `TySh`, as read, of every layer that owns its object: templates for `appends`.
+    sources: Vec<Vec<u8>>,
+}
+
+struct TextAppend {
+    layer: photosuite_doc::TextLayer,
+    /// Its `TySh` as written (with its new `TextIndex`).
+    written: Vec<u8>,
+    /// The `TySh` it was read with (a duplicate's source), the preferred template.
+    read: Option<Vec<u8>>,
+}
+
+struct TextEdit {
+    layer: photosuite_doc::TextLayer,
+    /// Its `TySh` as read (none for a new layer).
+    original: Option<Vec<u8>>,
+    /// Its `TySh` as written.
+    written: Vec<u8>,
+    /// The `TextIndex` written.
+    index: Option<i64>,
 }
 
 impl TextSync {
-    /// Is `Txt2` (with `objects` text objects, when its layout is the one we know) still true to
-    /// the layers? Each layer must keep its own object: none edited or new, no index out of range
-    /// or shared by two layers.
-    fn txt2_valid(&self, objects: Option<usize>) -> bool {
+    /// The `Txt2` to write for the document's `data`: as it is while no type layer changed,
+    /// updated for edited ones, `None` (dropped) when it can't describe the layers: a new layer,
+    /// an edit it can't take, an index out of range or shared by two layers (Photoshop refuses
+    /// such a file as "not compatible", 2026-10-13).
+    fn txt2_out(&self, data: &[u8], dpi: f32) -> Option<Vec<u8>> {
+        let objects = photosuite_text::psd::txt2_object_count(data);
         let mut seen = std::collections::HashSet::new();
-        !self.changed && self.indices.iter().all(|i| usize::try_from(*i).is_ok_and(|i| objects.is_none_or(|n| i < n)) && seen.insert(*i))
+        if !self.indices.iter().all(|i| usize::try_from(*i).is_ok_and(|i| objects.is_none_or(|n| i < n + self.appends.len())) && seen.insert(*i)) {
+            return None;
+        }
+        if self.edits.is_empty() && self.appends.is_empty() {
+            return Some(data.to_vec());
+        }
+        let pristine = photosuite_text::psd::parse_txt2(data)?;
+        let mut txt2 = pristine.clone();
+        for e in &self.edits {
+            let original = e.original.as_deref()?;
+            if photosuite_text::psd::text_index(original) != e.index || !photosuite_text::psd::patch_txt2(&mut txt2, &e.layer, original, &e.written, dpi) {
+                return None;
+            }
+        }
+        for a in &self.appends {
+            let templates: Vec<&[u8]> = a.read.iter().chain(&self.sources).map(Vec::as_slice).collect();
+            photosuite_text::psd::append_txt2(&mut txt2, &pristine, &a.layer, &templates, &a.written, dpi)?;
+        }
+        Some(photosuite_text::engine_data::write_txt2(&txt2))
+    }
+
+    /// Reads the document's `Txt2` and which layer owns each of its objects, before the layers
+    /// are written.
+    fn prepare(&mut self, doc: &Document) {
+        let Some(data) = doc.metadata.psd_global_blocks.iter().find(|(_, k, _)| k == b"Txt2").map(|(_, _, d)| d) else { return };
+        let Some(n) = photosuite_text::psd::txt2_object_count(data) else { return };
+        self.objects = Some(n);
+        for (_, _, l) in doc.walk() {
+            let LayerContent::Text(t) = &l.content else { continue };
+            let Some(i) = t.psd_raw.as_deref().and_then(|d| photosuite_text::psd::text_index(d)) else { continue };
+            if usize::try_from(i).is_ok_and(|i| i < n) {
+                let owner = self.owners.entry(i).or_insert(l.id);
+                *owner = (*owner).min(l.id);
+            }
+        }
     }
 }
 
@@ -142,7 +216,13 @@ struct SmartOut {
     /// Files to embed.
     add: Vec<crate::linked::LinkedFile>,
     /// Sources converted so far, by content hash (`Err` = can't be embedded).
-    converted: std::collections::HashMap<[u8; 32], Result<Source, String>>,
+    /// Embedded files written, by (content hash, owner): one file per independent contents.
+    converted: std::collections::HashMap<([u8; 32], usize), Result<Source, String>>,
+    /// The owner of each embedded file uuid written by this export (see [`Ex::embed`]).
+    uuid_owner: std::collections::HashMap<String, usize>,
+    /// Placed-layer ids written so far: each smart object instance needs its own (a duplicated
+    /// layer arrives with its source's).
+    placed_seen: std::collections::HashSet<String>,
     /// Embedded documents decoded while converting them, by uuid (for the filter caches).
     docs: std::collections::HashMap<String, Document>,
     /// Source composites (document pixel format, source space) by uuid; `None` = unreadable.
@@ -160,6 +240,36 @@ struct SmartOut {
 
 /// `FEid` data padded to 4 bytes inside the block length: Photoshop counts the padding in the
 /// length and can't open a file whose `FEid` is padded outside it.
+/// The signature a kept tagged block is written with: `8B64` exists only in PSB files, and
+/// Reference refuses a PSD holding one (kept from a PSB source, e.g. its `FMsk` or `cinf`) as
+/// "not compatible" (storytold/photocraft@3f72158f).
+pub(crate) fn block_signature(sig: [u8; 4], version: Version) -> [u8; 4] {
+    if version == Version::Psd && sig == *b"8B64" { *b"8BIM" } else { sig }
+}
+
+/// Resolution info (1005): the file's own while the resolution is unchanged, so Photoshop keeps
+/// the user's units (pixels/cm, width in cm…); else the new resolution in the file's units.
+pub(crate) fn resolution_resource(doc: &Document) -> Vec<u8> {
+    let dpi = f64::from(doc.resolution_dpi);
+    let raw = doc.metadata.psd_resources.iter().find(|r| r.0 == ids::RESOLUTION_INFO);
+    let Some((ri, data)) = raw.and_then(|r| ResolutionInfo::from_bytes(&r.2).ok().map(|ri| (ri, &r.2))) else {
+        return ResolutionInfo::from_dpi(dpi).to_bytes();
+    };
+    let per_inch = |unit: u16, res: f64| if unit == 2 { res * 2.54 } else { res };
+    if (per_inch(ri.h_res_unit, ri.h_res()) - dpi).abs() < 1e-3 && (per_inch(ri.v_res_unit, ri.v_res()) - dpi).abs() < 1e-3 {
+        return data.to_vec();
+    }
+    let fixed = |unit: u16| ((if unit == 2 { dpi / 2.54 } else { dpi }) * 65536.0).round().clamp(0.0, f64::from(u32::MAX)) as u32;
+    ResolutionInfo { h_res_fixed: fixed(ri.h_res_unit), v_res_fixed: fixed(ri.v_res_unit), ..ri }.to_bytes()
+}
+
+/// The layer id (`lyid`) kept among a group's end-divider blocks; 0 isn't an id.
+fn divider_id(blocks: &[([u8; 4], std::sync::Arc<Vec<u8>>)]) -> Option<u32> {
+    let (_, d) = blocks.iter().find(|(k, _)| k == b"lyid")?;
+    let b = d.get(..4)?;
+    Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]])).filter(|&id| id != 0)
+}
+
 fn padded_fx(fx: &photosuite_psd::filter_effects::FilterEffects) -> Vec<u8> {
     let mut d = fx.to_bytes();
     d.resize(d.len().next_multiple_of(4), 0);
@@ -242,10 +352,38 @@ fn source_geometry(name: &str, bytes: &[u8]) -> Result<((f64, f64), f64), String
     if crate::is_psd(bytes) {
         let rd = |at: usize| bytes.get(at..at + 4).map(|b| f64::from(u32::from_be_bytes([b[0], b[1], b[2], b[3]])));
         let (h, w) = rd(14).zip(rd(18)).ok_or("truncated PSD header")?;
-        return Ok(((w, h), 72.0));
+        return Ok(((w, h), psd_resolution(bytes).unwrap_or(72.0)));
     }
     let doc = crate::import(name, bytes).map_err(|e| e.to_string())?.document;
     Ok(((f64::from(doc.size.width), f64::from(doc.size.height)), f64::from(doc.resolution_dpi)))
+}
+
+/// A PSD/PSB's resolution in pixels per inch (resource 1005, `hRes` as 16.16 fixed point), found
+/// by walking the image resources only: the layers are never parsed. `None` when it is missing,
+/// truncated or not a positive finite number.
+fn psd_resolution(bytes: &[u8]) -> Option<f64> {
+    let be32 = |at: usize| bytes.get(at..at.checked_add(4)?).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    let be16 = |at: usize| bytes.get(at..at.checked_add(2)?).map(|b| u16::from_be_bytes([b[0], b[1]]));
+    // Header (26 bytes), then the colour mode data and the resources, each with a u32 length.
+    let resources = 26usize.checked_add(4)?.checked_add(usize::try_from(be32(26)?).ok()?)?;
+    let end = resources.checked_add(4)?.checked_add(usize::try_from(be32(resources)?).ok()?)?;
+    let mut at = resources + 4;
+    while at < end {
+        if bytes.get(at..at + 4)? != b"8BIM" {
+            return None;
+        }
+        let id = be16(at + 4)?;
+        // Pascal name padded to an even length (length byte included).
+        let name = usize::from(*bytes.get(at + 6)?);
+        let data = at + 6 + (name + 2) / 2 * 2;
+        let len = usize::try_from(be32(data)?).ok()?;
+        if id == 1005 {
+            let v = f64::from(be32(data + 4)?) / 65536.0;
+            return (v.is_finite() && v > 0.0).then_some(v);
+        }
+        at = data.checked_add(4)?.checked_add(len + len % 2)?;
+    }
+    None
 }
 
 /// The source size of a smart object whose file we can't decode: its rendered bounds taken back
@@ -298,7 +436,11 @@ impl Ex {
 
     fn encode(&self, id: i16, plane: &[u8], w: usize, h: usize) -> ChannelData {
         let depth = psd_depth(self.fmt.sample);
-        ChannelData::encode(id, self.compression(), plane, w, h, depth, self.version)
+        // An empty channel is just the raw compression code, as Reference writes it: a ZIP stream
+        // for a zero-sized channel made readers decompress an invalid extent
+        // (storytold/photocraft@c833294e).
+        let compression = if w == 0 || h == 0 { Compression::Raw } else { self.compression() };
+        ChannelData::encode(id, compression, plane, w, h, depth, self.version)
             .or_else(|_| ChannelData::encode(id, Compression::Raw, plane, w, h, depth, self.version))
             .unwrap_or(ChannelData { id, compression: Some(Compression::Raw), data: plane.to_vec() })
     }
@@ -374,9 +516,15 @@ impl Ex {
     }
 
     /// Ids for section dividers: above every layer id.
+    /// A layer id no record uses yet: past the ids in use, wrapping to the smallest free one at
+    /// u32::MAX (storytold/photocraft@ccb33741).
     fn fresh_id(&mut self) -> u32 {
-        self.next_id += 1;
-        self.next_id
+        loop {
+            self.next_id = self.next_id.wrapping_add(1).max(1);
+            if self.used_ids.insert(self.next_id) {
+                return self.next_id;
+            }
+        }
     }
 
     fn layer_id(&mut self, l: &Layer) -> u32 {
@@ -411,7 +559,7 @@ impl Ex {
                 real_first: true,
             });
         }
-        let mut flags = LayerFlags(layer_flags(&l.content));
+        let mut flags = LayerFlags(layer_flags(l));
         flags.set_hidden(!l.visible);
         flags.set_transparency_protected(l.locks.transparency);
         // Photoshop writes the locks and the label colour on every layer, zero or not.
@@ -511,7 +659,12 @@ impl Ex {
                 let old = raw.iter().find(|(k, _)| matches!(k, b"SoCo" | b"GdFl" | b"PtFl")).map(|(k, d)| (k, d.as_slice()));
                 let (k, d) = blocks::fill_to_desc_onto(f, old);
                 raw.retain(|(k, _)| !matches!(k, b"SoCo" | b"GdFl" | b"PtFl"));
-                regenerated.push((k, photosuite_psd::descriptor::VersionedDescriptor::new(d).to_bytes()));
+                // Padded to a multiple of 4 inside the length, as Reference writes layer blocks: a
+                // descriptor of 2 mod 4 bytes left the record's extra data unaligned
+                // (storytold/photocraft@e2aa1934).
+                let mut data = photosuite_psd::descriptor::VersionedDescriptor::new(d).to_bytes();
+                data.resize(data.len().next_multiple_of(4), 0);
+                regenerated.push((k, data));
             }
         };
         match &l.content {
@@ -551,9 +704,29 @@ impl Ex {
                 let src = t.psd_raw.as_ref().or(generated.as_ref());
                 // Character/paragraph style sheets from the document's styles.
                 let styled = src.and_then(|d| crate::text_styles_map::export_tysh(d, t, &self.text_styles, self.dpi)).map(std::sync::Arc::new);
-                let out = styled.as_ref().or(src);
+                let mut out = styled.as_ref().or(src).cloned();
                 let read_with = raw.iter().find(|(k, _)| k == b"TySh").map(|(_, d)| d.as_slice());
-                self.text.changed |= out.map(|d| d.as_slice()) != read_with;
+                // Without a readable `Txt2` every layer counts as its own (an edit or a shared
+                // index then drops `Txt2`).
+                let owns = self.text.objects.is_none()
+                    || t.psd_raw.as_deref().and_then(|d| photosuite_text::psd::text_index(d)).is_some_and(|i| self.text.owners.get(&i) == Some(&l.id));
+                if let (false, Some(n), Some(o)) = (owns, self.text.objects, out.as_ref()) {
+                    // A new or duplicated layer: the next object past the document's, appended
+                    // to `Txt2` when it is written.
+                    let index = i64::try_from(n + self.text.appends.len()).unwrap_or(i64::MAX);
+                    if let Some(w) = photosuite_text::psd::set_text_index(o, index) {
+                        self.text.appends.push(TextAppend { layer: t.clone(), written: w.clone(), read: read_with.map(<[u8]>::to_vec) });
+                        out = Some(std::sync::Arc::new(w));
+                    }
+                } else if owns && let Some(r) = read_with {
+                    self.text.sources.push(r.to_vec());
+                }
+                let out = out.as_ref();
+                if owns && out.map(|d| d.as_slice()) != read_with {
+                    let index = out.and_then(|d| photosuite_text::psd::text_index(d));
+                    let written = out.map(|d| d.to_vec()).unwrap_or_default();
+                    self.text.edits.push(TextEdit { layer: t.clone(), original: read_with.map(<[u8]>::to_vec), written, index });
+                }
                 if let Some(i) = out.and_then(|d| photosuite_text::psd::text_index(d)) {
                     self.text.indices.push(i);
                 }
@@ -564,11 +737,14 @@ impl Ex {
             }
             LayerContent::Smart(sm) => {
                 let parsed = sm.psd_raw.as_deref().and_then(|d| crate::smart_map::parse_sold(d));
-                if sm.psd_raw.is_some() && parsed.is_none() {
-                    // Placed-layer data we don't parse (`PlLd` only): kept verbatim.
+                if sm.psd_raw.is_some() && parsed.is_none() && !self.plld_edited(sm) {
+                    // Placed-layer data that isn't `SoLd` (a CS2 `PlLd` record, or one we can't
+                    // read) and still says what the layer is: kept verbatim.
                     self.smart.prune_ok = false;
                     set_principal(&mut raw, smart_keys(sm.psd_raw.as_deref().map(Vec::as_slice)), sm.psd_raw.as_ref());
                 } else {
+                    // An edited CS2 `PlLd`-only layer is written like any other smart object
+                    // (`SoLd` and a regenerated `PlLd`), with its current placement.
                     self.smart_blocks(l, sm, parsed, &mut raw);
                 }
             }
@@ -661,9 +837,12 @@ impl Ex {
             mask_linked: sm.filter_mask.as_ref().is_some_and(|m| m.linked),
         };
         let same_source = template.as_ref().filter(|t| t.idnt == src.uuid);
+        let repeated = same_source.is_some_and(|t| self.smart.placed_seen.contains(&t.placed));
         if let (Some(t), Some(data)) = (same_source, sm.psd_raw.as_ref())
+            && !repeated
             && self.placed_unchanged(t, data, sm, &stack)
         {
+            self.smart.placed_seen.insert(t.placed.clone());
             let keys: &[&[u8; 4]] = if raw.iter().any(|(k, _)| k == b"SoLd") { &[b"SoLd"] } else { &[b"SoLE", b"SoLd"] };
             match keys.iter().find_map(|k| raw.iter().position(|(rk, _)| rk == *k)) {
                 Some(i) => raw[i].1 = data.to_vec(),
@@ -676,9 +855,10 @@ impl Ex {
             return;
         }
         let placed = match same_source {
-            Some(t) if !t.placed.is_empty() => t.placed.clone(),
+            Some(t) if !t.placed.is_empty() && !repeated => t.placed.clone(),
             _ => uuid_from(format!("{}:{}", src.uuid, l.id.0).as_bytes()),
         };
+        self.smart.placed_seen.insert(placed.clone());
         let size = same_source.and_then(|t| crate::smart_map::stored_size(&t.descriptor)).unwrap_or(src.size);
         let size = if size.0 > 0.0 && size.1 > 0.0 { size } else { size_from_layer(sm) };
         let mut warnings = Vec::new();
@@ -731,6 +911,36 @@ impl Ex {
         self.warnings.extend(warnings.into_iter().map(|w| if w.starts_with("layer ") { w } else { format!("layer \"{}\": {w}", l.name) }));
     }
 
+    /// Whether a CS2 placed layer (`PlLd` with no `SoLd`) no longer matches its record: moved,
+    /// transformed, warped, filtered or given other contents. `false` for a record that can't be
+    /// read (or whose warp can't), or whose file isn't embedded: its contents were never
+    /// available, so it is kept (storytold/photocraft@0002d861).
+    fn plld_edited(&self, sm: &photosuite_doc::SmartObject) -> bool {
+        let Some(data) = sm.psd_raw.as_deref() else { return false };
+        let Some((id, corners)) = blocks::parse_plld(data) else { return false };
+        // Without its embedded file the contents were never available: keep the record as it
+        // is, rather than resolve the id (bytes from the file) as a path on disk.
+        if !self.smart.known.contains(&id) {
+            return false;
+        }
+        let warp = match blocks::parse_plld_warp(data) {
+            blocks::PlldWarp::Unreadable => return false,
+            blocks::PlldWarp::None => None,
+            blocks::PlldWarp::Warp(w) => Some(w),
+        };
+        if sm.source != (photosuite_doc::SmartSource::Linked { path: id.clone() })
+            || sm.warp != warp
+            || !sm.smart_filters.is_empty()
+            || sm.filter_mask.is_some()
+        {
+            return true;
+        }
+        // Placed as the importer places it (the same source size, from the same file, and the
+        // same frame: a custom warp's control-point box).
+        let size = crate::linked::source_size_in_blocks(self.smart.globals.iter().map(|(_, k, d)| (k, d.as_slice())), &id, &photosuite_raster::Interrupt::NONE);
+        blocks::plld_transform(&corners, size, warp.as_ref()) != (sm.transform, sm.perspective)
+    }
+
     /// Whether an imported placed layer still says what the smart object is: transform, warp,
     /// filter stack and filter mask as stored.
     fn placed_unchanged(&self, t: &crate::smart_map::Placed, data: &[u8], sm: &photosuite_doc::SmartObject, stack: &crate::smart_map::FilterStack) -> bool {
@@ -773,12 +983,14 @@ impl Ex {
                     let bytes = std::fs::read(path).map_err(|e| format!("the linked file {path} can't be read: {e}"))?;
                     let name = path.rsplit(['/', '\\']).next().unwrap_or(path).to_string();
                     self.warnings.push(format!("the linked smart object {name} was embedded (PSD export keeps no external links)"));
-                    self.embed(&name, &bytes)
+                    self.embed(&name, &bytes, 0)
                 }
                 #[cfg(target_arch = "wasm32")]
                 Err(format!("the linked file {path} can't be read here"))
             }
-            SmartSource::Embedded { file_name, bytes } => self.embed(file_name, bytes),
+            // Each embedded buffer is its own contents: smart objects share one only when they
+            // share the buffer (duplicates), not when an independent copy has equal bytes.
+            SmartSource::Embedded { file_name, bytes } => self.embed(file_name, bytes, std::sync::Arc::as_ptr(bytes) as usize),
         }
     }
 
@@ -819,18 +1031,20 @@ impl Ex {
     }
 
     /// Adds `bytes` as an embedded file (converted to PSB when it is a `.pcraft` bundle), once
-    /// per distinct content.
-    fn embed(&mut self, file_name: &str, bytes: &[u8]) -> Result<Source, String> {
-        let key = *blake3::hash(bytes).as_bytes();
+    /// per distinct `owner` (an independent contents buffer; 0 = files read from disk, shared by
+    /// content). Photoshop updates every layer that names a file's uuid when one is edited, so
+    /// independent contents with equal bytes get uuids of their own.
+    fn embed(&mut self, file_name: &str, bytes: &[u8], owner: usize) -> Result<Source, String> {
+        let key = (*blake3::hash(bytes).as_bytes(), owner);
         if let Some(r) = self.smart.converted.get(&key) {
             return r.clone();
         }
-        let r = self.convert_source(file_name, bytes);
+        let r = self.convert_source(file_name, bytes, owner);
         self.smart.converted.insert(key, r.clone());
         r
     }
 
-    fn convert_source(&mut self, file_name: &str, bytes: &[u8]) -> Result<Source, String> {
+    fn convert_source(&mut self, file_name: &str, bytes: &[u8], owner: usize) -> Result<Source, String> {
         let (name, data, size, dpi, nested) = if photosuite_format::is_pcraft(bytes) {
             if self.smart.depth >= MAX_NESTING {
                 return Err(format!("smart objects nest more than {MAX_NESTING} deep"));
@@ -847,7 +1061,18 @@ impl Ex {
             let (size, dpi) = source_geometry(file_name, bytes).unwrap_or(((0.0, 0.0), f64::from(self.dpi)));
             (file_name.to_string(), bytes.to_vec(), size, dpi, None)
         };
-        let uuid = crate::smart_map::uuid_from(&data);
+        let mut uuid = crate::smart_map::uuid_from(&data);
+        // Another contents (or an imported file) already took this uuid: derive a distinct,
+        // still deterministic one.
+        let mut salt = 0u32;
+        while self.smart.uuid_owner.get(&uuid).is_some_and(|o| *o != owner) || (owner != 0 && self.smart.known.contains(&uuid)) {
+            salt += 1;
+            let mut h = blake3::Hasher::new();
+            h.update(&data);
+            h.update(&salt.to_le_bytes());
+            uuid = crate::smart_map::uuid_from(h.finalize().as_bytes());
+        }
+        self.smart.uuid_owner.insert(uuid.clone(), owner);
         if let Some(d) = nested {
             self.smart.docs.insert(uuid.clone(), d);
         }
@@ -878,17 +1103,27 @@ impl Ex {
             return s;
         }
         // Rendered over the canvas (the fill's frame), then cut to what is shown.
-        let buf = photosuite_compose::render_fill_content(l, f, self.canvas, &[]);
+        // Readers composite these pixels, so a pattern fill is rendered from the document's
+        // patterns, not left transparent (storytold/photocraft@2819f370).
+        // A CMYK document's fill keeps the compositor's inks (a solid colour its own, a gradient
+        // its stops' interpolated), not a separation of their RGB rendering
+        // (storytold/photocraft@5290930e).
+        let samples: Vec<Vec<f32>> = if self.fmt.mode == photosuite_color::ColorMode::Cmyk {
+            let alpha = self.fmt.alpha;
+            photosuite_compose::render_fill_inks(l, f, self.canvas, &self.patterns)
+                .iter()
+                .map(|p| p.get(..if alpha { 5 } else { 4 }).unwrap_or_default().to_vec())
+                .collect()
+        } else {
+            photosuite_compose::render_fill_content(l, f, self.canvas, &self.patterns).px.iter().map(|p| photosuite_raster::from_rgba(&self.fmt, *p)).collect()
+        };
         let (cw, x0, w) = (self.canvas.width() as usize, (shown.x0 - self.canvas.x0) as usize, shown.width() as usize);
         let rows = (shown.y0 - self.canvas.y0) as usize..(shown.y1 - self.canvas.y0) as usize;
-        let vals: Vec<f32> = rows
-            .flat_map(|y| buf.px.get(y * cw + x0..y * cw + x0 + w).unwrap_or_default())
-            .flat_map(|p| photosuite_raster::from_rgba(&self.fmt, *p))
-            .collect();
+        let vals: Vec<f32> = rows.flat_map(|y| samples.get(y * cw + x0..y * cw + x0 + w).unwrap_or_default()).flatten().copied().collect();
         if vals.len() == w * shown.height() as usize * s.channels() {
             s.write_region(shown, &vals);
         } else {
-            let all: Vec<f32> = buf.px.iter().flat_map(|p| photosuite_raster::from_rgba(&self.fmt, *p)).collect();
+            let all: Vec<f32> = samples.concat();
             s.write_region(self.canvas, &all);
         }
         s.prune();
@@ -900,7 +1135,17 @@ impl Ex {
             let extra = self.content_blocks(l);
             match &l.content {
                 LayerContent::Group(g) => {
-                    let id = self.fresh_id();
+                    let id = match self.divider_ids.get(&l.id) {
+                        Some(id) => *id,
+                        None => self.fresh_id(),
+                    };
+                    // The divider's own blocks from the file (`shmd`, `fxrp`, `lnsr`…); its comp
+                    // settings go when the comps are regenerated.
+                    let mut kept: Vec<([u8; 4], Vec<u8>)> =
+                        g.divider_blocks.iter().filter(|(k, _)| k != b"lyid").map(|(k, d)| (*k, d.to_vec())).collect();
+                    if self.comps.is_some() {
+                        crate::comps_map::set_cmls(&mut kept, None);
+                    }
                     self.records.push(LayerRecord {
                         channels: self.empty_channels(),
                         blending_ranges: blocks::ranges_from_blend_if(&photosuite_doc::BlendIf::default(), self.cc),
@@ -912,12 +1157,16 @@ impl Ex {
                             TaggedBlock::section_divider(SectionType::BoundingDivider, None, None),
                             TaggedBlock::protection(0),
                             TaggedBlock::sheet_color(0),
-                        ],
+                        ]
+                        .into_iter()
+                        .chain(kept.into_iter().map(|(k, d)| TaggedBlock::new(k, d)))
+                        .collect(),
                         ..Default::default()
                     });
                     self.emit(&g.children);
                     let kind = if g.expanded { SectionType::OpenFolder } else { SectionType::ClosedFolder };
-                    let lsct = TaggedBlock::section_divider(kind, Some(PsdBlend::from_key(l.blend.psd_key())), None);
+                    // Photoshop's 16-byte form: kind, blend, sub-type 0 (a plain group).
+                    let lsct = TaggedBlock::section_divider(kind, Some(PsdBlend::from_key(l.blend.psd_key())), Some(0));
                     let r = self.record(l, std::iter::once(lsct).chain(extra).collect(), None);
                     self.records.push(r);
                 }
@@ -965,9 +1214,10 @@ impl Ex {
 /// appearance") on layers whose pixels are rendered from other data: adjustment, fill, shape
 /// and group layers (and group end dividers), not pixel, type or smart object layers (observed
 /// on every Photoshop-authored layer of the oracle corpus).
-fn layer_flags(c: &LayerContent) -> u8 {
-    let irrelevant = matches!(c, LayerContent::Adjustment(_) | LayerContent::Fill(_) | LayerContent::Shape(_) | LayerContent::Group(_));
-    LayerFlags::BIT4_USEFUL | if irrelevant { LayerFlags::PIXEL_DATA_IRRELEVANT } else { 0 }
+fn layer_flags(l: &Layer) -> u8 {
+    let irrelevant = matches!(l.content, LayerContent::Adjustment(_) | LayerContent::Fill(_) | LayerContent::Shape(_) | LayerContent::Group(_));
+    let effects = !l.effects.items.is_empty() || matches!(&l.content, LayerContent::Smart(sm) if !sm.smart_filters.is_empty());
+    LayerFlags::BIT4_USEFUL | if irrelevant { LayerFlags::PIXEL_DATA_IRRELEVANT } else { 0 } | if effects { LayerFlags::EFFECTS } else { 0 }
 }
 
 /// Resource 1026 (Layer › Link Layers): one u16 group id per layer record, in the order
@@ -1010,17 +1260,26 @@ fn link_group_resource(layers: &[Layer]) -> Vec<u8> {
 /// target layer (1024: record index), the selected layers (1069: count, then layer ids), each
 /// record's group-enabled flag (1072: one byte, 1) and the layer id seed (1044: the highest id,
 /// at least `min_seed`, the file's own).
-/// The document model keeps no target or selection, so the top record is both, as in a file
-/// Photoshop has just opened.
-fn layer_state_resources(records: &[LayerRecord], min_seed: u32) -> Vec<ImageResource> {
+/// `selected` holds the selected layers' record ids, the target first; without any that were
+/// written, the top record is both, as in a file Photoshop has just opened.
+fn layer_state_resources(records: &[LayerRecord], min_seed: u32, selected: &[u32]) -> Vec<ImageResource> {
     // The seed never goes back: Photoshop numbers new layers from it.
     let max_id = records.iter().filter_map(LayerRecord::layer_id).max().unwrap_or(0).max(min_seed);
     let mut out = vec![ImageResource::new(ids::DOCUMENT_IDS_SEED, max_id.to_be_bytes().to_vec())];
     let Some((top, rec)) = records.len().checked_sub(1).zip(records.last()) else { return out };
-    out.push(ImageResource::new(ids::LAYER_STATE, u16::try_from(top).unwrap_or(u16::MAX).to_be_bytes().to_vec()));
-    if let Some(id) = rec.layer_id() {
-        let mut sel = 1u16.to_be_bytes().to_vec();
-        sel.extend_from_slice(&id.to_be_bytes());
+    // A group's record carries its id; its closing divider has an id of its own.
+    let index_of = |id: u32| records.iter().position(|r| r.layer_id() == Some(id) && r.section_type() != photosuite_psd::SectionType::BoundingDivider);
+    let chosen: Vec<(usize, u32)> = selected.iter().filter_map(|id| Some((index_of(*id)?, *id))).collect();
+    let (target, ids): (usize, Vec<u32>) = match chosen.first() {
+        Some((i, _)) => (*i, chosen.iter().map(|(_, id)| *id).collect()),
+        None => (top, rec.layer_id().into_iter().collect()),
+    };
+    out.push(ImageResource::new(ids::LAYER_STATE, u16::try_from(target).unwrap_or(u16::MAX).to_be_bytes().to_vec()));
+    if !ids.is_empty() {
+        let mut sel = u16::try_from(ids.len()).unwrap_or(u16::MAX).to_be_bytes().to_vec();
+        for id in ids.iter().take(usize::from(u16::MAX)) {
+            sel.extend_from_slice(&id.to_be_bytes());
+        }
         out.push(ImageResource::new(ids::LAYER_SELECTION_IDS, sel));
     }
     out.push(ImageResource::new(ids::LAYER_GROUPS_ENABLED, vec![1; records.len()]));
@@ -1466,12 +1725,15 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         fmt,
         dpi: doc.resolution_dpi,
         text_styles: doc.text_styles.clone(),
+        patterns: doc.patterns.clone(),
         mask_fmt: PixelFormat::new(ColorMode::Grayscale, sample, false),
         cc,
         cmyk: fmt.mode == ColorMode::Cmyk,
         version,
         next_id: 0,
         layer_ids: Default::default(),
+        divider_ids: Default::default(),
+        used_ids: Default::default(),
         canvas: doc.bounds(),
         records: Vec::new(),
         warnings: Vec::new(),
@@ -1481,6 +1743,7 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         background: background_candidate(doc),
         text: TextSync::default(),
     };
+    ex.text.prepare(doc);
     if big && !opts.force_psb {
         ex.warnings.push("document exceeds 30000 px; written as PSB".into());
     } else if size_exceeds_limit && !opts.force_psb {
@@ -1507,19 +1770,31 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
                 ex.layer_ids.insert(l.id, id);
             }
         }
-        let mut next = 1u32;
+        // Dividers keep theirs next (layer comps and Photoshop's own references use them).
         for (_, _, l) in &walk {
-            if let std::collections::hash_map::Entry::Vacant(e) = ex.layer_ids.entry(l.id) {
-                while used.contains(&next) {
-                    next += 1;
-                }
-                used.insert(next);
-                e.insert(next);
+            if let LayerContent::Group(g) = &l.content
+                && let Some(id) = divider_id(&g.divider_blocks)
+                && used.insert(id)
+            {
+                ex.divider_ids.insert(l.id, id);
             }
         }
-        ex.next_id = used.iter().copied().max().unwrap_or(0);
+        // New layers are numbered past every id in use and the file's seed (1044), as Reference
+        // does: an id a deleted layer had may still be named by a layer comp or a link.
+        let seed = doc.metadata.psd_resources.iter().find(|r| r.0 == ids::DOCUMENT_IDS_SEED).and_then(|r| r.2.get(..4)).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+        ex.next_id = used.iter().copied().max().unwrap_or(0).max(seed);
+        ex.used_ids = used;
+        for (_, _, l) in &walk {
+            if !ex.layer_ids.contains_key(&l.id) {
+                let id = ex.fresh_id();
+                ex.layer_ids.insert(l.id, id);
+            }
+        }
     }
-    ex.emit(&doc.layers);
+    // Fill and type pixels are separated through the document's own CMYK profile, like its
+    // composite (storytold/photocraft@cf83e058).
+    let space = photosuite_compose::cmyk_space(doc);
+    photosuite_color::convert::with_cmyk_space(space.as_ref(), || ex.emit(&doc.layers));
 
     // Merged composite, rendered and encoded in bands (no full-size float composite). Matting
     // against white only changes pixels with alpha < 1; if some are slightly translucent but all
@@ -1567,7 +1842,7 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
 
     // Resources.
     let mut resources = vec![
-        ImageResource::new(ids::RESOLUTION_INFO, ResolutionInfo::from_dpi(f64::from(doc.resolution_dpi)).to_bytes()),
+        ImageResource::new(ids::RESOLUTION_INFO, resolution_resource(doc)),
         ImageResource::new(ids::GLOBAL_ANGLE, (doc.global_light.angle.round() as i32).to_be_bytes().to_vec()),
         ImageResource::new(ids::GLOBAL_ALTITUDE, (doc.global_light.altitude.round() as i32).to_be_bytes().to_vec()),
     ];
@@ -1599,7 +1874,8 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     resources.extend(path_resources(doc, &mut ex.warnings));
     resources.push(ImageResource::new(ids::LAYER_GROUP_INFO, link_group_resource(&doc.layers)));
     let old_seed = doc.metadata.psd_resources.iter().find(|r| r.0 == ids::DOCUMENT_IDS_SEED).and_then(|r| r.2.get(..4)).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
-    resources.extend(layer_state_resources(&ex.records, old_seed.unwrap_or(0)));
+    let selected: Vec<u32> = opts.selected_layers.iter().filter_map(|id| ex.layer_ids.get(id).copied()).collect();
+    resources.extend(layer_state_resources(&ex.records, old_seed.unwrap_or(0), &selected));
     if let Some(x) = &doc.metadata.xmp {
         // The pixels are saved as they are shown: never let a reader rotate them again.
         resources.push(ImageResource::new(ids::XMP, photosuite_codecs::upright_xmp(x).as_bytes().to_vec()));
@@ -1609,12 +1885,17 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     }
     let mut global_blocks = Vec::new();
     for (sig, key, data) in &ex.smart.finish(crate::annotations_map::export_blocks(doc, crate::pattern_map::export_global_blocks(doc))) {
-        // A stale Txt2 would override the type layers in Photoshop: dropped, Photoshop rebuilds it.
-        if key == b"Txt2" && !ex.text.txt2_valid(photosuite_text::psd::txt2_object_count(data)) {
-            continue;
-        }
+        // Txt2 overrides the type layers in Photoshop: updated for edits, else dropped (rebuilt).
+        let data = if key == b"Txt2" {
+            match ex.text.txt2_out(data, ex.dpi) {
+                Some(d) => std::borrow::Cow::Owned(d),
+                None => continue,
+            }
+        } else {
+            std::borrow::Cow::Borrowed(data.as_slice())
+        };
         let mut tb = TaggedBlock::new(*key, data.to_vec());
-        tb.signature = *sig;
+        tb.signature = block_signature(*sig, version);
         // Photoshop pads document-level (global) blocks to a multiple of 4, and readers such as
         // psd-tools step to the next block that way: an even pad after `CAI ` (77 bytes)
         // misaligned every block after it (#200).
@@ -1636,8 +1917,8 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
             continue;
         }
         // The layer id seed is regenerated from the ids written (see `layer_state_resources`), the
-        // alpha ids with the channel names.
-        if *id == ids::DOCUMENT_IDS_SEED || *id == ids::ALPHA_IDS {
+        // alpha ids with the channel names; the resolution is written above.
+        if *id == ids::DOCUMENT_IDS_SEED || *id == ids::ALPHA_IDS || *id == ids::RESOLUTION_INFO {
             continue;
         }
         // Measurement scale / count resources: only while they still describe the document.
@@ -1668,17 +1949,24 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     resources.push(version_info_resource(true));
 
     let has_layers = !ex.records.is_empty();
-    let placement = match (has_layers, sample) {
-        (true, SampleType::U16) => LayerInfoPlacement::GlobalBlock { index: 0, signature: *b"8BIM", key: *b"Lr16", padding: None },
-        (true, SampleType::F32) => LayerInfoPlacement::GlobalBlock { index: 0, signature: *b"8BIM", key: *b"Lr32", padding: None },
-        _ => LayerInfoPlacement::Section,
-    };
     let records = std::mem::take(&mut ex.records);
     let mut layer_info = has_layers.then_some(LayerInfo { merged_alpha: has_alpha, layers: records, padding: None });
+    // The layer info is padded to 4 bytes (an even pad misaligns readers after a global
+    // `Lr16`/`Lr32` block, #200). In a global block the padding follows the block, outside its
+    // length: readers that check that length exactly (Unity's PSD importer) refuse it otherwise
+    // (storytold/photocraft@481b939f). A length that can't be computed keeps the even default.
+    let pad4 = |info: &LayerInfo| info.unpadded_len(version).ok().map(|len| vec![0u8; ((4 - len % 4) % 4) as usize]);
+    let placement = match (layer_info.as_ref(), sample) {
+        (Some(info), SampleType::U16 | SampleType::F32) => {
+            let key = if sample == SampleType::U16 { *b"Lr16" } else { *b"Lr32" };
+            LayerInfoPlacement::GlobalBlock { index: 0, signature: *b"8BIM", key, padding: pad4(info) }
+        }
+        _ => LayerInfoPlacement::Section,
+    };
     if let Some(info) = &mut layer_info {
-        // Photoshop pads the layer info to 4 bytes (an even pad misaligns readers after a global
-        // `Lr16`/`Lr32` block, #200). A length that cannot be computed keeps the even default.
-        if info.pad_to(version, 4).is_err() {
+        if matches!(placement, LayerInfoPlacement::GlobalBlock { .. }) {
+            info.padding = Some(Vec::new());
+        } else if info.pad_to(version, 4).is_err() {
             info.padding = None;
         }
     }
@@ -1719,6 +2007,21 @@ fn mask_parameters(user: Option<(f32, f32)>, vector: Option<(f32, f32)>) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An embedded PSD's resolution comes from its resource 1005 (not an assumed 72 dpi), read
+    /// without parsing the file; truncated data reads as none.
+    #[test]
+    fn embedded_psd_resolution() {
+        let mut d = Document::new("r", photosuite_geom::Size::new(4, 4), ColorMode::Rgb, SampleType::U8);
+        d.resolution_dpi = 300.0;
+        let bytes = crate::export(&d, "r.psd", &Default::default()).unwrap().bytes;
+        assert_eq!(psd_resolution(&bytes), Some(300.0));
+        for n in 0..bytes.len().min(2000) {
+            let _ = psd_resolution(&bytes[..n]);
+        }
+        assert_eq!(psd_resolution(&bytes[..40]), None);
+        assert_eq!(source_geometry("r.psd", &bytes).map(|g| g.1), Ok(300.0));
+    }
 
     fn document(width: u32, height: u32) -> Document {
         Document::new("size estimate", photosuite_geom::Size::new(width, height), ColorMode::Rgb, SampleType::U8)

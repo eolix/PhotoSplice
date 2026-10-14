@@ -150,6 +150,11 @@ pub fn apply_char_props(s: &mut CharStyle, p: &Value) -> bool {
         s.italic = v;
         hit(true);
     }
+    // Another face of the family: the stored PostScript name (which layout follows) was the
+    // old face's.
+    if ["fontStyle", "weight", "italic"].iter().any(|k| p.get(k).is_some()) && p.get("postscriptName").is_none() {
+        s.postscript_name = None;
+    }
     if let Some(v) = f32p(p, "size") {
         s.size_pt = v.max(0.01);
         hit(true);
@@ -215,6 +220,15 @@ pub fn apply_char_props(s: &mut CharStyle, p: &Value) -> bool {
             hit(true);
         }
         _ => {}
+    }
+    if let Some(v) = p.get("baseline").and_then(Value::as_str) {
+        // Superscript / subscript (the Character panel's T¹ T₁).
+        s.position = match v {
+            "superscript" | "super" => photosuite_doc::text::BaselinePosition::Superscript,
+            "subscript" | "sub" => photosuite_doc::text::BaselinePosition::Subscript,
+            _ => photosuite_doc::text::BaselinePosition::Normal,
+        };
+        hit(true);
     }
     if let Some(v) = p.get("caps").and_then(Value::as_str) {
         s.caps = match v {
@@ -286,6 +300,11 @@ pub fn apply_para_props(s: &mut ParagraphStyle, p: &Value) -> bool {
     }
     if let Some(v) = p.get("hyphenate").and_then(Value::as_bool) {
         s.hyphenate = v;
+        any = true;
+    }
+    if let Some(v) = p.get("composer").and_then(Value::as_str) {
+        // Paragraph panel menu: Adobe Every-line / Single-line Composer.
+        s.every_line_composer = !matches!(v, "singleLine" | "single");
         any = true;
     }
     any
@@ -406,7 +425,7 @@ pub fn refresh(doc: &Document, t: &mut TextLayer) {
     let mut eng = photosuite_text::shared().lock().unwrap_or_else(|e| e.into_inner());
     let (layout, r) = eng.render(t, dpi, doc.pixel_format());
     t.cache = Some(r.surface);
-    t.psd_raw = Some(Arc::new(photosuite_text::psd::build_tysh(t, dpi, layout.bounds())));
+    t.psd_raw = Some(Arc::new(eng.tysh(t, dpi, layout.bounds())));
 }
 
 /// Whether every run of the layer renders in its own font (by family, or by the PostScript name
@@ -514,6 +533,7 @@ fn info(s: &Session, p: &Value) -> Result<Value> {
         "antialias": t.antialias,
         "orientation": t.orientation,
         "warp": t.warp,
+        "path": t.path,
         "runs": runs,
         "paragraphs": paragraphs,
         "lines": lines,
@@ -522,7 +542,7 @@ fn info(s: &Session, p: &Value) -> Result<Value> {
     }))
 }
 
-const CHAR_PARAMS: &str = r##""font":str,"fontStyle":str,"weight":100..900,"italic":bool,"size":0.1..=1296 pt,"color":"#rrggbb"|[r,g,b,a],"tracking":-1000..=10000 (1/1000 em),"leading":pt|"auto","baselineShift":pt,"horizontalScale":%,"verticalScale":%,"underline":bool,"strikethrough":bool,"fauxBold":bool,"fauxItalic":bool,"kerning":1/1000em (manual, after each character)|"metrics"|"optical"|"off","caps":"normal|small|all","ligatures":bool,"discretionaryLigatures":bool,"features":{"ss01":1},"variations":{"wght":650},"language":str"##;
+const CHAR_PARAMS: &str = r##""font":str,"fontStyle":str,"weight":100..900,"italic":bool,"size":0.1..=1296 pt,"color":"#rrggbb"|[r,g,b,a],"tracking":-1000..=10000 (1/1000 em),"leading":pt|"auto","baselineShift":pt,"horizontalScale":%,"verticalScale":%,"underline":bool,"strikethrough":bool,"fauxBold":bool,"fauxItalic":bool,"kerning":1/1000em (manual, after each character)|"metrics"|"optical"|"off","caps":"normal|small|all","baseline":"normal|superscript|subscript","ligatures":bool,"discretionaryLigatures":bool,"features":{"ss01":1},"variations":{"wght":650},"language":str"##;
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
@@ -707,7 +727,7 @@ pub fn specs() -> Vec<CommandSpec> {
             menu: &[],
             shortcut: None,
             params: Box::leak(
-                format!(r##"{{"layer":id?,"range":[startChar,endChar]? (default all), {CHAR_PARAMS}, paragraph keys: "align":"left|center|right|justify|justifyCenter|justifyRight|justifyAll","firstLineIndent":pt,"startIndent":pt,"endIndent":pt,"spaceBefore":pt,"spaceAfter":pt,"autoLeading":%,"direction":"auto|ltr|rtl","hyphenate":bool}}"##)
+                format!(r##"{{"layer":id?,"range":[startChar,endChar]? (default all), {CHAR_PARAMS}, paragraph keys: "align":"left|center|right|justify|justifyCenter|justifyRight|justifyAll","firstLineIndent":pt,"startIndent":pt,"endIndent":pt,"spaceBefore":pt,"spaceAfter":pt,"autoLeading":%,"direction":"auto|ltr|rtl","hyphenate":bool,"composer":"everyLine|singleLine"}}"##)
                     .into_boxed_str(),
             ),
             enabled: has_doc,
@@ -768,7 +788,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Type Layer Info",
             menu: &[],
             shortcut: None,
-            params: r##"{"layer":id?} → text, runs/paragraphs (char offsets + styles), shape, transform, laid-out lines (text space px), bounds"##,
+            params: r##"{"layer":id?} → text, runs/paragraphs (char offsets + styles), shape, transform, path (type on a path: text-space cubic segments, closed, start as a fraction of the length), laid-out lines (text space px), bounds"##,
             enabled: has_doc,
             journal: false,
             run: |s, p| info(s, p),
@@ -856,6 +876,30 @@ mod tests {
         s.execute("layer.translate", json!({"layer": id, "dx": 5, "dy": 3})).unwrap();
         let t = text_layer(&s, id);
         assert_ne!(t.cache.as_ref().unwrap().content_bounds(), photosuite_geom::Rect::new(15, 13, 35, 33));
+    }
+
+    /// A PSD's run names its face by PostScript name, which layout follows; another weight or
+    /// style drops it, so the new face renders and the PSD names it.
+    #[test]
+    fn a_new_font_style_replaces_the_files_postscript_name() {
+        let mut s = session();
+        let id = s.execute("type.create", json!({"x": 10, "y": 50, "text": "Logo", "size": 24})).unwrap()["layer"].as_u64().unwrap();
+        {
+            let st = s.active_mut().unwrap();
+            let doc = std::sync::Arc::make_mut(&mut st.doc);
+            let Some(LayerContent::Text(t)) = doc.layer_mut(LayerId(id)).map(|l| &mut l.content) else { panic!() };
+            for r in &mut t.runs {
+                r.style.postscript_name = Some("Inter-Regular".into());
+            }
+        }
+        s.execute("type.setStyle", json!({"layer": id, "fontStyle": "SemiBold"})).unwrap();
+        let t = text_layer(&s, id);
+        assert_eq!((t.char_runs()[0].style.weight, t.char_runs()[0].style.postscript_name.clone()), (600, None));
+        let back = photosuite_text::psd::text_layer_from_tysh(t.psd_raw.as_ref().unwrap(), 72.0).unwrap();
+        assert_eq!(back.char_runs()[0].style.postscript_name.as_deref(), Some("Inter-SemiBold"));
+        // An explicit PostScript name stays.
+        s.execute("type.setStyle", json!({"layer": id, "fontStyle": "Regular", "postscriptName": "Inter-Regular"})).unwrap();
+        assert_eq!(text_layer(&s, id).char_runs()[0].style.postscript_name.as_deref(), Some("Inter-Regular"));
     }
 
     #[test]
@@ -985,6 +1029,18 @@ mod tests {
         assert_eq!(restored.name, "Original");
         assert_eq!(text_layer(&s, id).text, "Before");
         assert_eq!(text_layer(&s, id).cache.unwrap().content_bounds(), before_bounds);
+    }
+
+    #[test]
+    fn superscript_from_set_style() {
+        use photosuite_doc::text::BaselinePosition;
+        let mut s = session();
+        let id = s.execute("type.create", json!({"x": 0, "y": 40, "text": "E=mc2"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("type.setStyle", json!({"layer": id, "range": [4, 5], "baseline": "superscript"})).unwrap();
+        let t = text_layer(&s, id);
+        assert_eq!(t.runs.iter().map(|r| (r.len, r.style.position)).collect::<Vec<_>>(), [(4, BaselinePosition::Normal), (1, BaselinePosition::Superscript)]);
+        s.execute("type.setStyle", json!({"layer": id, "range": [4, 5], "baseline": "normal"})).unwrap();
+        assert!(text_layer(&s, id).runs.iter().all(|r| r.style.position == BaselinePosition::Normal));
     }
 
     #[test]

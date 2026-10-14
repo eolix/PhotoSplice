@@ -84,7 +84,7 @@ pub fn vertical_class(c: char) -> VClass {
 }
 
 /// How a placed glyph's outline is oriented in text space.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum GlyphOrient {
     /// Horizontal type: origin on the baseline, outline upright.
     #[default]
@@ -94,6 +94,8 @@ pub enum GlyphOrient {
     Upright,
     /// Vertical type, rotated 90° clockwise about its origin (the baseline runs downwards).
     Rotated,
+    /// Type on a path: turned about its origin to the path direction `(cos, sin)`.
+    Path { cos: f32, sin: f32 },
 }
 
 /// A font instance used by some glyphs.
@@ -394,6 +396,8 @@ impl Layouter {
         let paras = t.paragraph_runs();
         let vertical = t.orientation == Orientation::Vertical;
         let mut out = TextLayout { px_per_pt: k, vertical, ..Default::default() };
+        // Each glyph's advance (type on a path centres glyphs on their advance).
+        let mut advances: Vec<f32> = Vec::new();
         // Resolve families (PostScript names from PSDs, unknown families).
         for r in &runs {
             let mut s = r.style.clone();
@@ -406,6 +410,8 @@ impl Layouter {
                     s.italic = f.italic;
                 }
             }
+            // Superscript / subscript draw at a smaller size on a shifted baseline.
+            (s.size_pt, s.baseline_shift_pt) = s.position.apply(s.size_pt, s.baseline_shift_pt);
             out.styles.push(s);
         }
         let run_starts: Vec<usize> = runs
@@ -428,9 +434,10 @@ impl Layouter {
         let para_style_at = |off: usize| &paras[para_starts.iter().rposition(|&s| s <= off).unwrap_or(0)].style;
 
         let text = &t.text;
+        // Type on a path runs along the path as one line (Photoshop still records a frame box).
         let (box_rect, is_box) = match t.shape {
-            TextShape::Box { x, y, width, height } => ((x, y, width, height), true),
-            TextShape::Point => ((0.0, 0.0, 0.0, 0.0), false),
+            TextShape::Box { x, y, width, height } if t.path.is_none() || vertical => ((x, y, width, height), true),
+            _ => ((0.0, 0.0, 0.0, 0.0), false),
         };
         let mut prev_baseline: Option<f32> = None;
         let mut pending_space = 0.0f32;
@@ -527,7 +534,11 @@ impl Layouter {
             // Box extent along the lines: width, or height for vertical type (columns).
             let (line_origin, line_len) = if vertical { (box_rect.1, box_rect.3) } else { (box_rect.0, box_rect.2) };
             let avail = if is_box { Some((line_len - indent_start - indent_end).max(1.0)) } else { None };
-            layout.break_all_lines(avail);
+            match avail {
+                // Box text: Photoshop's Every-line Composer (see `compose_lines`).
+                Some(w) if !vertical && ps.every_line_composer => compose_lines(&mut layout, &ptext, w, ps.first_line_indent_pt * k),
+                _ => layout.break_all_lines(avail),
+            }
             let alignment = if is_box {
                 match ps.align {
                     TextAlign::Left => Alignment::Left,
@@ -586,7 +597,11 @@ impl Layouter {
                     Some(b) => b + leading + pending_space,
                 };
                 pending_space = 0.0;
-                let overflow = if vertical { baseline + descent > -box_rect.0 + 0.5 } else { baseline + descent > box_rect.1 + box_rect.3 + 0.5 };
+                // Reference keeps a horizontal line whose baseline is inside the box and lets its
+                // descenders hang below the bottom edge (three 35 pt lines in a 91.3 pt box, the
+                // last baseline at 88; storytold/photocraft@73ed08dd): requiring the descent to
+                // fit dropped that line.
+                let overflow = if vertical { baseline + descent > -box_rect.0 + 0.5 } else { baseline > box_rect.1 + box_rect.3 + 0.5 };
                 if is_box && overflow {
                     stop = true;
                     break;
@@ -782,6 +797,7 @@ impl Layouter {
                             style: si,
                             orient: GlyphOrient::Horizontal,
                         });
+                        advances.push(g.advance * hs);
                         if let Some(v) = &vm {
                             let upright = class == 1 || (class == 2 && !plain.contains(&g.id));
                             vinfo.push(VGlyph {
@@ -876,6 +892,9 @@ impl Layouter {
                 });
             }
             pending_space += ps.space_after_pt * k;
+        }
+        if let Some(path) = t.path.as_ref().filter(|_| !vertical) {
+            crate::path::place_on_path(&mut out, &advances, path);
         }
         out
     }
@@ -1056,12 +1075,21 @@ fn style_props(st: &CharStyle, k: f32, fallback: &[String], idx: u32) -> Vec<Sty
         StyleProperty::FontStyle(if st.italic { FontStyle::Italic } else { FontStyle::Normal }),
         StyleProperty::FontFeatures(FontFeatures::Source(Cow::Owned(feats.join(", ")))),
         StyleProperty::FontVariations(FontVariations::Source(Cow::Owned(vars.join(", ")))),
-        StyleProperty::LetterSpacing(st.tracking / 1000.0 * px),
+        StyleProperty::LetterSpacing(st.tracking / 1000.0 * px + faux_bold_advance(st) * px),
         StyleProperty::Underline(st.underline),
         StyleProperty::Strikethrough(st.strikethrough),
         StyleProperty::Brush(RunBrush(idx, 0)),
         StyleProperty::Locale(st.language.as_deref().and_then(|l| parley::fontique::Language::parse(l).ok())),
     ]
+}
+
+/// What faux bold adds to each advance, as a fraction of the font size.
+fn faux_bold_advance(st: &CharStyle) -> f32 {
+    match (st.faux_bold, st.faux_italic) {
+        (false, _) => 0.0,
+        (true, false) => crate::render::FAUX_BOLD_ADVANCE,
+        (true, true) => crate::render::FAUX_BOLD_ITALIC_ADVANCE,
+    }
 }
 
 /// Closing CJK punctuation: its full-width cell has blank space after the mark.
@@ -1148,4 +1176,127 @@ fn first_ascent(line: &parley::Line<'_, RunBrush>) -> Option<f32> {
         }
     }
     best
+}
+
+/// Breaks `layout` (one paragraph, horizontal box text) into lines of at most `avail` px the way
+/// Photoshop's default Every-line Composer does: it weighs the whole paragraph instead of filling
+/// each line in turn, preferring an even right edge. Here the breaks minimise the sum of squared
+/// slack over every line but the last (Photoshop corpus paragraph-box-left.psd: "legible," moves
+/// to the third line, as Photoshop sets it). Falls back to greedy breaking for right-to-left
+/// text, hard breaks inside the paragraph, or when no arrangement fits.
+fn compose_lines(layout: &mut Layout<RunBrush>, text: &str, avail: f32, first_indent: f32) {
+    let Some(maxes) = composed_widths(layout, text, avail, first_indent) else {
+        layout.break_all_lines(Some(avail));
+        return;
+    };
+    let mut lines = layout.break_lines();
+    lines.state_mut().set_layout_max_advance(avail);
+    for m in maxes {
+        lines.state_mut().set_line_max_advance(m);
+        if lines.break_next().is_none() {
+            break;
+        }
+        // Align within the whole box, not the narrower width the break was steered with.
+        lines.set_prior_line_width(avail);
+    }
+    lines.state_mut().set_line_max_advance(avail);
+    while lines.break_next().is_some() {}
+    lines.finish();
+}
+
+/// The line max advances that make parley's line breaker take the composed breaks (see
+/// [`compose_lines`]); `None` = break greedily.
+fn composed_widths(layout: &mut Layout<RunBrush>, text: &str, avail: f32, first_indent: f32) -> Option<Vec<f32>> {
+    // One unbroken line: every cluster's position and the break opportunities.
+    layout.break_all_lines(None);
+    let mut lines = layout.lines();
+    let line = lines.next()?;
+    if lines.next().is_some() {
+        return None;
+    }
+    // (x before the cluster, advance, is a space, a break opportunity before it)
+    let mut cl: Vec<(f32, f32, bool, bool)> = Vec::new();
+    let mut x = 0.0f32;
+    let (mut prev_space, mut prev_dash) = (false, false);
+    for item in line.items() {
+        let PositionedLayoutItem::GlyphRun(gr) = item else { return None };
+        if gr.run().is_rtl() {
+            return None;
+        }
+        for c in gr.run().clusters() {
+            // A break opportunity follows a space or a hyphen / dash (UAX #14's common cases;
+            // parley marks opportunities only while it breaks).
+            let space = c.is_space_or_nbsp();
+            cl.push((x, c.advance(), space, (prev_space || prev_dash) && !space));
+            prev_space = space;
+            prev_dash = text.get(c.text_range()).is_some_and(|s| s.chars().any(|ch| matches!(ch, '-' | '\u{2010}' | '\u{2013}' | '\u{2014}' | '/')));
+            x += c.advance();
+        }
+    }
+    let n = cl.len();
+    if n < 2 || cl.len() > 20_000 {
+        return None;
+    }
+    let pos = |i: usize| cl.get(i).map_or(x, |c| c.0);
+    // A line's width from cluster `a` to `b` without its trailing spaces (they hang).
+    let width = |a: usize, b: usize| {
+        let mut end = b;
+        while end > a && cl.get(end - 1).is_some_and(|c| c.2) {
+            end -= 1;
+        }
+        pos(end) - pos(a)
+    };
+    let mut stops: Vec<usize> = (1..n).filter(|&i| cl.get(i).is_some_and(|c| c.3)).collect();
+    stops.push(n);
+    let points: Vec<usize> = std::iter::once(0).chain(stops.iter().copied()).collect();
+    // best[j]: least cost of setting everything before point j, and where its line starts.
+    let mut best: Vec<(f32, usize)> = vec![(f32::INFINITY, 0); points.len()];
+    if let Some(b) = best.get_mut(0) {
+        *b = (0.0, 0);
+    }
+    for j in 1..points.len() {
+        let pj = points.get(j).copied().unwrap_or(n);
+        for i in (0..j).rev() {
+            let pi = points.get(i).copied().unwrap_or(0);
+            let limit = avail - if pi == 0 { first_indent } else { 0.0 };
+            let w = width(pi, pj);
+            if w > limit + 0.01 {
+                // Longer lines from earlier starts only grow; a single word wider than the box
+                // still has to go somewhere (greedy handles that).
+                if i + 1 == j {
+                    return None;
+                }
+                break;
+            }
+            let base = best.get(i).map_or(f32::INFINITY, |b| b.0);
+            let slack = limit - w;
+            let cost = base + if pj == n { 0.0 } else { slack * slack };
+            if best.get(j).is_some_and(|b| cost < b.0)
+                && let Some(b) = best.get_mut(j)
+            {
+                *b = (cost, i);
+            }
+        }
+    }
+    // Walk back from the end: the points each line ends at.
+    let mut ends = Vec::new();
+    let mut j = points.len() - 1;
+    while j > 0 {
+        ends.push(j);
+        j = best.get(j).map_or(0, |b| b.1);
+    }
+    ends.reverse();
+    // Each line's max advance: between its width and the width with the next word, so the
+    // greedy breaker stops exactly there.
+    let mut maxes = Vec::with_capacity(ends.len());
+    let mut start = 0usize;
+    for &e in &ends {
+        let (ps, pe) = (points.get(start).copied().unwrap_or(0), points.get(e).copied().unwrap_or(n));
+        let indent = if ps == 0 { first_indent } else { 0.0 };
+        let w = width(ps, pe) + indent;
+        let next = points.get(e + 1).map_or(f32::INFINITY, |&q| width(ps, q) + indent);
+        maxes.push(((w + next) / 2.0).min(avail).max(w + 0.01));
+        start = e;
+    }
+    Some(maxes)
 }

@@ -5,7 +5,7 @@ use photosuite_doc::text::AntiAlias;
 use photosuite_geom::{Affine, Rect};
 use photosuite_raster::Surface;
 use skrifa::instance::{LocationRef, NormalizedCoord, Size};
-use skrifa::outline::DrawSettings;
+use skrifa::outline::{DrawSettings, HintingInstance, HintingOptions, SmoothMode, Target};
 use skrifa::{GlyphId, MetadataProvider};
 
 use crate::layout::{GlyphOrient, PlacedGlyph, TextLayout};
@@ -14,8 +14,26 @@ use crate::warp::Warp;
 
 /// Faux-italic slant in degrees (Photoshop-like).
 pub const FAUX_ITALIC_DEG: f32 = 12.0;
-/// Faux-bold dilation radius as a fraction of the font size.
-pub const FAUX_BOLD_RADIUS: f32 = 0.018;
+/// Faux-bold dilation radius as a fraction of the font size, and its floor in pixels: Reference
+/// thickens strokes only slightly (fitted on `layer_effects.psd` at 62.5 px and
+/// `faux-bold-italic-runs.psd` at 20 px, both about 0.2 px a side); the run widens mostly through
+/// its advances ([`FAUX_BOLD_ADVANCE`]).
+pub const FAUX_BOLD_RADIUS: f32 = 0.003;
+pub const FAUX_BOLD_MIN_RADIUS_PX: f32 = 0.2;
+/// Dilation radius (fraction of the font size) standing in for a bold face the family lacks.
+const SYNTHETIC_BOLD_RADIUS: f32 = 0.018;
+/// Faux bold widens every glyph's advance by this fraction of the font size (55/2048 em, from
+/// the pen positions Reference stores in `Txt2`: `faux-bold-italic-runs.psd` at 20 px,
+/// `layer_effects.psd` at 62.5 px).
+pub const FAUX_BOLD_ADVANCE: f32 = 55.0 / 2048.0;
+/// The same with faux italic too (59/2048 em, same oracle).
+pub const FAUX_BOLD_ITALIC_ADVANCE: f32 = 59.0 / 2048.0;
+/// Strong anti-aliasing: coverage raised to this power (Photoshop's Strong is heavier than its
+/// Smooth; fitted on `antialias-strong.psd`, error 38 → 9.5 against Photoshop's pixels).
+const STRONG_GAMMA: f32 = 0.58;
+/// Sharp type at this size (px) and above sets each glyph on a whole pixel, below it glyphs
+/// keep fractional positions (Photoshop corpus: 32, 44 and 64 px snap; 13-30 px don't).
+const SNAP_X_PX: f32 = 31.0;
 /// Largest raster we produce (pixels), as a guard against absurd sizes.
 const MAX_PIXELS: u64 = 256 * 1024 * 1024;
 
@@ -49,10 +67,113 @@ impl<S: LineSink> LineSink for WarpSink<'_, S> {
     }
 }
 
+/// How outlines meet the pixel grid, by anti-aliasing mode. Fitted on Photoshop's renders of the
+/// same text (corpus `antialias-*.psd` and every Sharp file): Sharp is hinted with baselines on
+/// whole pixels (error −80 % over 20 files), None is hinted for monochrome (mismatched pixels
+/// 390 → 94); Crisp, Strong and Smooth match best unhinted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GridFit {
+    Unhinted,
+    Mono,
+    Smooth,
+}
+
+impl GridFit {
+    fn of(aa: AntiAlias) -> Self {
+        match aa {
+            AntiAlias::None => Self::Mono,
+            AntiAlias::Sharp | AntiAlias::Windows | AntiAlias::WindowsLcd => Self::Smooth,
+            AntiAlias::Crisp | AntiAlias::Strong | AntiAlias::Smooth => Self::Unhinted,
+        }
+    }
+}
+
+/// One outline command (font px, y up), as recorded from a hinted glyph.
+#[derive(Clone, Copy, Debug)]
+enum Seg {
+    Move(f32, f32),
+    Line(f32, f32),
+    Quad(f32, f32, f32, f32),
+    Cubic(f32, f32, f32, f32, f32, f32),
+    Close,
+}
+
+#[derive(Default)]
+struct SegRec(Vec<Seg>);
+
+impl skrifa::outline::OutlinePen for SegRec {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.0.push(Seg::Move(x, y));
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.0.push(Seg::Line(x, y));
+    }
+    fn quad_to(&mut self, cx: f32, cy: f32, x: f32, y: f32) {
+        self.0.push(Seg::Quad(cx, cy, x, y));
+    }
+    fn curve_to(&mut self, c0x: f32, c0y: f32, c1x: f32, c1y: f32, x: f32, y: f32) {
+        self.0.push(Seg::Cubic(c0x, c0y, c1x, c1y, x, y));
+    }
+    fn close(&mut self) {
+        self.0.push(Seg::Close);
+    }
+}
+
+fn replay(segs: &[Seg], pen: &mut impl skrifa::outline::OutlinePen) {
+    for s in segs {
+        match *s {
+            Seg::Move(x, y) => pen.move_to(x, y),
+            Seg::Line(x, y) => pen.line_to(x, y),
+            Seg::Quad(cx, cy, x, y) => pen.quad_to(cx, cy, x, y),
+            Seg::Cubic(a, b, c, d, x, y) => pen.curve_to(a, b, c, d, x, y),
+            Seg::Close => pen.close(),
+        }
+    }
+}
+
+/// Grid-fitted outlines for one raster: hinting runs each glyph's instructions, so every face
+/// is set up and every glyph hinted once (5× slower than unhinted drawing without this).
+#[derive(Default)]
+struct Hinted {
+    faces: Vec<(u32, Option<HintingInstance>)>,
+    glyphs: std::collections::HashMap<(u32, u32), Option<Vec<Seg>>>,
+}
+
+impl Hinted {
+    /// The hinted outline of glyph `id` of `layout` face `fi` (`None`: draw it unhinted).
+    fn outline(&mut self, fit: GridFit, fi: u32, face: &crate::layout::GlyphFace, font: &skrifa::FontRef<'_>, id: u32) -> Option<&[Seg]> {
+        if !self.faces.iter().any(|f| f.0 == fi) {
+            let target = match fit {
+                GridFit::Mono => Target::Mono,
+                _ => Target::Smooth { mode: SmoothMode::Normal, symmetric_rendering: true, preserve_linear_metrics: false },
+            };
+            let coords: Vec<NormalizedCoord> = face.coords.iter().map(|&c| NormalizedCoord::from_bits(c)).collect();
+            let h = HintingInstance::new(&font.outline_glyphs(), Size::new(face.size_px), LocationRef::new(&coords), HintingOptions::from(target)).ok();
+            self.faces.push((fi, h));
+        }
+        let Self { faces, glyphs } = self;
+        glyphs
+            .entry((fi, id))
+            .or_insert_with(|| {
+                let h = faces.iter().find(|f| f.0 == fi).and_then(|f| f.1.as_ref())?;
+                let outline = font.outline_glyphs().get(GlyphId::new(id))?;
+                let mut rec = SegRec::default();
+                outline.draw(DrawSettings::hinted(h, false), &mut rec).ok()?;
+                Some(rec.0)
+            })
+            .as_deref()
+    }
+}
+
 /// Draws every glyph and decoration of `layout` whose style colour is `color` (or all of them
 /// when `color` is `None`) into `sink`, through `transform` (text space → sink space), bending
-/// the outlines with `warp` first (in text space).
-fn draw(layout: &TextLayout, transform: &Xform, sink: &mut impl LineSink, only_color: Option<&Color>, warp: Option<&Warp>) {
+/// the outlines with `warp` first (in text space). Horizontal glyphs under an unscaled, unturned
+/// `transform` are grid-fitted as `fit` asks (the sink's pixels must be the document's), from
+/// `hinted`, which keeps them across calls.
+fn draw(layout: &TextLayout, transform: &Xform, sink: &mut impl LineSink, only_color: Option<&Color>, warp: Option<&Warp>, fit: GridFit, hinted: &mut Hinted) {
+    let [a, b, c, d, _, _] = transform.0;
+    let upright = (a - 1.0).abs() < 1e-9 && b.abs() < 1e-9 && c.abs() < 1e-9 && (d - 1.0).abs() < 1e-9;
+    let fit = if upright && warp.is_none() { fit } else { GridFit::Unhinted };
     for g in &layout.glyphs {
         let st = &layout.styles[g.style as usize];
         if only_color.is_some_and(|c| c != &st.color) {
@@ -66,23 +187,43 @@ fn draw(layout: &TextLayout, transform: &Xform, sink: &mut impl LineSink, only_c
             continue;
         };
         let coords: Vec<NormalizedCoord> = face.coords.iter().map(|&c| NormalizedCoord::from_bits(c)).collect();
-        let glyph = glyph_xform(layout, g, face.skew_deg);
+        let mut glyph = glyph_xform(layout, g, face.skew_deg);
+        let segs = if fit != GridFit::Unhinted && g.orient == GlyphOrient::Horizontal {
+            // The baseline on a whole pixel (and, for large Sharp type, the glyph origin).
+            let (dx, dy) = transform.apply(glyph.0[4], glyph.0[5]);
+            glyph.0[5] += dy.round() - dy;
+            if fit == GridFit::Smooth && face.size_px >= SNAP_X_PX {
+                glyph.0[4] += dx.round() - dx;
+            }
+            hinted.outline(fit, g.face, face, &font, g.id)
+        } else {
+            None
+        };
         let bold = st.faux_bold || face.embolden;
-        let r = (face.size_px * FAUX_BOLD_RADIUS) as f64;
+        let r = if face.embolden && !st.faux_bold {
+            face.size_px * SYNTHETIC_BOLD_RADIUS
+        } else {
+            (face.size_px * FAUX_BOLD_RADIUS).max(FAUX_BOLD_MIN_RADIUS_PX)
+        } as f64;
         let offsets: &[(f64, f64)] =
             if bold { &[(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (0.7, 0.7), (-0.7, -0.7), (0.7, -0.7), (-0.7, 0.7)] } else { &[(0.0, 0.0)] };
         for &(ox, oy) in offsets {
             let local = Xform([1.0, 0.0, 0.0, 1.0, ox * r, oy * r]).mul(&glyph);
             let settings = DrawSettings::unhinted(Size::new(face.size_px), LocationRef::new(&coords));
-            match warp {
-                Some(w) => {
+            match (segs, warp) {
+                (Some(segs), _) => {
+                    let mut pen = Pen::new(&mut *sink, transform.mul(&local));
+                    replay(segs, &mut pen);
+                    skrifa::outline::OutlinePen::close(&mut pen);
+                }
+                (None, Some(w)) => {
                     let mut ws = WarpSink { inner: &mut *sink, warp: w, post: *transform };
                     let mut pen = Pen::new(&mut ws, local);
                     if outline.draw(settings, &mut pen).is_ok() {
                         skrifa::outline::OutlinePen::close(&mut pen);
                     }
                 }
-                None => {
+                (None, None) => {
                     let mut pen = Pen::new(&mut *sink, transform.mul(&local));
                     if outline.draw(settings, &mut pen).is_ok() {
                         skrifa::outline::OutlinePen::close(&mut pen);
@@ -122,12 +263,20 @@ fn glyph_xform(layout: &TextLayout, g: &PlacedGlyph, face_skew_deg: f32) -> Xfor
         GlyphOrient::Upright => Xform([hs, 0.0, skew, -vs, x + shift, y]),
         // 90° clockwise: the glyph's up direction (and its baseline shift) points right.
         GlyphOrient::Rotated => Xform([0.0, 1.0, -1.0, 0.0, x, y]).mul(&Xform([hs, 0.0, skew, -vs, 0.0, -shift])),
+        GlyphOrient::Path { cos, sin } => {
+            let (c, s) = (cos as f64, sin as f64);
+            Xform([c, s, -s, c, x, y]).mul(&Xform([hs, 0.0, skew, -vs, 0.0, -shift]))
+        }
     }
 }
 
-/// The warp to apply to `layout` (None when `warp` is absent, `warpNone` or flat).
-pub fn layout_warp(layout: &TextLayout, warp: Option<&photosuite_doc::text::TextWarp>) -> Option<Warp> {
-    Warp::new(warp?, layout.bounds()?)
+/// The warp to apply to `layer` laid out as `layout` (None when it has no warp, `warpNone` or a
+/// flat one), over the box its `TySh` records while that still holds its text (the box Reference
+/// warps over), else the layout's line box.
+pub fn layout_warp(layout: &TextLayout, layer: &photosuite_doc::TextLayer) -> Option<Warp> {
+    let warp = layer.warp.as_ref()?;
+    let stored = layer.psd_raw.as_deref().and_then(|d| crate::psd::tysh_text_box(d, &layer.text));
+    Warp::new(warp, stored.or_else(|| layout.bounds())?)
 }
 
 /// Colour components in `format`'s model (without alpha).
@@ -166,8 +315,12 @@ fn rect_from_bounds([x0, y0, x1, y1]: [f64; 4]) -> Rect {
 
 /// [`ink_rect`] of warped text.
 pub fn ink_rect_warped(layout: &TextLayout, transform: &Affine, warp: Option<&Warp>) -> Rect {
+    ink_rect_fitted(layout, transform, warp, GridFit::Unhinted, &mut Hinted::default())
+}
+
+fn ink_rect_fitted(layout: &TextLayout, transform: &Affine, warp: Option<&Warp>, fit: GridFit, hinted: &mut Hinted) -> Rect {
     let mut b = Bounds::default();
-    draw(layout, &Xform(transform.m), &mut b, None, warp);
+    draw(layout, &Xform(transform.m), &mut b, None, warp, fit, hinted);
     b.rect.map(rect_from_bounds).unwrap_or(Rect::EMPTY)
 }
 
@@ -180,7 +333,9 @@ pub fn rasterize(layout: &TextLayout, transform: &Affine, format: PixelFormat, a
 /// [`rasterize`] with the glyph outlines bent by `warp` (Type › Warp Text).
 pub fn rasterize_warped(layout: &TextLayout, transform: &Affine, format: PixelFormat, antialias: AntiAlias, warp: Option<&Warp>) -> Rendered {
     let format = PixelFormat { alpha: true, ..format };
-    let rect = ink_rect_warped(layout, transform, warp);
+    let fit = GridFit::of(antialias);
+    let mut hinted = Hinted::default();
+    let rect = ink_rect_fitted(layout, transform, warp, fit, &mut hinted);
     let (w, h) = (rect.width() as usize, rect.height() as usize);
     let mut surface = Surface::new(format);
     if w == 0 || h == 0 || (w as u64) * (h as u64) > MAX_PIXELS {
@@ -199,12 +354,17 @@ pub fn rasterize_warped(layout: &TextLayout, transform: &Affine, format: PixelFo
     }
     for c in &colors {
         let mut cov = Coverage::new(w, h);
-        draw(layout, &xf, &mut cov, Some(c), warp);
+        // A whole-pixel offset: grid fitting in `xf` space is grid fitting in the document.
+        draw(layout, &xf, &mut cov, Some(c), warp, fit, &mut hinted);
         let cov = cov.finish();
         let comps = color_in(&format, c);
         let a = c.alpha.clamp(0.0, 1.0);
         for (i, &cv) in cov.iter().enumerate() {
-            let cv = if antialias == AntiAlias::None { if cv >= 0.5 { 1.0 } else { 0.0 } } else { cv };
+            let cv = match antialias {
+                AntiAlias::None => f32::from(u8::from(cv >= 0.5)),
+                AntiAlias::Strong => cv.max(0.0).powf(STRONG_GAMMA),
+                _ => cv,
+            };
             let s = cv * a;
             if s <= 0.0 {
                 continue;

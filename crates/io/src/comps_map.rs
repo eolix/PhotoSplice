@@ -10,10 +10,11 @@
 //!   `artboardBackgroundType` (1 white, 2 black, 3 transparent, 4 other).
 //!
 //! Both are re-emitted verbatim while they still decode to the document's state, and are
-//! regenerated otherwise (comp appearance is not written to PSD; `.pcraft` keeps it).
+//! regenerated otherwise. Appearance (when captured) is each setting's `blendOptions` (mode,
+//! opacity, fill) and `Lefx` (layer style).
 
 use photosuite_doc::comps::layer_position;
-use photosuite_doc::{Artboard, ArtboardBackground, CompLayerState, Document, Guides, Layer, LayerComp};
+use photosuite_doc::{Artboard, ArtboardBackground, CompAppearance, CompLayerState, Document, Guides, Layer, LayerComp};
 use photosuite_geom::Rect;
 use photosuite_psd::descriptor::{Descriptor, UnicodeString, Value, VersionedDescriptor};
 use photosuite_psd::metadata::{MetadataItem, parse_shmd, write_shmd};
@@ -134,7 +135,44 @@ pub(crate) fn artboard_block(guides: &Guides, l: &Layer, raw: &mut Vec<([u8; 4],
 struct Setting {
     comps: Vec<u32>,
     visible: Option<bool>,
-    offset: Option<(i32, i32)>,
+    offset: Option<(i64, i64)>,
+    appearance: Option<CompAppearance>,
+}
+
+/// A setting's appearance: `blendOptions` (mode `Md  `, opacity `Opct`, fill `fillOpacity`)
+/// and the layer style `Lefx` (an `lfx2`-shaped descriptor; absent = no effects). Missing
+/// blend options read as the defaults.
+fn parse_appearance(s: &Descriptor) -> Option<CompAppearance> {
+    let blend = desc(s, "blendOptions");
+    let fx = desc(s, "Lefx");
+    if blend.is_none() && fx.is_none() {
+        return None;
+    }
+    let pct = |d: Option<&Descriptor>, key: &str| d.and_then(|d| num(d.get(key))).map_or(1.0, |v| (v / 100.0).clamp(0.0, 1.0) as f32);
+    let (enabled, items) = fx.map(crate::effects_map::effects_from_desc).unwrap_or((true, Vec::new()));
+    Some(CompAppearance {
+        blend: blend.map_or(photosuite_color::BlendMode::Normal, |b| crate::effects_map::blend_of(b, "Md  ", photosuite_color::BlendMode::Normal)),
+        opacity: pct(blend, "Opct"),
+        fill_opacity: pct(blend, "fillOpacity"),
+        effects: photosuite_doc::Effects { enabled, items, ..Default::default() },
+    })
+}
+
+/// The `blendOptions` / `Lefx` keys of an appearance (see [`parse_appearance`]).
+fn appearance_keys(mut s: Descriptor, a: &CompAppearance) -> Descriptor {
+    let prc = |v: f32| Value::UnitFloat { unit: *b"#Prc", value: f64::from((v * 100.0).round()) };
+    let mut b = obj("null").with("Md  ", crate::effects_map::blend_value(a.blend));
+    if a.opacity < 1.0 {
+        b = b.with("Opct", prc(a.opacity));
+    }
+    if a.fill_opacity < 1.0 {
+        b = b.with("fillOpacity", prc(a.fill_opacity));
+    }
+    s = s.with("blendOptions", Value::Descriptor(b));
+    if !a.effects.items.is_empty() {
+        s = s.with("Lefx", Value::Descriptor(crate::effects_map::lfx2_descriptor(a.effects.enabled, &a.effects.items)));
+    }
+    s
 }
 
 fn parse_cmls(data: &[u8]) -> Option<Vec<Setting>> {
@@ -151,8 +189,8 @@ fn parse_cmls(data: &[u8]) -> Option<Vec<Setting>> {
             Some(Value::Boolean(b)) => Some(*b),
             _ => None,
         };
-        let offset = desc(s, "Ofst").and_then(|o| Some((int(o, "Hrzn")? as i32, int(o, "Vrtc")? as i32)));
-        out.push(Setting { comps, visible, offset });
+        let offset = desc(s, "Ofst").and_then(|o| Some((int(o, "Hrzn")?, int(o, "Vrtc")?)));
+        out.push(Setting { comps, visible, offset, appearance: parse_appearance(s) });
     }
     Some(out)
 }
@@ -201,17 +239,21 @@ pub fn comps_from_psd(resource: Option<&[u8]>, doc: &Document) -> (Vec<LayerComp
         let Some(settings) = layer_cmls(l).and_then(|c| parse_cmls(&c)) else { continue };
         let here = layer_position(l);
         for s in settings {
-            if s.visible.is_none() && s.offset.is_none() {
+            if s.visible.is_none() && s.offset.is_none() && s.appearance.is_none() {
                 continue;
             }
             let state = CompLayerState {
                 layer: l.id,
                 visible: s.visible,
                 position: match (here, s.offset) {
-                    (Some((x, y)), Some((dx, dy))) => Some((x + dx, y + dy)),
+                    // An offset putting the layer outside i32 is no position (storytold/photocraft@cd03d49c).
+                    (Some((x, y)), Some((dx, dy))) => {
+                        let add = |a: i32, d: i64| i64::from(a).checked_add(d).and_then(|v| i32::try_from(v).ok());
+                        add(x, dx).zip(add(y, dy))
+                    }
                     _ => None,
                 },
-                appearance: None,
+                appearance: s.appearance.clone(),
             };
             for id in &s.comps {
                 let target = if *id == 0 { Some(&mut last) } else { comps.iter_mut().find(|c| c.id == *id) };
@@ -256,6 +298,9 @@ fn setting_value(ids: &[u32], st: Option<&CompLayerState>, here: Option<(i32, i3
         }
         if let (Some((x, y)), Some((hx, hy))) = (st.position, here) {
             s = s.with("Ofst", Value::Descriptor(obj("null").with("Hrzn", Value::Integer(x - hx)).with("Vrtc", Value::Integer(y - hy))));
+        }
+        if let Some(a) = &st.appearance {
+            s = appearance_keys(s, a);
         }
     }
     Value::Descriptor(s.with("compList", Value::List(ids.iter().map(|i| Value::Integer(*i as i32)).collect())))
@@ -373,5 +418,43 @@ mod tests {
         let mut only = vec![(*b"shmd", write_shmd(&[MetadataItem::new(*b"cmls", vec![0, 0])]))];
         set_cmls(&mut only, None);
         assert!(only.is_empty());
+    }
+
+    #[test]
+    fn comp_appearance_roundtrips_through_cmls() {
+        use photosuite_doc::{Effect, FxCommon};
+        let mut d = Document::with_background("t", Size::new(32, 32), ColorMode::Rgb, SampleType::U8, Color::WHITE);
+        let mut l = Layer::raster("A", PixelFormat::RGBA8);
+        l.surface_mut().unwrap().fill_rect(Rect::new(4, 4, 8, 8), &[1.0, 0.0, 0.0, 1.0]);
+        let lid = l.id;
+        d.layers.push(l);
+        let Effect::DropShadow(mut sh) = Effect::default_drop_shadow() else { panic!("drop shadow") };
+        sh.common = FxCommon { enabled: true, blend: photosuite_color::BlendMode::Multiply, opacity: 0.6 };
+        let shadow = Effect::DropShadow(sh);
+        let look = CompAppearance {
+            blend: photosuite_color::BlendMode::Screen,
+            opacity: 0.5,
+            fill_opacity: 0.3,
+            effects: photosuite_doc::Effects { enabled: true, items: vec![shadow], ..Default::default() },
+        };
+        d.layer_comps.push(LayerComp {
+            id: 9,
+            name: "Look".into(),
+            comment: String::new(),
+            apply_visibility: true,
+            apply_position: false,
+            apply_appearance: true,
+            states: vec![CompLayerState { layer: lid, visible: Some(true), position: None, appearance: Some(look.clone()) }],
+        });
+        let res = write_comps_resource(&d).unwrap();
+        let mut raw = Vec::new();
+        set_cmls(&mut raw, write_cmls(&d.layer_comps, None, d.layer(lid).unwrap(), 3));
+        d.layer_mut(lid).unwrap().psd_blocks = raw.iter().map(|(k, v)| (*k, std::sync::Arc::new(v.clone()))).collect();
+        d.metadata.psd_resources.push((LAYER_COMPS, String::new(), std::sync::Arc::new(res)));
+        let (comps, _, _) = comps_from_psd(d.metadata.psd_resources.last().map(|r| r.2.as_slice()), &d);
+        let back = comps[0].state(lid).and_then(|s| s.appearance.clone()).expect("appearance read back");
+        assert_eq!((back.blend, back.opacity, back.fill_opacity), (look.blend, look.opacity, look.fill_opacity));
+        assert_eq!(back.effects.items.len(), 1);
+        assert!(matches!(&back.effects.items[0], Effect::DropShadow(s) if (s.common.opacity - 0.6).abs() < 1e-3));
     }
 }

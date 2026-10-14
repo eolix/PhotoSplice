@@ -133,6 +133,11 @@ pub fn rich_doc(mode: ColorMode, depth: SampleType) -> Document {
             orientation: text::Orientation::Vertical,
             antialias: text::AntiAlias::Crisp,
             warp: Some(TextWarp { style: "warpArc".into(), value: 25.0, ..Default::default() }),
+            path: Some(text::TextPath {
+                segments: vec![[[0.0, 0.0], [10.0, -5.0], [20.0, -5.0], [30.0, 0.0]]],
+                closed: false,
+                start: 0.25,
+            }),
         }),
     );
     let mut shape = Layer::new(

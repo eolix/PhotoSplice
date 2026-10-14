@@ -211,15 +211,6 @@ fn smart_layer(s: &Session) -> std::result::Result<(), String> {
     }
 }
 
-/// Unlocks a Background layer for an operation that exposes transparency (as Photoshop does).
-fn float_background(l: &mut Layer) {
-    if l.locks.position && l.name == "Background" {
-        l.locks.position = false;
-        l.locks.transparency = false;
-        l.name = "Layer 0".into();
-    }
-}
-
 fn check_locks(l: &Layer, group: Locks, position: bool) -> Result<()> {
     let locks = l.locks.union(group);
     if locks.all || locks.pixels || (position && locks.position) {
@@ -250,14 +241,15 @@ fn run_on_layer(
         let canvas = doc.bounds();
         let selection = doc.selection.clone();
         let group = crate::transform_cmds::group_locks(doc, id);
-        let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
-        if let LayerContent::Smart(_) = l.content {
+        if matches!(doc.layer(id).ok_or(EngineError::NoLayer(id))?.content, LayerContent::Smart(_)) {
             let sf = SmartFilter { command: cmd.to_string(), params: params.clone(), blend: photosuite_color::BlendMode::Normal, opacity: 1.0, visible: true };
             return crate::smart_cmds::add_smart_filter(doc, id, sf, selection.as_ref());
         }
+        // A Background gains transparency when the distortion moves pixels.
         if moves {
-            float_background(l);
+            crate::extra_cmds::background_to_layer(doc, id);
         }
+        let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
         check_locks(l, group, moves)?;
         let LayerContent::Raster(surf) = &mut l.content else {
             return Err(EngineError::Other(format!("{label} needs a pixel layer (rasterize it first)")));

@@ -82,8 +82,9 @@ fn rotate_arbitrary(s: &mut Session, p: &Value) -> Result<Value> {
         let canvas = doc.bounds();
         let fmt = doc.pixel_format();
         let dpi = doc.resolution_dpi;
+        let background_id = doc.background().map(|l| l.id);
         for l in doc.layers.iter_mut() {
-            let background = l.name == "Background" && l.locks.position && matches!(l.content, LayerContent::Raster(_));
+            let background = Some(l.id) == background_id;
             if background && let Some(surf) = l.surface_mut() {
                 // The Background stays a Background: rotated pixels over the background colour.
                 let src = surf.content_bounds();

@@ -116,6 +116,9 @@ enum TexKind {
     Rgba8,
     /// 16/32-bit formats converted to RGBA16F.
     Rgba16F,
+    /// Lab content as RGBA32F, keeping colours outside sRGB (`to_rgba_unclamped`), as the CPU
+    /// compositor does.
+    Rgba32F,
     /// GRAY8 masks copied verbatim.
     R8Direct,
     /// Other masks as R32F.
@@ -125,6 +128,7 @@ enum TexKind {
 impl TexKind {
     fn for_surface(role: Role, f: PixelFormat) -> Self {
         match role {
+            Role::Content | Role::Stroke if f.mode == photosuite_color::ColorMode::Lab => TexKind::Rgba32F,
             Role::Content | Role::Stroke if f == PixelFormat::RGBA8 => TexKind::Rgba8Direct,
             Role::Content | Role::Stroke if f.sample == SampleType::U8 => TexKind::Rgba8,
             Role::Content | Role::Stroke => TexKind::Rgba16F,
@@ -136,6 +140,7 @@ impl TexKind {
         match self {
             TexKind::Rgba8Direct | TexKind::Rgba8 => wgpu::TextureFormat::Rgba8Unorm,
             TexKind::Rgba16F => wgpu::TextureFormat::Rgba16Float,
+            TexKind::Rgba32F => wgpu::TextureFormat::Rgba32Float,
             TexKind::R8Direct => wgpu::TextureFormat::R8Unorm,
             TexKind::R32F => wgpu::TextureFormat::R32Float,
         }
@@ -144,6 +149,7 @@ impl TexKind {
         match self {
             TexKind::Rgba8Direct | TexKind::Rgba8 => 4,
             TexKind::Rgba16F => 8,
+            TexKind::Rgba32F => 16,
             TexKind::R8Direct => 1,
             TexKind::R32F => 4,
         }
@@ -1726,6 +1732,11 @@ fn convert_tile(surface: &Surface, tile: Option<&Arc<Tile>>, kind: TexKind, c: T
                 let v = photosuite_raster::to_rgba(&fmt, px);
                 for x in v {
                     out.extend(f32_to_f16(x).to_le_bytes());
+                }
+            }
+            TexKind::Rgba32F => {
+                for x in photosuite_raster::to_rgba_unclamped(&fmt, px) {
+                    out.extend(x.to_le_bytes());
                 }
             }
             TexKind::R8Direct => out.push((px[0].clamp(0.0, 1.0) * 255.0 + 0.5) as u8),

@@ -253,6 +253,9 @@ pub enum ContentM {
         /// Artboard (Layer › New › Artboard).
         #[serde(default)]
         artboard: Option<photosuite_doc::Artboard>,
+        /// PSD group-end divider blocks (`Group::divider_blocks`).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        divider_blocks: Vec<(String, Hash)>,
     },
     Adjustment {
         adjustment: Adjustment,
@@ -280,6 +283,8 @@ pub enum ContentM {
         antialias: text::AntiAlias,
         #[serde(default)]
         warp: Option<text::TextWarp>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<text::TextPath>,
     },
     Shape {
         fill: Option<Fill>,

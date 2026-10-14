@@ -520,8 +520,11 @@ fn quad_points(s: &PlacedSpec<'_>) -> [f64; 8] {
         Some(p) => photosuite_algo::transform::Homography(*p).apply(x, y),
         None => (a * x + c * y + e, b * x + d * y + f),
     };
+    // The frame Reference maps onto the quad: the custom warp's control-point box for an affine
+    // placement (the inverse of `parse_smart`), the source rect for a projective one.
+    let [x0, y0, x1, y1] = if s.perspective.is_some() { [0.0, 0.0, w, h] } else { crate::blocks::placed_frame(s.warp, w, h) };
     let mut out = [0.0; 8];
-    for (i, (x, y)) in [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)].into_iter().enumerate() {
+    for (i, (x, y)) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].into_iter().enumerate() {
         (out[2 * i], out[2 * i + 1]) = map(x, y);
     }
     out
@@ -604,6 +607,8 @@ pub fn sold_bytes(template: Option<&Descriptor>, s: &PlacedSpec<'_>, warnings: &
     let d = match template {
         Some(t) => {
             let mut d = t.clone();
+            // The instance id: a duplicated layer is written with one of its own.
+            set(&mut d, "placed", Value::Text(UnicodeString::new_nul(s.placed)));
             if quad_moved(t, s) {
                 set(&mut d, "Trnf", quad(s));
                 set(&mut d, "nonAffineTransform", quad(s));
@@ -896,6 +901,28 @@ pub fn uuid_from(seed: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Trnf` is the image of a custom warp's control-point box, which may spill past the source:
+    /// export and import are each other's inverse, so a spilled mesh comes back with the same
+    /// transform and the quad Reference expects (storytold/photocraft@5ed75876).
+    #[test]
+    fn warp_control_box_quad_round_trips() {
+        use photosuite_geom::warp::{BezierMesh, WarpStyle};
+        let mut mesh = BezierMesh::identity([0.0, 0.0, 50.0, 25.0], 1, 1);
+        mesh.points[0] = [-10.0, -5.0];
+        mesh.points[15] = [60.0, 25.0];
+        let mut warp = Warp::preset(WarpStyle::Custom, 0.0, [0.0, 0.0, 50.0, 25.0]);
+        warp.mesh = Some(mesh);
+        let transform = Affine { m: [2.0, 0.0, 0.0, 2.0, 120.0, 210.0] };
+        let spec = PlacedSpec { idnt: "i", placed: "p", transform, perspective: None, size: (50.0, 25.0), dpi: 72.0, warp: Some(&warp), filter_fx: None };
+        let sold = sold_bytes(None, &spec, &mut Vec::new());
+        let p = parse_sold(&sold).expect("parses");
+        let Some(Value::List(q)) = p.descriptor.get("Trnf") else { panic!("no Trnf") };
+        let q: Vec<f64> = q.iter().filter_map(|v| if let Value::Double(d) = v { Some(*d) } else { None }).collect();
+        assert_eq!(q, [100.0, 200.0, 240.0, 200.0, 240.0, 260.0, 100.0, 260.0]);
+        assert_eq!(p.transform, transform);
+        assert!(!quad_moved(&p.descriptor, &spec));
+    }
 
     fn sf(command: &str, params: J) -> SmartFilter {
         SmartFilter { command: command.into(), params, blend: BlendMode::Normal, opacity: 1.0, visible: true }

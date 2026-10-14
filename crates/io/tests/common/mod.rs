@@ -334,7 +334,8 @@ fn tone_space(mode: ColorMode) -> photosuite_doc::adjust::ToneSpace {
 /// aligned. Returns one message per problem; empty means clean.
 ///
 /// - the file parses, with no unparsed bytes left in the layer and mask section;
-/// - the layer info body is padded to a multiple of 4;
+/// - the layer info body is padded to a multiple of 4 (in a global `Lr16`/`Lr32` block, the
+///   padding follows the block outside its length, as Reference writes it);
 /// - global (document-level) blocks are padded to a multiple of 4;
 /// - layer blocks have an even length with no pad byte outside it;
 /// - blocks with inner lengths (`PlLd`, `SoLd`, `SoLE`, `lnk2`/`lnk3`/`lnkD`, `lfx2`)
@@ -351,7 +352,11 @@ pub fn strict_block_errors(bytes: &[u8]) -> Vec<String> {
     }
     if let Some(li) = &file.layer_info {
         let body = li.unpadded_len(v).unwrap_or(1);
-        let pad = li.padding.as_ref().map_or(body % 2, |p| p.len() as u64);
+        let inner = li.padding.as_ref().map_or(body % 2, |p| p.len() as u64);
+        let pad = match &file.layer_info_placement {
+            photosuite_psd::file::LayerInfoPlacement::GlobalBlock { padding, .. } => inner + padding.as_ref().map_or((body + inner) % 2, |p| p.len() as u64),
+            _ => inner,
+        };
         if (body + pad) % 4 != 0 {
             errs.push(format!("layer info: {body} bytes + {pad} padding is not a multiple of 4"));
         }

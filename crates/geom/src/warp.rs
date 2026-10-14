@@ -1,10 +1,10 @@
 //! Warp geometry shared by Edit › Transform › Warp, smart-object warps and Warp Text.
 //!
 //! Two kinds of warp, both forward maps from a source box to document space:
-//! - **Styles** ([`WarpStyle`], Photoshop's fifteen presets plus bend and horizontal/vertical
-//!   distortion, the PSD `warp` descriptor's `warpStyle`/`warpValue`/`warpPerspective*`). The
-//!   shapes are our own closed-form approximations of each style's look (observed behaviour, not
-//!   Adobe's formulas). Every style is the identity at bend 0 and continuous in the bend.
+//! - **Styles** ([`WarpStyle`], Reference's fifteen presets plus bend and horizontal/vertical
+//!   distortion, the PSD `warp` descriptor's `warpStyle`/`warpValue`/`warpPerspective*`). Each is
+//!   the single Bézier patch Reference builds for it, as recorded from the warped placed layers it
+//!   saves ([`StyleWarp`]). Every style is the identity at bend 0 and continuous in the bend.
 //! - **Custom meshes** ([`BezierMesh`]): a grid of bicubic Bezier patches. The default is one
 //!   patch (a 4×4 control grid); split warps add patch rows/columns by exact de Casteljau
 //!   subdivision, so splitting never changes the shape.
@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Warp style: none, a custom mesh, or one of Photoshop's presets (menu order).
+/// Warp style: none, a custom mesh, or one of Reference's presets (menu order).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WarpStyle {
@@ -38,7 +38,7 @@ pub enum WarpStyle {
 }
 
 impl WarpStyle {
-    /// The fifteen presets in Photoshop's menu order.
+    /// The fifteen presets in Reference's menu order.
     pub const PRESETS: [WarpStyle; 15] = [
         WarpStyle::Arc,
         WarpStyle::ArcLower,
@@ -144,19 +144,31 @@ impl WarpStyle {
     }
 }
 
-/// A preset style prepared for one box: strengths and the box it bends.
+/// A preset style prepared for one box: the single Bézier patch Reference builds for it, raised
+/// to the bicubic 4 × 4 grid (box coordinates).
+///
+/// Reference stores a warped placed layer's preset as that patch (`warpCustom` with `uOrder` /
+/// `vOrder`), which gives every style's construction (fitted on 255 warped references made in
+/// Reference: 15 styles, bends ±, both orientations, square and wide boxes, each distortion):
+/// - Arc and Shells: concentric circular arcs (circular in pixels), half-angle `bend × 90°`, the
+///   inner one through the box corners, each drawn as one cubic (`k = 4/3 tan(θ/2)`).
+/// - Arc Lower / Upper, Arch, Bulge: arcs of that angle on the bottom / top edge chords.
+/// - Flag, Fish, Rise, Wave: inner control points moved by `2 × bend` of the box height.
+/// - Inflate, Squeeze: a 3 × 3 patch whose edge midpoints move by `bend / 2`.
+/// - Fisheye: inner points towards the corners by `2 × bend`; Twist: inner points along the
+///   edges by `bend` (the same for both orientations).
+///
+/// The bend shapes match Reference's control points to within 1e-4 of the box. Distortion scales
+/// each column's offsets (about the average of its ends) by its height factor
+/// `1 + h(2u − 1)`, and each row's (about the average of its ends) by its width factor
+/// `1 − v(1 − 2y)`, around the distorted grid: exact with one slider, within a few pixels with
+/// both at once.
 #[derive(Clone, Copy, Debug)]
 pub struct StyleWarp {
-    style: WarpStyle,
-    /// Bend, -1..1.
-    b: f64,
-    /// Horizontal / vertical distortion, -1..1.
-    hd: f64,
-    vd: f64,
-    /// Warp along the vertical axis (Photoshop's "Vertical" orientation).
-    vertical: bool,
-    c: (f64, f64),
-    h: (f64, f64),
+    /// Bicubic control points, row-major (`u` across), absolute coordinates.
+    points: [[f64; 2]; 16],
+    origin: [f64; 2],
+    size: [f64; 2],
 }
 
 impl StyleWarp {
@@ -167,8 +179,8 @@ impl StyleWarp {
             return None;
         }
         let [x0, y0, x1, y1] = bounds;
-        let (hw, hh) = ((x1 - x0) / 2.0, (y1 - y0) / 2.0);
-        if !(hw > 0.0 && hh > 0.0) {
+        let (w, h) = (x1 - x0, y1 - y0);
+        if !(w > 0.0 && h > 0.0 && w.is_finite() && h.is_finite()) {
             return None;
         }
         let pct = |v: f64| if v.is_finite() { (v / 100.0).clamp(-1.0, 1.0) } else { 0.0 };
@@ -176,98 +188,226 @@ impl StyleWarp {
         if b == 0.0 && hd == 0.0 && vd == 0.0 {
             return None;
         }
-        Some(StyleWarp { style, b, hd, vd, vertical, c: ((x0 + x1) / 2.0, (y0 + y1) / 2.0), h: (hw, hh) })
+        let (nu, nv, pts) = preset_patch(style, b, vertical, w, h);
+        // Distortion works on the box-normalised patch.
+        let norm: Vec<[f64; 2]> = pts.iter().map(|p| [p[0] / w, p[1] / h]).collect();
+        let distorted = distort(&norm, nu, nv, hd, vd);
+        let raised: Vec<[f64; 2]> = distorted.iter().map(|p| [x0 + p[0] * w, y0 + p[1] * h]).collect();
+        let mesh = BezierMesh::from_patch(nu, nv, &raised)?;
+        let points: [[f64; 2]; 16] = mesh.points.try_into().ok()?;
+        Some(StyleWarp { points, origin: [x0, y0], size: [w, h] })
     }
 
     /// Longest segment (px) worth sending through [`StyleWarp::apply`] unsplit.
     pub fn max_segment(&self) -> f64 {
-        (self.h.0.min(self.h.1) / 16.0).max(0.5)
+        (self.size[0].min(self.size[1]) / 32.0).max(0.5)
     }
 
     /// Maps a point.
     pub fn apply(&self, x: f64, y: f64) -> (f64, f64) {
-        // Normalised coordinates: u along the warp axis, v across it, both -1..1 over the box.
-        let (dx, dy) = (x - self.c.0, y - self.c.1);
-        let (u, v, hu, hv) =
-            if self.vertical { (dy / self.h.1, dx / self.h.0, self.h.1, self.h.0) } else { (dx / self.h.0, dy / self.h.1, self.h.0, self.h.1) };
-        let (mut u2, mut v2) = self.bend(u, v, hu / hv);
-        // Distortions: a perspective-like taper along each axis.
-        if self.hd != 0.0 {
-            v2 *= (1.0 + self.hd * u2).max(0.05);
+        let (s, t) = ((x - self.origin[0]) / self.size[0], (y - self.origin[1]) / self.size[1]);
+        let (bs, bt) = (bernstein(s), bernstein(t));
+        let mut out = [0.0; 2];
+        for (j, wt) in bt.iter().enumerate() {
+            for (i, ws) in bs.iter().enumerate() {
+                let p = self.points[j * 4 + i];
+                out[0] += ws * wt * p[0];
+                out[1] += ws * wt * p[1];
+            }
         }
-        if self.vd != 0.0 {
-            u2 *= (1.0 + self.vd * v2).max(0.05);
-        }
-        let (ox, oy) = if self.vertical { (v2 * self.h.0, u2 * self.h.1) } else { (u2 * self.h.0, v2 * self.h.1) };
-        (self.c.0 + ox, self.c.1 + oy)
+        (out[0], out[1])
     }
 
-    /// The style's mapping in normalised space; `aspect` = half-length along / across the axis.
-    fn bend(&self, u: f64, v: f64, aspect: f64) -> (f64, f64) {
-        use std::f64::consts::{FRAC_PI_2, PI};
-        let b = self.b;
-        let bell = (1.0 - u * u).max(0.0);
-        match self.style {
-            WarpStyle::Arc => arc(u, v, b, aspect),
-            WarpStyle::ArcLower => lerp2((u, v), arc(u, v, b, aspect), (v + 1.0) / 2.0),
-            WarpStyle::ArcUpper => lerp2((u, v), arc(u, v, b, aspect), (1.0 - v) / 2.0),
-            // Every column moves up (b > 0) by the same parabola; verticals stay vertical.
-            WarpStyle::Arch => (u, v - b * bell),
-            WarpStyle::Bulge => (u, v * (1.0 + b * bell)),
-            // The bottom (top) edge bows out while the opposite edge stays straight.
-            WarpStyle::ShellLower => (u, v + b * bell * (v + 1.0) / 2.0),
-            WarpStyle::ShellUpper => (u, v - b * bell * (1.0 - v) / 2.0),
-            WarpStyle::Flag => (u, v - b * 0.5 * (PI * u).sin()),
-            WarpStyle::Wave => (u, v - b * 0.5 * (PI * u + v * FRAC_PI_2).sin()),
-            // A body swelling towards the head (left) and a narrow tail, curving up.
-            WarpStyle::Fish => (u, v * (1.0 + b * 0.6 * (1.0 - u) * bell.sqrt()) - b * 0.35 * bell),
-            WarpStyle::Rise => (u, v - b * 0.5 * (FRAC_PI_2 * u).sin()),
-            WarpStyle::Fisheye => {
-                let r2 = (u * u + v * v).min(1.0);
-                let k = 1.0 + b * (1.0 - r2);
-                (u * k, v * k)
-            }
-            WarpStyle::Inflate => {
-                let (bu, bv) = ((1.0 - v * v).max(0.0), bell);
-                (u * (1.0 + b * 0.5 * bu), v * (1.0 + b * 0.5 * bv))
-            }
-            WarpStyle::Squeeze => (u * (1.0 + b * 0.5 * (1.0 - v * v).max(0.0)), v * (1.0 - b * 0.5 * bell)),
-            WarpStyle::Twist => {
-                let r = (u * u + v * v).sqrt();
-                if r >= 1.0 {
-                    return (u, v);
-                }
-                // Rotate in an isotropic frame so the twist stays circular on wide boxes.
-                let a = b * FRAC_PI_2 * (1.0 - r) * (1.0 - r);
-                let (s, c) = a.sin_cos();
-                let (x, y) = (u * aspect, v);
-                ((x * c - y * s) / aspect, x * s + y * c)
-            }
-            WarpStyle::None | WarpStyle::Custom => (u, v),
-        }
+    /// The bicubic control points (row-major, `u` across).
+    pub fn control_points(&self) -> &[[f64; 2]; 16] {
+        &self.points
     }
 }
 
-/// Along a circular arc: the box centre line becomes an arc spanning `b × 180°`.
-fn arc(u: f64, v: f64, b: f64, aspect: f64) -> (f64, f64) {
-    if b.abs() < 1e-6 {
-        return (u, v);
+/// The patch of `style` (bend `b`, -1..1) over a `w × h` box at the origin: (`u` order, `v`
+/// order, control points row-major).
+fn preset_patch(style: WarpStyle, b: f64, vertical: bool, w: f64, h: f64) -> (usize, usize, Vec<[f64; 2]>) {
+    // Twist is built the same way in both orientations.
+    if !vertical || style == WarpStyle::Twist {
+        return horizontal_patch(style, b, w, h);
     }
-    // Work in units of the half-height so the circle is round; arc length of the centre line
-    // equals the box half-length at the ends.
-    let half = aspect;
-    let theta_max = b * std::f64::consts::FRAC_PI_2;
-    let r = half / theta_max;
-    let theta = u * theta_max;
-    let rr = r - v;
-    let x = rr * theta.sin();
-    let y = r - rr * theta.cos();
-    (x / half, y)
+    // Vertical: the horizontal patch of the transposed box, axes swapped back.
+    let (nu, nv, p) = horizontal_patch(style, b, h, w);
+    let mut q = Vec::with_capacity(p.len());
+    for i in 0..nu {
+        for j in 0..nv {
+            let a = p.get(j * nu + i).copied().unwrap_or([0.0; 2]);
+            q.push([a[1], a[0]]);
+        }
+    }
+    (nv, nu, q)
 }
 
-fn lerp2(a: (f64, f64), b: (f64, f64), t: f64) -> (f64, f64) {
-    let t = t.clamp(0.0, 1.0);
-    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+/// An identity grid of `nu × nv` control points over `w × h`.
+fn identity_grid(nu: usize, nv: usize, w: f64, h: f64) -> Vec<[f64; 2]> {
+    (0..nv).flat_map(|j| (0..nu).map(move |i| [w * i as f64 / (nu - 1) as f64, h * j as f64 / (nv - 1) as f64])).collect()
+}
+
+/// The Arc style's top or bottom row: concentric circular arcs of half-angle `|b| × 90°`, the
+/// inner one through the box corners (the bottom one for `b > 0`, centre below; the top one for
+/// `b < 0`, centre above), the outer one `h` further out.
+fn arc_row(w: f64, h: f64, b: f64, top: bool) -> [[f64; 2]; 4] {
+    if b == 0.0 {
+        let y = if top { 0.0 } else { h };
+        return [[0.0, y], [w / 3.0, y], [2.0 * w / 3.0, y], [w, y]];
+    }
+    let th = b.abs() * std::f64::consts::FRAC_PI_2;
+    let (sin, cos) = th.sin_cos();
+    let r_in = (w / 2.0) / sin;
+    let k = 4.0 / 3.0 * (th / 2.0).tan();
+    // `up`: from the centre towards the box (-1: the centre is below).
+    let (c, up, inner_top) = if b > 0.0 { ([w / 2.0, h + r_in * cos], -1.0, false) } else { ([w / 2.0, -r_in * cos], 1.0, true) };
+    let r = if top == inner_top { r_in } else { r_in + h };
+    let a0 = [c[0] - r * sin, c[1] + up * r * cos];
+    let a3 = [c[0] + r * sin, c[1] + up * r * cos];
+    // Unit tangents, heading towards the other end.
+    let (n0, n3) = if up < 0.0 { ([cos, -sin], [-cos, -sin]) } else { ([cos, sin], [-cos, sin]) };
+    [a0, [a0[0] + k * r * n0[0], a0[1] + k * r * n0[1]], [a3[0] + k * r * n3[0], a3[1] + k * r * n3[1]], a3]
+}
+
+/// An arc of half-angle `|b| × 90°` on the chord `(0, y)–(w, y)`, bulging towards `side` (-1 up,
+/// 1 down) for a positive bend.
+fn chord_arc(w: f64, y: f64, b: f64, side: f64) -> [[f64; 2]; 4] {
+    if b == 0.0 {
+        return [[0.0, y], [w / 3.0, y], [2.0 * w / 3.0, y], [w, y]];
+    }
+    let th = b.abs() * std::f64::consts::FRAC_PI_2;
+    let (sin, cos) = th.sin_cos();
+    let l = 4.0 / 3.0 * (th / 2.0).tan() * (w / 2.0) / sin;
+    let dy = side * b.signum() * l * sin;
+    [[0.0, y], [l * cos, y + dy], [w - l * cos, y + dy], [w, y]]
+}
+
+fn horizontal_patch(style: WarpStyle, b: f64, w: f64, h: f64) -> (usize, usize, Vec<[f64; 2]>) {
+    let row = |r: [[f64; 2]; 4], dy: f64| r.map(|p| [p[0], p[1] + dy]);
+    match style {
+        WarpStyle::Arc => (4, 2, [arc_row(w, h, b, true), arc_row(w, h, b, false)].concat()),
+        WarpStyle::ArcLower => (4, 2, [chord_arc(w, 0.0, 0.0, 1.0), chord_arc(w, h, b, 1.0)].concat()),
+        WarpStyle::ArcUpper => (4, 2, [chord_arc(w, 0.0, b, -1.0), chord_arc(w, h, 0.0, 1.0)].concat()),
+        WarpStyle::Arch => {
+            let top = chord_arc(w, 0.0, b, -1.0);
+            (4, 2, [top, row(top, h)].concat())
+        }
+        WarpStyle::Bulge => (4, 2, [chord_arc(w, 0.0, b, -1.0), chord_arc(w, h, b, 1.0)].concat()),
+        WarpStyle::ShellUpper | WarpStyle::ShellLower => {
+            let mut g = identity_grid(4, 4, w, h);
+            let (top, bottom) = (arc_row(w, h, b, true), arc_row(w, h, b, false));
+            for (i, p) in top.iter().enumerate() {
+                g[i] = *p;
+            }
+            g[4] = lerp(top[0], bottom[0], 1.0 / 3.0);
+            g[7] = lerp(top[3], bottom[3], 1.0 / 3.0);
+            if style == WarpStyle::ShellLower {
+                // The upper shell mirrored top to bottom.
+                g = (0..4).rev().flat_map(|j| (0..4).map(move |i| (i, j))).map(|(i, j)| g[j * 4 + i]).map(|p| [p[0], h - p[1]]).collect();
+            }
+            (4, 4, g)
+        }
+        WarpStyle::Flag | WarpStyle::Fish | WarpStyle::Rise => {
+            let d = 2.0 * b * h;
+            let top = if style == WarpStyle::Rise {
+                [[0.0, d], [w / 3.0, d], [2.0 * w / 3.0, 0.0], [w, 0.0]]
+            } else {
+                [[0.0, 0.0], [w / 3.0, -d], [2.0 * w / 3.0, d], [w, 0.0]]
+            };
+            let bottom = match style {
+                WarpStyle::Fish => [[0.0, h], [w / 3.0, h + d], [2.0 * w / 3.0, h - d], [w, h]],
+                _ => row(top, h),
+            };
+            (4, 2, [top, bottom].concat())
+        }
+        WarpStyle::Wave => {
+            let mut g = identity_grid(4, 3, w, h);
+            let d = 2.0 * b * h;
+            g[5] = [w / 3.0, h / 2.0 + d];
+            g[6] = [2.0 * w / 3.0, h / 2.0 - d];
+            (4, 3, g)
+        }
+        WarpStyle::Inflate | WarpStyle::Squeeze => {
+            let mut g = identity_grid(3, 3, w, h);
+            let side = if style == WarpStyle::Inflate { 1.0 } else { -1.0 };
+            g[1] = [w / 2.0, -b * h / 2.0];
+            g[7] = [w / 2.0, h + b * h / 2.0];
+            g[3] = [-side * b * w / 2.0, h / 2.0];
+            g[5] = [w + side * b * w / 2.0, h / 2.0];
+            (3, 3, g)
+        }
+        WarpStyle::Fisheye => {
+            let mut g = identity_grid(4, 4, w, h);
+            for (k, corner) in [(5, [0.0, 0.0]), (6, [w, 0.0]), (9, [0.0, h]), (10, [w, h])] {
+                g[k] = lerp(g[k], corner, 2.0 * b);
+            }
+            (4, 4, g)
+        }
+        WarpStyle::Twist => {
+            let mut g = identity_grid(4, 4, w, h);
+            let a = b.abs();
+            let moves = if b > 0.0 {
+                [(5, [a * w, 0.0]), (6, [0.0, a * h]), (10, [-a * w, 0.0]), (9, [0.0, -a * h])]
+            } else {
+                [(5, [0.0, a * h]), (6, [-a * w, 0.0]), (10, [0.0, -a * h]), (9, [a * w, 0.0])]
+            };
+            for (k, d) in moves {
+                g[k] = [g[k][0] + d[0], g[k][1] + d[1]];
+            }
+            (4, 4, g)
+        }
+        WarpStyle::None | WarpStyle::Custom => (2, 2, identity_grid(2, 2, w, h)),
+    }
+}
+
+/// Applies the distortions to a box-normalised patch (`nu × nv` control points, row-major): each
+/// column's offsets from the identity grid scale by `1 + h(2u − 1)` about the average of its
+/// first and last, then each row's by `1 − v(1 − 2y)` about the average of its ends, added to
+/// the grid distorted the same way.
+fn distort(p: &[[f64; 2]], nu: usize, nv: usize, hd: f64, vd: f64) -> Vec<[f64; 2]> {
+    if hd == 0.0 && vd == 0.0 {
+        return p.to_vec();
+    }
+    let grid = identity_grid(nu, nv, 1.0, 1.0);
+    let at = |v: &Vec<[f64; 2]>, k: usize| v.get(k).copied().unwrap_or([0.0; 2]);
+    let mut d: Vec<[f64; 2]> = p.iter().zip(&grid).map(|(a, g)| [a[0] - g[0], a[1] - g[1]]).collect();
+    // Columns (horizontal distortion).
+    let mut dc = d.clone();
+    for i in 0..nu {
+        let (top, bottom) = (at(&d, i), at(&d, (nv - 1) * nu + i));
+        let a = [(top[0] + bottom[0]) / 2.0, (top[1] + bottom[1]) / 2.0];
+        let s = 1.0 + hd * (2.0 * (i as f64 / (nu - 1) as f64) - 1.0);
+        for j in 0..nv {
+            let k = j * nu + i;
+            let o = at(&d, k);
+            if let Some(slot) = dc.get_mut(k) {
+                *slot = [a[0] + (o[0] - a[0]) * s, a[1] + (o[1] - a[1]) * s];
+            }
+        }
+    }
+    d = dc;
+    // The distorted grid and its width factors.
+    let mut base = Vec::with_capacity(grid.len());
+    let mut sx = Vec::with_capacity(grid.len());
+    for g in &grid {
+        let y = 0.5 + (g[1] - 0.5) * (1.0 + hd * (2.0 * g[0] - 1.0));
+        let s = 1.0 - vd * (1.0 - 2.0 * y);
+        base.push([0.5 + (g[0] - 0.5) * s, y]);
+        sx.push(s);
+    }
+    // Rows (vertical distortion).
+    let mut out = Vec::with_capacity(grid.len());
+    for j in 0..nv {
+        let (first, last) = (at(&d, j * nu), at(&d, j * nu + nu - 1));
+        let a = [(first[0] + last[0]) / 2.0, (first[1] + last[1]) / 2.0];
+        for i in 0..nu {
+            let k = j * nu + i;
+            let (o, s, g) = (at(&d, k), sx.get(k).copied().unwrap_or(1.0), at(&base, k));
+            out.push([g[0] + a[0] + (o[0] - a[0]) * s, g[1] + a[1] + (o[1] - a[1]) * s]);
+        }
+    }
+    out
 }
 
 fn bernstein(t: f64) -> [f64; 4] {
@@ -294,6 +434,17 @@ fn split_cubic(p: [[f64; 2]; 4], t: f64) -> [[f64; 2]; 7] {
 /// columns: sample). Exact rational values.
 const BERN_INV: [[f64; 4]; 4] = [[1.0, 0.0, 0.0, 0.0], [-5.0 / 6.0, 3.0, -1.5, 1.0 / 3.0], [1.0 / 3.0, -1.5, 3.0, -5.0 / 6.0], [0.0, 0.0, 0.0, 1.0]];
 
+/// The cubic Bézier equal to the linear, quadratic or cubic one with control points `p`.
+fn elevate_to_cubic(p: &[[f64; 2]]) -> Option<[[f64; 2]; 4]> {
+    let lerp = |a: [f64; 2], b: [f64; 2], t: f64| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    match *p {
+        [a, b] => Some([a, lerp(a, b, 1.0 / 3.0), lerp(a, b, 2.0 / 3.0), b]),
+        [a, b, c] => Some([a, lerp(a, b, 2.0 / 3.0), lerp(c, b, 2.0 / 3.0), c]),
+        [a, b, c, d] => Some([a, b, c, d]),
+        _ => None,
+    }
+}
+
 /// A grid of bicubic Bezier patches over the unit square of a source box.
 ///
 /// `us`/`vs` are the patch boundaries in the box's normalised coordinates (`0..=1`, increasing,
@@ -314,6 +465,28 @@ impl BezierMesh {
         let us: Vec<f64> = (0..=cols).map(|i| i as f64 / cols as f64).collect();
         let vs: Vec<f64> = (0..=rows).map(|i| i as f64 / rows as f64).collect();
         Self::fit(&|s, t| [bounds[0] + s * (bounds[2] - bounds[0]), bounds[1] + t * (bounds[3] - bounds[1])], us, vs)
+    }
+
+    /// A one-patch mesh from a Bézier patch of `u_order × v_order` control points (2 to 4 each:
+    /// linear, quadratic or cubic; row-major, `u` across), raised to the bicubic 4 × 4 grid. Degree
+    /// elevation is exact, so the surface is unchanged. Reference stores most preset warps of a
+    /// placed layer this way (Arc 4 × 2, Inflate 3 × 3, Wave 4 × 3). `None` for other orders or a
+    /// point count that doesn't match.
+    pub fn from_patch(u_order: usize, v_order: usize, points: &[[f64; 2]]) -> Option<BezierMesh> {
+        if !(2..=4).contains(&u_order) || !(2..=4).contains(&v_order) || points.len() != u_order.checked_mul(v_order)? {
+            return None;
+        }
+        // Rows across, then columns down.
+        let rows: Vec<[[f64; 2]; 4]> = points.chunks_exact(u_order).map(elevate_to_cubic).collect::<Option<_>>()?;
+        let mut out = vec![[0.0; 2]; 16];
+        for i in 0..4 {
+            let column: Vec<[f64; 2]> = rows.iter().map(|r| r[i]).collect();
+            for (j, p) in elevate_to_cubic(&column)?.into_iter().enumerate() {
+                out[j * 4 + i] = p;
+            }
+        }
+        let mesh = BezierMesh { us: vec![0.0, 1.0], vs: vec![0.0, 1.0], points: out };
+        mesh.is_valid().then_some(mesh)
     }
 
     /// Fits a mesh with patch boundaries `us`/`vs` to the map `f` (normalised → output) by
@@ -665,6 +838,32 @@ mod tests {
         assert_eq!(WarpStyle::parse("spiral"), None);
     }
 
+    /// Linear, quadratic and cubic patches raise to the same surface on a 4 × 4 grid; other
+    /// orders and mismatched point counts are refused.
+    #[test]
+    fn patches_raise_exactly() {
+        let pts: Vec<[f64; 2]> = (0..8).map(|k| [f64::from(k % 4) * 10.0 + f64::from(k / 4) * 3.0, f64::from(k / 4) * 20.0 + f64::from(k % 4 * k % 3)]).collect();
+        let m = BezierMesh::from_patch(4, 2, &pts).unwrap();
+        // Cubic across, linear down.
+        let cubic = |s: f64| [(1.0 - s).powi(3), 3.0 * s * (1.0 - s).powi(2), 3.0 * s * s * (1.0 - s), s.powi(3)];
+        for (s, t) in [(0.0, 0.0), (0.3, 0.7), (1.0, 1.0), (0.5, 0.25)] {
+            let (bs, bt) = (cubic(s), [1.0 - t, t]);
+            let mut want = [0.0; 2];
+            for j in 0..2 {
+                for i in 0..4 {
+                    for c in 0..2 {
+                        want[c] += bs[i] * bt[j] * pts[j * 4 + i][c];
+                    }
+                }
+            }
+            let got = m.eval(s, t);
+            assert!((got[0] - want[0]).abs() < 1e-9 && (got[1] - want[1]).abs() < 1e-9, "{s},{t}");
+        }
+        assert!(BezierMesh::from_patch(5, 2, &[[0.0; 2]; 10]).is_none());
+        assert!(BezierMesh::from_patch(4, 2, &pts[..7]).is_none());
+        assert!(BezierMesh::from_patch(1, 4, &pts[..4]).is_none());
+    }
+
     #[test]
     fn presets_at_bend_zero_are_identity() {
         for s in WarpStyle::PRESETS {
@@ -717,18 +916,42 @@ mod tests {
         }
     }
 
+    /// Presets build the patch Reference builds: control points recorded from warped placed
+    /// layers it saved (normalised to the box, 4 decimals), square and wide boxes, both bends,
+    /// both orientations and single distortions.
     #[test]
-    fn arc_maps_known_points() {
-        // Arc, bend 50 %: the centre column stays, the ends drop and pull in along a circle.
-        let w = Warp::preset(WarpStyle::Arc, 50.0, [0.0, -40.0, 200.0, 10.0]);
-        let mid = w.map(100.0, -15.0);
-        assert!(close(mid, (100.0, -15.0), 1e-9));
-        // Centre line: radius r = half / θmax with half = 100/25 = 4 (in half-heights), θmax = π/4.
-        let (theta, r) = (std::f64::consts::FRAC_PI_4, 4.0 / std::f64::consts::FRAC_PI_4);
-        let ex = 100.0 - r * theta.sin() * 100.0 / 4.0;
-        let ey = -15.0 + (r - r * theta.cos()) * 25.0;
-        let end = w.map(0.0, -15.0);
-        assert!(close(end, (ex, ey), 1e-6), "{end:?} vs {:?}", (ex, ey));
+    // Recorded control points, not approximations of constants.
+    #[allow(clippy::approx_constant)]
+    fn presets_match_reference_patches() {
+        #[allow(clippy::type_complexity)]
+        let cases: [(WarpStyle, f64, f64, f64, bool, [f64; 2], usize, usize, &[f64]); 18] = [
+            (WarpStyle::Arc, 50.0, 0.0, 0.0, false, [256.0, 256.0], 4, 2, &[-0.7071, 0.2929, -0.0404, -0.3738, 1.0404, -0.3738, 1.7071, 0.2929, 0.0000, 1.0000, 0.2761, 0.7239, 0.7239, 0.7239, 1.0000, 1.0000][..]),
+            (WarpStyle::Arc, 50.0, 0.0, 0.0, false, [384.0, 128.0], 4, 2, &[-0.2357, 0.2929, 0.1706, -0.9261, 0.8294, -0.9261, 1.2357, 0.2929, -0.0000, 1.0000, 0.2761, 0.1716, 0.7239, 0.1716, 1.0000, 1.0000][..]),
+            (WarpStyle::ArcLower, -30.0, 0.0, 0.0, false, [384.0, 128.0], 4, 2, &[0.0000, 0.0000, 0.3333, 0.0000, 0.6667, 0.0000, 1.0000, 0.0000, 0.0000, 1.0000, 0.3141, 0.5198, 0.6859, 0.5198, 1.0000, 1.0000][..]),
+            (WarpStyle::ShellLower, -30.0, 0.0, 0.0, false, [256.0, 256.0], 4, 4, &[0.0000, 0.0000, 0.3333, 0.0000, 0.6667, 0.0000, 1.0000, 0.0000, 0.0000, 0.3333, 0.3333, 0.3333, 0.6667, 0.3333, 1.0000, 0.3333, -0.1513, 0.7030, 0.3333, 0.6667, 0.6667, 0.6667, 1.1513, 0.7030, 0.0000, 1.0000, 0.3141, 0.8399, 0.6859, 0.8399, 1.0000, 1.0000][..]),
+            (WarpStyle::ShellUpper, 50.0, 0.0, 0.0, false, [384.0, 128.0], 4, 4, &[-0.2357, 0.2929, 0.1706, -0.9261, 0.8294, -0.9261, 1.2357, 0.2929, -0.1571, 0.5286, 0.3333, 0.3333, 0.6667, 0.3333, 1.1571, 0.5286, 0.0000, 0.6667, 0.3333, 0.6667, 0.6667, 0.6667, 1.0000, 0.6667, 0.0000, 1.0000, 0.3333, 1.0000, 0.6667, 1.0000, 1.0000, 1.0000][..]),
+            (WarpStyle::Rise, -30.0, 0.0, 0.0, false, [384.0, 128.0], 4, 2, &[0.0000, -0.6000, 0.3333, -0.6000, 0.6667, 0.0000, 1.0000, 0.0000, 0.0000, 0.4000, 0.3333, 0.4000, 0.6667, 1.0000, 1.0000, 1.0000][..]),
+            (WarpStyle::Twist, -30.0, 0.0, 0.0, false, [256.0, 256.0], 4, 4, &[0.0000, 0.0000, 0.3333, 0.0000, 0.6667, 0.0000, 1.0000, 0.0000, 0.0000, 0.3333, 0.3333, 0.6333, 0.3667, 0.3333, 1.0000, 0.3333, 0.0000, 0.6667, 0.6333, 0.6667, 0.6667, 0.3667, 1.0000, 0.6667, 0.0000, 1.0000, 0.3333, 1.0000, 0.6667, 1.0000, 1.0000, 1.0000][..]),
+            (WarpStyle::Twist, 50.0, 0.0, 0.0, true, [384.0, 128.0], 4, 4, &[0.0000, 0.0000, 0.3333, 0.0000, 0.6667, 0.0000, 1.0000, 0.0000, 0.0000, 0.3333, 0.8333, 0.3333, 0.6667, 0.8333, 1.0000, 0.3333, 0.0000, 0.6667, 0.3333, 0.1667, 0.1667, 0.6667, 1.0000, 0.6667, 0.0000, 1.0000, 0.3333, 1.0000, 0.6667, 1.0000, 1.0000, 1.0000][..]),
+            (WarpStyle::Fisheye, -30.0, 0.0, 0.0, false, [256.0, 256.0], 4, 4, &[0.0000, 0.0000, 0.3333, 0.0000, 0.6667, 0.0000, 1.0000, 0.0000, 0.0000, 0.3333, 0.5333, 0.5333, 0.4667, 0.5333, 1.0000, 0.3333, 0.0000, 0.6667, 0.5333, 0.4667, 0.4667, 0.4667, 1.0000, 0.6667, 0.0000, 1.0000, 0.3333, 1.0000, 0.6667, 1.0000, 1.0000, 1.0000][..]),
+            (WarpStyle::Inflate, 40.0, 30.0, 0.0, false, [256.0, 256.0], 3, 3, &[0.0000, 0.1500, 0.5000, -0.2000, 1.0000, -0.1500, -0.1400, 0.5000, 0.5000, 0.5000, 1.2600, 0.5000, 0.0000, 0.8500, 0.5000, 1.2000, 1.0000, 1.1500][..]),
+            (WarpStyle::Arc, 40.0, 0.0, -20.0, false, [256.0, 256.0], 4, 2, &[-0.8053, 0.1910, -0.0270, -0.3745, 1.0270, -0.3745, 1.8053, 0.1910, 0.1000, 1.0000, 0.3385, 0.8267, 0.6615, 0.8267, 0.9000, 1.0000][..]),
+            (WarpStyle::Arc, 40.0, 30.0, 0.0, false, [256.0, 256.0], 4, 2, &[-0.4996, 0.3123, 0.0727, -0.2271, 0.9510, -0.3335, 1.6760, 0.0696, -0.0882, 0.8786, 0.2863, 0.7302, 0.6900, 0.8366, 0.9118, 1.1214][..]),
+            (WarpStyle::Wave, 50.0, 0.0, 0.0, true, [384.0, 128.0], 3, 4, &[-0.0000, 0.0000, 0.5000, 0.0000, 1.0000, 0.0000, -0.0000, 0.3333, 1.5000, 0.3333, 1.0000, 0.3333, -0.0000, 0.6667, -0.5000, 0.6667, 1.0000, 0.6667, -0.0000, 1.0000, 0.5000, 1.0000, 1.0000, 1.0000][..]),
+            (WarpStyle::ArcLower, 50.0, 0.0, 0.0, true, [384.0, 128.0], 2, 4, &[0.0000, 0.0000, 1.0000, 0.0000, 0.0000, 0.3333, 1.0920, 0.2761, 0.0000, 0.6667, 1.0920, 0.7239, 0.0000, 1.0000, 1.0000, 1.0000][..]),
+            (WarpStyle::Fish, -30.0, 0.0, 0.0, false, [384.0, 128.0], 4, 2, &[0.0000, 0.0000, 0.3333, 0.6000, 0.6667, -0.6000, 1.0000, 0.0000, 0.0000, 1.0000, 0.3333, 0.4000, 0.6667, 1.6000, 1.0000, 1.0000][..]),
+            (WarpStyle::Rise, 40.0, 0.0, -20.0, false, [256.0, 256.0], 4, 2, &[-0.1000, 0.8800, 0.3000, 0.8800, 0.7000, -0.0800, 1.1000, -0.0800, 0.1000, 1.7200, 0.3667, 1.7200, 0.6333, 1.0800, 0.9000, 1.0800][..]),
+            (WarpStyle::Bulge, -30.0, 0.0, 0.0, false, [384.0, 128.0], 4, 2, &[0.0000, 0.0000, 0.3141, 0.4802, 0.6859, 0.4802, 1.0000, 0.0000, 0.0000, 1.0000, 0.3141, 0.5198, 0.6859, 0.5198, 1.0000, 1.0000][..]),
+            (WarpStyle::Squeeze, 50.0, 0.0, 0.0, false, [384.0, 128.0], 3, 3, &[0.0000, 0.0000, 0.5000, -0.2500, 1.0000, 0.0000, 0.2500, 0.5000, 0.5000, 0.5000, 0.7500, 0.5000, 0.0000, 1.0000, 0.5000, 1.2500, 1.0000, 1.0000][..]),
+        ];
+        for (style, bend, hd, vd, vertical, [w, h], nu, nv, flat) in cases {
+            let pts: Vec<[f64; 2]> = flat.chunks_exact(2).map(|p| [10.0 + p[0] * w, 20.0 + p[1] * h]).collect();
+            let want = BezierMesh::from_patch(nu, nv, &pts).unwrap();
+            let got = StyleWarp::new(style, bend, hd, vd, vertical, [10.0, 20.0, 10.0 + w, 20.0 + h]).unwrap();
+            for (k, (a, b)) in got.control_points().iter().zip(&want.points).enumerate() {
+                assert!((a[0] - b[0]).abs() < 0.05 && (a[1] - b[1]).abs() < 0.05, "{style:?} {bend} h{hd} v{vd} vert {vertical} {w}x{h}: point {k} {a:?} vs {b:?}");
+            }
+        }
     }
 
     #[test]

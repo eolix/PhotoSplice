@@ -797,3 +797,31 @@ fn a_placed_pdf_from_photoshop_is_measured_in_its_stored_source_size() {
     let px = render(&doc, &sm).unwrap().unwrap();
     assert!(px.rgba(70, 36)[3] > 0.99 && px.rgba(73, 36)[3] < 0.01, "{:?} {:?}", px.rgba(70, 36), px.rgba(73, 36));
 }
+
+#[test]
+fn edit_contents_updates_every_shared_instance() {
+    let mut s = session(8);
+    paint(&mut s);
+    let a = convert(&mut s);
+    // A duplicate shares the contents; a "via Copy" smart object has its own.
+    let b = s.execute("layer.duplicate", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.select", json!({"layer": a})).unwrap();
+    let c = s.execute("layer.smartObjects.newSmartObjectViaCopy", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.select", json!({"layer": a})).unwrap();
+    let child = s.execute("layer.smartObjects.editContents", json!({})).unwrap()["document"].as_u64().unwrap() as usize;
+    s.edit("paint", |doc, _| {
+        doc.layers[0].surface_mut().unwrap().fill_rect(Rect::new(0, 0, 46, 33), &[1.0, 0.0, 0.0, 1.0]);
+        Ok(())
+    })
+    .unwrap();
+    s.execute("layer.smartObjects.saveContents", json!({})).unwrap();
+    let _ = child;
+    s.set_active(0);
+    let d = s.active().unwrap();
+    let source = |id: u64| match &d.doc.layer(LayerId(id)).unwrap().content {
+        LayerContent::Smart(sm) => sm.source.clone(),
+        _ => panic!("smart"),
+    };
+    assert!(same_contents(&source(a), &source(b)), "the duplicate follows the edit");
+    assert!(!same_contents(&source(a), &source(c)), "the copy keeps its own contents");
+}

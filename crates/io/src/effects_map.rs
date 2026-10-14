@@ -74,7 +74,7 @@ pub(crate) fn blend_from_id(v: &[u8]) -> Option<BlendMode> {
     BLEND_NAMES.iter().chain(&BLEND_LONG_NAMES).find(|(_, n)| n.as_bytes() == v).map(|(m, _)| *m)
 }
 
-fn blend_of(d: &Descriptor, key: &str, default: BlendMode) -> BlendMode {
+pub(crate) fn blend_of(d: &Descriptor, key: &str, default: BlendMode) -> BlendMode {
     enum_of(d, key).and_then(blend_from_id).unwrap_or(default)
 }
 
@@ -85,7 +85,7 @@ pub(crate) fn blend_long_value(m: BlendMode) -> Value {
     Value::Enumerated { type_id: Id::new("BlnM"), value: Id::new(n) }
 }
 
-fn blend_value(m: BlendMode) -> Value {
+pub(crate) fn blend_value(m: BlendMode) -> Value {
     let n = BLEND_NAMES.iter().find(|(b, _)| *b == m).map_or("Nrml", |(_, n)| n);
     Value::Enumerated { type_id: Id::new("BlnM"), value: Id::new(n) }
 }
@@ -137,7 +137,7 @@ fn common(d: &Descriptor, blend: BlendMode, opacity: f32) -> FxCommon {
 }
 
 fn gradient_from(d: &Descriptor) -> Gradient {
-    let (stops, opacity_stops) = get_desc(d, "Grad").map(|g| crate::blocks::gradient_stops_with(g, enum_of(d, "gs99"))).unwrap_or_default();
+    let (stops, opacity_stops) = get_desc(d, "Grad").map(|g| crate::blocks::gradient_stops_with(g, crate::blocks::gradient_method(d))).unwrap_or_default();
     let off = get_desc(d, "Ofst");
     Gradient {
         stops: if stops.is_empty() { Gradient::default().stops } else { stops },
@@ -298,7 +298,11 @@ fn placeholder(d: &Descriptor) -> bool {
 /// Parses `lfx2` block data: `(master switch, effects)`.
 pub fn parse_lfx2(data: &[u8]) -> Option<(bool, Vec<Effect>)> {
     let (vd, _) = VersionedDescriptor::parse_prefix(data.get(4..)?).ok()?;
-    let d = vd.descriptor;
+    Some(effects_from_desc(&vd.descriptor))
+}
+
+/// Effects of an `lfx2`-shaped descriptor (also a layer comp's `Lefx`): `(master switch, effects)`.
+pub(crate) fn effects_from_desc(d: &Descriptor) -> (bool, Vec<Effect>) {
     let master = !matches!(d.get("masterFXSwitch"), Some(Value::Boolean(false)));
     let mut out = Vec::new();
     for (single, multi) in KINDS {
@@ -315,7 +319,7 @@ pub fn parse_lfx2(data: &[u8]) -> Option<(bool, Vec<Effect>)> {
                 }
             }
             _ => {
-                if let Some(x) = get_desc(&d, single)
+                if let Some(x) = get_desc(d, single)
                     && !placeholder(x)
                     && let Some(e) = parse_one(single, x)
                 {
@@ -324,7 +328,7 @@ pub fn parse_lfx2(data: &[u8]) -> Option<(bool, Vec<Effect>)> {
             }
         }
     }
-    Some((master, out))
+    (master, out)
 }
 
 fn unit(u: &[u8; 4], v: f32) -> Value {
@@ -666,7 +670,7 @@ fn gradient_stops(e: &Effect) -> Option<GradientStops<'_>> {
     Some((&g.stops, &g.opacity_stops))
 }
 
-fn lfx2_descriptor(master: bool, items: &[Effect]) -> Descriptor {
+pub(crate) fn lfx2_descriptor(master: bool, items: &[Effect]) -> Descriptor {
     let mut d = Descriptor::new("null").with("Scl ", unit(b"#Prc", 100.0)).with("masterFXSwitch", Value::Boolean(master));
     for (single, multi) in KINDS {
         let of_kind: Vec<Descriptor> = items.iter().map(write_one).filter(|(k, _)| *k == single).map(|(_, d)| d).collect();

@@ -358,13 +358,22 @@ fn read_descriptor(r: &mut Reader<'_>, depth: usize) -> Result<Descriptor> {
     let n = r.u32()?;
     // Each item needs at least 5 (1-byte string key) + 4 (type) + 1 (bool).
     r.check_count(u64::from(n), 10)?;
-    let mut items = Vec::with_capacity(n as usize);
+    let mut items = vec_for_count(n);
     for _ in 0..n {
         let key = Id::read(r)?;
         let v = read_value(r, depth + 1)?;
         items.push((key, v));
     }
     Ok(Descriptor { name, class_id, items })
+}
+
+/// Preallocation for a list or object of `n` declared items: the count comes from the file, so
+/// it only sizes the first allocation up to a cap; real items still grow the vector
+/// (storytold/photocraft@64a02107).
+const MAX_PREALLOC: usize = 4096;
+
+fn vec_for_count<T>(n: u32) -> Vec<T> {
+    Vec::with_capacity((n as usize).min(MAX_PREALLOC))
 }
 
 fn read_value(r: &mut Reader<'_>, depth: usize) -> Result<Value> {
@@ -380,7 +389,7 @@ fn read_typed_value(r: &mut Reader<'_>, ty: &[u8; 4], depth: usize) -> Result<Va
         b"obj " => {
             let n = r.u32()?;
             r.check_count(u64::from(n), 8)?;
-            let mut items = Vec::with_capacity(n as usize);
+            let mut items = vec_for_count(n);
             for _ in 0..n {
                 items.push(read_reference_item(r)?);
             }
@@ -391,7 +400,7 @@ fn read_typed_value(r: &mut Reader<'_>, ty: &[u8; 4], depth: usize) -> Result<Va
         b"VlLs" => {
             let n = r.u32()?;
             r.check_count(u64::from(n), 4)?;
-            let mut items = Vec::with_capacity(n as usize);
+            let mut items = vec_for_count(n);
             for _ in 0..n {
                 items.push(read_value(r, depth + 1)?);
             }
@@ -403,7 +412,7 @@ fn read_typed_value(r: &mut Reader<'_>, ty: &[u8; 4], depth: usize) -> Result<Va
             let unit = r.array()?;
             let n = r.u32()?;
             r.check_count(u64::from(n), 8)?;
-            let mut values = Vec::with_capacity(n as usize);
+            let mut values = vec_for_count(n);
             for _ in 0..n {
                 values.push(r.f64()?);
             }
@@ -565,6 +574,13 @@ fn write_reference_item(it: &ReferenceItem, out: &mut Vec<u8>) {
 
 #[cfg(test)]
 mod tests {
+    /// A declared count only sizes the first allocation up to a cap (storytold/photocraft@64a02107).
+    #[test]
+    fn declared_counts_do_not_drive_preallocation() {
+        assert!(vec_for_count::<Value>(u32::MAX).capacity() <= MAX_PREALLOC);
+        assert!(vec_for_count::<Value>(3).capacity() >= 3);
+    }
+
     use super::*;
 
     fn class(name: &str, id: &str) -> Class {

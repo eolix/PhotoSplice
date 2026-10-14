@@ -30,6 +30,8 @@ use photosuite_doc::{Fill, FillRule, GradientStyle, Path, PathOp, ShapeLayer, Sh
 use photosuite_geom::{Rect, TILE_SIZE};
 use photosuite_raster::Surface;
 
+pub mod gradient;
+
 pub use flatten::{Polyline, flatten_path, flatten_subpath};
 pub use raster::Rasterizer;
 pub use stroke::{StrokeStyle, stroke_polygons};
@@ -209,12 +211,20 @@ pub enum Paint {
     /// Straight RGBA.
     Solid([f32; 4]),
     Gradient {
+        /// Colour stops (sorted by location, straight RGBA).
         stops: Vec<(f32, [f32; 4])>,
+        /// Midpoint of each segment between colour stops (0.5 = halfway).
+        mids: Vec<f32>,
+        /// Opacity stops (sorted; empty = opaque).
+        opacity: Vec<(f32, f32)>,
         style: GradientStyle,
         angle: f32,
         scale: f32,
         reverse: bool,
-        bounds: (f64, f64, f64, f64),
+        /// Centre offset, as fractions of the frame.
+        offset: (f32, f32),
+        /// The frame the gradient is laid out in (the shape's bounds).
+        frame: Rect,
     },
 }
 
@@ -228,14 +238,23 @@ impl Paint {
         };
         match f {
             Fill::Solid(c) => Paint::Solid(rgba(c)),
-            Fill::Gradient { stops, angle, scale, style, reverse, .. } => Paint::Gradient {
-                stops: stops.iter().map(|(p, c)| (*p, rgba(c))).collect(),
-                style: *style,
-                angle: *angle,
-                scale: *scale,
-                reverse: *reverse,
-                bounds,
-            },
+            Fill::Gradient { stops, angle, scale, style, reverse, opacity_stops, midpoints, offset, .. } => {
+                let mut stops: Vec<(f32, [f32; 4])> = stops.iter().map(|(p, c)| (*p, rgba(c))).collect();
+                stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let mut opacity = opacity_stops.clone();
+                opacity.sort_by(|a, b| a.0.total_cmp(&b.0));
+                Paint::Gradient {
+                    stops,
+                    mids: midpoints.clone(),
+                    opacity,
+                    style: *style,
+                    angle: *angle,
+                    scale: *scale,
+                    reverse: *reverse,
+                    offset: *offset,
+                    frame: frame_of(bounds),
+                }
+            }
             Fill::Pattern { .. } => Paint::None,
         }
     }
@@ -245,53 +264,27 @@ impl Paint {
         match self {
             Paint::None => [0.0; 4],
             Paint::Solid(c) => *c,
-            Paint::Gradient { stops, style, angle, scale, reverse, bounds } => {
-                let t = gradient_t(*style, *angle, *scale, *reverse, *bounds, x, y);
-                sample_stops(stops, t)
+            Paint::Gradient { style, angle, scale, reverse, offset, frame, .. } => {
+                self.sample(gradient::gradient_t(*style, *angle, *scale, *reverse, *offset, *frame, x as f32, y as f32))
             }
+        }
+    }
+
+    /// Straight RGBA at gradient position `t` (`0..=1`); a solid paint's colour.
+    pub fn sample(&self, t: f32) -> [f32; 4] {
+        match self {
+            Paint::None => [0.0; 4],
+            Paint::Solid(c) => *c,
+            Paint::Gradient { stops, mids, opacity, .. } => gradient::sample(stops, mids, opacity, t),
         }
     }
 }
 
-/// Gradient parameter at `(x, y)`: the gradient spans the bounds' extent along its angle
-/// (degrees, counter-clockwise from 3 o'clock), centred on the bounds.
-fn gradient_t(style: GradientStyle, angle: f32, scale: f32, reverse: bool, b: (f64, f64, f64, f64), x: f64, y: f64) -> f32 {
-    let (w, h) = ((b.2 - b.0).max(1.0), (b.3 - b.1).max(1.0));
-    let (cx, cy) = (b.0 + w / 2.0, b.1 + h / 2.0);
-    let a = f64::from(angle).to_radians();
-    let (s, c) = a.sin_cos();
-    let (dx, dy) = (x - cx, y - cy);
-    let along = dx * c - dy * s;
-    let across = dx * s + dy * c;
-    let len = ((c * w).powi(2) + (s * h).powi(2)).sqrt().max(1.0) * f64::from(scale.max(1e-3));
-    let t = match style {
-        GradientStyle::Linear => along / len + 0.5,
-        GradientStyle::Reflected => (along / (len / 2.0)).abs(),
-        GradientStyle::Radial => dx.hypot(dy) / (len / 2.0),
-        GradientStyle::Diamond => (along.abs() + across.abs()) / (len / 2.0),
-        GradientStyle::Angle => ((a - (-dy).atan2(dx)) / std::f64::consts::TAU).rem_euclid(1.0),
-    };
-    let t = t.clamp(0.0, 1.0) as f32;
-    if reverse { 1.0 - t } else { t }
-}
-
-fn sample_stops(stops: &[(f32, [f32; 4])], t: f32) -> [f32; 4] {
-    match stops {
-        [] => [0.0; 4],
-        [s] => s.1,
-        _ => {
-            if t <= stops[0].0 {
-                return stops[0].1;
-            }
-            for w in stops.windows(2) {
-                if t <= w[1].0 {
-                    let k = if w[1].0 > w[0].0 { (t - w[0].0) / (w[1].0 - w[0].0) } else { 0.0 };
-                    return std::array::from_fn(|i| w[0].1[i] + (w[1].1[i] - w[0].1[i]) * k);
-                }
-            }
-            stops[stops.len() - 1].1
-        }
-    }
+/// The whole-pixel frame of shape bounds (`x0, y0, x1, y1`), as Photoshop lays a shape layer's
+/// gradient out over the layer's pixel bounds.
+fn frame_of(b: (f64, f64, f64, f64)) -> Rect {
+    let px = |v: f64| if v.is_finite() { v.clamp(-1e9, 1e9) } else { 0.0 };
+    Rect::new(px(b.0).floor() as i32, px(b.1).floor() as i32, px(b.2).ceil() as i32, px(b.3).ceil() as i32)
 }
 
 /// Everything needed to render a shape layer, compiled once.
@@ -305,7 +298,18 @@ pub struct CompiledShape {
 
 impl CompiledShape {
     pub fn new(shape: &ShapeLayer, tol: f64) -> Self {
-        let pb = shape.path.control_bounds().unwrap_or((0.0, 0.0, 0.0, 0.0));
+        Self::new_in(shape, tol, None)
+    }
+
+    /// [`CompiledShape::new`] on a `canvas`: an inverted path (or one without points) fills the
+    /// whole canvas, so its gradients are laid out over the canvas, as Photoshop lays a shape
+    /// layer's gradient over the layer's bounds (psd-tools vector-mask2.psd).
+    pub fn new_in(shape: &ShapeLayer, tol: f64, canvas: Option<Rect>) -> Self {
+        let whole = canvas.filter(|_| shape.path.inverted || shape.path.control_bounds().is_none());
+        let pb = match whole {
+            Some(c) => (f64::from(c.x0), f64::from(c.y0), f64::from(c.x1), f64::from(c.y1)),
+            None => shape.path.control_bounds().unwrap_or((0.0, 0.0, 0.0, 0.0)),
+        };
         let area = fill_rasterizer(&shape.path, tol);
         let mut bounds = None;
         let fill = shape.fill.as_ref().map(|f| {
@@ -407,7 +411,7 @@ impl CompiledShape {
 
 /// Renders a shape layer's appearance (fill, then stroke over it) in `format`, clipped to `clip`.
 pub fn render_shape(shape: &ShapeLayer, format: PixelFormat, clip: Rect) -> Surface {
-    CompiledShape::new(shape, DEFAULT_TOLERANCE).render(format, clip)
+    CompiledShape::new_in(shape, DEFAULT_TOLERANCE, Some(clip)).render(format, clip)
 }
 
 #[cfg(test)]

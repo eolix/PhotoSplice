@@ -665,6 +665,10 @@ fn apply_adjustment(adj: &photosuite_doc::Adjustment, buf: &mut Buffer, cx: &Ctx
     if cx.mode == photosuite_color::ColorMode::Lab && lab::native(adj) {
         lab::apply(adj, buf, cx.transfer, cx.depth);
     } else {
+        if cx.mode == photosuite_color::ColorMode::Lab {
+            // The others work on the screen colour: clip what lies outside sRGB first.
+            lab::clip(buf);
+        }
         adjust::apply_depth(adj, buf, cx.transfer, Some(cx.depth));
     }
 }
@@ -876,7 +880,7 @@ pub fn stroke_frame(doc: &Document, layer: &Layer, st: &photosuite_doc::StrokeFx
 
 pub fn surface_to_buffer(s: &Surface, rect: Rect) -> Buffer {
     let mut px = vec![[0.0f32; 4]; rect.width() as usize * rect.height() as usize];
-    s.read_rgba_into(rect, &mut px);
+    s.read_rgba_unclamped_into(rect, &mut px);
     Buffer { rect, px }
 }
 
@@ -918,10 +922,19 @@ pub fn render_fill_content(layer: &Layer, f: &Fill, canvas: Rect, patterns: &[Pa
     render_fill(f, canvas, fill_frame(layer, canvas), &prepared)
 }
 
+/// A fill layer's pixels over `canvas` in a CMYK document, as ink amounts `[C, M, Y, K, alpha]`
+/// (row-major), the way the CMYK compositor renders them: a solid colour keeps its own inks and
+/// a gradient interpolates its stops' inks, so a CMYK file is written without a lossy round trip
+/// through RGB. Run inside the document's [`photosuite_color::convert::with_cmyk_space`] scope.
+pub fn render_fill_inks(layer: &Layer, f: &Fill, canvas: Rect, patterns: &[Pattern]) -> Vec<[f32; 5]> {
+    let prepared = pattern::PreparedPatterns::new(patterns, pattern::PREPARED_PATTERN_BYTES);
+    cmyk::fill_in(layer, f, canvas, canvas, &prepared).px.iter().map(|p| [1.0 - p[0], 1.0 - p[1], 1.0 - p[2], 1.0 - p[3], p[4]]).collect()
+}
+
 fn render_fill(f: &Fill, rect: Rect, canvas: Rect, patterns: &pattern::PreparedPatterns<'_>) -> Buffer {
     match f {
         Fill::Solid(c) => {
-            let rgb = c.to_rgb();
+            let rgb = c.to_rgb_unclamped();
             Buffer::filled(rect, [rgb[0], rgb[1], rgb[2], c.alpha])
         }
         // Gradient geometry relative to the layer's frame, independent of the render rect.
@@ -1222,6 +1235,21 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
         if ko {
             knockout::leave();
         }
+        // A pass-through group that layers are clipped to keeps blending through, but its
+        // adjustment layers change only the group's own content, not the layers beneath
+        // (psd-tools passthrough_clipping_mask_adjustment: an Exposure alone in such a group
+        // changes nothing; passthrough_clipping_mask_blendmode: blend modes still reach below).
+        if has_clipped
+            && g.children.iter().any(|c| c.visible && matches!(c.content, LayerContent::Adjustment(_)))
+            && let (Some(before), Some(iso)) = (&before, render_content(layer, rect, cx))
+        {
+            let plain: Vec<Layer> = g.children.iter().filter(|c| !matches!(c.content, LayerContent::Adjustment(_))).cloned().collect();
+            let mut unadjusted = before.clone();
+            composite_stack(&plain, &mut unadjusted, cx);
+            for ((p, u), c) in backdrop.px.iter_mut().zip(&unadjusted.px).zip(&iso.px) {
+                *p = knockout::mix(*u, *p, c[3]);
+            }
+        }
         if needs_mix && let Some(before) = &before {
             let mv = mask_vals(layer, rect, cx);
             for (i, (p, a)) in backdrop.px.iter_mut().zip(&before.px).enumerate() {
@@ -1335,6 +1363,7 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
             backdrop,
             &maps,
             paint_bounds(layer).unwrap_or_else(|| layer_bounds(layer, cx.canvas)),
+            cx.canvas,
             cx.patterns,
             vstroke,
         );
@@ -1665,6 +1694,7 @@ fn composite_atop_any(layer: &Layer, base: &mut Buffer, cx: &Ctx) {
             &mut opaque,
             &maps,
             paint_bounds(layer).unwrap_or_else(|| layer_bounds(layer, cx.canvas)),
+            cx.canvas,
             cx.patterns,
             vstroke,
         );

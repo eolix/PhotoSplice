@@ -78,11 +78,12 @@ pub fn apply_comp(doc: &mut Document, comp: &LayerComp, all: bool) {
             && let Some((x, y)) = st.position
             && let Some((cx, cy)) = doc.layer(id).and_then(layer_position)
             && (x, y) != (cx, cy)
+            && let (Some(dx), Some(dy)) = (x.checked_sub(cx), y.checked_sub(cy))
         {
             let snapshot = doc.clone();
             if let Some(l) = doc.layer_mut(id) {
-                crate::commands::translate_layer(&snapshot, l, x - cx, y - cy);
-                crate::vector_cmds::translate_vectors(&snapshot, l, f64::from(x - cx), f64::from(y - cy));
+                crate::commands::translate_layer(&snapshot, l, dx, dy);
+                crate::vector_cmds::translate_vectors(&snapshot, l, f64::from(dx), f64::from(dy));
             }
         }
         let Some(l) = doc.layer_mut(id) else { continue };

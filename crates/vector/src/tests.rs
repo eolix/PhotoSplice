@@ -369,3 +369,22 @@ fn joined_subpaths_fill_as_one_component() {
     let lone = Path::new(vec![Subpath::polygon(&[(2.0, 2.0), (8.0, 2.0), (8.0, 8.0)]).with_op(PathOp::Join)]);
     assert_eq!(cov(&lone, r)[3 * 20 + 6], 1.0);
 }
+
+#[test]
+fn gradient_fill_opacity_midpoints_and_inverted_frame() {
+    // Opacity stops fade the fill; a midpoint moves the colour halfway point.
+    let mut fill = Fill::gradient(vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], 0.0, 1.0, photosuite_doc::GradientStyle::Linear, false);
+    if let Fill::Gradient { opacity_stops, midpoints, .. } = &mut fill {
+        *opacity_stops = vec![(0.0, 1.0), (1.0, 0.0)];
+        *midpoints = vec![0.25];
+    }
+    let sh = ShapeLayer { path: shapes::rect(0.0, 0.0, 100.0, 10.0), fill: Some(fill.clone()), ..Default::default() };
+    let rgba = CompiledShape::new(&sh, DEFAULT_TOLERANCE).render_rgba(Rect::new(0, 0, 100, 10));
+    assert!(rgba[0][3] > 0.98 && rgba[99][3] < 0.02, "fades out: {:?} {:?}", rgba[0], rgba[99]);
+    assert!((rgba[25][0] - 0.5).abs() < 0.03, "halfway at the midpoint: {:?}", rgba[25]);
+    // An inverted path without points fills the canvas; its gradient spans the canvas too.
+    let inv = ShapeLayer { path: Path { inverted: true, ..Default::default() }, fill: Some(fill), ..Default::default() };
+    let s = render_shape(&inv, PixelFormat::RGBA8, Rect::new(0, 0, 40, 4));
+    let alpha = |x: i32| s.pixel(x, 1)[3];
+    assert!(alpha(0) > 0.98 && alpha(39) < 0.05, "{} {}", alpha(0), alpha(39));
+}

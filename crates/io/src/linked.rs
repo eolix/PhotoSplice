@@ -84,14 +84,88 @@ pub fn parse_linked_files(data: &[u8]) -> Vec<LinkedFile> {
 
 /// The embedded file for smart-object `uuid` among the document's preserved PSD global blocks.
 pub fn find_linked_file(meta: &Metadata, uuid: &str) -> Option<LinkedFile> {
+    find_in_blocks(meta.psd_global_blocks.iter().map(|(_, k, d)| (k, d.as_slice())), uuid)
+}
+
+/// The embedded file for smart-object `uuid` among PSD global blocks given as (key, data).
+pub fn find_in_blocks<'a>(blocks: impl IntoIterator<Item = (&'a [u8; 4], &'a [u8])>, uuid: &str) -> Option<LinkedFile> {
     if uuid.is_empty() {
         return None;
     }
-    meta.psd_global_blocks
-        .iter()
-        .filter(|(_, k, _)| matches!(k, b"lnk2" | b"lnk3" | b"lnkD"))
-        .flat_map(|(_, _, d)| parse_linked_files(d))
-        .find(|f| f.uuid == uuid)
+    blocks.into_iter().filter(|(k, _)| matches!(*k, b"lnk2" | b"lnk3" | b"lnkD")).flat_map(|(_, d)| parse_linked_files(d)).find(|f| f.uuid == uuid)
+}
+
+/// The size of embedded file `uuid` among PSD global blocks given as (key, data), when it is there
+/// and readable with a non-empty size (the source size a `PlLd` record leaves out).
+pub(crate) fn source_size_in_blocks<'a>(
+    blocks: impl IntoIterator<Item = (&'a [u8; 4], &'a [u8])>,
+    uuid: &str,
+    ctl: &photosuite_raster::Interrupt,
+) -> Option<(f64, f64)> {
+    let f = find_in_blocks(blocks, uuid)?;
+    if ctl.cancelled() {
+        return None;
+    }
+    source_size_probe(&f.bytes).filter(|(w, h)| *w > 0.0 && *h > 0.0)
+}
+
+/// Pixel size of an embedded source file from its header: PSD/PSB, TIFF (the default page's
+/// directory), PNG (`IHDR`) and JPEG (the frame header); any other image is decoded flat by
+/// `photosuite-codecs`. It never imports a document: a layered TIFF can carry PSD layer data
+/// whose `lnkD` holds another file, so a full import here would nest without bound.
+/// Ported from storytold/photocraft@0002d861.
+pub(crate) fn source_size_probe(bytes: &[u8]) -> Option<(f64, f64)> {
+    let be32 = |at: usize| bytes.get(at..at + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    let size = |w: u32, h: u32| (f64::from(w), f64::from(h));
+    match bytes {
+        _ if crate::is_psd(bytes) => be32(18).zip(be32(14)).map(|(w, h)| size(w, h)),
+        [b'I', b'I', 42, 0, ..] | [b'M', b'M', 0, 42, ..] | [b'I', b'I', 43, 0, ..] | [b'M', b'M', 0, 43, ..] => {
+            let info = photosuite_codecs::tiff_info(bytes).ok()?;
+            let page = info.pages.get(info.default_page()?)?;
+            Some(size(page.width, page.height))
+        }
+        [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, ..] => be32(16).zip(be32(20)).map(|(w, h)| size(w, h)),
+        [0xFF, 0xD8, ..] => jpeg_size(bytes),
+        _ => photosuite_codecs::decode(bytes).ok().map(|img| {
+            let (w, h) = img.dimensions();
+            size(w, h)
+        }),
+    }
+}
+
+/// A JPEG's size from its first start-of-frame marker (ITU-T T.81 B.2.2), walking the marker
+/// segments without decoding. Each step moves forward, so a malformed file ends the walk.
+fn jpeg_size(bytes: &[u8]) -> Option<(f64, f64)> {
+    let mut at = 2usize;
+    loop {
+        // Markers are 0xFF then a code; extra 0xFF fill bytes may come first.
+        while bytes.get(at) == Some(&0xFF) && bytes.get(at + 1) == Some(&0xFF) {
+            at += 1;
+        }
+        if *bytes.get(at)? != 0xFF {
+            return None;
+        }
+        let code = *bytes.get(at + 1)?;
+        match code {
+            // SOF0..SOF15, except DHT (C4), JPG (C8) and DAC (CC).
+            0xC0..=0xCF if !matches!(code, 0xC4 | 0xC8 | 0xCC) => {
+                let h = bytes.get(at + 5..at + 7)?;
+                let w = bytes.get(at + 7..at + 9)?;
+                return Some((f64::from(u16::from_be_bytes([w[0], w[1]])), f64::from(u16::from_be_bytes([h[0], h[1]]))));
+            }
+            // Standalone markers have no length.
+            0x01 | 0xD0..=0xD7 => at = at.checked_add(2)?,
+            // Start of scan or end of image before any frame header.
+            0xDA | 0xD9 => return None,
+            _ => {
+                let len = bytes.get(at + 2..at + 4).map(|b| usize::from(u16::from_be_bytes([b[0], b[1]])))?;
+                if len < 2 {
+                    return None;
+                }
+                at = at.checked_add(2 + len)?;
+            }
+        }
+    }
 }
 
 /// The four-character file type Photoshop records for an embedded file, from its contents.
@@ -192,6 +266,45 @@ pub fn block_uuids(data: &[u8]) -> Vec<String> {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    /// A placed source's size comes from its header, for every format a CS2 file embeds, and
+    /// never by importing it as a document.
+    #[test]
+    fn source_size_probe_reads_headers() {
+        use photosuite_codecs::{ChannelLayout, EncodeOptions, Format, Image, SampleType};
+        let img = Image::new(7, 5, ChannelLayout::Rgb, SampleType::U8).unwrap();
+        for format in [Format::Png, Format::Jpeg, Format::Tiff, Format::Bmp] {
+            let bytes = photosuite_codecs::encode(&img, format, &EncodeOptions::default()).unwrap();
+            assert_eq!(source_size_probe(&bytes), Some((7.0, 5.0)), "{format:?}");
+        }
+        let mut psd = b"8BPS\0\x01".to_vec();
+        psd.extend([0; 6]);
+        psd.extend(3u16.to_be_bytes());
+        psd.extend(40u32.to_be_bytes()); // height
+        psd.extend(30u32.to_be_bytes()); // width
+        assert_eq!(source_size_probe(&psd), Some((30.0, 40.0)));
+        assert_eq!(source_size_probe(b"not an image"), None);
+        assert_eq!(source_size_probe(&[]), None);
+    }
+
+    /// Malformed JPEG marker walks end without a size and without panicking or looping.
+    #[test]
+    fn jpeg_size_rejects_malformed_marker_walks() {
+        let sof = [0xFF, 0xC0, 0, 17, 8, 0, 5, 0, 7];
+        let ok: Vec<u8> = [&[0xFF, 0xD8][..], &[0xFF, 0xE0, 0, 4, 1, 2], &[0xFF, 0xFF, 0xD0], &sof].concat();
+        assert_eq!(jpeg_size(&ok), Some((7.0, 5.0)), "APP0, a fill byte and a standalone marker are skipped");
+        for bad in [
+            vec![0xFF, 0xD8],
+            vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 1],       // length below 2
+            vec![0xFF, 0xD8, 0xFF, 0xE0, 0xFF, 0xFF], // length past the end
+            vec![0xFF, 0xD8, 0x00, 0x00],             // not a marker
+            vec![0xFF, 0xD8, 0xFF, 0xDA, 0, 2],       // scan before any frame header
+            vec![0xFF, 0xD8, 0xFF, 0xC0, 0, 17, 8],   // truncated frame header
+            [&[0xFF, 0xD8][..], &[0xFF; 64]].concat(),
+        ] {
+            assert_eq!(jpeg_size(&bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn round_trips_and_finds_by_uuid() {

@@ -110,12 +110,9 @@ pub fn warp_from_params(cmd: &str, p: &Value, rect: [f64; 4]) -> Result<Warp> {
     Ok(w)
 }
 
+/// A Background is turned into a normal layer by the caller first
+/// ([`crate::extra_cmds::background_to_layer`]).
 fn warp_layer(doc_sel: Option<&Surface>, group: Locks, l: &mut Layer, w: &Warp, rect: Rect, interp: Interp) -> Result<()> {
-    if l.locks.position && l.name == "Background" {
-        l.locks.position = false;
-        l.locks.transparency = false;
-        l.name = "Layer 0".into();
-    }
     let locks = l.locks.union(group);
     if locks.position || locks.all {
         return Err(EngineError::Other(format!("layer \"{}\" is locked", l.name)));
@@ -220,6 +217,7 @@ fn apply(s: &mut Session, p: &Value, cmd: &str) -> Result<Value> {
         let sel = doc.selection.clone();
         let is_group = doc.layer(id).is_some_and(Layer::is_group);
         let group = crate::transform_cmds::group_locks(doc, id);
+        crate::extra_cmds::background_to_layer(doc, id);
         let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
         warp_layer(if is_group { None } else { sel.as_ref() }, group, l, &w, rect, interp)?;
         let snapshot = doc.clone();
@@ -539,8 +537,9 @@ mod tests {
         let before = active_surface(&s);
         s.execute("edit.transform.warp", json!({"style": "arc", "bend": 50})).unwrap();
         let after = active_surface(&s);
-        assert!(after.content_bounds().y1 > 42, "{:?}", after.content_bounds());
-        assert!(after.pixel(11, 11)[3] < 0.5, "top-left corner pulls in");
+        // Reference's Arc: the bottom corners stay, the top rises onto an arc.
+        assert!(after.content_bounds().y0 < 8, "{:?}", after.content_bounds());
+        assert!(after.pixel(11, 38)[3] > 0.5, "the bottom-left corner stays");
         s.undo();
         assert_eq!(active_surface(&s), before);
         assert!(s.execute("edit.transform.warp", json!({"style": "spiral"})).is_err());

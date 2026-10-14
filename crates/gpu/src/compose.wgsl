@@ -185,6 +185,17 @@ fn blend_channel(mode: i32, cb: f32, cs: f32) -> f32 {
     }
 }
 
+// adjust::range_hue: where a hue (turns) falls among Hue/Saturation's colour ranges.
+fn range_hue(h: f32) -> f32 {
+    let deg = rem_euclid(h, 1.0) * 360.0;
+    let k = min(floor(deg / 60.0), 5.0);
+    let f = deg / 60.0 - k;
+    // Steps behind per sextant: f, 1, 2, 2 + f, 3, 4.
+    var steps = k - select(0.0, 1.0, k >= 3.0);
+    if (k < 1.0 || (k >= 3.0 && k < 4.0)) { steps = steps + f; }
+    return rem_euclid(deg - steps * 60.0 / 255.0, 360.0) / 360.0;
+}
+
 fn lum(c: vec3<f32>) -> f32 { return 0.3 * c.r + 0.59 * c.g + 0.11 * c.b; }
 
 fn clip_color(c: vec3<f32>) -> vec3<f32> {
@@ -235,10 +246,17 @@ fn composite(mode: i32, b: vec4<f32>, s: vec4<f32>, opacity: f32) -> vec4<f32> {
         let m = srgb_to_lab(b.rgb) * (ab * (1.0 - as_) / ao) + srgb_to_lab(s.rgb) * (as_ / ao);
         return vec4(lab_to_srgb(m), ao);
     }
-    let bl = blend_rgb(mode, b.rgb, s.rgb);
+    var cb = b.rgb;
+    var cs = s.rgb;
+    if ((op.flags & F_LAB) != 0u && mode != M_NORMAL) {
+        // A Lab document keeps colours outside sRGB; the other modes blend the screen colour.
+        cb = clamp(cb, vec3(0.0), vec3(1.0));
+        cs = clamp(cs, vec3(0.0), vec3(1.0));
+    }
+    let bl = blend_rgb(mode, cb, cs);
     let ao = as_ + ab * (1.0 - as_);
     if (ao <= 0.0) { return vec4(0.0); }
-    let rgb = ((1.0 - as_) * ab * b.rgb + (1.0 - ab) * as_ * s.rgb + as_ * ab * bl) / ao;
+    let rgb = ((1.0 - as_) * ab * cb + (1.0 - ab) * as_ * cs + as_ * ab * bl) / ao;
     return vec4(rgb, ao);
 }
 
@@ -266,7 +284,7 @@ fn composite_g(mode: i32, b: vec4<f32>, s: vec4<f32>, opacity: f32, gamma_on: bo
     return vec4(text_dec(pw / ao, g), ao);
 }
 
-// photosuite_color::convert::{srgb_to_lab, lab_to_srgb} (D50, Bradford to sRGB).
+// photosuite_color::convert::{srgb_to_lab, lab_to_srgb_unclamped} (D50, Bradford to sRGB).
 const D50: vec3<f32> = vec3(0.96422, 1.0, 0.82521);
 fn lab_f(t: f32) -> f32 {
     if (t > 0.008856452) { return pow(t, 1.0 / 3.0); }   // (6/29)^3
@@ -294,7 +312,8 @@ fn lab_to_srgb(lab: vec3<f32>) -> vec3<f32> {
     let r = 3.133856 * xyz.x - 1.616867 * xyz.y - 0.490615 * xyz.z;
     let g = -0.978768 * xyz.x + 1.916142 * xyz.y + 0.033454 * xyz.z;
     let b = 0.071945 * xyz.x - 0.228991 * xyz.y + 1.405243 * xyz.z;
-    return vec3(linear_to_srgb(clamp(r, 0.0, 1.0)), linear_to_srgb(clamp(g, 0.0, 1.0)), linear_to_srgb(clamp(b, 0.0, 1.0)));
+    // Unclipped, as `lab_to_srgb_unclamped` (a Lab document keeps colours outside sRGB).
+    return vec3(linear_to_srgb(r), linear_to_srgb(g), linear_to_srgb(b));
 }
 
 fn dissolve_noise(d: vec2<i32>) -> f32 {
@@ -415,11 +434,14 @@ fn color_lookup(c: vec3<f32>, n: i32, tetra: bool) -> vec3<f32> {
 }
 
 // One Selective Color range: its CMYK percentages (LUT row 0, 4 per range) weighted by `w`.
+// The ink moves towards a target clamped to 0..1 (mirrors compose::adjust::selective_color).
 fn selective_row(r: i32, w: f32, c: vec3<f32>, relative: bool) -> vec3<f32> {
     let k = lut_at(r * 4 + 3) / 100.0;
-    var d = vec3(lut_at(r * 4), lut_at(r * 4 + 1), lut_at(r * 4 + 2)) / 100.0 + k;
-    if (relative) { d = d * (1.0 - c); }
-    return select(vec3(0.0), d * w, w > 0.0);
+    let a = vec3(lut_at(r * 4), lut_at(r * 4 + 1), lut_at(r * 4 + 2)) / 100.0;
+    let ink = 1.0 - c;
+    var t = ink + a + k;
+    if (relative) { t = ink * (1.0 + a) * (1.0 + k); }
+    return select(vec3(0.0), (clamp(t, vec3(0.0), vec3(1.0)) - ink) * w, w > 0.0);
 }
 
 // compose::adjust::selective_color (ranges × CMYK percentages in LUT row 0). Written without
@@ -459,7 +481,7 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
         }
         case 3: { return vec3(posterize(c.r, p0.x), posterize(c.g, p0.x), posterize(c.b, p0.x)); }
         case 6: { return vec3(exposure(c.r, p0), exposure(c.g, p0), exposure(c.b, p0)); }  // Exposure
-        case 7: { return vec3(lut(0, c.r), lut(1, c.g), lut(2, c.b)); }        // Levels / Curves / B/C
+        case 7: { return vec3(lut(0, c.r), lut(1, c.g), lut(2, c.b)); }        // Levels / Curves / B/C / Color balance
         case 8: {                                                              // Hue/Saturation
             let hsl = rgb_to_hsl(c);
             var hh: f32;
@@ -470,32 +492,77 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
             var dl = 0.0;
             if (p1.x > 0.5) {
                 let chroma = min((max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b))) * 4.0, 1.0);
-                dh = lut(0, hsl.x) * chroma;
-                ds = lut(1, hsl.x) * chroma;
-                dl = lut(2, hsl.x) * chroma;
+                let rh = range_hue(hsl.x);
+                dh = lut(0, rh) * chroma;
+                // Row 1 holds the ranges' saturation factor excess.
+                ds = lut(1, rh) * chroma;
+                dl = lut(2, rh) * chroma;
             }
-            let sat = clamp(p0.y + ds, -1.0, 1.0);
+            // adjust::master_and_range_saturation: the master's factor times the ranges'.
+            let ms = clamp(p0.y, -1.0, 0.999);
+            let mk = select(1.0 + ms, 1.0 / (1.0 - ms), ms > 0.0);
+            let ke = mk * (1.0 + max(ds, -1.0)) - 1.0;
+            var sat = select(max(ke, -1.0), 1.0 - 1.0 / (1.0 + ke), ke > 0.0);
+            if (p0.w > 0.5) { sat = clamp(p0.y, -1.0, 1.0); }
             let light = clamp(p0.z + dl, -1.0, 1.0);
+            var rgb: vec3<f32>;
             if (p0.w > 0.5) {
+                // Colorize: lightness moves the HSL lightness (mirrors compose::adjust::hue_saturation).
                 hh = rem_euclid(p0.x, 360.0) / 360.0;
-                ss = max(abs(sat), 0.25);
+                ss = min(abs(sat), 1.0);
+                var ll = hsl.z;
+                if (light > 0.0) { ll = ll + (1.0 - ll) * light; } else { ll = ll * (1.0 + light); }
+                return clamp(hsl_to_rgb(hh, ss, ll), vec3(0.0), vec3(1.0));
             } else {
+                // Saturation scales about the HSL lightness, held where the smallest channel would
+                // go below 0 (mirrors compose::adjust::hue_saturation).
                 hh = rem_euclid(hsl.x + (p0.x + dh) / 360.0, 1.0);
-                ss = clamp(hsl.y * (1.0 + sat), 0.0, 1.0);
+                rgb = hsl_to_rgb(hh, hsl.y, hsl.z);
+                // A range's lightness comes before the saturation step: a raise towards the
+                // brightest channel, a cut towards the darkest (adjust::hue_saturation_ranged).
+                let rl = clamp(dl, -1.0, 1.0);
+                let hi = max(rgb.r, max(rgb.g, rgb.b));
+                let lo = min(rgb.r, min(rgb.g, rgb.b));
+                if (rl > 0.0) {
+                    rgb = rgb + (hi - rgb) * rl;
+                } else if (rl < 0.0) {
+                    rgb = rgb + (lo - rgb) * -rl;
+                }
+                let mx = max(rgb.r, max(rgb.g, rgb.b));
+                let mn = min(rgb.r, min(rgb.g, rgb.b));
+                let mid = (mx + mn) * 0.5;
+                var k = 1.0 + sat;
+                if (sat > 0.0) {
+                    k = 1.0 / max(1.0 - sat, 1e-6);
+                    if (p1.y < 0.5 && mn < mid) { k = min(k, mid / (mid - mn)); }
+                    // With colour ranges, nor the largest above 1 (adjust::hue_saturation_scale).
+                    if (p1.y < 0.5 && p1.x > 0.5 && mx > mid) { k = min(max(k, 1.0), max((1.0 - mid) / (mx - mid), 1.0)); }
+                }
+                rgb = mid + (rgb - mid) * k;
             }
-            var rgb = hsl_to_rgb(hh, ss, hsl.z);
-            if (light > 0.0) {
-                rgb = rgb + (1.0 - rgb) * light;
-            } else if (light < 0.0) {
-                rgb = rgb * (1.0 + light);
+            // The master lightness towards white or black.
+            let ml = clamp(p0.z, -1.0, 1.0);
+            if (ml > 0.0) {
+                rgb = rgb + (1.0 - rgb) * ml;
+            } else if (ml < 0.0) {
+                rgb = rgb * (1.0 + ml);
             }
-            return rgb;
+            return clamp(rgb, vec3(0.0), vec3(1.0));
         }
         case 9: {                                                              // Vibrance
-            let hsl = rgb_to_hsl(c);
-            let boost = p0.x * (1.0 - hsl.y);
-            let ns = clamp(hsl.y * (1.0 + p0.y) + boost * max(hsl.y, 0.1), 0.0, 1.0);
-            return hsl_to_rgb(hsl.x, ns, hsl.z);
+            // compose::adjust::vibrance_px: in linear light, channels move from the brightest by
+            // the factor for their saturation (LUT row 0), then blend with the luminance by p0.x.
+            let g = p0.y;
+            var l = vec3(t_decode(c.r, g), t_decode(c.g, g), t_decode(c.b, g));
+            let mx = max(l.r, max(l.g, l.b));
+            let mn = min(l.r, min(l.g, l.b));
+            if (mx > 0.0) {
+                let f = lut(0, 1.0 - mn / mx);
+                l = max(mx - (mx - l) * f, vec3(0.0));
+            }
+            let y = 0.29 * l.r + 0.71 * l.g;
+            l = y + (l - y) * p0.x;
+            return clamp(vec3(t_encode(l.r, g), t_encode(l.g, g), t_encode(l.b, g)), vec3(0.0), vec3(1.0));
         }
         case 10: {                                                             // Channel mixer
             let r = clamp(dot(p0.xyz, c) + p0.w, 0.0, 1.0);
@@ -522,27 +589,16 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
             if (c.b <= c.r && c.b <= c.g) { secondary = 1; } else if (c.r <= c.g) { secondary = 3; }
             let g = clamp(mn + (mid - mn) * w[secondary] / 100.0 + (mx - mid) * w[primary] / 100.0, 0.0, 1.0);
             if (p1.z > 0.5) {
-                return clamp(g * p2.rgb * 2.0, vec3(0.0), vec3(1.0)) * 0.5 + g * 0.5;
+                // The tint at the grey's luminosity (Color blend), as compose::adjust.
+                return clamp(set_lum(p2.rgb, g), vec3(0.0), vec3(1.0));
             }
             return vec3(g);
         }
         case 13: {                                                             // Gradient map
-            var t = gray(c);
+            var t = dot(c, vec3(0.30, 0.59, 0.11));                            // adjust::gradient_map_level
             if (p0.x > 0.5) { t = 1.0 - t; }
             var o = vec3(lut(0, t), lut(1, t), lut(2, t));
             if (p0.y > 0.5) { o = clamp(o + bayer4(adj_px) / 255.0, vec3(0.0), vec3(1.0)); }
-            return o;
-        }
-        case 14: {                                                             // Color balance
-            let l = gray(c);
-            let ws = clamp(1.0 - l * 2.0, 0.0, 1.0);
-            let wh = clamp(l * 2.0 - 1.0, 0.0, 1.0);
-            let wm = 1.0 - ws - wh;
-            let o = clamp(c + (p0.rgb * ws + p1.rgb * wm + p2.rgb * wh) / 100.0 * 0.5, vec3(0.0), vec3(1.0));
-            if (p3.x > 0.5) {
-                let l1 = max(gray(o), 1e-6);
-                return clamp(o * l / l1, vec3(0.0), vec3(1.0));
-            }
             return o;
         }
         case 15: { return selective_color(c, p0.x > 0.5); }                       // Selective color
@@ -733,12 +789,13 @@ fn wrap(i: i32, n: i32) -> i32 {
 // compose::pattern::Tile::sample through Placement::map. p3 = (origin, cos, sin),
 // p4 = (1 / scale, tile w, tile h); `pat_tex` holds premultiplied RGBA.
 fn pattern_sample(d: vec2<i32>) -> vec4<f32> {
-    let dx = f32(d.x) + 0.5 - op.p3.x;
-    let dy = f32(d.y) + 0.5 - op.p3.y;
+    // The pixel's corner maps into the tile, tile pixel i at i (compose::pattern::render).
+    let dx = f32(d.x) - op.p3.x;
+    let dy = f32(d.y) - op.p3.y;
     let c = op.p3.z;
     let s = op.p3.w;
-    let u = (dx * c - dy * s) * op.p4.x - 0.5;
-    let v = (dx * s + dy * c) * op.p4.x - 0.5;
+    let u = (dx * c - dy * s) * op.p4.x;
+    let v = (dx * s + dy * c) * op.p4.x;
     let x0 = floor(u);
     let y0 = floor(v);
     let fx = u - x0;
@@ -989,10 +1046,10 @@ fn fs_mblur(in: VOut) -> @location(0) vec4<f32> {
     return mout(acc);
 }
 
-// Precise glow from a distance map: p0 = (solid, soft, invert).
+// Precise glow from a distance map: p0 = (solid, soft, invert, distance offset).
 @fragment
 fn fs_mglow(in: VOut) -> @location(0) vec4<f32> {
-    let d = textureLoad(tex_a, local(in.pos), 0).r;
+    let d = textureLoad(tex_a, local(in.pos), 0).r + op.p0.w;
     var m = clamp(1.0 - (d - op.p0.x) / op.p0.y, 0.0, 1.0);
     if (d <= op.p0.x) { m = 1.0; }
     if (op.p0.z > 0.5) { m = 1.0 - m; }
@@ -1067,22 +1124,26 @@ fn fs_mbevelshade(in: VOut) -> @location(0) vec4<f32> {
 
 // One bevel shading value (`bevel_maps`' shade_into): highlight (p1.z = 0) or shadow amount for
 // height-gradient scale `depth`, times `region`, through the gloss contour.
+// Height read clamped to the chunk (`bevel_maps`' `hc`): past the edge it continues the edge's.
+fn ra_clamped(p: vec2<i32>) -> f32 {
+    return textureLoad(tex_a, clamp(p, vec2(0), vec2<i32>(chunk.size) - vec2(1)), 0).r;
+}
+
 fn bevel_part(p: vec2<i32>, depth: f32, region: f32) -> f32 {
-    let gx = (ra(p + vec2(1, 0)) - ra(p - vec2(1, 0))) * 0.5 * depth;
-    let gy = (ra(p + vec2(0, 1)) - ra(p - vec2(0, 1))) * 0.5 * depth;
+    let gx = (ra_clamped(p + vec2(1, 0)) - ra_clamped(p - vec2(1, 0))) * 0.5 * depth;
+    let gy = (ra_clamped(p + vec2(0, 1)) - ra_clamped(p - vec2(0, 1))) * 0.5 * depth;
     let n = vec3(-gx, -gy, 1.0);
     let len = sqrt(n.x * n.x + n.y * n.y + 1.0);
     let shade = (n.x * op.p0.x + n.y * op.p0.y + n.z * op.p0.z) / len;
     let se = op.p0.w;
     let k = shade - se;
-    var v = 0.0;
-    if (op.p1.z > 0.5) {
-        if (k <= 0.0) { v = clamp(-k / max(se, 1e-3), 0.0, 1.0) * region; }
-    } else if (k > 0.0) {
-        v = clamp(k / max(1.0 - se, 1e-3), 0.0, 1.0) * region;
-    }
-    if (op.p1.w > 0.5) { v = lut(0, v); }
-    return v;
+    // `effects::gloss`: shading 0 .. ½ (flat) .. 1 through the gloss contour; above ½ is
+    // highlight, below shadow.
+    var s = 0.5 - 0.5 * clamp(-k / max(se, 1e-3), 0.0, 1.0);
+    if (k > 0.0) { s = 0.5 + 0.5 * clamp(k / max(1.0 - se, 1e-3), 0.0, 1.0); }
+    if (op.p1.w > 0.5) { s = lut(0, s); }
+    if (op.p1.z > 0.5) { return max(1.0 - 2.0 * s, 0.0) * region; }
+    return max(2.0 * s - 1.0, 0.0) * region;
 }
 
 // Bevel texture (`effects::bevel_height`): A + k × luminance of the pattern (× its alpha; 1 −

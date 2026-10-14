@@ -523,6 +523,7 @@ pub fn shape_blocks(sh: &ShapeLayer, raw: &mut Vec<([u8; 4], Vec<u8>)>, w: u32, 
     let pos = find(raw, b"vsms").or_else(|| find(raw, b"vmsk"));
     let from_raw = |d: &[u8]| path_from_vmsk(d, w, h).map(|(p, _)| p);
     let keep = |d: &[u8]| from_raw(d).as_ref() == Some(&sh.path);
+    let path_edited = pos.is_some_and(|i| !keep(&raw[i].1));
     match pos {
         Some(i) if keep(&raw[i].1) => {}
         _ => {
@@ -569,8 +570,17 @@ pub fn shape_blocks(sh: &ShapeLayer, raw: &mut Vec<([u8; 4], Vec<u8>)>, w: u32, 
         }
         None => {}
     }
-    // Live shape origination.
+    // Live shape origination. One we can't read (a polygon, a star, several shapes) stays while
+    // the path does; once the path is edited without a live shape it describes a shape that is
+    // gone, which the editor would bring back.
     let pos = find(raw, b"vogk");
+    if path_edited
+        && sh.live.is_none()
+        && let Some(i) = pos
+    {
+        raw.remove(i);
+        return;
+    }
     let current = pos.and_then(|i| live_from_vogk(&raw[i].1));
     if current != sh.live || (pos.is_none() && sh.live.is_some()) {
         let generated = sh.live.as_ref().and_then(|l| vogk_bytes_onto(l, dpi, pos.and_then(|i| raw.get(i)).map(|r| r.1.as_slice())));
@@ -787,6 +797,23 @@ mod tests {
         assert!(!raw.iter().any(|(k, _)| k == b"vogk"));
         let (p, _) = path_from_vmsk(&raw[0].1, 64, 64).unwrap();
         assert_eq!(p, edited.path);
+    }
+
+    /// A `vogk` we can't read (here not even a descriptor) stays while the path is unchanged, and
+    /// goes when the path is edited without a live shape (it would bring the old shape back).
+    #[test]
+    fn unreadable_vogk_goes_with_an_edited_path() {
+        let sh = ShapeLayer { path: sample_path(), fill: Some(Fill::Solid(Color::BLACK)), ..Default::default() };
+        let mut raw = Vec::new();
+        shape_blocks(&sh, &mut raw, 64, 64, 72.0);
+        raw.push((*b"vogk", vec![0, 0, 0, 1, 9, 9]));
+        let before = raw.clone();
+        shape_blocks(&sh, &mut raw, 64, 64, 72.0);
+        assert_eq!(raw, before, "unchanged path: kept");
+        let mut edited = sh.clone();
+        edited.path.subpaths.pop();
+        shape_blocks(&edited, &mut raw, 64, 64, 72.0);
+        assert!(!raw.iter().any(|(k, _)| k == b"vogk"));
     }
 }
 

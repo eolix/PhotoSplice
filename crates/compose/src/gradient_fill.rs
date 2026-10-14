@@ -32,7 +32,7 @@ impl Ramp {
         let mut color: Vec<(f32, [f32; 4])> = stops
             .iter()
             .map(|(p, c)| {
-                let rgb = crate::cmyk::project_color(c).unwrap_or_else(|| c.to_rgb());
+                let rgb = crate::cmyk::project_color(c).unwrap_or_else(|| c.to_rgb_unclamped());
                 (*p, [rgb[0], rgb[1], rgb[2], c.alpha])
             })
             .collect();
@@ -52,18 +52,7 @@ impl Ramp {
     }
 }
 
-/// Where a segment of relative position `u` lands once its midpoint is `m` (0.5 = unchanged):
-/// the colour is half-way at `m`, linear on either side.
-pub fn midpoint_remap(u: f32, m: f32) -> f32 {
-    let m = m.clamp(0.05, 0.95);
-    if (m - 0.5).abs() < 1e-6 {
-        u
-    } else if u <= m {
-        0.5 * u / m
-    } else {
-        0.5 + 0.5 * (u - m) / (1.0 - m)
-    }
-}
+pub use photosuite_vector::gradient::midpoint_remap;
 
 fn sample_color(stops: &[(f32, [f32; 4])], mids: &[f32], t: f32) -> [f32; 4] {
     match crate::adjust::locate(stops, t) {
@@ -92,7 +81,8 @@ fn sample_opacity(stops: &[(f32, f32)], t: f32) -> f32 {
 pub fn dither(c: &mut [f32; 4], x: i32, y: i32) {
     let n = (photosuite_color::dither_noise(x, y) - 0.5) / 255.0;
     for ch in c.iter_mut().take(3) {
-        *ch = (*ch + n).clamp(0.0, 1.0);
+        // A Lab document's colour outside sRGB stays outside (`Color::to_rgb_unclamped`).
+        *ch = if (0.0..=1.0).contains(ch) { (*ch + n).clamp(0.0, 1.0) } else { *ch + n };
     }
 }
 

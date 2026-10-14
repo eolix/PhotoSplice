@@ -38,15 +38,26 @@ fn has_text(s: &Session) -> std::result::Result<(), String> {
     active_text(s).map(|_| ())
 }
 
+/// Type on a path is neither point nor paragraph text (Photoshop offers no conversion).
+const ON_PATH: &str = "type on a path can't be converted";
+
 fn has_point_text(s: &Session) -> std::result::Result<(), String> {
-    match active_text(s)?.shape {
+    let t = active_text(s)?;
+    if t.path.is_some() {
+        return Err(ON_PATH.into());
+    }
+    match t.shape {
         TextShape::Point => Ok(()),
         TextShape::Box { .. } => Err("the type layer is already paragraph text".into()),
     }
 }
 
 fn has_box_text(s: &Session) -> std::result::Result<(), String> {
-    match active_text(s)?.shape {
+    let t = active_text(s)?;
+    if t.path.is_some() {
+        return Err(ON_PATH.into());
+    }
+    match t.shape {
         TextShape::Box { .. } => Ok(()),
         TextShape::Point => Err("the type layer is already point text".into()),
     }
@@ -140,6 +151,9 @@ fn set_orientation(s: &mut Session, p: &Value, o: Orientation) -> Result<Value> 
 
 fn to_paragraph(s: &mut Session, p: &Value) -> Result<Value> {
     let r = with_text(s, p, "Convert to Paragraph Text", |t, doc| {
+        if t.path.is_some() {
+            return Err(EngineError::Other(ON_PATH.into()));
+        }
         let l = layout(doc, t);
         let size_px = t.char_runs().iter().map(|r| r.style.size_pt).fold(t.size_pt, f32::max) * doc.resolution_dpi / 72.0;
         let ps = t.paragraph_runs().first().map(|p| p.style.clone()).unwrap_or_default();
@@ -184,6 +198,9 @@ fn to_paragraph(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn to_point(s: &mut Session, p: &Value) -> Result<Value> {
     let r = with_text(s, p, "Convert to Point Text", |t, doc| {
+        if t.path.is_some() {
+            return Err(EngineError::Other(ON_PATH.into()));
+        }
         let TextShape::Box { x, y, width, height } = t.shape else { return Err(EngineError::Other("already point text".into())) };
         let l = layout(doc, t);
         // Vertical type: columns run along the box height.
@@ -276,7 +293,7 @@ fn contours(els: &[PathEl]) -> Vec<Vec<Knot>> {
 /// which reproduces the nonzero fill under Photoshop's per-subpath path operations.
 pub fn text_path(doc: &Document, t: &TextLayer) -> Path {
     let l = layout(doc, t);
-    let warp = photosuite_text::render::layout_warp(&l, t.warp.as_ref());
+    let warp = photosuite_text::render::layout_warp(&l, t);
     let mut subpaths = Vec::new();
     for glyph in photosuite_text::render::outlines(&l, &t.transform, warp.as_ref()) {
         let cs = contours(&glyph);

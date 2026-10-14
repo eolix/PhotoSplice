@@ -228,6 +228,24 @@ impl DocState {
         let set: &[LayerId] = if self.selected_layers.contains(&active) { &self.selected_layers } else { std::slice::from_ref(&active) };
         self.doc.walk().into_iter().map(|(_, _, l)| l.id).filter(|id| set.contains(id)).collect()
     }
+    /// The selected layers with the active (target) layer first, as a saved file records them.
+    pub fn layer_selection(&self) -> Vec<LayerId> {
+        let mut out: Vec<LayerId> = self.active_layer.into_iter().collect();
+        out.extend(self.selected_layers().into_iter().filter(|id| Some(*id) != self.active_layer));
+        out
+    }
+
+    /// Selects `layers` (the first the active layer) as a file recorded them, when they are in
+    /// the document; no history step, the document stays clean.
+    pub fn restore_selection(&mut self, layers: &[LayerId]) {
+        let found: Vec<LayerId> = layers.iter().copied().filter(|id| self.doc.layer(*id).is_some()).collect();
+        let Some(&active) = found.first() else { return };
+        self.active_layer = Some(active);
+        self.layer_anchor = Some(active);
+        self.selected_layers = found;
+        self.history.set_current_layers(self.layer_target());
+    }
+
     pub fn is_layer_selected(&self, id: LayerId) -> bool {
         self.active_layer == Some(id) || (self.active_layer.is_some_and(|a| self.selected_layers.contains(&a)) && self.selected_layers.contains(&id))
     }

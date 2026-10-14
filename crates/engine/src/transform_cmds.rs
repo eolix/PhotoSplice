@@ -166,13 +166,9 @@ pub(crate) fn group_locks(doc: &Document, id: LayerId) -> Locks {
 }
 
 /// `group` holds the locks `l` inherits from the groups around it ([`group_locks`]).
+/// A Background is turned into a normal layer by the caller first
+/// ([`crate::extra_cmds::background_to_layer`]).
 pub(crate) fn transform_layer(doc_sel: Option<&Surface>, group: Locks, l: &mut Layer, h: &Homography, affine: Option<Affine>, interp: Interp) -> Result<()> {
-    // Photoshop turns the Background into a normal layer before transforming it.
-    if l.locks.position && l.name == "Background" {
-        l.locks.position = false;
-        l.locks.transparency = false;
-        l.name = "Layer 0".into();
-    }
     let locks = l.locks.union(group);
     if locks.position || locks.all {
         return Err(EngineError::Other(format!("layer \"{}\" is locked", l.name)));
@@ -398,6 +394,8 @@ fn transform(s: &mut Session, p: &Value) -> Result<Value> {
         let id = id.ok_or_else(|| EngineError::Other("no active layer".into()))?;
         let is_group = doc.layer(id).is_some_and(Layer::is_group);
         let group = group_locks(doc, id);
+        // The Background becomes a normal layer before it is transformed.
+        crate::extra_cmds::background_to_layer(doc, id);
         let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
         transform_layer(if is_group { None } else { sel.as_ref() }, group, l, &h, affine, interp)?;
         // Type layers re-render from their new transform.

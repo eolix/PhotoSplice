@@ -167,7 +167,7 @@ fn read_private(name: &str, pdf: &Pdf, private: &Dict<'_>, layers: &Stream<'_>) 
     if document.icc_profile.is_none() {
         document.icc_profile = space.icc.map(Arc::new);
     }
-    Ok(ImportResult { document, warnings })
+    Ok(ImportResult { document, warnings, selected: Vec::new() })
 }
 
 struct Space {
@@ -218,7 +218,7 @@ fn catalog_xmp(pdf: &Pdf) -> Option<Vec<u8>> {
 pub(super) fn attach(pdf: Vec<u8>, doc: &Document, warnings: &mut Vec<String>) -> Result<Vec<u8>, IoError> {
     let big = doc.size.width > 30_000 || doc.size.height > 30_000;
     // Raw so the planes can be interleaved; matted against white as Photoshop's composite is.
-    let opts = PsdExportOptions { force_psb: big, merged_matte: true, merged_compression: Compression::Raw, native_modes: false };
+    let opts = PsdExportOptions { force_psb: big, merged_matte: true, merged_compression: Compression::Raw, native_modes: false, selected_layers: Vec::new() };
     let (file, w) = document_to_psd_with(doc, &opts);
     warnings.extend(w);
     let (mode, cc) = match file.header.color_mode {

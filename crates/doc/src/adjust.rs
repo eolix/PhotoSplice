@@ -127,6 +127,15 @@ fn default_hue_ranges() -> [HueRange; 6] {
     HueRange::defaults()
 }
 
+/// The number of floats a 3D colour lookup of `size`³ RGB entries holds; `None` below 2 or
+/// when it overflows (a stored size is untrusted; storytold/photocraft@5049a1d0).
+pub fn lut3d_len(size: u32) -> Option<usize> {
+    if size < 2 {
+        return None;
+    }
+    usize::try_from(size).ok()?.checked_pow(3)?.checked_mul(3)
+}
+
 /// Photoshop adjustment layers (Layer → New Adjustment Layer).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Adjustment {
@@ -281,6 +290,16 @@ impl Adjustment {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lut3d_len_rejects_tiny_and_overflowing_sizes() {
+        assert_eq!(super::lut3d_len(0), None);
+        assert_eq!(super::lut3d_len(1), None);
+        assert_eq!(super::lut3d_len(2), Some(24));
+        assert_eq!(super::lut3d_len(33), Some(33 * 33 * 33 * 3));
+        assert_eq!(super::lut3d_len(1 << 22), None, "(2²²)³ overflows a 64-bit length");
+        assert_eq!(super::lut3d_len(u32::MAX), None);
+    }
+
     use super::*;
 
     #[test]

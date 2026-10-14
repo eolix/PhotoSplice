@@ -114,10 +114,13 @@ fn huge_declared_dimensions_small_data() {
     f.header.height = 300_000;
     let b = f.to_bytes().unwrap();
     assert!(PsdFile::from_bytes(&b).is_err());
+    // A ZIP merged image past the decode budget isn't inflated while parsing: the file opens and
+    // decoding the image refuses (storytold/photocraft@0fb4bbf1).
     f.image_data.compression = Compression::Zip;
     f.image_data.data = compression::zip_compress(&[0; 100]);
     let b = f.to_bytes().unwrap();
-    assert!(PsdFile::from_bytes(&b).is_err());
+    let parsed = PsdFile::from_bytes(&b).unwrap();
+    assert!(matches!(parsed.decode_merged(), Err(PsdError::LimitExceeded(_))));
 }
 
 #[test]

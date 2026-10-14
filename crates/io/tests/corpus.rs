@@ -148,15 +148,15 @@ struct Source {
 }
 
 /// Hand-picked mix in `corpus/psd` (170 files: 134 vs the merged image + 12 vs the thumbnail).
-const MIXED: Source = Source { label: "io corpus", dir: "corpus/psd", group_depth: 0, pass_floor: 146, roundtrip_floor: 169 };
+const MIXED: Source = Source { label: "io corpus", dir: "corpus/psd", group_depth: 0, pass_floor: 147, roundtrip_floor: 169 };
 
 /// The full psd-tools test set (309 files at the pinned commit; see `xtask/psd-tools-corpus.sha256`):
-/// 219 vs the merged image + 10 vs the thumbnail.
-const PSD_TOOLS: Source = Source { label: "psd-tools corpus", dir: "corpus/psd-tools", group_depth: 0, pass_floor: 229, roundtrip_floor: 307 };
+/// 234 vs the merged image + 10 vs the thumbnail.
+const PSD_TOOLS: Source = Source { label: "psd-tools corpus", dir: "corpus/psd-tools", group_depth: 0, pass_floor: 246, roundtrip_floor: 308 };
 
-/// Our Photoshop-authored oracles (256 files; https://github.com/storytold/photocraft-corpus),
+/// Our Reference-authored oracles (271 files; https://github.com/storytold/photocraft-corpus),
 /// grouped by feature (`smart-filters`, `effects`, `text`, `adjustments/<mode><bits>`).
-const PHOTOSHOP: Source = Source { label: "photoshop oracles", dir: "corpus/photoshop", group_depth: 2, pass_floor: 133, roundtrip_floor: 258 };
+const PHOTOSHOP: Source = Source { label: "photoshop oracles", dir: "corpus/photoshop", group_depth: 2, pass_floor: 204, roundtrip_floor: 271 };
 
 /// The corpus directory; a missing corpus fails the test.
 fn locate(src: &Source) -> PathBuf {

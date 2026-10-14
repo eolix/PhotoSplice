@@ -150,6 +150,9 @@ struct Widget {
     mids: Vec<f32>,
 }
 
+/// The most colour stops the on-canvas widget shows as handles.
+const MAX_STOP_HANDLES: usize = 32;
+
 impl Widget {
     fn new(f: &Fill, frame: Rect32) -> Option<Widget> {
         let Fill::Gradient { stops, midpoints, reverse, style, .. } = f else { return None };
@@ -174,6 +177,13 @@ impl Widget {
         lerp(self.start, self.end, self.u_of(t))
     }
 
+    /// Whether the stops are few enough to show and drag one by one. Gradients read with
+    /// Photoshop's smoothness or interpolation baked in (97 stops) and noise gradients (1024)
+    /// show only their end handles.
+    fn stops_editable(&self) -> bool {
+        self.stops.len() <= MAX_STOP_HANDLES
+    }
+
     fn mid_location(&self, i: usize) -> Option<f32> {
         let (a, b) = (self.stops.get(i)?.0, self.stops.get(i + 1)?.0);
         (b - a > 1e-4).then(|| a + (b - a) * self.mids.get(i).copied().unwrap_or(0.5))
@@ -188,6 +198,10 @@ impl Widget {
             return Some(Grab::Start);
         }
         let near = |q: [f32; 2]| dist(p, q) <= tol;
+        if !self.stops_editable() {
+            let (u, d) = project(self.start, self.end, p);
+            return (d <= tol).then_some(Grab::Line(if self.reverse { 1.0 - u } else { u }));
+        }
         if let Some(i) = self.stops.iter().position(|s| near(self.at(s.0))) {
             return Some(Grab::Stop(i));
         }
@@ -469,8 +483,9 @@ pub fn draw_overlay(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform
         GradientStyle::Linear => {}
     }
     line(painter, s, e);
-    // Midpoints.
-    for i in 0..w.stops.len().saturating_sub(1) {
+    // Midpoints (none on dense, baked ramps; see `Widget::stops_editable`).
+    let handles = if w.stops_editable() { w.stops.len() } else { 0 };
+    for i in 0..handles.saturating_sub(1) {
         if let Some(t) = w.mid_location(i) {
             let sel = grabbed == Some(Grab::Mid(i));
             diamond(painter, sp(w.at(t)), 4.5, if sel { accent } else { Color32::WHITE }, Color32::from_black_alpha(160));
@@ -482,7 +497,7 @@ pub fn draw_overlay(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform
         painter.circle_stroke(p, 8.0, Stroke::new(3.5, Color32::from_black_alpha(90)));
         painter.circle_stroke(p, 8.0, Stroke::new(2.0, ring));
     }
-    for (i, (t, c)) in w.stops.iter().enumerate() {
+    for (i, (t, c)) in w.stops.iter().enumerate().take(handles) {
         let p = sp(w.at(*t));
         let sel = grabbed == Some(Grab::Stop(i));
         painter.circle_filled(p, 5.0, c32(*c));
@@ -870,6 +885,22 @@ mod tests {
 
     fn mods() -> egui::Modifiers {
         egui::Modifiers::NONE
+    }
+
+    #[test]
+    fn dense_ramps_grab_the_line_not_a_stop() {
+        use photosuite_color::Color;
+        let frame = Rect32::new(0, 0, 100, 20);
+        let ramp = |n: usize| {
+            let stops = (0..n).map(|i| (i as f32 / (n - 1) as f32, Color::gray(i as f32 / (n - 1) as f32))).collect();
+            Fill::gradient(stops, 0.0, 1.0, photosuite_doc::GradientStyle::Linear, false)
+        };
+        let few = Widget::new(&ramp(3), frame).unwrap();
+        let mid = few.at(0.5);
+        assert_eq!(few.hit(mid, 2.0), Some(Grab::Stop(1)));
+        let dense = Widget::new(&ramp(97), frame).unwrap();
+        assert!(matches!(dense.hit(dense.at(0.5), 2.0), Some(Grab::Line(_))), "baked ramp: the line, no stop handles");
+        assert_eq!(dense.hit(dense.end, 2.0), Some(Grab::End));
     }
 
     fn drag(app: &mut PhotosuiteApp, a: [f64; 2], b: [f64; 2]) {

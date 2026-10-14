@@ -536,7 +536,7 @@ fn plain(l: &Layer, clipped: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
                 let (cmy, k) = (content_in(Projection::Cmy), content_in(Projection::K));
                 two_passes(backdrop, |b| {
                     let content = if PROJECTION.with(std::cell::Cell::get) == Projection::Cmy { &cmy } else { &k };
-                    crate::effects::composite_with_effects_prepared(l, content, b, &maps, bounds, cx.patterns, None);
+                    crate::effects::composite_with_effects_prepared(l, content, b, &maps, bounds, cx.canvas, cx.patterns, None);
                 });
                 if separate {
                     let shape: Vec<f32> = src.px.iter().map(|p| p[4]).collect();
@@ -629,15 +629,20 @@ fn from_surface(s: &Surface, rect: Rect) -> CBuf {
 /// An edited fill layer: a solid colour in its own inks; gradients interpolated in inks and
 /// patterns separated (two projected renders).
 fn fill(l: &Layer, f: &Fill, rect: Rect, cx: &Ctx) -> CBuf {
+    fill_in(l, f, rect, cx.canvas, cx.patterns)
+}
+
+/// [`fill`] with the canvas and patterns given apart from a render context.
+pub(crate) fn fill_in(l: &Layer, f: &Fill, rect: Rect, canvas: Rect, patterns: &crate::pattern::PreparedPatterns<'_>) -> CBuf {
     if let Fill::Solid(c) = f {
         let p = from_inks(color_inks(c), c.alpha);
         return CBuf { rect, px: vec![p; rect.width() as usize * rect.height() as usize] };
     }
     // Gradients interpolate their stops' inks and patterns separate their pixels: one
     // projected render per ink group.
-    let frame = crate::fill_frame(l, cx.canvas);
+    let frame = crate::fill_frame(l, canvas);
     let mut buf = CBuf::transparent(rect);
-    two_passes(&mut buf, |b| *b = crate::render_fill(f, rect, frame, cx.patterns));
+    two_passes(&mut buf, |b| *b = crate::render_fill(f, rect, frame, patterns));
     buf
 }
 

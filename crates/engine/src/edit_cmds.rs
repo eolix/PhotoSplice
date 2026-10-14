@@ -117,8 +117,8 @@ fn clear_selected(doc: &mut Document, id: LayerId, background: [f32; 4]) -> Resu
 /// Cut / Clear on a layer: makes the selected pixels transparent. The Background can't hold
 /// transparency, so there the area is filled with the background colour instead (Photoshop).
 pub(crate) fn clear_area(doc: &mut Document, id: LayerId, area: Rect, sel: Option<&Surface>, background: [f32; 4]) -> Result<()> {
+    let bg = doc.is_background(id);
     let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
-    let bg = crate::extra_cmds::is_background(l);
     let surf = l.surface_mut().ok_or(EngineError::Other("the active layer has no pixels".into()))?;
     if bg {
         crate::pixels::fill_surface(surf, area, background, sel, true);
@@ -226,7 +226,7 @@ fn merge_visible(s: &mut Session) -> Result<Value> {
         }
         let lowest = visible[0];
         let base = doc.layers[lowest].clone();
-        let is_background = base.name == "Background" && base.locks.transparency;
+        let is_background = doc.is_background(base.id);
         // Composite of visible layers only (hidden ones stay where they are).
         let mut solo = doc.clone();
         solo.layers.retain(|l| l.visible);
@@ -680,7 +680,7 @@ mod tests {
             let mut s = fresh();
             s.execute(cmd, json!({})).unwrap();
             let d = &s.active().unwrap().doc;
-            assert!(crate::extra_cmds::is_background(&d.layers[0]), "{cmd}: still the Background");
+            assert!(d.background().is_some(), "{cmd}: still the Background");
             assert_eq!(px(&s, 0, 8, 8), vec![1.0, 0.0, 0.0, 1.0], "{cmd}: cut area is the background colour");
             assert_eq!(px(&s, 0, 30, 20), vec![1.0, 1.0, 1.0, 1.0], "{cmd}: outside untouched");
         }

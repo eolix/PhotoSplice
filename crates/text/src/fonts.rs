@@ -240,6 +240,41 @@ impl FontDb {
         r
     }
 
+    /// The PostScript name of the face `family` sets at `weight` / `italic` (the closest face,
+    /// as layout picks it), from the font's `name` table: what a PSD's `FontSet` must name for
+    /// Photoshop to find the font (`ArialMT`, not `Arial-Regular`). A variable font names its
+    /// instance at that weight (its own PostScript name, else the variations prefix and the
+    /// instance's subfamily). `None` when the family isn't installed or has no such face (a
+    /// Bold or Italic made up from another face keeps the name the run asks for).
+    pub fn postscript_of(&mut self, family: &str, weight: u16, italic: bool) -> Option<String> {
+        let info = self.fcx.collection.family_by_name(family)?;
+        let font = info
+            .fonts()
+            .iter()
+            .min_by_key(|f| u32::from(matches!(f.style(), FontStyle::Normal) == italic) * 10_000 + (f.weight().value() - f32::from(weight)).abs() as u32)?;
+        let variable = !font.axes().is_empty();
+        if matches!(font.style(), FontStyle::Normal) == italic || (!variable && (font.weight().value() - f32::from(weight)).abs() > 50.0) {
+            return None;
+        }
+        let blob = font.load(Some(&mut self.fcx.source_cache))?;
+        let fr = skrifa::FontRef::from_index(blob.as_ref(), font.index()).ok()?;
+        let name = |id: StringId| fr.localized_strings(id).english_or_first().map(|s| s.to_string()).filter(|s| !s.is_empty());
+        let wght = fr.axes().iter().position(|a| a.tag() == skrifa::Tag::new(b"wght"));
+        let Some(wi) = wght else {
+            return name(StringId::POSTSCRIPT_NAME);
+        };
+        let instance = fr.named_instances().iter().find(|i| i.user_coords().nth(wi).is_some_and(|w| (w - f32::from(weight)).abs() < 0.5));
+        let Some(inst) = instance else {
+            return (fr.axes().get(wi).is_some_and(|a| (a.default_value() - f32::from(weight)).abs() < 0.5)).then(|| name(StringId::POSTSCRIPT_NAME)).flatten();
+        };
+        if let Some(ps) = inst.postscript_name_id().and_then(name) {
+            return Some(ps);
+        }
+        let prefix = name(StringId::VARIATIONS_POSTSCRIPT_NAME_PREFIX)
+            .or_else(|| name(StringId::POSTSCRIPT_NAME).map(|p| p.split('-').next().unwrap_or(&p).to_string()))?;
+        Some(format!("{prefix}-{}", name(inst.subfamily_name_id())?.replace(' ', "")))
+    }
+
     fn find_exact(&mut self, ps: &str, family_guess: &str) -> Option<ResolvedFont> {
         let first_word = family_guess.split(' ').next().unwrap_or(family_guess).to_lowercase();
         let candidates: Vec<String> = self.families().into_iter().filter(|f| f.to_lowercase().replace(' ', "").starts_with(&first_word)).collect();

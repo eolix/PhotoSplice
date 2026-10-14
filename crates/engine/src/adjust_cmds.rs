@@ -327,6 +327,7 @@ fn hdr_toning(s: &mut Session, p: &Value) -> Result<Value> {
         let data: Vec<f32> = px.iter().flat_map(|q| photosuite_raster::from_rgba(&fmt, *q)).collect();
         let mut bg = Layer::raster("Background", fmt);
         bg.locks.transparency = true;
+        bg.locks.position = true;
         crate::pixels_mut(&mut bg)?.write_region(doc.bounds(), &data);
         *active = Some(bg.id);
         doc.layers = vec![bg];

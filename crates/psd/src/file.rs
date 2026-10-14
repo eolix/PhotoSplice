@@ -119,10 +119,21 @@ impl PsdFile {
                 layer_mask_trailing = s.peek_rest().to_vec();
             }
         }
-        // 16/32-bit files keep their layers in a global Lr16/Lr32 block.
-        if layer_info.is_none()
-            && let Some(i) = global_blocks.iter().position(|b| matches!(&b.key, b"Lr16" | b"Lr32" | b"Layr"))
-            && let Ok(info) = LayerInfo::read_body(&global_blocks[i].data, header.version)
+        // 16/32-bit files keep their layers in a global Lr16/Lr32 block, next to a section that
+        // is empty or holds 8-bit compatibility layers: the block of the file's depth wins when it
+        // reads (storytold/photocraft@3260f6ab); other files use one only without a section.
+        let own = match header.depth {
+            16 => Some(b"Lr16"),
+            32 => Some(b"Lr32"),
+            _ => None,
+        };
+        let candidate = |b: &TaggedBlock| match own {
+            Some(k) => &b.key == k,
+            None => matches!(&b.key, b"Lr16" | b"Lr32" | b"Layr"),
+        };
+        if (own.is_some() || layer_info.is_none())
+            && let Some(i) = global_blocks.iter().position(candidate)
+            && let Some(Ok(info)) = global_blocks.get(i).map(|b| LayerInfo::read_body(&b.data, header.version))
         {
             let b = global_blocks.remove(i);
             layer_info = Some(info);
@@ -276,5 +287,32 @@ impl PsdFile {
     pub fn save(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
         let b = self.to_bytes().map_err(std::io::Error::other)?;
         std::fs::write(path, b)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 16/32-bit file whose section holds 8-bit compatibility layers reads its layers from the
+    /// global Lr16/Lr32 block (storytold/photocraft@3260f6ab).
+    #[test]
+    fn global_layers_win_over_the_compatibility_section() {
+        for version in [Version::Psd, Version::Psb] {
+            for depth in [16, 32] {
+                let file = crate::testgen::layered(version, ColorMode::Rgb, depth, crate::Compression::Raw);
+                let key = if depth == 16 { *b"Lr16" } else { *b"Lr32" };
+                let mut lr = Vec::new();
+                file.layer_info.as_ref().unwrap().write_body(&mut lr, version).unwrap();
+                let mut compat = file.clone();
+                compat.layer_info = Some(LayerInfo { layers: vec![LayerRecord { name: b"CompatibilityLayer".to_vec(), ..Default::default() }], ..Default::default() });
+                compat.layer_info_placement = LayerInfoPlacement::Section;
+                compat.global_blocks.insert(0, TaggedBlock::new(key, lr));
+                let parsed = PsdFile::from_bytes(&compat.to_bytes().unwrap()).unwrap();
+                assert_eq!(parsed.layers().len(), file.layers().len(), "{version:?} {depth}");
+                assert_eq!(parsed.layers()[0].name(), file.layers()[0].name());
+                assert!(matches!(parsed.layer_info_placement, LayerInfoPlacement::GlobalBlock { key: k, .. } if k == key));
+            }
+        }
     }
 }

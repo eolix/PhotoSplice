@@ -644,7 +644,7 @@ fn straighten(s: &mut Session, p: &Value) -> Result<Value> {
         return Ok(json!({"angle": 0.0}));
     }
     let st = s.active().ok_or(EngineError::NoDocument)?;
-    let active_bg = st.active_layer.and_then(|id| d.layer(id)).is_some_and(|l| l.name == "Background" && l.locks.position);
+    let active_bg = st.active_layer.and_then(|id| d.layer(id)).is_some_and(|l| d.is_background(l.id));
     let crop = p.get("crop").and_then(Value::as_bool).unwrap_or(active_bg || st.active_layer.is_none());
     let (w0, h0) = (f64::from(d.size.width), f64::from(d.size.height));
     compound(s, "Straighten", |s| {

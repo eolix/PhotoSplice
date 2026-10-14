@@ -50,6 +50,21 @@ fn anti_alias_and_orientation_are_one_step_each() {
 }
 
 #[test]
+fn type_on_a_path_is_not_converted() {
+    let mut s = session(8);
+    let id = text_layer(&mut s, "Around");
+    if let Some(LayerContent::Text(t)) = std::sync::Arc::make_mut(&mut s.active_mut().unwrap().doc).layer_mut(id).map(|l| &mut l.content) {
+        t.path = Some(photosuite_doc::text::TextPath { segments: vec![[[0.0, 0.0], [50.0, -40.0], [100.0, -40.0], [150.0, 0.0]]], ..Default::default() });
+        t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 150.0, height: 40.0 };
+    }
+    for cmd in ["type.convertToParagraphText", "type.convertToPointText"] {
+        assert!(!s.is_enabled(cmd), "{cmd}");
+        assert!(s.execute(cmd, json!({"layer": id.0})).is_err(), "{cmd}");
+    }
+    assert!(text(&s, id).path.is_some());
+}
+
+#[test]
 fn point_and_paragraph_conversion_keep_the_text_in_place() {
     for align in ["left", "center", "right"] {
         let mut s = session(8);

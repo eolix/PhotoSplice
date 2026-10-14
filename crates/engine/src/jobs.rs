@@ -427,6 +427,9 @@ impl Session {
             },
             move |s, r: photosuite_io::ImportResult| {
                 let (index, color) = s.open_document(r.document, None);
+                if let Some(st) = s.docs.get_mut(index) {
+                    st.restore_selection(&r.selected);
+                }
                 Ok(json!({"document": index, "name": name_a, "warnings": r.warnings, "color": color}))
             },
         )

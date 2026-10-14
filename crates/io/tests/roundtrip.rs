@@ -310,7 +310,12 @@ fn psd_raw_resources_and_global_blocks_preserved() {
     d.metadata.psd_global_blocks.push((*b"8BIM", *b"Patt", std::sync::Arc::new(vec![7; 6])));
     d.metadata.psd_global_blocks.push((*b"8B64", *b"lnk2", std::sync::Arc::new(vec![1, 2])));
     let back = roundtrip(&d);
-    assert_eq!(back.metadata, d.metadata);
+    // A PSD carries the PSB-only `8B64` block as `8BIM` (Reference refuses it otherwise).
+    let mut want = d.metadata.clone();
+    if let Some(b) = want.psd_global_blocks.iter_mut().find(|b| &b.1 == b"lnk2") {
+        b.0 = *b"8BIM";
+    }
+    assert_eq!(back.metadata, want);
 }
 
 #[test]

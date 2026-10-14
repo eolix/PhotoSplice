@@ -32,6 +32,44 @@ pub enum Caps {
     AllCaps,
 }
 
+/// Type on a path (Photoshop's path text frame): the baseline follows cubic Bézier segments in
+/// text space; the glyphs stand on it, rotated to its direction, from `start` on.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TextPath {
+    /// Cubic segments `[p0, c1, c2, p1]`, each starting where the previous one ended.
+    pub segments: Vec<[[f32; 2]; 4]>,
+    /// Whether the path closes on itself (text wraps around it).
+    pub closed: bool,
+    /// Where the text starts, as a fraction of the path length.
+    pub start: f32,
+}
+
+/// Superscript / subscript (Photoshop's `FontBaseline`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BaselinePosition {
+    #[default]
+    Normal,
+    Superscript,
+    Subscript,
+}
+
+impl BaselinePosition {
+    /// Photoshop's default document settings: superscript and subscript text at 58.3 % of the
+    /// size, raised or lowered by 33.3 % of it.
+    pub const SIZE: f32 = 0.583;
+    pub const OFFSET: f32 = 0.333;
+
+    /// The size (points) and baseline shift (points, positive up) a character of `size_pt` with
+    /// baseline shift `shift_pt` is drawn at.
+    pub fn apply(self, size_pt: f32, shift_pt: f32) -> (f32, f32) {
+        match self {
+            BaselinePosition::Normal => (size_pt, shift_pt),
+            BaselinePosition::Superscript => (size_pt * Self::SIZE, shift_pt + size_pt * Self::OFFSET),
+            BaselinePosition::Subscript => (size_pt * Self::SIZE, shift_pt - size_pt * Self::OFFSET),
+        }
+    }
+}
+
 /// An OpenType feature setting, e.g. `{ tag: "ss01", value: 1 }`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FontFeature {
@@ -79,6 +117,8 @@ pub struct CharStyle {
     /// per character run as `Kerning`). Added to the automatic kerning of the pair.
     pub kern: f32,
     pub caps: Caps,
+    /// Superscript / subscript.
+    pub position: BaselinePosition,
     /// Standard ligatures (`liga`/`clig`).
     pub ligatures: bool,
     /// Discretionary ligatures (`dlig`).
@@ -117,6 +157,7 @@ impl Default for CharStyle {
             kerning: Kerning::Metrics,
             kern: 0.0,
             caps: Caps::Normal,
+            position: BaselinePosition::Normal,
             ligatures: true,
             discretionary_ligatures: false,
             features: Vec::new(),
@@ -179,6 +220,9 @@ pub struct ParagraphStyle {
     pub auto_leading: f32,
     pub direction: TextDirection,
     pub hyphenate: bool,
+    /// Adobe Every-line Composer (Photoshop's default): line breaks weigh the whole paragraph.
+    /// Off = Single-line Composer, each line filled in turn.
+    pub every_line_composer: bool,
     /// Applied paragraph style (id in [`crate::TextStyles`]); `None` = Basic Paragraph.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style_sheet: Option<u32>,
@@ -196,6 +240,7 @@ impl Default for ParagraphStyle {
             auto_leading: 1.2,
             direction: TextDirection::Auto,
             hyphenate: false,
+            every_line_composer: true,
             style_sheet: None,
         }
     }

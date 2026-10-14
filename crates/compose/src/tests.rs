@@ -1073,46 +1073,42 @@ fn adjustment_results_are_rounded_to_the_document_depth() {
     }
 }
 
-// Ground truth captured from Adobe Photoshop 2026 (27.10.0): a 0..255 ramp pushed through modern
-// (non-legacy) Brightness/Contrast via `executeAction("BrgC", ... useLegacy=false)`. These pin our
-// reverse-engineered curves (see crates/compose/src/adjust.rs modern_* and log/devlog.md).
-#[test]
-fn modern_contrast_matches_photoshop() {
-    // (contrast, [out at x = 0,16,32,64,96,128,160,192,224,255])
-    let cases: [(f32, [u8; 10]); 4] = [
-        (50.0, [0, 11, 23, 52, 87, 128, 169, 204, 233, 255]),
-        (-50.0, [0, 21, 41, 76, 105, 128, 151, 180, 215, 255]),
-        (100.0, [0, 5, 14, 40, 78, 128, 178, 216, 242, 255]),
-        (-25.0, [0, 19, 37, 70, 101, 128, 155, 186, 220, 255]),
-    ];
-    let xs = [0usize, 16, 32, 64, 96, 128, 160, 192, 224, 255];
-    for (c, out) in cases {
-        for (i, &x) in xs.iter().enumerate() {
-            let got = adjust::modern_contrast(x as f32 / 255.0, c) * 255.0;
-            let err = (got - out[i] as f32).abs();
-            assert!(err <= 2.0, "contrast {c} x={x}: got {got:.1} want {} (err {err:.1})", out[i]);
-        }
-    }
-}
+// Reference's modern (non-legacy) Brightness/Contrast, read from its 16-bit composites of a
+// 4096-step gray ramp (temp kit `psd-verify-adjust`, 2026-10-14): output levels at
+// x = 0, 512, 1024, …, 3584, 4095 (of 4095).
+const BC_REFS: [((f32, f32), [f32; 9]); 13] = [
+    ((-150.0, 0.0), [0.0, 12.39, 24.78, 37.17, 49.56, 62.79, 78.95, 104.81, 255.0]),
+    ((-100.0, 0.0), [0.0, 16.98, 33.95, 50.94, 67.91, 86.64, 110.51, 145.57, 255.0]),
+    ((-25.0, 0.0), [0.0, 27.24, 54.47, 81.71, 108.95, 136.61, 166.26, 200.85, 255.0]),
+    ((25.0, 0.0), [0.0, 37.32, 74.65, 111.97, 149.09, 184.23, 215.09, 239.44, 255.0]),
+    ((75.0, 0.0), [0.0, 51.15, 102.29, 151.75, 190.43, 218.37, 237.3, 248.94, 255.0]),
+    ((125.0, 0.0), [0.0, 70.09, 140.11, 197.58, 229.4, 244.58, 251.11, 253.76, 255.0]),
+    ((150.0, 0.0), [0.0, 82.05, 161.6, 214.08, 238.35, 248.65, 252.74, 254.3, 255.0]),
+    ((0.0, -50.0), [0.0, 40.96, 75.88, 104.73, 127.52, 150.32, 179.19, 214.11, 255.0]),
+    ((0.0, 25.0), [0.0, 27.34, 57.71, 91.11, 127.54, 163.96, 197.35, 227.72, 255.0]),
+    ((0.0, 100.0), [0.0, 13.71, 39.54, 77.49, 127.55, 177.6, 215.52, 241.33, 255.0]),
+    ((25.0, 30.0), [0.0, 31.31, 67.6, 108.86, 153.19, 191.41, 221.35, 242.56, 255.0]),
+    ((-100.0, -50.0), [0.0, 22.58, 43.42, 62.56, 79.98, 97.2, 116.11, 139.67, 255.0]),
+    ((150.0, 100.0), [0.0, 59.81, 180.58, 235.2, 249.36, 253.24, 254.42, 254.83, 255.0]),
+];
 
 #[test]
-fn modern_brightness_matches_photoshop() {
-    let cases: [(f32, [u8; 10]); 2] = [(50.0, [0, 22, 44, 88, 132, 171, 203, 228, 246, 255]), (-50.0, [0, 12, 23, 47, 70, 93, 118, 148, 186, 255])];
-    let xs = [0usize, 16, 32, 64, 96, 128, 160, 192, 224, 255];
-    for (b, out) in cases {
-        for (i, &x) in xs.iter().enumerate() {
-            let got = adjust::modern_brightness(x as f32 / 255.0, b) * 255.0;
-            let err = (got - out[i] as f32).abs();
-            // Interpolated from curves measured in Photoshop (a 0..255 ramp, 2026-10).
-            assert!(err <= 3.0, "brightness {b} x={x}: got {got:.1} want {} (err {err:.1})", out[i]);
+fn modern_brightness_contrast_match_reference() {
+    for ((b, c), want) in BC_REFS {
+        let t = adjust::brightness_contrast_lut(b, c, false);
+        for (k, w) in want.iter().enumerate() {
+            let x = (k * 512).min(4095) as f32 / 4095.0;
+            let got = adjust::modern_contrast(adjust::modern_brightness(x, b), c) * 255.0;
+            assert!((got - w).abs() < 0.05, "b {b} c {c} x {x}: {got} vs {w}");
+            // The LUT both compositors use draws the same curve.
+            assert!((adjust::lut(&t, x) * 255.0 - w).abs() < 0.1, "LUT b {b} c {c} x {x}");
         }
     }
-    // Endpoints and the zero slider are exact.
+    // Endpoints and the zero sliders are exact; curves rise in v and in b.
     assert_eq!(adjust::modern_brightness(0.0, 120.0), 0.0);
     assert_eq!(adjust::modern_brightness(1.0, -120.0), 1.0);
     assert_eq!(adjust::modern_brightness(0.37, 0.0), 0.37);
     assert_eq!(adjust::modern_contrast(0.37, 0.0), 0.37);
-    // Between measured sliders the curves blend smoothly and stay monotone in both v and b.
     for b in [-150.0, -100.0, -20.0, 10.0, 75.0, 120.0, 150.0, 400.0, f32::NAN] {
         let t = adjust::brightness_contrast_lut(b, 0.0, false);
         assert!(t.windows(2).all(|w| w[1] >= w[0] - 1e-6), "brightness {b} not monotone");
@@ -1120,6 +1116,68 @@ fn modern_brightness_matches_photoshop() {
     for x in [0.1f32, 0.5, 0.9] {
         let ys: Vec<f32> = (-150..=150).step_by(10).map(|b| adjust::modern_brightness(x, b as f32)).collect();
         assert!(ys.windows(2).all(|w| w[1] >= w[0]), "x={x} not monotone in brightness");
+    }
+}
+
+/// Color Balance against Reference's 16-bit curves (temp kit `psd-verify-adjust`): shadows and
+/// highlights without Preserve Luminosity, a midtone gamma with its shadow toe, combined midtones
+/// with Preserve Luminosity, and all three ranges at once. Outputs at x = 64, 256, 512, 1024, 2048, 3072, 3840 (of 4095), R G B.
+#[test]
+fn color_balance_matches_reference() {
+    type Case = ([f32; 3], [f32; 3], [f32; 3], bool, [[f32; 3]; 7]);
+    let cases: [Case; 6] = [
+        (
+            [-100.0, 0.0, 0.0],
+            [0.0; 3],
+            [0.0; 3],
+            false,
+            [[0.0, 3.98, 3.98], [0.0, 15.95, 15.95], [0.0, 31.88, 31.88], [0.0, 63.77, 63.77], [22.38, 127.53, 127.53], [121.01, 191.3, 191.3], [219.02, 239.12, 239.12]],
+        ),
+        (
+            [0.0; 3],
+            [0.0; 3],
+            [100.0, 0.0, 0.0],
+            false,
+            [[16.43, 3.98, 3.98], [50.82, 15.95, 15.95], [83.05, 31.88, 31.88], [135.79, 63.77, 63.77], [222.05, 127.53, 127.53], [255.0, 191.3, 191.3], [255.0, 239.12, 239.12]],
+        ),
+        (
+            [20.0, -10.0, 0.0],
+            [0.0; 3],
+            [0.0, 0.0, -20.0],
+            false,
+            [[5.23, 0.0, 2.91], [19.11, 5.5, 12.94], [36.53, 21.1, 27.27], [69.82, 53.36, 57.45], [133.44, 119.56, 121.05], [194.93, 186.93, 187.2], [240.12, 238.0, 237.96]],
+        ),
+        (
+            [0.0; 3],
+            [100.0, 0.0, 0.0],
+            [0.0; 3],
+            false,
+            [[15.46, 3.98, 3.98], [55.4, 15.95, 15.95], [90.17, 31.88, 31.88], [127.51, 63.77, 63.77], [180.33, 127.53, 127.53], [220.87, 191.3, 191.3], [246.93, 239.12, 239.12]],
+        ),
+        (
+            [0.0; 3],
+            [50.0, 20.0, -40.0],
+            [0.0; 3],
+            true,
+            [[9.95, 6.02, 0.86], [33.71, 20.99, 5.72], [55.9, 39.18, 14.78], [92.72, 73.15, 38.19], [153.78, 136.6, 98.7], [206.74, 196.82, 172.0], [243.3, 240.64, 233.5]],
+        ),
+        (
+            [20.0, -10.0, 0.0],
+            [-15.0, 10.0, 30.0],
+            [0.0, 0.0, -20.0],
+            true,
+            [[2.21, 0.0, 0.0], [11.18, 0.0, 0.0], [25.02, 2.54, 19.89], [55.95, 43.49, 60.65], [125.26, 123.09, 130.74], [200.7, 201.58, 194.62], [255.0, 255.0, 240.18]],
+        ),
+    ];
+    let xs = [64.0f32, 256.0, 512.0, 1024.0, 2048.0, 3072.0, 3840.0];
+    for (sh, mid, hi, lum, want) in cases {
+        let t = adjust::color_balance_luts(&sh, &mid, &hi, lum);
+        for (x, w) in xs.iter().zip(want) {
+            for c in 0..3 {
+                let got = adjust::lut(&t[c], x / 4095.0) * 255.0;
+                assert!((got - w[c]).abs() < 0.15, "{mid:?} lum {lum} x {x} ch {c}: {got} vs {}", w[c]);
+            }
+        }
     }
 }
 
@@ -1497,3 +1555,129 @@ fn photo_filter_matches_photoshop() {
     }
 }
 
+
+#[test]
+fn hue_saturation_matches_photoshop() {
+    // Photoshop corpus hue-saturation.psd (hue +40, saturation +25, lightness −10) and
+    // hue-saturation-colorize.psd (colorize: hue −160, saturation 40, lightness +5), rgb16.
+    type Case = ([u8; 3], [u8; 3], (f32, f32, f32, bool));
+    let cases: [Case; 5] = [
+        ([240, 162, 34], [176, 246, 0], (40.0, 0.25, -0.10, false)),
+        ([255, 108, 0], [209, 230, 0], (40.0, 0.25, -0.10, false)),
+        ([128, 128, 128], [115, 115, 115], (40.0, 0.25, -0.10, false)),
+        ([118, 118, 118], [75, 141, 175], (-160.0, 0.40, 0.05, true)),
+        ([242, 170, 53], [112, 167, 194], (-160.0, 0.40, 0.05, true)),
+    ];
+    for (input, want, (h, s, l, colorize)) in cases {
+        let got = adjust::hue_saturation(input.map(|v| f32::from(v) / 255.0), h, s, l, colorize).map(|v| v * 255.0);
+        for k in 0..3 {
+            assert!((got[k] - f32::from(want[k])).abs() <= 1.5, "{input:?} → {got:?}, Photoshop {want:?}");
+        }
+    }
+}
+
+#[test]
+fn black_white_tint_matches_photoshop() {
+    // Photoshop corpus black-white-tint.psd (default weights, tint 225 211 179), rgb16: grey input.
+    let tint = Some([225.0 / 255.0, 211.0 / 255.0, 179.0 / 255.0]);
+    let adj = Adjustment::BlackWhite { weights: [40.0, 60.0, 40.0, 60.0, 20.0, 80.0], tint };
+    for (v, want) in [(8u8, [11u8, 8, 0]), (134, [147, 133, 101]), (246, [255, 246, 224])] {
+        let x = f32::from(v) / 255.0;
+        let mut b = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![[x, x, x, 1.0]] };
+        adjust::apply(&adj, &mut b);
+        for k in 0..3 {
+            assert!((b.px[0][k] * 255.0 - f32::from(want[k])).abs() <= 1.0, "{v}: {:?} vs Photoshop {want:?}", b.px[0]);
+        }
+    }
+}
+
+#[test]
+fn selective_color_matches_photoshop() {
+    // Photoshop corpus selective-color.psd (relative; reds −30 C +10 M, blues +20 C −20 M +5 K), rgb16.
+    let mut adj = [[0.0f32; 4]; 9];
+    adj[0] = [-30.0, 10.0, 0.0, 0.0];
+    adj[4] = [20.0, -20.0, 0.0, 5.0];
+    for (input, want) in [([20u8, 90, 200], [11u8, 101, 199]), ([36, 0, 255], [5, 35, 255]), ([128, 0, 255], [111, 20, 255]), ([0, 0, 255], [0, 41, 255])] {
+        let got = adjust::selective_color(input.map(|v| f32::from(v) / 255.0), true, &adj).map(|v| v * 255.0);
+        for k in 0..3 {
+            assert!((got[k] - f32::from(want[k])).abs() <= 1.5, "{input:?} → {got:?}, Photoshop {want:?}");
+        }
+    }
+}
+
+#[test]
+fn levels_apply_the_channel_before_the_composite() {
+    // psd-tools levels_rgb.psd "Levels 4": green input white 128 (channel), then the composite
+    // input white 135 / output 74..141: green saturates in its channel and the composite caps it
+    // at 141, as Photoshop draws it.
+    let ch = |in_white: f32| LevelsChannel { in_white, ..Default::default() };
+    let master = LevelsChannel { in_black: 48.0 / 255.0, in_white: 135.0 / 255.0, out_black: 74.0 / 255.0, out_white: 141.0 / 255.0, ..Default::default() };
+    let adj = Adjustment::Levels { master, per_channel: [ch(1.0), ch(128.0 / 255.0), ch(1.0)], space: photosuite_doc::adjust::ToneSpace::Rgb, black: LevelsChannel::default() };
+    let luts = adjust::tone_luts(&adj);
+    assert!((adjust::lut(&luts[1], 200.0 / 255.0) * 255.0 - 141.0).abs() < 1.0);
+}
+
+#[test]
+fn vibrance_matches_photoshop() {
+    // Photoshop corpus vibrance-*.psd (rgb8): (vibrance, saturation), input → Photoshop.
+    type Case = ((f32, f32), [u8; 3], [u8; 3]);
+    let cases: [Case; 6] = [
+        ((0.0, -50.0), [255, 0, 0], [210, 106, 106]),
+        ((0.0, -50.0), [0, 0, 255], [0, 0, 188]),
+        ((0.0, 50.0), [245, 194, 111], [255, 185, 0]),
+        ((50.0, 0.0), [245, 194, 111], [245, 191, 99]),
+        ((-50.0, 0.0), [245, 194, 111], [244, 206, 156]),
+        ((60.0, -15.0), [20, 90, 200], [31, 87, 188]),
+    ];
+    for ((v, s), input, want) in cases {
+        let x = input.map(|c| f32::from(c) / 255.0);
+        let mut b = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![[x[0], x[1], x[2], 1.0]] };
+        adjust::apply(&Adjustment::Vibrance { vibrance: v, saturation: s }, &mut b);
+        for k in 0..3 {
+            assert!((b.px[0][k] * 255.0 - f32::from(want[k])).abs() <= 2.0, "{v}/{s} {input:?} → {:?}, Photoshop {want:?}", b.px[0].map(|c| c * 255.0));
+        }
+    }
+}
+
+#[test]
+fn color_balance_matches_photoshop() {
+    // Photoshop corpus cb-*.psd (rgb8), one slider at a time: grey 128 and an orange.
+    let z = [0.0f32; 3];
+    type Sliders<'a> = (&'a [f32; 3], &'a [f32; 3], &'a [f32; 3], bool);
+    let cases: [(Sliders, [u8; 3], [u8; 3]); 5] = [
+        ((&[50.0, 0.0, 0.0], &z, &z, true), [128, 128, 128], [128, 97, 97]),
+        ((&z, &[50.0, 0.0, 0.0], &z, true), [245, 194, 111], [247, 184, 95]),
+        ((&z, &z, &[50.0, 0.0, 0.0], true), [128, 128, 128], [159, 128, 128]),
+        ((&z, &z, &[0.0, 0.0, -50.0], true), [128, 128, 128], [159, 159, 128]),
+        ((&z, &[50.0, 0.0, 0.0], &z, false), [128, 128, 128], [156, 128, 128]),
+    ];
+    for ((sh, mi, hi, lum), input, want) in cases {
+        let t = adjust::color_balance_luts(sh, mi, hi, lum);
+        for k in 0..3 {
+            let got = adjust::lut(&t[k], f32::from(input[k]) / 255.0) * 255.0;
+            assert!((got - f32::from(want[k])).abs() <= 1.5, "{input:?} ch {k}: {got} vs Photoshop {want:?}");
+        }
+    }
+}
+
+/// An adjustment inside a pass-through group that a layer is clipped to changes only the group's
+/// own content: alone in the group it leaves the layers beneath as they are (psd-tools
+/// passthrough_clipping_mask_adjustment). Without the clipped layer it reaches them.
+#[test]
+fn clipped_passthrough_keeps_its_adjustment_inside() {
+    let make = |clip: bool| {
+        let mut d = Document::with_background("t", Size::new(4, 4), ColorMode::Rgb, SampleType::U8, Color::rgb(1.0, 0.0, 0.0));
+        let mut group = Layer::group("g", vec![Layer::new("invert", LayerContent::Adjustment(photosuite_doc::Adjustment::Invert))]);
+        group.blend = BlendMode::PassThrough;
+        d.layers.push(group);
+        if clip {
+            let mut c = Layer::raster("clip", d.pixel_format());
+            c.clipped = true;
+            d.layers.push(c);
+        }
+        flatten(&d).px[5]
+    };
+    let close = |a: [f32; 4], b: [f32; 4]| a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-3);
+    assert!(close(make(false), [0.0, 1.0, 1.0, 1.0]), "{:?}", make(false));
+    assert!(close(make(true), [1.0, 0.0, 0.0, 1.0]), "{:?}", make(true));
+}

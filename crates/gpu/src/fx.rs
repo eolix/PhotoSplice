@@ -224,6 +224,13 @@ impl B {
         v.lut = Some(w);
         self.push(v)
     }
+    /// `src` through a 0..1 lookup table (identity when `None`).
+    fn lut_map(&mut self, src: In, lut: Option<Vec<f32>>) -> In {
+        let Some(l) = lut else { return src };
+        let mut s = stage(Kernel::MFinish, Some(src), None, [0.0, 0.0, 1.0, 0.0], 0);
+        s.lut = Some(Arc::new(l));
+        self.push(s)
+    }
     fn finish(&mut self, a: In, b: Option<In>, invert: bool, contour: &Contour, times_shape: bool, out: usize) {
         self.finish_lut(a, b, invert, contour_lut(contour), times_shape, out);
     }
@@ -305,14 +312,14 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
         Effect::OuterGlow(g) | Effect::InnerGlow(g) => {
             // glow_map
             let inner = matches!(e, Effect::InnerGlow(_));
-            let edge = inner && g.source == GlowSource::Edge;
             let center = inner && g.source == GlowSource::Center;
             match g.technique {
                 GlowTechnique::Precise => {
-                    let d = b.field(if edge { FieldKind::Inside } else { FieldKind::Outside }, g.size);
-                    let solid = g.size * g.spread;
-                    let soft = (g.size - solid).max(1e-3);
-                    let m = b.push(stage(Kernel::MGlow, Some(d), None, [solid, soft, f32::from(u8::from(center)), 0.0], 0));
+                    // Inner glows measure inwards for either source (compose::effects::glow_map).
+                    let d = b.field(if inner { FieldKind::StrokeInside } else { FieldKind::StrokeOutside }, g.size + 1.0);
+                    let solid = (g.size * g.spread).floor();
+                    let soft = (g.size + 1.0 - solid).max(1e-3);
+                    let m = b.push(stage(Kernel::MGlow, Some(d), None, [solid, soft, f32::from(u8::from(center)), 0.5], 0));
                     b.finish_lut(m, None, false, photosuite_compose::effects::glow_lut(g), inner, 0);
                 }
                 GlowTechnique::Softer => {
@@ -337,7 +344,10 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
             let a = b.conv(a, photosuite_compose::effects::tent_kernel(s.size));
             let c = b.shift(In::Shape, -dx, -dy, 0.0, false);
             let c = b.conv(c, photosuite_compose::effects::tent_kernel(s.size));
-            b.finish(a, Some(c), s.invert, &s.contour, true, 0);
+            // The contour shapes each copy before the difference (compose::effects::satin_map).
+            let a = b.lut_map(a, contour_lut(&s.contour));
+            let c = b.lut_map(c, contour_lut(&s.contour));
+            b.finish(a, Some(c), s.invert, &Contour::Linear, true, 0);
             1
         }
         Effect::BevelEmboss(bv) => {
@@ -363,7 +373,7 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
             };
             if let Some(c) = &bv.contour {
                 // Contour element: the height through the contour over its range.
-                let lut = photosuite_compose::effects::ranged_lut(&c.contour, c.range).unwrap_or_else(|| (0..4096).map(|k| k as f32 / 4095.0).collect());
+                let lut = photosuite_compose::effects::bevel_contour_lut(c);
                 let mut st = stage(Kernel::MFinish, Some(h), None, [0.0, 0.0, 1.0, 0.0], 0);
                 st.lut = Some(Arc::new(lut));
                 h = b.push(st);

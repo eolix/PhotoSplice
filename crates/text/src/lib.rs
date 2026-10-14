@@ -20,6 +20,7 @@ pub mod fonts;
 pub mod glyphs;
 pub mod layout;
 pub mod optical;
+pub mod path;
 pub mod psd;
 pub mod psd_styles;
 pub mod raster;
@@ -62,6 +63,23 @@ impl TextEngine {
     /// Lays out a text layer (text space: pixels, before `layer.transform`).
     pub fn layout(&mut self, layer: &TextLayer, dpi: f32) -> TextLayout {
         self.layouter.layout(&mut self.fonts, layer, dpi)
+    }
+
+    /// The layer's PSD `TySh` block ([`psd::build_tysh`]), naming each face by its real PostScript
+    /// name where a run names only a family (new type, a font change): Photoshop finds fonts by
+    /// that name (`ArialMT`, not a guessed `Arial-Regular`). The layer itself is left as it is.
+    pub fn tysh(&mut self, layer: &TextLayer, dpi: f32, ink: Option<[f32; 4]>) -> Vec<u8> {
+        if layer.runs.iter().all(|r| r.style.postscript_name.is_some()) {
+            return psd::build_tysh(layer, dpi, ink);
+        }
+        let mut named = layer.clone();
+        for r in &mut named.runs {
+            if r.style.postscript_name.is_none() {
+                let family = if r.style.font_family.is_empty() { fonts::DEFAULT_FAMILY } else { r.style.font_family.as_str() };
+                r.style.postscript_name = self.fonts.postscript_of(family, r.style.weight, r.style.italic);
+            }
+        }
+        psd::build_tysh(&named, dpi, ink)
     }
 
     /// Kerning (1/1000 em) between the character starting at byte `at` and the next one, as
@@ -119,7 +137,7 @@ impl TextEngine {
     /// Lays out and rasterizes a text layer into document space.
     pub fn render(&mut self, layer: &TextLayer, dpi: f32, format: PixelFormat) -> (TextLayout, Rendered) {
         let l = self.layout(layer, dpi);
-        let warp = render::layout_warp(&l, layer.warp.as_ref());
+        let warp = render::layout_warp(&l, layer);
         let r = render::rasterize_warped(&l, &layer.transform, format, layer.antialias, warp.as_ref());
         (l, r)
     }

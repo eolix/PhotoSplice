@@ -318,7 +318,7 @@ pub fn open_page_with(name: &str, bytes: &[u8], o: &OpenOptions) -> Result<Impor
     if o.how == PageAs::Layers {
         let (document, more) = layers::import_layers(name, p, &place, scale * 72.0);
         warnings.extend(more);
-        return Ok(ImportResult { document, warnings });
+        return Ok(ImportResult { document, warnings, selected: Vec::new() });
     }
     let rgba = match rendered {
         Some(r) => r,

@@ -104,21 +104,29 @@ pub fn blend_channel(mode: BlendMode, cb: f32, cs: f32) -> f32 {
 
 /// Straight-alpha source over straight-alpha backdrop (W3C/PDF general
 /// formula) using [`blend_rgb`].
-pub fn composite(mode: BlendMode, backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
+pub fn composite(mode: BlendMode, mut backdrop: [f32; 4], mut source: [f32; 4], opacity: f32) -> [f32; 4] {
     let ab = backdrop[3];
     let as_ = source[3] * opacity;
     if as_ <= 0.0 {
         return backdrop;
     }
     let ao = as_ + ab * (1.0 - as_);
-    if mode == BlendMode::Normal && LAB_MIX.with(|l| l.get()) && ab > 0.0 && ao > 0.0 {
+    let lab = LAB_MIX.with(|l| l.get());
+    if mode == BlendMode::Normal && lab && ab > 0.0 && ao > 0.0 {
         let lb = photosuite_color::convert::srgb_to_lab([backdrop[0], backdrop[1], backdrop[2]]);
         let ls = photosuite_color::convert::srgb_to_lab([source[0], source[1], source[2]]);
         let kb = ab * (1.0 - as_) / ao;
         let k = as_ / ao;
         let m: [f32; 3] = std::array::from_fn(|i| lb[i] * kb + ls[i] * k);
-        let r = photosuite_color::convert::lab_to_srgb(m);
+        let r = photosuite_color::convert::lab_to_srgb_unclamped(m);
         return [r[0], r[1], r[2], ao];
+    }
+    if lab && mode != BlendMode::Normal {
+        // A Lab document's composite keeps colours outside sRGB (`lab`); the other modes blend
+        // the screen colour.
+        for v in backdrop[..3].iter_mut().chain(&mut source[..3]) {
+            *v = v.clamp(0.0, 1.0);
+        }
     }
     if mode == BlendMode::Normal {
         // Fast path: B(Cb, Cs) = Cs.

@@ -22,7 +22,7 @@
 use photosuite_color::blend::BlendMode;
 use photosuite_doc::Pattern;
 use photosuite_doc::{
-    Bevel, BevelStyle, BevelTechnique, Contour, Effect, FxPaint, GlobalLight, Glow, GlowSource, GlowTechnique, Gradient, GradientStyle, Layer, Shadow,
+    Bevel, BevelStyle, BevelTechnique, Contour, Effect, FxPaint, GlobalLight, Glow, GlowSource, GlowTechnique, Gradient, Layer, Shadow,
     StrokePosition,
 };
 use photosuite_geom::Rect;
@@ -440,11 +440,44 @@ fn lut_at(l: &[f32], v: f32) -> f32 {
     l[i] + (l[j] - l[i]) * (x - i as f32)
 }
 
-/// A glow's coverage transfer: its contour applied over the Range (Photoshop maps the glow's
-/// coverage `v` through `contour(min(v / range, 1))`, so the default 50 % doubles a blurred
-/// edge's 0.5 to full strength). `None` = identity.
+/// A glow's coverage transfer: its contour applied over the Range (Photoshop maps a Softer
+/// glow's coverage `v` through `contour(min(v / range, 1))`, so the default 50 % doubles a
+/// blurred edge's 0.5 to full strength). A Precise glow's ramp takes the contour as it is
+/// (Photoshop corpus outer-glow-precise-spread40.psd: 94/255 → 20/255 with Range 50 %).
+/// `None` = identity.
 pub fn glow_lut(g: &Glow) -> Option<Vec<f32>> {
-    ranged_lut(&g.contour, g.range)
+    match g.technique {
+        GlowTechnique::Precise => contour_lut(&g.contour),
+        GlowTechnique::Softer => ranged_lut(&g.contour, g.range),
+    }
+}
+
+/// The bevel's Contour element as a height transfer: the Range picks the top of the height
+/// profile, `contour((h − (1 − range)) / range)`, so the default 50 % spans exactly an inner
+/// bevel (whose height runs from ½ at the edge to 1). Photoshop corpus
+/// bevel-inner-contour-ramp-peak: lit for 4 px from the edge, shaded to 14 px (the size), as
+/// a ramp peak over `h ∈ [½, 1]` gives; the old `min(h / range, 1)` put it all outside the shape.
+pub fn bevel_contour_lut(c: &photosuite_doc::effects::BevelContour) -> Vec<f32> {
+    let base = contour_lut(&c.contour);
+    let r = if c.range.is_finite() { c.range.clamp(0.01, 1.0) } else { 1.0 };
+    let n = 4096;
+    (0..n)
+        .map(|k| {
+            let v = ((k as f32 / (n - 1) as f32 - (1.0 - r)) / r).clamp(0.0, 1.0);
+            base.as_ref().map_or(v, |l| lut_at(l, v))
+        })
+        .collect()
+}
+
+/// A bevel's lighting through its Gloss Contour. The shading runs 0 (full shadow) .. ½ (facing
+/// the light as a flat surface does) .. 1 (full highlight); the contour maps it, and what lands
+/// above ½ is highlight, below shadow. A flat area under a peaked contour turns highlight
+/// (Photoshop corpus bevel-inner-gloss-ramp-peak: the interior 0.35 → 0.84, Screen white at
+/// 75 %); a linear contour leaves the shading as it is. Returns `(highlight, shadow)`.
+pub fn gloss(k: f32, se: f32, lut: Option<&[f32]>) -> (f32, f32) {
+    let s = if k > 0.0 { 0.5 + 0.5 * (k / (1.0 - se).max(1e-3)).clamp(0.0, 1.0) } else { 0.5 - 0.5 * (-k / se.max(1e-3)).clamp(0.0, 1.0) };
+    let c = lut.map_or(s, |l| lut_at(l, s));
+    ((2.0 * c - 1.0).max(0.0), (1.0 - 2.0 * c).max(0.0))
 }
 
 /// A contour applied over a Range (`contour(min(v / range, 1))`); `None` = identity.
@@ -515,7 +548,7 @@ fn apply_contour(m: Map, c: &Contour) -> Map {
 
 fn rgb(c: &photosuite_color::Color) -> [f32; 3] {
     // In a CMYK document's projected passes, the colour's inks stand in (see `cmyk`).
-    crate::cmyk::project_color(c).unwrap_or_else(|| c.to_rgb())
+    crate::cmyk::project_color(c).unwrap_or_else(|| c.to_rgb_unclamped())
 }
 
 /// Offset of an effect lit from `angle` at `distance` (shadow falls away from
@@ -525,51 +558,8 @@ fn offset(angle: f32, distance: f32) -> (f32, f32) {
     ((-a.cos() * distance).round(), (a.sin() * distance).round())
 }
 
-/// The lengths a 100 % gradient at `angle` spans in a `w` × `h` frame: the chord (Linear and
-/// Reflected) and the ellipse-norm length (Radial, Angle, Diamond; its half is the radius).
-pub fn gradient_units(angle: f32, w: f32, h: f32) -> (f32, f32) {
-    let (s, c) = angle.to_radians().sin_cos();
-    // Gradient length: the bounds' extent along the angle as an ellipse
-    // norm (a unit gradient scaled to the bounds); fitted on psd-tools
-    // gradient-styles.psd (cached Photoshop renderings of every style).
-    let len = ((c * w).powi(2) + (s * h).powi(2)).sqrt().max(1.0);
-    // Linear / Reflected span the chord of the bounds through their centre along the angle:
-    // min(w / |cos|, h / |sin|). A 45° gradient on a 29 px square runs 41 px (psd-tools
-    // shape-fx2), an 87° one on a 600 × 60 text line 60 px (layer_effects); axis-aligned angles
-    // span the width / height.
-    let chord = (w / c.abs().max(1e-6)).min(h / s.abs().max(1e-6)).max(1.0);
-    (chord, len)
-}
-
-/// Gradient parameter `t` in `0..=1` for pixel centre `(x, y)` inside `bounds`.
-#[allow(clippy::too_many_arguments)]
-pub fn gradient_t(style: GradientStyle, angle: f32, scale: f32, reverse: bool, offset: (f32, f32), bounds: Rect, x: f32, y: f32) -> f32 {
-    let w = bounds.width().max(1) as f32;
-    let h = bounds.height().max(1) as f32;
-    let cx = bounds.x0 as f32 + w / 2.0 + offset.0 * w;
-    let cy = bounds.y0 as f32 + h / 2.0 + offset.1 * h;
-    let (s, c) = angle.to_radians().sin_cos();
-    let (dx, dy) = (x - cx, y - cy);
-    // Distance along the gradient direction (y axis points down).
-    let along = dx * c - dy * s;
-    let across = dx * s + dy * c;
-    let (chord, len) = gradient_units(angle, w, h);
-    let (chord, len) = (chord * scale.max(1e-3), len * scale.max(1e-3));
-    // Linear / Reflected sample the pixel's top-left corner, half a pixel before its centre
-    // (with the whole-pixel end points of `fill_layout`: layer_effects' overlay 5.8 → 1.8/255,
-    // shape-fx2 2.8 → 1.1/255, gradient-fill.psd 1.9 → 0.5/255).
-    let corner = 0.5 * (c - s);
-    let mut t = match style {
-        GradientStyle::Linear => (along - corner) / chord + 0.5,
-        GradientStyle::Reflected => ((along - corner) / (chord / 2.0)).abs(),
-        GradientStyle::Radial => (dx * dx + dy * dy).sqrt() / (len / 2.0),
-        GradientStyle::Diamond => (along.abs() + across.abs()) / (len / 2.0),
-        // Clockwise sweep starting at the gradient angle.
-        GradientStyle::Angle => ((angle.to_radians() - (-dy).atan2(dx)) / std::f32::consts::TAU).rem_euclid(1.0),
-    };
-    t = t.clamp(0.0, 1.0);
-    if reverse { 1.0 - t } else { t }
-}
+// The gradient geometry is shared with the vector renderer (shape layers).
+pub use photosuite_vector::gradient::{gradient_t, gradient_units};
 
 /// Samples colour and opacity stops at `t`.
 pub fn sample_gradient(g: &Gradient, t: f32) -> [f32; 4] {
@@ -654,9 +644,16 @@ fn glow_map(shape: &Map, g: &Glow, inner: bool, origin: (i32, i32)) -> Map {
     };
     let mut m = match g.technique {
         GlowTechnique::Precise => {
-            let d = if inner && g.source == GlowSource::Edge { dist_inside(shape) } else { dist_outside(&src) };
-            let solid = g.size * g.spread;
-            let soft = (g.size - solid).max(1e-3);
+            // Inner glows measure from the edge inwards, for either source; Center is the Edge
+            // ramp inverted (brightest deep inside: Photoshop corpus
+            // inner-glow-center-precise-choke30.psd).
+            // Reference measures from pixel centre to pixel centre (half a pixel past the edge
+            // distance), holds full strength over the whole pixels of the Spread and fades to
+            // nothing one pixel past the Size (corpus outer-glow-precise-spread40.psd, size 16,
+            // spread 40 %: full to 6, (17 − d) / 11 beyond).
+            let d: Vec<f32> = if inner { dist_inside_by(shape, Metric::Chamfer) } else { dist_outside_by(&src, Metric::Chamfer) }.into_iter().map(|d| d + 0.5).collect();
+            let solid = (g.size * g.spread).floor();
+            let soft = (g.size + 1.0 - solid).max(1e-3);
             let mut m = Map::new(shape.w, shape.h, 0.0);
             for (o, d) in m.v.iter_mut().zip(d) {
                 *o = if d <= solid { 1.0 } else { (1.0 - (d - solid) / soft).clamp(0.0, 1.0) };
@@ -708,7 +705,8 @@ fn paint_pattern(
         dst,
         m,
         |i| {
-            let (x, y) = (f64::from(big.x0 + (i % w) as i32) + 0.5, f64::from(big.y0 + (i / w) as i32) + 0.5);
+            // The pixel's corner, as `pattern::render`.
+            let (x, y) = (f64::from(big.x0 + (i % w) as i32), f64::from(big.y0 + (i / w) as i32));
             let (u, v) = place.map(x, y);
             tile.sample(u, v)
         },
@@ -723,6 +721,7 @@ fn paint_fx(
     m: &Map,
     p: &FxPaint,
     shape_bounds: Rect,
+    canvas: Rect,
     anchor: (f64, f64),
     big: Rect,
     blend: BlendMode,
@@ -733,6 +732,9 @@ fn paint_fx(
         FxPaint::Color(c) => paint_color(dst, m, rgb(c), blend, opacity),
         FxPaint::Gradient(g) => {
             let prepared = PreparedGradient::new(g);
+            // "Align with Layer" off lays the gradient out over the canvas instead of the layer
+            // (psd-tools layer_params: a radial stroke gradient centred on the document).
+            let shape_bounds = if g.align { shape_bounds } else { canvas };
             let (angle, scale, offset) = crate::fill_layout::gradient_layout(g.style, g.angle, g.scale, g.offset, shape_bounds);
             let w = big.width() as usize;
             paint(
@@ -766,7 +768,7 @@ pub fn glow_gradient_gain(range: f32) -> f32 {
 #[allow(clippy::too_many_arguments)]
 fn paint_glow(dst: &mut Buffer, m: &Map, g: &Glow, shape_bounds: Rect, anchor: (f64, f64), big: Rect, patterns: &PreparedPatterns<'_>) {
     let FxPaint::Gradient(gradient) = &g.paint else {
-        return paint_fx(dst, m, &g.paint, shape_bounds, anchor, big, g.common.blend, g.common.opacity, patterns);
+        return paint_fx(dst, m, &g.paint, shape_bounds, shape_bounds, anchor, big, g.common.blend, g.common.opacity, patterns);
     };
     let prepared = PreparedGradient::new(gradient);
     let gain = glow_gradient_gain(g.range);
@@ -1040,7 +1042,7 @@ fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, pattern
     };
     // Contour element: the height profile through the contour over its range.
     if let Some(c) = &b.contour {
-        h = apply_lut(h, Some(ranged_lut(&c.contour, c.range).unwrap_or_else(|| (0..4096).map(|k| k as f32 / 4095.0).collect())));
+        h = apply_lut(h, Some(bevel_contour_lut(c)));
     }
     // Texture element: the pattern's luminance as extra height, scaled so a full-contrast step
     // at 100 % depth slopes like the bevel at its depth.
@@ -1053,7 +1055,7 @@ fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, pattern
         let (x0, y0) = (tex.rect.x0, tex.rect.y0);
         for y in 0..h.h {
             for x in 0..h.w {
-                let (u, v) = place.map(f64::from(x0 + x as i32) + 0.5, f64::from(y0 + y as i32) + 0.5);
+                let (u, v) = place.map(f64::from(x0 + x as i32), f64::from(y0 + y as i32));
                 let p = tile.sample(u, v);
                 let l = (0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2]) * p[3];
                 h.v[y * h.w + x] += k * if t.invert { 1.0 - l } else { l };
@@ -1114,26 +1116,28 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
     let on_bevel = |x: i64, y: i64| {
         hmap.get(x, y) > BEVEL_H_EPS || (reach_past && [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dy)| hmap.get(x + dx, y + dy) > BEVEL_H_EPS))
     };
+    let gloss_lut = contour_lut(&b.gloss_contour);
+    // Heights past the maps' edge continue the edge's (a contour can raise the whole outside: a
+    // zero read there would be a slope along the region's border).
+    let (mw, mh) = (hmap.w as i64 - 1, hmap.h as i64 - 1);
+    let hc = |x: i64, y: i64| hmap.get(x.clamp(0, mw.max(0)), y.clamp(0, mh.max(0)));
     let shade_into = |depth: f32, region_kind: u8| -> (Map, Map) {
         let (mut hi, mut sh) = (Map::new(shape.w, shape.h, 0.0), Map::new(shape.w, shape.h, 0.0));
         for y in 0..shape.h as i64 {
             for x in 0..shape.w as i64 {
                 let i = y as usize * shape.w + x as usize;
-                let gx = (hmap.get(x + 1, y) - hmap.get(x - 1, y)) * 0.5 * depth;
-                let gy = (hmap.get(x, y + 1) - hmap.get(x, y - 1)) * 0.5 * depth;
+                let gx = (hc(x + 1, y) - hc(x - 1, y)) * 0.5 * depth;
+                let gy = (hc(x, y + 1) - hc(x, y - 1)) * 0.5 * depth;
                 let n = [-gx, -gy, 1.0];
                 let len = (n[0] * n[0] + n[1] * n[1] + 1.0).sqrt();
                 let shade = (n[0] * light_v[0] + n[1] * light_v[1] + n[2] * light_v[2]) / len;
                 let region = if region_kind == 0 { shape.v[i] } else { f32::from(shape.v[i] < 1.0 - INSIDE_EPS && on_bevel(x, y)) };
-                let k = shade - se;
-                if k > 0.0 {
-                    hi.v[i] = (k / (1.0 - se).max(1e-3)).clamp(0.0, 1.0) * region;
-                } else {
-                    sh.v[i] = (-k / se.max(1e-3)).clamp(0.0, 1.0) * region;
-                }
+                let (h, s) = gloss(shade - se, se, gloss_lut.as_deref());
+                hi.v[i] = h * region;
+                sh.v[i] = s * region;
             }
         }
-        (apply_contour(hi, &b.gloss_contour), apply_contour(sh, &b.gloss_contour))
+        (hi, sh)
     };
     let maps = match g.paint {
         BevelPaint::Inner | BevelPaint::Outer | BevelPaint::Stroke => {
@@ -1221,11 +1225,14 @@ fn satin_map(shape: &Map, s: &photosuite_doc::effects::Satin) -> Map {
     // Two box passes of the satin size (fitted: 0.2 % mean error on psd-tools layer_effects).
     tent(&mut a, s.size);
     tent(&mut b, s.size);
+    // The contour shapes each blurred copy before they are differenced (Photoshop corpus
+    // satin-default.psd, an S contour: 27/255 → 1.1/255; satin-inverted-ramp-peak-aa.psd
+    // 112/255 → 19/255); a linear contour is the same either way.
+    let (a, b) = (apply_contour(a, &s.contour), apply_contour(b, &s.contour));
     let mut m = Map { w: shape.w, h: shape.h, v: a.v.iter().zip(&b.v).map(|(x, y)| (x - y).abs()).collect() };
     if s.invert {
         m = m.map(|v| 1.0 - v);
     }
-    let mut m = apply_contour(m, &s.contour);
     for (v, a) in m.v.iter_mut().zip(&shape.v) {
         *v *= a;
     }
@@ -1261,11 +1268,10 @@ pub(crate) fn build_maps_prepared(
             Effect::OuterGlow(g) => vec![glow_map(&shape, g, false, (rect.x0, rect.y0))],
             Effect::InnerGlow(g) => vec![glow_map(&shape, g, true, (rect.x0, rect.y0))],
             Effect::Satin(s) => vec![satin_map(&shape, s)],
-            // Stroke Emboss: an inner bevel of the stroke effect's area, painted over the stroke
-            // (Photoshop corpus bevel-stroke-*: the stroke is shaded, the layer stays flat;
-            // pixels off 29-35 % → 10-20 %). An inside stroke is the shape's own inner band, and
-            // Photoshop shades it as an inner bevel of the shape (bevel-stroke-emboss-inside-stroke
-            // 3.6 %, the ring 13 %). Without a stroke there is nothing to emboss.
+            // Stroke Emboss: the shape's own bevel, painted over the stroke effect's area
+            // (Photoshop corpus bevel-stroke-*: the stroke is shaded, the layer stays flat). An
+            // inside stroke is the shape's inner band, shaded as an inner bevel of the shape
+            // (bevel-stroke-emboss-inside-stroke 3.6 %). Without a stroke there is nothing to emboss.
             Effect::BevelEmboss(b)
                 if b.style == BevelStyle::StrokeEmboss
                     && items.iter().find_map(|e| if let Effect::Stroke(st) = e { Some(st.position) } else { None }) != Some(StrokePosition::Inside) =>
@@ -1285,8 +1291,20 @@ pub(crate) fn build_maps_prepared(
                                 .map(|(a, (di, dou))| if *a > INSIDE_EPS { (in_w + 0.5 - di).clamp(0.0, 1.0) } else { (out_w + 0.5 - dou).clamp(0.0, 1.0) })
                                 .collect(),
                         };
-                        let inner = Bevel { style: BevelStyle::InnerBevel, ..(*b).clone() };
-                        bevel_maps(&ring, &inner, light, tex, patterns).0
+                        // The slope is the shape's own, steepest at its edge: an outside stroke is
+                        // shaded as an outer bevel of the shape, a centre stroke as an emboss of it,
+                        // shown over the stroke only (Photoshop corpus, pixels off: bevel-stroke-smooth
+                        // 13.1 → 1.7 %, -chisel-hard 10.3 → 4.0 %, centre stroke 20.3 → 12.3 %; as
+                        // an inner bevel of the ring the slope fell and rose again across it).
+                        let union = Map { w, h, v: shape.v.iter().zip(&ring.v).map(|(a, r)| a.max(*r)).collect() };
+                        let style = if st.position == StrokePosition::Center { BevelStyle::Emboss } else { BevelStyle::OuterBevel };
+                        let mut maps = bevel_maps(&shape, &Bevel { style, ..(*b).clone() }, light, tex, patterns).0;
+                        for m in &mut maps {
+                            for ((v, r), u) in m.v.iter_mut().zip(&ring.v).zip(&union.v) {
+                                *v *= if *u > 1e-6 { (r / u).min(1.0) } else { 0.0 };
+                            }
+                        }
+                        maps
                     }
                     _ => Vec::new(),
                 }
@@ -1322,17 +1340,20 @@ const FAR: f32 = 1.0e9;
 
 /// Composites `content` (the layer's own pixels over `big`, alpha already
 /// masked, clipped layers applied) plus its effects into `backdrop`.
-pub fn composite_with_effects(layer: &Layer, content: &Buffer, backdrop: &mut Buffer, maps: &FxMaps, layer_bounds: Rect, patterns: &[Pattern]) {
+/// `canvas` is the document's bounds (gradients not aligned with the layer span it).
+pub fn composite_with_effects(layer: &Layer, content: &Buffer, backdrop: &mut Buffer, maps: &FxMaps, layer_bounds: Rect, canvas: Rect, patterns: &[Pattern]) {
     let prepared = PreparedPatterns::new(patterns, PREPARED_PATTERN_BYTES);
-    composite_with_effects_prepared(layer, content, backdrop, maps, layer_bounds, &prepared, None);
+    composite_with_effects_prepared(layer, content, backdrop, maps, layer_bounds, canvas, &prepared, None);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn composite_with_effects_prepared(
     layer: &Layer,
     content: &Buffer,
     backdrop: &mut Buffer,
     maps: &FxMaps,
     layer_bounds: Rect,
+    canvas: Rect,
     patterns: &PreparedPatterns<'_>,
     vstroke: Option<VectorStroke<'_>>,
 ) {
@@ -1424,7 +1445,7 @@ pub(crate) fn composite_with_effects_prepared(
     }
     for (_, e) in rev() {
         if let Effect::GradientOverlay { common, gradient, .. } = e {
-            paint_fx(&mut lay, &full, &FxPaint::Gradient(gradient.clone()), sb, anchor, big, common.blend, common.opacity, patterns)
+            paint_fx(&mut lay, &full, &FxPaint::Gradient(gradient.clone()), sb, canvas, anchor, big, common.blend, common.opacity, patterns)
         }
     }
     for (_, e) in rev() {
@@ -1482,7 +1503,7 @@ pub(crate) fn composite_with_effects_prepared(
         for ((mv, a), dv) in m.v.iter_mut().zip(&shape.v).zip(&din) {
             *mv = if inside(*a) { (in_w + 0.5 - dv).clamp(0.0, 1.0) } else { 0.0 };
         }
-        paint_fx(&mut lay, &m, &st.paint, frame(st), anchor, big, st.common.blend, st.common.opacity, patterns);
+        paint_fx(&mut lay, &m, &st.paint, frame(st), canvas, anchor, big, st.common.blend, st.common.opacity, patterns);
     }
     for (i, e) in rev() {
         if let Effect::BevelEmboss(b) = e
@@ -1532,7 +1553,7 @@ pub(crate) fn composite_with_effects_prepared(
             // The stroke blended over the backdrop at full coverage.
             let mut blended = base.clone();
             let ones = Map { w, h, v: share.iter().map(|&s| if s > 0.0 { 1.0 } else { 0.0 }).collect() };
-            paint_fx(&mut blended, &ones, &st.paint, frame(st), anchor, big, st.common.blend, 1.0, patterns);
+            paint_fx(&mut blended, &ones, &st.paint, frame(st), canvas, anchor, big, st.common.blend, 1.0, patterns);
             for ((a, b), s) in acc.iter_mut().zip(&blended.px).zip(&share) {
                 if *s > 0.0 {
                     for c in 0..3 {
@@ -1663,18 +1684,18 @@ fn mix_premul(a: [f32; 4], b: [f32; 4], k: f32) -> [f32; 4] {
 /// `glow_map`, `bevel_maps` and `build_maps`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FieldKind {
-    /// `dist_outside` of the shape: precise outer and centre glows.
+    /// `dist_outside` of the shape.
     Outside,
     /// `dist_outside_smooth` of the shape: bevels.
     BevelOutside,
-    /// `dist_inside` of the shape: precise edge inner glows, bevels.
+    /// `dist_inside` of the shape: bevels.
     Inside,
-    /// Chamfer distance outside the shape: outside strokes, and the spread of drop shadows and
-    /// softer outer glows ([`dilate`]).
+    /// Chamfer distance outside the shape: outside strokes, precise outer glows, and the spread
+    /// of drop shadows and softer outer glows ([`dilate`]).
     StrokeOutside,
     /// Chamfer distance outside `1 - alpha`: the choke of inner shadows and softer inner glows.
     ChokeInside,
-    /// Stroke distance inside the shape.
+    /// Stroke distance inside the shape: inside strokes, precise inner glows.
     StrokeInside,
     /// Stroke distance outside a shape layer's outline (from its local coverage).
     StrokeOutsideVector,
@@ -1697,6 +1718,7 @@ pub fn distance_field(kind: FieldKind, alpha: Vec<f32>, w: usize, h: usize) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use photosuite_doc::GradientStyle;
 
     #[test]
     fn edt_is_exact() {
@@ -1961,6 +1983,11 @@ mod tests {
         // The ring's lit and shaded sides are painted; the middle of the shape isn't.
         assert!(at(hi, 8, 24) > 0.05 || at(sh, 8, 24) > 0.05 || at(hi, 24, 8) > 0.05 || at(sh, 24, 8) > 0.05);
         assert_eq!((at(hi, 24, 24), at(sh, 24, 24)), (0.0, 0.0));
+        // Lit from above, the top of the ring is lit most by the shape's edge, where the shape's
+        // own slope is steepest (Photoshop corpus bevel-stroke-smooth: 0.87 at the ring's outer
+        // edge → 0.91 by the shape), and the ring past the size isn't shaded.
+        assert!(at(hi, 24, 11) > at(hi, 24, 8) && at(hi, 24, 8) > 0.0, "{:?}", (5..12).map(|y| at(hi, 24, y)).collect::<Vec<_>>());
+        assert!(at(sh, 24, 36) > at(sh, 24, 39) && at(sh, 24, 39) > 0.0, "shaded below, most by the shape: {:?}", (36..43).map(|y| at(sh, 24, y)).collect::<Vec<_>>());
         // No stroke, no emboss.
         layer.effects.items = vec![emboss];
         let maps = build_maps(&layer, shape.v.clone(), Rect::new(0, 0, n as i32, n as i32), &GlobalLight::default(), &no_tex());
@@ -2084,6 +2111,43 @@ mod tests {
         assert!(mid > flat + 0.5, "{mid} vs {flat}");
     }
 
+    /// Photoshop corpus bevel-inner-contour-ramp-peak / bevel-inner-gloss-ramp-peak (inner smooth,
+    /// size 14, angle 120°, altitude 30°), across the square's left edge: with a ramp-peak
+    /// Contour at Range 50 % the bevel is lit for ~4 px, then in full shadow to ~12 px, flat
+    /// past the size; with the ramp peak as Gloss Contour the flat interior is full highlight.
+    #[test]
+    fn bevel_contour_range_and_gloss_contour_match_photoshop() {
+        let shape = square(64, 8, 56);
+        let l = GlobalLight::default();
+        let peak = Contour::Custom {
+            name: "ramp peak".into(),
+            points: vec![
+                photosuite_doc::adjust::CurvePoint { input: 0.0, output: 0.0 },
+                photosuite_doc::adjust::CurvePoint { input: 128.0 / 255.0, output: 1.0 },
+                photosuite_doc::adjust::CurvePoint { input: 1.0, output: 0.0 },
+            ],
+        };
+        let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::Smooth);
+        (b.size, b.angle) = (14.0, 120.0);
+        let mut c = b.clone();
+        c.contour = Some(photosuite_doc::BevelContour { contour: peak.clone(), range: 0.5, anti_alias: false });
+        let (m, _) = bevel_maps(&shape, &c, &l, &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        let at = |map: &Map, d: usize| map.v[32 * 64 + 8 + d];
+        // Photoshop's highlight amounts at 1-3 px: (0.38, 0.42, 0.51 − 0.35 fill) / (0.65 × 75 %).
+        for (d, ps) in [(1, 0.06), (2, 0.14), (3, 0.33)] {
+            assert!((at(&m[0], d) - ps).abs() < 0.05 && at(&m[1], d) == 0.0, "lit by the edge: {:?}", (0..16).map(|d| at(&m[0], d)).collect::<Vec<_>>());
+        }
+        assert!((6..=10).all(|d| at(&m[1], d) > 0.9), "then full shadow: {:?}", (0..16).map(|d| at(&m[1], d)).collect::<Vec<_>>());
+        assert!((16..24).all(|d| at(&m[0], d) + at(&m[1], d) < 1e-3), "flat past the size");
+        let mut g = b.clone();
+        g.gloss_contour = peak;
+        let (m, _) = bevel_maps(&shape, &g, &l, &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        assert!((at(&m[0], 24) - 1.0).abs() < 1e-3 && at(&m[1], 24) == 0.0, "flat interior full highlight");
+        // A linear gloss contour leaves the shading alone.
+        let near = |(h, s): (f32, f32), (eh, es): (f32, f32)| (h - eh).abs() < 1e-5 && (s - es).abs() < 1e-5;
+        assert!(near(gloss(0.2, 0.5, None), (0.4, 0.0)) && near(gloss(-0.25, 0.5, None), (0.0, 0.5)));
+    }
+
     #[test]
     fn glow_range_stretches_the_contour() {
         let mut g = Glow {
@@ -2181,5 +2245,41 @@ mod tests {
         let noisy = glow_map(&square_shape(40), &g(0.6), false, (0, 0));
         let diff: f32 = plain.v.iter().zip(&noisy.v).map(|(a, b)| (a - b).abs()).sum();
         assert!(diff > 5.0, "glow noise changes the coverage: {diff}");
+    }
+
+    /// A Precise outer glow, size 16, spread 40 %, by a straight edge: full strength to 6 px
+    /// (pixel centre to pixel centre), then (17 − d) / 11 (Reference corpus
+    /// outer-glow-precise-spread40.psd, exact along its straight edges).
+    #[test]
+    fn precise_glow_profile_matches_reference() {
+        let g = Glow {
+            common: photosuite_doc::FxCommon::new(BlendMode::Screen, 1.0),
+            paint: FxPaint::Color(photosuite_color::Color::WHITE),
+            technique: GlowTechnique::Precise,
+            spread: 0.4,
+            size: 16.0,
+            contour: Contour::Linear,
+            anti_alias: false,
+            range: 0.5,
+            jitter: 0.0,
+            noise: 0.0,
+            source: GlowSource::Edge,
+        };
+        let n = 60;
+        let mut shape = Map::new(n, n, 0.0);
+        for y in 0..n {
+            for x in 30..n {
+                shape.v[y * n + x] = 1.0;
+            }
+        }
+        let m = glow_map(&shape, &g, false, (0, 0));
+        let at = |x: usize| m.v[30 * n + x];
+        for d in 1..=6 {
+            assert!((at(30 - d) - 1.0).abs() < 1e-4, "{d}: {}", at(30 - d));
+        }
+        for d in 7..=18 {
+            let want = ((17.0 - d as f32) / 11.0).clamp(0.0, 1.0);
+            assert!((at(30 - d) - want).abs() < 1e-3, "{d}: {} vs {want}", at(30 - d));
+        }
     }
 }

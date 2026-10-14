@@ -1801,7 +1801,7 @@ fn layer_row(
     let name_color = if l.visible { t.text } else { t.text_faint };
     let font = if selected && !t.pro { theme::medium(13.0) } else { egui::FontId::proportional(if t.pro { 12.0 } else { 13.0 }) };
     // Photoshop before 2026 set the Background layer's name in italics; 2026 sets it upright.
-    let italic = !t.pro && l.name == "Background" && l.locks.transparency;
+    let italic = !t.pro && doc.is_background(l.id);
     // Photoshop rows show only the name; the kind sub-label is a Studio-theme addition.
     let is_pixel = t.pro || matches!(l.content, LayerContent::Raster(_));
     let name_rect = crate::layer_row_ui::truncated(&painter, &l.name, font, name_color, italic, name_right - x).map(|galley| {

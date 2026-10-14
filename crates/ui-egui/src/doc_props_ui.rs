@@ -3,15 +3,16 @@
 //! Rulers & Grids toggles. Every edit dispatches an engine or view command, so the panel stays thin.
 
 use egui::{Align2, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
-use photosuite_doc::{ColorMode, Document, Layer, LayerContent, LayerId, SampleType};
+use photosuite_doc::{ColorMode, Document, Layer, LayerId, SampleType};
 use serde_json::{Value, json};
 
 use crate::theme::Tokens;
 use crate::{PhotosuiteApp, icons, widgets};
 
-/// Photoshop's Background layer: the locked, opaque raster layer at the bottom of the stack.
+/// The Background layer: the locked, opaque raster layer at the bottom of the stack, whatever
+/// its (localized) name ([`Document::background`]).
 pub fn is_background(doc: &Document, l: &Layer) -> bool {
-    l.name == "Background" && l.locks.transparency && matches!(l.content, LayerContent::Raster(_)) && doc.layers.first().is_some_and(|b| b.id == l.id)
+    doc.is_background(l.id)
 }
 
 /// Does the Properties panel show the Document view? (No layer selected, or the Background layer.)

@@ -50,7 +50,7 @@ fn has_layer_for_slice(s: &Session) -> std::result::Result<(), String> {
     if matches!(l.content, LayerContent::Adjustment(_)) {
         return Err("adjustment layers have no bounds to slice".into());
     }
-    if d.doc.layers.first().is_some_and(|b| b.id == id && b.name == "Background" && b.locks.transparency && b.locks.position) {
+    if d.doc.is_background(id) {
         return Err("the Background layer can't have a layer-based slice".into());
     }
     if d.doc.slices.list.iter().any(|s| s.layer == Some(id)) {

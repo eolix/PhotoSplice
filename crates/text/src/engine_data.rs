@@ -15,6 +15,9 @@ pub enum Value {
     Real(f64),
     Bool(bool),
     Name(String),
+    /// A string stored as plain bytes (no UTF-16 byte-order mark), kept as it was so it is
+    /// written back the same.
+    Bytes(Vec<u8>),
 }
 
 impl Value {
@@ -67,6 +70,7 @@ impl Value {
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Value::String(s) | Value::Name(s) => Some(s),
+            Value::Bytes(b) => std::str::from_utf8(b).ok(),
             _ => None,
         }
     }
@@ -207,7 +211,7 @@ impl Parser<'_> {
                         }
                     }
                 }
-                Ok(Value::String(decode_string(&raw)))
+                Ok(if raw.starts_with(&[0xFE, 0xFF]) { Value::String(decode_string(&raw)) } else { Value::Bytes(raw) })
             }
             Some(b'/') => Ok(Value::Name(self.name())),
             Some(_) => {
@@ -239,13 +243,10 @@ impl Parser<'_> {
     }
 }
 
+/// A UTF-16 string after its byte-order mark.
 fn decode_string(raw: &[u8]) -> String {
-    if raw.len() >= 2 && raw[0] == 0xFE && raw[1] == 0xFF {
-        let u: Vec<u16> = raw[2..].as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
-        String::from_utf16_lossy(&u)
-    } else {
-        raw.iter().map(|&c| c as char).collect()
-    }
+    let u: Vec<u16> = raw.get(2..).unwrap_or_default().as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+    String::from_utf16_lossy(&u)
 }
 
 /// Parses an EngineData document (the top-level dictionary).
@@ -260,6 +261,50 @@ pub fn write(v: &Value) -> Vec<u8> {
     let mut out = b"\n\n".to_vec();
     write_value(v, 0, &mut out);
     out
+}
+
+/// Serializes a document's `Txt2` block as Photoshop writes it: the dictionary's entries with no
+/// enclosing `<< >>`, every token after a single space, all on one line (Photoshop refuses a
+/// `Txt2` in the multi-line EngineData layout: "not compatible with this version", 2026-10-13).
+pub fn write_txt2(v: &Value) -> Vec<u8> {
+    let mut out = Vec::new();
+    match v {
+        Value::Dict(items) => {
+            for (k, x) in items {
+                out.push(b' ');
+                out.push(b'/');
+                out.extend_from_slice(k.as_bytes());
+                out.push(b' ');
+                write_compact(x, &mut out);
+            }
+        }
+        other => write_compact(other, &mut out),
+    }
+    out
+}
+
+fn write_compact(v: &Value, out: &mut Vec<u8>) {
+    match v {
+        Value::Dict(items) => {
+            out.extend_from_slice(b"<<");
+            for (k, x) in items {
+                out.extend_from_slice(b" /");
+                out.extend_from_slice(k.as_bytes());
+                out.push(b' ');
+                write_compact(x, out);
+            }
+            out.extend_from_slice(b" >>");
+        }
+        Value::Array(items) => {
+            out.push(b'[');
+            for x in items {
+                out.push(b' ');
+                write_compact(x, out);
+            }
+            out.extend_from_slice(b" ]");
+        }
+        scalar => write_value(scalar, 0, out),
+    }
 }
 
 fn indent(out: &mut Vec<u8>, n: usize) {
@@ -310,12 +355,13 @@ fn write_value(v: &Value, depth: usize, out: &mut Vec<u8>) {
             }
             out.extend_from_slice(b" ]");
         }
-        Value::String(s) => {
+        Value::String(_) | Value::Bytes(_) => {
             out.push(b'(');
-            let mut raw = vec![0xFE, 0xFF];
-            for u in s.encode_utf16() {
-                raw.extend_from_slice(&u.to_be_bytes());
-            }
+            let raw = match v {
+                Value::Bytes(b) => b.clone(),
+                Value::String(s) => [0xFE, 0xFF].into_iter().chain(s.encode_utf16().flat_map(u16::to_be_bytes)).collect(),
+                _ => Vec::new(),
+            };
             for c in raw {
                 if matches!(c, b'(' | b')' | b'\\') {
                     out.push(b'\\');
@@ -356,6 +402,11 @@ fn format_real(r: f64) -> String {
     while s.ends_with('0') {
         s.pop();
     }
+    // A real that rounds to nothing would be written as a bare `.`, which no reader parses
+    // (storytold/photocraft@925bdfe3).
+    if matches!(s.as_str(), "0." | "-0.") {
+        return "0.0".into();
+    }
     if let Some(rest) = s.strip_prefix("0.") {
         s = format!(".{rest}");
     } else if let Some(rest) = s.strip_prefix("-0.") {
@@ -369,6 +420,30 @@ mod tests {
     use super::*;
 
     const SAMPLE: &[u8] = b"\n\n<<\n\t/EngineDict\n\t<<\n\t\t/Editor\n\t\t<<\n\t\t\t/Text (\xFE\xFF\x00H\x00i\x00\\)\x00\r)\n\t\t>>\n\t\t/Nums [ 1.0 .5 -2 0 ]\n\t\t/Flag true\n\t\t/Kind /Roman\n\t\t/Runs [\n\t\t<<\n\t\t\t/A 1\n\t\t>>\n\t\t]\n\t>>\n>>";
+
+    /// `Txt2` comes back byte for byte (all 83 in the corpora do): one line, single spaces, no
+    /// enclosing `<< >>`, plain byte strings kept without a byte-order mark.
+    #[test]
+    fn txt2_round_trips_byte_for_byte() {
+        // A UTF-16 string holding an escaped `)`, a byte string, reals, empty containers, a name.
+        let raw: Vec<u8> = [&b" /98 << /0 14 >> /0 << /1 [ << /0 ("[..], &[0xFE, 0xFF, 0x00, b'A', 0x00, b'\\', b')'], &b") /2 (0010) /3 [ 1.0 .5 -.25 12 ] /4 << >> /5 [ ] /6 true /7 /nil >> ] >> /1 7"[..]].concat();
+        let mut wrapped = b"<<".to_vec();
+        wrapped.extend_from_slice(&raw);
+        wrapped.extend_from_slice(b">>");
+        let v = parse(&wrapped).unwrap();
+        assert_eq!(v.path(&["0", "1"]).and_then(|a| a.as_array()).and_then(|a| a.first()).and_then(|o| o.get("2")), Some(&Value::Bytes(b"0010".to_vec())));
+        assert_eq!(write_txt2(&v), raw);
+    }
+
+    #[test]
+    fn tiny_reals_round_trip_as_numbers() {
+        for value in [0.000004, -0.000004] {
+            assert_eq!(format_real(value), "0.0");
+            let source = Value::Dict(vec![("A".into(), Value::Array(vec![Value::Real(value)]))]);
+            let parsed = parse(&write(&source)).expect("a tiny real parses");
+            assert_eq!(parsed.get("A").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_f64), Some(0.0));
+        }
+    }
 
     #[test]
     fn parses_sample() {

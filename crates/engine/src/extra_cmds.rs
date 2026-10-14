@@ -43,13 +43,9 @@ fn has_clip_and_selection(s: &Session) -> std::result::Result<(), String> {
     d.doc.selection.as_ref().map(|_| ()).ok_or_else(|| "Paste Into needs a selection".into())
 }
 
-pub(crate) fn is_background(l: &Layer) -> bool {
-    l.name == "Background" && l.locks.transparency && l.locks.position && matches!(l.content, LayerContent::Raster(_))
-}
-
 fn has_background(s: &Session) -> std::result::Result<(), String> {
     let d = s.active().ok_or("no document open")?;
-    d.doc.layers.first().filter(|l| is_background(l)).map(|_| ()).ok_or_else(|| "the document has no Background layer".into())
+    d.doc.background().map(|_| ()).ok_or_else(|| "the document has no Background layer".into())
 }
 
 /// A key that makes the sub-commands of one command share a single history step.
@@ -333,7 +329,7 @@ fn paste_into(s: &mut Session, p: &Value, outside: bool) -> Result<Value> {
 
 fn layer_from_background(s: &mut Session) -> Result<Value> {
     let id = s.edit("Layer From Background", |doc, active| {
-        let l = doc.layers.first_mut().filter(|l| is_background(l)).ok_or(EngineError::Other("the document has no Background layer".into()))?;
+        let l = doc.background_mut().ok_or(EngineError::Other("the document has no Background layer".into()))?;
         unlock_background(l);
         *active = Some(l.id);
         Ok(l.id)
@@ -350,7 +346,14 @@ fn unlock_background(l: &mut Layer) {
 /// Before `id` gets a layer mask: the Background can't have one, so it becomes a normal layer
 /// first ("Layer 0"), as when adding a mask to it in Photoshop. Other layers are left alone.
 pub(crate) fn background_to_layer_for_mask(doc: &mut photosuite_doc::Document, id: photosuite_doc::LayerId) {
-    if let Some(l) = doc.layers.first_mut().filter(|l| l.id == id && is_background(l)) {
+    background_to_layer(doc, id);
+}
+
+/// If `id` is the Background ([`photosuite_doc::Document::background`], whatever its name), turns
+/// it into a normal layer ("Layer 0"), as before an edit the Background can't take (moving,
+/// transforming, exposing transparency, a style). Other layers are left alone.
+pub(crate) fn background_to_layer(doc: &mut photosuite_doc::Document, id: photosuite_doc::LayerId) {
+    if let Some(l) = doc.background_mut().filter(|l| l.id == id) {
         unlock_background(l);
     }
 }

@@ -262,6 +262,16 @@ impl Surface {
     /// Fast paths for RGB(A) and gray(A) at 8/16/32 bits read tile bytes
     /// directly; missing tiles are filled with the default pixel.
     pub fn read_rgba_into(&self, r: Rect, out: &mut [[f32; 4]]) {
+        self.read_rgba_with(r, out, to_rgba);
+    }
+
+    /// [`Surface::read_rgba_into`] keeping colours outside sRGB (Lab surfaces: see
+    /// [`to_rgba_unclamped`]), for the compositor.
+    pub fn read_rgba_unclamped_into(&self, r: Rect, out: &mut [[f32; 4]]) {
+        self.read_rgba_with(r, out, to_rgba_unclamped);
+    }
+
+    fn read_rgba_with(&self, r: Rect, out: &mut [[f32; 4]], to_rgba: fn(&PixelFormat, &[f32]) -> [f32; 4]) {
         let w = r.width() as usize;
         debug_assert_eq!(out.len(), w * r.height() as usize);
         let fmt = self.format;
@@ -555,6 +565,17 @@ pub fn convert_pixel(from: &PixelFormat, to: &PixelFormat, px: &[f32]) -> Vec<f3
     }
     let rgba = to_rgba(from, px);
     from_rgba(to, rgba)
+}
+
+/// [`to_rgba`], except that a Lab pixel outside sRGB keeps its colour (channels below 0 or above
+/// 1, see `lab_to_srgb_unclamped`): converting back gives the same L, a, b.
+pub fn to_rgba_unclamped(format: &PixelFormat, px: &[f32]) -> [f32; 4] {
+    if format.mode != ColorMode::Lab {
+        return to_rgba(format, px);
+    }
+    let get = |i: usize| px.get(i).copied().unwrap_or(0.0);
+    let rgb = photosuite_color::convert::lab_to_srgb_unclamped([get(0) * 100.0, get(1) * 255.0 - 128.0, get(2) * 255.0 - 128.0]);
+    [rgb[0], rgb[1], rgb[2], if format.alpha { get(3) } else { 1.0 }]
 }
 
 pub fn to_rgba(format: &PixelFormat, px: &[f32]) -> [f32; 4] {

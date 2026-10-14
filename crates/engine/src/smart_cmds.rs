@@ -462,6 +462,17 @@ pub(crate) fn shift_smart(sm: &mut SmartObject, dx: i32, dy: i32) {
 
 /// Forget PSD placed-layer data that no longer describes the smart object (its source changed):
 /// PSD export then writes fresh placed-layer blocks and embeds the new source.
+/// Whether two smart objects share their contents: the same linked path (a PSD's embedded file
+/// uuid, or a file on disk) or the same embedded buffer. Independent copies with equal bytes
+/// ("New Smart Object via Copy") don't.
+fn same_contents(a: &SmartSource, b: &SmartSource) -> bool {
+    match (a, b) {
+        (SmartSource::Linked { path: x }, SmartSource::Linked { path: y }) => !x.is_empty() && x == y,
+        (SmartSource::Embedded { bytes: x, .. }, SmartSource::Embedded { bytes: y, .. }) => Arc::ptr_eq(x, y),
+        _ => false,
+    }
+}
+
 fn detach_psd(l: &mut Layer) {
     if let LayerContent::Smart(sm) = &mut l.content {
         sm.psd_raw = None;
@@ -525,7 +536,7 @@ fn any_layer(l: &Layer, f: &dyn Fn(&Layer) -> bool) -> bool {
 /// the document looks the same before and after.
 pub fn layer_to_smart(doc: &Document, l: &Layer) -> Result<Layer> {
     let canvas = doc.bounds();
-    let background = l.name == "Background" && l.locks.position;
+    let background = doc.is_background(l.id);
     let mut inner = l.clone();
     inner.visible = true;
     inner.opacity = 1.0;
@@ -611,8 +622,9 @@ fn via_copy(s: &mut Session, p: &Value) -> Result<Value> {
         copy.name = format!("{} copy", src.name);
         if let LayerContent::Smart(sm) = &mut copy.content {
             // Independent contents: resolve to embedded bytes and drop the shared PSD uuid.
+            // A buffer of its own: sharing the source's would keep the two linked.
             if let Some((file_name, bytes)) = source_bytes(&doc.metadata, &sm.source) {
-                sm.source = SmartSource::Embedded { file_name, bytes };
+                sm.source = SmartSource::Embedded { file_name, bytes: Arc::new(bytes.as_ref().clone()) };
             }
         } else {
             return Err(other("the layer is not a smart object"));
@@ -687,14 +699,26 @@ pub fn commit_child(s: &mut Session, index: usize) -> Result<bool> {
     let prev = s.active;
     s.active = Some(parent);
     let r = s.edit("Edit Contents", |doc, _| {
-        let sm = smart_mut(doc, link.layer)?;
-        let stem = match &sm.source {
+        let old = smart(doc, link.layer)?.source.clone();
+        let stem = match &old {
             SmartSource::Embedded { file_name, .. } => file_name.rsplit_once('.').map_or(file_name.as_str(), |(a, _)| a).to_string(),
             SmartSource::Linked { .. } => child.name.rsplit_once('.').map_or(child.name.as_str(), |(a, _)| a).to_string(),
         };
-        sm.source = SmartSource::Embedded { file_name: format!("{stem}.pcraft"), bytes: bytes.clone() };
-        detach_psd(doc.layer_mut(link.layer).ok_or(EngineError::NoLayer(link.layer))?);
-        refresh_or_fail(doc, link.layer)
+        let new = SmartSource::Embedded { file_name: format!("{stem}.pcraft"), bytes: bytes.clone() };
+        // Every instance sharing these contents updates, as in Photoshop (duplicated smart
+        // objects share their file: the PSD `Idnt` read as the linked path, or one buffer).
+        let shared: Vec<LayerId> = doc
+            .walk()
+            .into_iter()
+            .filter(|(_, _, l)| l.id == link.layer || matches!(&l.content, LayerContent::Smart(sm) if same_contents(&sm.source, &old)))
+            .map(|(_, _, l)| l.id)
+            .collect();
+        for id in shared {
+            smart_mut(doc, id)?.source = new.clone();
+            detach_psd(doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?);
+            refresh_or_fail(doc, id)?;
+        }
+        Ok(())
     });
     s.active = prev;
     r?;

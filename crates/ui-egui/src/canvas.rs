@@ -1183,7 +1183,7 @@ fn pro_tabs(app: &mut PhotosuiteApp, ui: &mut egui::Ui) -> TabStrip {
         let zoom = app.ui.views.get(i).map_or(100.0, |v| v.zoom * 100.0);
         // Photoshop: "name @ 50% (Layer 1, RGB/8)", "(Layer 1, Layer Mask/8)" when the mask is targeted;
         // the Background layer's name is omitted.
-        let active_layer = st.active_layer.and_then(|id| st.doc.layer(id)).filter(|l| !(l.name == "Background" && l.locks.transparency));
+        let active_layer = st.active_layer.and_then(|id| st.doc.layer(id)).filter(|l| !st.doc.is_background(l.id));
         let is_active_doc = app.session.active_index() == Some(i);
         let mask = is_active_doc && app.ui.mask_target && active_layer.is_some_and(|l| l.mask.is_some());
         let model = if mask { tl!("Layer Mask").to_string() } else { mode_label(&st.doc).to_string() };

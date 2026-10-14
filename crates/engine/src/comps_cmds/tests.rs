@@ -225,3 +225,33 @@ fn out_of_range_comp_ids_are_rejected_not_wrapped() {
     assert!(r.is_err());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A comp position no layer can reach from where it is (the difference leaves i32) leaves the
+/// layer in place instead of overflowing (storytold/photocraft@cd03d49c).
+#[test]
+fn unreachable_comp_positions_leave_the_layer_in_place() {
+    for target in [(i32::MIN, 4), (4, i32::MIN)] {
+        let (mut s, a, b) = session(8);
+        let comp = LayerComp {
+            id: 1,
+            name: "Far".into(),
+            comment: String::new(),
+            apply_visibility: true,
+            apply_position: true,
+            apply_appearance: false,
+            states: vec![
+                CompLayerState { layer: a, visible: Some(false), position: Some(target), appearance: None },
+                CompLayerState { layer: b, visible: None, position: Some((31, 22)), appearance: None },
+            ],
+        };
+        let before = pos(&s, a);
+        s.edit("far", |d, _| {
+            apply_comp(d, &comp, false);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(pos(&s, a), before, "{target:?}");
+        assert!(!doc(&s).layer(a).unwrap().visible);
+        assert_eq!(pos(&s, b), Some((31, 22)));
+    }
+}

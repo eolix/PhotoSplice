@@ -78,6 +78,8 @@ People trust PhotoSuite with their work, and a crash loses it. A malformed file,
 
 9. **Never panic on input** (see *Never crash* above). A command's `run` closure and anything it calls must return `Err`, never panic, for *any* params or document state: validate params, check bounds before indexing or dividing, and reject absurd sizes before allocating. The `panic_hunt` integration test fuzzes every command with adversarial params and must stay green.
 
+10. **Call it "Reference".** In code comments, doc comments, commit messages, PR descriptions and test names, the proprietary editor whose behaviour we match is **Reference** ("as Reference does", "Reference's Layer Style dialog", `matches_reference_rounding`). Never write its name or its maker's there. The only exception is data whose text is fixed by a file format or spec (signatures, descriptor keys, strings a file must contain). Rename the existing mentions in any comment you touch.
+
 ## 4. Picking work
 
 Priorities: important infrastructure first, then low-hanging parity, then the long tail.

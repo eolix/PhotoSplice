@@ -1,15 +1,15 @@
-//! Warp Text: bends the glyph outlines of a type layer with one of Photoshop's fifteen warp
+//! Warp Text: bends the glyph outlines of a type layer with one of Reference's fifteen warp
 //! styles (the PSD `warp` descriptor's `warpStyle`).
 //!
-//! The style math lives in `photosuite_geom::warp` (shared with Edit › Transform › Warp): our
-//! own closed-form approximations of each style's look (observed behaviour, not Adobe's
-//! formulas), the identity at `bend = 0` and continuous in `bend`. The mapping is evaluated per
-//! point; the renderer subdivides long segments so straight edges bend.
+//! The style math lives in `photosuite_geom::warp` (shared with Edit › Transform › Warp): the
+//! Bézier patch Reference builds for each style, the identity at `bend = 0` and continuous in
+//! `bend`. The mapping is evaluated per point; the renderer subdivides long segments so straight
+//! edges bend.
 
 use photosuite_doc::text::TextWarp;
 use photosuite_geom::warp::{StyleWarp, WarpStyle};
 
-/// Warp styles in Photoshop's menu order: (PSD `warpStyle` value, short id used by commands).
+/// Warp styles in Reference's menu order: (PSD `warpStyle` value, short id used by commands).
 pub const STYLES: [(&str, &str); 15] = [
     ("warpArc", "arc"),
     ("warpArcLower", "arcLower"),
@@ -96,24 +96,27 @@ mod tests {
         }
     }
 
+    /// Reference's Arc keeps the inner edge's corners (the bottom one for a positive bend) and
+    /// lifts the rest onto concentric arcs; a negative bend keeps the top corners instead.
     #[test]
-    fn arc_raises_the_middle_relative_to_the_ends() {
+    fn arc_keeps_the_inner_corners_and_lifts_the_middle() {
+        let close = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6;
         let w = warp("arc", 50.0);
-        let mid = w.apply(100.0, -15.0);
-        let end = w.apply(0.0, -15.0);
-        assert!((mid.1 - -15.0).abs() < 1e-9, "centre stays put");
-        assert!(end.1 > mid.1 + 5.0, "ends drop below the centre: {end:?}");
-        assert!(end.0 > 0.0, "ends pull inwards along the arc");
-        // A negative bend smiles.
+        assert!(close(w.apply(0.0, 10.0), (0.0, 10.0)) && close(w.apply(200.0, 10.0), (200.0, 10.0)));
+        assert!(w.apply(100.0, -40.0).1 < -40.0, "the top centre rises");
+        assert!(w.apply(0.0, -40.0).0 < 0.0, "the top corners spread along the outer arc");
         let s = warp("arc", -50.0);
-        assert!(s.apply(0.0, -15.0).1 < -20.0);
+        assert!(close(s.apply(0.0, -40.0), (0.0, -40.0)));
+        assert!(s.apply(100.0, 10.0).1 > 10.0, "the bottom centre drops");
     }
 
+    /// Bulge swells the middle; Squeeze pulls the sides in and pushes the top and bottom out.
     #[test]
-    fn bulge_and_squeeze_change_height_in_the_middle() {
+    fn bulge_and_squeeze_reshape_the_middle() {
         let b = warp("bulge", 50.0);
-        assert!(b.apply(100.0, -40.0).1 < -50.0);
+        assert!(b.apply(100.0, -40.0).1 < -50.0 && b.apply(100.0, 10.0).1 > 20.0);
         let s = warp("squeeze", 50.0);
-        assert!(s.apply(100.0, -40.0).1 > -40.0);
+        assert!(s.apply(100.0, -40.0).1 < -40.0);
+        assert!(s.apply(0.0, -15.0).0 > 0.0 && s.apply(200.0, -15.0).0 < 200.0);
     }
 }

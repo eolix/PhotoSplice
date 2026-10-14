@@ -170,6 +170,15 @@ impl Color {
         }
     }
 
+    /// [`Color::to_rgb`], except that a Lab colour outside sRGB keeps its colour (channels below 0
+    /// or above 1), as a Lab document's composite carries it.
+    pub fn to_rgb_unclamped(&self) -> [f32; 3] {
+        match self.mode {
+            ColorMode::Lab => convert::lab_to_srgb_unclamped([self.c[0] * 100.0, self.c[1] * 255.0 - 128.0, self.c[2] * 255.0 - 128.0]),
+            _ => self.to_rgb(),
+        }
+    }
+
     pub fn to_rgba8(&self) -> [u8; 4] {
         let [r, g, b] = self.to_rgb();
         let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;

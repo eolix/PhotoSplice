@@ -514,3 +514,28 @@ fn batch_reports_inputs_that_share_an_output_name() {
     let px = photosuite_compose::render(&kept, Rect::new(1, 1, 2, 2)).px[0];
     assert!(px[0] > 0.99 && px[1] < 0.01, "the first input's result is kept: {px:?}");
 }
+
+/// A PSD reopens with the layers it was saved with selected, the target active; a file that
+/// names none keeps the top layer active.
+#[test]
+fn psd_selection_survives_save_and_open() {
+    let mut s = session(8, 8, 8);
+    s.execute("layer.new.layer", json!({})).unwrap();
+    s.execute("layer.new.layer", json!({})).unwrap();
+    let ids: Vec<LayerId> = doc(&s).layers.iter().map(|l| l.id).collect();
+    let (bg, mid) = (ids[0], ids[1]);
+    let st = s.active_mut().unwrap();
+    st.restore_selection(&[mid, bg]);
+    assert_eq!(st.layer_selection(), vec![mid, bg]);
+    let opts = photosuite_io::ExportOptions { selected_layers: st.layer_selection(), ..Default::default() };
+    let bytes = photosuite_io::export(doc(&s), "x.psd", &opts).unwrap().bytes;
+    open_bytes_as(&mut s, "x.psd", &bytes, None, None).unwrap();
+    let st = s.active().unwrap();
+    let name = |id: LayerId| st.doc.layer(id).unwrap().name.clone();
+    assert_eq!(st.layer_selection().into_iter().map(name).collect::<Vec<_>>(), ["Layer 1", "Background"]);
+    assert!(!st.is_dirty(), "selecting on open is not an edit");
+    let plain = photosuite_io::export(&st.doc, "y.psd", &Default::default()).unwrap().bytes;
+    open_bytes_as(&mut s, "y.psd", &plain, None, None).unwrap();
+    let st = s.active().unwrap();
+    assert_eq!(st.active_layer, st.doc.top_layer());
+}

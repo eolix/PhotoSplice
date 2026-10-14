@@ -331,6 +331,7 @@ pub fn open_bytes_as(s: &mut Session, name: &str, bytes: &[u8], as_ext: Option<&
         None => name.to_string(),
     };
     let r = photosuite_io::import(&decode_name, bytes).map_err(|e| EngineError::Other(format!("{decode_name}: {e}")))?;
+    let selected = r.selected;
     let mut doc = r.document;
     let path = match template_name(s, name) {
         Some(untitled) => {
@@ -344,6 +345,10 @@ pub fn open_bytes_as(s: &mut Session, name: &str, bytes: &[u8], as_ext: Option<&
     };
     // Color Settings policies (preserve / convert / discard the embedded profile).
     let (i, color) = s.open_document(doc, path);
+    // The layers the file had selected.
+    if let Some(st) = s.docs.get_mut(i) {
+        st.restore_selection(&selected);
+    }
     // Import notes (e.g. how a camera raw was developed, or that only its preview opened).
     Ok(json!({"document": i, "color": color, "warnings": r.warnings}))
 }
@@ -902,7 +907,7 @@ fn load_files_into_stack(s: &mut Session, p: &Value) -> Result<Value> {
         // "Create Smart Object after Loading Layers": the layers go inside one smart object, ready
         // for Layer › Smart Objects › Stack Mode.
         let children = std::mem::take(&mut stack.layers);
-        let group = Layer::new(stem(&paths[0]), LayerContent::Group(photosuite_doc::Group { children, expanded: true, artboard: None }));
+        let group = Layer::new(stem(&paths[0]), LayerContent::Group(photosuite_doc::Group { children, expanded: true, artboard: None, divider_blocks: Vec::new() }));
         let smart = crate::smart_cmds::layer_to_smart(&stack, &group)?;
         stack.layers = vec![smart];
     }

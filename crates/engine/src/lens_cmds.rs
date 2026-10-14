@@ -340,6 +340,7 @@ fn run_filter(s: &mut Session, cmd: &str, label: &str, stored: Value, float_bg: 
         let canvas = doc.bounds();
         let selection = doc.selection.clone();
         let locks = doc.effective_locks(id);
+        let background = doc.is_background(id);
         let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
         if let LayerContent::Smart(_) = l.content {
             let sf = SmartFilter { command: cmd.to_string(), params: stored.clone(), blend: photosuite_color::BlendMode::Normal, opacity: 1.0, visible: true };
@@ -349,7 +350,7 @@ fn run_filter(s: &mut Session, cmd: &str, label: &str, stored: Value, float_bg: 
             return Err(EngineError::Other(format!("layer \"{}\" is locked", l.name)));
         }
         // A Background layer gains transparency when the edge mode exposes it (as in Photoshop).
-        if float_bg && l.locks.position && l.name == "Background" {
+        if float_bg && background {
             l.locks.position = false;
             l.locks.transparency = false;
             l.name = "Layer 0".into();

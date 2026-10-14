@@ -33,15 +33,19 @@ enum Layout {
 /// The krilla paint of a shape layer's fill or stroke `f` (a gradient), as
 /// `photosuite_vector::Paint::from_fill(f, bounds)` renders it.
 pub(super) fn shape_paint(f: &Fill, bounds: (f64, f64, f64, f64)) -> Option<Paint> {
-    let Fill::Gradient { stops, angle, scale, style, reverse, .. } = f else { return None };
+    let Fill::Gradient { stops, angle, style, reverse, opacity_stops, midpoints, .. } = f else { return None };
+    let real = VPaint::from_fill(f, bounds);
     // The renderer's parameter: its own paint with a black → white ramp, read in the red channel.
-    let probe = |style: GradientStyle| VPaint::Gradient {
-        stops: vec![(0.0, [0.0, 0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 1.0, 1.0])],
-        style,
-        angle: *angle,
-        scale: *scale,
-        reverse: false,
-        bounds,
+    let probe = |probe_style: GradientStyle| {
+        let mut p = real.clone();
+        if let VPaint::Gradient { stops, mids, opacity, style, reverse, .. } = &mut p {
+            *stops = vec![(0.0, [0.0, 0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 1.0, 1.0])];
+            mids.clear();
+            opacity.clear();
+            *style = probe_style;
+            *reverse = false;
+        }
+        p
     };
     let c = [(bounds.0 + bounds.2) / 2.0, (bounds.1 + bounds.3) / 2.0];
     let layout = match style {
@@ -60,18 +64,17 @@ pub(super) fn shape_paint(f: &Fill, bounds: (f64, f64, f64, f64)) -> Option<Pain
         }
         GradientStyle::Diamond => return None,
     };
-    // The ramp: its own paint over a unit frame, where the parameter is x.
-    let ramp = VPaint::Gradient {
-        stops: stops.iter().map(|(p, c)| (*p, rgba(c))).collect(),
-        style: GradientStyle::Linear,
-        angle: 0.0,
-        scale: 1.0,
-        reverse: false,
-        bounds: (0.0, 0.0, 1.0, 1.0),
-    };
-    let mut at: Vec<f32> = stops.iter().map(|s| s.0).collect();
+    // Breakpoints: colour stops, the midpoints between them, opacity stops.
+    let mut sorted: Vec<f32> = stops.iter().map(|s| s.0).collect();
+    sorted.sort_by(f32::total_cmp);
+    let mut at = sorted.clone();
+    for (i, w) in sorted.windows(2).enumerate() {
+        let m = midpoints.get(i).copied().unwrap_or(0.5).clamp(0.05, 0.95);
+        at.push(w[0] + (w[1] - w[0]) * m);
+    }
+    at.extend(opacity_stops.iter().map(|s| s.0));
     at.extend([0.0, 1.0]);
-    let samples = sample(&at, |t| ramp.at(f64::from(t), 0.5));
+    let samples = sample(&at, |t| real.sample(t));
     paint(*style, *reverse, layout, samples)
 }
 
@@ -109,11 +112,6 @@ pub(super) fn fill_paint(f: &Fill, frame: Rect) -> Option<Paint> {
     at.extend([0.0, 1.0]);
     let samples = sample(&at, |t| ramp.sample(t));
     paint(*style, *reverse, layout, samples)
-}
-
-fn rgba(c: &photosuite_color::Color) -> [f32; 4] {
-    let v = c.to_rgb();
-    [v[0], v[1], v[2], c.alpha]
 }
 
 /// The axial layout of an affine parameter `t` (clamped to 0…1 by the renderer), read at points

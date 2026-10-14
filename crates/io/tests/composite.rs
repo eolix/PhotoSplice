@@ -17,8 +17,10 @@ fn check_export_oracle(d: &photosuite_doc::Document, tol: f32) {
     let d2 = import("x.psd", &r.bytes).unwrap().document;
     // CMYK documents: the merged image holds the composited inks, so both sides are the same
     // composite (no separation of a screen colour in between).
-    let ours = photosuite_compose::flatten(&d2).px;
-    let m = max_diff(&ours, &merged);
+    // Lab composites keep colours outside sRGB; compare what is shown.
+    let shown = |px: Vec<[f32; 4]>| -> Vec<[f32; 4]> { px.into_iter().map(|p| p.map(|v| v.clamp(0.0, 1.0))).collect() };
+    let ours = shown(photosuite_compose::flatten(&d2).px);
+    let m = max_diff(&ours, &shown(merged));
     assert!(m <= tol, "max diff {m} > {tol}");
 }
 
@@ -101,8 +103,10 @@ fn builder_oracle(depth: u16, mode: ColorMode) {
     let f = PsdFile::from_bytes(&bytes).unwrap();
     let merged = merged_composite(&f).unwrap();
     let d2 = import("b.psd", &bytes).unwrap().document;
-    let ours = photosuite_compose::flatten(&d2).px;
-    let m = max_diff(&ours, &merged);
+    // Lab composites keep colours outside sRGB; compare what is shown.
+    let shown = |px: Vec<[f32; 4]>| -> Vec<[f32; 4]> { px.into_iter().map(|p| p.map(|v| v.clamp(0.0, 1.0))).collect() };
+    let ours = shown(photosuite_compose::flatten(&d2).px);
+    let m = max_diff(&ours, &shown(merged));
     // Density/feather of masks are not written by the builder; the generated
     // doc uses them only on a disabled mask, so results must match.
     assert!(m <= 2.0 / 255.0, "builder oracle {mode:?} {depth}: max diff {m}");

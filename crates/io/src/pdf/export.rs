@@ -285,9 +285,9 @@ impl Writer<'_> {
     }
 
     /// The layer's text as PDF text in its fonts, laid out as the text engine lays it out.
-    /// `false` when it can't be (warped or vertical type, a face krilla can't read).
+    /// `false` when it can't be (warped, vertical or path type, a face krilla can't read).
     fn draw_text(&mut self, s: &mut KSurface<'_>, t: &TextLayer, fill_opacity: f32) -> bool {
-        if t.warp.is_some() || !matches!(t.orientation, photosuite_doc::text::Orientation::Horizontal) {
+        if t.warp.is_some() || t.path.is_some() || !matches!(t.orientation, photosuite_doc::text::Orientation::Horizontal) {
             return false;
         }
         let mut engine = photosuite_text::shared().lock().unwrap_or_else(std::sync::PoisonError::into_inner);

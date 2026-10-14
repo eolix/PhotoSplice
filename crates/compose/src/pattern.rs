@@ -106,10 +106,9 @@ impl Tile {
         self.px[yi * self.w + xi]
     }
 
-    /// Bilinear, wrapping sample at continuous tile coordinates (pixel centres at `i + 0.5`).
-    /// Returns straight alpha.
+    /// Bilinear, wrapping sample at continuous tile coordinates, tile pixel `i` at `i`: callers
+    /// map a document pixel's top-left corner (see [`render`]). Returns straight alpha.
     pub fn sample(&self, u: f64, v: f64) -> [f32; 4] {
-        let (u, v) = (u - 0.5, v - 0.5);
         let (x0, y0) = (u.floor(), v.floor());
         let (fx, fy) = ((u - x0) as f32, (v - y0) as f32);
         let (x0, y0) = (x0 as i64, y0 as i64);
@@ -187,7 +186,9 @@ pub fn render(tile: &Tile, place: &Placement, rect: Rect) -> Vec<[f32; 4]> {
     let mut out = Vec::with_capacity(rect.width() as usize * rect.height() as usize);
     for y in rect.y0..rect.y1 {
         for x in rect.x0..rect.x1 {
-            let (u, v) = place.map(f64::from(x) + 0.5, f64::from(y) + 0.5);
+            // Photoshop maps the pixel's corner: identical at 100 %, a quarter tile pixel off the
+            // centre at 200 % (psd-tools patterns.psd: 56/255 → 0.8/255).
+            let (u, v) = place.map(f64::from(x), f64::from(y));
             out.push(tile.sample(u, v));
         }
     }
@@ -239,5 +240,16 @@ mod tests {
         let rot = Placement::new(Rect::EMPTY, false, (0.0, 0.0), 1.0, 90.0);
         let (u, v) = rot.map(1.0, 3.0);
         assert!((u - -3.0).abs() < 1e-9 && (v - 1.0).abs() < 1e-9, "{u},{v}");
+    }
+
+    #[test]
+    fn scaled_patterns_sample_from_the_pixel_corner() {
+        // Blue columns 0-1, red 2-3. At 200 %, document pixel x maps its corner to tile x / 2:
+        // pixel 2 lands on tile pixel 1 (blue) exactly, pixel 3 halfway into the red.
+        let tile = Tile::new(&checker()).expect("tile");
+        let px = render(&tile, &Placement::new(Rect::new(0, 0, 8, 8), false, (0.0, 0.0), 2.0, 0.0), Rect::new(0, 0, 8, 1));
+        assert!(px[2][2] > 0.99 && px[2][0] < 0.01, "{:?}", px[2]);
+        assert!((px[3][0] - 0.5).abs() < 0.01, "{:?}", px[3]);
+        assert!(px[4][0] > 0.99, "{:?}", px[4]);
     }
 }

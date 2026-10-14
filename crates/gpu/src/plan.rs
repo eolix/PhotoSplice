@@ -15,7 +15,7 @@
 use photosuite_color::BlendMode;
 use photosuite_compose::adjust::{self, Transfer};
 use photosuite_compose::effects::has_effects;
-use photosuite_doc::adjust::ToneSpace;
+use photosuite_doc::adjust::{ToneSpace, lut3d_len};
 use photosuite_doc::{Adjustment, Document, Effect, Fill, FxPaint, GlobalLight, Glow, Gradient, Layer, LayerContent, LayerId, Pattern, StrokePosition};
 use photosuite_geom::Rect;
 use photosuite_raster::Surface;
@@ -329,6 +329,15 @@ pub fn plan(doc: &Document) -> Result<Plan<'_>, Unsupported> {
         if visible.len() > 1 || visible.iter().any(|(_, _, l)| photosuite_compose::effects::has_effects(l)) {
             return Err(Unsupported("CMYK blending (composited in CMYK on the CPU)".into()));
         }
+        // A gradient fill without a valid cache interpolates its stops' inks, which the RGB
+        // shader can't (storytold/photocraft@5290930e).
+        let uncached_gradient = |l: &Layer| match &l.content {
+            LayerContent::Fill(f @ Fill::Gradient { .. }) => l.fill_cache.as_ref().is_none_or(|c| c.fill != *f),
+            _ => false,
+        };
+        if visible.iter().any(|(_, _, l)| uncached_gradient(l)) {
+            return Err(Unsupported("native CMYK gradient fill (composited on the CPU)".into()));
+        }
     }
     let mut p = Planner::new(DocCtx::of(doc));
     let root = p.clear();
@@ -619,6 +628,10 @@ impl<'a> Planner<'a> {
             && layer.fill_opacity >= 1.0
             && !has_effects(layer)
         {
+            // Clipped to, its adjustments reach only its own content (composited on the CPU).
+            if !visible_clipped.is_empty() && g.children.iter().any(|c| c.visible && matches!(c.content, LayerContent::Adjustment(_))) {
+                return Err(Unsupported("adjustment in a pass-through group that layers are clipped to (composited on the CPU)".into()));
+            }
             let before = self.retain(backdrop);
             let mut after = self.stack(&g.children, backdrop)?;
             if opacity < 1.0 || layer.mask.is_some() || layer.vector_mask.is_some() {
@@ -857,7 +870,7 @@ impl<'a> Planner<'a> {
     fn fill(&self, p: &mut Pass<'a>, f: &Fill, frame: photosuite_geom::Rect) {
         match f {
             Fill::Solid(c) => {
-                let rgb = c.to_rgb();
+                let rgb = c.to_rgb_unclamped();
                 p.color = [rgb[0], rgb[1], rgb[2], c.alpha];
             }
             Fill::Gradient { angle, scale, style, reverse, offset, dither, .. } => {
@@ -927,7 +940,8 @@ impl<'a> Planner<'a> {
 
     /// adjust::apply_with on a slot (consumes it).
     fn adjust(&mut self, adj: &Adjustment, src: Slot) -> Result<Slot, Unsupported> {
-        if !adjustment_on_gpu(adj) || (self.cx.mode == photosuite_color::ColorMode::Lab && photosuite_compose::lab::native(adj)) {
+        // Lab documents: on L, a, b, or on the clipped screen colour (compose::lab); both on the CPU.
+        if !adjustment_on_gpu(adj) || self.cx.mode == photosuite_color::ColorMode::Lab {
             return Err(Unsupported(format!("{} on CMYK/Lab channels (evaluated on the CPU)", adj.label())));
         }
         let mut p = Pass::new(Kernel::Adjust, 0);
@@ -1039,7 +1053,7 @@ impl<'a> Planner<'a> {
                     w,
                     content,
                     Cov::Map(map(i, 0), 0.0),
-                    &Paint::Color(s.color.to_rgb()),
+                    &Paint::Color(s.color.to_rgb_unclamped()),
                     s.common.blend,
                     s.common.opacity,
                     flags,
@@ -1079,12 +1093,12 @@ impl<'a> Planner<'a> {
         }
         for &(_, e) in &rev {
             if let Effect::ColorOverlay { common, color } = e {
-                l = self.paint(l, content, Cov::One, &Paint::Color(color.to_rgb()), common.blend, common.opacity, F_GATE, clip, sb);
+                l = self.paint(l, content, Cov::One, &Paint::Color(color.to_rgb_unclamped()), common.blend, common.opacity, F_GATE, clip, sb);
             }
         }
         for &(i, e) in &rev {
             if let Effect::Satin(s) = e {
-                l = self.paint(l, content, Cov::Map(map(i, 0), 0.0), &Paint::Color(s.color.to_rgb()), s.common.blend, s.common.opacity, F_REL, clip, sb);
+                l = self.paint(l, content, Cov::Map(map(i, 0), 0.0), &Paint::Color(s.color.to_rgb_unclamped()), s.common.blend, s.common.opacity, F_REL, clip, sb);
             }
         }
         for &(i, e) in &rev {
@@ -1095,7 +1109,7 @@ impl<'a> Planner<'a> {
         }
         for &(i, e) in &rev {
             if let Effect::InnerShadow(s) = e {
-                l = self.paint(l, content, Cov::Map(map(i, 0), 0.0), &Paint::Color(s.color.to_rgb()), s.common.blend, s.common.opacity, F_REL, clip, sb);
+                l = self.paint(l, content, Cov::Map(map(i, 0), 0.0), &Paint::Color(s.color.to_rgb_unclamped()), s.common.blend, s.common.opacity, F_REL, clip, sb);
             }
         }
         if let Some(s) = vstroke {
@@ -1137,14 +1151,14 @@ impl<'a> Planner<'a> {
                     l,
                     content,
                     Cov::Map(map(i, 0), 0.0),
-                    &Paint::Color(b.highlight_color.to_rgb()),
+                    &Paint::Color(b.highlight_color.to_rgb_unclamped()),
                     b.highlight.blend,
                     b.highlight.opacity,
                     F_REL,
                     clip,
                     sb,
                 );
-                l = self.paint(l, content, Cov::Map(map(i, 1), 0.0), &Paint::Color(b.shadow_color.to_rgb()), b.shadow.blend, b.shadow.opacity, F_REL, clip, sb);
+                l = self.paint(l, content, Cov::Map(map(i, 1), 0.0), &Paint::Color(b.shadow_color.to_rgb_unclamped()), b.shadow.blend, b.shadow.opacity, F_REL, clip, sb);
             }
         }
         // The shape's own alpha.
@@ -1214,14 +1228,14 @@ impl<'a> Planner<'a> {
                     w,
                     content,
                     Cov::Map(map(i, k), 0.0),
-                    &Paint::Color(b.highlight_color.to_rgb()),
+                    &Paint::Color(b.highlight_color.to_rgb_unclamped()),
                     b.highlight.blend,
                     b.highlight.opacity,
                     0,
                     clip,
                     sb,
                 );
-                w = self.paint(w, content, Cov::Map(map(i, k + 1), 0.0), &Paint::Color(b.shadow_color.to_rgb()), b.shadow.blend, b.shadow.opacity, 0, clip, sb);
+                w = self.paint(w, content, Cov::Map(map(i, k + 1), 0.0), &Paint::Color(b.shadow_color.to_rgb_unclamped()), b.shadow.blend, b.shadow.opacity, 0, clip, sb);
             }
         }
 
@@ -1257,7 +1271,7 @@ impl<'a> Planner<'a> {
             let mut m = self.emit(p);
             for (i, b) in late {
                 for (k, color, fxc) in [(0, &b.highlight_color, &b.highlight), (1, &b.shadow_color, &b.shadow)] {
-                    m = self.paint(m, content, Cov::Map(map(i, k), 0.0), &Paint::Color(color.to_rgb()), fxc.blend, fxc.opacity, 0, clip, sb);
+                    m = self.paint(m, content, Cov::Map(map(i, k), 0.0), &Paint::Color(color.to_rgb_unclamped()), fxc.blend, fxc.opacity, 0, clip, sb);
                 }
             }
             let mut p = Pass::new(Kernel::FxMerge, 0);
@@ -1278,7 +1292,7 @@ impl<'a> Planner<'a> {
 
     fn fx_paint(&self, p: &'a FxPaint, anchor: (f64, f64)) -> Paint<'a> {
         match p {
-            FxPaint::Color(c) => Paint::Color(c.to_rgb()),
+            FxPaint::Color(c) => Paint::Color(c.to_rgb_unclamped()),
             FxPaint::Gradient(g) => Paint::Gradient(g),
             FxPaint::Pattern { name, id, scale } => match photosuite_doc::pattern::find(self.cx.patterns, id, name).filter(|p| !p.is_empty()) {
                 Some(pat) => Paint::Pattern(pat, placement(anchor, true, (0.0, 0.0), *scale, 0.0)),
@@ -1325,7 +1339,9 @@ impl<'a> Planner<'a> {
             Paint::None => {}
             Paint::Color(c) => p.color = [c[0], c[1], c[2], 1.0],
             Paint::Gradient(g) => {
-                // effects::paint_fx: whole-pixel end points (fill_layout::gradient_layout).
+                // effects::paint_fx: whole-pixel end points (fill_layout::gradient_layout), over
+                // the canvas when not aligned with the layer.
+                let sb = if g.align { sb } else { self.cx.canvas };
                 let (angle, scale, offset) = photosuite_compose::fill_layout::gradient_layout(g.style, g.angle, g.scale, g.offset, sb);
                 p.params[0] = [angle, scale, if g.reverse { 1.0 } else { 0.0 }, style_index(g.style)];
                 p.params[1] = [sb.x0 as f32, sb.y0 as f32, sb.width() as f32, sb.height() as f32];
@@ -1523,6 +1539,8 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photosuit
         }
         Adjustment::HueSaturation { hue, saturation, lightness, colorize, ranges } => {
             p[0] = [*hue, saturation / 100.0, lightness / 100.0, if *colorize { 1.0 } else { 0.0 }];
+            // 32-bit documents don't hold the smallest channel at 0 (compose::adjust::hue_saturation_in).
+            p[1][1] = if depth == photosuite_color::SampleType::F32 { 1.0 } else { 0.0 };
             if !*colorize && ranges.iter().any(|r| !r.is_neutral()) {
                 // Range edits: hue-indexed rows (shift, saturation, lightness), as on the CPU.
                 p[1][0] = 1.0;
@@ -1531,9 +1549,10 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photosuit
                 (8, p, None)
             }
         }
+        // The factor table over saturation (compose::adjust::vibrance_lut) as LUT row 0.
         Adjustment::Vibrance { vibrance, saturation } => {
-            p[0] = [vibrance / 100.0, saturation / 100.0, 0.0, 0.0];
-            (9, p, None)
+            p[0] = [1.0 + (saturation / 100.0).clamp(-1.0, 1.0), transfer_exponent(transfer), 0.0, 0.0];
+            (9, p, Some(vec![to_row(&adjust::vibrance_lut(*vibrance))]))
         }
         Adjustment::ChannelMixer { matrix, monochrome, .. } => {
             p[0] = matrix[0];
@@ -1567,12 +1586,9 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photosuit
             let rows = lut_rows(|r, t| if s4.is_empty() { t } else { sample_stops4(&s4, t)[r] }, 3);
             (13, p, Some(rows))
         }
+        // Per-channel curves (compose::adjust::color_balance_luts), as Levels / Curves.
         Adjustment::ColorBalance { shadows, midtones, highlights, preserve_luminosity } => {
-            p[0] = [shadows[0], shadows[1], shadows[2], 0.0];
-            p[1] = [midtones[0], midtones[1], midtones[2], 0.0];
-            p[2] = [highlights[0], highlights[1], highlights[2], 0.0];
-            p[3][0] = if *preserve_luminosity { 1.0 } else { 0.0 };
-            (14, p, None)
+            (7, p, Some(adjust::color_balance_luts(shadows, midtones, highlights, *preserve_luminosity).iter().map(|t| to_row(t)).collect()))
         }
         Adjustment::SelectiveColor { relative, adjustments } => {
             // 9 ranges × CMYK don't fit the 16 params: they go in LUT row 0 (read texel-exact).
@@ -1583,7 +1599,7 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photosuit
             }
             (15, p, Some(vec![row]))
         }
-        Adjustment::ColorLookup { lut: Some(table), size, tetrahedral, dither, .. } if *size >= 2 && table.len() >= (*size as usize).pow(3) * 3 => {
+        Adjustment::ColorLookup { lut: Some(table), size, tetrahedral, dither, .. } if lut3d_len(*size).is_some_and(|len| table.len() >= len) => {
             // The flattened table (n³ RGB triplets) spans as many 4096-wide rows as it needs.
             let n = *size as usize;
             let len = n * n * n * 3;
@@ -1654,6 +1670,43 @@ mod tests {
     use super::*;
     use photosuite_color::{Color, ColorMode, SampleType};
     use photosuite_geom::Size;
+
+    /// A pass-through group with an adjustment inside and a layer clipped to it goes to the CPU,
+    /// which keeps the adjustment off the layers beneath.
+    #[test]
+    fn clipped_passthrough_with_an_adjustment_falls_back() {
+        let mut d = Document::with_background("t", Size::new(8, 8), ColorMode::Rgb, SampleType::U8, Color::WHITE);
+        let adj = Layer::new("adj", LayerContent::Adjustment(Adjustment::Invert));
+        let mut group = Layer::group("g", vec![adj]);
+        group.blend = BlendMode::PassThrough;
+        let mut clip = Layer::raster("clip", d.pixel_format());
+        clip.clipped = true;
+        d.layers.push(group);
+        d.layers.push(clip);
+        assert!(plan(&d).unwrap_err().0.contains("clipped to"));
+        d.layers[2].visible = false;
+        assert!(plan(&d).is_ok());
+    }
+
+    #[test]
+    fn native_cmyk_gradients_fall_back_only_without_a_valid_cache() {
+        use photosuite_doc::{FillCache, GradientStyle};
+        for depth in SampleType::ALL {
+            let fill = Fill::gradient(vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], 0.0, 1.0, GradientStyle::Linear, false);
+            let mut doc = Document::new("CMYK", Size::new(3, 2), ColorMode::Cmyk, depth);
+            doc.layers.push(Layer::new("Fill", LayerContent::Fill(fill.clone())));
+            assert!(plan(&doc).unwrap_err().0.contains("native CMYK gradient"));
+            doc.layers[0].visible = false;
+            assert!(plan(&doc).is_ok());
+            doc.layers[0].visible = true;
+            doc.layers[0].fill_cache = Some(FillCache { fill, surface: Surface::new(doc.pixel_format()) });
+            assert!(plan(&doc).is_ok());
+            doc.layers[0].fill_cache.as_mut().unwrap().fill = Fill::Solid(Color::TRANSPARENT);
+            assert!(plan(&doc).is_err());
+            doc.mode = ColorMode::Rgb;
+            assert!(plan(&doc).is_ok());
+        }
+    }
 
     #[test]
     fn slots_are_recycled() {

@@ -287,7 +287,7 @@ fn stack_modes_render_from_the_nested_layers() {
             surf.write_region(Rect::new(3, 3, 4, 4), &photosuite_raster::from_rgba(&fmt, [v, v, v, 1.0]));
             kids.push(l);
         }
-        let g = Layer::new("stack", LayerContent::Group(photosuite_doc::Group { children: kids, expanded: true, artboard: None }));
+        let g = Layer::new("stack", LayerContent::Group(photosuite_doc::Group { children: kids, expanded: true, artboard: None, divider_blocks: Vec::new() }));
         let smart = crate::smart_cmds::layer_to_smart(doc, &g)?;
         let id = smart.id;
         doc.layers = vec![smart];

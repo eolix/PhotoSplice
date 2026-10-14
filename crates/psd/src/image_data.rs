@@ -41,9 +41,17 @@ impl ImageData {
 
     /// Decodes and returns a single channel plane.
     pub fn decode_channel(&self, header: &Header, index: usize) -> Result<Vec<u8>> {
+        // The index is checked before anything is decoded, and the plane arithmetic can't
+        // overflow (storytold/photocraft@40c9c3c4).
+        let invalid = || crate::error::PsdError::invalid(format!("no merged channel {index}"));
+        if index >= usize::from(header.channels) {
+            return Err(invalid());
+        }
+        let plane = header.row_bytes().checked_mul(header.height as usize).ok_or_else(invalid)?;
+        let start = index.checked_mul(plane).ok_or_else(invalid)?;
+        let end = start.checked_add(plane).ok_or_else(invalid)?;
         let all = self.decode(header)?;
-        let plane = header.row_bytes() * header.height as usize;
-        all.get(index * plane..(index + 1) * plane).map(<[u8]>::to_vec).ok_or_else(|| crate::error::PsdError::invalid(format!("no merged channel {index}")))
+        all.get(start..end).map(<[u8]>::to_vec).ok_or_else(invalid)
     }
 
     pub(crate) fn read(r: &mut Reader<'_>, header: &Header) -> Result<Self> {

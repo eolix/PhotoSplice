@@ -165,11 +165,14 @@ pub struct ExportSettings {
     pub tiff_layers: bool,
     /// PDF: Photoshop's editing data ("Preserve Photoshop Editing Capabilities").
     pub pdf_editing: bool,
+    /// PSD: the selected layers, the active one first, so the file reopens with them selected
+    /// (set by [`PhotosuiteApp::write_document`]).
+    pub selected_layers: Vec<photosuite_doc::LayerId>,
 }
 
 impl Default for ExportSettings {
     fn default() -> Self {
-        ExportSettings { jpeg_quality: None, webp_quality: None, tiff_layers: true, pdf_editing: true }
+        ExportSettings { jpeg_quality: None, webp_quality: None, tiff_layers: true, pdf_editing: true, selected_layers: Vec::new() }
     }
 }
 
@@ -926,7 +929,8 @@ impl PhotosuiteApp {
     pub(crate) fn write_document(&mut self, path: String, settings: &ExportSettings) -> Result<(String, Vec<String>), String> {
         let st = self.session.active().ok_or("no document")?;
         let export = self.services.export.as_ref().ok_or("no exporter configured")?;
-        let (bytes, warnings) = export(&st.doc, &path, settings)?;
+        let settings = ExportSettings { selected_layers: st.layer_selection(), ..settings.clone() };
+        let (bytes, warnings) = export(&st.doc, &path, &settings)?;
         let write = self.services.write.as_mut().ok_or("no writer configured")?;
         write(&path, &bytes)?;
         if let Some(st) = self.session.active_mut() {

@@ -289,8 +289,8 @@ fn parse_gradient_map(d: &[u8]) -> Option<Adjustment> {
 
 /// A noise gradient map's settings at `at` (Adobe spec: seed, add-transparency and
 /// restrict-colours flags, roughness /4096, colour model, four minimums and four maximums on a
-/// 0..32768 scale), generated as dense stops (`noise_gradient`). The colour model code isn't
-/// documented, so these walk in RGB.
+/// 0..32768 scale), generated as dense stops (`noise_gradient`). Colour model 4 is HSB
+/// (Photoshop-verified 2026-10-13), 3 RGB; 5 is taken as Lab (next in the sequence, unverified).
 fn parse_noise_gradient_map(d: &[u8], at: usize, reverse: bool, dither: bool) -> Option<Adjustment> {
     let flag = |k: usize| be16(d, k).map(|v| v != 0);
     let bound = |k: usize| be16(d, k).map(|v| (f32::from(v) / 32768.0).clamp(0.0, 1.0));
@@ -299,7 +299,11 @@ fn parse_noise_gradient_map(d: &[u8], at: usize, reverse: bool, dither: bool) ->
         transparency: flag(at + 4)?,
         restrict: flag(at + 6)?,
         roughness: (be32(d, at + 8)? as f32 / 4096.0).clamp(0.0, 1.0),
-        model: crate::noise_gradient::Model::Rgb,
+        model: match be16(d, at + 12)? {
+            4 => crate::noise_gradient::Model::Hsb,
+            5 => crate::noise_gradient::Model::Lab,
+            _ => crate::noise_gradient::Model::Rgb,
+        },
         min: [bound(at + 14)?, bound(at + 16)?, bound(at + 18)?, bound(at + 20)?],
         max: [bound(at + 22)?, bound(at + 24)?, bound(at + 26)?, bound(at + 28)?],
     };
@@ -499,8 +503,12 @@ fn parse_black_white(d: &[u8]) -> Option<Adjustment> {
 }
 
 /// `phfl` (Adobe spec, "Photo Filter"): version (2 or 3); version 2 has a colour structure
-/// (colour space + four u16), version 3 three i32 holding the Lab colour ×100 (as documented by
-/// ag-psd, MIT); then density (u32 percent) and preserve luminosity (1 byte).
+/// (colour space + four u16), version 3 three u32 "XYZ" values; then density (u32 percent) and
+/// preserve luminosity (1 byte). The version 3 colour is XYZ relative to the D50 white
+/// (X / 0.9642, Y, Z / 0.8249) with 1.0 = 32768 (inferred upstream from CS2 files, whose colours
+/// all decode to Reference's presets that way: Warming Filter (85) (15548, 12029, 0) = #EC8A00;
+/// storytold/photocraft@41e578b4, @fc02c91f). It was read as Lab ×100, so those files came in
+/// with a wrong colour or as unsupported.
 fn parse_photo_filter(d: &[u8]) -> Option<Adjustment> {
     let (color, at) = match be16(d, 0)? {
         2 => {
@@ -512,11 +520,15 @@ fn parse_photo_filter(d: &[u8]) -> Option<Adjustment> {
             (crate::channel_map::decode_color(space, c).to_rgb(), 12)
         }
         3 => {
-            let lab = [be32(d, 2)? as i32, be32(d, 6)? as i32, be32(d, 10)? as i32].map(|v| v as f32 / 100.0);
-            if !(0.0..=100.0).contains(&lab[0]) || lab[1].abs() > 128.0 || lab[2].abs() > 128.0 {
+            let rel = [be32(d, 2)?, be32(d, 6)?, be32(d, 10)?].map(|v| v as f32 / 32768.0);
+            // Relative to the white, real colours stay below about 2.0 (Cooling Filter (82)
+            // reaches 1.99 on Z); anything past that is no XYZ colour.
+            if rel.iter().any(|v| *v > 2.0) {
                 return None;
             }
-            (photosuite_color::convert::lab_to_srgb(lab), 14)
+            use photosuite_color::convert::{D50, XYZ_D50_TO_SRGB, linear_to_srgb, mat3_mul};
+            let xyz = [rel[0] * D50[0], rel[1], rel[2] * D50[2]];
+            (mat3_mul(&XYZ_D50_TO_SRGB, xyz).map(|v| linear_to_srgb(v.clamp(0.0, 1.0))), 14)
         }
         _ => return None,
     };
@@ -762,7 +774,9 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
             put16(&mut v, 0);
             v.extend_from_slice(&((density.clamp(0.0, 1.0) * 100.0).round() as u32).to_be_bytes());
             v.push(u8::from(*preserve_luminosity));
-            v.push(0);
+            // Padded to 20 bytes inside the block: Reference refuses a file with the 18-byte
+            // form ("not compatible"; storytold/photocraft@0d058f4c).
+            v.extend_from_slice(&[0, 0, 0]);
             return vec![(*b"phfl", v)];
         }
         Adjustment::ChannelMixer { cmyk: Some(m), monochrome: false, .. } => {
@@ -911,6 +925,11 @@ mod tests {
         let Adjustment::GradientMap { stops, .. } = parse(b"grdm", &noise, None, Channels::Rgb) else { panic!("noise gradient map") };
         assert_eq!(stops.len(), crate::noise_gradient::ENTRIES);
         assert!(stops.windows(2).any(|w| w[0].1 != w[1].1));
+        // Colour model 4 (HSB, as Photoshop writes it) walks in HSB: another ramp.
+        let model_at = noise.len() - 2 - 16 - 2;
+        noise[model_at..model_at + 2].copy_from_slice(&4u16.to_be_bytes());
+        let Adjustment::GradientMap { stops: hsb, .. } = parse(b"grdm", &noise, None, Channels::Rgb) else { panic!("noise gradient map") };
+        assert_ne!(hsb, stops);
     }
 
     fn rt(a: Adjustment) {
@@ -1047,15 +1066,16 @@ mod tests {
         let ours = write(&Adjustment::ChannelMixer { matrix: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]], monochrome: false, cmyk: None });
         assert!(matches!(parse(b"mixr", &ours[0].1, None, Channels::Other), Adjustment::ChannelMixer { .. }));
         assert!(matches!(parse(b"mixr", &[0, 1, 0, 0, 0, 100], None, Channels::Rgb), Adjustment::Unsupported { .. }));
-        // Photo Filter: unknown version, HSB colour space, out-of-range version-3 Lab, truncated.
+        // Photo Filter: unknown version, HSB colour space, out-of-range version-3 XYZ (past twice
+        // the white), truncated.
         assert!(matches!(parse(b"phfl", &[0, 4, 0, 0], None, Channels::Rgb), Adjustment::Unsupported { .. }));
         assert!(matches!(parse(b"phfl", &[0, 2, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 25, 1], None, Channels::Rgb), Adjustment::Unsupported { .. }));
-        let mut lab = vec![0, 3];
-        for x in [20000i32, 0, 0] {
-            lab.extend(x.to_be_bytes());
+        let mut xyz = vec![0, 3];
+        for x in [70000u32, 0, 0] {
+            xyz.extend(x.to_be_bytes());
         }
-        lab.extend([0, 0, 0, 25, 1]);
-        assert!(matches!(parse(b"phfl", &lab, None, Channels::Rgb), Adjustment::Unsupported { .. }));
+        xyz.extend([0, 0, 0, 25, 1]);
+        assert!(matches!(parse(b"phfl", &xyz, None, Channels::Rgb), Adjustment::Unsupported { .. }));
         assert!(matches!(parse(b"phfl", &[0, 2, 0, 0, 0, 0], None, Channels::Rgb), Adjustment::Unsupported { .. }));
         // Arbitrary bytes never panic, whatever the key.
         for key in ADJUSTMENT_KEYS {
@@ -1092,12 +1112,14 @@ mod tests {
         let mut v2 = i16s(&[2, 0]);
         v2.extend([0xff, 0xff, 0x80, 0x00, 0, 0, 0, 0]);
         v2.extend(40u32.to_be_bytes());
-        v2.extend([1, 0]);
+        v2.extend([1, 0, 0, 0]);
         let a = parse(b"phfl", &v2, None, Channels::Rgb);
         let Adjustment::PhotoFilter { color, density, preserve_luminosity: true } = a else { panic!("{a:?}") };
         assert_eq!(color, [1.0, 32768.0 / 65535.0, 0.0]);
         assert_eq!(density, 0.4);
-        assert_eq!(write(&a)[0].1, v2, "version 2 RGB is written back byte-exact");
+        assert_eq!(write(&a)[0].1, v2, "version 2 RGB is written back byte-exact, 20 bytes as Reference needs");
+        // The 18-byte form older saves wrote still reads.
+        assert_eq!(parse(b"phfl", &v2[..18], None, Channels::Rgb), a);
         // Version 2, Lab colour structure: L 50, a 0, b 0 is mid gray.
         let mut lab = i16s(&[2, 7, 5000, 0, 0, 0]);
         lab.extend(25u32.to_be_bytes());
@@ -1105,25 +1127,28 @@ mod tests {
         let Adjustment::PhotoFilter { color, density, preserve_luminosity: false } = parse(b"phfl", &lab, None, Channels::Rgb) else { panic!() };
         assert!(color.iter().all(|c| (c - 0.466).abs() < 0.01), "{color:?}");
         assert_eq!(density, 0.25);
-        // Version 3: Lab ×100 as i32 (L 100, a 0, b 0 = white), density 100 %.
-        let mut v3 = vec![0, 3];
-        for x in [10000i32, 0, 0] {
-            v3.extend(x.to_be_bytes());
-        }
-        v3.extend(100u32.to_be_bytes());
-        v3.push(1);
-        let Adjustment::PhotoFilter { color, density, preserve_luminosity: true } = parse(b"phfl", &v3, None, Channels::Rgb) else { panic!() };
-        assert!(color.iter().all(|c| (c - 1.0).abs() < 0.01), "{color:?}");
+        // Version 3: XYZ relative to the D50 white, 1.0 = 32768 (storytold/photocraft@41e578b4):
+        // white, then Reference's Warming Filter (85) (#EC8A00), Yellow (#F9E31C) and Cooling
+        // Filter (82), out of sRGB, clamped to (0, 181, 255).
+        let v3 = |xyz: [u32; 3], density: u32, preserve: bool| {
+            let mut v = vec![0, 3];
+            for x in xyz {
+                v.extend(x.to_be_bytes());
+            }
+            v.extend(density.to_be_bytes());
+            v.extend([u8::from(preserve), 0]);
+            v
+        };
+        let Adjustment::PhotoFilter { color, density, preserve_luminosity: true } = parse(b"phfl", &v3([32768, 32768, 32768], 100, true), None, Channels::Rgb) else { panic!() };
+        assert!(color.iter().all(|c| (c - 1.0).abs() < 0.005), "{color:?}");
         assert_eq!(density, 1.0);
-        // A negative a* (green) in version 3.
-        let mut green = vec![0, 3];
-        for x in [5000i32, -6000, 0] {
-            green.extend(x.to_be_bytes());
+        for (xyz, rgb) in [([15548, 12029, 0], [0xec, 0x8a, 0x00]), ([24191, 25002, 3827], [0xf9, 0xe3, 0x1c]), ([5327, 9584, 65357], [0, 181, 255])] {
+            let Adjustment::PhotoFilter { color, .. } = parse(b"phfl", &v3(xyz, 25, false), None, Channels::Rgb) else { panic!("{xyz:?}") };
+            let want = rgb.map(|v: u8| f32::from(v) / 255.0);
+            assert!(color.iter().zip(want).all(|(g, w)| (g - w).abs() < 1.5 / 255.0), "{xyz:?}: {color:?}");
         }
-        green.extend(30u32.to_be_bytes());
-        green.push(0);
-        let Adjustment::PhotoFilter { color, .. } = parse(b"phfl", &green, None, Channels::Rgb) else { panic!() };
-        assert!(color[1] > color[0] && color[1] > color[2], "{color:?}");
+        // Past 2.0 relative to white is no colour.
+        assert!(matches!(parse(b"phfl", &v3([70000, 0, 0], 25, false), None, Channels::Rgb), Adjustment::Unsupported { .. }));
     }
 
     #[test]

@@ -237,6 +237,26 @@ fn raster_coverage_scales_and_depths_agree() {
 /// Sum of alpha for "Ink", Inter Regular 12 px (measured once; guards rasterizer regressions).
 const GOLDEN_INK_12: f64 = 44.4;
 
+/// Faux bold widens each advance by 55/2048 em (59/2048 with faux italic), as the pen positions
+/// Reference stores in `Txt2` show.
+#[test]
+fn faux_bold_widens_advances() {
+    let mut e = TextEngine::new();
+    let base = CharStyle { size_pt: 40.0, ..Default::default() };
+    let xs = |e: &mut TextEngine, s: CharStyle| -> Vec<f32> { e.layout(&styled("Hiya", s), 72.0).glyphs.iter().map(|g| g.x).collect() };
+    let plain = xs(&mut e, base.clone());
+    let bold = xs(&mut e, CharStyle { faux_bold: true, ..base.clone() });
+    let both = xs(&mut e, CharStyle { faux_bold: true, faux_italic: true, ..base.clone() });
+    let italic = xs(&mut e, CharStyle { faux_italic: true, ..base.clone() });
+    assert_eq!(plain.len(), 4);
+    for i in 0..4 {
+        let n = i as f32;
+        assert!((bold[i] - plain[i] - n * 40.0 * 55.0 / 2048.0).abs() < 1e-3, "{plain:?} {bold:?}");
+        assert!((both[i] - plain[i] - n * 40.0 * 59.0 / 2048.0).abs() < 1e-3, "{plain:?} {both:?}");
+        assert!((italic[i] - plain[i]).abs() < 1e-3);
+    }
+}
+
 #[test]
 fn styles_change_pixels() {
     let mut e = TextEngine::new();
@@ -247,7 +267,7 @@ fn styles_change_pixels() {
     };
     let (plain, prect) = ink(&mut e, base.clone());
     let (bold, _) = ink(&mut e, CharStyle { faux_bold: true, ..base.clone() });
-    assert!(bold > plain * 1.1, "{plain} → {bold}");
+    assert!(bold > plain * 1.02, "{plain} → {bold}");
     let (under, urect) = ink(&mut e, CharStyle { underline: true, ..base.clone() });
     assert!(under > plain && urect.y1 > prect.y1);
     let (_, irect) = ink(&mut e, CharStyle { faux_italic: true, ..base.clone() });
@@ -459,7 +479,7 @@ fn warp_bends_rendered_text_and_outlines() {
     assert!(arced.rect.height() > flat.rect.height() + 10, "{:?} vs {:?}", arced.rect, flat.rect);
     assert!(alpha_sum(&arced.surface, arced.rect) > 0.0);
     // Outlines follow the same warp: the first glyph's outline sits lower than the middle one's.
-    let warp = crate::render::layout_warp(&layout, t.warp.as_ref());
+    let warp = crate::render::layout_warp(&layout, &t);
     let outs = crate::render::outlines(&layout, &t.transform, warp.as_ref());
     assert_eq!(outs.len(), layout.glyphs.iter().filter(|g| g.id != 0).count() - 1, "space has no outline");
     let low_y = |els: &Vec<crate::render::PathEl>| {
@@ -486,6 +506,11 @@ fn warp_bends_rendered_text_and_outlines() {
 /// `Txt2` as Photoshop writes it (a bare `/key value` sequence; text objects at `/1 /1`, style
 /// runs at `/0 /6 /0`, auto-kern mode at `/11`), for the layer text `text`.
 fn txt2_with_modes(text: &str, modes: &[(usize, i64)]) -> Vec<u8> {
+    txt2_with_styles(text, &modes.iter().map(|(len, m)| (*len, format!("/11 {m}"))).collect::<Vec<_>>())
+}
+
+/// [`txt2_with_modes`] with each style run's keys given as EngineData text (`"/11 1 /85 2"`).
+fn txt2_with_styles(text: &str, styles: &[(usize, String)]) -> Vec<u8> {
     let mut v = b"\n\n/98 << /0 14 >> /0 << >> /1 << /1 [ << /0 << /0 (\xfe\xff".to_vec();
     for u in format!("{text}\r").encode_utf16() {
         let b = u.to_be_bytes();
@@ -497,8 +522,8 @@ fn txt2_with_modes(text: &str, modes: &[(usize, i64)]) -> Vec<u8> {
         }
     }
     v.extend_from_slice(b") /6 << /0 [ ");
-    for (len, m) in modes {
-        v.extend_from_slice(format!("<< /0 << /0 << /0 (\u{fe}\u{ff}) /6 << /0 0 /11 {m} >> >> >> /1 {len} >> ").as_bytes());
+    for (len, keys) in styles {
+        v.extend_from_slice(format!("<< /0 << /0 << /0 (\u{fe}\u{ff}) /6 << /0 0 {keys} >> >> >> /1 {len} >> ").as_bytes());
     }
     v.extend_from_slice(b"] >> >> >> ] >>");
     v
@@ -899,4 +924,344 @@ fn rewrite_keeps_what_photoshop_wrote() {
     // Photoshop's layout: an array opens on its key's line.
     let raw = String::from_utf8_lossy(&ed::write(&e)).into_owned();
     assert!(raw.contains("/RunArray [") && !raw.contains("/RunArray\n"));
+}
+
+#[test]
+fn superscript_and_subscript_shrink_and_shift() {
+    use photosuite_doc::text::BaselinePosition;
+    let base = CharStyle { font_family: "Inter".into(), size_pt: 20.0, ..Default::default() };
+    let mut t = TextLayer {
+        text: "x2y".into(),
+        runs: vec![
+            TextRun { len: 1, style: base.clone() },
+            TextRun { len: 1, style: CharStyle { position: BaselinePosition::Superscript, ..base.clone() } },
+            TextRun { len: 1, style: CharStyle { position: BaselinePosition::Subscript, ..base.clone() } },
+        ],
+        ..Default::default()
+    };
+    t.sync_summary();
+    let mut e = TextEngine::new();
+    let l = e.layout(&t, 72.0);
+    let size = |i: usize| l.faces[l.glyphs[i].face as usize].size_px;
+    assert!((size(1) - 20.0 * BaselinePosition::SIZE).abs() < 0.01, "{}", size(1));
+    let shift = |i: usize| l.styles[l.glyphs[i].style as usize].baseline_shift_pt;
+    assert!((shift(1) - 20.0 * BaselinePosition::OFFSET).abs() < 0.01 && (shift(2) + 20.0 * BaselinePosition::OFFSET).abs() < 0.01);
+    // The model keeps the set size; FontBaseline survives the type data both ways.
+    let back = crate::psd::text_layer_from_tysh(&crate::psd::build_tysh(&t, 72.0, None), 72.0).unwrap();
+    let positions: Vec<_> = back.runs.iter().map(|r| r.style.position).collect();
+    assert_eq!(positions, [BaselinePosition::Normal, BaselinePosition::Superscript, BaselinePosition::Subscript]);
+    assert!(back.runs.iter().all(|r| (r.style.size_pt - 20.0).abs() < 1e-3));
+}
+
+#[test]
+fn every_line_composer_evens_the_rag() {
+    // The Photoshop corpus paragraph (paragraph-box-left.psd): Every-line breaks before
+    // "legible," where greedy filling keeps it on line 2.
+    let text = "Typography is the craft of arranging type to make written language legible, readable and appealing when displayed. Justification, hyphenation and leading shape the texture of a paragraph.";
+    let mut e = TextEngine::new();
+    let set = |every: bool| {
+        let mut t = point(text, 14.0);
+        t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 240.0, height: 1000.0 };
+        with_para(t, ParagraphStyle { every_line_composer: every, ..Default::default() })
+    };
+    let rag = |l: &crate::TextLayout| -> f32 { l.lines.iter().rev().skip(1).map(|ln| (240.0 - (ln.x1 - ln.x0)).powi(2)).sum() };
+    let (every, single) = (e.layout(&set(true), 72.0), e.layout(&set(false), 72.0));
+    for l in [&every, &single] {
+        assert!(l.lines.iter().all(|ln| ln.x1 - ln.x0 <= 240.0 + 1e-3));
+        assert_eq!(l.lines.first().map(|ln| ln.range.start), Some(0));
+        assert_eq!(l.lines.last().map(|ln| ln.range.end), Some(text.len()));
+    }
+    assert!(rag(&every) <= rag(&single) + 1e-3, "{} vs {}", rag(&every), rag(&single));
+    // Right alignment uses the whole box, whatever width steered the break.
+    let mut right = set(true);
+    right.paragraphs[0].style.align = TextAlign::Right;
+    let r = e.layout(&right, 72.0);
+    assert!(r.lines.iter().rev().skip(1).all(|ln| (ln.x1 - 240.0).abs() < 1.0), "{:?}", r.lines.iter().map(|l| l.x1).collect::<Vec<_>>());
+    // The composer setting survives the PSD type data.
+    let back = crate::psd::text_layer_from_tysh(&crate::psd::build_tysh(&set(false), 72.0, None), 72.0).unwrap();
+    assert!(!back.paragraphs[0].style.every_line_composer);
+}
+
+/// `Txt2` with one path frame (`kind` 2: path) for the layer text `text`: a straight line from
+/// (32, 132) to (332, 132) in the document, the text space 32 px left and up, and the first
+/// glyph's position given as Photoshop records it (offset by the ascent, here −10).
+fn txt2_with_path(text: &str, kind: i64, glyph: (f32, f32)) -> Vec<u8> {
+    let mut v = b"/0 << /8 << /0 [ << /0 << /1 << /0 [ 32.0 132.0 132.0 132.0 232.0 132.0 332.0 132.0 ] >> ".to_vec();
+    v.extend_from_slice(format!("/2 << /0 {kind} /2 [ 1.0 0.0 0.0 1.0 -32.0 -32.0 ] >> >> >> ] >> >> /1 << /1 [ << /0 << /0 (").as_bytes());
+    v.extend_from_slice(&[0xfe, 0xff]);
+    for u in format!("{text}\r").encode_utf16() {
+        v.extend_from_slice(&u.to_be_bytes());
+    }
+    v.extend_from_slice(
+        format!(") >> /1 << /2 [ << /6 [ << /10 0 /6 [ << /14 -10.0 /6 [ << /21 << /1 [ {} ] /2 [ {} ] >> >> ] >> ] >> ] >> ] >> >> ] >>", glyph.0, glyph.1).as_bytes(),
+    );
+    v
+}
+
+/// Type on a path lives only in `Txt2`: import reads the frame into text space and finds the
+/// start from the first glyph's position; other frames, stale text and garbage are ignored.
+#[test]
+fn txt2_carries_type_on_a_path() {
+    let t = styled("Path", CharStyle::default());
+    let tysh = with_text_index(&crate::psd::build_tysh(&t, 72.0, None), 0);
+    let read = |data: &[u8]| {
+        let mut l = crate::psd::text_layer_from_tysh(&tysh, 72.0).unwrap();
+        if let Some(txt2) = crate::psd::parse_txt2(data) {
+            crate::psd::apply_txt2(&mut l, &tysh, &txt2);
+        }
+        l.path
+    };
+    let p = read(&txt2_with_path("Path", 2, (85.0, 110.0))).expect("path");
+    assert_eq!(p.segments, vec![[[0.0, 100.0], [100.0, 100.0], [200.0, 100.0], [300.0, 100.0]]]);
+    assert!(!p.closed);
+    assert!((p.start - 0.25).abs() < 1e-3, "{}", p.start);
+    // Positions without the ascent offset are read as they are.
+    assert!((read(&txt2_with_path("Path", 2, (150.0, 100.0))).unwrap().start - 0.5).abs() < 1e-3);
+    assert_eq!(read(&txt2_with_path("Path", 1, (85.0, 110.0))), None, "a box frame");
+    assert_eq!(read(&txt2_with_path("Other", 2, (85.0, 110.0))), None, "stale Txt2");
+    for bad in [&b"/0 << /8 << /0 [ << /0 << /1 << /0 [ 1.0 ] >> /2 << /0 2 >> >> >> ] >> >>"[..], b"/0 << /8 (x) >>", b""] {
+        assert_eq!(read(bad), None);
+    }
+}
+
+/// Grid fitting by anti-aliasing mode (fitted on Photoshop's renders, see `render::GridFit`):
+/// Sharp and None put the baseline on a whole pixel, large Sharp type each glyph too; Crisp and
+/// Smooth draw the exact outline; Strong is heavier than Smooth.
+#[test]
+fn anti_aliasing_modes_fit_the_pixel_grid_like_photoshop() {
+    use photosuite_doc::text::AntiAlias;
+    let mut e = TextEngine::new();
+    let px = |l: &crate::TextLayout, x: f64, y: f64, aa: AntiAlias| {
+        let r = crate::render::rasterize(l, &Affine::translate(x, y), PixelFormat::RGBA8, aa);
+        (r.rect, r.surface.read_region(r.rect))
+    };
+    let small = e.layout(&point("Hamburg", 18.0), 72.0);
+    let large = e.layout(&point("H", 40.0), 72.0);
+    for aa in [AntiAlias::Sharp, AntiAlias::None] {
+        assert!(px(&small, 10.0, 40.3, aa) == px(&small, 10.0, 40.0, aa), "{aa:?}: baseline snapped");
+    }
+    assert!(px(&small, 10.0, 40.3, AntiAlias::Smooth) != px(&small, 10.0, 40.0, AntiAlias::Smooth), "Smooth isn't snapped");
+    assert!(px(&small, 10.3, 40.0, AntiAlias::Sharp) != px(&small, 10.0, 40.0, AntiAlias::Sharp), "small Sharp type keeps fractional x");
+    assert!(px(&large, 10.3, 40.0, AntiAlias::Sharp) == px(&large, 10.0, 40.0, AntiAlias::Sharp), "large Sharp type on whole pixels");
+    // Turned type isn't grid-fitted (its pixels aren't the glyphs' grid).
+    let turned = Affine { m: [0.0, 1.0, -1.0, 0.0, 40.0, 10.0] };
+    let r = crate::render::rasterize(&small, &turned, PixelFormat::RGBA8, AntiAlias::Sharp);
+    assert_eq!(r.rect, crate::render::ink_rect(&small, &turned));
+    let ink = |aa| {
+        let r = crate::render::rasterize(&small, &Affine::translate(10.0, 40.0), PixelFormat::RGBA8, aa);
+        alpha_sum(&r.surface, r.rect)
+    };
+    assert!(ink(AntiAlias::Strong) > ink(AntiAlias::Smooth) * 1.05);
+}
+
+/// A run's face by its real PostScript name (what a PSD's FontSet needs), when the family has
+/// that face; a made-up Bold or Italic keeps the name the run asks for.
+#[test]
+fn faces_are_named_by_their_postscript_names() {
+    let mut e = TextEngine::new();
+    assert_eq!(e.fonts.postscript_of("Inter", 400, false).as_deref(), Some("Inter-Regular"));
+    assert_eq!(e.fonts.postscript_of("Inter", 600, false).as_deref(), Some("Inter-SemiBold"));
+    assert_eq!(e.fonts.postscript_of("JetBrains Mono", 400, false).as_deref(), Some("JetBrainsMono-Regular"));
+    for (f, w, i) in [("Inter", 900, false), ("Inter", 400, true), ("No Such Family", 400, false)] {
+        assert_eq!(e.fonts.postscript_of(f, w, i), None, "{f} {w} {i}");
+    }
+    // The TySh names a family-only run's face; the layer keeps no name of its own.
+    let mut t = point("Ab", 20.0);
+    t.runs = vec![TextRun { len: 2, style: CharStyle { font_family: "JetBrains Mono".into(), ..CharStyle::default() } }];
+    let tysh = e.tysh(&t, 72.0, None);
+    let back = crate::psd::text_layer_from_tysh(&tysh, 72.0).unwrap();
+    assert_eq!(back.char_runs()[0].style.postscript_name.as_deref(), Some("JetBrainsMono-Regular"));
+    assert_eq!(t.runs[0].style.postscript_name, None);
+}
+
+/// storytold/photocraft#1317: Reference keeps the last line of a text box whose baseline is inside the box even
+/// when its descenders hang below the bottom edge (three 35 pt lines of 25 pt type in a
+/// 91.3 pt box). A line whose baseline falls outside the box is still dropped.
+#[test]
+fn box_lines_whose_descent_hangs_below_the_box_are_kept() {
+    let mut e = TextEngine::new();
+    let mut t = styled("one\ntwo\nthree", CharStyle { size_pt: 25.0, leading_pt: Some(35.0), ..Default::default() });
+    t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 300.0, height: 91.27 };
+    let l = e.layout(&t, 72.0);
+    assert_eq!(l.lines.len(), 3, "{:?}", l.lines.iter().map(|l| l.baseline).collect::<Vec<_>>());
+    assert!(l.lines[2].baseline <= 91.27 + 0.5);
+    t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 300.0, height: 80.0 };
+    assert_eq!(e.layout(&t, 72.0).lines.len(), 2, "the third baseline (about 88) is below an 80 pt box");
+}
+
+/// `Txt2` with one text object for `text` whose rendered frame is frame 0, and that frame:
+/// for point text an anchor `point`, and a frame-to-text matrix `matrix` (recent Reference,
+/// storytold/photocraft#1317).
+fn txt2_with_frame(text: &str, point: Option<[f64; 2]>, matrix: [f64; 6]) -> Vec<u8> {
+    let mut v = txt2_with_modes(text, &[(text.encode_utf16().count() + 1, 1)]);
+    // Close the object's model early: `… >> >> ] >>` → `… >> /1 << /2 [ frame ] >> >> ] >>`.
+    let tail = b"] >> >> >> ] >>";
+    assert!(v.ends_with(tail));
+    v.truncate(v.len() - tail.len());
+    v.extend_from_slice(b"] >> >> /1 << /2 [ << /6 [ << /10 0 >> ] >> ] >> >> ] >>");
+    let pt = point.map(|[x, y]| format!("/0 [ {x:.5} {y:.5} ] ")).unwrap_or_default();
+    let m = matrix.map(|x| format!("{x:.5}")).join(" ");
+    let frames = format!("/0 << /8 << /0 [ << /0 << {pt}/2 << /2 [ {m} ] >> >> >> ] >> >>");
+    let at = v.windows(9).position(|w| w == b"/0 << >> ").unwrap();
+    v.splice(at..at + 9, frames.into_bytes().into_iter().chain(*b" "));
+    v
+}
+
+/// storytold/photocraft#1317: point text whose anchor Reference keeps only in its `Txt2` frame (EngineData's
+/// `PointBase` at the origin, the transform far away) is placed at that anchor, not at the
+/// ink's top left. A rewritten `TySh` (bounds near the origin) is left alone.
+#[test]
+fn txt2_frame_places_point_text_at_its_anchor() {
+    let mut t = point("2", 100.0);
+    t.transform = Affine::translate(-1000.0, -2000.0);
+    // Reference's text space: anchor at (1100, 2050), ink above its baseline.
+    let tysh = with_text_index(&crate::psd::build_tysh(&t, 72.0, Some([1100.0, 1980.0, 1160.0, 2050.0])), 0);
+    let txt2 = crate::psd::parse_txt2(&txt2_with_frame("2", Some([1000.0, 2100.0]), [1.0, 0.0, 0.0, 1.0, 100.0, -50.0])).unwrap();
+    let mut l = crate::psd::text_layer_from_tysh(&tysh, 72.0).unwrap();
+    crate::psd::apply_txt2_frame(&mut l, &tysh, &txt2);
+    let o = l.transform.apply(photosuite_geom::Point::new(0.0, 0.0));
+    assert!((o.x - 100.0).abs() < 1e-3 && (o.y - 50.0).abs() < 1e-3, "anchor at {o:?}");
+    // Already folded in (bounds near the origin): unchanged; another text: unchanged.
+    let tysh = with_text_index(&crate::psd::build_tysh(&t, 72.0, Some([0.0, -70.0, 60.0, 0.0])), 0);
+    let mut l = crate::psd::text_layer_from_tysh(&tysh, 72.0).unwrap();
+    let before = l.transform;
+    crate::psd::apply_txt2_frame(&mut l, &tysh, &txt2);
+    assert_eq!(l.transform, before);
+    let tysh = with_text_index(&crate::psd::build_tysh(&t, 72.0, Some([1100.0, 1980.0, 1160.0, 2050.0])), 0);
+    let other = crate::psd::parse_txt2(&txt2_with_frame("3", Some([1000.0, 2100.0]), [1.0, 0.0, 0.0, 1.0, 100.0, -50.0])).unwrap();
+    let mut l = crate::psd::text_layer_from_tysh(&tysh, 72.0).unwrap();
+    let before = l.transform;
+    crate::psd::apply_txt2_frame(&mut l, &tysh, &other);
+    assert_eq!(l.transform, before);
+}
+
+/// `tysh` with its text-space `bounds` set to `r` (Reference's, where it drew the text).
+fn with_bounds(tysh: &[u8], r: [f64; 4]) -> Vec<u8> {
+    use photosuite_psd::descriptor::{Descriptor, Id, Value};
+    let mut t = crate::psd::parse_tysh(tysh).unwrap();
+    let mut d = Descriptor::default();
+    for (k, v) in ["Left", "Top ", "Rght", "Btom"].iter().zip(r) {
+        d.items.push((Id::new(k), Value::Double(v)));
+    }
+    t.text.items.retain(|(k, _)| !k.is("bounds"));
+    t.text.items.push((Id::new("bounds"), Value::Descriptor(d)));
+    crate::psd::write_tysh(&t)
+}
+
+/// storytold/photocraft#1317: a text box whose `BoxBounds` are in its `Txt2` frame's space is moved by the frame's
+/// matrix onto the `bounds` Reference drew it at (it used to land off the canvas, so its text
+/// "disappeared" when an edit started).
+#[test]
+fn txt2_frame_moves_box_text_onto_its_bounds() {
+    let mut t = styled("Casemiro 45", CharStyle { size_pt: 25.0, ..Default::default() });
+    t.shape = TextShape::Box { x: 500.0, y: 600.0, width: 300.0, height: 90.0 };
+    t.transform = Affine::translate(-700.0, -300.0);
+    let built = with_text_index(&crate::psd::build_tysh(&t, 72.0, None), 0);
+    let tysh = with_bounds(&built, [960.0, 300.0, 1260.0, 390.0]);
+    let txt2 = crate::psd::parse_txt2(&txt2_with_frame("Casemiro 45", None, [1.0, 0.0, 0.0, 1.0, 460.0, -300.0])).unwrap();
+    let mut l = crate::psd::text_layer_from_tysh(&tysh, 72.0).unwrap();
+    assert!(matches!(l.shape, TextShape::Box { .. }));
+    crate::psd::apply_txt2_frame(&mut l, &tysh, &txt2);
+    let TextShape::Box { x, y, .. } = l.shape else { panic!("not a box") };
+    let o = l.transform.apply(photosuite_geom::Point::new(f64::from(x), f64::from(y)));
+    assert!((o.x - 260.0).abs() < 1e-3 && (o.y - 0.0).abs() < 1e-3, "box top left at {o:?}");
+    // Our own `TySh` (bounds = the box, frame already folded in): unchanged.
+    let mut l = crate::psd::text_layer_from_tysh(&built, 72.0).unwrap();
+    let before = l.transform;
+    crate::psd::apply_txt2_frame(&mut l, &built, &txt2);
+    assert_eq!(l.transform, before);
+}
+
+/// storytold/photocraft#1469: Some older PSD writers combine a zero PointBase with an enormous local ink origin.
+/// The TySh transform cancels that origin, so importing it as a zero-based layout puts text far
+/// off-canvas. Fold the descriptor origin into the imported transform and preserve it on a TySh
+/// round trip so every editing and export path uses the same position.
+#[test]
+fn legacy_tysh_point_origin_imports_and_round_trips_on_canvas() {
+    use photosuite_psd::descriptor::{Descriptor, Id, Value as D};
+
+    let source = styled("Name", CharStyle { font_family: "Inter".into(), size_pt: 120.0, ..Default::default() });
+    let mut tysh = crate::psd::parse_tysh(&crate::psd::build_tysh(&source, 72.0, None)).unwrap();
+    tysh.transform = Affine { m: [4.1667, 0.0, 0.0, 4.1667, -32375.0, -32887.5] };
+    let ink = [8050.0, 8160.0, 8220.0, 8300.0];
+    let rect = |class| {
+        D::Descriptor(
+            Descriptor::new(class)
+                .with("Left", D::UnitFloat { unit: *b"#Pnt", value: ink[0] })
+                .with("Top ", D::UnitFloat { unit: *b"#Pnt", value: ink[1] })
+                .with("Rght", D::UnitFloat { unit: *b"#Pnt", value: ink[2] })
+                .with("Btom", D::UnitFloat { unit: *b"#Pnt", value: ink[3] }),
+        )
+    };
+    tysh.text.items.retain(|(key, _)| !key.is("bounds") && !key.is("boundingBox"));
+    tysh.text.items.push((Id::new("bounds"), rect("bounds")));
+    tysh.text.items.push((Id::new("boundingBox"), rect("boundingBox")));
+    let data = crate::psd::write_tysh(&tysh);
+
+    let imported = crate::psd::text_layer_from_tysh(&data, 72.0).unwrap();
+    let expected = [4.1667, 0.0, 0.0, 4.1667, 1166.935, 1112.772];
+    for (got, want) in imported.transform.m.iter().zip(expected) {
+        assert!((got - want).abs() < 0.001, "{:?}", imported.transform.m);
+    }
+    let (_, rendered) = TextEngine::new().render(&imported, 72.0, PixelFormat::RGBA8);
+    let placed = rendered.surface.content_bounds();
+    assert!(!placed.is_empty(), "the normalized layer renders");
+    assert!((1000..3000).contains(&placed.x0) && (500..2000).contains(&placed.y0), "{placed:?}");
+
+    let round_trip = crate::psd::text_layer_from_tysh(&crate::psd::build_tysh(&imported, 72.0, Some(ink.map(|v| v as f32))), 72.0).unwrap();
+    for (got, want) in round_trip.transform.m.iter().zip(expected) {
+        assert!((got - want).abs() < 0.001, "{:?}", round_trip.transform.m);
+    }
+}
+
+/// storytold/photocraft#3617: Reference keeps Stylistic Sets, Contextual Alternates, Swash and
+/// the other OpenType settings besides (discretionary) ligatures only in `Txt2`. Import reads
+/// them, so the layout our engine draws when the type is edited keeps Reference's glyphs.
+#[test]
+fn txt2_carries_opentype_features() {
+    let feats = |l: &TextLayer| l.char_runs().iter().map(|r| r.style.features.iter().map(|f| (f.tag.clone(), f.value)).collect::<Vec<_>>()).collect::<Vec<_>>();
+    let f = |tag: &str, value: u16| (tag.to_string(), value);
+    let text = "Il->36";
+    let plain = styled(text, CharStyle { font_family: "Inter".into(), ..Default::default() });
+    let tysh = with_text_index(&crate::psd::build_tysh(&plain, 72.0, None), 0);
+    let styles = [(2, "/11 1 /18 true /19 false /20 true /25 true /85 2".to_string()), (5, "/11 1 /20 false /23 true /85 1".to_string())];
+    let txt2 = crate::psd::parse_txt2(&txt2_with_styles(text, &styles)).unwrap();
+    let mut back = crate::psd::text_layer_from_tysh(&tysh, 72.0).unwrap();
+    assert_eq!(feats(&back), vec![Vec::<(String, u16)>::new()], "EngineData alone doesn't have them");
+    crate::psd::apply_txt2(&mut back, &tysh, &txt2);
+    assert_eq!(feats(&back), vec![vec![f("calt", 1), f("swsh", 1), f("ss02", 1)], vec![f("calt", 0), f("frac", 1), f("ss01", 1)]]);
+    assert_eq!(back.char_runs().iter().map(|r| r.len).collect::<Vec<_>>(), vec![2, 4]);
+    // A feature the style already sets keeps its value; masks and flags of the wrong type, masks
+    // beyond the 20 sets and unknown keys change nothing.
+    let mut t = crate::psd::text_layer_from_tysh(&tysh, 72.0).unwrap();
+    t.runs = vec![TextRun { len: text.len(), style: CharStyle { features: vec![FontFeature { tag: "ss01".into(), value: 0 }], ..Default::default() } }];
+    let odd = [(1, "/85 1".to_string()), (1, "/85 (x) /20 (x) /25 (true)".to_string()), (1, "/85 -1".to_string()), (4, "/85 99999999999 /999 true".to_string())];
+    crate::psd::apply_txt2(&mut t, &tysh, &crate::psd::parse_txt2(&txt2_with_styles(text, &odd)).unwrap());
+    assert_eq!(feats(&t), vec![vec![f("ss01", 0)]]);
+}
+
+/// `set_text_index` patches the integer in place, leaving every other byte as it was.
+#[test]
+fn set_text_index_patches_in_place() {
+    let layer = TextLayer { text: "Hi".into(), ..Default::default() };
+    let tysh = crate::psd::build_tysh(&layer, 72.0, None);
+    assert_eq!(crate::psd::text_index(&tysh), Some(0));
+    let out = crate::psd::set_text_index(&tysh, 7).unwrap();
+    assert_eq!(out.len(), tysh.len());
+    assert_eq!(crate::psd::text_index(&out), Some(7));
+    assert_eq!(out.iter().zip(&tysh).filter(|(a, b)| a != b).count(), 1);
+    assert_eq!(crate::psd::set_text_index(&tysh, i64::MAX), None);
+    assert_eq!(crate::psd::set_text_index(b"junk", 1), None);
+}
+
+/// A `TySh` gives its recorded text box only while it still holds the layer's text.
+#[test]
+fn tysh_text_box_follows_the_text() {
+    let mut layer = TextLayer { text: "Warp me".into(), ..Default::default() };
+    layer.runs = vec![TextRun { len: layer.text.len(), style: CharStyle { size_pt: 24.0, ..Default::default() } }];
+    layer.sync_summary();
+    let tysh = crate::psd::build_tysh(&layer, 72.0, Some([0.0, -20.0, 90.0, 8.0]));
+    assert_eq!(crate::psd::tysh_text_box(&tysh, "Warp me"), Some([0.0, -20.0, 90.0, 8.0]));
+    assert_eq!(crate::psd::tysh_text_box(&tysh, "Edited"), None);
+    assert_eq!(crate::psd::tysh_text_box(b"junk", "Warp me"), None);
 }

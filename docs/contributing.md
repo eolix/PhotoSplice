@@ -10,7 +10,7 @@
 - **Tests:** required for every change. Format code needs round-trip and malformed-input tests. Pixel code is tested at 8, 16 and 32-bit. If you touch psd, io, codecs, compose, gpu, text or format, also run the real-file corpus tests: `cargo xtask test-corpus` (fetches the pinned corpora, including our Photoshop oracles from https://github.com/storytold/photocraft-corpus, then runs the `corpus`-feature tests; run them locally, CI doesn't yet). Never commit corpus files; see `docs/development.md` › Test corpora.
 - **Style:** `cargo fmt`, and `cargo clippy -- -D warnings`. Match surrounding code. Comments explain *why*.
 - **UI:** use `theme::Tokens` and `widgets::*`. Verify visually (offscreen `snapshot` example or the control channel) before submitting, and attach before/after screenshots to PRs.
-- **Commits:** small, focused, with a clear subject line.
+- **Commits:** small, focused, with a clear subject line. The proprietary editor we match is "Reference" in commits, PRs and code comments (`AGENTS.md` rule 10).
 
 ## Adding a command
 

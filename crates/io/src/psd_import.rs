@@ -58,6 +58,8 @@ pub(crate) struct Ctx<'a> {
     pub txt2: Option<photosuite_text::engine_data::Value>,
     /// Smart-filter caches from the global `FEid`/`FXid` blocks (filter masks, by placed id).
     pub filter_effects: Vec<photosuite_psd::filter_effects::FilterEffectsItem>,
+    /// Source sizes of `PlLd`-only placed layers, by source id (read once per embedded file).
+    pub plld_sizes: std::collections::HashMap<String, Option<(f64, f64)>>,
     /// Cancellation and progress for background opens (checked per layer record).
     pub ctl: photosuite_raster::Interrupt<'a>,
     /// Layer records decoded so far, out of `total` (progress).
@@ -88,7 +90,7 @@ fn selected_real_mask(rec: &LayerRecord) -> Option<photosuite_psd::RealMask> {
 /// The fill of a plain shape layer (fill block + vector path, no stroke) to import as a fill layer
 /// with a vector mask: when its mask parameters give the vector mask a density below 100 % or a
 /// feather, or when it stores no pixels and fills with a pattern.
-fn soft_shape_fill(rec: &LayerRecord, has_vector: bool, fill_key: Option<&[u8; 4]>) -> Option<photosuite_doc::Fill> {
+fn soft_shape_fill(rec: &LayerRecord, has_vector: bool, fill_key: Option<&[u8; 4]>) -> Option<(photosuite_doc::Fill, bool)> {
     if !has_vector || rec.block(b"vstk").is_some() || rec.block(b"vscg").is_some() {
         return None;
     }
@@ -96,15 +98,58 @@ fn soft_shape_fill(rec: &LayerRecord, has_vector: bool, fill_key: Option<&[u8; 4
     let fill = rec.block(k).and_then(|b| blocks::parse_fill(k, &b.data))?;
     let p = rec.layer_mask().and_then(|m| m.parameters);
     let soft = p.is_some_and(|p| p.vector_density.is_some_and(|d| d < 255) || p.vector_feather.is_some_and(|f| f > 0.0));
-    // Without stored pixels a pattern-filled shape cannot be rasterized on its own (the
-    // compositor resolves the document's patterns for fill layers).
-    let unrendered_pattern = (rec.rect.is_empty() || rec.rect.size().is_err()) && matches!(fill, photosuite_doc::Fill::Pattern { .. });
-    (soft || unrendered_pattern).then_some(fill)
+    // A pattern-filled shape can't be rasterized on its own (the compositor resolves the
+    // document's patterns for fill layers), and its stored pixels may be the unclipped fill
+    // (our export writes fill layers so): it is a pattern fill layer seen through its vector
+    // mask (storytold/photocraft@9b0c6c4d). Returns the fill and whether the mask is soft.
+    let pattern = matches!(fill, photosuite_doc::Fill::Pattern { .. });
+    (soft || pattern).then_some((fill, soft))
+}
+
+/// Where a placed layer's source goes: read from `SoLd`/`SoLE`, or from a CS2 `PlLd` record.
+/// An empty `id` leaves the contents unavailable (the stored pixels stay the rendering).
+#[derive(Default)]
+struct Placement {
+    id: String,
+    transform: photosuite_geom::Affine,
+    perspective: Option<[f64; 9]>,
+    warp: Option<photosuite_geom::warp::Warp>,
 }
 
 impl Ctx<'_> {
     fn warn(&mut self, s: impl Into<String>) {
         self.warnings.push(s.into());
+    }
+
+    /// Source id, transform, (Distort/Perspective) projective placement and warp of a placed
+    /// layer that has only a `PlLd` block, as CS2 and older write it. `PlLd` stores the placed
+    /// corners but not the source size, which comes from the embedded file
+    /// (storytold/photocraft@0002d861).
+    fn plld_placement(&mut self, data: &[u8], name: &str) -> Placement {
+        let Some((id, p)) = blocks::parse_plld(data) else {
+            self.warn(format!("layer \"{name}\": its placed-layer data (PlLd) could not be read; the smart object's contents are unavailable"));
+            return Placement::default();
+        };
+        let warp = match blocks::parse_plld_warp(data) {
+            blocks::PlldWarp::None => None,
+            blocks::PlldWarp::Warp(w) => Some(w),
+            blocks::PlldWarp::Unreadable => {
+                // Re-rendering from the source would unwarp the layer: keep it as saved (its
+                // warped pixels).
+                self.warn(format!(
+                    "layer \"{name}\": its smart object warp (PlLd) could not be read; the layer keeps its warped pixels but its contents are unavailable"
+                ));
+                return Placement::default();
+            }
+        };
+        let (file, ctl) = (self.file, self.ctl);
+        let size = *self
+            .plld_sizes
+            .entry(id.clone())
+            .or_insert_with(|| crate::linked::source_size_in_blocks(file.global_blocks.iter().map(|b| (&b.key, b.data.as_slice())), &id, &ctl));
+        // Without the source (missing or unreadable), it is taken as placed at 100 %.
+        let (transform, perspective) = blocks::plld_transform(&p, size, warp.as_ref());
+        Placement { id, transform, perspective, warp }
     }
 
     fn channel_plane(&mut self, rec: &LayerRecord, id: i16, name: &str) -> Option<Vec<u8>> {
@@ -130,6 +175,13 @@ impl Ctx<'_> {
             planes.push(self.channel_plane(rec, c as i16, name));
         }
         planes.push(self.channel_plane(rec, CHANNEL_TRANSPARENCY, name));
+        // Only decoded channel data justifies a buffer: the decoders bound their output by the
+        // bytes in the file, but a bare rectangle can declare 300000² pixels in a few bytes
+        // (storytold/photocraft@dc256b8b).
+        if planes.iter().all(Option::is_none) {
+            self.warn(format!("layer \"{name}\": no channel data for its {w}x{h} bounds; treated as empty"));
+            return Surface::new(self.fmt);
+        }
         // A channel that is in the file but could not be decoded leaves the layer empty, as the
         // warning says. Filling in for it would paint an opaque black layer over the document.
         let ids = (0..self.cc as i16).chain([CHANNEL_TRANSPARENCY]);
@@ -274,7 +326,8 @@ impl Ctx<'_> {
         let fill_key = [b"SoCo", b"GdFl", b"PtFl"].into_iter().find(|k| rec.block(k).is_some());
         let vector_key = [b"vsms", b"vmsk"].into_iter().find(|k| rec.block(k).is_some());
         let adj_key = ADJUSTMENT_KEYS.into_iter().find(|k| rec.block(k).is_some());
-        let smart_key = [b"SoLd", b"PlLd", b"SoLE"].into_iter().find(|k| rec.block(k).is_some());
+        // `SoLE` (a linked smart object) before `PlLd`: a `PlLd` alone is CS2's record.
+        let smart_key = [b"SoLd", b"SoLE", b"PlLd"].into_iter().find(|k| rec.block(k).is_some());
         let blocks = preserved_blocks(rec);
         // `psd_raw` shares the Arc of the matching `psd_blocks` entry.
         let principal = |k: &[u8; 4]| blocks.iter().find(|(bk, _)| bk == k).map(|(_, d)| d.clone());
@@ -304,12 +357,29 @@ impl Ctx<'_> {
             });
             if let Some(txt2) = &self.txt2 {
                 photosuite_text::psd::apply_txt2(&mut t, &data, txt2);
+                photosuite_text::psd::apply_txt2_frame(&mut t, &data, txt2);
             }
-            t.cache = Some(self.record_surface(rec, &name));
+            // The file's pixels are the cache only when it has some: ag-psd, GIMP and other
+            // writers leave type layers without image data (Reference re-renders them on open),
+            // and an empty cache showed nothing until the layer was edited; `text_import` renders
+            // such a layer from its model. When the engine text itself is blank, Reference draws
+            // nothing either: the empty pixels stay (storytold/photocraft@d2ad238e).
+            let cache = self.record_surface(rec, &name);
+            let drawn = !cache.content_bounds().is_empty() || photosuite_text::psd::engine_text_is_blank(&data);
+            t.cache = drawn.then_some(cache);
             t.psd_raw = principal(b"TySh");
             LayerContent::Text(t)
         } else if let Some(k) = smart_key {
-            let (id, transform) = rec.block(k).map(|b| blocks::parse_smart(k, &b.data)).unwrap_or_default();
+            let Placement { id, transform, perspective, warp } = match rec.block(k) {
+                Some(b) if k == b"PlLd" => self.plld_placement(&b.data, &name),
+                Some(b) => {
+                    let (id, transform) = blocks::parse_smart(k, &b.data);
+                    // Distort / Perspective: the fourth corner (the affine `transform` drops it).
+                    let perspective = blocks::parse_smart_perspective(k, &b.data);
+                    Placement { id, transform, perspective, warp: blocks::parse_placed_warp(k, &b.data) }
+                }
+                None => Placement::default(),
+            };
             // Smart filters (`filterFX` in the placed-layer data) and their mask (`FEid`).
             let placed = rec.block(b"SoLd").or_else(|| rec.block(b"SoLE")).and_then(|b| crate::smart_map::parse_sold(&b.data));
             let stack = placed.as_ref().and_then(|p| p.stack.clone()).unwrap_or_default();
@@ -333,15 +403,18 @@ impl Ctx<'_> {
                 psd_raw: principal(k),
                 filters_enabled: stack.enabled,
                 filter_mask,
-                warp: rec.block(k).and_then(|b| blocks::parse_placed_warp(k, &b.data)),
+                warp,
                 stack_mode: None,
-                // Distort / Perspective: the fourth corner (the affine `transform` drops it).
-                perspective: rec.block(k).and_then(|b| blocks::parse_smart_perspective(k, &b.data)),
+                perspective,
             })
-        } else if let Some(f) = soft_shape_fill(rec, vector_key.is_some(), fill_key) {
+        } else if let Some((f, soft)) = soft_shape_fill(rec, vector_key.is_some(), fill_key) {
             // A shape whose vector mask has a density or feather is a fill layer seen through a
             // soft vector mask: the fill shows beyond the path, which the stored pixels (the
-            // shape alone) lack. Import it as exactly that.
+            // shape alone) lack. Import it as exactly that. A pattern fill keeps its stored
+            // pixels as its rendering (a soft mask's pixels lack the fill beyond the path).
+            if !soft && matches!(f, photosuite_doc::Fill::Pattern { .. }) && !rec.rect.is_empty() {
+                fill_cache = Some(FillCache { fill: f.clone(), surface: self.record_surface(rec, &name) });
+            }
             LayerContent::Fill(f)
         } else if (vector_key.is_some() && (fill_key.is_some() || rec.block(b"vstk").is_some())) || rec.block(b"vscg").is_some() {
             let fill = fill_key.and_then(|k| rec.block(k).and_then(|b| blocks::parse_fill(k, &b.data)));
@@ -422,8 +495,9 @@ impl Ctx<'_> {
                     self.ctl.progress(0.1 + 0.85 * self.done as f32 / self.total.max(1) as f32);
                     l
                 }
-                LayerNode::Group { index, children, .. } => {
+                LayerNode::Group { index, children, divider } => {
                     let rec = &layers[*index];
+                    let divider_blocks = divider.and_then(|d| layers.get(d)).map(divider_preserved).unwrap_or_default();
                     // The recursion here (and in every later consumer of the tree) is bounded by
                     // the document model's nesting cap; a deeper subtree is not imported.
                     let children = if depth >= photosuite_doc::MAX_GROUP_DEPTH {
@@ -439,7 +513,7 @@ impl Ctx<'_> {
                     let sd = rec.section_divider();
                     let expanded = sd.is_none_or(|s| s.kind != photosuite_psd::SectionType::ClosedFolder);
                     let artboard = crate::comps_map::ARTBOARD_KEYS.iter().find_map(|k| rec.block(k)).and_then(|b| crate::comps_map::parse_artboard(&b.data));
-                    let mut l = Layer::new(rec.name(), LayerContent::Group(Group { children, expanded, artboard }));
+                    let mut l = Layer::new(rec.name(), LayerContent::Group(Group { children, expanded, artboard, divider_blocks }));
                     l.psd_blocks = preserved_blocks(rec);
                     self.apply_common(&mut l, rec, sd.and_then(|s| s.blend_mode));
                     self.apply_vector_mask(&mut l, rec);
@@ -494,6 +568,11 @@ fn preserved_blocks(rec: &LayerRecord) -> Vec<([u8; 4], Arc<Vec<u8>>)> {
     rec.blocks.iter().filter(|b| !REGENERATED.contains(&&b.key)).map(|b| (b.key, Arc::new(b.data.clone()))).collect()
 }
 
+/// A group's end divider's blocks, its layer id (`lyid`) included: export reuses it.
+fn divider_preserved(rec: &LayerRecord) -> Vec<([u8; 4], Arc<Vec<u8>>)> {
+    rec.blocks.iter().filter(|b| &b.key == b"lyid" || !REGENERATED.contains(&&b.key)).map(|b| (b.key, Arc::new(b.data.clone()))).collect()
+}
+
 fn be_to_ne_plane(plane: &[u8], s: SampleType, n: usize) -> Vec<u8> {
     interleave(&[Some(plane)], &[zero_sample(s)], n, s, &[false])
 }
@@ -511,6 +590,59 @@ fn parse_guides(data: &[u8], doc: &mut Document) {
             doc.guides.vertical.push(pos);
         }
     }
+}
+
+/// A flattened file's merged image as its layer: like Reference, an opaque one is the locked
+/// Background (Reference 27.11 opens psd-tools' flat Bitmap and Indexed files that way), so it is
+/// written back as one (storytold/photocraft@57624bd0).
+fn flat_background(s: Surface) -> Layer {
+    let opaque = {
+        let r = s.content_bounds();
+        let n = s.channels();
+        !r.is_empty() && s.read_region(r).chunks_exact(n).all(|p| p.last().is_some_and(|a| *a >= 1.0))
+    };
+    let mut l = Layer::new("Background", LayerContent::Raster(s));
+    l.locks.transparency = opaque;
+    l.locks.position = opaque;
+    l
+}
+
+/// Reference opens a file's bottom layer as its Background when that layer's record has no
+/// transparency (`-1`) channel, whatever its name and lock flags say: it is then locked
+/// (measured upstream on Reference 27.11 with psd-tools and ag-psd files whose bottom layer is
+/// called "Фон", "bg" or "Layer 1" and carries no locks; storytold/photocraft@57624bd0).
+fn mark_background(file: &PsdFile, layers: &mut [Layer]) {
+    let Some(rec) = file.layers().first() else { return };
+    let Some(bottom) = layers.first_mut() else { return };
+    let opaque_record = !rec.channels.is_empty() && rec.channels.iter().all(|c| c.id >= 0);
+    if opaque_record && matches!(bottom.content, LayerContent::Raster(_)) && !bottom.clipped {
+        bottom.locks.transparency = true;
+        bottom.locks.position = true;
+    }
+}
+
+/// The layers `file` had selected, its target first: the ids of resource 1069 (a u16 count,
+/// then u32 layer ids) and the record of resource 1024 (a u16 record index), found in `doc` by
+/// their PSD layer ids. Empty when the file names none of `doc`'s layers.
+pub(crate) fn selection(file: &PsdFile, doc: &Document) -> Vec<photosuite_doc::LayerId> {
+    let by_psd: std::collections::HashMap<u32, photosuite_doc::LayerId> = doc.walk().into_iter().filter_map(|(_, _, l)| Some((l.psd_id?, l.id))).collect();
+    let target = file
+        .resource(ids::LAYER_STATE)
+        .and_then(|r| r.data.get(..2))
+        .map(|b| usize::from(u16::from_be_bytes([b[0], b[1]])))
+        .and_then(|i| file.layers().get(i))
+        .and_then(LayerRecord::layer_id)
+        .and_then(|id| by_psd.get(&id).copied());
+    let listed: Vec<photosuite_doc::LayerId> = file
+        .resource(ids::LAYER_SELECTION_IDS)
+        .map(|r| {
+            let n = r.data.get(..2).map_or(0, |b| usize::from(u16::from_be_bytes([b[0], b[1]])));
+            (0..n).filter_map(|k| r.data.get(2 + k * 4..6 + k * 4)).filter_map(|b| by_psd.get(&u32::from_be_bytes([b[0], b[1], b[2], b[3]])).copied()).collect()
+        })
+        .unwrap_or_default();
+    let mut out: Vec<photosuite_doc::LayerId> = target.into_iter().collect();
+    out.extend(listed.into_iter().filter(|id| Some(*id) != target));
+    out
 }
 
 /// Converts a parsed PSD into a document. Never fails: problems become warnings.
@@ -542,6 +674,11 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
                 if let Ok(ri) = photosuite_psd::ResolutionInfo::from_bytes(&r.data) {
                     let f = if ri.h_res_unit == 2 { 2.54 } else { 1.0 };
                     doc.resolution_dpi = (ri.h_res() * f) as f32;
+                    // Kept for its display units (pixels/cm, width in cm…) when export wouldn't
+                    // write it the same, see `resolution_resource`.
+                    if r.data != photosuite_psd::ResolutionInfo::from_dpi(f64::from(doc.resolution_dpi)).to_bytes() {
+                        doc.metadata.psd_resources.push((r.id, String::from_utf8_lossy(&r.name).into_owned(), Arc::new(r.data.clone())));
+                    }
                 }
             }
             ids::ICC_PROFILE => doc.icc_profile = Some(Arc::new(r.data.clone())),
@@ -600,6 +737,8 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
     doc.patterns = crate::pattern_map::from_global_blocks(&doc);
     // Notes (`Anno`) and the measurement scale (resource 1074); raw data stays for verbatim export.
     doc.notes = crate::annotations_map::notes_from_blocks(&doc);
+    let anno_warning = crate::annotations_map::anno_unreadable(&doc)
+        .then(|| "the notes (Anno block) could not be read; they are kept unchanged on PSD save unless a note is added".to_string());
     if let Some(scale) = crate::annotations_map::raw_scale(&doc) {
         doc.measurement.scale = scale;
     }
@@ -616,10 +755,14 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
         dpi: doc.resolution_dpi,
         txt2: file.global_blocks.iter().find(|b| &b.key == b"Txt2").and_then(|b| photosuite_text::psd::parse_txt2(&b.data)),
         filter_effects: Vec::new(),
+        plld_sizes: Default::default(),
         ctl: *ctl,
         done: 0,
         total: file.layers().len(),
     };
+    if let Some(w) = anno_warning {
+        cx.warn(w);
+    }
     for b in file.global_blocks.iter().filter(|b| matches!(&b.key, b"FEid" | b"FXid")) {
         // Smart-filter caches can be large: a cancelled open stops between blocks.
         if ctl.cancelled() {
@@ -635,7 +778,7 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
     }
 
     let (w, hh) = (h.width as usize, h.height as usize);
-    let n = w * hh;
+    let n = w.saturating_mul(hh);
     let canvas = Rect::new(0, 0, h.width as i32, h.height as i32);
     // The merged composite is decoded only when something consumes it: a flattened or
     // multichannel file (it *is* the image), or extra alpha/spot channels behind the colour
@@ -675,6 +818,9 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
     } else if layered {
         let tree = file.layer_tree();
         doc.layers = cx.build(&tree, 0);
+        // Reference's Background: the bottom record stored without a transparency channel (-1),
+        // locked whatever its (localized) name, lock flags or `lspf` say. Its name is kept.
+        mark_background(file, &mut doc.layers);
         // Layer › Link Layers: resource 1026 holds one group id per layer record (0 = unlinked).
         if let Some(Ok(photosuite_psd::resources::ResourceData::LayerGroupInfo(groups))) =
             file.resources.iter().find(|r| r.id == ids::LAYER_GROUP_INFO).and_then(photosuite_psd::resources::ImageResource::parsed)
@@ -748,12 +894,17 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
         let rgba = file.composite_rgba8().or_else(|_| {
             // Multichannel: show the first channels as RGB.
             let all = merged.clone().ok_or_else(|| photosuite_psd::PsdError::Invalid("no merged image".into()))??;
-            let plane = h.row_bytes() * hh;
-            let mut data = vec![255u8; n * 4];
+            let plane = h.row_bytes().checked_mul(hh).ok_or(photosuite_psd::PsdError::LimitExceeded("plane size overflow"))?;
+            let mut data = vec![255u8; n.checked_mul(4).ok_or(photosuite_psd::PsdError::LimitExceeded("image size overflow"))?];
             for c in 0..3.min(usize::from(h.channels)) {
-                let p = photosuite_psd::pixels::plane_to_u8(&all[c * plane..(c + 1) * plane], h.depth, w, hh)?;
-                for i in 0..n {
-                    data[i * 4 + c] = p[i];
+                // Channel bounds checked: a short merged image is an error, not a panic
+                // (storytold/photocraft@40c9c3c4).
+                let bytes = c.checked_mul(plane).and_then(|a| all.get(a..a.checked_add(plane)?)).ok_or_else(|| photosuite_psd::PsdError::Invalid("channel size mismatch".into()))?;
+                let p = photosuite_psd::pixels::plane_to_u8(bytes, h.depth, w, hh)?;
+                for (px, v) in data.chunks_exact_mut(4).zip(&p) {
+                    if let Some(slot) = px.get_mut(c) {
+                        *slot = *v;
+                    }
                 }
             }
             Ok::<_, photosuite_psd::PsdError>(photosuite_psd::RgbaImage { left: 0, top: 0, width: h.width, height: h.height, data })
@@ -783,7 +934,7 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
                 .collect();
             s.write_region(canvas, &vals);
             s.prune();
-            doc.layers.push(Layer::new("Background", LayerContent::Raster(s)));
+            doc.layers.push(flat_background(s));
         }
     }
 

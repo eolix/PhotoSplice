@@ -14,6 +14,7 @@
 //! SCALE=4 …                                                                         # upscale the png
 //! HIDE_ADJ=1 …                                                                        # adjustment layers hidden
 //! ONLY="name,name" …                                                                  # only these top-level layers (+ the bottom one)
+//! RERENDER=1 …                                                                       # type and shape layers re-rendered by PhotoSuite
 //! DUMP_FX=1 …                                                                          # raw effects descriptors
 //! ```
 fn main() {
@@ -38,6 +39,9 @@ fn main() {
             }
         }
         hide(&mut imp.document.layers);
+    }
+    if std::env::var_os("RERENDER").is_some() {
+        rerender(&mut imp.document);
     }
     if let Some(keep) = std::env::var_os("ONLY") {
         // Hide every top-level layer but the bottom one and those named in ONLY (comma-separated).
@@ -459,7 +463,10 @@ fn corpus_summary(root: &std::path::Path) {
         let name = p.strip_prefix(root).unwrap_or(p).display().to_string();
         let Ok(bytes) = std::fs::read(p) else { return (name, None) };
         let Ok(file) = photosuite_psd::PsdFile::from_bytes(&bytes) else { return (name, None) };
-        let Ok(imp) = photosuite_io::import(&name, &bytes) else { return (name, None) };
+        let Ok(mut imp) = photosuite_io::import(&name, &bytes) else { return (name, None) };
+        if std::env::var_os("RERENDER").is_some() {
+            rerender(&mut imp.document);
+        }
         if file.has_real_merged_data() == Some(false) || file.layers().is_empty() {
             return (name, None);
         }
@@ -511,4 +518,26 @@ fn corpus_summary(root: &std::path::Path) {
         }
     }
     println!("{} files: {pass} pass, {diff} differ, {skip} skipped/errors", rows.len());
+}
+
+/// Re-renders type and shape layers with PhotoSuite's engines (as an edit does), instead of the
+/// file's stored pixels: how close a PhotoSuite edit lands to Photoshop's rendering.
+fn rerender(doc: &mut photosuite_doc::Document) {
+    let (dpi, fmt, canvas) = (doc.resolution_dpi, doc.pixel_format(), doc.bounds());
+    let mut engine = photosuite_text::TextEngine::with_system_fonts();
+    fn walk(ls: &mut [photosuite_doc::Layer], f: &mut dyn FnMut(&mut photosuite_doc::Layer)) {
+        for l in ls {
+            f(l);
+            if let photosuite_doc::LayerContent::Group(g) = &mut l.content {
+                walk(&mut g.children, f);
+            }
+        }
+    }
+    walk(&mut doc.layers, &mut |l| match &mut l.content {
+        photosuite_doc::LayerContent::Text(t) => {
+            engine.render_layer(t, dpi, fmt);
+        }
+        photosuite_doc::LayerContent::Shape(sh) => sh.cache = Some(photosuite_vector::render_shape(sh, fmt, canvas)),
+        _ => {}
+    });
 }

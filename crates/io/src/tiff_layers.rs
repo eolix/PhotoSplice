@@ -103,7 +103,12 @@ pub(crate) fn import_layered(name: &str, img: &Image, layers: &[u8]) -> Result<I
     let data = planar_big_endian(&img, color_channels, mode == PsdMode::Cmyk)?;
     let image_data = ImageData { compression: Compression::Raw, data };
     let file = isd.into_psd(header, resources, image_data);
+    // The same nesting cap as a PSD (storytold/photocraft@fd351918).
+    if crate::psd_import::group_depth(&file) > photosuite_doc::MAX_GROUP_DEPTH {
+        return Err(crate::IoError::Unsupported(format!("layer groups nested deeper than {}", photosuite_doc::MAX_GROUP_DEPTH)));
+    }
     let (mut doc, w) = psd_to_document(&file);
+    crate::text_import::prepare(&mut doc);
     warnings.extend(w);
     doc.name = name.to_string();
     if doc.icc_profile.is_none() {
@@ -112,7 +117,7 @@ pub(crate) fn import_layered(name: &str, img: &Image, layers: &[u8]) -> Result<I
     if !img.meta.text.is_empty() {
         warnings.push(format!("{} text metadata entries are not kept in the document", img.meta.text.len()));
     }
-    Ok(ImportResult { document: doc, warnings })
+    Ok(ImportResult { document: doc, warnings, selected: Vec::new() })
 }
 
 /// Interleaved native-endian samples → planar big-endian planes (PSD merged-image order),
@@ -191,7 +196,7 @@ pub(crate) fn export_layered(doc: &Document, opts: &ExportOptions) -> Result<Exp
     let big = doc.size.width > 30_000 || doc.size.height > 30_000;
     // The PSD exporter renders the composite we need for the TIFF itself: unmatted (the TIFF
     // keeps straight alpha) and uncompressed (its planes are interleaved below).
-    let psd_opts = PsdExportOptions { force_psb: opts.force_psb || big, merged_matte: false, merged_compression: Compression::Raw, native_modes: false };
+    let psd_opts = PsdExportOptions { force_psb: opts.force_psb || big, merged_matte: false, merged_compression: Compression::Raw, native_modes: false , selected_layers: opts.selected_layers.clone() };
     let (file, w) = document_to_psd_with(doc, &psd_opts);
     warnings.extend(w);
     let order = if codecs::tiff_writes_little_endian() { ByteOrder::Little } else { ByteOrder::Big };

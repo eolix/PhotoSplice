@@ -10,7 +10,7 @@ use photosuite_color::{Color, ColorMode, PixelFormat, SampleType};
 use photosuite_doc::{AlphaChannel, Document};
 use photosuite_geom::Rect;
 use photosuite_psd::file::LayerInfoPlacement;
-use photosuite_psd::resources::{ImageResource, ResolutionInfo, ids, version_info_resource};
+use photosuite_psd::resources::{ImageResource, ids, version_info_resource};
 use photosuite_psd::{ColorMode as PsdMode, Compression, Header, ImageData, PsdFile};
 use photosuite_raster::Surface;
 
@@ -22,14 +22,14 @@ const LAYER_RESOURCES: [u16; 6] = [1024, 1026, 1069, 1072, ids::DOCUMENT_IDS_SEE
 
 /// The document-level tagged blocks kept from the file (`FMsk`, `Patt`, …), padded to 4 as
 /// Photoshop writes them; not layer data.
-fn global_blocks(doc: &Document) -> Vec<photosuite_psd::TaggedBlock> {
+fn global_blocks(doc: &Document, version: photosuite_psd::Version) -> Vec<photosuite_psd::TaggedBlock> {
     doc.metadata
         .psd_global_blocks
         .iter()
         .filter(|(_, key, _)| !matches!(key, b"Layr" | b"Lr16" | b"Lr32"))
         .map(|(sig, key, data)| {
             let mut tb = photosuite_psd::TaggedBlock::new(*key, data.to_vec());
-            tb.signature = *sig;
+            tb.signature = crate::psd_export::block_signature(*sig, version);
             tb.padding = Some(vec![0; (4 - data.len() % 4) % 4]);
             tb
         })
@@ -118,7 +118,7 @@ pub(crate) fn document_to_psd(doc: &Document, force_psb: bool) -> (PsdFile, Vec<
         .or_else(|_| ImageData::encode(Compression::Raw, &planes, &header))
         .unwrap_or(ImageData { compression: Compression::Raw, data: planes });
     let mut resources = vec![
-        ImageResource::new(ids::RESOLUTION_INFO, ResolutionInfo::from_dpi(f64::from(doc.resolution_dpi)).to_bytes()),
+        ImageResource::new(ids::RESOLUTION_INFO, crate::psd_export::resolution_resource(doc)),
         ImageResource::new(ids::GLOBAL_ANGLE, (doc.global_light.angle.round() as i32).to_be_bytes().to_vec()),
         ImageResource::new(ids::GLOBAL_ALTITUDE, (doc.global_light.altitude.round() as i32).to_be_bytes().to_vec()),
         // Photoshop writes the grid and guides resource in every file.
@@ -169,7 +169,7 @@ pub(crate) fn document_to_psd(doc: &Document, force_psb: bool) -> (PsdFile, Vec<
         layer_info: None,
         layer_info_placement: LayerInfoPlacement::Section,
         global_layer_mask: None,
-        global_blocks: global_blocks(doc),
+        global_blocks: global_blocks(doc, version),
         layer_mask_trailing: Vec::new(),
         image_data,
     };

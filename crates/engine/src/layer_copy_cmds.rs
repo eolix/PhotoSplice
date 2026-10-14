@@ -99,7 +99,7 @@ fn copy_to_document(s: &mut Session, p: &Value) -> Result<Value> {
         let src_layer = sdoc.layer(*id).ok_or(EngineError::NoLayer(*id))?;
         let mut l = src_layer.duplicate();
         // A dragged Background arrives as an ordinary layer (the destination keeps its own).
-        if crate::extra_cmds::is_background(src_layer) && sdoc.layers.first().is_some_and(|b| b.id == *id) {
+        if sdoc.is_background(*id) {
             l.name = ddoc.next_layer_name("Layer");
             l.locks = Default::default();
         }
