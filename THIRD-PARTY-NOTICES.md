@@ -149,13 +149,9 @@ the public domain.
 | `assets/icons/{check,chevron-*,chevrons-*,circle,clock,compass,info,link,lock,minus,moon,move,navigation,plus,search,square,trash,triangle,type,x,zoom-in}.svg` | Lucide icons derived from Feather | Cole Bemis; Lucide Contributors | MIT and ISC |
 | `assets/icons/slice-knife.svg` | Slice tool glyph | PhotoCraft contributors | MIT OR Apache-2.0 |
 | `assets/icons/eraser-{background,magic}.svg` | Lucide `eraser` with added marks | Lucide Contributors; PhotoCraft contributors | ISC |
-| `assets/app-icon/` | Application icon: the PhotoSuite logo | The PhotoSuite authors | MIT OR Apache-2.0 |
 | `assets/dict/en_US-scowl-50.txt.gz` | English word list | Kevin Atkinson and the SCOWL contributors | SCOWL |
 | `assets/ico/**/*.svg`, most | Tabler Icons | Paweł Kuna | MIT |
-| `assets/ico/tools/{blur,brush,camove,corner,crepl,fpen,gradient,hbrush,mlasso,oselect,patch,pen,plasso,qselect,redeye,shbrush,sponge}.svg` | Tool glyphs drawn for this app | The PhotoSuite authors | MIT OR Apache-2.0 |
 | `assets/ico/tools/mbrush.svg` | Mixer Brush glyph: the Brush glyph above with Tabler Icons' `droplet` | The PhotoSuite authors; Paweł Kuna | MIT OR Apache-2.0; MIT |
-| `assets/img/icon_full.{svg,png}` | PhotoSuite logo | The PhotoSuite authors | MIT OR Apache-2.0 |
-| `assets/img/beach.jpg` | The Filter Gallery thumbnails' picture (a sailboat on a beach) | The PhotoSuite authors | MIT OR Apache-2.0 |
 | `resources/luts/*.CUBE` (45) | Color Lookup presets | Fresh LUTs uploaders | CC0 |
 | `resources/lensfun/lens-database.json` | Lens profiles (adapted from the Lensfun database) | The Lensfun contributors | CC BY-SA 3.0 |
 | `resources/gradients/uigradients.grd` | Gradient library (the Gradients panel's uiGradients group) | uiGradients contributors | MIT |
@@ -164,7 +160,7 @@ the public domain.
 | `resources/brushes/{Markers,Paintbrush_Set}.abr` | Brush libraries | brushchick; lovelace | CC BY-ND |
 | `resources/brushes/Pencil_Scribbles.abr` | Brush library | stuffwemake | CC BY-SA |
 | `crates/cms/profiles/photosuite-coated-cmyk.icc` | Synthetic CMYK profile | PhotoCraft contributors | CC0 |
-| `crates/codecs/tests/fixtures/heic/*.heic` | Synthetic HEIC test images (generated; see the README there) | The PhotoSuite authors | MIT OR Apache-2.0 |
+
 
 ## Test data — not shipped
 
