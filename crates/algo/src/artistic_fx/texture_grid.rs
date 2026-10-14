@@ -28,7 +28,7 @@ pub(super) fn craquelure(e: &GalleryEffect, img: &Img) -> Img {
         let gn = slope_pairs(&box_twice(&rng(e).fill(w * h), w, h, 11), w, h);
         let gi = pair_box(&pair_box(&slope_pairs(&m, w, h), w, h, 5), w, h, 5);
         let jit: Vec<i32> = gn.iter().zip(&gi).map(|(n, i)| n + i - 128).collect();
-        wobbly_grid(&jit, w, g, 0.2)
+        wobbly_grid(&jit, w, g, CRACK_WOBBLE)
     };
     let s = px8::rank_rect(&wm, w, h, 2, 2, 1.0);
     let wm = px8::rank_rect(&s, w, h, 2, 2, 3.0);
@@ -37,6 +37,11 @@ pub(super) fn craquelure(e: &GalleryEffect, img: &Img) -> Img {
     let v = crack_value(&s, &wm, depth, bright, w, h, 1.0);
     with_value(img, &v)
 }
+
+/// How far the noise and image slopes push the reference's cracks, in px per angle step. Fitted
+/// on two images by how periodic the crack lines stay locally and how far their phase holds:
+/// the reference breaks them into short, staggered pieces rather than long wavy lines.
+const CRACK_WOBBLE: f64 = 0.3;
 
 /// Mosaic Tiles: a noise-jittered grid of grout lines widened by a minimum filter, darkening
 /// the max channel, embossed from the top.
@@ -49,15 +54,20 @@ pub(super) fn mosaic_tiles(e: &GalleryEffect, img: &Img) -> Img {
         let gn = pair_box(&noise_slopes(e, w, h), w, h, 5);
         grid_mask(&coord_bias(&gn, w, 0.97), g)
     } else {
-        // The reference's grid keeps its period and wobbles in small steps; the spec's slope
+        // The reference's grid keeps its period and bends in smooth curves; the spec's slope
         // fallback (a ramp over the image) stretched it and drifted its phase.
-        let n = box_twice(&rng(e).fill(w * h), w, h, 7);
-        wobbly_grid(&pair_box(&slope_pairs(&n, w, h), w, h, 5), w, g, 0.03)
+        let n = box_twice(&rng(e).fill(w * h), w, h, 11);
+        wobbly_grid(&pair_box(&slope_pairs(&n, w, h), w, h, 5), w, g, TILE_WOBBLE)
     };
     let s = px8::rank_rect(&mask, w, h, gw, gw, 1.0);
     let v = crack_value(&s, &px8::max_channel(img), 0.6, lighten, w, h, 1.0);
     with_value(img, &v)
 }
+
+/// How far the noise slopes push the reference's grout, in px per angle step. With the noise
+/// twice box-blurred over 11 px this matches, on two images, how periodic its lines stay
+/// locally, how far their phase holds and how few stray grout specks it leaves.
+const TILE_WOBBLE: f64 = 0.06;
 
 /// Patchwork: tile means with a noisy value, darkened seams, softened, dilated and embossed.
 pub(super) fn patchwork(e: &GalleryEffect, img: &Img) -> Img {

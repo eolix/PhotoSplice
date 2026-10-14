@@ -17,10 +17,15 @@ pub(super) fn stained_glass(e: &GalleryEffect, img: &Img) -> Img {
     let nr = (h as f64 * kappa).floor() as usize + 1;
     let mut rnd = px8::Mulberry32::new(e.seed());
     let mut sites = Vec::with_capacity(nc * nr);
+    // The reference's cells are less regular than the spec's (a wider spread of areas and
+    // neighbour distances).
+    let jit = if px8::defects() { 0.5 } else { SITE_JITTER };
+    // Jitter past half a cell can bring a site from two columns or rows back.
+    let reach = if jit > 0.5 { -2 } else { -1 };
     for r in 0..nr {
         for q in 0..nc {
-            let sx = (q as f64 + 0.5 * rnd.next() + 0.5 * (r & 1) as f64) * cell;
-            let sy = (r as f64 + 0.5 * rnd.next()) * cell;
+            let sx = (q as f64 + jit * rnd.next() + 0.5 * (r & 1) as f64) * cell;
+            let sy = (r as f64 + jit * rnd.next()) * cell;
             let p = ((sy.floor() as usize).min(h - 1) * w + (sx.floor() as usize).min(w - 1)) * 4;
             for _ in 0..4 {
                 rnd.next();
@@ -30,20 +35,19 @@ pub(super) fn stained_glass(e: &GalleryEffect, img: &Img) -> Img {
     }
     let total = sites.len() as i64;
     // Light Intensity: a light through the middle of the image that raises the contrast and
-    // darkens the rim (the spec ignored it).
+    // the saturation and darkens the rim (the spec ignored it).
     let li = if px8::defects() { 0.0 } else { param(e, "lightIntensity", 0.0, 10.0) };
     let (cx, cy) = (w as f64 * 0.5, h as f64 * 0.5);
     let half_diag = (cx * cx + cy * cy).sqrt().max(1.0);
-    // (gain, offset) of the light at a point.
-    let light = |px: f64, py: f64| -> (f64, f64) {
+    // The light added at a point.
+    let light = |px: f64, py: f64| -> f64 {
         if li == 0.0 {
-            return (1.0, 0.0);
+            return 0.0;
         }
         let r2 = ((px - cx).powi(2) + (py - cy).powi(2)) / (half_diag * half_diag);
-        let core = (-r2 / (LIGHT_CORE * LIGHT_CORE)).exp();
-        let pool = (-(r2 / (LIGHT_POOL * LIGHT_POOL)).powi(2)).exp();
-        (1.0 + li * (LIGHT_CONTRAST + LIGHT_GAIN * core), li * (LIGHT_ADD * pool - LIGHT_RIM))
+        li * (LIGHT_ADD * (-r2 / (LIGHT_RADIUS * LIGHT_RADIUS)).exp() - LIGHT_RIM)
     };
+    let (value_gain, chroma_gain) = (1.0 + li * LIGHT_CONTRAST, 1.0 + li * LIGHT_SATURATION);
     let mut out = img.clone();
     par_rows(&mut out.d, w, 4, |y, row| {
         let py = y as f64 + 0.5;
@@ -58,8 +62,8 @@ pub(super) fn stained_glass(e: &GalleryEffect, img: &Img) -> Img {
                 let home = home_r * nc as i64 + (px * kappa).floor() as i64;
                 let (mut e1, mut e2, mut e3) = (1e9, 1e9, 1e9);
                 (n1, n2, n3) = (0, 0, 0);
-                for dr in -1..=1i64 {
-                    for dc in -1..=1i64 {
+                for dr in reach..=1i64 {
+                    for dc in reach..=1i64 {
                         let j = home + dr * nc as i64 + dc;
                         if j < 0 || j >= total {
                             continue;
@@ -81,7 +85,9 @@ pub(super) fn stained_glass(e: &GalleryEffect, img: &Img) -> Img {
             }
             let (b2, b3) = (bisector(&sites, n1, n2, px, py), bisector(&sites, n1, n3, px, py));
             let beta = if b2.is_nan() || b3.is_nan() { f64::NAN } else { b2.min(b3) };
-            let mut wt = beta - 0.5 * margin + if px8::defects() { 0.0 } else { LEAD_THIN };
+            // Leading as wide as the border thickness says: the reference's covers the same share
+            // of the image, with the same 2- and 3-pixel cores.
+            let mut wt = beta - 0.5 * margin;
             if !wt.is_nan() {
                 wt = wt.clamp(0.0, 1.0);
             }
@@ -96,9 +102,10 @@ pub(super) fn stained_glass(e: &GalleryEffect, img: &Img) -> Img {
                 wt = if wt.is_nan() { frame } else { wt.min(frame) };
             }
             let col = sites[n1].2;
-            let (lg, lo) = light(px, py);
+            let value = col[0].max(col[1]).max(col[2]);
+            let lit = value * value_gain + light(px, py);
             for ch in 0..3 {
-                let c = (col[ch] * lg + lo).clamp(0.0, 255.0);
+                let c = if li == 0.0 { col[ch] } else { (lit + (col[ch] - value) * chroma_gain).clamp(0.0, 255.0) };
                 row[x * 4 + ch] = px8::clamp255((0.5 + wt * c + (1.0 - wt) * fill[ch]).floor());
             }
         }
@@ -107,19 +114,19 @@ pub(super) fn stained_glass(e: &GalleryEffect, img: &Img) -> Img {
 }
 
 /// Per unit of Light Intensity, fitted on the reference's cells (source-to-output levels by
-/// distance from the centre): a contrast gain everywhere plus `LIGHT_GAIN` in a Gaussian core of
-/// radius `LIGHT_CORE`, light added over a flat-topped pool (`exp(−(r/LIGHT_POOL)⁴)`) and taken
-/// everywhere, so dark glass goes black towards the rim. `r` is relative to the half-diagonal.
-const LIGHT_CONTRAST: f64 = 0.05;
-const LIGHT_GAIN: f64 = 0.08;
-const LIGHT_ADD: f64 = 19.0;
-const LIGHT_RIM: f64 = 8.5;
-const LIGHT_CORE: f64 = 0.35;
-const LIGHT_POOL: f64 = 0.45;
-/// How much thinner the reference's leading is on each side of a bisector, in pixels.
-const LEAD_THIN: f64 = 0.15;
-/// How far into the frame its soft inner pixel starts.
-const FRAME_SOFT: f64 = 0.8;
+/// distance from the centre, on two images of different sizes and aspect ratios): a gain on the
+/// glass's value (its brightest channel) and on each channel's distance below it, plus light in a
+/// Gaussian spot of radius `LIGHT_RADIUS` less a rim darkening, so dark glass goes black towards
+/// the edges. The radius is relative to the half-diagonal: the spot scales with the image.
+const LIGHT_CONTRAST: f64 = 0.058;
+const LIGHT_SATURATION: f64 = 0.020;
+const LIGHT_ADD: f64 = 26.1;
+const LIGHT_RIM: f64 = 7.3;
+const LIGHT_RADIUS: f64 = 0.354;
+/// How far each site is jittered, in cells (the spec's 0.5).
+const SITE_JITTER: f64 = 0.6;
+/// How far into the frame the reference's soft inner pixel starts.
+const FRAME_SOFT: f64 = 0.9;
 
 /// Distance from `(px, py)` to the perpendicular bisector of sites `a` and `b`.
 fn bisector(sites: &[(f64, f64, [f64; 3])], a: usize, b: usize, px: f64, py: f64) -> f64 {

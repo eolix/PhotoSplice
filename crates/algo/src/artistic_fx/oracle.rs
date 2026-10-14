@@ -4,8 +4,10 @@
 //!   `{"filter", "image", "variant", "file", "params", "foreground", "background", "glowColor"}`)
 //!   and `src-<image>.ppm`. Each entry is re-rendered with the spec's edge defects
 //!   reproduced ([`super::px8::defects`]); this checks a filter does what its specification says.
-//! * `against_reference`: `GALLERY_REF` names a folder with `src-parrot.ppm` and `<key>.ppm`,
-//!   the reference's render of every filter at its defaults (black foreground, white background).
+//! * `against_reference`: `GALLERY_REF` names a folder with the source (`src.ppm`, or
+//!   `src-parrot.ppm`), the reference's render of each filter at its defaults as `<key>.ppm`, and
+//!   variants with one setting changed as `<key>__<param>-<value>.ppm` (black foreground, white
+//!   background).
 //!
 //! Both print the mean absolute difference per channel in 0–255 levels, per pixel and over 8 × 8
 //! block means (which ignores grain). `GALLERY_FILTER` (comma-separated keys) limits the run;
@@ -159,6 +161,27 @@ fn against_spec() {
     super::px8::set_defects(false);
 }
 
+/// The renders in a reference folder: `<key>.ppm` (defaults) and `<key>__<param>-<value>.ppm`
+/// (one setting changed: a choice name or a number), sorted by file name.
+fn reference_renders(dir: &std::path::Path) -> Vec<(String, GalleryEffect)> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(stem) = name.strip_suffix(".ppm") else { continue };
+        let (key, setting) = stem.split_once("__").map_or((stem, None), |(k, s)| (k, Some(s)));
+        let Some(f) = GalleryFilter::from_key(key).filter(|f| f.key() == key) else { continue };
+        let mut e = GalleryEffect::new(f);
+        if let Some((param, value)) = setting.and_then(|s| s.split_once('-'))
+            && !e.set_choice(param, value)
+        {
+            e.set(param, value.parse().unwrap_or_else(|_| panic!("{name}: {param} = {value}?")));
+        }
+        out.push((stem.to_string(), e));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 #[test]
 #[ignore = "needs GALLERY_REF"]
 fn against_reference() {
@@ -166,30 +189,29 @@ fn against_reference() {
     let dir = std::path::PathBuf::from(dir);
     let only = only();
     let out_dir = std::env::var("GALLERY_OUT").ok().map(std::path::PathBuf::from);
-    let (w, h, src) = read_ppm(&dir.join("src-parrot.ppm"));
-    eprintln!("{:<20} {:>8} {:>8} {:>8}", "filter", "pixel", "8x8", "ms");
+    // The source: `src.ppm`, else the first reference set's `src-parrot.ppm`.
+    let src_file = ["src.ppm", "src-parrot.ppm"].into_iter().map(|f| dir.join(f)).find(|p| p.exists()).expect("no src.ppm in GALLERY_REF");
+    let (w, h, src) = read_ppm(&src_file);
+    eprintln!("{:<40} {:>8} {:>8} {:>8}", "render", "pixel", "8x8", "ms");
     let (mut tp, mut tb, mut n) = (0.0, 0.0, 0.0);
-    for f in GalleryFilter::ALL {
-        if only.as_ref().is_some_and(|o| !o.iter().any(|k| k == f.key())) {
+    for (stem, e) in reference_renders(&dir) {
+        if only.as_ref().is_some_and(|o| !o.iter().any(|k| k == e.filter.key())) {
             continue;
         }
-        let rf = dir.join(format!("{}.ppm", f.key()));
-        if !rf.exists() {
-            continue;
-        }
-        let (_, _, want) = read_ppm(&rf);
+        let (rw, rh, want) = read_ppm(&dir.join(format!("{stem}.ppm")));
+        assert_eq!((rw, rh), (w, h), "{stem}: size");
         let t = std::time::Instant::now();
-        let got = render(&GalleryEffect::new(*f), w, h, &src);
+        let got = render(&e, w, h, &src);
         let ms = t.elapsed().as_secs_f64() * 1000.0;
         let (px, bl) = diff(&got, &want, w, h);
         (tp, tb, n) = (tp + px, tb + bl, n + 1.0);
-        eprintln!("{:<20} {px:>8.2} {bl:>8.2} {ms:>8.0}", f.key());
+        eprintln!("{stem:<40} {px:>8.2} {bl:>8.2} {ms:>8.0}");
         if let Some(o) = &out_dir {
             std::fs::create_dir_all(o).unwrap();
-            write_ppm(&o.join(format!("{}.ppm", f.key())), w, h, &got);
+            write_ppm(&o.join(format!("{stem}.ppm")), w, h, &got);
         }
     }
     if n > 0.0 {
-        eprintln!("{:<20} {:>8.2} {:>8.2}", "mean", tp / n, tb / n);
+        eprintln!("{:<40} {:>8.2} {:>8.2}", "mean", tp / n, tb / n);
     }
 }
