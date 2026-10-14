@@ -92,11 +92,11 @@ mod tests {
     }
 
     /// How far two seeds of the same filter are apart: the floor of a comparison with
-    /// Photoshop, whose random numbers can't be matched.
+    /// The reference, whose random numbers can't be matched.
     #[test]
-    #[ignore = "needs GALLERY_PS"]
+    #[ignore = "needs GALLERY_REF"]
     fn seed_noise_floor() {
-        let Ok(dir) = std::env::var("GALLERY_PS") else { return };
+        let Ok(dir) = std::env::var("GALLERY_REF") else { return };
         let (w, h, src) = oracle::read_ppm(&std::path::Path::new(&dir).join("src-parrot.ppm"));
         for f in [F::ChalkCharcoal, F::GraphicPen, F::NotePaper, F::Reticulation, F::TornEdges, F::WaterPaper] {
             let a = oracle::render(&GalleryEffect::new(f), w, h, &src);

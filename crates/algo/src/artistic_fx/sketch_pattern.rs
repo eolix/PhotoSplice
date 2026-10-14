@@ -10,9 +10,9 @@ use crate::photo_util::par_rows;
 /// streak starts inked or blank by comparing a random number with the pixel's darkness, and
 /// continues while the gray stays close, ending at random or after a random length.
 ///
-/// A streak inks when `r / rs + ro ≤ τ − gray` (r uniform, rs = 1 + length/10). Photoshop's range
+/// A streak inks when `r / rs + ro ≤ τ − gray` (r uniform, rs = 1 + length/10). The reference's range
 /// ends at 1 (ro = 1 − 1/rs), so at balance 50 the ink fades linearly from black to gray ≈ 100;
-/// the reference centred it (ro = (1 − 1/rs)/2) and inked everything darker than mid-gray.
+/// the spec centred it (ro = (1 − 1/rs)/2) and inked everything darker than mid-gray.
 pub(in super::super) fn graphic_pen(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
     let len = int(e, "strokeLength").min(1000);
@@ -103,8 +103,8 @@ struct Pen {
 /// Halftone Pattern: the box-blurred gray modulated by a dot, circle or line screen, then a
 /// contrast stretch around the image's mean.
 ///
-/// Photoshop's screen is gentle (±10 %) with its dark dots on the cell centres counted from the
-/// image origin, and its output has 32 levels. The reference used a centred screen that only
+/// The reference's screen is gentle (±10 %) with its dark dots on the cell centres counted from the
+/// image origin, and its output has 32 levels. The spec used a centred screen that only
 /// darkens (×0.75 … ×1), which left the image a third darker.
 pub(in super::super) fn halftone(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
@@ -131,7 +131,7 @@ pub(in super::super) fn halftone(e: &GalleryEffect, img: &Img) -> Img {
                 "circle" => {
                     let (rx, ry) = ((x as f64 - cx) * f, (y as f64 - cy) * f);
                     let k = (0.5 + (rx * rx + ry * ry).sqrt() * 4.5).trunc();
-                    // The reference reads a sine table of 2W entries: beyond it the pixel is 0.
+                    // The spec reads a sine table of 2W entries: beyond it the pixel is 0.
                     (!quirk || k < 2.0 * w as f64).then(|| (k * (1.0 / 4.5)).sin())
                 }
                 _ => Some(ax.cos() * ay.cos()),
@@ -216,7 +216,7 @@ pub(in super::super) fn water_paper(e: &GalleryEffect, img: &Img) -> Img {
 fn tone(row: &mut [u8], tb: &[u8; 256], quirk: bool) {
     for px in row.chunks_exact_mut(4) {
         let (r, g, b) = (px[0], px[1], px[2]);
-        // The reference compares blue with red instead of with the running maximum.
+        // The spec compares blue with red instead of with the running maximum.
         let m = if quirk {
             let m = if g > r { g } else { r };
             if b > r { b } else { m }

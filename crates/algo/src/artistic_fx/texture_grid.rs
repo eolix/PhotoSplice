@@ -23,8 +23,8 @@ pub(super) fn craquelure(e: &GalleryEffect, img: &Img) -> Img {
         coord_blend(&gn, &mut gi, 0.8, 0.9);
         grid_mask(&gi, g)
     } else {
-        // Photoshop's cracks are as far apart as the spacing says, bent by noise and image
-        // slopes; the reference stretched them by 1/0.72 and drifted them with a ramp.
+        // The reference's cracks are as far apart as the spacing says, bent by noise and image
+        // slopes; the spec stretched them by 1/0.72 and drifted them with a ramp.
         let gn = slope_pairs(&box_twice(&rng(e).fill(w * h), w, h, 11), w, h);
         let gi = pair_box(&pair_box(&slope_pairs(&m, w, h), w, h, 5), w, h, 5);
         let jit: Vec<i32> = gn.iter().zip(&gi).map(|(n, i)| n + i - 128).collect();
@@ -49,7 +49,7 @@ pub(super) fn mosaic_tiles(e: &GalleryEffect, img: &Img) -> Img {
         let gn = pair_box(&noise_slopes(e, w, h), w, h, 5);
         grid_mask(&coord_bias(&gn, w, 0.97), g)
     } else {
-        // Photoshop's grid keeps its period and wobbles in small steps; the reference's slope
+        // The reference's grid keeps its period and wobbles in small steps; the spec's slope
         // fallback (a ramp over the image) stretched it and drifted its phase.
         let n = box_twice(&rng(e).fill(w * h), w, h, 7);
         wobbly_grid(&pair_box(&slope_pairs(&n, w, h), w, h, 5), w, g, 0.03)

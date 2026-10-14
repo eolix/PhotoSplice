@@ -1,7 +1,7 @@
 //! The Filter Gallery's 8-bit toolkit: an RGBA8 working image, byte planes, the random number
 //! generators and the shared primitives the category modules build their filters from.
 //!
-//! Every filter in the gallery works the way Photoshop's does: on 8-bit straight-alpha RGBA,
+//! Every filter in the gallery works the way the reference's does: on 8-bit straight-alpha RGBA,
 //! over the whole image at once (whole-image histograms, random numbers drawn in raster order,
 //! textures and grids anchored at the image origin). Planes are row-major, `w × h` bytes.
 //! Neighbourhood primitives clamp coordinates to the image unless they say otherwise.
@@ -14,13 +14,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::photo_util::{par_map, par_rows};
 
-/// Test switch: reproduce the edge defects of the reference renders (see [`defects`]).
+/// Test switch: reproduce the edge defects of the spec renders (see [`defects`]).
 static DEFECTS: AtomicBool = AtomicBool::new(false);
 
-/// Whether the edge defects of the reference renders are reproduced: the four-neighbour
+/// Whether the edge defects of the spec renders are reproduced: the four-neighbour
 /// sharpen/smoothing ignoring the pixel below, the relief kernel's black last row, the gray
-/// writer's nudged first pixel. Off in the app (Photoshop has none of them); the comparison
-/// against the reference renders turns it on.
+/// writer's nudged first pixel. Off in the app (the reference has none of them); the comparison
+/// against the spec renders turns it on.
 pub(super) fn defects() -> bool {
     DEFECTS.load(Ordering::Relaxed)
 }
@@ -338,8 +338,11 @@ pub(super) fn rank_rect(src: &[u8], w: usize, h: usize, kw: usize, kh: usize, ra
             let drop = clampi(x as i64 - 1 - hw, w);
             let take = clampi(x as i64 - 1 - hw + kw as i64, w);
             for &sy in &rows {
-                hist.remove(src[sy * w + drop]);
-                hist.add(src[sy * w + take]);
+                let (old, new) = (src[sy * w + drop], src[sy * w + take]);
+                if old != new {
+                    hist.remove(old);
+                    hist.add(new);
+                }
             }
             out[x] = hist.rank(target);
         }
@@ -359,30 +362,51 @@ pub(super) fn rank_dir(src: &[u8], w: usize, h: usize, len: usize, span: usize, 
     let (len_i, span_i) = (len as i64, span as i64);
     let diag = len_i + span_i - 1;
     let (hl, hd) = (len_i >> 1, diag >> 1);
+    // Rows padded by `m` replicated edge pixels on both sides: no window run leaves them.
+    let m = diag as usize + 1;
+    let pw = w + 2 * m;
+    let pad = pad_rows(src, w, h, m);
     par_rows(&mut dst, w, 1, |row, out| {
         let mut hist = Hist::new();
-        // For each step: its sample row and the x of its run's first sample at column 0.
-        let steps: Vec<(usize, i64)> = (0..len_i)
+        // For each step: the padded index of its run's first sample at column 0.
+        let steps: Vec<usize> = (0..len_i)
             .map(|s| {
                 let start = if reverse { diag - s - span_i } else { s };
-                (clampi(row as i64 - hl + s, h), -hd + start)
+                (clampi(row as i64 - hl + s, h) * pw) as i64 + m as i64 - hd + start
             })
+            .map(|i| i.max(0) as usize)
             .collect();
-        for &(sy, x0) in &steps {
-            for o in 0..span_i {
-                hist.add(src[sy * w + clampi(x0 + o, w)]);
+        for &b in &steps {
+            for o in 0..span {
+                hist.add(pad[b + o]);
             }
         }
         out[0] = hist.rank(target);
-        for x in 1..w as i64 {
-            for &(sy, x0) in &steps {
-                hist.remove(src[sy * w + clampi(x0 + x - 1, w)]);
-                hist.add(src[sy * w + clampi(x0 + x - 1 + span_i, w)]);
+        for x in 1..w {
+            for &b in &steps {
+                let (old, new) = (pad[b + x - 1], pad[b + x - 1 + span]);
+                if old != new {
+                    hist.remove(old);
+                    hist.add(new);
+                }
             }
-            out[x as usize] = hist.rank(target);
+            out[x] = hist.rank(target);
         }
     });
     dst
+}
+
+/// `p` with every row extended by `m` copies of its first and last pixel on either side.
+fn pad_rows(p: &[u8], w: usize, h: usize, m: usize) -> Vec<u8> {
+    let pw = w + 2 * m;
+    let mut out = vec![0u8; pw * h];
+    for (src, dst) in p.chunks_exact(w).zip(out.chunks_exact_mut(pw)) {
+        let (first, last) = (src[0], src[w - 1]);
+        dst[..m].fill(first);
+        dst[m..m + w].copy_from_slice(src);
+        dst[m + w..].fill(last);
+    }
+    out
 }
 
 /// [`rank_rect`] of R, G and B; alpha kept.
@@ -682,7 +706,7 @@ pub(super) fn relief(p: &[u8], q: &[u8], w: usize, h: usize, k: usize, wt: f64) 
     let mut out = vec![0u8; w * h];
     par_rows(&mut out, w, 1, |y, row| {
         if quirk && y + 1 >= h {
-            return; // the reference reads past the plane: its last row is 0
+            return; // the spec reads past the plane: its last row is 0
         }
         let at = |x: usize, dx: i64, dy: i64| -> f64 {
             if quirk {
@@ -902,7 +926,7 @@ pub(super) fn colourise(g: &[u8], fg: [u8; 3], bg: [u8; 3], like: &Img) -> Img {
     colourise_direct(&gray_out(g), fg, bg, like)
 }
 
-/// The gray plane as the reference's gray writer leaves it (P-20): its first pixel nudged by
+/// The gray plane as the spec's gray writer leaves it (P-20): its first pixel nudged by
 /// one when reproducing [`defects`].
 fn gray_out(g: &[u8]) -> std::borrow::Cow<'_, [u8]> {
     if !defects() || g.is_empty() {
@@ -915,7 +939,7 @@ fn gray_out(g: &[u8]) -> std::borrow::Cow<'_, [u8]> {
 
 /// [`colourise`] without the gray writer's first-pixel nudge (filters that colourise their own
 /// plane directly: Photocopy, Bas Relief, Halftone Pattern).
-/// The mix is rounded; the reference truncated it, which turns some grays one level darker
+/// The mix is rounded; the spec truncated it, which turns some grays one level darker
 /// even between black and white (41 → 40).
 pub(super) fn colourise_direct(g: &[u8], fg: [u8; 3], bg: [u8; 3], like: &Img) -> Img {
     let mut out = like.clone();
@@ -1202,7 +1226,7 @@ fn mulberry_mix(t: u32) -> f64 {
 }
 
 /// The gallery's random generator (R-1): Mulberry32 whose state is kept as a double, so it
-/// drifts from the 32-bit generator once the state passes 2^53, exactly as the reference does.
+/// drifts from the 32-bit generator once the state passes 2^53, exactly as the spec does.
 pub(super) struct Rng {
     s: f64,
 }

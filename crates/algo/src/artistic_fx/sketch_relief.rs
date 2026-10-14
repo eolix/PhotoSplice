@@ -7,35 +7,30 @@ use super::{ink_paper, int, light_index};
 use crate::artistic::GalleryEffect;
 use crate::photo_util::{par_rows, par_rows2};
 
-/// Forward-difference slopes ×0.4 (the last column/row looks back); where a slope is exactly 0
-/// it falls back to a ramp across the image, −1 … 1 as in Photoshop (the reference: −0.7 … 0.7).
-/// Stored f32.
-fn slopes(g: &[u8], w: usize, h: usize) -> (Vec<f32>, Vec<f32>) {
+/// Slopes ×0.4: forward differences (the last column/row looks back), or backward ones with
+/// `back` (the first column/row looks ahead); where a slope is exactly 0 it falls back to a
+/// ramp across the image, −1 … 1 as in the reference (the spec: −0.7 … 0.7). Stored f32.
+fn slopes(g: &[u8], w: usize, h: usize, back: bool) -> (Vec<f32>, Vec<f32>) {
     let span = if px8::defects() { 1.4 } else { 2.0 };
     let (kx, ky) = (span / w.max(1) as f64, span / h.max(1) as f64);
     let ramp = |v: usize, k: f64, s: i32| if s == 0 { v as f64 * k - span / 2.0 } else { s as f64 * 0.4 } as f32;
+    // The difference at `pos` along an axis of `n` samples `st` apart.
+    let diff = |i: usize, pos: usize, n: usize, st: usize| -> i32 {
+        let at = |j: usize| g[j] as i32;
+        let (ahead, behind) = (pos + 1 < n, pos > 0);
+        match (back, ahead, behind) {
+            (true, _, true) | (false, false, true) => at(i) - at(i - st),
+            (_, true, _) => at(i + st) - at(i),
+            _ => 0,
+        }
+    };
     let mut gx = vec![0f32; w * h];
     let mut gy = vec![0f32; w * h];
     par_rows2(&mut gx, &mut gy, w, |y, rx, ry| {
         for x in 0..w {
             let i = y * w + x;
-            let c = g[i] as i32;
-            let sx = if x + 1 < w {
-                g[i + 1] as i32 - c
-            } else if x > 0 {
-                c - g[i - 1] as i32
-            } else {
-                0
-            };
-            let sy = if y + 1 < h {
-                g[i + w] as i32 - c
-            } else if y > 0 {
-                c - g[i - w] as i32
-            } else {
-                0
-            };
-            rx[x] = ramp(x, kx, sx);
-            ry[x] = ramp(y, ky, sy);
+            rx[x] = ramp(x, kx, diff(i, x, w, 1));
+            ry[x] = ramp(y, ky, diff(i, y, h, w));
         }
     });
     (gx, gy)
@@ -60,7 +55,9 @@ pub(in super::super) fn bas_relief(e: &GalleryEffect, img: &Img) -> Img {
     let sign = |v: f64| if v.abs() < 0.1 { 0.0 } else { v.signum() };
     let (cx, sy) = (sign(th.cos()), sign(th.sin()));
     let norm = 1.0 / (cx * cx + sy * sy);
-    let (gx, gy) = slopes(&g, w, h);
+    // The reference's relief sits a pixel further along the slope than the spec's: it takes
+    // backward differences.
+    let (gx, gy) = slopes(&g, w, h, !px8::defects());
     let mut r: Vec<u8> = gx
         .iter()
         .zip(&gy)
@@ -70,10 +67,10 @@ pub(in super::super) fn bas_relief(e: &GalleryEffect, img: &Img) -> Img {
             px8::wrap(128.0 + 127.0 * (lx + ly) * norm)
         })
         .collect();
-    // Photoshop smooths about twice as much as the reference's round((s − 1)/2).
+    // The reference smooths half again as much as the spec's round((s − 1)/2).
     let smooth = e.get("smoothness") as f64;
     if smooth > 1.0 {
-        let sigma = if px8::defects() { px8::rhu((smooth - 1.0) * 0.5) } else { smooth - 1.0 };
+        let sigma = if px8::defects() { px8::rhu((smooth - 1.0) * 0.5) } else { (smooth - 1.0) * 0.75 };
         r = px8::gauss_u8(&r, w, h, sigma.min(500.0), 3);
     }
     let (fg, bg) = ink_paper(e);
@@ -81,14 +78,28 @@ pub(in super::super) fn bas_relief(e: &GalleryEffect, img: &Img) -> Img {
 }
 
 /// Chrome: the blurred gray reflected through a heavily smoothed slope field, looked up around
-/// the image centre.
+/// the image centre. The reference takes backward slopes clamped to ±0.8 (two levels) before
+/// smoothing, from a lighter pre-blur than the gray it reflects.
 pub(in super::super) fn chrome(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
-    let g = detail_blur(px8::gray_weighted(img), w, h, e.get("detail") as f64);
-    let (gx, gy) = slopes(&g, w, h);
-    let sigma = ((e.get("smoothness") as f64 + 4.0) * 0.42).clamp(0.0, 500.0);
-    let gx = px8::gauss_f32(&gx, w, h, sigma);
-    let gy = px8::gauss_f32(&gy, w, h, sigma);
+    let detail = e.get("detail") as f64;
+    let smooth = e.get("smoothness") as f64;
+    let (g, gx, gy) = if px8::defects() {
+        let g = detail_blur(px8::gray_weighted(img), w, h, detail);
+        let (gx, gy) = slopes(&g, w, h, false);
+        let sigma = ((smooth + 4.0) * 0.42).clamp(0.0, 500.0);
+        (g, px8::gauss_f32(&gx, w, h, sigma), px8::gauss_f32(&gy, w, h, sigma))
+    } else {
+        let gray = px8::gray_weighted(img);
+        let blur = |k: f64| {
+            let sigma = ((15.0 - detail) * k).clamp(0.0, 500.0);
+            if sigma > 0.0 { px8::gauss_u8(&gray, w, h, sigma, 3) } else { gray.clone() }
+        };
+        let (gx, gy) = slopes(&blur(0.45), w, h, true);
+        let clamp = |p: Vec<f32>| -> Vec<f32> { p.into_iter().map(|v| v.clamp(-0.8, 0.8)).collect() };
+        let sigma = ((smooth + 4.0) * 0.48).clamp(0.0, 500.0);
+        (blur(0.75), px8::gauss_f32(&clamp(gx), w, h, sigma), px8::gauss_f32(&clamp(gy), w, h, sigma))
+    };
     let (hw, hh) = ((w / 2) as f64, (h / 2) as f64);
     let (wm, hm) = (w.saturating_sub(1) as f64, h.saturating_sub(1) as f64);
     let mut out = img.clone();
@@ -116,7 +127,7 @@ pub(in super::super) fn conte_crayon(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
     let pf = (15.0 - e.get("foregroundLevel") as f64) / 4.0 + 1.0;
     let pb = (15.0 - e.get("backgroundLevel") as f64) / 4.0 + 1.0;
-    // Photoshop keeps more of the image's detail and shows the texture more strongly.
+    // The reference keeps more of the image's detail and shows the texture more strongly.
     let (boost, window) = if px8::defects() { (1.0, 5) } else { (1.5, 3) };
     let wt = px8::relief_factor(e.get("relief") as f64) * boost;
     let k = light_index(e.choice("light")) + 1;

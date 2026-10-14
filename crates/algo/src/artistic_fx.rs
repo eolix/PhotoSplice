@@ -1,6 +1,6 @@
 //! Pixel work of the Filter Gallery ([`crate::artistic`]).
 //!
-//! The effects work the way Photoshop's do: on 8-bit straight RGBA, over the whole reference area
+//! The effects work the way the reference's do: on 8-bit straight RGBA, over the whole reference area
 //! at once (histograms, random numbers drawn in raster order, textures and grids anchored at the
 //! area's origin), so a gallery stack never runs tile by tile. [`px8`] is the shared toolkit; each
 //! gallery folder has its own module, and Cutout lives in [`crate::cutout`].

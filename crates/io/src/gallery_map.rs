@@ -1,6 +1,6 @@
 //! Filter Gallery smart filters in PSD.
 //!
-//! Photoshop stores a one-effect gallery as a `filterFX` item whose `Fltr` is a `GEfc` object:
+//! PSD stores a one-effect gallery as a `filterFX` item whose `Fltr` is a `GEfc` object:
 //! `GEfk` names the effect (enum `GEft`, e.g. `Spng` for Sponge), then the effect's settings
 //! under their own keys and, for effects that draw random numbers, the seed `FlRs`. The item's
 //! `FrgC`/`BckC` hold the foreground and background colours the Sketch effects use.
@@ -354,7 +354,7 @@ pub(super) fn export(f: &SmartFilter) -> Option<Result<Descriptor, String>> {
         return None;
     }
     Some(single_effect(f).and_then(|(g, p)| {
-        let effect = by_filter(g).ok_or("no Photoshop equivalent")?;
+        let effect = by_filter(g).ok_or("no PSD equivalent")?;
         let defaults = photosuite_algo::GalleryEffect::new(g);
         let mut d = Descriptor::new(CLASS).with("GEfk", Value::Enumerated { type_id: Id::new("GEft"), value: Id::new(effect.id) });
         let kinds = g.params();
@@ -407,8 +407,8 @@ mod tests {
         }
     }
 
-    /// The descriptor Photoshop wrote for Sponge at its defaults (a smart filter, PS 2026).
-    fn photoshop_sponge() -> Descriptor {
+    /// The descriptor the reference wrote for Sponge at its defaults (as a smart filter).
+    fn reference_sponge() -> Descriptor {
         Descriptor::new("filterFX")
             .with("Nm  ", Value::Text(UnicodeString::new_nul("Filter Gallery...")))
             .with("FrgC", rgbc_from(None, 0.0))
@@ -429,7 +429,7 @@ mod tests {
 
     #[test]
     fn sponge_round_trips_with_its_seed() {
-        let item = photoshop_sponge();
+        let item = reference_sponge();
         let fltr = get_desc(&item, "Fltr").unwrap();
         let (cmd, p) = import(&item, fltr).unwrap();
         assert_eq!(cmd, COMMAND);

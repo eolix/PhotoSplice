@@ -2,16 +2,16 @@
 //!
 //! * `against_spec`: `GALLERY_ORACLE` names a folder with `manifest.json` (an array of
 //!   `{"filter", "image", "variant", "file", "params", "foreground", "background", "glowColor"}`)
-//!   and `src-<image>.ppm`. Each entry is re-rendered with the reference's edge defects
+//!   and `src-<image>.ppm`. Each entry is re-rendered with the spec's edge defects
 //!   reproduced ([`super::px8::defects`]); this checks a filter does what its specification says.
-//! * `against_photoshop`: `GALLERY_PS` names a folder with `src-parrot.ppm` and `<key>.ppm`,
-//!   Photoshop's render of every filter at its defaults (black foreground, white background).
+//! * `against_reference`: `GALLERY_REF` names a folder with `src-parrot.ppm` and `<key>.ppm`,
+//!   the reference's render of every filter at its defaults (black foreground, white background).
 //!
 //! Both print the mean absolute difference per channel in 0–255 levels, per pixel and over 8 × 8
 //! block means (which ignores grain). `GALLERY_FILTER` (comma-separated keys) limits the run;
 //! `GALLERY_OUT` (a folder) receives our renders.
 //!
-//! `GALLERY_PS=dir cargo test -p photosuite-algo --lib artistic_fx::oracle -- --ignored --nocapture`
+//! `GALLERY_REF=dir cargo test -p photosuite-algo --lib artistic_fx::oracle -- --ignored --nocapture`
 
 use photosuite_color::{ColorMode, PixelFormat, SampleType};
 use photosuite_geom::Rect;
@@ -74,7 +74,7 @@ fn effect(entry: &Value) -> Option<GalleryEffect> {
                 (_, Some(Value::Bool(b))) => e.set(prm.key, *b as u8 as f32),
                 (_, Some(v)) => {
                     if let Some(n) = v.as_f64() {
-                        // The reference's own ranges are sometimes wider than ours.
+                        // The spec's own ranges are sometimes wider than ours.
                         e.values.insert(prm.key.to_string(), n as f32);
                     }
                 }
@@ -85,7 +85,7 @@ fn effect(entry: &Value) -> Option<GalleryEffect> {
             e.seed = Some(s as u32);
         }
     }
-    // The reference seeded its unseeded randomness with this before every render.
+    // The spec seeded its unseeded randomness with this before every render.
     if f == GalleryFilter::StainedGlass && e.seed.is_none() {
         e.seed = Some(1_234_567);
     }
@@ -160,9 +160,9 @@ fn against_spec() {
 }
 
 #[test]
-#[ignore = "needs GALLERY_PS"]
-fn against_photoshop() {
-    let Ok(dir) = std::env::var("GALLERY_PS") else { return };
+#[ignore = "needs GALLERY_REF"]
+fn against_reference() {
+    let Ok(dir) = std::env::var("GALLERY_REF") else { return };
     let dir = std::path::PathBuf::from(dir);
     let only = only();
     let out_dir = std::env::var("GALLERY_OUT").ok().map(std::path::PathBuf::from);

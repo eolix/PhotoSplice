@@ -1,0 +1,3 @@
+
+# Filter Gallery height maps: raw bytes, never line-converted.
+resources/textures/gallery/*.r8 binary

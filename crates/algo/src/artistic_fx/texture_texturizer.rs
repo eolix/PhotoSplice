@@ -38,7 +38,7 @@ pub(super) fn texturizer(e: &GalleryEffect, img: &Img) -> Img {
             let (nx, ny) = (-(sx * na) * nb, -(na * (sy * nb)));
             let dot = sigma * (nx * lx + ny * ly);
             if !reference {
-                // Photoshop: the shading is added as it is, as strong toward white as toward black
+                // The reference: the shading is added as it is, as strong toward white as toward black
                 // (amplitude and mean fitted on its render).
                 let add = 255.0 * dot * kr * RELIEF_GAIN;
                 for c in 0..3 {
@@ -46,7 +46,7 @@ pub(super) fn texturizer(e: &GalleryEffect, img: &Img) -> Img {
                 }
                 continue;
             }
-            // The reference: an overlay toward white or black, weighted quadratically.
+            // The spec: an overlay toward white or black, weighted quadratically.
             let (lit, m) = if dot < 0.0 { (0.0, (-dot * kr).min(1.0)) } else { (1.0, (dot * kr).min(1.0)) };
             for c in 0..3 {
                 let b = img.d[i * 4 + c] as f64 / 255.0;
@@ -58,10 +58,10 @@ pub(super) fn texturizer(e: &GalleryEffect, img: &Img) -> Img {
     out
 }
 
-/// Strength of Photoshop's relief relative to the reference's curve.
+/// Strength of the reference's relief relative to the spec's curve.
 const RELIEF_GAIN: f64 = 1.3;
 
-/// The light direction's position in Photoshop's list (bottom, bottom left … bottom right).
+/// The light direction's position in the reference's list (bottom, bottom left … bottom right).
 fn light_index(name: &str) -> usize {
     match name {
         "bottomLeft" => 1,

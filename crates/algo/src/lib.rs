@@ -553,7 +553,7 @@ impl FilterParams {
     }
 
     /// Whether the filter works on the whole image in one piece (it can't be split into tiles):
-    /// a Filter Gallery stack (its effects use whole-image statistics, like Photoshop's).
+    /// a Filter Gallery stack (its effects use whole-image statistics).
     pub fn one_piece(&self) -> bool {
         matches!(self, FilterParams::FilterGallery { effects } if artistic_fx::whole_image(effects))
     }

@@ -147,7 +147,7 @@ impl GalleryFilter {
         out
     }
 
-    /// The random seed a new effect of this filter gets (`FlRs` in Photoshop's descriptors); 0
+    /// The random seed a new effect of this filter gets (`FlRs` in PSD descriptors); 0
     /// for filters that draw no random numbers.
     pub fn default_seed(self) -> u32 {
         match self {
@@ -182,7 +182,7 @@ impl GalleryFilter {
     }
 }
 
-/// Photoshop's default Neon Glow colour (pure blue).
+/// The default Neon Glow colour, pure blue (the dialog picks any other).
 pub const NEON_DEFAULT: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
 /// One effect layer of the gallery: a filter with its values. Choice values are indices into
@@ -199,7 +199,7 @@ pub struct GalleryEffect {
     pub background: [f32; 4],
     #[serde(default = "neon")]
     pub color: [f32; 4],
-    /// The random seed of filters that draw random numbers (Photoshop's `FlRs`); 0 for the
+    /// The random seed of filters that draw random numbers (PSD `FlRs`); 0 for the
     /// others. Missing in older documents: the filter's default.
     #[serde(default)]
     pub seed: Option<u32>,

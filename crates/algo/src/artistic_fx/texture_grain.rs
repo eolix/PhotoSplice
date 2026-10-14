@@ -67,7 +67,7 @@ pub(super) fn grain(e: &GalleryEffect, img: &Img) -> Img {
             out
         }
         Kind::Sprinkles => {
-            // The reference sprinkled the foreground; Photoshop sprinkles the background colour.
+            // The spec sprinkled the foreground; the reference sprinkles the background colour.
             let col = if px8::defects() { fg } else { bg };
             let mut out = img.clone();
             for p in out.d.chunks_exact_mut(4) {
@@ -78,7 +78,7 @@ pub(super) fn grain(e: &GalleryEffect, img: &Img) -> Img {
             adjust(&mut out);
             out
         }
-        // The reference drew Contrasty with the Clumped routine.
+        // The spec drew Contrasty with the Clumped routine.
         Kind::Clumped | Kind::Contrasty if kind == Kind::Clumped || px8::defects() => {
             let noise = Img { w: img.w, h: img.h, d: r.fill(4 * n) };
             let noise = px8::rank_rect_rgb(&noise, 3, 3, 4.0);

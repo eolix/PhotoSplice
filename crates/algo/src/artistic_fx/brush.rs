@@ -1,9 +1,9 @@
 //! Filter Gallery › Brush Strokes.
 //!
-//! Where Photoshop measurably differs from the reference renders, the Photoshop behaviour is
-//! used and the reference one kept behind [`px8::defects`]: thick (two-pixel) Angled Strokes
+//! Where the reference measurably differs from the spec renders, the reference behaviour is
+//! used and the spec one kept behind [`px8::defects`]: thick (two-pixel) Angled Strokes
 //! with the true median, Crosshatch's truncated rank, rounded mask blends and sharpen terms,
-//! Photoshop's placement of even-length sheared windows, and value edits that keep hue and
+//! The reference's placement of even-length sheared windows, and value edits that keep hue and
 //! saturation exactly instead of the byte-HSV round trip.
 
 use super::Render;
@@ -49,8 +49,8 @@ fn keep_alpha(mut out: Img, src: &Img) -> Img {
     out
 }
 
-/// Replaces `img`'s HSV value (its largest channel) through `f`. Photoshop keeps hue and
-/// saturation exactly (each channel scaled by new/old value); the reference round-trips byte HSV.
+/// Replaces `img`'s HSV value (its largest channel) through `f`. The reference keeps hue and
+/// saturation exactly (each channel scaled by new/old value); the spec round-trips byte HSV.
 fn edit_value(mut img: Img, f: impl FnOnce(&mut Vec<u8>)) -> Img {
     if px8::defects() {
         px8::to_hsv(&mut img);
@@ -77,7 +77,7 @@ fn edit_value(mut img: Img, f: impl FnOnce(&mut Vec<u8>)) -> Img {
 }
 
 /// Mask blend (P-17): where `m ≠ 0` each channel is `(m·top + (255 − m)·base)/255`, rounded in
-/// Photoshop, truncated in the reference; alpha from `top`.
+/// The reference, truncated in the spec; alpha from `top`.
 fn blend(top: &Img, m: &[u8], base: &Img) -> Img {
     let mut out = base.clone();
     if px8::defects() {
@@ -96,7 +96,7 @@ fn blend(top: &Img, m: &[u8], base: &Img) -> Img {
     out
 }
 
-/// Four-neighbour sharpen of R, G and B with amount `a` (P-14). Photoshop rounds the centre and
+/// Four-neighbour sharpen of R, G and B with amount `a` (P-14). The reference rounds the centre and
 /// neighbour terms to integers, `C + round(4·C·a) − round(Σ·a)`, and uses the pixel below.
 fn sharpen(img: &Img, a: f64) -> Img {
     if px8::defects() {
@@ -120,8 +120,8 @@ fn sharpen(img: &Img, a: f64) -> Img {
     })
 }
 
-/// Sheared rank filter of R, G and B (P-12) with Photoshop's window placement: its rows start
-/// `⌊L/2⌋ + ⌊T/2⌋` columns left of the pixel, one further than the reference's
+/// Sheared rank filter of R, G and B (P-12) with the reference's window placement: its rows start
+/// `⌊L/2⌋ + ⌊T/2⌋` columns left of the pixel, one further than the spec's
 /// `⌊(L + T − 1)/2⌋` when both `L` and `T` are even.
 fn rank_dir_rgb(img: &Img, len: usize, span: usize, reverse: bool, rank: f64) -> Img {
     let extra = (len / 2 + span / 2).saturating_sub((len + span).saturating_sub(1) / 2);
@@ -174,7 +174,7 @@ fn accented_edges(e: &GalleryEffect, img: &Img) -> Img {
 }
 
 /// Down-right strokes in light areas, up-right strokes in dark ones, then a sharpen.
-/// Photoshop's strokes are two pixels thick (the median of `2L` samples); the reference's are
+/// The reference's strokes are two pixels thick (the median of `2L` samples); the spec's are
 /// one pixel thick with the rank below the median.
 fn angled_strokes(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
@@ -190,7 +190,7 @@ fn angled_strokes(e: &GalleryEffect, img: &Img) -> Img {
 }
 
 /// `strength` passes of: both diagonal rank strokes averaged, a 2 × 2 box, a sharpen. The rank
-/// is `⌊L/2⌋` in Photoshop; the reference rounds the fractional `L/2` up.
+/// is `⌊L/2⌋` in the reference; the spec rounds the fractional `L/2` up.
 fn crosshatch(e: &GalleryEffect, img: &Img) -> Img {
     let l = int(e, "strokeLength", 1, 50);
     let a = real(e, "sharpness", 0.0, 20.0) / 2.0;
@@ -370,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn photoshop_window_placement_moves_even_thick_windows_left() {
+    fn reference_window_placement_moves_even_thick_windows_left() {
         let src = img(12, 9);
         let base = px8::rank_dir_rgb(&src, 4, 2, false, 4.0);
         let ps = rank_dir_rgb(&src, 4, 2, false, 4.0);

@@ -29,18 +29,20 @@ pub(super) fn stained_glass(e: &GalleryEffect, img: &Img) -> Img {
         }
     }
     let total = sites.len() as i64;
-    // Light Intensity: a soft light through the middle of the image, slightly darkening the rim
-    // (the reference ignored it).
+    // Light Intensity: a light through the middle of the image that raises the contrast and
+    // darkens the rim (the spec ignored it).
     let li = if px8::defects() { 0.0 } else { param(e, "lightIntensity", 0.0, 10.0) };
     let (cx, cy) = (w as f64 * 0.5, h as f64 * 0.5);
-    let spread = 0.35 * (cx * cx + cy * cy).sqrt().max(1.0);
+    let half_diag = (cx * cx + cy * cy).sqrt().max(1.0);
     // (gain, offset) of the light at a point.
     let light = |px: f64, py: f64| -> (f64, f64) {
         if li == 0.0 {
             return (1.0, 0.0);
         }
-        let g = (-((px - cx).powi(2) + (py - cy).powi(2)) / (spread * spread)).exp();
-        (1.0 + li * LIGHT_GAIN * g, li * (LIGHT_ADD * g - LIGHT_RIM))
+        let r2 = ((px - cx).powi(2) + (py - cy).powi(2)) / (half_diag * half_diag);
+        let core = (-r2 / (LIGHT_CORE * LIGHT_CORE)).exp();
+        let pool = (-(r2 / (LIGHT_POOL * LIGHT_POOL)).powi(2)).exp();
+        (1.0 + li * (LIGHT_CONTRAST + LIGHT_GAIN * core), li * (LIGHT_ADD * pool - LIGHT_RIM))
     };
     let mut out = img.clone();
     par_rows(&mut out.d, w, 4, |y, row| {
@@ -79,12 +81,19 @@ pub(super) fn stained_glass(e: &GalleryEffect, img: &Img) -> Img {
             }
             let (b2, b3) = (bisector(&sites, n1, n2, px, py), bisector(&sites, n1, n3, px, py));
             let beta = if b2.is_nan() || b3.is_nan() { f64::NAN } else { b2.min(b3) };
-            let mut wt = beta - 0.5 * margin;
+            let mut wt = beta - 0.5 * margin + if px8::defects() { 0.0 } else { LEAD_THIN };
             if !wt.is_nan() {
                 wt = wt.clamp(0.0, 1.0);
             }
-            if px < margin || w as f64 - margin < px || py < margin || h as f64 - margin < py {
-                wt = 0.0;
+            if px8::defects() {
+                if px < margin || w as f64 - margin < px || py < margin || h as f64 - margin < py {
+                    wt = 0.0;
+                }
+            } else {
+                // The reference's frame is a little thinner, with a soft inner pixel.
+                let edge = px.min(w as f64 - px).min(py).min(h as f64 - py);
+                let frame = (edge - margin + FRAME_SOFT).clamp(0.0, 1.0);
+                wt = if wt.is_nan() { frame } else { wt.min(frame) };
             }
             let col = sites[n1].2;
             let (lg, lo) = light(px, py);
@@ -97,11 +106,20 @@ pub(super) fn stained_glass(e: &GalleryEffect, img: &Img) -> Img {
     out
 }
 
-/// Per unit of Light Intensity: the gain and the light added at the centre, and the light
-/// taken at the rim.
-const LIGHT_GAIN: f64 = 0.06;
-const LIGHT_ADD: f64 = 20.0;
-const LIGHT_RIM: f64 = 3.0;
+/// Per unit of Light Intensity, fitted on the reference's cells (source-to-output levels by
+/// distance from the centre): a contrast gain everywhere plus `LIGHT_GAIN` in a Gaussian core of
+/// radius `LIGHT_CORE`, light added over a flat-topped pool (`exp(−(r/LIGHT_POOL)⁴)`) and taken
+/// everywhere, so dark glass goes black towards the rim. `r` is relative to the half-diagonal.
+const LIGHT_CONTRAST: f64 = 0.05;
+const LIGHT_GAIN: f64 = 0.08;
+const LIGHT_ADD: f64 = 19.0;
+const LIGHT_RIM: f64 = 8.5;
+const LIGHT_CORE: f64 = 0.35;
+const LIGHT_POOL: f64 = 0.45;
+/// How much thinner the reference's leading is on each side of a bisector, in pixels.
+const LEAD_THIN: f64 = 0.15;
+/// How far into the frame its soft inner pixel starts.
+const FRAME_SOFT: f64 = 0.8;
 
 /// Distance from `(px, py)` to the perpendicular bisector of sites `a` and `b`.
 fn bisector(sites: &[(f64, f64, [f64; 3])], a: usize, b: usize, px: f64, py: f64) -> f64 {

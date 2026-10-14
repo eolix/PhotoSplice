@@ -144,7 +144,7 @@ fn colored_pencil(e: &GalleryEffect, img: &Img) -> Img {
     let n = 2 * int(e, "pencilWidth", 1.0, 24.0) + 1;
     let gain = tables::STROKE_AMOUNT[int(e, "strokePressure", 0.0, 15.0).min(15)];
     let lp = (num(e, "paperBrightness", 0.0, 50.0) * 5.1).trunc();
-    // Paper: the background colour at Paper Brightness (the reference ignores the colour).
+    // Paper: the background colour at Paper Brightness (the spec ignores the colour).
     let bg = px8::rgb8(e.background);
     let paper_c = [0, 1, 2].map(|c| if px8::defects() { lp } else { (lp * bg[c] as f64 / 255.0).trunc() });
 
@@ -254,7 +254,7 @@ fn paint_daubs(e: &GalleryEffect, img: &Img) -> Img {
     let r = px8::rhu(num(e, "brushSize", 1.0, 50.0) * 0.5) as usize;
     let gain = num(e, "sharpness", 0.0, 40.0) * 0.4;
     let p = tables::PAINT_DAUBS_PERCENTILE[BRUSHES.iter().position(|b| *b == e.choice("brushType")).unwrap_or(0)];
-    // The reference ranks a square; Photoshop's daubs are round and a little lighter.
+    // The spec ranks a square; the reference's daubs are round and a little lighter.
     let d = if px8::defects() { px8::clipped_rank_rgb(img, r, px8::Clipped::Percentile(p)) } else { disc_percentile_rgb(img, r, p + 0.03) };
     let k = [-0.7, -1.0, -0.7, -1.0, 10.0, -1.0, -0.7, -1.0, -0.7];
     let sum: f64 = k.iter().sum();
@@ -288,13 +288,16 @@ fn palette_knife(e: &GalleryEffect, img: &Img) -> Img {
 }
 
 /// Plastic Wrap: a highlight `c¹⁰` from the slope of the blurred luma (flat regions take a
-/// coordinate ramp), composited in white over the image at Highlight Strength.
+/// coordinate ramp), composited over the image at Highlight Strength. The reference takes
+/// backward differences, clamps each slope before smoothing it (so busy texture averages out and
+/// catches highlights too) and composites at Highlight Strength / 25.
 fn plastic_wrap(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
     if img.n() == 0 {
         return img.clone();
     }
-    let opacity = num(e, "highlightStrength", 0.0, 20.0) / 20.0;
+    let spec = px8::defects();
+    let opacity = num(e, "highlightStrength", 0.0, 20.0) / if spec { 20.0 } else { 25.0 };
     let detail = num(e, "detail", 1.0, 15.0).trunc();
     let smooth = num(e, "smoothness", 1.0, 15.0).trunc();
     let mut y = px8::gray_weighted(img);
@@ -302,28 +305,38 @@ fn plastic_wrap(e: &GalleryEffect, img: &Img) -> Img {
         y = px8::gauss_u8(&y, w, h, px8::rhu((15.0 - detail) * 0.5), 3);
     }
     // Flat pixels take a slope ramping across the image (−ramp at the left/top edge, +ramp at
-    // the right/bottom): flat regions shine near the centre only. Photoshop's falls off faster
-    // than the reference's ±0.7.
-    let ramp = if px8::defects() { 0.7 } else { 1.1 };
+    // the right/bottom): flat regions shine near the centre only. The reference's falls off
+    // faster than the spec's ±0.7.
+    let ramp = if spec { 0.7 } else { 1.1 };
+    let limit = if spec { f64::INFINITY } else { 0.8 };
     let (mut gx, mut gy) = (vec![0f32; w * h], vec![0f32; w * h]);
     par_rows2(&mut gx, &mut gy, w, |yy, rx, ry| {
         for x in 0..w {
             let i = yy * w + x;
-            // Forward difference; backward at the last column / row.
             let at = |j: usize| y[j] as f64;
+            // The spec: forward differences, backward at the last column / row; the reference:
+            // backward differences, forward at the first.
             let slope = |pos: usize, n: usize, st: usize| match (pos + 1 < n, pos > 0) {
+                (_, true) if !spec => at(i) - at(i - st),
                 (true, _) => at(i + st) - at(i),
                 (false, true) => at(i) - at(i - st),
                 _ => 0.0,
             };
             let (sx, sy) = (slope(x, w, 1), slope(yy, h, w));
-            rx[x] = if sx != 0.0 { 0.4 * sx } else { x as f64 * (2.0 * ramp / w as f64) - ramp } as f32;
-            ry[x] = if sy != 0.0 { 0.4 * sy } else { yy as f64 * (2.0 * ramp / h as f64) - ramp } as f32;
+            let ax = if sx != 0.0 { (0.4 * sx).clamp(-limit, limit) } else { x as f64 * (2.0 * ramp / w as f64) - ramp };
+            let ay = if sy != 0.0 { (0.4 * sy).clamp(-limit, limit) } else { yy as f64 * (2.0 * ramp / h as f64) - ramp };
+            rx[x] = ax as f32;
+            ry[x] = ay as f32;
         }
     });
     if smooth > 1.0 {
-        gx = px8::field_smooth(&gx, w, h, smooth - 1.0);
-        gy = px8::field_smooth(&gy, w, h, smooth - 1.0);
+        if spec {
+            gx = px8::field_smooth(&gx, w, h, smooth - 1.0);
+            gy = px8::field_smooth(&gy, w, h, smooth - 1.0);
+        } else {
+            gx = px8::gauss_f32(&gx, w, h, 0.5 * (smooth - 1.0));
+            gy = px8::gauss_f32(&gy, w, h, 0.5 * (smooth - 1.0));
+        }
     }
     let mut out = img.clone();
     par_px(&mut out, |i, px| {
@@ -409,7 +422,7 @@ fn smudge_stick(e: &GalleryEffect, img: &Img) -> Img {
     let m = num(e, "strokeLength", 0.0, 20.0).trunc() + 4.0;
     let noise = px8::Rng::new(e.seed()).fill(img.n());
     let vs = grain_tone(e, img, &noise, 0.8);
-    // Photoshop's rank stays near an eighth of the window; the reference adds `m mod 5`.
+    // The reference's rank stays near an eighth of the window; the spec adds `m mod 5`.
     let rank = if px8::defects() { 2.0 * m / 5.0 + m % 5.0 } else { (2.0 * m / 5.0).floor() };
     let v = px8::rank_dir(&vs, w, h, m as usize - 1, 3, false, rank);
     with_value(img, &v)

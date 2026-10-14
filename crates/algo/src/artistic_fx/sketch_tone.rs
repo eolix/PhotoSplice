@@ -103,7 +103,7 @@ pub(in super::super) fn photocopy(e: &GalleryEffect, img: &Img) -> Img {
         detail = 2.0;
         dark = px8::rhu(dark / 4.0);
     }
-    // Photoshop's difference of Gaussians is a little narrower and lighter than the reference's.
+    // The reference's difference of Gaussians is a little narrower and lighter than the spec's.
     if !px8::defects() {
         detail *= 6.0 / 7.0;
         dark *= 7.0 / 8.0;
