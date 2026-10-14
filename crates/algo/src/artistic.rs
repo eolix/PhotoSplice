@@ -147,6 +147,32 @@ impl GalleryFilter {
         out
     }
 
+    /// The random seed a new effect of this filter gets (`FlRs` in Photoshop's descriptors); 0
+    /// for filters that draw no random numbers.
+    pub fn default_seed(self) -> u32 {
+        match self {
+            Self::FilmGrain => 23_068_185,
+            Self::SmudgeStick => 6_399_750,
+            Self::Sponge => 218_877_241,
+            Self::Spatter => 10_738_420,
+            Self::SprayedStrokes => 893_120_664,
+            Self::DiffuseGlow => 325_892_160,
+            Self::OceanRipple => 64_008_840,
+            Self::ChalkCharcoal => 314_004_633,
+            Self::GraphicPen => 55_993_248,
+            Self::NotePaper => 52_642_770,
+            Self::Reticulation => 301_835_400,
+            Self::TornEdges => 461_109_340,
+            Self::WaterPaper => 83_852_682,
+            Self::Craquelure => 495_615_720,
+            Self::Grain => 217_582_197,
+            Self::MosaicTiles => 25_445_584,
+            Self::Patchwork => 383_529_723,
+            Self::StainedGlass => 319_935_998,
+            _ => 0,
+        }
+    }
+
     /// Whether the filter reads the foreground / background colours. Derived
     /// from the params notation, plus the filters whose pixel code reads the
     /// colours without listing them (issue #709): Colored Pencil uses the
@@ -156,8 +182,8 @@ impl GalleryFilter {
     }
 }
 
-/// Photoshop's default Neon Glow colour (a saturated sky blue).
-pub const NEON_DEFAULT: [f32; 4] = [0.0, 0.62, 1.0, 1.0];
+/// Photoshop's default Neon Glow colour (pure blue).
+pub const NEON_DEFAULT: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
 /// One effect layer of the gallery: a filter with its values. Choice values are indices into
 /// the filter's choice list; bools are 0/1. Colours are straight sRGB RGBA, 0–1.
@@ -173,6 +199,10 @@ pub struct GalleryEffect {
     pub background: [f32; 4],
     #[serde(default = "neon")]
     pub color: [f32; 4],
+    /// The random seed of filters that draw random numbers (Photoshop's `FlRs`); 0 for the
+    /// others. Missing in older documents: the filter's default.
+    #[serde(default)]
+    pub seed: Option<u32>,
 }
 
 fn black() -> [f32; 4] {
@@ -197,7 +227,12 @@ impl GalleryEffect {
             };
             values.insert(p.key.to_string(), v);
         }
-        GalleryEffect { filter, values, foreground: black(), background: white(), color: neon() }
+        GalleryEffect { filter, values, foreground: black(), background: white(), color: neon(), seed: None }
+    }
+
+    /// The random seed: the one set, else the filter's default.
+    pub fn seed(&self) -> u32 {
+        self.seed.unwrap_or_else(|| self.filter.default_seed())
     }
 
     /// Sets a numeric value (clamped to its range), a choice by index, or a bool.

@@ -34,6 +34,8 @@ use crate::blocks::{enum_of, get_desc, num};
 
 #[path = "camera_raw_map.rs"]
 mod camera_raw;
+#[path = "gallery_map.rs"]
+mod gallery;
 
 /// Command id of a Photoshop smart filter PhotoSuite does not implement. Its params hold the
 /// filter's name, Photoshop filter id and descriptor (`psd`, hex); it renders as a pass-through.
@@ -307,6 +309,8 @@ pub fn filter_from_item(item: &Descriptor) -> SmartFilter {
     let class = class.or_else(|| KNOWN.iter().find(|k| k.filter_id == filter_id).map(|k| k.class.to_string()));
     let known = if class.as_deref() == Some(camera_raw::CLASS) {
         camera_raw::import_params(item).map(|p| (camera_raw::COMMAND, p))
+    } else if class.as_deref() == Some(gallery::CLASS) {
+        fltr.and_then(|f| gallery::import(item, f))
     } else {
         class.as_deref().and_then(|c| known_params(c, fltr))
     };
@@ -445,6 +449,9 @@ pub fn item_for_filter(f: &SmartFilter) -> Result<Descriptor, String> {
         set(&mut d, "blendOptions", blend_options(f));
         set(&mut d, "enab", Value::Boolean(f.visible));
         return Ok(d);
+    }
+    if let Some(d) = gallery::export(f) {
+        return d;
     }
     if f.command == UNSUPPORTED_FILTER {
         let raw = f.params.get("psd").and_then(J::as_str).and_then(from_hex).ok_or("its Photoshop data is missing")?;

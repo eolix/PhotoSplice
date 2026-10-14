@@ -553,7 +553,7 @@ impl FilterParams {
     }
 
     /// Whether the filter works on the whole image in one piece (it can't be split into tiles):
-    /// a Filter Gallery stack with Cutout, which segments the image as a whole.
+    /// a Filter Gallery stack (its effects use whole-image statistics, like Photoshop's).
     pub fn one_piece(&self) -> bool {
         matches!(self, FilterParams::FilterGallery { effects } if artistic_fx::whole_image(effects))
     }
@@ -659,9 +659,9 @@ fn halo_ext(p: &FilterParams) -> Halo {
         FilterParams::PathBlur { paths } => r(paths.iter().map(|p| p.speed.abs()).fold(0.0, f32::max) / 2.0 + 1.0),
         FilterParams::Custom { .. } => r(2.0),
         FilterParams::DeInterlace { .. } => r(1.0),
-        // Cutout segments the whole image at once.
+        // Gallery effects use whole-image statistics.
         FilterParams::FilterGallery { effects } if artistic_fx::whole_image(effects) => Halo::Bounds,
-        FilterParams::FilterGallery { effects } => Halo::Radius(artistic_fx::reach(effects)),
+        FilterParams::FilterGallery { .. } => Halo::Radius(0),
         _ => Halo::Radius(0),
     }
 }

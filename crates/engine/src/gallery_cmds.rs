@@ -45,6 +45,9 @@ pub fn effect_from_json(filter: GalleryFilter, p: &Value, fallback: &Value) -> G
             }
         }
     }
+    if let Some(seed) = p.get("seed").and_then(Value::as_u64).and_then(|v| u32::try_from(v).ok()) {
+        e.seed = Some(seed);
+    }
     let pick = |k: &str| colour(p.get(k)).or_else(|| colour(fallback.get(k)));
     if let Some(c) = pick("foreground") {
         e.foreground = c;
