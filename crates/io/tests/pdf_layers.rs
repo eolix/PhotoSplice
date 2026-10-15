@@ -12,8 +12,13 @@ fn pdf(content: &str, resources: &str, extra: &[String]) -> Vec<u8> {
 
 /// [`pdf`] with `page` added to the page dictionary (boxes, `/Rotate`, …).
 fn pdf_page(page: &str, content: &str, resources: &str, extra: &[String]) -> Vec<u8> {
+    pdf_full("", page, content, resources, extra)
+}
+
+/// [`pdf_page`] with `catalog` added to the catalog dictionary (`/OCProperties`, …).
+fn pdf_full(catalog: &str, page: &str, content: &str, resources: &str, extra: &[String]) -> Vec<u8> {
     let mut objs: Vec<String> = vec![
-        "<< /Type /Catalog /Pages 2 0 R >>".into(),
+        format!("<< /Type /Catalog /Pages 2 0 R {catalog} >>"),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
         format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] {page} /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> {resources} >> >>"),
         format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
@@ -279,6 +284,8 @@ fn probe() {
         }
     }
     walk(&layers.document.layers, &mut count, &mut fonts);
+    let top: Vec<String> = layers.document.layers.iter().map(|l| format!("{}{}", l.name, if l.visible { "" } else { " (hidden)" })).collect();
+    eprintln!("top level: {top:?}");
     let (a, b) = (photosplice_compose::flatten(&layers.document), photosplice_compose::flatten(&pixels));
     assert_eq!(a.rect, b.rect, "both ways open at one size");
     // Premultiplied, so colour under no coverage doesn't count.
@@ -634,5 +641,65 @@ fn a_gradient_fill_saved_to_pdf_reopens_as_a_gradient_fill() {
         assert_eq!(*s, style);
         let diff = looks_like_the_page(&bytes);
         assert!(diff < 0.012, "{style:?}: {diff}");
+    }
+}
+
+/// Three PDF layers (objects 6, 7, 8): "Back" on, "Hidden" off, "Locked art" on and locked, and
+/// a grey square outside them all.
+fn pdf_with_layers(content: &str, more: &[String]) -> Vec<u8> {
+    let catalog = "/OCProperties << /OCGs [6 0 R 7 0 R 8 0 R] /D << /Order [6 0 R 7 0 R 8 0 R] /OFF [7 0 R] /Locked [8 0 R] >> >>";
+    let mut extra = vec![
+        "<< /Type /OCG /Name (Back) >>".to_string(),
+        "<< /Type /OCG /Name <FEFF00480069006400640065006E> >>".to_string(),
+        "<< /Type /OCG /Name (Locked art) >>".to_string(),
+    ];
+    extra.extend(more.iter().cloned());
+    pdf_full(catalog, "", content, "/Properties << /oc1 6 0 R /oc2 7 0 R /oc3 8 0 R >> /XObject << /Fm 9 0 R >>", &extra)
+}
+
+fn group_children(d: &Document, i: usize) -> Vec<&'static str> {
+    let Some(children) = d.layers[i].children() else { return Vec::new() };
+    let sub = Document { layers: children.to_vec(), ..Document::new("g", photosplice_geom::Size::new(1, 1), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8) };
+    kinds(&sub)
+}
+
+#[test]
+fn pdf_layers_become_named_groups_hidden_ones_included() {
+    let content = "0.5 g 0 0 10 10 re f \
+        /OC /oc1 BDC 1 0 0 rg 20 20 50 50 re f EMC \
+        /OC /oc2 BDC 0 0 1 rg 100 20 50 50 re f EMC \
+        /OC /oc3 BDC BT /F1 12 Tf 0 g 10 80 Td (Hi) Tj ET EMC";
+    let d = open(&pdf_with_layers(&content.replace('\\', ""), &["<< /Type /XObject /Subtype /Form /BBox [0 0 1 1] /Length 0 >>\nstream\n\nendstream".into()]));
+    assert_eq!(kinds(&d), ["shape", "group", "group", "group"], "outside every layer at the bottom, then one group per layer");
+    let names: Vec<&str> = d.layers.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(&names[1..], ["Back", "Hidden", "Locked art"], "names, a UTF-16 one too");
+    assert_eq!(d.layers.iter().map(|l| l.visible).collect::<Vec<_>>(), [true, true, false, true]);
+    assert!(d.layers[3].locks.all && !d.layers[1].locks.all);
+    // Each group holds just its layer's content; the hidden layer's square came in too.
+    assert_eq!(group_children(&d, 1), ["shape"]);
+    assert_eq!(group_children(&d, 2), ["shape"]);
+    assert_eq!(group_children(&d, 3), ["text"]);
+}
+
+#[test]
+fn a_form_in_a_pdf_layer_lands_in_its_group() {
+    let form = "<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] /OC 7 0 R /Length 22 >>\nstream\n0 1 0 rg 0 0 40 40 re f\nendstream";
+    let d = open(&pdf_with_layers("/Fm Do", &[form.into()]));
+    assert_eq!(kinds(&d), ["group"], "only the layer the form is in, which is off");
+    assert_eq!(d.layers[0].name, "Hidden");
+    assert!(!d.layers[0].visible);
+    assert_eq!(group_children(&d, 0), ["shape"]);
+    // With content outside every layer too, the form's layer holds only the form's content.
+    let d = open(&pdf_with_layers("0.5 g 0 0 10 10 re f /Fm Do", &[form.into()]));
+    assert_eq!(kinds(&d), ["shape", "group"]);
+    assert_eq!(group_children(&d, 1), ["shape"]);
+}
+
+#[test]
+fn broken_layer_lists_open_as_one_stack() {
+    // `/OCGs` that isn't an array, and a layer the page never uses: no groups, no panic.
+    for catalog in ["/OCProperties << /OCGs 5 /D << >> >>", "/OCProperties << /OCGs [6 0 R] /D 3 >>", "/OCProperties 7"] {
+        let bytes = pdf_full(catalog, "", "1 0 0 rg 20 20 50 50 re f", "", &["<< /Type /OCG /Name (Unused) >>".into()]);
+        assert_eq!(kinds(&open(&bytes)), ["shape"], "{catalog}");
     }
 }

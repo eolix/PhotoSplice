@@ -45,15 +45,90 @@ const MAX_LAYERS: usize = 4000;
 
 /// A page as a layered document, placed by `place`, at `dpi`.
 pub(crate) fn import_layers(name: &str, page: &Page<'_>, place: &super::Placement, dpi: f32) -> (Document, Vec<String>) {
-    let (w, h) = (place.w.max(1), place.h.max(1));
-    let mut doc = Document::new(name, Size::new(w, h), ColorMode::Rgb, SampleType::U8);
-    doc.resolution_dpi = dpi;
+    let mut doc = empty_document(name, place, dpi);
+    let (layers, warnings) = stack(page, place, dpi, doc.pixel_format(), Keep::All);
+    doc.layers = layers;
+    if doc.layers.is_empty() {
+        doc.layers.push(Layer::raster("Layer 1", doc.pixel_format()));
+    }
+    (doc, warnings)
+}
+
+/// A page with PDF layers ([`super::ocg`]) as a layered document: what is outside every PDF layer
+/// at the bottom, then a layer group per PDF layer in drawing order, named, shown and locked as
+/// the PDF's default configuration has it. Each is drawn from the file with only that layer on,
+/// so the content of hidden layers comes in too. `page` is the page's index; `None` when a pass
+/// can't be made (the caller then opens the page as one stack).
+pub(crate) fn import_pdf_layers(
+    name: &str,
+    bytes: &[u8],
+    pdf: &hayro::hayro_syntax::Pdf,
+    page: usize,
+    pdf_layers: &[super::ocg::PdfLayer],
+    place: &super::Placement,
+    dpi: f32,
+) -> Option<(Document, Vec<String>)> {
+    let mut doc = empty_document(name, place, dpi);
+    let mut warnings = Vec::new();
     let fmt = doc.pixel_format();
+    let pass = |on: Option<super::ocg::Id>, keep: Keep, warnings: &mut Vec<String>| -> Option<Vec<Layer>> {
+        let only = super::ocg::only(bytes, pdf, pdf_layers, on)?;
+        let pdf = hayro::hayro_syntax::Pdf::new(only).ok()?;
+        let pages = pdf.pages();
+        let (layers, more) = stack(pages.get(page)?, place, dpi, fmt, keep);
+        warnings.extend(more);
+        Some(layers)
+    };
+    let outside = pass(None, Keep::All, &mut warnings)?;
+    doc.layers = outside.clone();
+    for l in pdf_layers {
+        // A layer only marked content uses is drawn alone. A form's `/OC` marks nothing, so a
+        // layer a form is in keeps the whole pass, less what the outside pass drew.
+        let children = if l.via_form { without(pass(Some(l.id), Keep::All, &mut warnings)?, &outside) } else { pass(Some(l.id), Keep::InLayer, &mut warnings)? };
+        let mut g = Layer::group(l.name.clone(), children);
+        g.visible = l.visible;
+        g.locks.all = l.locked;
+        doc.layers.push(g);
+    }
+    // The same warning from every pass once.
+    warnings.sort();
+    warnings.dedup();
+    Some((doc, warnings))
+}
+
+/// `layers` less those of `outside`, matched in order (the outside content each pass draws).
+fn without(mut layers: Vec<Layer>, outside: &[Layer]) -> Vec<Layer> {
+    fn same(a: &Layer, b: &Layer) -> bool {
+        match (a.children(), b.children()) {
+            (Some(x), Some(y)) => a.name == b.name && x.len() == y.len() && x.iter().zip(y).all(|(x, y)| same(x, y)),
+            (None, None) => a.name == b.name && a.content == b.content,
+            _ => false,
+        }
+    }
+    let mut next = 0;
+    layers.retain(|l| {
+        let drop = outside.get(next).is_some_and(|o| same(o, l));
+        next += usize::from(drop);
+        !drop
+    });
+    layers
+}
+
+fn empty_document(name: &str, place: &super::Placement, dpi: f32) -> Document {
+    let mut doc = Document::new(name, Size::new(place.w.max(1), place.h.max(1)), ColorMode::Rgb, SampleType::U8);
+    doc.resolution_dpi = dpi;
+    doc
+}
+
+/// The page's drawing as a layer stack, bottom first.
+fn stack(page: &Page<'_>, place: &super::Placement, dpi: f32, fmt: PixelFormat, keep: Keep) -> (Vec<Layer>, Vec<String>) {
+    let (w, h) = (place.w.max(1), place.h.max(1));
     let cache = RenderCache::new();
     let global = GlobalState::new(&cache, &RenderSettings::default());
     let transform = place.transform;
-    let mut builder = LayerBuilder::new(&global, w, h, fmt, doc.resolution_dpi);
+    let mut builder = LayerBuilder::new(&global, w, h, fmt, dpi);
     builder.font_names = font_names(page);
+    builder.keep = keep;
     // The chosen page box clips everything, as in the renderer.
     let mut crop = place.clip.to_path(0.1);
     crop.apply_affine(transform);
@@ -61,12 +136,16 @@ pub(crate) fn import_layers(name: &str, page: &Page<'_>, place: &super::Placemen
     let mut ctx = Context::new(transform, kurbo::Rect::new(0.0, 0.0, f64::from(w), f64::from(h)), &cache.interpreter_cache, page.xref(), InterpreterSettings::default());
     interpret_page(page, &mut ctx, &mut builder);
     builder.pop_clip();
-    let (layers, warnings) = builder.finish();
-    doc.layers = layers;
-    if doc.layers.is_empty() {
-        doc.layers.push(Layer::raster("Layer 1", fmt));
-    }
-    (doc, warnings)
+    builder.finish()
+}
+
+/// What a pass over the page keeps.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    All,
+    /// Only what is drawn inside a PDF layer's marked content (`/OC … BDC`): with one layer on,
+    /// that layer's content, without what is outside every layer.
+    InLayer,
 }
 
 /// One level of the layer stack being built: the page itself, or a transparency group.
@@ -146,6 +225,10 @@ pub(crate) struct LayerBuilder<'g> {
     font_names: HashMap<u128, String>,
     warnings: Vec<String>,
     pixel_items: usize,
+    /// Which of the page's drawing becomes layers (a PDF layer's pass keeps only its content).
+    keep: Keep,
+    /// Open marked-content sequences: whether each is a PDF layer's (`/OC`).
+    marked: Vec<bool>,
 }
 
 impl<'g> LayerBuilder<'g> {
@@ -168,6 +251,8 @@ impl<'g> LayerBuilder<'g> {
             font_names: HashMap::new(),
             warnings: Vec::new(),
             pixel_items: 0,
+            keep: Keep::All,
+            marked: Vec::new(),
         }
     }
 
@@ -184,6 +269,11 @@ impl<'g> LayerBuilder<'g> {
         }
         let layers = self.frames.pop().map(|f| f.layers).unwrap_or_default();
         (layers, self.warnings)
+    }
+
+    /// Whether what is being drawn now is kept (see [`Keep`]).
+    fn wanted(&self) -> bool {
+        self.keep == Keep::All || self.marked.contains(&true)
     }
 
     fn bounds(&self) -> Rect {
@@ -643,6 +733,9 @@ impl<'g> LayerBuilder<'g> {
 
 impl<'a> Device<'a> for LayerBuilder<'_> {
     fn draw_path(&mut self, path: &BezPath, props: DrawProps<'a>, draw_mode: &DrawMode) {
+        if !self.wanted() {
+            return;
+        }
         match (&props.paint, &props.soft_mask) {
             (Paint::Color(c), None) if self.raster_groups == 0 && !self.full() => {
                 let color = c.to_rgba().to_rgba8();
@@ -686,6 +779,9 @@ impl<'a> Device<'a> for LayerBuilder<'_> {
     }
 
     fn draw_glyph_run(&mut self, glyph_run: &GlyphRun<'_, 'a>, props: DrawProps<'a>, draw_mode: &DrawMode) {
+        if !self.wanted() {
+            return;
+        }
         let editable = self.raster_groups == 0
             && !self.full()
             && props.soft_mask.is_none()
@@ -702,6 +798,9 @@ impl<'a> Device<'a> for LayerBuilder<'_> {
     }
 
     fn draw_image(&mut self, image: Image<'a, '_>, props: ImageDrawProps<'a>) {
+        if !self.wanted() {
+            return;
+        }
         if self.raster_groups > 0 || self.full() {
             self.with_segment(|r| Device::draw_image(r, image, props));
             return;
@@ -744,6 +843,14 @@ impl<'a> Device<'a> for LayerBuilder<'_> {
             self.flush_shape();
         }
         self.clips.pop();
+    }
+
+    fn begin_marked_content(&mut self, tag: &[u8], _mcid: Option<i32>) {
+        self.marked.push(tag == b"OC");
+    }
+
+    fn end_marked_content(&mut self) {
+        self.marked.pop();
     }
 
     fn pop_transparency_group(&mut self) {

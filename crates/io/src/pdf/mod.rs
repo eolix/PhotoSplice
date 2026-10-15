@@ -14,6 +14,7 @@
 pub mod export;
 mod gradient;
 mod layers;
+mod ocg;
 mod photoshop;
 mod render;
 mod shading;
@@ -316,6 +317,13 @@ pub fn open_page_with(name: &str, bytes: &[u8], o: &OpenOptions) -> Result<Impor
         }
     }
     if o.how == PageAs::Layers {
+        let pdf_layers = ocg::page_layers(&pdf, p);
+        if !pdf_layers.is_empty()
+            && let Some((document, more)) = layers::import_pdf_layers(name, bytes, &pdf, o.page, &pdf_layers, &place, scale * 72.0)
+        {
+            warnings.extend(more);
+            return Ok(ImportResult { document, warnings, selected: Vec::new() });
+        }
         let (document, more) = layers::import_layers(name, p, &place, scale * 72.0);
         warnings.extend(more);
         return Ok(ImportResult { document, warnings, selected: Vec::new() });
