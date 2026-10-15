@@ -1681,3 +1681,64 @@ fn clipped_passthrough_keeps_its_adjustment_inside() {
     assert!(close(make(false), [0.0, 1.0, 1.0, 1.0]), "{:?}", make(false));
     assert!(close(make(true), [1.0, 0.0, 0.0, 1.0]), "{:?}", make(true));
 }
+
+/// Stroke Emboss shades the stroke's own colour before it is mixed over the backdrop, so a
+/// partly covered edge pixel of a black stroke on white never ends darker than the stroke alone
+/// left it (Reference corpus bevel-stroke-smooth: shading the composite darkened the backdrop's
+/// share of those pixels by up to 125/255).
+#[test]
+fn stroke_emboss_leaves_the_backdrop_share_alone() {
+    use photosplice_color::BlendMode;
+    use photosplice_doc::{Bevel, BevelStyle, BevelTechnique};
+    let n = 64u32;
+    let render = |emboss: bool| {
+        let mut d = doc_white(n, n);
+        let mut l = Layer::raster("disc", PixelFormat::RGBA8);
+        let s = l.surface_mut().unwrap();
+        for y in 0..n as i32 {
+            for x in 0..n as i32 {
+                // An anti-aliased disc, radius 14.
+                let r = ((x as f32 + 0.5 - 32.0).powi(2) + (y as f32 + 0.5 - 32.0).powi(2)).sqrt();
+                let a = (14.5 - r).clamp(0.0, 1.0);
+                if a > 0.0 {
+                    s.write_pixel(x, y, &[0.3, 0.5, 0.8, a]);
+                }
+            }
+        }
+        l.effects.items.push(Effect::Stroke(StrokeFx { common: FxCommon::new(BlendMode::Normal, 1.0), size: 5.5, position: StrokePosition::Outside, paint: FxPaint::Color(Color::BLACK) }));
+        if emboss {
+            l.effects.items.push(Effect::BevelEmboss(Bevel {
+                enabled: true,
+                style: BevelStyle::StrokeEmboss,
+                technique: BevelTechnique::Smooth,
+                depth: 1.0,
+                up: true,
+                size: 8.0,
+                soften: 0.0,
+                angle: 120.0,
+                altitude: 30.0,
+                use_global_light: false,
+                gloss_contour: photosplice_doc::Contour::Linear,
+                highlight: FxCommon::new(BlendMode::Screen, 0.75),
+                highlight_color: Color::WHITE,
+                shadow: FxCommon::new(BlendMode::Multiply, 0.75),
+                shadow_color: Color::BLACK,
+                contour: None,
+                texture: None,
+            }));
+        }
+        d.layers.push(l);
+        flatten(&d).px
+    };
+    let (plain, embossed) = (render(false), render(true));
+    let mut shaded = 0;
+    for (i, (p, e)) in plain.iter().zip(&embossed).enumerate() {
+        let (x, y) = (i as i32 % n as i32, i as i32 / n as i32);
+        let r = ((x as f32 + 0.5 - 32.0).powi(2) + (y as f32 + 0.5 - 32.0).powi(2)).sqrt();
+        if r > 15.0 {
+            assert!(e[0] >= p[0] - 1e-3, "({x},{y}) {:?} vs stroke alone {:?}", e, p);
+        }
+        shaded += usize::from((e[0] - p[0]).abs() > 0.01);
+    }
+    assert!(shaded > 50, "the stroke is shaded at all ({shaded} pixels)");
+}

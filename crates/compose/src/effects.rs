@@ -1299,9 +1299,20 @@ pub(crate) fn build_maps_prepared(
                         let union = Map { w, h, v: shape.v.iter().zip(&ring.v).map(|(a, r)| a.max(*r)).collect() };
                         let style = if st.position == StrokePosition::Center { BevelStyle::Emboss } else { BevelStyle::OuterBevel };
                         let mut maps = bevel_maps(&shape, &Bevel { style, ..(*b).clone() }, light, tex, patterns).0;
+                        // An outside stroke is shaded in its own colour before it is mixed over the
+                        // backdrop ([`composite_with_effects_prepared`]), so the maps run at full
+                        // strength wherever the ring reaches; a centre stroke is shaded over the
+                        // composite, weighted by the ring's share.
+                        let outside = st.position != StrokePosition::Inside;
                         for m in &mut maps {
                             for ((v, r), u) in m.v.iter_mut().zip(&ring.v).zip(&union.v) {
-                                *v *= if *u > 1e-6 { (r / u).min(1.0) } else { 0.0 };
+                                *v *= if *u <= 1e-6 || *r <= 1e-6 {
+                                    0.0
+                                } else if outside {
+                                    1.0
+                                } else {
+                                    (r / u).min(1.0)
+                                };
                             }
                         }
                         maps
@@ -1503,7 +1514,32 @@ pub(crate) fn composite_with_effects_prepared(
         for ((mv, a), dv) in m.v.iter_mut().zip(&shape.v).zip(&din) {
             *mv = if inside(*a) { (in_w + 0.5 - dv).clamp(0.0, 1.0) } else { 0.0 };
         }
-        paint_fx(&mut lay, &m, &st.paint, frame(st), canvas, anchor, big, st.common.blend, st.common.opacity, patterns);
+        let embossed: Vec<usize> = if st.position == StrokePosition::Center {
+            rev().filter(|(i, e)| matches!(e, Effect::BevelEmboss(_)) && maps.bevel_paint[*i] == BevelPaint::Stroke && !maps.per.get(*i).is_none_or(Vec::is_empty)).map(|(i, _)| i).collect()
+        } else {
+            Vec::new()
+        };
+        if embossed.is_empty() {
+            paint_fx(&mut lay, &m, &st.paint, frame(st), canvas, anchor, big, st.common.blend, st.common.opacity, patterns);
+        } else {
+            // Stroke Emboss on a centre stroke: the inside half shaded in its own colour too,
+            // then laid over the layer by its coverage.
+            let mut stroked = lay.clone();
+            let ones = Map { w, h, v: m.v.iter().map(|&v| if v > 0.0 { 1.0 } else { 0.0 }).collect() };
+            paint_fx(&mut stroked, &ones, &st.paint, frame(st), canvas, anchor, big, st.common.blend, 1.0, patterns);
+            for i in embossed {
+                if let Some(Effect::BevelEmboss(b)) = items.get(i) {
+                    paint_color(&mut stroked, &rel(fx(i, 0)), rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
+                    paint_color(&mut stroked, &rel(fx(i, 1)), rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
+                }
+            }
+            for ((p, q), k) in lay.px.iter_mut().zip(&stroked.px).zip(&m.v) {
+                let k = k * st.common.opacity;
+                if k > 0.0 {
+                    *p = std::array::from_fn(|c| p[c] + (q[c] - p[c]) * k);
+                }
+            }
+        }
     }
     for (i, e) in rev() {
         if let Effect::BevelEmboss(b) = e
@@ -1554,6 +1590,20 @@ pub(crate) fn composite_with_effects_prepared(
             let mut blended = base.clone();
             let ones = Map { w, h, v: share.iter().map(|&s| if s > 0.0 { 1.0 } else { 0.0 }).collect() };
             paint_fx(&mut blended, &ones, &st.paint, frame(st), canvas, anchor, big, st.common.blend, 1.0, patterns);
+            // Stroke Emboss shades the stroke itself, so a partly covered edge pixel keeps its
+            // backdrop share unshaded (Reference corpus bevel-stroke-smooth: edge pixels nearly
+            // white where shading the composite made them up to 125/255 dark).
+            if st.position != StrokePosition::Inside {
+                for (i, e) in rev() {
+                    if let Effect::BevelEmboss(b) = e
+                        && maps.bevel_paint[i] == BevelPaint::Stroke
+                        && !maps.per.get(i).is_none_or(Vec::is_empty)
+                    {
+                        paint_color(&mut blended, &fx(i, 0), rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
+                        paint_color(&mut blended, &fx(i, 1), rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
+                    }
+                }
+            }
             for ((a, b), s) in acc.iter_mut().zip(&blended.px).zip(&share) {
                 if *s > 0.0 {
                     for c in 0..3 {
@@ -1592,12 +1642,14 @@ pub(crate) fn composite_with_effects_prepared(
             *wp = psblend::composite_gamma(mode, *wp, *lp, 1.0, gamma);
         }
     }
+    // An outside stroke's Stroke Emboss was shaded with the stroke itself, above.
+    let outside_stroke = strokes.first().is_some_and(|st| st.position != StrokePosition::Inside);
     // Emboss styles shade the composited layer (their maps cover inside and outside). Painting
     // them into the layer before its (text-gamma) composite left a type layer's lit top edges up
     // to 6/255 dark (psd-tools layer_effects Emboss: 7.8 → 5.7/255).
     for (i, e) in rev() {
         if let Effect::BevelEmboss(b) = e
-            && matches!(maps.bevel_paint[i], BevelPaint::Both | BevelPaint::Stroke)
+            && (maps.bevel_paint[i] == BevelPaint::Both || (maps.bevel_paint[i] == BevelPaint::Stroke && !outside_stroke))
             && !maps.per.get(i).is_none_or(Vec::is_empty)
         {
             paint_color(&mut work, &fx(i, 0), rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
