@@ -60,14 +60,18 @@ fn dropout(p: &mut [u8], rng: &mut px8::Rng, prob: f64) {
 }
 
 /// Charcoal: dark detail stretched and smeared by sheared rank filters along both diagonals,
-/// mixed toward gray, sharpened, then a hard contrast window set by balance and detail.
+/// mixed toward gray, sharpened, then a hard contrast window set by balance and detail. The
+/// window starts at `trunc(0.78·balance) + 44`; the spec had `trunc(0.73·balance) + 50`, which
+/// left balance 0 too dark.
 pub(in super::super) fn charcoal(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
     let thick = int(e, "charcoalThickness").min(1000);
     let detail = e.get("detail") as f64;
     let balance = e.get("lightDarkBalance") as f64;
     let spread = 5.0 + 10.0 * detail + if detail > 3.0 { 10.0 * (detail - 3.0) } else { 0.0 };
-    let mid = (0.73 * balance).trunc() + 50.0;
+    // The reference's window starts lower and moves a little faster with the balance.
+    let (k, m0) = if px8::defects() { (0.73, 50.0) } else { (0.78, 44.0) };
+    let mid = (k * balance).trunc() + m0;
     let upper = (mid + spread).min(128.0);
     let range = upper - mid;
     let mut lut = [0u8; 256];
@@ -95,21 +99,26 @@ pub(in super::super) fn charcoal(e: &GalleryEffect, img: &Img) -> Img {
 
 /// Photocopy: a difference of two Gaussians (σ 1 against σ = detail) scaled by darkness inks
 /// the dark side of edges.
+///
+/// The reference works on the plain mean gray, with a difference of Gaussians a little narrower
+/// than the spec's, and lets a difference of one level through only faintly: the ink is
+/// `(d − 0.7)·darkness` where the spec had `d·darkness`.
 pub(in super::super) fn photocopy(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
+    let quirk = px8::defects();
     let mut detail = e.get("detail") as f64;
-    let mut dark = e.get("darkness") as f64;
-    if detail <= 1.0 {
+    let dark = e.get("darkness") as f64;
+    let mut dark = if dark.is_finite() { dark } else { 0.0 };
+    if detail <= 1.0 || !detail.is_finite() {
         detail = 2.0;
         dark = px8::rhu(dark / 4.0);
     }
-    // The reference's difference of Gaussians is a little narrower and lighter than the spec's.
-    if !px8::defects() {
+    let floor = if quirk { 0.0 } else { PC_FLOOR };
+    if !quirk {
         detail *= 6.0 / 7.0;
-        dark *= 7.0 / 8.0;
     }
     let detail = detail.min(500.0);
-    let g = px8::gray_weighted(img);
+    let g = if quirk { px8::gray_weighted(img) } else { px8::gray_mean(img) };
     let b1 = px8::gauss_u8(&g, w, h, 1.0, 2);
     let bd = px8::gauss_u8(&g, w, h, detail, 2);
     let v: Vec<u8> = (0..img.n())
@@ -117,12 +126,17 @@ pub(in super::super) fn photocopy(e: &GalleryEffect, img: &Img) -> Img {
             let gv = g[i] as f64;
             let l = (128.0 + gv - b1[i] as f64).clamp(0.0, 255.0);
             let hh = (128.0 + gv - bd[i] as f64).clamp(0.0, 255.0);
-            px8::clamp255(255.0 - (l - hh) * dark)
+            let d = l - hh;
+            let ink = if d > 0.0 { (d - floor) * dark } else { d * dark };
+            px8::clamp255(255.0 - ink)
         })
         .collect();
     let (fg, bg) = ink_paper(e);
     px8::colourise_direct(&v, fg, bg, img)
 }
+
+/// How much of Photocopy's edge difference the reference ignores, in gray levels.
+const PC_FLOOR: f64 = 0.7;
 
 /// Reticulation: a median-smoothed, auto-levelled image combined with blurred binary noise
 /// through screen and multiply blends, then rank, sharpen and box passes.
@@ -200,6 +214,8 @@ pub(in super::super) fn stamp(e: &GalleryEffect, img: &Img) -> Img {
 pub(in super::super) fn torn_edges(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
     let t = 5.1 * e.get("imageBalance") as f64;
+    // The reference's threshold is a whole level: gray 127 is light at the default balance (25).
+    let t = if px8::defects() { t } else { t.floor() };
     let bw = (16 - int(e, "smoothness").min(15)).max(1);
     let k = tables::TORN_EDGES_CONTRAST[int(e, "contrast").min(25)];
     let mut m = px8::gray_mean(img);

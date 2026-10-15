@@ -25,13 +25,20 @@ pub(in super::super) fn graphic_pen(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
     let len = int(e, "strokeLength").min(1000);
     let bal = int(e, "lightDarkBalance").min(100);
-    let tau = if bal <= 50 { tables::GRAPHIC_PEN_DENSITY[bal] / 255.0 } else { 1.0 + (255.0 - tables::GRAPHIC_PEN_DENSITY[101 - bal]) / 255.0 };
     let quirk = px8::defects();
-    let rs = if quirk { 1.0 + 0.1 * len as f64 } else { 1.0 / GP_RAMP };
-    let ro = if quirk { (1.0 - 1.0 / rs) / 2.0 } else { 1.0 - 1.0 / rs };
+    // The reference stops darkening at balance 50: 100 draws exactly what 50 does.
+    let bal = if quirk { bal } else { bal.min(50) };
+    let tau = if bal <= 50 { tables::GRAPHIC_PEN_DENSITY[bal] / 255.0 } else { 1.0 + (255.0 - tables::GRAPHIC_PEN_DENSITY[101 - bal]) / 255.0 };
+    // The reference's ramp narrows with the stroke length, from the whole gray range at length 1
+    // (ink in proportion to darkness) to [`GP_RAMP`] at 15, about the same centre; its draw goes
+    // from one uniform to the mean of two.
+    let k = (len.clamp(1, 15) - 1) as f64 / 14.0;
+    let ramp = 1.0 + (GP_RAMP - 1.0) * k;
+    let rs = if quirk { 1.0 + 0.1 * len as f64 } else { 1.0 / ramp };
+    let ro = if quirk { (1.0 - 1.0 / rs) / 2.0 } else { 1.0 - (GP_RAMP + ramp) / 2.0 };
     let gray = px8::gray_mean(img);
     let n: Vec<f32> = gray.iter().map(|&g| (g as f64 / 255.0) as f32).collect();
-    let shift = if quirk { 0.0 } else { GP_CENTRE - alpha_mean(&gray, img) / 255.0 };
+    let shift = if quirk { 0.0 } else { GP_CENTRE - GP_FOLLOW * alpha_mean(&gray, img) / 255.0 };
     let mut rng = px8::Rng::new(e.seed() >> 1);
     // 0 = ink, 255 = paper, None = not drawn yet.
     let mut pen: Vec<Option<u8>> = vec![None; w * h];
@@ -52,7 +59,7 @@ pub(in super::super) fn graphic_pen(e: &GalleryEffect, img: &Img) -> Img {
         let r = rng.next();
         let jump = st.pg.is_some_and(|pg| ((pg - nv) as f64).abs() > 0.0625);
         if st.c == 0 || jump {
-            let u = if quirk { r } else { (r + rng.next()) / 2.0 };
+            let u = if quirk { r } else { r + (rng.next() - r) * k / 2.0 };
             st.pv = if u / rs + ro <= d { 0 } else { 255 };
             let r2 = rng.next();
             st.c = if quirk { (r2 * len as f64) as i64 } else { (r2 * r2 * r2 * 1.3 * len as f64) as i64 };
@@ -107,8 +114,11 @@ pub(in super::super) fn graphic_pen(e: &GalleryEffect, img: &Img) -> Img {
 
 /// Graphic Pen's ink ramp width (gray 0–1) in the reference's model.
 const GP_RAMP: f64 = 0.55;
-/// Where the image's mean gray lands on Graphic Pen's ramp (just past its middle, 0.275).
-const GP_CENTRE: f64 = 0.295;
+/// Where a mid-dark image's mean gray (95) lands on Graphic Pen's ramp (just past its middle).
+const GP_CENTRE: f64 = 0.321;
+/// How far Graphic Pen's ramp follows the image's mean gray: a little further than the mean
+/// moves (the beach, mean 130, inks a little more than the parrot, mean 61, at its mean).
+const GP_FOLLOW: f64 = 1.07;
 
 /// The alpha-weighted mean of a gray plane (128 when fully transparent).
 fn alpha_mean(g: &[u8], img: &Img) -> f64 {
@@ -128,14 +138,20 @@ struct Pen {
     c: i64,
 }
 
-/// Halftone Pattern as the reference draws it: the gray box-blurred, multiplied by a screen
-/// (`1 + 0.3·σ`), box-blurred again and scaled to about a quarter (so the plane has 60-odd levels),
-/// then stretched to 0–255 between the levels that clip `contrast` % of the pixels at each end.
-/// The output therefore has as many evenly spaced levels as the stretched range spans: 32 on the
-/// parrot, 37 to 42 on the beach. Contrast 50 clips at the median, a two-tone threshold.
+/// Halftone Pattern as the reference draws it: the gray box-blurred (radius 1), multiplied by a
+/// screen (`1 + a·σ`), box-blurred again over about five sixths of the cell and scaled to about a
+/// quarter (so the plane has 60-odd levels), then stretched to 0–255 between the levels that clip
+/// `contrast` % of the pixels at each end. The output therefore has as many evenly spaced levels
+/// as the stretched range spans: 32 on the parrot, 37 to 42 on the beach. Contrast 50 clips at the
+/// median, a two-tone threshold.
 ///
 /// The dot and line screens are dark at `(size, size)` and repeat every two cells from the image
-/// origin; the circles are concentric about the image centre, light there, two cells apart.
+/// origin, with a narrower peak than a cosine (`|cos|^1.64`: after the blur the pixels beside a
+/// size-1 dot carry 0.61 of its swing, not 0.5); the circles are concentric about the image
+/// centre, light there, two cells apart. The screen's amplitude grows with the size, from 0.374
+/// at 1 to 0.8 at 12. The second blur reads the screened plane past the bottom and right edges
+/// as if the screen went on, and before about half its radius from the top and left edges as the
+/// first row or column inside it, which leaves the first rows and columns with a stronger pattern.
 ///
 /// The spec ([`halftone_spec`]) screened once with a centred screen that only darkens
 /// (×0.75 … ×1), stretched around the image's mean and thresholded above contrast 46, which left
@@ -145,23 +161,39 @@ pub(in super::super) fn halftone(e: &GalleryEffect, img: &Img) -> Img {
         return halftone_spec(e, img);
     }
     let (w, h) = (img.w, img.h);
-    let size = int(e, "size").min(1000);
+    // Capped well past the slider (12): the blur pads the plane by most of a cell all round.
+    let size = int(e, "size").clamp(1, 100);
     let clip = (e.get("contrast") as f64 / 100.0).clamp(0.0, 0.5);
     let f = std::f64::consts::PI / (2 * size + 1) as f64;
     let o = size as f64;
     let (cx, cy) = ((w / 2) as f64, (h / 2) as f64);
-    let g: Vec<f32> = px8::gray_round(img).iter().map(|&v| v as f32).collect();
-    let mut s = px8::box_pass_f32(&g, w, h, size);
     let pattern = e.choice("patternType");
-    par_rows(&mut s, w, 1, |y, row| {
+    let r2 = (5 * size + 3) / 6;
+    let low = (r2 as i64 + 1) / 2;
+    let grow = 1.0 + HT_AMP_GROWTH * (size - 1) as f64;
+    // The circles keep a plain cosine.
+    let (amp, peak) = if pattern == "circle" { (0.3 * grow, 1.0) } else { (HT_AMP * grow, HT_PEAK) };
+    let shape = |c: f64| c.signum() * c.abs().powf(peak);
+    let g: Vec<f32> = px8::gray_round(img).iter().map(|&v| v as f32).collect();
+    let s = px8::box_pass_f32(&g, w, h, 1);
+    // The screened plane with `r2` extra rows and columns all round, cropped after the blur.
+    let (pw, ph) = (w + 2 * r2, h + 2 * r2);
+    let at = |p: usize| (p as i64 - r2 as i64).max(low);
+    let mut big = vec![0f32; pw * ph];
+    par_rows(&mut big, pw, 1, |py, row| {
+        let y = at(py);
+        let sy = (y.max(0) as usize).min(h.saturating_sub(1));
         let ay = (y as f64 - o) * f;
-        for (x, v) in row.iter_mut().enumerate() {
+        for (px, v) in row.iter_mut().enumerate() {
+            let x = at(px);
+            let sx = (x.max(0) as usize).min(w.saturating_sub(1));
             let sigma = match pattern {
-                "line" => -ay.cos(),
-                "circle" => ((x as f64 - cx).hypot(y as f64 - cy) * f).cos(),
-                _ => -((x as f64 - o) * f).cos() * ay.cos(),
+                "line" => -shape(ay.cos()),
+                "circle" => shape(((x as f64 - cx).hypot(y as f64 - cy) * f).cos()),
+                _ => -shape(((x as f64 - o) * f).cos()) * shape(ay.cos()),
             };
-            *v = (*v as f64 * (1.0 + 0.3 * sigma)) as f32;
+            let base = s.get(sy * w + sx).copied().unwrap_or(0.0) as f64;
+            *v = (base * (1.0 + amp * sigma)) as f32;
         }
     });
     // The scale fixes how many levels the stretch spreads: the reference's line and circle screens
@@ -171,7 +203,14 @@ pub(in super::super) fn halftone(e: &GalleryEffect, img: &Img) -> Img {
         "circle" => 0.2475,
         _ => 0.24,
     };
-    let v: Vec<u8> = px8::box_pass_f32(&s, w, h, size).iter().map(|&p| px8::clamp255((p as f64 * scale).floor())).collect();
+    let blurred = px8::box_pass_f32(&big, pw, ph, r2);
+    let mut v = vec![0u8; w * h];
+    for (y, row) in v.chunks_exact_mut(w.max(1)).enumerate() {
+        for (x, p) in row.iter_mut().enumerate() {
+            let b = blurred.get((y + r2) * pw + x + r2).copied().unwrap_or(0.0);
+            *p = px8::clamp255((b as f64 * scale).floor());
+        }
+    }
     // The clip levels, from a histogram weighted by alpha.
     let mut hist = [0f64; 256];
     for (p, px) in v.iter().zip(img.d.chunks_exact(4)) {
@@ -190,6 +229,13 @@ pub(in super::super) fn halftone(e: &GalleryEffect, img: &Img) -> Img {
     let (fg, bg) = ink_paper(e);
     px8::colourise_direct(&out, fg, bg, img)
 }
+
+/// Halftone Pattern's screen amplitude at size 1 (dots and lines).
+const HT_AMP: f64 = 0.374;
+/// How much the screen amplitude grows per size step (relative): 0.374 at 1, 0.8 at 12.
+const HT_AMP_GROWTH: f64 = (0.8 / HT_AMP - 1.0) / 11.0;
+/// The exponent narrowing the dot and line screens' peaks.
+const HT_PEAK: f64 = 1.64;
 
 /// The first level in `order` past which the histogram's running sum exceeds `cut`.
 fn clip_level(hist: &[f64; 256], cut: f64, order: impl Iterator<Item = usize>) -> Option<usize> {

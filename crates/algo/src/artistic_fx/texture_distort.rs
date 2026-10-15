@@ -35,15 +35,19 @@ pub(super) fn diffuse_glow(e: &GalleryEffect, img: &Img) -> Img {
 const FROSTED_AMP: f64 = 5.8;
 const FROSTED_SAT: f64 = 4.0;
 const FROSTED_SIGMA: f64 = 0.58;
+/// The rate of the reference's distortion curve: 7.2 times the default depth at 20.
+const FROSTED_RATE: f64 = 0.069;
 /// The reference's Ocean Ripple: the same field over texels of `1 + 0.1·(size − 1)` px smoothed
 /// with σ = 1.67 texels, each axis bounded on its own (so the ripples lean diagonal and run flat,
-/// a median of 6.3 px at the defaults), and the image scaled about the origin so that it starts
-/// `RIPPLE_MARGIN`·amplitude pixels in (2 % at the defaults on a 444 px side), which keeps the
-/// ripples inside it.
+/// a median of 6.3 px at the defaults), its depth proportional to the texel. The reference also
+/// magnifies the image about a point `RIPPLE_CENTER` px in from the origin, by a fraction that
+/// follows the magnitude's strength curve (2.3 % at the defaults, about 15 % at magnitude 20, on
+/// any image size), less for larger ripples ([`ripple_zoom_size`]).
 const RIPPLE_AMP: f64 = 6.6;
 const RIPPLE_SAT: f64 = 1.4;
 const RIPPLE_SIGMA: f64 = 1.67;
-const RIPPLE_MARGIN: f64 = 0.75;
+const RIPPLE_ZOOM: f64 = 0.023 / RIPPLE_AMP;
+const RIPPLE_CENTER: f64 = 230.0;
 
 /// Glass: the image seen through the chosen texture's bumps.
 pub(super) fn glass(e: &GalleryEffect, img: &Img) -> Img {
@@ -52,7 +56,8 @@ pub(super) fn glass(e: &GalleryEffect, img: &Img) -> Img {
     let smooth = param(e, "smoothness", 1.0, 15.0);
     let dist = param(e, "distortion", 0.0, 20.0);
     if t == Texture::Frosted && !px8::defects() {
-        let a = FROSTED_AMP * strength(dist, 5.0);
+        // Deeper for larger bumps (the square root of the scaling) and for sharper ones.
+        let a = FROSTED_AMP * curve(dist, 5.0, FROSTED_RATE) * frosted_smooth_depth(smooth) / sc.sqrt();
         let (p, fx, fy) = frosted_field(1.0 / sc, FROSTED_SIGMA * smooth, FROSTED_SAT, false);
         return warp_tiled(img, p, &fx, &fy, if e.flag("invert") { -a } else { a }, 0.0);
     }
@@ -67,15 +72,24 @@ pub(super) fn glass(e: &GalleryEffect, img: &Img) -> Img {
     displace(img, t.plane(), sc, smooth, s)
 }
 
+/// The depth of the reference's frosted glass relative to the default smoothness, 3: the
+/// smoother the bumps, the flatter they are (about 4 times deeper at 1, nearly flat at 15).
+fn frosted_smooth_depth(smooth: f64) -> f64 {
+    const C: f64 = 5.0 / 3.0;
+    (C + 9.0) / (C + smooth * smooth)
+}
+
 /// Ocean Ripple: Glass through a magnified frosted texture, always smoothed.
 pub(super) fn ocean_ripple(e: &GalleryEffect, img: &Img) -> Img {
     let size = param(e, "rippleSize", 1.0, 15.0);
     let mag = param(e, "rippleMagnitude", 0.0, 20.0);
     let texel = 1.0 + 0.1 * (size - 1.0);
     if !px8::defects() {
-        let a = RIPPLE_AMP * strength(mag, 9.0);
+        // The ripples' depth grows with their size (1.8 px texels at the default size, 9); the
+        // magnification does not follow it.
+        let k = RIPPLE_AMP * strength(mag, 9.0);
         let (p, fx, fy) = frosted_field(texel, RIPPLE_SIGMA * texel, RIPPLE_SAT, true);
-        return warp_tiled(img, p, &fx, &fy, a, RIPPLE_MARGIN * a);
+        return warp_tiled(img, p, &fx, &fy, k * texel / 1.8, RIPPLE_ZOOM * k * ripple_zoom_size(size));
     }
     // The spec: the forward texel gradient, clamped, smoothed and scaled.
     let sc = 1.0 / texel;
@@ -83,9 +97,20 @@ pub(super) fn ocean_ripple(e: &GalleryEffect, img: &Img) -> Img {
     displace(img, Texture::Frosted.plane(), sc, 3.5 / sc, s)
 }
 
+/// The reference's magnification relative to the default ripple size (measured 1.25 at size 1,
+/// 1 at 9 and 0.45 at 15).
+fn ripple_zoom_size(size: f64) -> f64 {
+    (1.2424 + 0.0119 * size - 0.004315 * size * size).max(0.0)
+}
+
 /// The exponential strength curve of a 0–20 slider, 1 at `at`.
 fn strength(v: f64, at: f64) -> f64 {
-    ((0.155 * v).exp() - 1.0) / ((0.155 * at).exp() - 1.0)
+    curve(v, at, 0.155)
+}
+
+/// `(e^(rate·v) − 1) / (e^(rate·at) − 1)`: 0 at 0, 1 at `at`.
+fn curve(v: f64, at: f64, rate: f64) -> f64 {
+    ((rate * v).exp() - 1.0) / ((rate * at).exp() - 1.0)
 }
 
 /// One period of the frosted displacement field: the frosted texture over texels of `texel`
@@ -141,13 +166,12 @@ fn blur_wrap(f: &[f64], p: usize, sigma: f64, rows: bool) -> Vec<f64> {
     out
 }
 
-/// Each pixel takes the source pixel (nearest) at `margin + x·k + a·f(x)`, where `f` is the
-/// tiled `p × p` field and `k = 1 − 2·margin/min(w, h)` scales the image into the margin.
-fn warp_tiled(img: &Img, p: usize, fx: &[f32], fy: &[f32], a: f64, margin: f64) -> Img {
+/// Each pixel takes the source pixel (nearest) at `c·z + x·(1 − z) + a·f(x)`, where `f` is the
+/// tiled `p × p` field, `z` the magnification and `c` = `RIPPLE_CENTER` its fixed point.
+fn warp_tiled(img: &Img, p: usize, fx: &[f32], fy: &[f32], a: f64, zoom: f64) -> Img {
     let (w, h) = (img.w, img.h);
-    let side = w.min(h) as f64;
-    let m = if margin.is_finite() { margin.abs().min(side / 4.0) } else { 0.0 };
-    let k = 1.0 - 2.0 * m / side.max(1.0);
+    let z = if zoom.is_finite() { zoom.clamp(0.0, 0.5) } else { 0.0 };
+    let (m, k) = (RIPPLE_CENTER * z, 1.0 - z);
     let (wm, hm) = (w.saturating_sub(1) as f64, h.saturating_sub(1) as f64);
     let mut out = img.clone();
     par_rows(&mut out.d, w, 4, |y, row| {
@@ -234,7 +258,10 @@ pub(super) fn glowing_edges(e: &GalleryEffect, img: &Img) -> Img {
         return out;
     }
     // The reference: the raw magnitude times b/6 (fitted on its render), no widening at width 2.
-    let mut edges = sobel_mag(&a, |m| px8::clamp255(m * b / 6.0));
+    // Its edges are half as bright at width 1, 20 % brighter at 14 and 30 % brighter with no
+    // smoothing (measured on its renders; linear in between).
+    let gain = b / 6.0 * glow_gain(width as f64, param(e, "smoothness", 1.0, 15.0));
+    let mut edges = sobel_mag(&a, |m| px8::clamp255(m * gain));
     edges.d.chunks_exact_mut(4).for_each(|p| p[3] = 255);
     let f = px8::clipped_rank_rgb(&edges, width.saturating_sub(1) >> 1, Clipped::Max);
     let mut out = img.clone();
@@ -242,6 +269,12 @@ pub(super) fn glowing_edges(e: &GalleryEffect, img: &Img) -> Img {
         o[..3].copy_from_slice(&f[..3]);
     }
     out
+}
+
+/// The reference's edge gain relative to the defaults (width 2, smoothness 5).
+fn glow_gain(width: f64, smooth: f64) -> f64 {
+    let w = if width < 2.0 { 0.5 + 0.5 * (width - 1.0).max(0.0) } else { 1.0 + 0.2 * (width - 2.0) / 12.0 };
+    w * (1.0 + 0.075 * (5.0 - smooth).max(0.0))
 }
 
 /// Per-channel Sobel gradient magnitude (un-normalised, clamped edges) through `f`; alpha kept.
@@ -286,6 +319,27 @@ mod tests {
         let mut o = GalleryEffect::new(F::OceanRipple);
         o.set("rippleMagnitude", 0.0);
         assert_eq!(super::ocean_ripple(&o, &img), img);
+    }
+
+    #[test]
+    fn frosted_glass_flattens_as_it_smooths() {
+        let img = image(80, 64);
+        let moved = |smooth: f32| {
+            let mut g = GalleryEffect::new(F::Glass);
+            g.set_choice("texture", "frosted");
+            g.set("smoothness", smooth);
+            let out = super::glass(&g, &img);
+            out.d.iter().zip(&img.d).filter(|(a, b)| a != b).count()
+        };
+        let (sharp, default, smooth) = (moved(1.0), moved(3.0), moved(15.0));
+        assert!(sharp > default && default > smooth, "{sharp} {default} {smooth}");
+    }
+
+    #[test]
+    fn ocean_ripple_magnifies_less_for_larger_ripples() {
+        assert!((super::ripple_zoom_size(9.0) - 1.0).abs() < 1e-3);
+        assert!(super::ripple_zoom_size(1.0) > 1.0 && super::ripple_zoom_size(15.0) < 1.0);
+        assert!((1..=15).all(|s| super::ripple_zoom_size(s as f64) >= 0.0));
     }
 
     #[test]

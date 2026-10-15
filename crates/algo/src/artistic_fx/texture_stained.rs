@@ -11,7 +11,7 @@ pub(super) fn stained_glass(e: &GalleryEffect, img: &Img) -> Img {
     let b = param(e, "borderThickness", 1.0, 20.0);
     let fill = px8::rgb8(e.foreground).map(|v| v as f64);
     let margin = b * 0.5;
-    let cell = px8::rhu(c * 2.2).max(1.0);
+    let cell = if px8::defects() { px8::rhu(c * 2.2).max(1.0) } else { cell_size(c) };
     let kappa = 1.0 / cell;
     let nc = (w as f64 * kappa).floor() as usize + 1;
     let nr = (h as f64 * kappa).floor() as usize + 1;
@@ -34,20 +34,20 @@ pub(super) fn stained_glass(e: &GalleryEffect, img: &Img) -> Img {
         }
     }
     let total = sites.len() as i64;
-    // Light Intensity: a light through the middle of the image that raises the contrast and
-    // the saturation and darkens the rim (the spec ignored it).
+    // Light Intensity: white light added to the glass in a cone around the image centre (the
+    // spec ignored it).
     let li = if px8::defects() { 0.0 } else { param(e, "lightIntensity", 0.0, 10.0) };
     let (cx, cy) = (w as f64 * 0.5, h as f64 * 0.5);
-    let half_diag = (cx * cx + cy * cy).sqrt().max(1.0);
-    // The light added at a point.
+    let spot = (cx * cx + cy * cy).sqrt().max(1.0) * LIGHT_RADIUS;
+    let (l1, l2) = (li * LIGHT_LINEAR, li * LIGHT_SQUARE);
     let light = |px: f64, py: f64| -> f64 {
         if li == 0.0 {
             return 0.0;
         }
-        let r2 = ((px - cx).powi(2) + (py - cy).powi(2)) / (half_diag * half_diag);
-        li * (LIGHT_ADD * (-r2 / (LIGHT_RADIUS * LIGHT_RADIUS)).exp() - LIGHT_RIM)
+        let cone = (1.0 - ((px - cx).powi(2) + (py - cy).powi(2)).sqrt() / spot).max(0.0);
+        cone * (l1 + l2 * cone)
     };
-    let (value_gain, chroma_gain) = (1.0 + li * LIGHT_CONTRAST, 1.0 + li * LIGHT_SATURATION);
+    let (gain, offset) = if px8::defects() { (1.0, 0.0) } else { (GLASS_GAIN, GLASS_OFFSET) };
     let mut out = img.clone();
     par_rows(&mut out.d, w, 4, |y, row| {
         let py = y as f64 + 0.5;
@@ -85,9 +85,10 @@ pub(super) fn stained_glass(e: &GalleryEffect, img: &Img) -> Img {
             }
             let (b2, b3) = (bisector(&sites, n1, n2, px, py), bisector(&sites, n1, n3, px, py));
             let beta = if b2.is_nan() || b3.is_nan() { f64::NAN } else { b2.min(b3) };
-            // Leading as wide as the border thickness says: the reference's covers the same share
-            // of the image, with the same 2- and 3-pixel cores.
-            let mut wt = beta - 0.5 * margin;
+            // The reference's leading: a solid core b − 2 px wide plus a soft pixel each side, so a
+            // thickness of 1 gives a thin grey line, 4 the default 2- and 3-pixel cores and 20
+            // leaves only specks of glass at the default cell size.
+            let mut wt = if px8::defects() { beta - 0.5 * margin } else { beta - (margin - 1.0).max(0.0) };
             if !wt.is_nan() {
                 wt = wt.clamp(0.0, 1.0);
             }
@@ -102,10 +103,9 @@ pub(super) fn stained_glass(e: &GalleryEffect, img: &Img) -> Img {
                 wt = if wt.is_nan() { frame } else { wt.min(frame) };
             }
             let col = sites[n1].2;
-            let value = col[0].max(col[1]).max(col[2]);
-            let lit = value * value_gain + light(px, py);
+            let lit = light(px, py);
             for ch in 0..3 {
-                let c = if li == 0.0 { col[ch] } else { (lit + (col[ch] - value) * chroma_gain).clamp(0.0, 255.0) };
+                let c = if px8::defects() { col[ch] } else { ((col[ch] * gain + offset).clamp(0.0, 255.0) + lit).min(255.0) };
                 row[x * 4 + ch] = px8::clamp255((0.5 + wt * c + (1.0 - wt) * fill[ch]).floor());
             }
         }
@@ -113,16 +113,25 @@ pub(super) fn stained_glass(e: &GalleryEffect, img: &Img) -> Img {
     out
 }
 
-/// Per unit of Light Intensity, fitted on the reference's cells (source-to-output levels by
-/// distance from the centre, on two images of different sizes and aspect ratios): a gain on the
-/// glass's value (its brightest channel) and on each channel's distance below it, plus light in a
-/// Gaussian spot of radius `LIGHT_RADIUS` less a rim darkening, so dark glass goes black towards
-/// the edges. The radius is relative to the half-diagonal: the spot scales with the image.
-const LIGHT_CONTRAST: f64 = 0.058;
-const LIGHT_SATURATION: f64 = 0.020;
-const LIGHT_ADD: f64 = 26.1;
-const LIGHT_RIM: f64 = 7.3;
-const LIGHT_RADIUS: f64 = 0.354;
+/// The reference's glass has more contrast than the source, at every Light Intensity.
+const GLASS_GAIN: f64 = 1.156;
+const GLASS_OFFSET: f64 = -14.0;
+/// Light per unit of Light Intensity, the same on each channel: `cone·(LIGHT_LINEAR +
+/// LIGHT_SQUARE·cone)`, `cone` falling from 1 at the centre to 0 at `LIGHT_RADIUS` half-diagonals.
+/// Fitted on the reference's renders at intensities 0, 3 and 10, which share their cells: outside
+/// the cone they are identical, and inside the glass gains the same levels whatever its colour
+/// (the leading stays black).
+const LIGHT_LINEAR: f64 = 29.7;
+const LIGHT_SQUARE: f64 = -5.8;
+const LIGHT_RADIUS: f64 = 0.5625;
+
+/// The distance between cell sites for Cell Size `c`, fitted on the reference's cell counts: 6 px
+/// at 2, 22 at the default 10, and growing much faster towards the top of the range (at 50 a
+/// 1536 × 2048 image holds four cells).
+fn cell_size(c: f64) -> f64 {
+    (2.4 + 1.8 * c + 1.37e-4 * c.powi(4)).max(1.0)
+}
+
 /// How far each site is jittered, in cells (the spec's 0.5).
 const SITE_JITTER: f64 = 0.6;
 /// How far into the frame the reference's soft inner pixel starts.

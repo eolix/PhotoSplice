@@ -40,9 +40,24 @@ pub(super) fn grain(e: &GalleryEffect, img: &Img) -> Img {
     let c = param(e, "contrast", 0.0, 100.0).trunc();
     // Contrast: as set for the first four looks, halved around 50 for the others.
     let cc = if matches!(kind, Kind::Regular | Kind::Soft | Kind::Sprinkles | Kind::Clumped) { c } else { (c as i64 >> 1) as f64 + 50.0 };
-    let lut = px8::bc_lut(if kind == Kind::Speckle { 75.0 } else { 50.0 }, cc);
+    let b = if kind == Kind::Speckle { 75.0 } else { 50.0 };
+    let spec_only = px8::defects();
+    let lut = if spec_only { px8::bc_lut(b, cc) } else { bc_lut_exact(b, cc) };
     let g = Grain { kind, i, cc, lut, fg: px8::rgb8(e.foreground), bg: px8::rgb8(e.background) };
-    if px8::defects() { spec(&g, e, img) } else { reference(&g, e, img) }
+    if spec_only { spec(&g, e, img) } else { reference(&g, e, img) }
+}
+
+/// The brightness/contrast line of [`px8::bc_lut`] without its fixed-point truncations (which
+/// darken it by about a level at low contrast), rounded: the reference's tones.
+fn bc_lut_exact(b: f64, c: f64) -> [u8; 256] {
+    let b2 = if b > 5.0 { (100.0 - b.max(4.0)) / 100.0 } else { 0.95 };
+    let c2 = if c != 100.0 { c.max(4.0) / 100.0 } else { 0.9995 };
+    let slope = if c2 > 0.5 { 0.5 / (1.0 - c2) } else { 2.0 * c2 };
+    let mut lut = [0u8; 256];
+    for (v, l) in lut.iter_mut().enumerate() {
+        *l = px8::sat(256.0 * (0.5 - b2 * slope) + slope * v as f64);
+    }
+    lut
 }
 
 /// The settings both renderers share.

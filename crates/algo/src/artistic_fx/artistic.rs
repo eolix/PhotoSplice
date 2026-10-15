@@ -52,12 +52,31 @@ fn light_kernel(e: &GalleryEffect) -> usize {
     LIGHTS.iter().position(|n| *n == e.choice("light")).unwrap_or(0) + 1
 }
 
-/// `img` with its HSV value channel replaced by `v`.
+/// `img` with its HSV value channel replaced by `v`. The spec goes through byte HSV, which
+/// drifts the hue; the reference keeps hue and saturation, so each colour scales by `v / max`
+/// (its middle channel rounds a little up, its smallest a little down).
 fn with_value(img: &Img, v: &[u8]) -> Img {
     let mut out = img.clone();
-    px8::to_hsv(&mut out);
-    out.set_plane(2, v);
-    px8::from_hsv(&mut out);
+    if px8::defects() {
+        px8::to_hsv(&mut out);
+        out.set_plane(2, v);
+        px8::from_hsv(&mut out);
+        return out;
+    }
+    par_px(&mut out, |i, px| {
+        let nv = v.get(i).copied().unwrap_or(0);
+        let mx = px[0].max(px[1]).max(px[2]);
+        let mn = px[0].min(px[1]).min(px[2]);
+        let k = if mx == 0 { 0.0 } else { nv as f64 / mx as f64 };
+        for c in &mut px[..3] {
+            *c = if *c == mx {
+                nv
+            } else {
+                let bias = if *c == mn { -0.4 } else { 0.8 };
+                px8::clamp255((*c as f64 * k + bias).floor()).min(nv)
+            };
+        }
+    });
     out
 }
 
@@ -248,14 +267,59 @@ fn neon_glow(e: &GalleryEffect, img: &Img) -> Img {
 }
 
 /// Paint Daubs: a per-channel percentile filter (fraction by brush type) with a fixed 3×3
-/// sharpen blended back in by Sharpness.
+/// sharpen blended back in by Sharpness. In the reference the brush type sets more than the
+/// fraction: the rough and sparkle brushes rank a lightly noised copy and soften it (mottled,
+/// lighter or darker daubs), Dark Rough with a smaller disc; Light Rough and Sparkle add coloured
+/// glints along edges; Wide Blurry barely sharpens.
 fn paint_daubs(e: &GalleryEffect, img: &Img) -> Img {
     const BRUSHES: [&str; 6] = ["simple", "lightRough", "darkRough", "wideSharp", "wideBlurry", "sparkle"];
-    let r = px8::rhu(num(e, "brushSize", 1.0, 50.0) * 0.5) as usize;
+    /// Per brush type: percentile, disc radius factor, noise amplitude, edge glint, sharpen factor.
+    const LOOK: [(f64, f64, f64, f64, f64); 6] = [
+        (0.78, 1.0, 0.0, 0.0, 1.0),
+        (0.97, 1.0, 10.0, 0.15, 1.0),
+        (0.02, 0.5, 10.0, 0.0, 1.0),
+        (0.78, 1.0, 0.0, 0.0, 1.0),
+        (0.78, 1.0, 0.0, 0.0, 0.25),
+        (0.9, 1.0, 10.0, 0.3, 1.0),
+    ];
+    let size = num(e, "brushSize", 1.0, 50.0);
     let gain = num(e, "sharpness", 0.0, 40.0) * 0.4;
-    let p = tables::PAINT_DAUBS_PERCENTILE[BRUSHES.iter().position(|b| *b == e.choice("brushType")).unwrap_or(0)];
-    // The spec ranks a square; the reference's daubs are round and a little lighter.
-    let d = if px8::defects() { px8::clipped_rank_rgb(img, r, px8::Clipped::Percentile(p)) } else { disc_percentile_rgb(img, r, p + 0.03) };
+    let ty = BRUSHES.iter().position(|b| *b == e.choice("brushType")).unwrap_or(0);
+    let (d, gain) = if px8::defects() {
+        // The spec ranks a square.
+        let r = px8::rhu(size * 0.5) as usize;
+        (px8::clipped_rank_rgb(img, r, px8::Clipped::Percentile(tables::PAINT_DAUBS_PERCENTILE[ty])), gain)
+    } else {
+        let (p, rk, na, glint, gk) = LOOK[ty];
+        // Bigger brushes rank a little higher; Brush Size 1 leaves the image to the sharpen.
+        let p = (p + 0.03 * (size - 8.0) / 42.0).clamp(0.0, 1.0);
+        let r = ((size * 0.5).trunc() * rk).round() as usize;
+        let d = if na > 0.0 {
+            let mut rng = px8::Rng::new(e.seed());
+            let mut m = img.clone();
+            for px in m.d.chunks_exact_mut(4) {
+                for v in &mut px[..3] {
+                    *v = px8::clamp255(*v as f64 + (rng.next() * 2.0 - 1.0) * na);
+                }
+            }
+            let d = disc_percentile_rgb(&m, r, p).map_rgb(|pl| px8::gauss_u8(pl, img.w, img.h, 0.7, 3));
+            if glint > 0.0 {
+                let edges = px8::sobel_rgb(&d);
+                let mut d = d;
+                for (o, s) in d.d.chunks_exact_mut(4).zip(edges.d.chunks_exact(4)) {
+                    for c in 0..3 {
+                        o[c] = px8::clamp255(o[c] as f64 + glint * (255 - s[c]) as f64);
+                    }
+                }
+                d
+            } else {
+                d
+            }
+        } else {
+            disc_percentile_rgb(img, r, p)
+        };
+        (d, gain * gk)
+    };
     let k = [-0.7, -1.0, -0.7, -1.0, 10.0, -1.0, -0.7, -1.0, -0.7];
     let sum: f64 = k.iter().sum();
     let s = px8::conv3_rgba(&d, &k.map(|v| v / sum), false, false);
@@ -408,7 +472,19 @@ fn rough_pastels(e: &GalleryEffect, img: &Img) -> Img {
         v
     });
     let mut mt = px8::relief(&tex, &vec![0; w * h], w, h, light_kernel(e), relief);
-    px8::scale(&mut mt, 3.0);
+    // Our textures' relief differs from the reference's: at 100 % its burlap shows a little
+    // less, its canvas and brick more, its sandstone much more; scaled up or down by half or
+    // more, they show about 1/1.4 of that.
+    let gain = match e.choice("texture") {
+        _ if px8::defects() => 1.0,
+        "brick" | "canvas" => 1.4,
+        "burlap" => 0.9,
+        "sandstone" => 4.5,
+        _ => 1.0,
+    };
+    let off = (num(e, "scaling", 50.0, 200.0) / 100.0).log2().abs().min(1.0);
+    let gain = if px8::defects() { 1.0 } else { gain * (1.0 - off * (1.0 - 1.0 / 1.4)) };
+    px8::scale(&mut mt, 3.0 * gain);
     let mut out = img.clone();
     px8::blend_mask_rgb(&emb, &mt, img, &mut out);
     keep_alpha(&mut out, img);
@@ -679,6 +755,31 @@ mod tests {
                     v.sort();
                     let t = ((0.5 + p * v.len() as f64) as usize).min(v.len() - 1);
                     assert_eq!(got.d[(y as usize * w + x as usize) * 4], v[t], "r {r} at {x},{y}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_brush_type_and_texture_renders_tiny_images() {
+        let cases = [
+            (F::PaintDaubs, "brushType", ["simple", "lightRough", "darkRough", "wideSharp", "wideBlurry", "sparkle"].as_slice()),
+            (F::RoughPastels, "texture", ["canvas", "brick", "burlap", "sandstone"].as_slice()),
+        ];
+        for (f, key, names) in cases {
+            let Some(r) = render(f) else { panic!("{f:?} has no renderer") };
+            for name in names {
+                for (w, h) in [(0, 0), (1, 1), (2, 3), (9, 7)] {
+                    for v in [f32::NAN, -1e9, 1.0, 1e9] {
+                        let mut e = GalleryEffect::new(f);
+                        for k in ["brushSize", "sharpness", "scaling", "relief", "strokeDetail"] {
+                            e.set(k, v);
+                        }
+                        assert!(e.set_choice(key, name), "{f:?} {name}");
+                        let src = img(w, h);
+                        let out = r(&e, &src);
+                        assert_eq!((out.w, out.h, out.d.len()), (w, h, w * h * 4), "{f:?} {name} {w}x{h} {v}");
+                    }
                 }
             }
         }
