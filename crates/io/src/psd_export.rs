@@ -19,6 +19,10 @@ const PSD_MAX_FILE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 const PSD_ESTIMATE_FIXED_OVERHEAD: u64 = 1024 * 1024;
 const PSD_ESTIMATE_LAYER_OVERHEAD: u64 = 64 * 1024;
 
+/// Where an imported file's global layer mask info rides in `Metadata::psd_global_blocks` (no
+/// tagged block has this key; export writes it back as the global layer mask, not a block).
+pub(crate) const GLOBAL_MASK_KEY: [u8; 4] = *b"\0GLM";
+
 /// Options for [`document_to_psd_with`].
 #[derive(Debug, Clone)]
 pub struct PsdExportOptions {
@@ -1856,7 +1860,7 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     }
     // Photoshop writes the grid and guides resource in every file, guides or not.
     resources.push(ImageResource::new(1032, guides_resource(doc)));
-    // Alpha channel names, ids and display options. Photoshop lists the merged transparency
+    // Alpha channel names, ids and display options. Reference lists the merged transparency
     // first ("Transparency", id 0), then the alpha and spot channels.
     if has_alpha || !extra.is_empty() {
         let names: Vec<&str> = has_alpha.then_some(photosplice_psd::resources::TRANSPARENCY_NAME).into_iter().chain(extra.iter().map(|a| a.name.as_str())).collect();
@@ -1865,6 +1869,10 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         let old = doc.metadata.psd_resources.iter().find(|r| r.0 == ids::ALPHA_IDS).map(|r| r.2.as_slice());
         resources.push(ImageResource::new(ids::ALPHA_IDS, alpha_ids_resource(old, has_alpha, names.len())));
         resources.push(ImageResource::new(crate::channel_map::DISPLAY_INFO, crate::channel_map::display_info(has_alpha, &extra)));
+        // Files that also carried the older form get it back, from the same channels.
+        if doc.metadata.psd_resources.iter().any(|r| r.0 == crate::channel_map::DISPLAY_INFO_OLD) {
+            resources.push(ImageResource::new(crate::channel_map::DISPLAY_INFO_OLD, crate::channel_map::display_info_old(has_alpha, &extra)));
+        }
     }
     if let Some(id) = quick_mask_id {
         let mut data = id.to_be_bytes().to_vec();
@@ -1885,6 +1893,9 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     }
     let mut global_blocks = Vec::new();
     for (sig, key, data) in &ex.smart.finish(crate::annotations_map::export_blocks(doc, crate::pattern_map::export_global_blocks(doc))) {
+        if *key == GLOBAL_MASK_KEY {
+            continue;
+        }
         // Txt2 overrides the type layers in Photoshop: updated for edits, else dropped (rebuilt).
         let data = if key == b"Txt2" {
             match ex.text.txt2_out(data, ex.dpi) {
@@ -1896,7 +1907,7 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         };
         let mut tb = TaggedBlock::new(*key, data.to_vec());
         tb.signature = block_signature(*sig, version);
-        // Photoshop pads document-level (global) blocks to a multiple of 4, and readers such as
+        // Reference pads document-level (global) blocks to a multiple of 4, and readers such as
         // psd-tools step to the next block that way: an even pad after `CAI ` (77 bytes)
         // misaligned every block after it (#200).
         tb.padding = Some(vec![0; (4 - data.len() % 4) % 4]);
@@ -1918,7 +1929,7 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         }
         // The layer id seed is regenerated from the ids written (see `layer_state_resources`), the
         // alpha ids with the channel names; the resolution is written above.
-        if *id == ids::DOCUMENT_IDS_SEED || *id == ids::ALPHA_IDS || *id == ids::RESOLUTION_INFO {
+        if *id == ids::DOCUMENT_IDS_SEED || *id == ids::ALPHA_IDS || *id == ids::RESOLUTION_INFO || *id == crate::channel_map::DISPLAY_INFO_OLD {
             continue;
         }
         // Measurement scale / count resources: only while they still describe the document.
@@ -1979,7 +1990,10 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         resources,
         layer_info,
         layer_info_placement: placement,
-        global_layer_mask: (has_layers || !global_blocks.is_empty()).then(GlobalLayerMask::default),
+        global_layer_mask: (has_layers || !global_blocks.is_empty()).then(|| {
+            let kept = doc.metadata.psd_global_blocks.iter().find(|(_, k, _)| *k == GLOBAL_MASK_KEY);
+            kept.map_or_else(GlobalLayerMask::default, |(_, _, d)| GlobalLayerMask { data: d.to_vec() })
+        }),
         global_blocks,
         layer_mask_trailing: Vec::new(),
         image_data,

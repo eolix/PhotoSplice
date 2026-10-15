@@ -248,19 +248,26 @@ impl PsdFile {
         if self.header.channels <= color {
             return false;
         }
+        // The Reference lists the merged transparency first among the alpha channel names, as
+        // "Transparency". A name list that covers every extra channel and doesn't start with it
+        // means they are all alpha / spot channels (psd-tools cmyk-alpha-spot.psd: a spot channel
+        // was taken for transparency).
+        let extra = usize::from(self.header.channels - color);
+        let names = self.resource(crate::resources::ids::UNICODE_ALPHA_NAMES).map(|r| crate::resources::unicode_names(&r.data));
+        let named = names.as_ref().filter(|n| n.len() >= extra).map(|n| n.first().is_some_and(|n| n == crate::resources::TRANSPARENCY_NAME));
+        // The name is localised ("透明部分" from a Japanese Reference); its alpha id is 0 in any
+        // language (user channels get other ids).
+        let ids = self.resource(crate::resources::ids::ALPHA_IDS).map(|r| r.data.chunks_exact(4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])).collect::<Vec<_>>());
+        let named = match ids {
+            Some(ids) if ids.len() >= extra && ids.first() == Some(&0) => Some(true),
+            _ => named,
+        };
         match &self.layer_info {
-            Some(li) => li.merged_alpha,
-            // No layer info to say so: Photoshop lists the merged transparency first among the
-            // alpha channel names, as "Transparency". A name list that covers every extra
-            // channel and doesn't start with it means they are all alpha / spot channels
-            // (psd-tools cmyk-alpha-spot.psd: a spot channel was taken for transparency).
-            None => {
-                let extra = usize::from(self.header.channels - color);
-                match self.resource(crate::resources::ids::UNICODE_ALPHA_NAMES).map(|r| crate::resources::unicode_names(&r.data)) {
-                    Some(names) if names.len() >= extra => names.first().is_some_and(|n| n == crate::resources::TRANSPARENCY_NAME),
-                    _ => true,
-                }
-            }
+            // A positive layer count says there is none, but a name list that starts with it
+            // says otherwise (psd-tools transparentbg.psd; it was read as an alpha channel named
+            // "Transparency" and written back twice).
+            Some(li) => li.merged_alpha || named == Some(true),
+            None => named.unwrap_or(true),
         }
     }
 
