@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build, sign and (optionally) notarize the macOS release artifacts:
 #
-#   $DIST/photosuite-<version>-macos-<arch>.dmg          PhotoSuite.app on a drag-to-Applications DMG
+#   $DIST/photosplice-<version>-macos-<arch>.dmg          PhotoSplice.app on a drag-to-Applications DMG
 #
 # Usage: packaging/macos/package.sh [--arch universal|aarch64|x86_64] [--skip-build]
 #
@@ -39,8 +39,8 @@ export MACOSX_DEPLOYMENT_TARGET=11.0
 IDENTITY="${MACOS_SIGN_IDENTITY:--}"
 SHORT_VERSION="${VERSION%%-*}"
 WORK="$CARGO_TARGET_DIR/macos-package"
-APP="$WORK/PhotoSuite.app"
-DMG="$DIST/photosuite-$VERSION-macos-$ARCH.dmg"
+APP="$WORK/PhotoSplice.app"
+DMG="$DIST/photosplice-$VERSION-macos-$ARCH.dmg"
 
 NOTARIZE=0
 NOTARY_AUTH=()
@@ -56,18 +56,18 @@ else
   warn "macOS: no notarization credentials (API key or Apple ID); signed but not notarized"
 fi
 
-echo "==> PhotoSuite $VERSION for macOS ($ARCH), identity: $IDENTITY, notarize: $NOTARIZE"
+echo "==> PhotoSplice $VERSION for macOS ($ARCH), identity: $IDENTITY, notarize: $NOTARIZE"
 
 # ---- build -------------------------------------------------------------------------------------
 if [ "$SKIP_BUILD" = 0 ]; then
   args=()
   for t in "${TARGETS[@]}"; do args+=(--target "$t"); done
-  (cd "$ROOT" && cargo build --release --locked -p photosuite "${args[@]}")
+  (cd "$ROOT" && cargo build --release --locked -p photosplice "${args[@]}")
 fi
 
 rm -rf "$WORK"
 mkdir -p "$WORK/bin"
-for bin in photosuite; do
+for bin in photosplice; do
   inputs=()
   for t in "${TARGETS[@]}"; do inputs+=("$CARGO_TARGET_DIR/$t/release/$bin"); done
   lipo -create -output "$WORK/bin/$bin" "${inputs[@]}"
@@ -100,30 +100,30 @@ notarize() {
   fi
 }
 
-# ---- PhotoSuite.app ----------------------------------------------------------------------------
+# ---- PhotoSplice.app ----------------------------------------------------------------------------
 echo "==> assembling $APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 # Executable and icon carry the display name (CFBundleExecutable / CFBundleIconFile).
-cp "$WORK/bin/photosuite" "$APP/Contents/MacOS/PhotoSuite"
-cp "$ROOT/assets/app-icon/photosuite.icns" "$APP/Contents/Resources/PhotoSuite.icns"
+cp "$WORK/bin/photosplice" "$APP/Contents/MacOS/PhotoSplice"
+cp "$ROOT/assets/app-icon/photosplice.icns" "$APP/Contents/Resources/PhotoSplice.icns"
 copy_resources "$APP/Contents/Resources/resources"
 # NOTICE and the licences travel with the app (Apache-2.0 §4(d)).
 copy_docs "$APP/Contents/Resources"
 sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHORT_VERSION@/$SHORT_VERSION/g" \
-  -e "s/@BUILD_SHA@/${PHOTOSUITE_BUILD_SHA:-unknown}/g" \
+  -e "s/@BUILD_SHA@/${PHOTOSPLICE_BUILD_SHA:-unknown}/g" \
   "$HERE/Info.plist.in" >"$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist"
 printf 'APPL????' >"$APP/Contents/PkgInfo"
 
 # Sign inside-out: nested code first, then the bundle itself (no --deep on the final signature).
 # Today the only nested code is the main executable; frameworks/helpers would be signed here too.
-sign --options runtime --entitlements "$HERE/entitlements.plist" "$APP/Contents/MacOS/PhotoSuite"
+sign --options runtime --entitlements "$HERE/entitlements.plist" "$APP/Contents/MacOS/PhotoSplice"
 sign --options runtime --entitlements "$HERE/entitlements.plist" "$APP"
 codesign --verify --strict --deep --verbose=2 "$APP"
 
 if [ "$NOTARIZE" = 1 ]; then
-  ditto -c -k --keepParent "$APP" "$WORK/PhotoSuite-notarize.zip"
-  notarize "$WORK/PhotoSuite-notarize.zip"
+  ditto -c -k --keepParent "$APP" "$WORK/PhotoSplice-notarize.zip"
+  notarize "$WORK/PhotoSplice-notarize.zip"
   xcrun stapler staple "$APP"
   xcrun stapler validate "$APP"
   spctl --assess --type execute -vvv "$APP"
@@ -133,12 +133,12 @@ fi
 echo "==> building $DMG"
 STAGE="$WORK/dmg"
 mkdir -p "$STAGE"
-ditto "$APP" "$STAGE/PhotoSuite.app"
+ditto "$APP" "$STAGE/PhotoSplice.app"
 ln -s /Applications "$STAGE/Applications"
 rm -f "$DMG" "$WORK/raw.dmg"
 # makehybrid + convert builds the image without attaching a device, unlike `create -srcfolder`,
 # which is flaky on CI runners ("Resource busy") and hangs in sandboxed sessions.
-hdiutil makehybrid -hfs -hfs-volume-name "PhotoSuite $VERSION" -hfs-openfolder "$STAGE" -o "$WORK/raw.dmg" "$STAGE"
+hdiutil makehybrid -hfs -hfs-volume-name "PhotoSplice $VERSION" -hfs-openfolder "$STAGE" -o "$WORK/raw.dmg" "$STAGE"
 hdiutil convert "$WORK/raw.dmg" -format UDZO -imagekey zlib-level=9 -o "$DMG"
 rm -f "$WORK/raw.dmg"
 sign "$DMG"
@@ -150,6 +150,6 @@ if [ "$NOTARIZE" = 1 ]; then
   spctl --assess --type open --context context:primary-signature -vvv "$DMG"
 fi
 
-"$WORK/bin/photosuite" --version
+"$WORK/bin/photosplice" --version
 echo "==> done"
 ls -lh "$DMG"

@@ -1,25 +1,25 @@
 //! Vector masks on the GPU: the planner samples the layer's combined mask (pixel mask × the
 //! rasterised path, `compose::masks::combined_mask`); results must match the CPU compositor.
 
-use photosuite_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
-use photosuite_doc::{Adjustment, Document, Effect, Layer, LayerContent, LayerMask, Path, Size, Subpath, VectorMask};
-use photosuite_geom::Rect;
+use photosplice_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
+use photosplice_doc::{Adjustment, Document, Effect, Layer, LayerContent, LayerMask, Path, Size, Subpath, VectorMask};
+use photosplice_geom::Rect;
 
-fn gpu() -> Option<(wgpu::Device, wgpu::Queue, photosuite_gpu::Compositor)> {
+fn gpu() -> Option<(wgpu::Device, wgpu::Queue, photosplice_gpu::Compositor)> {
     let instance = wgpu::Instance::default();
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
     // Exact comparison needs 32-bit float targets (see parity.rs); skip on adapters without them.
-    if photosuite_gpu::Compositor::preferred_acc_format(&adapter) != wgpu::TextureFormat::Rgba32Float {
+    if photosplice_gpu::Compositor::preferred_acc_format(&adapter) != wgpu::TextureFormat::Rgba32Float {
         return None;
     }
-    let comp = photosuite_gpu::Compositor::try_new_with_format(&device, wgpu::TextureFormat::Rgba32Float).ok()?;
+    let comp = photosplice_gpu::Compositor::try_new_with_format(&device, wgpu::TextureFormat::Rgba32Float).ok()?;
     Some((device, queue, comp))
 }
 
-fn check(g: &mut (wgpu::Device, wgpu::Queue, photosuite_gpu::Compositor), d: &Document, what: &str) {
-    let cpu = photosuite_compose::flatten(d);
-    let out = photosuite_gpu::render_to_vec(&mut g.2, &g.0, &g.1, d, d.bounds()).unwrap_or_else(|e| panic!("{what}: {e}"));
+fn check(g: &mut (wgpu::Device, wgpu::Queue, photosplice_gpu::Compositor), d: &Document, what: &str) {
+    let cpu = photosplice_compose::flatten(d);
+    let out = photosplice_gpu::render_to_vec(&mut g.2, &g.0, &g.1, d, d.bounds()).unwrap_or_else(|e| panic!("{what}: {e}"));
     let worst = cpu
         .px
         .iter()
@@ -39,7 +39,7 @@ fn tri(inverted: bool, density: f32) -> VectorMask {
 
 fn painted(name: &str, fmt: PixelFormat, rgba: [f32; 4]) -> Layer {
     let mut l = Layer::raster(name, fmt);
-    l.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 44, 34), &photosuite_raster::from_rgba(&fmt, rgba));
+    l.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 44, 34), &photosplice_raster::from_rgba(&fmt, rgba));
     l
 }
 
@@ -73,8 +73,8 @@ fn vector_masks_match_the_cpu() {
             adj.vector_mask = Some(tri(inverted, density));
             d.layers.push(adj);
             let mut fx = painted("fx", fmt, [0.2, 0.8, 0.3, 1.0]);
-            fx.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 44, 34), &photosuite_raster::from_rgba(&fmt, [0.0; 4]));
-            fx.surface_mut().unwrap().fill_rect(Rect::new(8, 8, 30, 26), &photosuite_raster::from_rgba(&fmt, [0.2, 0.8, 0.3, 1.0]));
+            fx.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 44, 34), &photosplice_raster::from_rgba(&fmt, [0.0; 4]));
+            fx.surface_mut().unwrap().fill_rect(Rect::new(8, 8, 30, 26), &photosplice_raster::from_rgba(&fmt, [0.2, 0.8, 0.3, 1.0]));
             fx.vector_mask = Some(tri(inverted, density));
             fx.effects.items = vec![Effect::default_drop_shadow()];
             d.layers.push(fx);

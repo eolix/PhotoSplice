@@ -1,6 +1,6 @@
 [package]
-name = "photosuite-plugins"
-description = "Sandboxed WebAssembly filter plug-ins: a resource-limited wasmi host for the PhotoSuite plug-in ABI"
+name = "photosplice-plugins"
+description = "Sandboxed WebAssembly filter plug-ins: a resource-limited wasmi host for the PhotoSplice plug-in ABI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,9 +10,9 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-photosuite-geom = { workspace = true }
-photosuite-color = { workspace = true }
-photosuite-raster = { workspace = true }
+photosplice-geom = { workspace = true }
+photosplice-color = { workspace = true }
+photosplice-raster = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use photosuite_doc::{Pattern, Rect};
+use photosplice_doc::{Pattern, Rect};
 
 pub(crate) const PREPARED_PATTERN_BYTES: usize = 64 << 20;
 const MAX_PREPARED_PATTERNS: usize = 64;
@@ -36,7 +36,7 @@ impl<'a> PreparedPatterns<'a> {
     }
 
     pub(crate) fn get(&self, id: &str, name: &str) -> Option<Arc<Tile>> {
-        let p = photosuite_doc::pattern::find(self.patterns, id, name)?;
+        let p = photosplice_doc::pattern::find(self.patterns, id, name)?;
         if p.is_empty() {
             return None;
         }
@@ -198,7 +198,7 @@ pub fn render(tile: &Tile, place: &Placement, rect: Rect) -> Vec<[f32; 4]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_doc::{PixelFormat, Surface};
+    use photosplice_doc::{PixelFormat, Surface};
 
     fn checker() -> Pattern {
         let mut s = Surface::new(PixelFormat::RGBA8);

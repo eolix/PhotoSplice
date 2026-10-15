@@ -1,12 +1,12 @@
-//! Flat raster formats via `photosuite-codecs`.
+//! Flat raster formats via `photosplice-codecs`.
 
 use std::sync::Arc;
 
-use photosuite_codecs::{self as codecs, ChannelLayout, Format, Image, SampleType as CSample};
-use photosuite_color::{BlendMode, ColorMode, PixelFormat, SampleType};
-use photosuite_doc::{Document, Layer, LayerContent};
-use photosuite_geom::{Rect, Size, TILE_SIZE};
-use photosuite_raster::Surface;
+use photosplice_codecs::{self as codecs, ChannelLayout, Format, Image, SampleType as CSample};
+use photosplice_color::{BlendMode, ColorMode, PixelFormat, SampleType};
+use photosplice_doc::{Document, Layer, LayerContent};
+use photosplice_geom::{Rect, Size, TILE_SIZE};
+use photosplice_raster::Surface;
 
 use crate::{ExportOptions, ExportResult, ImportResult, IoError};
 
@@ -25,7 +25,7 @@ pub fn import_flat(name: &str, bytes: &[u8]) -> Result<ImportResult, IoError> {
     // stated otherwise): tag them linear sRGB so they display and convert correctly.
     let d = &mut r.document;
     if d.icc_profile.is_none() && d.mode == ColorMode::Rgb && matches!(codecs::detect(bytes), Some(Format::OpenExr | Format::Hdr)) {
-        d.icc_profile = Some(photosuite_cms::Builtin::LinearSrgb.profile().to_bytes());
+        d.icc_profile = Some(photosplice_cms::Builtin::LinearSrgb.profile().to_bytes());
     }
     Ok(r)
 }
@@ -118,8 +118,8 @@ pub(crate) fn single_layer(doc: &Document) -> Option<&Surface> {
         && l.effects.items.is_empty()
         && l.effects.psd_raw.is_none()
         && matches!(l.blend, BlendMode::Normal | BlendMode::PassThrough)
-        && photosuite_compose::channel_weights(l, doc.mode).is_none()
-        && !photosuite_compose::blend_if_active(l, doc.mode);
+        && photosplice_compose::channel_weights(l, doc.mode).is_none()
+        && !photosplice_compose::blend_if_active(l, doc.mode);
     match (&l.content, ok) {
         (LayerContent::Raster(s), true) if s.format() == doc.pixel_format() => Some(s),
         _ => None,
@@ -187,7 +187,7 @@ pub fn document_to_image(doc: &Document, warnings: &mut Vec<String>) -> Result<I
             // The compositor renders CMYK/Lab documents in sRGB (CMYK through the built-in
             // profile), so the file is tagged sRGB.
             warnings.push(format!("{:?} composite written as sRGB RGB (colour-managed conversion)", fmt.mode));
-            icc = Some(photosuite_cms::Builtin::Srgb.profile().to_bytes().to_vec());
+            icc = Some(photosplice_cms::Builtin::Srgb.profile().to_bytes().to_vec());
         }
         let cs = csample(fmt.sample);
         let colors = if gray { 1 } else { 3 };
@@ -195,7 +195,7 @@ pub fn document_to_image(doc: &Document, warnings: &mut Vec<String>) -> Result<I
         // is dropped afterwards, in place, when every pixel turned out opaque.
         let mut data = try_buffer(n, (colors + 1) * cs.bytes())?;
         let mut opaque = true;
-        let _ = photosuite_compose::render_bands(doc, canvas, 0, |band| -> Result<(), ()> {
+        let _ = photosplice_compose::render_bands(doc, canvas, 0, |band| -> Result<(), ()> {
             opaque &= band.px.iter().all(|p| p[3] >= 1.0);
             let parts = crate::pixels::par_map(crate::pixels::bands(band.px.len()), |range| {
                 let mut out = Vec::with_capacity(range.len() * (colors + 1) * cs.bytes());
@@ -209,7 +209,7 @@ pub fn document_to_image(doc: &Document, warnings: &mut Vec<String>) -> Result<I
                 };
                 for p in &band.px[range] {
                     if gray {
-                        put(photosuite_color::convert::rgb_to_gray([p[0], p[1], p[2]]));
+                        put(photosplice_color::convert::rgb_to_gray([p[0], p[1], p[2]]));
                     } else {
                         put(p[0]);
                         put(p[1]);
@@ -264,9 +264,9 @@ fn opaque_surface(s: &Surface, r: Rect) -> bool {
     let fmt = s.format();
     let (ch, bps) = (fmt.channels(), fmt.sample.bytes());
     let a = ch - 1;
-    let alpha_ok = |px: &[u8]| photosuite_color::read_sample(px, fmt.sample, a) >= 1.0;
+    let alpha_ok = |px: &[u8]| photosplice_color::read_sample(px, fmt.sample, a) >= 1.0;
     let mut default = vec![0u8; ch * bps];
-    photosuite_raster::encode_pixel(&fmt, &s.default_pixel(), &mut default);
+    photosplice_raster::encode_pixel(&fmt, &s.default_pixel(), &mut default);
     r.tiles().all(|tc| {
         let tr = tc.rect().intersect(&r);
         match s.tile(tc) {
@@ -281,7 +281,7 @@ fn opaque_surface(s: &Surface, r: Rect) -> bool {
 
 /// Flattens and encodes as `format`.
 pub fn export_flat(doc: &Document, format: Format, opts: &ExportOptions) -> Result<ExportResult, IoError> {
-    use photosuite_cms::{Builtin, Intent};
+    use photosplice_cms::{Builtin, Intent};
     if let Some(r) = export_mode_specific(doc, format, opts)? {
         return Ok(r);
     }
@@ -353,8 +353,8 @@ fn matte_over_white(img: &Image) -> Result<Image, IoError> {
 
 /// RGB pixels converted from their profile (sRGB when untagged) to `dst`, unclamped, untagged and
 /// stored as `sample`. `None` when the image isn't RGB or already holds `dst`'s colours.
-fn convert_rgb(img: &Image, dst: &photosuite_cms::Profile, intent: photosuite_cms::Intent, bpc: bool, sample: CSample) -> Result<Option<Image>, IoError> {
-    use photosuite_cms::{Builtin, ColorSpace, Profile, Transform};
+fn convert_rgb(img: &Image, dst: &photosplice_cms::Profile, intent: photosplice_cms::Intent, bpc: bool, sample: CSample) -> Result<Option<Image>, IoError> {
+    use photosplice_cms::{Builtin, ColorSpace, Profile, Transform};
     if !img.layout().is_rgb() {
         return Ok(None);
     }
@@ -375,7 +375,7 @@ fn convert_rgb(img: &Image, dst: &photosuite_cms::Profile, intent: photosuite_cm
 /// Colour-managed CMYK → sRGB for formats that cannot store CMYK (the document's embedded
 /// CMYK profile when it parses, else the built-in coated CMYK; relative colorimetric + BPC).
 pub(crate) fn cmyk_image_to_srgb(img: &Image) -> Result<Image, IoError> {
-    use photosuite_cms::{Builtin, ColorSpace, Intent, Profile, Transform};
+    use photosplice_cms::{Builtin, ColorSpace, Intent, Profile, Transform};
     let src = img
         .icc
         .as_ref()
@@ -404,7 +404,7 @@ fn export_mode_specific(doc: &Document, format: Format, opts: &ExportOptions) ->
         ColorMode::Indexed if format == Format::Png => {
             let Some(table) = doc.color_table.as_ref().filter(|t| !t.colors.is_empty() && t.colors.len() <= 256) else { return Ok(None) };
             let mut idx = try_buffer(doc.size.area() as usize, 1)?;
-            let _ = photosuite_compose::render_bands(doc, doc.bounds(), 0, |band| -> Result<(), ()> {
+            let _ = photosplice_compose::render_bands(doc, doc.bounds(), 0, |band| -> Result<(), ()> {
                 idx.extend(band.px.iter().map(|p| match table.transparent {
                     Some(t) if p[3] < 0.5 => t,
                     _ => table.nearest([p[0], p[1], p[2]]) as u8,
@@ -417,7 +417,7 @@ fn export_mode_specific(doc: &Document, format: Format, opts: &ExportOptions) ->
         ColorMode::Duotone => {
             let Some(d) = doc.duotone.as_ref() else { return Ok(None) };
             let mut shown = doc.clone();
-            shown.layers.push(photosuite_doc::Layer::new("Duotone", photosuite_doc::LayerContent::Adjustment(d.display_adjustment())));
+            shown.layers.push(photosplice_doc::Layer::new("Duotone", photosplice_doc::LayerContent::Adjustment(d.display_adjustment())));
             shown.mode = ColorMode::Rgb;
             shown.icc_profile = None;
             shown.duotone = None;

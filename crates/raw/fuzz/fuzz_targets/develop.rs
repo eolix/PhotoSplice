@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use photosuite_raw::{Demosaic, DevelopOptions, Limits, decode, develop_sensor, embedded_preview, identify};
+use photosplice_raw::{Demosaic, DevelopOptions, Limits, decode, develop_sensor, embedded_preview, identify};
 
 // Any bytes: identify, find the preview, decode and develop (fast demosaic)
 // under tight limits. Must never panic or exceed the limits.

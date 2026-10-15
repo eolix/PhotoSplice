@@ -9,12 +9,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use eframe::egui_wgpu::RenderState;
 use eframe::wgpu::TextureFormat;
-use photosuite_color::{ColorMode, PixelFormat, SampleType};
-use photosuite_doc::{Document, Layer, LayerContent, Size};
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
-use photosuite_ui_egui::PhotosuiteApp;
-use photosuite_ui_egui::gpu_canvas::{self, GpuCanvas};
+use photosplice_color::{ColorMode, PixelFormat, SampleType};
+use photosplice_doc::{Document, Layer, LayerContent, Size};
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
+use photosplice_ui_egui::PhotospliceApp;
+use photosplice_ui_egui::gpu_canvas::{self, GpuCanvas};
 use serde_json::json;
 
 /// Concurrent wgpu devices in one process crash on some drivers (Mesa llvmpipe over GL, RADV;
@@ -33,7 +33,7 @@ fn canvas() -> Option<(GpuCanvas, RenderState)> {
         eprintln!("skipping: no GPU adapter");
         return None;
     };
-    if !gpu_canvas::supports_f16_canvas(&rs.adapter) || std::env::var("PHOTOSUITE_CANVAS_F16").as_deref() == Ok("0") {
+    if !gpu_canvas::supports_f16_canvas(&rs.adapter) || std::env::var("PHOTOSPLICE_CANVAS_F16").as_deref() == Ok("0") {
         eprintln!("skipping: adapter can't render/filter Rgba16Float");
         return None;
     }
@@ -60,7 +60,7 @@ fn levels(texels: &[[f32; 4]], w: u32, y: u32) -> usize {
 
 /// The stored texels of a document's canvas texture against its CPU composite (premultiplied).
 fn max_error(doc: &Document, texels: &[[f32; 4]]) -> f32 {
-    let buf = photosuite_compose::render(doc, doc.bounds());
+    let buf = photosplice_compose::render(doc, doc.bounds());
     buf.px.iter().zip(texels).map(|(c, t)| (0..4).map(|i| ((if i < 3 { c[i] * c[3] } else { c[3] }) - t[i]).abs()).fold(0.0, f32::max)).fold(0.0, f32::max)
 }
 
@@ -120,7 +120,7 @@ fn eight_bit_documents_keep_their_rgba8_texture() {
     g.upload_composite(doc.id.0, &doc, None);
     let (format, _, texels) = g.read_texels(doc.id.0).expect("read back");
     assert_eq!(format, TextureFormat::Rgba8Unorm);
-    let want = gpu_canvas::premultiply_rgba8(&photosuite_compose::render(&doc, doc.bounds()).px);
+    let want = gpu_canvas::premultiply_rgba8(&photosplice_compose::render(&doc, doc.bounds()).px);
     let got: Vec<u8> = texels.iter().flat_map(|p| p.map(|v| (v * 255.0).round() as u8)).collect();
     assert!(got == want, "8-bit texels changed");
     assert!(levels(&texels, 1024, 0) <= 256);
@@ -146,7 +146,7 @@ fn format_follows_depth_and_budget() {
     assert_eq!(g.format_for(SampleType::U16, [7360, 4912]), TextureFormat::Rgba16Float);
     assert_eq!(g.format_for(SampleType::F32, [7360, 4912]), TextureFormat::Rgba16Float);
     // Over the budget (a 14000² 16-bit document): 8-bit, so it stays on the GPU.
-    if std::env::var_os("PHOTOSUITE_CANVAS_F16").is_none() {
+    if std::env::var_os("PHOTOSPLICE_CANVAS_F16").is_none() {
         assert_eq!(g.format_for(SampleType::U16, [14000, 14000]), TextureFormat::Rgba8Unorm);
     }
 }
@@ -188,10 +188,10 @@ fn screen(doc: Document, setup: &[(&str, serde_json::Value)], name: &str) -> Opt
     let setup: Vec<(String, serde_json::Value)> = setup.iter().map(|(a, b)| (a.to_string(), b.clone())).collect();
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 700.0)).with_pixels_per_point(1.0).with_max_steps(64).wgpu().build_eframe(move |cc| {
-            PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-            let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+            PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+            let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
             if let Some(rs) = cc.wgpu_render_state.as_ref() {
-                ok2.store(gpu_canvas::supports_f16_canvas(&rs.adapter) && std::env::var("PHOTOSUITE_CANVAS_F16").as_deref() != Ok("0"), Ordering::SeqCst);
+                ok2.store(gpu_canvas::supports_f16_canvas(&rs.adapter) && std::env::var("PHOTOSPLICE_CANVAS_F16").as_deref() != Ok("0"), Ordering::SeqCst);
                 app.set_wgpu(rs.clone());
             }
             app.session.open_document(doc, None);
@@ -232,7 +232,7 @@ fn sixteen_bit_gradient_on_screen() {
     let _gpu = gpu_lock();
     // A 16-bit ramp drawn by the app's canvas: smooth, monotonic, no visible steps.
     let doc = gradient(SampleType::U16, 2048, 1024, 0.0, 1.0);
-    let Some(img) = screen(doc, &[], "photosuite-canvas-16f-gradient.png") else { return };
+    let Some(img) = screen(doc, &[], "photosplice-canvas-16f-gradient.png") else { return };
     let (n, step) = screen_levels(&img, img.h / 2, 150, 600);
     assert!(n > 100 && step <= 3, "{n} levels, max step {step}");
 }
@@ -243,7 +243,7 @@ fn thirty_two_bit_preview_exposes_values_above_one() {
     // A dark 32-bit ramp brightened +4 stops by View › 32-bit Preview Options: with an 8-bit
     // canvas texture its 0..1/16 range has 16 codes (banding); the float texture keeps it smooth.
     let doc = gradient(SampleType::F32, 2048, 1024, 0.0, 1.0 / 16.0);
-    let Some(img) = screen(doc, &[("view.thirtyTwoBitPreviewOptions", json!({"exposure": 4.0, "gamma": 1.0}))], "photosuite-canvas-16f-hdr-ramp.png") else {
+    let Some(img) = screen(doc, &[("view.thirtyTwoBitPreviewOptions", json!({"exposure": 4.0, "gamma": 1.0}))], "photosplice-canvas-16f-hdr-ramp.png") else {
         return;
     };
     let (n, _) = screen_levels(&img, img.h / 2, 150, 600);
@@ -254,7 +254,7 @@ fn thirty_two_bit_preview_exposes_values_above_one() {
     let mut s = Surface::new(PixelFormat::new(ColorMode::Rgb, SampleType::F32, true));
     s.fill_rect(Rect::new(0, 0, 512, 512), &[2.0, 2.0, 2.0, 1.0]);
     flat.layers.push(Layer::new("bright", LayerContent::Raster(s)));
-    let Some(img) = screen(flat, &[("view.thirtyTwoBitPreviewOptions", json!({"exposure": -3.0, "gamma": 1.0}))], "photosuite-canvas-16f-hdr-flat.png") else {
+    let Some(img) = screen(flat, &[("view.thirtyTwoBitPreviewOptions", json!({"exposure": -3.0, "gamma": 1.0}))], "photosplice-canvas-16f-hdr-flat.png") else {
         return;
     };
     let got = img.green(img.w * 2 / 5, img.h / 2) as f32;

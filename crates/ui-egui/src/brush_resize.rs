@@ -12,10 +12,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use egui::{Color32, Pos2, Stroke, vec2};
-use photosuite_engine::paint::MAX_BRUSH_SIZE;
+use photosplice_engine::paint::MAX_BRUSH_SIZE;
 use serde_json::json;
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::{ToolEvent, ViewXform};
 use crate::state::Tool;
 
@@ -67,7 +67,7 @@ pub fn resized(start: (f32, f32), dx: f64, dy: f64, zoom: f32) -> (f32, f32) {
 /// Route a tool event: true when it belongs to a resize drag (begun here with Control+Alt held,
 /// or an Alt+right-drag `armed` for this press, or already in progress), so the tool never sees
 /// it.
-pub fn pointer(app: &mut PhotosuiteApp, ev: ToolEvent, mods: egui::Modifiers, armed: bool) -> bool {
+pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers, armed: bool) -> bool {
     static KEY: AtomicU64 = AtomicU64::new(0);
     match ev {
         ToolEvent::Down { x, y, .. } => {
@@ -99,13 +99,13 @@ pub fn pointer(app: &mut PhotosuiteApp, ev: ToolEvent, mods: egui::Modifiers, ar
 
 /// End an Alt+right-drag resize whose button is no longer down (its release went elsewhere, e.g.
 /// outside the window), so it can't swallow the next stroke.
-pub fn release_stale(app: &mut PhotosuiteApp, secondary_down: bool) {
+pub fn release_stale(app: &mut PhotospliceApp, secondary_down: bool) {
     if !secondary_down && app.brush_resize.is_some_and(|r| r.secondary) {
         app.brush_resize = None;
     }
 }
 
-fn update(app: &mut PhotosuiteApp, r: Resize, x: f64, y: f64) {
+fn update(app: &mut PhotospliceApp, r: Resize, x: f64, y: f64) {
     // Right is bigger on screen, also in a flipped view (View › Flip Horizontal).
     let dx = (x - r.anchor[0]) * if app.ui.view.flip_horizontal { -1.0 } else { 1.0 };
     let (size, hardness) = resized(r.start, dx, y - r.anchor[1], app.current_zoom());
@@ -122,7 +122,7 @@ fn update(app: &mut PhotosuiteApp, r: Resize, x: f64, y: f64) {
 /// Draw the resize feedback: the brush circle at the anchor, filled with a red tip preview whose
 /// solid core shows the hardness (Photoshop's), and the readout beside the pointer. Returns true
 /// while a resize is in progress (the canvas then hides its cursor).
-pub fn draw(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform) -> bool {
+pub fn draw(app: &PhotospliceApp, painter: &egui::Painter, xf: &ViewXform) -> bool {
     let Some(r) = app.brush_resize else { return false };
     let b = &app.session.tools.brush;
     let c = xf.to_screen(r.anchor[0] as f32, r.anchor[1] as f32);
@@ -184,15 +184,15 @@ mod tests {
 
     const CTRL_ALT: Modifiers = Modifiers { alt: true, ctrl: true, shift: false, mac_cmd: false, command: false };
 
-    fn app(tool: Tool) -> PhotosuiteApp {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+    fn app(tool: Tool) -> PhotospliceApp {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         app.run("file.new", json!({"width": 300, "height": 200, "background": "transparent"})).unwrap();
         app.run("tools.setBrush", json!({"brush": {"size": 40, "hardness": 0.2}})).unwrap();
         app.ui.tool = tool;
         app
     }
 
-    fn history(app: &PhotosuiteApp) -> usize {
+    fn history(app: &PhotospliceApp) -> usize {
         app.session.active().unwrap().history.past_len()
     }
 
@@ -254,7 +254,7 @@ mod tests {
         let mut a = app(Tool::Brush);
         a.sync_views();
         let mut h = Harness::builder().with_size(vec2(1000.0, 700.0)).build_ui_state(
-            |ui, app: &mut PhotosuiteApp| {
+            |ui, app: &mut PhotospliceApp| {
                 let ctx = ui.ctx().clone();
                 if !ctx.fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                     return;
@@ -263,10 +263,10 @@ mod tests {
             },
             a,
         );
-        PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::default());
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::default());
         h.run_steps(4);
         let c = h.state().last_canvas_rect.center();
-        let press = |h: &mut Harness<'static, PhotosuiteApp>, pos: Pos2, pressed: bool| {
+        let press = |h: &mut Harness<'static, PhotospliceApp>, pos: Pos2, pressed: bool| {
             h.event(egui::Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: CTRL_ALT });
             h.run();
         };
@@ -293,9 +293,9 @@ mod tests {
         assert_eq!(history(h.state()), undo0, "no undo step");
     }
 
-    fn canvas(a: PhotosuiteApp) -> Harness<'static, PhotosuiteApp> {
+    fn canvas(a: PhotospliceApp) -> Harness<'static, PhotospliceApp> {
         let mut h = Harness::builder().with_size(vec2(1000.0, 700.0)).build_ui_state(
-            |ui, app: &mut PhotosuiteApp| {
+            |ui, app: &mut PhotospliceApp| {
                 let ctx = ui.ctx().clone();
                 if !ctx.fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                     return;
@@ -304,18 +304,18 @@ mod tests {
             },
             a,
         );
-        PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::default());
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::default());
         h.run_steps(4);
         h
     }
 
-    fn button(h: &mut Harness<'static, PhotosuiteApp>, pos: Pos2, button: PointerButton, pressed: bool, modifiers: Modifiers) {
+    fn button(h: &mut Harness<'static, PhotospliceApp>, pos: Pos2, button: PointerButton, pressed: bool, modifiers: Modifiers) {
         h.event(egui::Event::PointerButton { pos, button, pressed, modifiers });
         h.run_steps(2);
     }
 
     /// Alt+right-drag from the canvas centre, six steps of `step` screen points.
-    fn alt_right_drag(h: &mut Harness<'static, PhotosuiteApp>, step: egui::Vec2) -> Pos2 {
+    fn alt_right_drag(h: &mut Harness<'static, PhotospliceApp>, step: egui::Vec2) -> Pos2 {
         let c = h.state().last_canvas_rect.center();
         h.event(egui::Event::ModifiersChanged(Modifiers::ALT));
         h.event(egui::Event::PointerMoved(c));

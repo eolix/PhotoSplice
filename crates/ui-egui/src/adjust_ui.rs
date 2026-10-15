@@ -4,11 +4,11 @@
 //! values). Selective Color previews live while a slider drags, via `app.live_adjust` carrying
 //! the full parameter set; Color Lookup commits on every change (its table isn't in the params).
 
-use photosuite_doc::{Adjustment, LayerId};
-use photosuite_engine::adjust_cmds::RANGES;
+use photosplice_doc::{Adjustment, LayerId};
+use photosplice_engine::adjust_cmds::RANGES;
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::theme::Tokens;
 use crate::widgets;
 
@@ -26,7 +26,7 @@ pub fn selective_values(adj: &Adjustment) -> Value {
     v
 }
 
-pub fn selective_color_editor(app: &mut PhotosuiteApp, ui: &mut egui::Ui, id: LayerId, adj: &Adjustment) {
+pub fn selective_color_editor(app: &mut PhotospliceApp, ui: &mut egui::Ui, id: LayerId, adj: &Adjustment) {
     let t = Tokens::get(ui.ctx());
     let committed = selective_values(adj);
     let mut values = match &app.live_adjust {
@@ -93,9 +93,9 @@ fn is_lut(path: &std::path::Path) -> bool {
 }
 
 /// Every LUT the dropdown offers: the bundled ones (`resources/luts`) and the ones the user
-/// loaded (`…/app.photosuite/libraries`), as (path, name shown), by name. Cached until a load
+/// loaded (`…/app.photosplice/libraries`), as (path, name shown), by name. Cached until a load
 /// adds one; the folders don't change behind the application's back otherwise.
-fn lut_list(app: &PhotosuiteApp, ctx: &egui::Context) -> std::sync::Arc<Vec<(String, String)>> {
+fn lut_list(app: &PhotospliceApp, ctx: &egui::Context) -> std::sync::Arc<Vec<(String, String)>> {
     let key = egui::Id::new(LUT_LIST_KEY);
     if let Some(list) = ctx.data(|d| d.get_temp::<std::sync::Arc<Vec<(String, String)>>>(key)) {
         return list;
@@ -126,7 +126,7 @@ fn lut_list(app: &PhotosuiteApp, ctx: &egui::Context) -> std::sync::Arc<Vec<(Str
 /// returns the path to load. A name already taken by a different file gets a numbered suffix
 /// rather than overwriting it. Falls back to the picked path if the copy is not possible.
 #[cfg(not(target_arch = "wasm32"))]
-fn keep_lut(app: &PhotosuiteApp, picked: &str) -> String {
+fn keep_lut(app: &PhotospliceApp, picked: &str) -> String {
     let Some(dir) = app.services.user_resources_dir.clone() else { return picked.to_string() };
     let src = std::path::Path::new(picked);
     if src.parent().is_some_and(|p| p == dir) || std::fs::create_dir_all(&dir).is_err() {
@@ -152,7 +152,7 @@ fn keep_lut(app: &PhotosuiteApp, picked: &str) -> String {
 /// The LUT dropdown shared by the Color Lookup adjustment layer and Image › Adjustments › Color
 /// Lookup. `current` is the loaded LUT's file name, empty for none. Returns the parameters to
 /// apply when the choice changes: `{"lut": "none"}` or `{"file": path}`.
-fn lut_dropdown(app: &mut PhotosuiteApp, ui: &mut egui::Ui, salt: &str, current: &str) -> Option<Value> {
+fn lut_dropdown(app: &mut PhotospliceApp, ui: &mut egui::Ui, salt: &str, current: &str) -> Option<Value> {
     let t = Tokens::get(ui.ctx());
     let list = lut_list(app, ui.ctx());
     let selected = if current.is_empty() {
@@ -207,7 +207,7 @@ pub fn owns_lookup(f: &serde_json::Map<String, Value>) -> bool {
     f.get("__command").and_then(Value::as_str) == Some("image.adjustments.colorLookup")
 }
 
-pub fn lookup_dialog_body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut serde_json::Map<String, Value>) {
+pub fn lookup_dialog_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut serde_json::Map<String, Value>) {
     // Upstream's generated looks are not offered: with no file chosen, nothing is applied.
     if !f.contains_key("file") {
         f.insert("lut".into(), json!("none"));
@@ -230,7 +230,7 @@ pub fn lookup_dialog_body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut se
     crate::filter_dialog::body(ui, f);
 }
 
-pub fn color_lookup_editor(app: &mut PhotosuiteApp, ui: &mut egui::Ui, id: LayerId, adj: &Adjustment) {
+pub fn color_lookup_editor(app: &mut PhotospliceApp, ui: &mut egui::Ui, id: LayerId, adj: &Adjustment) {
     let t = Tokens::get(ui.ctx());
     let Adjustment::ColorLookup { name, lut, size, tetrahedral, dither } = adj else {
         return;

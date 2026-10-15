@@ -34,8 +34,8 @@ pub mod sky;
 pub mod slic;
 pub mod subject;
 
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 
 pub use crate::selection::Region;
 use gmm::Gmm;

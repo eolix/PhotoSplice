@@ -28,7 +28,7 @@ id = "REL-4"
 target = "Atomic save (temp, fsync, rename) for every document write"
 status = "done"
 issue = 203
-note = "photosuite_format::atomic_write (format/src/atomic.rs, #230): same-dir temp, sync_all, rename with Windows PermissionDenied retry, Unix dir fsync; every document write site routes through it and format/src/atomic/tests.rs failure-injects write, rename and read-only-dir errors"
+note = "photosplice_format::atomic_write (format/src/atomic.rs, #230): same-dir temp, sync_all, rename with Windows PermissionDenied retry, Unix dir fsync; every document write site routes through it and format/src/atomic/tests.rs failure-injects write, rename and read-only-dir errors"
 
 [[item]]
 id = "REL-212-1"

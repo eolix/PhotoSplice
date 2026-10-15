@@ -5,7 +5,7 @@
 //! One operation per run, so the process's peak RSS is that operation's (plus opening):
 //!
 //! ```sh
-//! cargo build --release -p photosuite-ui-egui --example large_image_bench
+//! cargo build --release -p photosplice-ui-egui --example large_image_bench
 //! for op in open refresh thumbs filter brush psd png jpeg pcraft; do
 //!   /usr/bin/time -l target/release/examples/large_image_bench --size 14000x14000 --op $op 2>&1 | grep -E 'ms|maximum resident'
 //! done
@@ -19,8 +19,8 @@
 use std::time::Instant;
 
 use eframe::egui_wgpu::RenderState;
-use photosuite_engine::Session;
-use photosuite_ui_egui::gpu_canvas::GpuCanvas;
+use photosplice_engine::Session;
+use photosplice_ui_egui::gpu_canvas::GpuCanvas;
 use serde_json::{Value, json};
 
 fn arg(args: &[String], name: &str) -> Option<String> {
@@ -32,7 +32,7 @@ fn ms(t: Instant) -> f64 {
 }
 
 /// A photo-like RGB image: smooth gradients, soft blobs, fine noise (so JPEG has real work).
-fn photo(w: u32, h: u32) -> photosuite_codecs::Image {
+fn photo(w: u32, h: u32) -> photosplice_codecs::Image {
     use rayon::prelude::*;
     let mut px = vec![0u8; w as usize * h as usize * 3];
     px.par_chunks_mut(w as usize * 3).enumerate().for_each(|(y, row)| {
@@ -48,12 +48,12 @@ fn photo(w: u32, h: u32) -> photosuite_codecs::Image {
             }
         }
     });
-    photosuite_codecs::Image::from_raw(w, h, photosuite_codecs::ChannelLayout::Rgb, photosuite_codecs::SampleType::U8, px).expect("image")
+    photosplice_codecs::Image::from_raw(w, h, photosplice_codecs::ChannelLayout::Rgb, photosplice_codecs::SampleType::U8, px).expect("image")
 }
 
 /// A headless GPU canvas on a device created like the app's.
 fn canvas() -> Option<(GpuCanvas, RenderState)> {
-    let setup = photosuite_ui_egui::gpu_canvas::wgpu_setup();
+    let setup = photosplice_ui_egui::gpu_canvas::wgpu_setup();
     let rs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| egui_kittest::wgpu::create_render_state(setup, Default::default()))).ok()?;
     let l = rs.device.limits();
     eprintln!("adapter: {} (max texture {}, max buffer {} MB)", rs.adapter.get_info().name, l.max_texture_dimension_2d, l.max_buffer_size >> 20);
@@ -80,7 +80,7 @@ fn refresh(gpu: Option<&(GpuCanvas, RenderState)>, s: &Session, full: bool) -> &
         }
         None => {
             let r = damage.unwrap_or(st.doc.bounds()).intersect(&st.doc.bounds());
-            std::hint::black_box(photosuite_compose::render(&st.doc, r));
+            std::hint::black_box(photosplice_compose::render(&st.doc, r));
             "cpu"
         }
     }
@@ -92,11 +92,11 @@ fn main() {
         arg(&args, "--size").and_then(|s| s.split_once('x').map(|(a, b)| (a.parse().unwrap_or(14000), b.parse().unwrap_or(14000)))).unwrap_or((14000, 14000));
     let op = arg(&args, "--op").unwrap_or_else(|| "open".into());
     let dir = arg(&args, "--cache").map_or_else(std::env::temp_dir, std::path::PathBuf::from);
-    let src = dir.join(format!("photosuite-bench-{w}x{h}.jpg"));
+    let src = dir.join(format!("photosplice-bench-{w}x{h}.jpg"));
     if !src.exists() {
         let t = Instant::now();
         let img = photo(w, h);
-        let jpeg = photosuite_codecs::encode(&img, photosuite_codecs::Format::Jpeg, &Default::default()).expect("jpeg");
+        let jpeg = photosplice_codecs::encode(&img, photosplice_codecs::Format::Jpeg, &Default::default()).expect("jpeg");
         std::fs::write(&src, jpeg).expect("write cache");
         eprintln!("generated {} in {:.0} ms (run again to measure)", src.display(), ms(t));
         // `--json` (`cargo xtask perf`) measures in the same run.
@@ -110,7 +110,7 @@ fn main() {
 
     let t = Instant::now();
     let bytes = std::fs::read(&src).expect("read");
-    let doc = photosuite_io::import("photo.jpg", &bytes).expect("import").document;
+    let doc = photosplice_io::import("photo.jpg", &bytes).expect("import").document;
     drop(bytes);
     let mut s = Session::new();
     s.open_document(doc, Some("photo.jpg".into()));
@@ -129,8 +129,8 @@ fn main() {
     // the canvas texture size and the process's peak RSS.
     let json_out = arg(&args, "--json");
     let mut json_rows = vec![
-        photosuite_testkit::perf::row("open (decode + document)", &[t_open], None, None),
-        photosuite_testkit::perf::row("first refresh", &[t_first], None, None),
+        photosplice_testkit::perf::row("open (decode + document)", &[t_open], None, None),
+        photosplice_testkit::perf::row("first refresh", &[t_first], None, None),
     ];
     if let Some((g, _)) = gpu
         && let Some((format, bytes)) = g.texture_info(s.active().expect("doc").doc.id.0)
@@ -152,18 +152,18 @@ fn main() {
                 v.push(ms(t));
                 println!("full refresh ({path:<8})        {:>9.0} ms", ms(t));
             }
-            json_rows.push(photosuite_testkit::perf::row("full refresh", &v, None, None));
+            json_rows.push(photosplice_testkit::perf::row("full refresh", &v, None, None));
         }
         "thumbs" => {
             let d = doc();
             let t = Instant::now();
-            std::hint::black_box(photosuite_compose::thumbnail(&d, 512));
+            std::hint::black_box(photosplice_compose::thumbnail(&d, 512));
             println!("navigator thumbnail (512)     {:>9.0} ms", ms(t));
             let t = Instant::now();
-            std::hint::black_box(photosuite_compose::thumbnail(&d, 56));
+            std::hint::black_box(photosplice_compose::thumbnail(&d, 56));
             println!("channel thumbnails (56)       {:>9.0} ms", ms(t));
             let t = Instant::now();
-            std::hint::black_box(photosuite_compose::thumbnail(&d, 384));
+            std::hint::black_box(photosplice_compose::thumbnail(&d, 384));
             println!("histogram source (384)        {:>9.0} ms", ms(t));
         }
         "filter" => {
@@ -193,17 +193,17 @@ fn main() {
             let ext = if op == "jpeg" { "jpg" } else { op.as_str() };
             let d = doc();
             let t = Instant::now();
-            let out = photosuite_io::export(&d, &format!("x.{ext}"), &Default::default()).expect("export");
+            let out = photosplice_io::export(&d, &format!("x.{ext}"), &Default::default()).expect("export");
             println!("save {ext:<6} ({:>5} MB)          {:>9.0} ms", out.bytes.len() >> 20, ms(t));
         }
         other => eprintln!("unknown --op {other}"),
     }
     if let Some(out) = json_out {
-        let peak = photosuite_testkit::perf::process_peak_rss_bytes().or_else(photosuite_testkit::perf::current_rss_bytes);
+        let peak = photosplice_testkit::perf::process_peak_rss_bytes().or_else(photosplice_testkit::perf::current_rss_bytes);
         let context = json!({"width": w, "height": h, "op": op, "gpu_adapter": gpu.map(|(_, rs)| rs.adapter.get_info().name)});
-        let mut report = photosuite_testkit::perf::report("large_image_bench", context, json_rows, None);
+        let mut report = photosplice_testkit::perf::report("large_image_bench", context, json_rows, None);
         report["process_peak_rss_bytes"] = json!(peak);
-        if let Err(e) = photosuite_testkit::perf::write_report(&out, &report) {
+        if let Err(e) = photosplice_testkit::perf::write_report(&out, &report) {
             eprintln!("{e}");
         }
     }

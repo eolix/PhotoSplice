@@ -1,9 +1,9 @@
-//! `cargo bench -p photosuite-compose`
+//! `cargo bench -p photosplice-compose`
 use criterion::{Criterion, criterion_group, criterion_main};
-use photosuite_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
-use photosuite_doc::{Adjustment, Document, Layer, LayerContent, LayerMask, Size};
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
+use photosplice_doc::{Adjustment, Document, Layer, LayerContent, LayerMask, Size};
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 
 fn filled(n: u32, seed: u8) -> Surface {
     let r = Rect::new(0, 0, n as i32, n as i32);
@@ -53,12 +53,12 @@ fn benches(c: &mut Criterion) {
     let doc = five_layer_doc(6016);
     let mut g = c.benchmark_group("compose");
     g.sample_size(10);
-    g.bench_function("flatten_6016_5_layers", |b| b.iter(|| photosuite_compose::flatten(&doc)));
+    g.bench_function("flatten_6016_5_layers", |b| b.iter(|| photosplice_compose::flatten(&doc)));
     let masks = mask_heavy_doc();
-    g.bench_function("flatten_2048_20_masked_layers", |b| b.iter(|| photosuite_compose::flatten(&masks)));
-    let stroke = photosuite_paint::Stroke {
-        brush: photosuite_paint::BrushSettings { size: 60.0, hardness: 0.5, ..Default::default() },
-        points: (0..500).map(|i| photosuite_paint::StrokePoint::new(100.0 + i as f64 * 7.0, 1000.0 + (i as f64 * 0.05).sin() * 400.0, 1.0)).collect(),
+    g.bench_function("flatten_2048_20_masked_layers", |b| b.iter(|| photosplice_compose::flatten(&masks)));
+    let stroke = photosplice_paint::Stroke {
+        brush: photosplice_paint::BrushSettings { size: 60.0, hardness: 0.5, ..Default::default() },
+        points: (0..500).map(|i| photosplice_paint::StrokePoint::new(100.0 + i as f64 * 7.0, 1000.0 + (i as f64 * 0.05).sin() * 400.0, 1.0)).collect(),
     };
     let base = filled(4096, 5);
     let mut sel = Surface::with_default(PixelFormat::GRAY8, &[1.0]);
@@ -66,7 +66,7 @@ fn benches(c: &mut Criterion) {
     g.bench_function("paint_stroke_500pt_60px_with_selection", |b| {
         b.iter(|| {
             let mut s = base.clone();
-            photosuite_paint::apply_stroke(&mut s, &stroke, Some(&sel), false)
+            photosplice_paint::apply_stroke(&mut s, &stroke, Some(&sel), false)
         })
     });
     g.finish();

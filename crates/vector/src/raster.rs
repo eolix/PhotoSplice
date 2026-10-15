@@ -12,8 +12,8 @@
 //! from first principles here; it needs no sub-sampling and handles overlapping components
 //! exactly.
 
-use photosuite_doc::{FillRule, PathOp};
-use photosuite_geom::Rect;
+use photosplice_doc::{FillRule, PathOp};
+use photosplice_geom::Rect;
 
 #[derive(Clone, Copy, Debug)]
 struct Edge {
@@ -376,7 +376,7 @@ fn draw(acc: &mut [f32], x0: i32, xa: f64, ya: f64, xb: f64, yb: f64, w: f64) {
 mod tests {
     use super::*;
     use crate::coverage_surface;
-    use photosuite_color::PixelFormat;
+    use photosplice_color::PixelFormat;
 
     fn square(x: f64, y: f64, s: f64) -> Vec<(f64, f64)> {
         vec![(x, y), (x + s, y), (x + s, y + s), (x, y + s)]

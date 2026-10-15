@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# Ελληνικά translations for PhotoSuite UI.
+# Ελληνικά translations for PhotoSplice UI.
 
 	File	Αρχείο
 	Edit	Επεξεργασία
@@ -672,7 +672,7 @@
 	Timeline	Χρονολόγιο
 	Tool Presets	Προεπιλογές εργαλείων
 	Tools	Εργαλεία
-	About PhotoSuite	Σχετικά με το PhotoSuite
+	About PhotoSplice	Σχετικά με το PhotoSplice
 	Website	Ιστοσελίδα
 	Report an Issue…	Αναφορά προβλήματος…
 	WIA Support…	Υποστήριξη WIA…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Το Perspective Warp δεν είναι ενεργό
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Παραμόρφωση προοπτικής: σχεδιάστε επίπεδα κατά μήκος της προοπτικής της εικόνας και, στη συνέχεια, μεταβείτε στο Warp
 	Photo Filter	Φίλτρο φωτογραφίας
-	PhotoSuite	PhotoSuite
-	PhotoSuite Manages Colors	Το PhotoSuite διαχειρίζεται τα χρώματα
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite — ένα πρόγραμμα επεξεργασίας εικόνων ανοιχτού κώδικα, εγγενές γραμμένο σε Rust
+	PhotoSplice	PhotoSplice
+	PhotoSplice Manages Colors	Το PhotoSplice διαχειρίζεται τα χρώματα
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice — ένα πρόγραμμα επεξεργασίας εικόνων ανοιχτού κώδικα, εγγενές γραμμένο σε Rust
 	Pin Depth:	Βάθος καρφίτσας:
 	Pixel Length:	Μήκος pixel:
 	Pixels/Centimeter	Pixels/Centimeter
@@ -1570,7 +1570,7 @@
 	Pen Tilt	Κλίση στυλό
 	Pen Tool	Εργαλείο στυλό
 	Photo	Φωτογραφία
-	PhotoSuite website	Ιστοσελίδα PhotoSuite
+	PhotoSplice website	Ιστοσελίδα PhotoSplice
 	Picas	Πίκες
 	Pillow Emboss	Σφράγισμα
 	Pixel Replacement	Αντικατάσταση pixel
@@ -1877,7 +1877,7 @@
 	System Info…	Πληροφορίες συστήματος…
 	System Info	Πληροφορίες συστήματος
 	More panels	Περισσότερα πάνελ
-	These settings aren't available in PhotoSuite yet.	Αυτές οι ρυθμίσεις δεν είναι ακόμη διαθέσιμες στο PhotoSuite
+	These settings aren't available in PhotoSplice yet.	Αυτές οι ρυθμίσεις δεν είναι ακόμη διαθέσιμες στο PhotoSplice
 	Graphics	Γραφικά
 	Reset GPU Backend	Επαναφορά GPU Backend
 	Applies at next launch.	Ισχύει στην επόμενη κυκλοφορία
@@ -2018,7 +2018,7 @@
 	Opening…	Άνοιγμα…
 	Patch	Μπάλωμα
 	Patch:	Μπάλωμα:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	Το PhotoSuite χρησιμοποιεί τη σύνθεση εικόνας μέσω CPU. Το παράθυρο ενδέχεται να εξακολουθεί να χρησιμοποιεί την κάρτα γραφικών σας.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	Το PhotoSplice χρησιμοποιεί τη σύνθεση εικόνας μέσω CPU. Το παράθυρο ενδέχεται να εξακολουθεί να χρησιμοποιεί την κάρτα γραφικών σας.
 	Play Action	Αναπαραγωγή ενέργειας
 	Reading…	Ανάγνωση…
 	Record Action	Εγγραφή ενέργειας

@@ -34,7 +34,7 @@
 //! filters, knockout); the run asserts no crashes, and that the oracle pass count and the export
 //! round-trip count do not fall below the source's floors. Raise the floors when they improve;
 //! never lower them.
-//! Set `PHOTOSUITE_CORPUS_STRICT=1` to also fail on import/export errors
+//! Set `PHOTOSPLICE_CORPUS_STRICT=1` to also fail on import/export errors
 //! (files listed in `KNOWN_BAD` excepted).
 //!
 //! Every exported file must also pass `common::strict_block_errors` (#200): each tagged block
@@ -50,8 +50,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use photosuite_io::*;
-use photosuite_psd::PsdFile;
+use photosplice_io::*;
+use photosplice_psd::PsdFile;
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
@@ -81,13 +81,13 @@ const DISSOLVE_TOL: f32 = 0.1;
 /// as usual (≤ 2/255), and inside them the premultiplied colour averaged over 16 × 16 blocks
 /// (density and colour) must agree within 0.1 (binomial noise of a 50 % dissolve is about
 /// 0.044 per block difference).
-fn dissolve_matches(doc: &photosuite_doc::Document, ours: &[[f32; 4]], ps: &[[f32; 4]]) -> bool {
+fn dissolve_matches(doc: &photosplice_doc::Document, ours: &[[f32; 4]], ps: &[[f32; 4]]) -> bool {
     let canvas = doc.bounds();
     let regions: Vec<_> = doc
         .walk()
         .into_iter()
-        .filter(|(_, _, l)| l.visible && l.blend == photosuite_color::BlendMode::Dissolve)
-        .map(|(_, _, l)| photosuite_compose::layer_bounds(l, canvas).intersect(&canvas))
+        .filter(|(_, _, l)| l.visible && l.blend == photosplice_color::BlendMode::Dissolve)
+        .map(|(_, _, l)| photosplice_compose::layer_bounds(l, canvas).intersect(&canvas))
         .filter(|r| !r.is_empty())
         .collect();
     let (w, h) = (canvas.width() as i32, canvas.height() as i32);
@@ -191,12 +191,12 @@ const THUMB_BAD_FRAC: f32 = 0.02;
 
 /// Photoshop's embedded thumbnail (resource 1036: a 28-byte header, then JFIF) as RGB floats.
 fn thumbnail(file: &PsdFile) -> Option<(u32, u32, Vec<[f32; 3]>)> {
-    let r = file.resource(photosuite_psd::resources::ids::THUMBNAIL)?;
+    let r = file.resource(photosplice_psd::resources::ids::THUMBNAIL)?;
     let format = u32::from_be_bytes(r.data.get(..4)?.try_into().ok()?);
     if format != 1 {
         return None;
     }
-    let img = photosuite_codecs::decode(r.data.get(28..)?).ok()?;
+    let img = photosplice_codecs::decode(r.data.get(28..)?).ok()?;
     let rgba = img.to_rgba8();
     Some((img.width(), img.height(), rgba.as_chunks::<4>().0.iter().map(|p| [0, 1, 2].map(|c| f32::from(p[c]) / 255.0)).collect()))
 }
@@ -316,16 +316,16 @@ fn check_file(name: &str, bytes: &[u8]) -> (Outcome, Option<f32>) {
             return (Outcome::Error, None);
         }
     };
-    let ours = photosuite_compose::flatten(doc).px;
+    let ours = photosplice_compose::flatten(doc).px;
     // Our own export must not change how the document renders.
-    let again = photosuite_compose::flatten(&reimported).px;
+    let again = photosplice_compose::flatten(&reimported).px;
     let rt = if again.len() == ours.len() { common::max_diff(&ours, &again) } else { f32::INFINITY };
     let layers = doc.layer_count();
     // Oracle choice: the merged image (Photoshop's composite; for files without layers it is the
     // whole image, decoded independently by the psd crate). When Photoshop wrote no real merged
     // image (Maximize Compatibility off) or it decodes through our own model code (Multichannel),
     // its embedded thumbnail is the oracle at thumbnail size.
-    let use_thumb = file.has_real_merged_data() == Some(false) || file.header.color_mode == photosuite_psd::ColorMode::Multichannel;
+    let use_thumb = file.has_real_merged_data() == Some(false) || file.header.color_mode == photosplice_psd::ColorMode::Multichannel;
     let merged = if use_thumb { None } else { merged_composite(&file).ok() };
     let Some(merged) = merged else {
         let notes: Vec<&str> = imp.warnings.iter().map(String::as_str).take(2).collect();
@@ -427,7 +427,7 @@ fn run_oracle(src: &Source) {
     eprintln!("{label}: export -> re-import renders the same for {rt_same} files; differs for {}: {}", rt_diff.len(), rt_diff.join(", "));
     let block_errors = BLOCK_ERRORS.with(|b| b.borrow().clone());
     eprintln!("{label}: exported files whose tagged blocks fail the strict re-parse: {}", block_errors.len());
-    if std::env::var_os("PHOTOSUITE_CORPUS_STRICT").is_some() {
+    if std::env::var_os("PHOTOSPLICE_CORPUS_STRICT").is_some() {
         assert_eq!(errors, 0);
     }
     assert!(crashes.is_empty(), "{label}: panics (Rule 9): {crashes:?}");
@@ -483,7 +483,7 @@ fn run_mutations(src: &Source) {
                 if let Ok(imp) = import(&name, &data) {
                     let b = imp.document.bounds();
                     if i64::from(b.width()) * i64::from(b.height()) <= 4_000_000 {
-                        let _ = photosuite_compose::flatten(&imp.document);
+                        let _ = photosplice_compose::flatten(&imp.document);
                     }
                 }
             }));

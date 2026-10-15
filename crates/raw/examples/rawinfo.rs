@@ -1,7 +1,7 @@
 //! Inspect and time raw decoding.
 //!
 //! ```text
-//! cargo run --release -p photosuite-raw --example rawinfo -- [--dump] [--demosaic bilinear|mhc|ahd] [--ppm out.ppm] FILE...
+//! cargo run --release -p photosplice-raw --example rawinfo -- [--dump] [--demosaic bilinear|mhc|ahd] [--ppm out.ppm] FILE...
 //! ```
 //!
 //! `--ppm` writes the developed image (ProPhoto, gamma 1.8, 16-bit) as a binary PPM;
@@ -9,7 +9,7 @@
 
 use std::time::Instant;
 
-use photosuite_raw::{Demosaic, DevelopOptions, decode, develop_sensor, dump_structure, embedded_preview, identify};
+use photosplice_raw::{Demosaic, DevelopOptions, decode, develop_sensor, dump_structure, embedded_preview, identify};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -26,7 +26,7 @@ fn main() {
             "--demosaic" => opts.demosaic = args.next().and_then(|s| Demosaic::from_id(&s)).unwrap_or_default(),
             "--write-synthetic" => {
                 // `--write-synthetic DIR`: write 24 MP synthetic DNG (uncompressed, LJ92 tiles) and CR2 files.
-                use photosuite_raw::testgen::{Cr2Spec, DngSpec, DngStorage, mosaic, scene};
+                use photosplice_raw::testgen::{Cr2Spec, DngSpec, DngStorage, mosaic, scene};
                 let dir = args.next().unwrap_or_else(|| ".".into());
                 let (w, h) = (6000, 4000);
                 let data = mosaic(&scene(w, h), w, [0, 1, 1, 2], 512, 15000);
@@ -160,7 +160,7 @@ fn main() {
 }
 
 fn synthetic(w: usize, h: usize, opts: &DevelopOptions) {
-    use photosuite_raw::testgen::{Cr2Spec, DngSpec, DngStorage, mosaic, scene};
+    use photosplice_raw::testgen::{Cr2Spec, DngSpec, DngStorage, mosaic, scene};
     let data = mosaic(&scene(w, h), w, [0, 1, 1, 2], 512, 15000);
     let mut spec = DngSpec::cfa(w, h, data.clone());
     spec.bits = 14;
@@ -208,7 +208,7 @@ fn synthetic(w: usize, h: usize, opts: &DevelopOptions) {
 }
 
 /// ProPhoto (gamma 1.8) → sRGB 8-bit, box-downscaled to at most 1600 px wide.
-fn write_png(path: &str, dev: &photosuite_raw::Developed) {
+fn write_png(path: &str, dev: &photosplice_raw::Developed) {
     // Linear ProPhoto → XYZ D50 → linear sRGB (Bradford-adapted D50 → D65), combined.
     const M: [[f32; 3]; 3] = [[2.0341, -0.7276, -0.3065], [-0.2289, 1.2317, -0.0028], [-0.0086, -0.1534, 1.1620]];
     let (w, h) = (dev.width as usize, dev.height as usize);

@@ -1,29 +1,29 @@
 [package]
-name = "photosuite"
+name = "photosplice"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-default-run = "photosuite"
-description = "PhotoSuite: an open-source, native image editor"
+default-run = "photosplice"
+description = "PhotoSplice: an open-source, native image editor"
 build = "build.rs"
 
 [lints]
 workspace = true
 
 [dependencies]
-photosuite-doc = { workspace = true }
-photosuite-color = { workspace = true }
-photosuite-raster = { workspace = true }
-photosuite-geom = { workspace = true }
-photosuite-compose = { workspace = true }
-photosuite-engine = { workspace = true }
-photosuite-codecs = { workspace = true }
-photosuite-io = { workspace = true }
-photosuite-format = { workspace = true }
-photosuite-automation = { workspace = true }
-photosuite-ui-egui = { workspace = true }
+photosplice-doc = { workspace = true }
+photosplice-color = { workspace = true }
+photosplice-raster = { workspace = true }
+photosplice-geom = { workspace = true }
+photosplice-compose = { workspace = true }
+photosplice-engine = { workspace = true }
+photosplice-codecs = { workspace = true }
+photosplice-io = { workspace = true }
+photosplice-format = { workspace = true }
+photosplice-automation = { workspace = true }
+photosplice-ui-egui = { workspace = true }
 # Pen tablet pressure/tilt on macOS and X11 (the workspace's one isolated unsafe helper crate).
-photosuite-tablet = { workspace = true }
+photosplice-tablet = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11", "persistence"] }
 egui = { workspace = true }
 serde_json = { workspace = true }
@@ -48,7 +48,7 @@ winit = { version = "0.30", default-features = false, features = ["wayland-csd-a
 fmv-macos-events = "=0.1.0"
 muda = "0.21.0"
 # Safe AppKit calls only: find where the pointer is when files are dropped (cursor.rs; winit 0.30
-# drops carry no position). Already in Cargo.lock (winit, photosuite-tablet); pinned exactly to the
+# drops carry no position). Already in Cargo.lock (winit, photosplice-tablet); pinned exactly to the
 # same versions.
 objc2 = "=0.6.4"
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSGeometry"] }
@@ -64,5 +64,5 @@ x11rb = { version = "=0.13.2", default-features = false }
 winsafe = { version = "=0.0.29", default-features = false, features = ["user"] }
 
 [build-dependencies]
-# Icon + VERSIONINFO for photosuite.exe; build.rs only uses it when targeting Windows.
+# Icon + VERSIONINFO for photosplice.exe; build.rs only uses it when targeting Windows.
 winresource = "0.1"

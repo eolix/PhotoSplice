@@ -14,12 +14,12 @@
 use std::sync::Arc;
 
 use egui::{Color32, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
-use photosuite_compose::gradient_fill as gf;
-use photosuite_doc::{Document, Fill, GradientStyle, Layer, LayerContent, LayerId};
-use photosuite_engine::gradient_fill_cmds as cmds;
+use photosplice_compose::gradient_fill as gf;
+use photosplice_doc::{Document, Fill, GradientStyle, Layer, LayerContent, LayerId};
+use photosplice_engine::gradient_fill_cmds as cmds;
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::{ToolEvent, ViewXform};
 use crate::state::Tool;
 use crate::theme::Tokens;
@@ -71,7 +71,7 @@ pub struct LiveGradient {
 /// Whether the Gradient tool is in its live (Gradient Fill layer) mode.
 /// Painting into a layer mask, an alpha channel or the Quick Mask stays classic (pixels), except
 /// that a selected gradient fill layer is always edited live (selecting it targets its mask).
-pub fn live_mode(app: &PhotosuiteApp) -> bool {
+pub fn live_mode(app: &PhotospliceApp) -> bool {
     if app.ui.tool != Tool::Gradient || app.ui.tool_options.gradient_classic {
         return false;
     }
@@ -83,17 +83,17 @@ pub fn live_mode(app: &PhotosuiteApp) -> bool {
 }
 
 /// The active layer when it is a gradient fill layer: (layer, its frame, the canvas).
-fn active_gradient(app: &PhotosuiteApp) -> Option<(Layer, Rect32, photosuite_geom::Rect)> {
+fn active_gradient(app: &PhotospliceApp) -> Option<(Layer, Rect32, photosplice_geom::Rect)> {
     let st = app.session.active()?;
     let l = st.doc.layer(st.active_layer?)?;
     if !matches!(l.content, LayerContent::Fill(Fill::Gradient { .. })) || !l.visible {
         return None;
     }
     let canvas = st.doc.bounds();
-    Some((l.clone(), photosuite_compose::fill_frame(l, canvas), canvas))
+    Some((l.clone(), photosplice_compose::fill_frame(l, canvas), canvas))
 }
 
-type Rect32 = photosuite_geom::Rect;
+type Rect32 = photosplice_geom::Rect;
 
 fn fill_of(l: &Layer) -> Option<&Fill> {
     match &l.content {
@@ -103,7 +103,7 @@ fn fill_of(l: &Layer) -> Option<&Fill> {
 }
 
 /// The fill an in-progress edit shows (`None` when it can't apply, e.g. a stale index).
-fn edited_fill(app: &PhotosuiteApp, layer: &Layer, canvas: Rect32, cmd: &str, p: &Value) -> Option<Fill> {
+fn edited_fill(app: &PhotospliceApp, layer: &Layer, canvas: Rect32, cmd: &str, p: &Value) -> Option<Fill> {
     let f = fill_of(layer)?;
     let (fg, bg) = (app.session.tools.foreground, app.session.tools.background);
     match cmd {
@@ -114,7 +114,7 @@ fn edited_fill(app: &PhotosuiteApp, layer: &Layer, canvas: Rect32, cmd: &str, p:
 }
 
 /// Options-bar params of a new live gradient.
-fn create_params(app: &PhotosuiteApp, from: [f32; 2], to: [f32; 2]) -> Value {
+fn create_params(app: &PhotospliceApp, from: [f32; 2], to: [f32; 2]) -> Value {
     let o = &app.ui.tool_options;
     json!({"from": from, "to": to, "style": o.gradient_style, "reverse": o.gradient_reverse, "dither": o.gradient_dither, "opacity": o.fill_opacity, "mode": o.gradient_blend_mode.label()})
 }
@@ -214,7 +214,7 @@ impl Widget {
 }
 
 /// Pointer input for the Gradient tool in live mode. Returns true when consumed.
-pub fn pointer(app: &mut PhotosuiteApp, ev: ToolEvent, mods: egui::Modifiers) -> bool {
+pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers) -> bool {
     if !live_mode(app) {
         app.gradient.drag = None;
         return false;
@@ -239,7 +239,7 @@ pub fn pointer(app: &mut PhotosuiteApp, ev: ToolEvent, mods: egui::Modifiers) ->
     true
 }
 
-fn drag_to(app: &mut PhotosuiteApp, p: [f32; 2], mods: egui::Modifiers) {
+fn drag_to(app: &mut PhotospliceApp, p: [f32; 2], mods: egui::Modifiers) {
     let zoom = app.current_zoom().max(0.01);
     let active = active_gradient(app);
     let Some(drag) = app.gradient.drag.as_mut() else { return };
@@ -291,7 +291,7 @@ fn drag_to(app: &mut PhotosuiteApp, p: [f32; 2], mods: egui::Modifiers) {
     }
 }
 
-fn finish(app: &mut PhotosuiteApp) {
+fn finish(app: &mut PhotospliceApp) {
     let Some(drag) = app.gradient.drag.take() else { return };
     let zoom = app.current_zoom().max(0.01);
     match drag {
@@ -317,7 +317,7 @@ fn finish(app: &mut PhotosuiteApp) {
 
 /// A click (no drag) on the widget: the line adds a stop; a double-click on a stop (or on an end
 /// handle, for the stop there) opens the Color Picker.
-fn click(app: &mut PhotosuiteApp, layer: LayerId, grab: Grab) {
+fn click(app: &mut PhotospliceApp, layer: LayerId, grab: Grab) {
     let now = app.last_frame_time;
     let double = app.gradient.last_click.is_some_and(|(g, t)| g == grab && now - t <= DOUBLE_CLICK);
     app.gradient.last_click = Some((grab, now));
@@ -339,7 +339,7 @@ fn click(app: &mut PhotosuiteApp, layer: LayerId, grab: Grab) {
 }
 
 /// Opens the Color Picker on colour stop `i`; OK runs `gradient.fill.stop` (one history step).
-pub fn edit_stop_color(app: &mut PhotosuiteApp, layer: LayerId, i: usize) {
+pub fn edit_stop_color(app: &mut PhotospliceApp, layer: LayerId, i: usize) {
     let Some(st) = app.session.active() else { return };
     let Some(Fill::Gradient { stops, .. }) = st.doc.layer(layer).and_then(fill_of) else { return };
     let mut sorted = stops.clone();
@@ -361,7 +361,7 @@ fn preview_key(revision: u64, what: &str) -> u64 {
 }
 
 /// The document to show while a gradient is drawn or edited (`canvas::display_doc`).
-pub fn display_doc(app: &mut PhotosuiteApp, idx: usize) -> Option<(Arc<Document>, u64)> {
+pub fn display_doc(app: &mut PhotospliceApp, idx: usize) -> Option<(Arc<Document>, u64)> {
     if app.session.active_index() != Some(idx) {
         return None;
     }
@@ -402,19 +402,19 @@ pub fn display_doc(app: &mut PhotosuiteApp, idx: usize) -> Option<(Arc<Document>
 }
 
 /// The fill and frame the widget shows: the one being drawn or edited, else the selected one.
-fn shown_fill(app: &PhotosuiteApp) -> Option<(Fill, Rect32, Option<Grab>)> {
+fn shown_fill(app: &PhotospliceApp) -> Option<(Fill, Rect32, Option<Grab>)> {
     let st = app.session.active()?;
     let canvas = st.doc.bounds();
     match &app.gradient.drag {
         Some(Drag::Draw { from, to, redraw: None }) => {
             let l = cmds::new_layer(&app.session, &st.doc, &create_params(app, *from, *to)).ok()?;
             let f = fill_of(&l)?.clone();
-            Some((f, photosuite_compose::fill_frame(&l, canvas), Some(Grab::End)))
+            Some((f, photosplice_compose::fill_frame(&l, canvas), Some(Grab::End)))
         }
         Some(Drag::Draw { from, to, redraw: Some(id) }) => {
             let l = st.doc.layer(*id)?;
             let f = edited_fill(app, l, canvas, cmds::SET, &json!({"from": from, "to": to}))?;
-            Some((f, photosuite_compose::fill_frame(l, canvas), Some(Grab::End)))
+            Some((f, photosplice_compose::fill_frame(l, canvas), Some(Grab::End)))
         }
         Some(Drag::Edit { layer, grab, commit, .. }) => {
             let l = st.doc.layer(*layer)?;
@@ -427,7 +427,7 @@ fn shown_fill(app: &PhotosuiteApp) -> Option<(Fill, Rect32, Option<Grab>)> {
             };
             // A torn-off stop no longer exists: highlight nothing.
             let deleting = commit.as_ref().is_some_and(|(_, p)| p["action"] == "delete");
-            Some((f, photosuite_compose::fill_frame(l, canvas), (!deleting).then_some(*grab)))
+            Some((f, photosplice_compose::fill_frame(l, canvas), (!deleting).then_some(*grab)))
         }
         None => {
             let (l, frame, _) = active_gradient(app)?;
@@ -452,7 +452,7 @@ fn diamond(painter: &egui::Painter, c: Pos2, r: f32, fill: Color32, outline: Col
 }
 
 /// Draws the live gradient widget over the canvas.
-pub fn draw_overlay(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform) {
+pub fn draw_overlay(app: &PhotospliceApp, painter: &egui::Painter, xf: &ViewXform) {
     if !live_mode(app) {
         return;
     }
@@ -539,7 +539,7 @@ const THUMB_PX: u32 = 64;
 pub fn thumbnail_image(f: &Fill) -> Option<egui::ColorImage> {
     let Fill::Gradient { .. } = f else { return None };
     let n = THUMB_PX as i32;
-    let square = photosuite_geom::Rect::new(0, 0, n, n);
+    let square = photosplice_geom::Rect::new(0, 0, n, n);
     // No dither: it is invisible at this size and would only add noise.
     let mut plain = f.clone();
     if let Fill::Gradient { dither, .. } = &mut plain {
@@ -579,13 +579,13 @@ pub fn paint_thumbnail(ui: &egui::Ui, layer: LayerId, f: &Fill, rect: Rect) -> b
 
 /// Options-bar swatch of the current gradient (what both modes paint); a click opens the gradient
 /// picker: the Gradients panel's presets, as Photoshop's options-bar picker.
-pub fn picker(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
+pub fn picker(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let (fg, bg) = (app.session.tools.foreground, app.session.tools.background);
     let stops = app.session.presets.gradient.resolve(fg, bg);
     let (r, resp) = ui.allocate_exact_size(vec2(110.0, 20.0), Sense::click());
     let ramp = Rect::from_min_max(r.min, pos2(r.right() - 14.0, r.bottom()));
-    paint_ramp(ui.painter(), ramp, |u| photosuite_algo::paint::sample_stops(&stops, u));
+    paint_ramp(ui.painter(), ramp, |u| photosplice_algo::paint::sample_stops(&stops, u));
     ui.painter().rect_stroke(ramp, 0.0, Stroke::new(1.0, t.field_border), StrokeKind::Outside);
     crate::icons::paint(ui, Rect::from_center_size(pos2(r.right() - 6.0, r.center().y), vec2(10.0, 10.0)), "chevron-down", 9.0, t.text_faint);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tl!("Gradient picker")));
@@ -601,7 +601,7 @@ pub fn picker(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
 
 /// Live mode: style, reverse, dither and blend mode changes in the options bar also edit the selected
 /// gradient fill layer (one history step each), as in Photoshop.
-pub fn options_changed(app: &mut PhotosuiteApp, before: &crate::state::ToolOptions) {
+pub fn options_changed(app: &mut PhotospliceApp, before: &crate::state::ToolOptions) {
     let o = app.ui.tool_options.clone();
     if app.ui.tool != Tool::Gradient || o.gradient_classic {
         return;
@@ -653,7 +653,7 @@ fn label(ui: &mut egui::Ui, text: &str) {
 /// Properties panel sections for a gradient fill layer (`props_layout::section` headers):
 /// "Gradient" (the stops editor) and "Gradient Options" (style, angle, scale, reverse, dither,
 /// "Align with layer", Reset Alignment). Every change is one `gradient.fill.*` command.
-pub fn properties(app: &mut PhotosuiteApp, ui: &mut egui::Ui, layer: &Layer) {
+pub fn properties(app: &mut PhotospliceApp, ui: &mut egui::Ui, layer: &Layer) {
     use crate::props_layout::{COL_GAP, LABEL_GAP, field_width, section};
     let Some(Fill::Gradient { angle, scale, style, reverse, dither, align, .. }) = fill_of(layer).cloned() else { return };
     let id = layer.id.0;
@@ -731,7 +731,7 @@ enum Marker {
 /// Photoshop's Gradient Editor strip: opacity stops above the ramp, colour stops and midpoints
 /// below. Drag a stop to move it (off the strip to delete it), click above / below to add one,
 /// double-click a colour stop for the Color Picker.
-fn stops_editor(app: &mut PhotosuiteApp, ui: &mut egui::Ui, layer: &Layer) {
+fn stops_editor(app: &mut PhotospliceApp, ui: &mut egui::Ui, layer: &Layer) {
     let Some(f) = fill_of(layer).cloned() else { return };
     let Fill::Gradient { stops, .. } = &f else { return };
     let t = Tokens::get(ui.ctx());
@@ -875,8 +875,8 @@ fn stops_editor(app: &mut PhotosuiteApp, ui: &mut egui::Ui, layer: &Layer) {
 mod tests {
     use super::*;
 
-    fn app_with_gradient(style: &str) -> PhotosuiteApp {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+    fn app_with_gradient(style: &str) -> PhotospliceApp {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({"width": 200, "height": 120})).unwrap();
         app.ui.tool = Tool::Gradient;
         app.ui.tool_options.gradient_style = style.into();
@@ -889,11 +889,11 @@ mod tests {
 
     #[test]
     fn dense_ramps_grab_the_line_not_a_stop() {
-        use photosuite_color::Color;
+        use photosplice_color::Color;
         let frame = Rect32::new(0, 0, 100, 20);
         let ramp = |n: usize| {
             let stops = (0..n).map(|i| (i as f32 / (n - 1) as f32, Color::gray(i as f32 / (n - 1) as f32))).collect();
-            Fill::gradient(stops, 0.0, 1.0, photosuite_doc::GradientStyle::Linear, false)
+            Fill::gradient(stops, 0.0, 1.0, photosplice_doc::GradientStyle::Linear, false)
         };
         let few = Widget::new(&ramp(3), frame).unwrap();
         let mid = few.at(0.5);
@@ -903,20 +903,20 @@ mod tests {
         assert_eq!(dense.hit(dense.end, 2.0), Some(Grab::End));
     }
 
-    fn drag(app: &mut PhotosuiteApp, a: [f64; 2], b: [f64; 2]) {
+    fn drag(app: &mut PhotospliceApp, a: [f64; 2], b: [f64; 2]) {
         crate::canvas::tool_event(app, ToolEvent::Down { x: a[0], y: a[1], pressure: 1.0 }, mods());
         crate::canvas::tool_event(app, ToolEvent::Move { x: (a[0] + b[0]) / 2.0, y: (a[1] + b[1]) / 2.0, pressure: 1.0 }, mods());
         crate::canvas::tool_event(app, ToolEvent::Move { x: b[0], y: b[1], pressure: 1.0 }, mods());
         crate::canvas::tool_event(app, ToolEvent::Up { x: b[0], y: b[1] }, mods());
     }
 
-    fn get(app: &mut PhotosuiteApp) -> Value {
+    fn get(app: &mut PhotospliceApp) -> Value {
         app.run(cmds::GET, json!({})).unwrap()
     }
 
     #[test]
     fn thumbnails_show_the_gradient() {
-        use photosuite_color::Color;
+        use photosplice_color::Color;
         // Black to white, left to right: the left edge is dark, the right light, top = bottom.
         let f = Fill::gradient(vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], 0.0, 1.0, GradientStyle::Linear, false);
         let img = thumbnail_image(&f).unwrap();
@@ -1008,7 +1008,7 @@ mod tests {
 
     #[test]
     fn gradient_blend_mode_reaches_live_and_classic_drags() {
-        use photosuite_color::BlendMode;
+        use photosplice_color::BlendMode;
         for mode in [BlendMode::Difference, BlendMode::Multiply, BlendMode::Screen, BlendMode::Exclusion] {
             let mut live = app_with_gradient("linear");
             live.ui.tool_options.gradient_blend_mode = mode;
@@ -1038,7 +1038,7 @@ mod tests {
 
     #[test]
     fn changing_live_gradient_mode_updates_selected_fill_layer() {
-        use photosuite_color::BlendMode;
+        use photosplice_color::BlendMode;
         let mut app = app_with_gradient("linear");
         drag(&mut app, [20.0, 60.0], [180.0, 60.0]);
         let before = app.ui.tool_options.clone();

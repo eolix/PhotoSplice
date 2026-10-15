@@ -3,13 +3,13 @@
 //! All edits go through the engine's `shape.*` / `path.*` commands.
 
 use egui::{Color32, Pos2, Rect, Sense, Stroke, pos2, vec2};
-use photosuite_doc::vector::Path;
-use photosuite_doc::{Document, LayerContent};
-use photosuite_geom::Affine;
+use photosplice_doc::vector::Path;
+use photosplice_doc::{Document, LayerContent};
+use photosplice_geom::Affine;
 
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::ViewXform;
 use crate::state::{Tool, ToolOptions};
 use crate::theme::Tokens;
@@ -28,7 +28,7 @@ fn hex(c: [f32; 4]) -> String {
     format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
 }
 
-fn stroke_param(app: &PhotosuiteApp) -> Value {
+fn stroke_param(app: &PhotospliceApp) -> Value {
     let o = &app.ui.tool_options;
     if o.stroke_width > 0.0 { json!({"width": o.stroke_width, "color": hex(app.session.tools.background)}) } else { Value::Null }
 }
@@ -71,7 +71,7 @@ fn shape_geometry(o: &ToolOptions, tool: Tool, start: [f64; 2], end: [f64; 2], m
 }
 
 /// Finish a Shape-tool drag: ⇧ constrains proportions, ⌥ draws from the centre.
-pub fn finish_shape(app: &mut PhotosuiteApp, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) {
+pub fn finish_shape(app: &mut PhotospliceApp, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) {
     let Some(mut p) = shape_geometry(&app.ui.tool_options, tool, start, end, mods) else { return };
     let fill = if app.ui.tool_options.shape_fill { json!(hex(app.session.tools.foreground)) } else { Value::Null };
     let stroke = stroke_param(app);
@@ -92,9 +92,9 @@ pub fn finish_shape(app: &mut PhotosuiteApp, tool: Tool, start: [f64; 2], end: [
 
 /// Shape-tool drag preview: the shape `finish_shape` will create, filled and stroked, under its
 /// path outline. Custom shapes show their box outline only.
-pub fn draw_shape_preview(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) {
+pub fn draw_shape_preview(app: &PhotospliceApp, painter: &egui::Painter, xf: &ViewXform, tool: Tool, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) {
     let o = &app.ui.tool_options;
-    let Some(path) = shape_geometry(o, tool, start, end, mods).and_then(|p| photosuite_engine::vector_cmds::shape_path(&p).ok()) else { return };
+    let Some(path) = shape_geometry(o, tool, start, end, mods).and_then(|p| photosplice_engine::vector_cmds::shape_path(&p).ok()) else { return };
     let custom = tool == Tool::CustomShape;
     // ponytail: preview colours skip the canvas's colour management; the commit renders them exactly.
     let fill = if o.shape_fill && !custom { rgb32(app.session.tools.foreground) } else { Color32::TRANSPARENT };
@@ -113,7 +113,7 @@ pub fn draw_shape_preview(app: &PhotosuiteApp, painter: &egui::Painter, xf: &Vie
 
 /// The path that path commands act on without a name: the one selected in the Paths panel, else
 /// the work path, else the selected layer's shape path or vector mask; `None` when there's none.
-pub fn active_path_name(app: &PhotosuiteApp) -> Option<String> {
+pub fn active_path_name(app: &PhotospliceApp) -> Option<String> {
     let st = app.session.active()?;
     let rows = path_rows(&st.doc, st.active_layer);
     let key = |r: &PathEntry| match r.kind {
@@ -128,7 +128,7 @@ pub fn active_path_name(app: &PhotosuiteApp) -> Option<String> {
 /// ⌘↩ / Ctrl+Enter (#306): load a path as a selection, like Photoshop with a Pen or Path
 /// Selection tool or a path selected in the Paths panel. A path being drawn with the Pen is
 /// finished first and loads; otherwise [`active_path_name`]. `params` may set feather, mode…
-pub fn path_to_selection(app: &mut PhotosuiteApp, params: Value) -> Result<Value, String> {
+pub fn path_to_selection(app: &mut PhotospliceApp, params: Value) -> Result<Value, String> {
     // The path being drawn with the Pen is the one that loads.
     if let Some(a) = app.ui.pen.active {
         app.ui.selected_path = Some(if matches!(a.target, crate::direct_select::PathRef::Work) { "work" } else { "layer" }.into());
@@ -153,7 +153,7 @@ enum PathTarget {
 }
 
 /// The targeted vector mask of the active layer, if the Layers panel targets it.
-pub(crate) fn targeted_vector_mask(app: &PhotosuiteApp) -> Option<(u64, Path)> {
+pub(crate) fn targeted_vector_mask(app: &PhotospliceApp) -> Option<(u64, Path)> {
     let st = app.session.active()?;
     let l = st.active_layer.and_then(|id| st.doc.layer(id))?;
     (app.ui.vector_mask_target && !matches!(l.content, LayerContent::Shape(_))).then_some(())?;
@@ -161,7 +161,7 @@ pub(crate) fn targeted_vector_mask(app: &PhotosuiteApp) -> Option<(u64, Path)> {
 }
 
 /// The active shape layer's path, if the active layer is a shape layer.
-pub(crate) fn active_shape_path(app: &PhotosuiteApp) -> Option<(u64, Path)> {
+pub(crate) fn active_shape_path(app: &PhotospliceApp) -> Option<(u64, Path)> {
     let st = app.session.active()?;
     let l = st.active_layer.and_then(|id| st.doc.layer(id))?;
     match &l.content {
@@ -172,7 +172,7 @@ pub(crate) fn active_shape_path(app: &PhotosuiteApp) -> Option<(u64, Path)> {
 
 /// The path Path Selection edits: the targeted vector mask, the active shape layer's path, else
 /// the work path.
-fn target_path(app: &PhotosuiteApp) -> Option<(PathTarget, Path)> {
+fn target_path(app: &PhotospliceApp) -> Option<(PathTarget, Path)> {
     if let Some((id, p)) = targeted_vector_mask(app) {
         return Some((PathTarget::VectorMask(id), p));
     }
@@ -182,7 +182,7 @@ fn target_path(app: &PhotosuiteApp) -> Option<(PathTarget, Path)> {
     app.session.active()?.doc.work_path.clone().map(|p| (PathTarget::Work, p))
 }
 
-pub fn path_selection_finish(app: &mut PhotosuiteApp, start: [f64; 2], end: [f64; 2]) {
+pub fn path_selection_finish(app: &mut PhotospliceApp, start: [f64; 2], end: [f64; 2]) {
     let (dx, dy) = (end[0] - start[0], end[1] - start[1]);
     if dx.abs() + dy.abs() < 0.5 {
         return;
@@ -192,11 +192,11 @@ pub fn path_selection_finish(app: &mut PhotosuiteApp, start: [f64; 2], end: [f64
         PathTarget::Shape(id) => app.run("shape.edit", json!({"layer": id, "move": [dx.round(), dy.round()]})),
         PathTarget::VectorMask(id) => {
             let moved = path.transform(&Affine::translate(dx.round(), dy.round()));
-            app.run("layer.vectorMask.edit", json!({"layer": id, "path": photosuite_engine::vector_cmds::path_json(&moved)}))
+            app.run("layer.vectorMask.edit", json!({"layer": id, "path": photosplice_engine::vector_cmds::path_json(&moved)}))
         }
         PathTarget::Work => {
             let moved = path.transform(&Affine::translate(dx.round(), dy.round()));
-            app.run("path.set", json!({"name": "work", "path": photosuite_engine::vector_cmds::path_json(&moved)}))
+            app.run("path.set", json!({"name": "work", "path": photosplice_engine::vector_cmds::path_json(&moved)}))
         }
     };
 }
@@ -261,7 +261,7 @@ pub(crate) fn draw_handle(painter: &egui::Painter, anchor: Pos2, handle: Pos2, a
 }
 
 /// Work path / active shape path outlines, anchors, and the pen path in progress.
-pub fn draw_overlay(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform, doc: &Document) {
+pub fn draw_overlay(app: &PhotospliceApp, painter: &egui::Painter, xf: &ViewXform, doc: &Document) {
     let tool = app.ui.tool;
     let vector_tool = tool.is_pen() || tool == Tool::PathSelection || is_shape_tool(tool);
     let accent = Tokens::get(painter.ctx()).accent;
@@ -304,7 +304,7 @@ pub fn draw_overlay(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform
 // Options bars
 
 /// Options bar for vector tools; false for other tools.
-pub fn options_bar(app: &mut PhotosuiteApp, ui: &mut egui::Ui, tool: Tool) -> bool {
+pub fn options_bar(app: &mut PhotospliceApp, ui: &mut egui::Ui, tool: Tool) -> bool {
     if !(is_shape_tool(tool) || tool.is_pen() || matches!(tool, Tool::PathSelection | Tool::DirectSelection)) {
         return false;
     }
@@ -409,9 +409,9 @@ pub fn options_bar(app: &mut PhotosuiteApp, ui: &mut egui::Ui, tool: Tool) -> bo
 // ---------------------------------------------------------------------------------------------
 // Properties (shape layers)
 
-fn color_of(f: &photosuite_doc::Fill) -> Option<Color32> {
+fn color_of(f: &photosplice_doc::Fill) -> Option<Color32> {
     match f {
-        photosuite_doc::Fill::Solid(c) => {
+        photosplice_doc::Fill::Solid(c) => {
             let v = c.to_rgba8();
             Some(Color32::from_rgb(v[0], v[1], v[2]))
         }
@@ -420,7 +420,7 @@ fn color_of(f: &photosuite_doc::Fill) -> Option<Color32> {
 }
 
 /// A colour swatch that opens a picker; returns the new `#rrggbb` when changed.
-fn swatch(ui: &mut egui::Ui, fill: Option<&photosuite_doc::Fill>, tip: &str) -> Option<String> {
+fn swatch(ui: &mut egui::Ui, fill: Option<&photosplice_doc::Fill>, tip: &str) -> Option<String> {
     let t = Tokens::get(ui.ctx());
     let (r, resp) = ui.allocate_exact_size(vec2(26.0, 18.0), Sense::click());
     let current = fill.and_then(color_of);
@@ -428,9 +428,9 @@ fn swatch(ui: &mut egui::Ui, fill: Option<&photosuite_doc::Fill>, tip: &str) -> 
         (Some(c), _) => {
             ui.painter().rect_filled(r, 2.0, c);
         }
-        (None, Some(photosuite_doc::Fill::Gradient { stops, .. })) if !stops.is_empty() => {
+        (None, Some(photosplice_doc::Fill::Gradient { stops, .. })) if !stops.is_empty() => {
             // Gradient fills preview as a left-to-right ramp through their stops.
-            let rgb = |c: &photosuite_doc::Color| {
+            let rgb = |c: &photosplice_doc::Color| {
                 let v = c.to_rgba8();
                 Color32::from_rgb(v[0], v[1], v[2])
             };
@@ -476,7 +476,7 @@ fn swatch(ui: &mut egui::Ui, fill: Option<&photosuite_doc::Fill>, tip: &str) -> 
 }
 
 /// Properties panel for a shape layer: Appearance (fill, stroke) and live shape geometry.
-pub fn shape_properties(app: &mut PhotosuiteApp, ui: &mut egui::Ui, id: photosuite_doc::LayerId) {
+pub fn shape_properties(app: &mut PhotospliceApp, ui: &mut egui::Ui, id: photosplice_doc::LayerId) {
     let Some(sh) = app.session.active().and_then(|s| s.doc.layer(id)).and_then(|l| match &l.content {
         LayerContent::Shape(sh) => Some(sh.clone()),
         _ => None,
@@ -508,8 +508,8 @@ pub fn shape_properties(app: &mut PhotosuiteApp, ui: &mut egui::Ui, id: photosui
             }
             if sh.stroke.is_some() {
                 let mut align = match sh.stroke.as_ref().map(|s| s.align) {
-                    Some(photosuite_doc::vector::StrokeAlign::Inside) => "inside",
-                    Some(photosuite_doc::vector::StrokeAlign::Outside) => "outside",
+                    Some(photosplice_doc::vector::StrokeAlign::Inside) => "inside",
+                    Some(photosplice_doc::vector::StrokeAlign::Outside) => "outside",
                     _ => "center",
                 }
                 .to_string();
@@ -528,9 +528,9 @@ pub fn shape_properties(app: &mut PhotosuiteApp, ui: &mut egui::Ui, id: photosui
             crate::widgets::value_field(ui, v, range, unit, 64.0).changed()
         };
         match live {
-            photosuite_doc::vector::LiveShape::Rect { rect, .. }
-            | photosuite_doc::vector::LiveShape::Ellipse { rect }
-            | photosuite_doc::vector::LiveShape::Polygon { rect, .. } => {
+            photosplice_doc::vector::LiveShape::Rect { rect, .. }
+            | photosplice_doc::vector::LiveShape::Ellipse { rect }
+            | photosplice_doc::vector::LiveShape::Polygon { rect, .. } => {
                 ui.horizontal(|ui| {
                     let (mut w, mut h) = (rect[2] as f32, rect[3] as f32);
                     let cw = num(ui, "W", &mut w, 1.0..=300000.0, "px");
@@ -540,16 +540,16 @@ pub fn shape_properties(app: &mut PhotosuiteApp, ui: &mut egui::Ui, id: photosui
                     }
                 });
             }
-            photosuite_doc::vector::LiveShape::Line { .. } => {}
+            photosplice_doc::vector::LiveShape::Line { .. } => {}
         }
         ui.horizontal(|ui| match live {
-            photosuite_doc::vector::LiveShape::Rect { radii, .. } => {
+            photosplice_doc::vector::LiveShape::Rect { radii, .. } => {
                 let mut r = radii[0] as f32;
                 if num(ui, tl!("Corner radius"), &mut r, 0.0..=100000.0, "px") {
                     edit = Some(json!({"radii": r, "coalesce": key("radius")}));
                 }
             }
-            photosuite_doc::vector::LiveShape::Polygon { sides, star_ratio, .. } => {
+            photosplice_doc::vector::LiveShape::Polygon { sides, star_ratio, .. } => {
                 let mut n = *sides as f32;
                 if num(ui, tl!("Sides"), &mut n, 3.0..=100.0, "") {
                     edit = Some(json!({"sides": n.round() as u32, "coalesce": key("sides")}));
@@ -559,7 +559,7 @@ pub fn shape_properties(app: &mut PhotosuiteApp, ui: &mut egui::Ui, id: photosui
                     edit = Some(json!({"starRatio": sr as f64 / 100.0, "coalesce": key("star")}));
                 }
             }
-            photosuite_doc::vector::LiveShape::Line { weight, .. } => {
+            photosplice_doc::vector::LiveShape::Line { weight, .. } => {
                 let mut w = *weight as f32;
                 if num(ui, tl!("Weight"), &mut w, 1.0..=10000.0, "px") {
                     edit = Some(json!({"weight": w, "coalesce": key("weight")}));
@@ -617,7 +617,7 @@ pub struct PathEntry {
 
 /// The Paths panel's rows, top to bottom: saved paths, the work path, then the selected layer's
 /// shape path ("<Layer> Shape Path") or vector mask ("<Layer> Vector Mask"), like Photoshop.
-pub fn path_rows(doc: &Document, active: Option<photosuite_doc::LayerId>) -> Vec<PathEntry> {
+pub fn path_rows(doc: &Document, active: Option<photosplice_doc::LayerId>) -> Vec<PathEntry> {
     let mut rows: Vec<_> = doc.paths.iter().map(|p| PathEntry { name: p.name.clone(), path: p.path.clone(), kind: PathRow::Saved }).collect();
     if let Some(wp) = &doc.work_path {
         rows.push(PathEntry { name: "Work Path".into(), path: wp.clone(), kind: PathRow::Work });
@@ -678,7 +678,7 @@ fn path_context_actions(entry: &PathEntry, doc: &Document) -> Vec<(&'static str,
             }
         }
         let copy_name = format!("{} copy {n}", entry.name);
-        actions.push(("Duplicate Path", "path.set", json!({"name": copy_name, "path": photosuite_engine::vector_cmds::path_json(&entry.path)})));
+        actions.push(("Duplicate Path", "path.set", json!({"name": copy_name, "path": photosplice_engine::vector_cmds::path_json(&entry.path)})));
     }
     if entry.kind != PathRow::Layer {
         actions.push(("Delete Path", "path.delete", json!({"name": key})));
@@ -688,7 +688,7 @@ fn path_context_actions(entry: &PathEntry, doc: &Document) -> Vec<(&'static str,
     actions
 }
 
-pub fn paths_panel(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
+pub fn paths_panel(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let Some(st) = app.session.active() else {
         ui.label(egui::RichText::new(tl!("No document")).color(t.text_faint));
@@ -804,8 +804,8 @@ pub fn paths_panel(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
 mod tests {
     use super::*;
 
-    fn app() -> PhotosuiteApp {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+    fn app() -> PhotospliceApp {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.session.execute("file.new", json!({"width": 200, "height": 200})).unwrap();
         app.sync_views();
         app
@@ -826,7 +826,7 @@ mod tests {
         let entries = path_context_actions(&first, doc);
         assert_eq!(entries[0].1, "path.toSelection");
         assert_eq!(entries[0].2["name"], "First");
-        assert!(entries.iter().all(|(_, id, _)| photosuite_engine::commands::find(id).is_some()));
+        assert!(entries.iter().all(|(_, id, _)| photosplice_engine::commands::find(id).is_some()));
         let (_, id, params) = entries.into_iter().find(|(_, id, _)| *id == "path.toSelection").unwrap();
         app.run(id, params).unwrap();
         assert!(app.session.active().unwrap().doc.selection.is_some());
@@ -873,9 +873,9 @@ mod tests {
     fn shape_preview_is_the_committed_path() {
         let mut app = app();
         app.ui.tool_options.corner_radius = 8.0;
-        let preview = |app: &PhotosuiteApp, tool, end| {
+        let preview = |app: &PhotospliceApp, tool, end| {
             shape_geometry(&app.ui.tool_options, tool, [10.0, 10.0], end, egui::Modifiers::ALT)
-                .and_then(|p| photosuite_engine::vector_cmds::shape_path(&p).ok())
+                .and_then(|p| photosplice_engine::vector_cmds::shape_path(&p).ok())
         };
         for tool in [Tool::Rectangle, Tool::EllipseShape, Tool::Triangle, Tool::Polygon, Tool::Line] {
             let shown = preview(&app, tool, [60.0, 30.0]).unwrap();
@@ -885,8 +885,8 @@ mod tests {
             assert_eq!(sh.path, shown, "{tool:?}");
         }
         assert!(preview(&app, Tool::Rectangle, [10.2, 40.0]).is_none(), "too thin to draw");
-        assert!(photosuite_engine::vector_cmds::shape_path(&json!({"kind": "nope", "rect": [0, 0, 5, 5]})).is_err());
-        assert!(photosuite_engine::vector_cmds::shape_path(&json!({"kind": "rect"})).is_err());
+        assert!(photosplice_engine::vector_cmds::shape_path(&json!({"kind": "nope", "rect": [0, 0, 5, 5]})).is_err());
+        assert!(photosplice_engine::vector_cmds::shape_path(&json!({"kind": "rect"})).is_err());
     }
 
     /// #534: dragging in a shape's fill picker, opened from the Properties panel at the right edge
@@ -899,21 +899,21 @@ mod tests {
         let mut app = app();
         let id = app.run("shape.create", json!({"kind": "rect", "rect": [10, 10, 100, 60], "fill": "#3070c0"})).unwrap()["layer"].as_u64().unwrap();
         let mut h = egui_kittest::Harness::builder().with_size(vec2(1440.0, 900.0)).build_ui_state(
-            move |ui, app: &mut PhotosuiteApp| {
+            move |ui, app: &mut PhotospliceApp| {
                 // Fonts set up after the first frame only apply from the next one.
                 if !ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                     return;
                 }
-                egui::Panel::right("properties").resizable(false).exact_size(285.0).show(ui, |ui| shape_properties(app, ui, photosuite_doc::LayerId(id)));
+                egui::Panel::right("properties").resizable(false).exact_size(285.0).show(ui, |ui| shape_properties(app, ui, photosplice_doc::LayerId(id)));
             },
             app,
         );
-        PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::Midnight);
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::Midnight);
         h.run_steps(4);
         let label = h.query_all(egui_kittest::kittest::by().label("Fill").include_labels()).next().expect("the Fill label").rect();
         // The swatch is right of its label.
         let swatch = egui::pos2(label.right() + 17.0, label.center().y);
-        let press = |h: &mut egui_kittest::Harness<'_, PhotosuiteApp>, pos, pressed| {
+        let press = |h: &mut egui_kittest::Harness<'_, PhotospliceApp>, pos, pressed| {
             h.event(egui::Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
             h.step();
         };
@@ -922,13 +922,13 @@ mod tests {
         press(&mut h, swatch, true);
         press(&mut h, swatch, false);
         h.run_steps(3);
-        let popup = |h: &egui_kittest::Harness<'_, PhotosuiteApp>| {
+        let popup = |h: &egui_kittest::Harness<'_, PhotospliceApp>| {
             h.ctx.memory(|m| m.areas().visible_layer_ids().into_iter().filter(|l| l.order == egui::Order::Foreground).find_map(|l| m.area_rect(l.id)))
         };
         let opened = popup(&h).expect("the picker opened");
-        let fill = |h: &egui_kittest::Harness<'_, PhotosuiteApp>| {
+        let fill = |h: &egui_kittest::Harness<'_, PhotospliceApp>| {
             let st = h.state().session.active().unwrap();
-            match &st.doc.layer(photosuite_doc::LayerId(id)).unwrap().content {
+            match &st.doc.layer(photosplice_doc::LayerId(id)).unwrap().content {
                 LayerContent::Shape(sh) => sh.fill.clone(),
                 _ => None,
             }

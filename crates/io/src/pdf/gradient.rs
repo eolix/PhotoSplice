@@ -1,8 +1,8 @@
-//! Gradients as PDF shadings, laid out exactly as PhotoSuite's renderers draw them.
+//! Gradients as PDF shadings, laid out exactly as PhotoSplice's renderers draw them.
 //!
-//! Two renderers draw gradients: shape layers through `photosuite_vector::Paint` (colour stops,
+//! Two renderers draw gradients: shape layers through `photosplice_vector::Paint` (colour stops,
 //! laid out over the path's control bounds) and Gradient Fill layers through
-//! `photosuite_compose::gradient_fill` (colour and opacity stops with midpoints, laid out over the
+//! `photosplice_compose::gradient_fill` (colour and opacity stops with midpoints, laid out over the
 //! layer's frame, Linear and Reflected end points on whole pixels). The geometry is read back
 //! from the renderer itself (its gradient parameter at a few points) rather than re-derived, so
 //! the PDF follows whatever the renderer does. Both ramps are piecewise linear in the parameter,
@@ -16,9 +16,9 @@ use krilla::color::rgb;
 use krilla::geom::Transform;
 use krilla::num::NormalizedF32;
 use krilla::paint::{LinearGradient, Paint, RadialGradient, SpreadMethod, Stop, SweepGradient};
-use photosuite_doc::{Fill, GradientStyle};
-use photosuite_geom::Rect;
-use photosuite_vector::Paint as VPaint;
+use photosplice_doc::{Fill, GradientStyle};
+use photosplice_geom::Rect;
+use photosplice_vector::Paint as VPaint;
 
 /// Where the parameter runs, in document pixels.
 enum Layout {
@@ -31,7 +31,7 @@ enum Layout {
 }
 
 /// The krilla paint of a shape layer's fill or stroke `f` (a gradient), as
-/// `photosuite_vector::Paint::from_fill(f, bounds)` renders it.
+/// `photosplice_vector::Paint::from_fill(f, bounds)` renders it.
 pub(super) fn shape_paint(f: &Fill, bounds: (f64, f64, f64, f64)) -> Option<Paint> {
     let Fill::Gradient { stops, angle, style, reverse, opacity_stops, midpoints, .. } = f else { return None };
     let real = VPaint::from_fill(f, bounds);
@@ -79,9 +79,9 @@ pub(super) fn shape_paint(f: &Fill, bounds: (f64, f64, f64, f64)) -> Option<Pain
 }
 
 /// The krilla paint of a Gradient Fill layer's fill `f`, laid out in `frame` (see
-/// `photosuite_compose::fill_frame`), as `photosuite_compose::gradient_fill::render` draws it.
+/// `photosplice_compose::fill_frame`), as `photosplice_compose::gradient_fill::render` draws it.
 pub(super) fn fill_paint(f: &Fill, frame: Rect) -> Option<Paint> {
-    use photosuite_compose::{effects, fill_layout, gradient_fill};
+    use photosplice_compose::{effects, fill_layout, gradient_fill};
     let Fill::Gradient { stops, angle, scale, style, reverse, opacity_stops, midpoints, offset, .. } = f else { return None };
     let layout = match style {
         GradientStyle::Linear | GradientStyle::Reflected => {

@@ -1,7 +1,7 @@
 //! Image › Analysis data stored with a document (measurement scale, count groups, the ruler line)
 //! and annotations (Notes). Pure data; the measuring itself lives in the engine.
 
-use photosuite_color::Color;
+use photosplice_color::Color;
 use serde::{Deserialize, Serialize};
 
 /// Image › Analysis › Set Measurement Scale: `pixel_length` pixels equal `logical_length`

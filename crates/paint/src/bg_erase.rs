@@ -4,8 +4,8 @@
 //! Colours are compared in the surface's own colour channels (RGB, CMYK, Gray, Lab… at any depth),
 //! so nothing is converted through RGB; only alpha changes.
 
-use photosuite_geom::Rect;
-use photosuite_raster::{Surface, from_rgba};
+use photosplice_geom::Rect;
+use photosplice_raster::{Surface, from_rgba};
 use serde::{Deserialize, Serialize};
 
 use crate::Stroke;
@@ -170,7 +170,7 @@ fn keep_connected(weight: &mut [f32], w: usize, h: usize, sx: usize, sy: usize) 
 mod tests {
     use super::*;
     use crate::{BrushSettings, StrokePoint};
-    use photosuite_color::{ColorMode, PixelFormat, SampleType};
+    use photosplice_color::{ColorMode, PixelFormat, SampleType};
 
     const GREEN: [f32; 4] = [0.2, 0.6, 0.2, 1.0];
     const BLUE: [f32; 4] = [0.1, 0.1, 0.5, 1.0];

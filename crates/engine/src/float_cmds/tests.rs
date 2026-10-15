@@ -1,4 +1,4 @@
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 use serde_json::json;
 
 use super::*;
@@ -76,7 +76,7 @@ fn needs_a_selection_and_an_unlocked_pixel_layer() {
     assert!(s.is_enabled("select.float"));
 }
 
-/// `cargo test --release -p photosuite-engine float_drag_bench -- --ignored --nocapture`
+/// `cargo test --release -p photosplice-engine float_drag_bench -- --ignored --nocapture`
 #[test]
 #[ignore]
 fn float_drag_bench() {

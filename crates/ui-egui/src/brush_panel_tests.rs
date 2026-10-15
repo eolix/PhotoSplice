@@ -1,14 +1,14 @@
 use egui::vec2;
 use egui_kittest::Harness;
-use photosuite_engine::paint::{Control, GrayTile, MaskMode, Pattern, PatternStyle, TipShape};
+use photosplice_engine::paint::{Control, GrayTile, MaskMode, Pattern, PatternStyle, TipShape};
 
 use super::*;
 
-fn app() -> PhotosuiteApp {
-    PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default())
+fn app() -> PhotospliceApp {
+    PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default())
 }
 
-fn last_journal(app: &PhotosuiteApp) -> Option<(String, Value)> {
+fn last_journal(app: &PhotospliceApp) -> Option<(String, Value)> {
     app.session.journal.last().cloned()
 }
 
@@ -147,7 +147,7 @@ fn every_section_round_trips_through_set_brush() {
         let got = app.session.execute("brush.get", json!({})).unwrap();
         assert_eq!(serde_json::from_value::<BrushSettings>(got).unwrap(), after, "section {i}");
         // Replaying the journaled call onto a fresh session gives the same brush (drivable).
-        let mut s = photosuite_engine::Session::new();
+        let mut s = photosplice_engine::Session::new();
         s.execute(&id, p).unwrap();
         assert_eq!(s.tools.brush, after, "replay of section {i}");
     }
@@ -221,11 +221,11 @@ fn section_locks_round_trip_and_survive_preset_picks() {
 }
 
 /// A harness that shows the options bar with `tool` in the Studio (non-pro) theme.
-fn options_bar_harness(tool: crate::state::Tool) -> Harness<'static, PhotosuiteApp> {
+fn options_bar_harness(tool: crate::state::Tool) -> Harness<'static, PhotospliceApp> {
     let mut app = app();
     app.ui.tool = tool;
     let mut h = Harness::builder().with_size(vec2(1400.0, 60.0)).build_ui_state(
-        |ui, app: &mut PhotosuiteApp| {
+        |ui, app: &mut PhotospliceApp| {
             if !ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                 return;
             }
@@ -233,7 +233,7 @@ fn options_bar_harness(tool: crate::state::Tool) -> Harness<'static, PhotosuiteA
         },
         app,
     );
-    PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::Midnight);
+    PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::Midnight);
     h.run_steps(4);
     h
 }
@@ -281,7 +281,7 @@ fn options_bar_edits_are_one_set_brush_per_gesture() {
     assert_eq!(h.state().session.journal.len(), n + 2);
     assert_eq!(h.state().session.journal.last().unwrap().1["brush"], json!({"pressureOpacity": !was}));
     // Replaying the journal gives the same brush.
-    let mut s = photosuite_engine::Session::new();
+    let mut s = photosplice_engine::Session::new();
     for (id, p) in &h.state().session.journal {
         s.execute(id, p.clone()).unwrap();
     }
@@ -292,7 +292,7 @@ fn options_bar_edits_are_one_set_brush_per_gesture() {
 fn mixer_brush_options_update_the_persisted_mixer_settings() {
     use egui_kittest::kittest::Queryable;
     let mut h = options_bar_harness(crate::state::Tool::MixerBrush);
-    // PhotoSuite's themes all draw option labels with a trailing colon (`Tokens::pro`).
+    // PhotoSplice's themes all draw option labels with a trailing colon (`Tokens::pro`).
     for label in ["Wet:", "Load:", "Mix:", "Flow:", "Sample All Layers"] {
         assert!(h.get_by_label(label).rect().is_positive(), "missing Mixer Brush option {label}");
     }
@@ -330,12 +330,12 @@ fn drop_targets_and_actions_reorder_presets() {
     assert_eq!(group_key(p, UNGROUPED), "");
     let (group, index) = drop_target(p, "A1", "A3", true).unwrap();
     apply(&mut app, vec![Action::Move { name: "A1".into(), group, index: Some(index) }]);
-    let names = |app: &PhotosuiteApp, g: &str| app.session.tools.presets.iter().filter(|x| x.group == g).map(|x| x.name.clone()).collect::<Vec<_>>();
+    let names = |app: &PhotospliceApp, g: &str| app.session.tools.presets.iter().filter(|x| x.group == g).map(|x| x.name.clone()).collect::<Vec<_>>();
     assert_eq!(names(&app, "Alpha"), ["A2", "A3", "A1"]);
     apply(&mut app, vec![Action::Move { name: "A2".into(), group: "Beta".into(), index: None }]);
     assert_eq!(names(&app, "Beta"), ["B1", "A2"]);
     apply(&mut app, vec![Action::MoveGroup { group: "Beta".into(), before: Some("Alpha".into()) }]);
-    let order = photosuite_engine::brush_preset_cmds::group_order(&app.session.tools.presets);
+    let order = photosplice_engine::brush_preset_cmds::group_order(&app.session.tools.presets);
     assert!(order.iter().position(|g| g == "Beta") < order.iter().position(|g| g == "Alpha"));
     // Rename and delete from the context menu.
     apply(&mut app, vec![Action::Rename(Renaming { group: false, name: "A3".into(), text: "Third".into() })]);
@@ -360,13 +360,13 @@ fn drop_targets_and_actions_reorder_presets() {
     }
 }
 
-fn harness(tab: usize, section: usize) -> Harness<'static, PhotosuiteApp> {
+fn harness(tab: usize, section: usize) -> Harness<'static, PhotospliceApp> {
     let mut app = app();
     app.ui.panels.brush_settings = true;
     app.ui.brush_tab = tab;
     app.ui.brush_section = section;
     let mut h = Harness::builder().with_size(vec2(1200.0, 900.0)).build_ui_state(
-        |ui, app: &mut PhotosuiteApp| {
+        |ui, app: &mut PhotospliceApp| {
             let ctx = ui.ctx().clone();
             if !ctx.fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                 return;
@@ -375,7 +375,7 @@ fn harness(tab: usize, section: usize) -> Harness<'static, PhotosuiteApp> {
         },
         app,
     );
-    PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+    PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
     h.run_steps(4);
     h
 }
@@ -429,7 +429,7 @@ fn brushes_panel_groups_collapse_and_filter() {
     let groups = grouped_presets(&h.state().session.tools.presets);
     assert!(groups.len() >= 2, "{groups:?}");
     let ctx = h.ctx.clone();
-    let shown = |h: &mut Harness<'static, PhotosuiteApp>| {
+    let shown = |h: &mut Harness<'static, PhotospliceApp>| {
         h.run_steps(2);
         brush_preview::with_cache(&ctx, |c| c.len())
     };
@@ -448,11 +448,11 @@ fn brushes_panel_groups_collapse_and_filter() {
 
 /// A fresh session with the Brush tool: shortcuts, the options bar and the Brush Settings window,
 /// in the default theme (#258).
-fn app_harness() -> Harness<'static, PhotosuiteApp> {
+fn app_harness() -> Harness<'static, PhotospliceApp> {
     let mut app = app();
     app.ui.tool = crate::state::Tool::Brush;
     let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).build_ui_state(
-        |ui, app: &mut PhotosuiteApp| {
+        |ui, app: &mut PhotospliceApp| {
             let ctx = ui.ctx().clone();
             if !ctx.fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                 return;
@@ -463,7 +463,7 @@ fn app_harness() -> Harness<'static, PhotosuiteApp> {
         },
         app,
     );
-    PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::default());
+    PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::default());
     h.run_steps(4);
     h
 }

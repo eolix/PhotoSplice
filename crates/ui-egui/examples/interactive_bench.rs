@@ -3,7 +3,7 @@
 //! save .pcraft / .psd, export PNG / JPEG, plus the canvas refresh each edit triggers.
 //!
 //! ```sh
-//! cargo run --release -p photosuite-ui-egui --example interactive_bench -- [--size 7360x4912] [--reps 5] [--json out.json] [--only text] [--cpu]
+//! cargo run --release -p photosplice-ui-egui --example interactive_bench -- [--size 7360x4912] [--reps 5] [--json out.json] [--only text] [--cpu]
 //! ```
 //!
 //! Every edit goes through `Session::execute` (the command path the UI and the control channel share:
@@ -17,9 +17,9 @@
 use std::time::Instant;
 
 use eframe::wgpu;
-use photosuite_doc::{Document, LayerContent};
-use photosuite_engine::Session;
-use photosuite_geom::Rect;
+use photosplice_doc::{Document, LayerContent};
+use photosplice_engine::Session;
+use photosplice_geom::Rect;
 use serde_json::{Value, json};
 
 fn arg(args: &[String], name: &str) -> Option<String> {
@@ -40,7 +40,7 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    comp: photosuite_gpu::Compositor,
+    comp: photosplice_gpu::Compositor,
 }
 
 fn gpu() -> Option<Gpu> {
@@ -50,14 +50,14 @@ fn gpu() -> Option<Gpu> {
             .ok()?;
     eprintln!("adapter: {}", adapter.get_info().name);
     // The limits the app requests (see `gpu_canvas::use_adapter_limits`).
-    let limits = photosuite_ui_egui::gpu_canvas::device_limits(&adapter);
+    let limits = photosplice_ui_egui::gpu_canvas::device_limits(&adapter);
     let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_limits: limits, ..Default::default() })).ok()?;
-    let comp = photosuite_gpu::Compositor::new(&device);
+    let comp = photosplice_gpu::Compositor::new(&device);
     Some(Gpu { device, queue, comp })
 }
 
 /// A photo-like RGB image: smooth gradients, soft blobs, fine noise (so JPEG has real work).
-fn photo(w: u32, h: u32) -> photosuite_codecs::Image {
+fn photo(w: u32, h: u32) -> photosplice_codecs::Image {
     use rayon::prelude::*;
     let mut px = vec![0u8; w as usize * h as usize * 3];
     px.par_chunks_mut(w as usize * 3).enumerate().for_each(|(y, row)| {
@@ -73,7 +73,7 @@ fn photo(w: u32, h: u32) -> photosuite_codecs::Image {
             }
         }
     });
-    photosuite_codecs::Image::from_raw(w, h, photosuite_codecs::ChannelLayout::Rgb, photosuite_codecs::SampleType::U8, px).expect("image")
+    photosplice_codecs::Image::from_raw(w, h, photosplice_codecs::ChannelLayout::Rgb, photosplice_codecs::SampleType::U8, px).expect("image")
 }
 
 struct Bench {
@@ -86,7 +86,7 @@ struct Bench {
     /// Per row (same order as `rows`): the timed samples and the peak RSS while they ran, for
     /// `--json` (`cargo xtask perf`).
     extra: Vec<(Vec<f64>, Option<u64>)>,
-    rss: photosuite_testkit::perf::RssSampler,
+    rss: photosplice_testkit::perf::RssSampler,
 }
 
 impl Bench {
@@ -108,12 +108,12 @@ impl Bench {
         match &mut self.gpu {
             Some(g) => {
                 if g.comp.render(&g.device, &g.queue, doc, region, |_, _| {}).is_err() {
-                    std::hint::black_box(photosuite_compose::render(doc, region));
+                    std::hint::black_box(photosplice_compose::render(doc, region));
                 }
                 let _ = g.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
             }
             None => {
-                std::hint::black_box(photosuite_compose::render(doc, region));
+                std::hint::black_box(photosplice_compose::render(doc, region));
             }
         }
         t.elapsed().as_secs_f64() * 1000.0
@@ -137,13 +137,13 @@ impl Bench {
 }
 
 /// How far an edit's composite change reaches beyond its damage (layer effects).
-fn reach(layers: &[photosuite_doc::Layer]) -> i32 {
+fn reach(layers: &[photosplice_doc::Layer]) -> i32 {
     layers
         .iter()
         .map(|l| {
-            let own = if photosuite_compose::effects::has_effects(l) { photosuite_compose::effects::margin(l) } else { 0 };
+            let own = if photosplice_compose::effects::has_effects(l) { photosplice_compose::effects::margin(l) } else { 0 };
             let kids = match &l.content {
-                photosuite_doc::LayerContent::Group(g) => reach(&g.children),
+                photosplice_doc::LayerContent::Group(g) => reach(&g.children),
                 _ => 0,
             };
             own + kids
@@ -178,7 +178,7 @@ fn main() {
         only: arg(&args, "--only"),
         rows: Vec::new(),
         extra: Vec::new(),
-        rss: photosuite_testkit::perf::RssSampler::start(std::time::Duration::from_millis(2)),
+        rss: photosplice_testkit::perf::RssSampler::start(std::time::Duration::from_millis(2)),
     };
     println!("document {w}×{h} ({:.1} MP), 8-bit RGB, {} reps, {}", (w * h) as f64 / 1e6, reps, if b.gpu.is_some() { "GPU canvas" } else { "CPU canvas" });
 
@@ -187,13 +187,13 @@ fn main() {
     let mut jpeg = Vec::new();
     b.time("encode JPEG (codecs, q 90)", |_| {
         let t = Instant::now();
-        jpeg = photosuite_codecs::encode(&img, photosuite_codecs::Format::Jpeg, &Default::default()).expect("jpeg");
+        jpeg = photosplice_codecs::encode(&img, photosplice_codecs::Format::Jpeg, &Default::default()).expect("jpeg");
         ms(t)
     });
     let mut s = Session::new();
     b.time("open JPEG (decode + document + refresh)", |b| {
         let t = Instant::now();
-        let doc = photosuite_io::import("photo.jpg", &jpeg).expect("import").document;
+        let doc = photosplice_io::import("photo.jpg", &jpeg).expect("import").document;
         s = Session::new();
         s.open_document(doc, Some("photo.jpg".into()));
         let t = ms(t);
@@ -206,7 +206,7 @@ fn main() {
     b.time("viewport 1920×1080 (CPU compose)", |_| {
         let d = doc(&s);
         let t = Instant::now();
-        std::hint::black_box(photosuite_compose::render(&d, Rect::from_xywh(w as i32 / 3, h as i32 / 3, 1920, 1080)));
+        std::hint::black_box(photosplice_compose::render(&d, Rect::from_xywh(w as i32 / 3, h as i32 / 3, 1920, 1080)));
         ms(t)
     });
 
@@ -251,11 +251,11 @@ fn main() {
     for radius in [40.0, 250.0] {
         b.time(&format!("Gaussian Blur dialog preview r {radius}"), |_| {
             let st = s.active().expect("doc");
-            let k = photosuite_ui_egui::proxy::factor(&st.doc);
+            let k = photosplice_ui_egui::proxy::factor(&st.doc);
             let t = Instant::now();
-            let p = photosuite_ui_egui::filter_dialog::preview_document(&st.doc, st.active_layer, "filter.blur.gaussianBlur", &json!({"radius": radius}), k)
+            let p = photosplice_ui_egui::filter_dialog::preview_document(&st.doc, st.active_layer, "filter.blur.gaussianBlur", &json!({"radius": radius}), k)
                 .expect("preview");
-            std::hint::black_box(photosuite_compose::flatten(&p));
+            std::hint::black_box(photosplice_compose::flatten(&p));
             ms(t)
         });
     }
@@ -271,9 +271,9 @@ fn main() {
         b.time(&format!("Curves dialog change, CPU proxy preview{sel}"), |_| {
             v = (v + 7) % 120;
             let st = s.active().expect("doc");
-            let k = photosuite_ui_egui::proxy::factor(&st.doc);
+            let k = photosplice_ui_egui::proxy::factor(&st.doc);
             let t = Instant::now();
-            let p = photosuite_ui_egui::filter_dialog::preview_document(
+            let p = photosplice_ui_egui::filter_dialog::preview_document(
                 &st.doc,
                 st.active_layer,
                 "image.adjustments.curves",
@@ -281,7 +281,7 @@ fn main() {
                 k,
             )
             .expect("preview");
-            std::hint::black_box(photosuite_compose::flatten(&p));
+            std::hint::black_box(photosplice_compose::flatten(&p));
             ms(t)
         });
         // Once per dialog session (the app caches both per document revision).
@@ -289,8 +289,8 @@ fn main() {
             let st = s.active().expect("doc");
             let target = st.active_layer.expect("layer");
             let t = Instant::now();
-            let base = photosuite_ui_egui::adjust_preview::base_document(&st.doc, target).expect("base");
-            let region = photosuite_ui_egui::adjust_preview::region(&st.doc, target);
+            let base = photosplice_ui_egui::adjust_preview::base_document(&st.doc, target).expect("base");
+            let region = photosplice_ui_egui::adjust_preview::region(&st.doc, target);
             println!("  (layer preview session setup: {:.1} ms, region {region:?})", ms(t));
             (base, region)
         };
@@ -298,18 +298,18 @@ fn main() {
             v = (v + 7) % 120;
             let t = Instant::now();
             let p =
-                photosuite_ui_egui::adjust_preview::with_settings(&base, "curves", &json!({"points": [[0, 0], [100, 100 + v], [255, 255]]})).expect("preview");
+                photosplice_ui_egui::adjust_preview::with_settings(&base, "curves", &json!({"points": [[0, 0], [100, 100 + v], [255, 255]]})).expect("preview");
             let build = ms(t);
             let t = Instant::now();
             match &mut b.gpu {
                 Some(g) => {
                     if g.comp.render(&g.device, &g.queue, &p, region, |_, _| {}).is_err() {
-                        std::hint::black_box(photosuite_compose::render(&p, region));
+                        std::hint::black_box(photosplice_compose::render(&p, region));
                     }
                     let _ = g.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
                 }
                 None => {
-                    std::hint::black_box(photosuite_compose::render(&p, region));
+                    std::hint::black_box(photosplice_compose::render(&p, region));
                 }
             }
             build + ms(t)
@@ -321,16 +321,16 @@ fn main() {
             v = (v + 7) % 120;
             let t = Instant::now();
             let p =
-                photosuite_ui_egui::adjust_preview::with_settings(&base, "curves", &json!({"points": [[0, 0], [100, 100 + v], [255, 255]]})).expect("preview");
+                photosplice_ui_egui::adjust_preview::with_settings(&base, "curves", &json!({"points": [[0, 0], [100, 100 + v], [255, 255]]})).expect("preview");
             match &mut b.gpu {
                 Some(g) => {
                     if g.comp.render(&g.device, &g.queue, &p, view, |_, _| {}).is_err() {
-                        std::hint::black_box(photosuite_compose::render(&p, view));
+                        std::hint::black_box(photosplice_compose::render(&p, view));
                     }
                     let _ = g.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
                 }
                 None => {
-                    std::hint::black_box(photosuite_compose::render(&p, view));
+                    std::hint::black_box(photosplice_compose::render(&p, view));
                 }
             }
             ms(t)
@@ -338,26 +338,26 @@ fn main() {
         // Zoomed out (fit to a 1600-pixel-wide view on a 2× display: k = 2 for 36 MP), the canvas
         // previews on a reduced copy built once per session.
         let zoom = 1600.0 / w as f32 * 2.0;
-        let k = photosuite_ui_egui::adjust_preview::proxy_factor(zoom);
+        let k = photosplice_ui_egui::adjust_preview::proxy_factor(zoom);
         let t = Instant::now();
-        let proxy = photosuite_ui_egui::adjust_preview::proxy_base(&base, k);
+        let proxy = photosplice_ui_egui::adjust_preview::proxy_base(&base, k);
         println!("  (zoomed-out proxy k {k} setup: {:.1} ms)", ms(t));
         let kk = k as i32;
         let pregion = Rect::new(region.x0 / kk, region.y0 / kk, region.x1 / kk + 1, region.y1 / kk + 1).intersect(&proxy.bounds());
         b.time(&format!("Curves dialog change, layer preview zoomed out{sel}"), |b| {
             v = (v + 7) % 120;
             let t = Instant::now();
-            let p = photosuite_ui_egui::adjust_preview::proxy_with_settings(&proxy, "curves", &json!({"points": [[0, 0], [100, 100 + v], [255, 255]]}))
+            let p = photosplice_ui_egui::adjust_preview::proxy_with_settings(&proxy, "curves", &json!({"points": [[0, 0], [100, 100 + v], [255, 255]]}))
                 .expect("preview");
             match &mut b.gpu {
                 Some(g) => {
                     if g.comp.render(&g.device, &g.queue, &p, pregion, |_, _| {}).is_err() {
-                        std::hint::black_box(photosuite_compose::render(&p, pregion));
+                        std::hint::black_box(photosplice_compose::render(&p, pregion));
                     }
                     let _ = g.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
                 }
                 None => {
-                    std::hint::black_box(photosuite_compose::render(&p, pregion));
+                    std::hint::black_box(photosplice_compose::render(&p, pregion));
                 }
             }
             ms(t)
@@ -394,18 +394,18 @@ fn main() {
     b.time("save .pcraft (bytes, full)", |_| {
         let d = doc(&s);
         let t = Instant::now();
-        std::hint::black_box(photosuite_format::save_to_bytes(&d, &photosuite_format::SaveOptions::default()).expect("pcraft"));
+        std::hint::black_box(photosplice_format::save_to_bytes(&d, &photosplice_format::SaveOptions::default()).expect("pcraft"));
         ms(t)
     });
     b.time("save .psd", |_| {
         let d = doc(&s);
         let t = Instant::now();
-        psd = photosuite_io::export(&d, "x.psd", &Default::default()).expect("psd").bytes;
+        psd = photosplice_io::export(&d, "x.psd", &Default::default()).expect("psd").bytes;
         ms(t)
     });
     b.time("open .psd (3 layers) + refresh", |b| {
         let t = Instant::now();
-        let d = photosuite_io::import("x.psd", &psd).expect("psd").document;
+        let d = photosplice_io::import("x.psd", &psd).expect("psd").document;
         let mut s2 = Session::new();
         s2.open_document(d, None);
         ms(t) + b.refresh(&s2, true)
@@ -413,19 +413,19 @@ fn main() {
     b.time("flatten (CPU compositor, 3 layers)", |_| {
         let d = doc(&s);
         let t = Instant::now();
-        std::hint::black_box(photosuite_compose::flatten(&d));
+        std::hint::black_box(photosplice_compose::flatten(&d));
         ms(t)
     });
     b.time("export PNG (flatten + encode)", |_| {
         let d = doc(&s);
         let t = Instant::now();
-        std::hint::black_box(photosuite_io::export(&d, "x.png", &Default::default()).expect("png"));
+        std::hint::black_box(photosplice_io::export(&d, "x.png", &Default::default()).expect("png"));
         ms(t)
     });
     b.time("export JPEG (flatten + encode)", |_| {
         let d = doc(&s);
         let t = Instant::now();
-        std::hint::black_box(photosuite_io::export(&d, "x.jpg", &Default::default()).expect("jpg"));
+        std::hint::black_box(photosplice_io::export(&d, "x.jpg", &Default::default()).expect("jpg"));
         ms(t)
     });
 
@@ -443,7 +443,7 @@ fn main() {
         let d = doc(&s);
         let l = d.layer(gid).expect("layer");
         let LayerContent::Fill(f) = &l.content else { panic!("not a fill") };
-        let f = photosuite_engine::gradient_fill_cmds::apply_set(l, f, d.bounds(), &json!({"to": to}), [0.0, 0.0, 0.0, 1.0], [1.0; 4]).expect("set");
+        let f = photosplice_engine::gradient_fill_cmds::apply_set(l, f, d.bounds(), &json!({"to": to}), [0.0, 0.0, 0.0, 1.0], [1.0; 4]).expect("set");
         let mut shown = (*d).clone();
         shown.layer_mut(gid).expect("layer").content = LayerContent::Fill(f);
         std::hint::black_box(&shown);
@@ -456,7 +456,7 @@ fn main() {
         let d = doc(&s);
         let l = d.layer(gid).expect("layer");
         let LayerContent::Fill(f) = &l.content else { panic!("not a fill") };
-        let f = photosuite_engine::gradient_fill_cmds::apply_set(l, f, d.bounds(), &json!({"to": to}), [0.0, 0.0, 0.0, 1.0], [1.0; 4]).expect("set");
+        let f = photosplice_engine::gradient_fill_cmds::apply_set(l, f, d.bounds(), &json!({"to": to}), [0.0, 0.0, 0.0, 1.0], [1.0; 4]).expect("set");
         let mut shown = (*d).clone();
         shown.layer_mut(gid).expect("layer").content = LayerContent::Fill(f);
         ms(t) + b.render(&shown, shown.bounds())

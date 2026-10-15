@@ -1,10 +1,10 @@
 //! Color Replacement: recolour pixels similar to a sampled colour using a non-separable blend
 //! (Hue, Saturation, Color or Luminosity) with the foreground colour.
 
-use photosuite_color::BlendMode;
-use photosuite_color::blend::blend_rgb;
-use photosuite_geom::Rect;
-use photosuite_raster::{Surface, from_rgba_into, to_rgba};
+use photosplice_color::BlendMode;
+use photosplice_color::blend::blend_rgb;
+use photosplice_geom::Rect;
+use photosplice_raster::{Surface, from_rgba_into, to_rgba};
 use serde::{Deserialize, Serialize};
 
 use crate::Stroke;
@@ -194,14 +194,14 @@ pub fn apply_color_replacement(target: &mut Surface, stroke: &Stroke, rs: &Repla
 mod tests {
     use super::*;
     use crate::{BrushSettings, StrokePoint};
-    use photosuite_color::PixelFormat;
-    use photosuite_color::blend::lum;
+    use photosplice_color::PixelFormat;
+    use photosplice_color::blend::lum;
 
     fn setup(fmt: PixelFormat) -> Surface {
         let mut s = Surface::new(fmt);
         // Left: mid green; right: dark blue.
-        s.fill_rect(Rect::new(0, 0, 40, 40), &photosuite_raster::from_rgba(&fmt, [0.2, 0.6, 0.2, 1.0]));
-        s.fill_rect(Rect::new(40, 0, 80, 40), &photosuite_raster::from_rgba(&fmt, [0.1, 0.1, 0.5, 1.0]));
+        s.fill_rect(Rect::new(0, 0, 40, 40), &photosplice_raster::from_rgba(&fmt, [0.2, 0.6, 0.2, 1.0]));
+        s.fill_rect(Rect::new(40, 0, 80, 40), &photosplice_raster::from_rgba(&fmt, [0.1, 0.1, 0.5, 1.0]));
         s
     }
 

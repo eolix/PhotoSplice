@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# العربية translations for PhotoSuite UI.
+# العربية translations for PhotoSplice UI.
 
 	File	ملف
 	Edit	تحرير
@@ -672,7 +672,7 @@
 	Timeline	الجدول الزمني
 	Tool Presets	مُسْبَقات الأداة
 	Tools	الأدوات
-	About PhotoSuite	حول فوتو كرافت
+	About PhotoSplice	حول فوتو كرافت
 	Website	موقع الكتروني
 	Report an Issue…	الإبلاغ عن مشكلة…
 	WIA Support…	دعم ويا…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Perspective Warp غير نشط
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Perspective Warp: ارسم مستويات على طول منظور الصورة، ثم قم بالتبديل إلى Warp
 	Photo Filter	فلتر صور
-	PhotoSuite	فوتو كرافت
-	PhotoSuite Manages Colors	PhotoSuite يدير الألوان
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite — محرر صور أصلي مفتوح المصدر ومكتوب بلغة Rust
+	PhotoSplice	فوتو كرافت
+	PhotoSplice Manages Colors	PhotoSplice يدير الألوان
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice — محرر صور أصلي مفتوح المصدر ومكتوب بلغة Rust
 	Pin Depth:	عمق الدبوس:
 	Pixel Length:	طول البكسل:
 	Pixels/Centimeter	بكسل / سم
@@ -1570,7 +1570,7 @@
 	Pen Tilt	إمالة القلم
 	Pen Tool	أداة القلم
 	Photo	صورة
-	PhotoSuite website	موقع فوتو كرافت
+	PhotoSplice website	موقع فوتو كرافت
 	Picas	بيكاس
 	Pillow Emboss	وسادة منقوشة
 	Pixel Replacement	استبدال البكسل
@@ -1877,7 +1877,7 @@
 	System Info…	معلومات النظام…
 	System Info	معلومات النظام
 	More panels	المزيد من اللوحات
-	These settings aren't available in PhotoSuite yet.	هذه الإعدادات غير متوفرة في PhotoSuite حتى الآن
+	These settings aren't available in PhotoSplice yet.	هذه الإعدادات غير متوفرة في PhotoSplice حتى الآن
 	Graphics	الرسومات
 	Reset GPU Backend	إعادة تعيين الواجهة الخلفية لوحدة معالجة الرسومات
 	Applies at next launch.	ينطبق عند الإطلاق التالي
@@ -2018,7 +2018,7 @@
 	Opening…	جارٍ الفتح…
 	Patch	رقعة
 	Patch:	رقعة:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	يستخدم PhotoSuite مُركِّب الصور على CPU. قد تظل النافذة تستخدم محوّل الرسومات لديك.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	يستخدم PhotoSplice مُركِّب الصور على CPU. قد تظل النافذة تستخدم محوّل الرسومات لديك.
 	Play Action	تشغيل الإجراء
 	Reading…	جارٍ القراءة…
 	Record Action	تسجيل إجراء

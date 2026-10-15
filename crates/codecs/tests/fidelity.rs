@@ -3,7 +3,7 @@
 mod common;
 use FidelityWarning as W;
 use common::*;
-use photosuite_codecs::*;
+use photosplice_codecs::*;
 
 fn warns(img: &Image, f: Format) -> Vec<FidelityWarning> {
     fidelity_warnings(img, f)

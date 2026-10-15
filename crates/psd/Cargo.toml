@@ -1,5 +1,5 @@
 [package]
-name = "photosuite-psd"
+name = "photosplice-psd"
 description = "Faithful, lossless reader and writer for Adobe Photoshop PSD (v1) and PSB (v2) files"
 version.workspace = true
 edition.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [lib]
-name = "photosuite_psd"
+name = "photosplice_psd"
 path = "src/lib.rs"
 
 [features]
@@ -24,7 +24,7 @@ serde = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
-photosuite-psd = { path = ".", features = ["testgen"] }
+photosplice-psd = { path = ".", features = ["testgen"] }
 
 [lints]
 workspace = true

@@ -1,7 +1,7 @@
 use super::*;
 
 fn tmp(name: &str) -> String {
-    let d = std::env::temp_dir().join(format!("photosuite-file-cmds-{}-{name}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("photosplice-file-cmds-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d.to_string_lossy().into_owned()
@@ -27,7 +27,7 @@ fn png(dir: &str, name: &str, w: u32, h: u32, color: &str) -> String {
 }
 
 fn composite(s: &Session, x: i32, y: i32) -> [f32; 4] {
-    let b = photosuite_compose::render(doc(s), Rect::new(x, y, x + 1, y + 1));
+    let b = photosplice_compose::render(doc(s), Rect::new(x, y, x + 1, y + 1));
     b.px[0]
 }
 
@@ -50,7 +50,7 @@ fn close_all_and_close_others() {
 
 #[test]
 fn camera_raw_opens_as_16_bit_with_notes() {
-    use photosuite_raw::testgen::{DngSpec, mosaic, scene};
+    use photosplice_raw::testgen::{DngSpec, mosaic, scene};
     let (w, h) = (24, 16);
     let mut spec = DngSpec::cfa(w, h, mosaic(&scene(w, h), w, [0, 1, 1, 2], 0, 65535));
     spec.as_shot_neutral = Some([0.5, 1.0, 0.7]);
@@ -58,7 +58,7 @@ fn camera_raw_opens_as_16_bit_with_notes() {
     let r = open_bytes_as(&mut s, "IMG_0001.dng", &spec.build(), None, None).unwrap();
     assert!(r["warnings"].as_array().is_some_and(|w| w.iter().any(|m| m.as_str().is_some_and(|m| m.contains("DNG")))), "{r}");
     assert_eq!((doc(&s).size.width, doc(&s).size.height), (24, 16));
-    assert_eq!(doc(&s).depth, photosuite_color::SampleType::U16);
+    assert_eq!(doc(&s).depth, photosplice_color::SampleType::U16);
     // Damaged raw data is an error, not a crash.
     let mut bad = spec.build();
     bad.truncate(bad.len() / 2);
@@ -103,13 +103,13 @@ fn save_a_copy_keeps_path_and_dirty_state() {
     assert_eq!(s.active().unwrap().path, None);
     assert_eq!(s.active().unwrap().revision, rev);
     assert!(s.active().unwrap().is_dirty());
-    let back = photosuite_io::import("copy.psd", &std::fs::read(&out).unwrap()).unwrap().document;
+    let back = photosplice_io::import("copy.psd", &std::fs::read(&out).unwrap()).unwrap().document;
     assert_eq!(back.layers.len(), 2);
-    assert_eq!(back.depth, photosuite_color::SampleType::U16);
+    assert_eq!(back.depth, photosplice_color::SampleType::U16);
     // Flattened copy.
     let flat = join(&dir, "flat.psd");
     s.execute("file.saveACopy", json!({"path": flat, "layers": false})).unwrap();
-    assert_eq!(photosuite_io::import("flat.psd", &std::fs::read(&flat).unwrap()).unwrap().document.layers.len(), 1);
+    assert_eq!(photosplice_io::import("flat.psd", &std::fs::read(&flat).unwrap()).unwrap().document.layers.len(), 1);
     assert!(s.execute("file.saveACopy", json!({})).is_err());
 }
 
@@ -162,8 +162,8 @@ fn place_embedded_centres_fits_and_embeds() {
 /// is 20×40, red on top.
 fn rotated_jpeg(dir: &str) -> String {
     let px: Vec<u8> = (0..20).flat_map(|_| (0..40).flat_map(|x| if x < 20 { [230, 20, 20] } else { [20, 20, 230] })).collect();
-    let img = photosuite_codecs::Image::from_u8(40, 20, photosuite_codecs::ChannelLayout::Rgb, px).unwrap();
-    let jpeg = photosuite_codecs::encode(&img, photosuite_codecs::Format::Jpeg, &Default::default()).unwrap();
+    let img = photosplice_codecs::Image::from_u8(40, 20, photosplice_codecs::ChannelLayout::Rgb, px).unwrap();
+    let jpeg = photosplice_codecs::encode(&img, photosplice_codecs::Format::Jpeg, &Default::default()).unwrap();
     let mut seg = b"Exif\0\0II*\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0".to_vec();
     let mut file = vec![0xFF, 0xD8, 0xFF, 0xE1];
     file.extend_from_slice(&((seg.len() + 2) as u16).to_be_bytes());
@@ -209,7 +209,7 @@ fn file_info_round_trips_through_xmp_and_psd() {
     assert_eq!(read_file_info(Some(&xmp))["author"], "V. van Gogh");
     // PSD round trip.
     let (bytes, _) = encode(doc(&s), "x.psd", None).unwrap();
-    let back = photosuite_io::import("x.psd", &bytes).unwrap().document;
+    let back = photosplice_io::import("x.psd", &bytes).unwrap().document;
     let info = read_file_info(back.metadata.xmp.as_deref());
     assert_eq!(info["title"], "The Starry Night");
     assert_eq!(info["keywords"], json!(["stars", "night"]));
@@ -266,9 +266,9 @@ fn flatten_all_layer_effects_and_masks() {
         s.edit("fx", |doc, _| {
             let l = doc.layer_mut(id).unwrap();
             l.effects.enabled = true;
-            l.effects.items.push(photosuite_doc::Effect::ColorOverlay {
-                common: photosuite_doc::effects::FxCommon::new(photosuite_color::BlendMode::Normal, 1.0),
-                color: photosuite_color::Color::rgb(0.0, 1.0, 0.0),
+            l.effects.items.push(photosplice_doc::Effect::ColorOverlay {
+                common: photosplice_doc::effects::FxCommon::new(photosplice_color::BlendMode::Normal, 1.0),
+                color: photosplice_color::Color::rgb(0.0, 1.0, 0.0),
             });
             Ok(())
         })
@@ -332,15 +332,15 @@ fn load_files_into_stack_and_image_processor_and_batch() {
     let r = s.execute("file.scripts.imageProcessor", json!({"input": input, "output": out, "format": "jpg", "width": 20, "height": 20})).unwrap();
     let files = r["files"].as_array().unwrap();
     assert_eq!(files.len(), 2, "{r}");
-    let back = photosuite_io::import("a.jpg", &std::fs::read(files[0].as_str().unwrap()).unwrap()).unwrap().document;
+    let back = photosplice_io::import("a.jpg", &std::fs::read(files[0].as_str().unwrap()).unwrap()).unwrap().document;
     assert_eq!((back.size.width, back.size.height), (20, 10));
     // Batch: run an action (invert) over the folder, save PNGs.
     let out = join(&dir, "png");
     let r = s.execute("file.automate.batch", json!({"steps": [["image.adjustments.invert", {}]], "input": input, "output": out, "format": "png"})).unwrap();
     assert_eq!(r["files"].as_array().unwrap().len(), 2, "{r}");
     assert!(r["errors"].as_array().unwrap().is_empty());
-    let inv = photosuite_io::import("a.png", &std::fs::read(join(&out, "a.png")).unwrap()).unwrap().document;
-    let px = photosuite_compose::render(&inv, Rect::new(1, 1, 2, 2)).px[0];
+    let inv = photosplice_io::import("a.png", &std::fs::read(join(&out, "a.png")).unwrap()).unwrap().document;
+    let px = photosplice_compose::render(&inv, Rect::new(1, 1, 2, 2)).px[0];
     assert!(px[0] < 0.01 && px[1] > 0.99 && px[2] > 0.99, "red inverted to cyan: {px:?}");
     assert!(s.execute("file.automate.batch", json!({"steps": [["no.such.command", {}]], "input": input, "output": out})).is_err());
 }
@@ -398,11 +398,11 @@ fn import_pdf_opens_the_chosen_page_at_a_resolution() {
     // Two 1 in × 1 in pages (72 × 72 px at 72 ppi): red, then blue.
     let page = |c: [u8; 3]| {
         let rgb: Vec<u8> = (0..72 * 72).flat_map(|_| c).collect();
-        let img = photosuite_codecs::Image::from_u8(72, 72, photosuite_codecs::ChannelLayout::Rgb, rgb).unwrap();
-        let jpeg = photosuite_codecs::encode(&img, photosuite_codecs::Format::Jpeg, &photosuite_codecs::EncodeOptions::default()).unwrap();
+        let img = photosplice_codecs::Image::from_u8(72, 72, photosplice_codecs::ChannelLayout::Rgb, rgb).unwrap();
+        let jpeg = photosplice_codecs::encode(&img, photosplice_codecs::Format::Jpeg, &photosplice_codecs::EncodeOptions::default()).unwrap();
         (72u32, 72u32, 72.0f32, jpeg)
     };
-    let pdf = photosuite_io::pdf::raster_pdf(&[page([255, 0, 0]), page([0, 0, 255])]);
+    let pdf = photosplice_io::pdf::raster_pdf(&[page([255, 0, 0]), page([0, 0, 255])]);
     let dir = std::env::temp_dir().join(format!("pc-pdf-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("two.pdf").to_string_lossy().into_owned();
@@ -429,7 +429,7 @@ fn import_pdf_opens_the_chosen_page_at_a_resolution() {
     assert_eq!(r["documents"].as_array().unwrap().len(), 2);
     assert_eq!(s.documents().len(), before + 2);
     let st = s.active().unwrap();
-    assert_eq!((st.doc.mode, st.doc.depth), (ColorMode::Grayscale, photosuite_color::SampleType::U16));
+    assert_eq!((st.doc.mode, st.doc.depth), (ColorMode::Grayscale, photosplice_color::SampleType::U16));
     assert_eq!(st.doc.name, "two.pdf (page 1)");
     for bad in [json!({"pages": []}), json!({"pages": [0]}), json!({"pages": "1"}), json!({"cropTo": "page"}), json!({"mode": "hsl"}), json!({"depth": 32})] {
         let mut p = bad.clone();
@@ -506,12 +506,12 @@ fn batch_reports_inputs_that_share_an_output_name() {
     std::fs::create_dir_all(&other).unwrap();
     png(&other, "a.png", 8, 8, "#ffffff");
     let droplet = join(&dir, "d.pcdroplet");
-    std::fs::write(&droplet, json!({"photosuiteDroplet": 1, "name": "d", "action": {"steps": []}, "options": {"format": "png"}}).to_string()).unwrap();
+    std::fs::write(&droplet, json!({"photospliceDroplet": 1, "name": "d", "action": {"steps": []}, "options": {"format": "png"}}).to_string()).unwrap();
     let out = join(&dir, "droplet");
     let r = s.execute("file.automate.runDroplet", json!({"droplet": droplet, "input": [join(&input, "a.png"), other], "output": out})).unwrap();
     assert_eq!((r["files"].as_array().unwrap().len(), r["errors"].as_array().unwrap().len()), (1, 1), "{r}");
-    let kept = photosuite_io::import("a.png", &std::fs::read(join(&out, "a.png")).unwrap()).unwrap().document;
-    let px = photosuite_compose::render(&kept, Rect::new(1, 1, 2, 2)).px[0];
+    let kept = photosplice_io::import("a.png", &std::fs::read(join(&out, "a.png")).unwrap()).unwrap().document;
+    let px = photosplice_compose::render(&kept, Rect::new(1, 1, 2, 2)).px[0];
     assert!(px[0] > 0.99 && px[1] < 0.01, "the first input's result is kept: {px:?}");
 }
 
@@ -527,14 +527,14 @@ fn psd_selection_survives_save_and_open() {
     let st = s.active_mut().unwrap();
     st.restore_selection(&[mid, bg]);
     assert_eq!(st.layer_selection(), vec![mid, bg]);
-    let opts = photosuite_io::ExportOptions { selected_layers: st.layer_selection(), ..Default::default() };
-    let bytes = photosuite_io::export(doc(&s), "x.psd", &opts).unwrap().bytes;
+    let opts = photosplice_io::ExportOptions { selected_layers: st.layer_selection(), ..Default::default() };
+    let bytes = photosplice_io::export(doc(&s), "x.psd", &opts).unwrap().bytes;
     open_bytes_as(&mut s, "x.psd", &bytes, None, None).unwrap();
     let st = s.active().unwrap();
     let name = |id: LayerId| st.doc.layer(id).unwrap().name.clone();
     assert_eq!(st.layer_selection().into_iter().map(name).collect::<Vec<_>>(), ["Layer 1", "Background"]);
     assert!(!st.is_dirty(), "selecting on open is not an edit");
-    let plain = photosuite_io::export(&st.doc, "y.psd", &Default::default()).unwrap().bytes;
+    let plain = photosplice_io::export(&st.doc, "y.psd", &Default::default()).unwrap().bytes;
     open_bytes_as(&mut s, "y.psd", &plain, None, None).unwrap();
     let st = s.active().unwrap();
     assert_eq!(st.active_layer, st.doc.top_layer());

@@ -11,12 +11,12 @@
 use std::sync::Arc;
 
 use egui::{Color32, CursorIcon, Pos2, Stroke, pos2, vec2};
-use photosuite_algo::transform::Homography;
-use photosuite_doc::{Document, LayerContent, LayerId};
-use photosuite_geom::warp::{BezierMesh, Warp, WarpStyle};
+use photosplice_algo::transform::Homography;
+use photosplice_doc::{Document, LayerContent, LayerId};
+use photosplice_geom::warp::{BezierMesh, Warp, WarpStyle};
 use serde_json::json;
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::{ToolEvent, ViewXform};
 use crate::state::{MadeLayer, Tool, TransformMode, TransformSession};
 
@@ -73,7 +73,7 @@ pub struct TransformPreview {
 pub const HANDLE_PX: f64 = 12.0;
 
 /// [`HANDLE_PX`] in document pixels at the current zoom.
-pub fn handle_tolerance(app: &PhotosuiteApp) -> f64 {
+pub fn handle_tolerance(app: &PhotospliceApp) -> f64 {
     HANDLE_PX / app.current_zoom().max(0.01) as f64
 }
 
@@ -130,11 +130,11 @@ fn corners(r: [f64; 4]) -> [[f64; 2]; 4] {
 
 /// Start Free Transform on the active layer (or its selected pixels), or on the targeted unlinked
 /// layer mask, alpha channel or Quick Mask.
-pub fn begin(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), String> {
+pub fn begin(app: &mut PhotospliceApp, ctx: &egui::Context) -> Result<(), String> {
     let target = crate::canvas::paint_target(app);
     let st = app.session.active().ok_or("no document")?;
     let doc = st.doc.clone();
-    let lone = photosuite_engine::transform_cmds::lone_target(&doc, st.active_layer, &json!({ "target": target })).map_err(|e| e.to_string())?.cloned();
+    let lone = photosplice_engine::transform_cmds::lone_target(&doc, st.active_layer, &json!({ "target": target })).map_err(|e| e.to_string())?.cloned();
     if let Some(surf) = lone {
         return begin_lone(app, ctx, doc, surf, target);
     }
@@ -143,7 +143,7 @@ pub fn begin(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), String>
     if matches!(layer.content, LayerContent::Adjustment(_)) && layer.mask.is_none() {
         return Err("Adjustment layers have nothing to transform".into());
     }
-    let b = photosuite_engine::transform_cmds::transform_bounds(&doc, layer);
+    let b = photosplice_engine::transform_cmds::transform_bounds(&doc, layer);
     if b.is_empty() {
         return Err("Could not transform: the layer is empty".into());
     }
@@ -155,7 +155,7 @@ pub fn begin(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), String>
     let mut lifted = None;
     if let Some(sel) = doc.selection.clone().filter(|_| !layer.is_group() && layer.surface().is_some()) {
         if let Some(surf) = pd.layer_mut(id).and_then(|l| l.surface_mut()) {
-            let (l, rest) = photosuite_engine::transform_cmds::split_selected(surf, &sel);
+            let (l, rest) = photosplice_engine::transform_cmds::split_selected(surf, &sel);
             *surf = rest;
             lifted = Some(l);
         }
@@ -199,7 +199,7 @@ pub fn begin(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), String>
 
 /// Free Transform on a copy (⌥⌘T, no menu item): duplicates the active layer (with a selection,
 /// its selected pixels, as Layer via Copy) and transforms the copy (#352).
-pub fn begin_copy(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), String> {
+pub fn begin_copy(app: &mut PhotospliceApp, ctx: &egui::Context) -> Result<(), String> {
     let selection = app.session.active().is_some_and(|d| d.doc.selection.is_some());
     app.run(if selection { "layer.new.layerViaCopy" } else { "layer.duplicate" }, json!({}))?;
     if let Err(e) = begin(app, ctx) {
@@ -214,7 +214,7 @@ pub fn begin_copy(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), St
 
 /// Free Transform on the layer a file dropped on the canvas just placed, like the reference app's
 /// Place: Esc takes the place back, ↩ makes the place and the transform one Place Embedded step.
-pub fn begin_placed(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), String> {
+pub fn begin_placed(app: &mut PhotospliceApp, ctx: &egui::Context) -> Result<(), String> {
     begin(app, ctx)?;
     if let Some(t) = app.ui.transform.as_mut() {
         t.made = Some(MadeLayer::Place);
@@ -224,7 +224,7 @@ pub fn begin_placed(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), 
 
 /// Undoes the layer a cancelled or failed session made (⌥⌘T's copy, a placed file), leaving
 /// nothing to redo.
-fn take_back_made(app: &mut PhotosuiteApp) {
+fn take_back_made(app: &mut PhotospliceApp) {
     app.session.undo();
     if let Some(st) = app.session.active_mut() {
         st.history.clear_redo();
@@ -234,11 +234,11 @@ fn take_back_made(app: &mut PhotosuiteApp) {
 
 /// After the transform: the step that made the layer and the transform become one history step,
 /// the transform's for a copy and Place Embedded for a placed file.
-fn fold_made(app: &mut PhotosuiteApp, made: MadeLayer) {
+fn fold_made(app: &mut PhotospliceApp, made: MadeLayer) {
     if let Some(st) = app.session.active_mut() {
         st.history.purge_last();
         if made == MadeLayer::Place {
-            st.history.set_current_label(photosuite_engine::file_cmds::PLACE_EMBEDDED);
+            st.history.set_current_label(photosplice_engine::file_cmds::PLACE_EMBEDDED);
         }
     }
 }
@@ -247,13 +247,13 @@ fn fold_made(app: &mut PhotosuiteApp, made: MadeLayer) {
 /// box frames its content (within the selection) and previews the moving values in grey over the
 /// document with them vacated.
 fn begin_lone(
-    app: &mut PhotosuiteApp,
+    app: &mut PhotospliceApp,
     ctx: &egui::Context,
     doc: Arc<Document>,
-    surf: photosuite_raster::Surface,
+    surf: photosplice_raster::Surface,
     target: serde_json::Value,
 ) -> Result<(), String> {
-    use photosuite_engine::transform_cmds as tc;
+    use photosplice_engine::transform_cmds as tc;
     let b = tc::target_bounds(&doc, &surf);
     if b.is_empty() {
         return Err("Could not transform: nothing is selected".into());
@@ -262,7 +262,7 @@ fn begin_lone(
     let sel = match &doc.selection {
         Some(s) => s,
         None => {
-            let mut s = photosuite_raster::Surface::new(photosuite_color::PixelFormat::GRAY8);
+            let mut s = photosplice_raster::Surface::new(photosplice_color::PixelFormat::GRAY8);
             s.fill_rect(b, &[1.0]);
             whole = s;
             &whole
@@ -314,7 +314,7 @@ fn begin_lone(
 
 /// Start Select › Transform Selection: the same box over the selection's bounds, previewing the
 /// selection mask (the marching ants are hidden meanwhile); commits `select.transformSelection`.
-pub fn begin_selection(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), String> {
+pub fn begin_selection(app: &mut PhotospliceApp, ctx: &egui::Context) -> Result<(), String> {
     let st = app.session.active().ok_or("no document")?;
     let doc = st.doc.clone();
     let sel = doc.selection.clone().ok_or("no selection")?;
@@ -372,7 +372,7 @@ pub fn begin_selection(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(
 }
 
 /// Start (or switch an active Free Transform into) Warp mode.
-pub fn begin_warp(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), String> {
+pub fn begin_warp(app: &mut PhotospliceApp, ctx: &egui::Context) -> Result<(), String> {
     let fresh = app.ui.transform.is_none();
     if fresh {
         begin(app, ctx)?;
@@ -387,9 +387,9 @@ pub fn begin_warp(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), St
 
 /// Switch to Warp mode: a smart object's existing warp (when the box is untouched), else a
 /// custom mesh following the current box (so a transform made first carries over).
-pub fn enter_warp(app: &mut PhotosuiteApp) {
+pub fn enter_warp(app: &mut PhotospliceApp) {
     let existing =
-        app.session.active().and_then(|d| d.doc.layer(LayerId(app.ui.transform.as_ref()?.layer)).and_then(photosuite_engine::warp_cmds::smart_warp_doc_space));
+        app.session.active().and_then(|d| d.doc.layer(LayerId(app.ui.transform.as_ref()?.layer)).and_then(photosplice_engine::warp_cmds::smart_warp_doc_space));
     let Some(t) = app.ui.transform.as_mut() else { return };
     // Warp moves layers only: a lone mask or channel keeps the box.
     if t.warp.is_some() || t.target.is_some() {
@@ -414,7 +414,7 @@ pub fn enter_warp(app: &mut PhotosuiteApp) {
 
 /// Leave Warp mode (back to the box; warp edits are dropped, like Photoshop's mode toggle on an
 /// untouched warp).
-pub fn leave_warp(app: &mut PhotosuiteApp) {
+pub fn leave_warp(app: &mut PhotospliceApp) {
     if let Some(t) = app.ui.transform.as_mut() {
         t.warp = None;
     }
@@ -432,8 +432,8 @@ pub fn leave_warp(app: &mut PhotosuiteApp) {
 fn preview_image(
     doc: &Document,
     id: LayerId,
-    lifted: Option<&photosuite_raster::Surface>,
-    b: photosuite_geom::Rect,
+    lifted: Option<&photosplice_raster::Surface>,
+    b: photosplice_geom::Rect,
     max_side: usize,
 ) -> (egui::ColorImage, [f32; 2]) {
     let layer = doc.layer(id);
@@ -441,7 +441,7 @@ fn preview_image(
     let mask = layer.and_then(|l| preview_mask(l, b));
     // Groups and type/fill layers preview from a flattened render of just that layer.
     let rendered;
-    let surf: Option<&photosuite_raster::Surface> = match (lifted, layer.and_then(|l| l.surface())) {
+    let surf: Option<&photosplice_raster::Surface> = match (lifted, layer.and_then(|l| l.surface())) {
         (Some(s), _) => Some(s),
         (None, Some(s)) if layer.is_some_and(|l| matches!(l.content, LayerContent::Raster(_))) => Some(s),
         _ => {
@@ -451,8 +451,8 @@ fn preview_image(
                     l.visible = false;
                 }
             }
-            let buf = photosuite_compose::render(&solo, b);
-            let mut s = photosuite_raster::Surface::new(photosuite_color::PixelFormat::RGBA8);
+            let buf = photosplice_compose::render(&solo, b);
+            let mut s = photosplice_raster::Surface::new(photosplice_color::PixelFormat::RGBA8);
             let flat: Vec<f32> = buf.px.iter().flat_map(|p| *p).collect();
             s.write_region(b, &flat);
             rendered = s;
@@ -468,25 +468,25 @@ fn preview_image(
 /// The layer's masks as the moving texels carry them: the enabled masks when all of them are linked
 /// (the vector mask and feathering folded in as the compositor applies them), else the linked
 /// pixel mask alone. `None` when no enabled mask moves with the pixels.
-fn preview_mask(l: &photosuite_doc::Layer, b: photosuite_geom::Rect) -> Option<crate::transform_tex::PreviewMask> {
+fn preview_mask(l: &photosplice_doc::Layer, b: photosplice_geom::Rect) -> Option<crate::transform_tex::PreviewMask> {
     use crate::transform_tex::PreviewMask;
     let pixel = l.mask.as_ref().filter(|m| m.enabled);
     let vector = l.vector_mask.as_ref().filter(|v| v.enabled);
     let linked_pixel = pixel.filter(|m| m.linked);
     if pixel.is_none_or(|m| m.linked)
         && vector.is_some_and(|v| v.linked)
-        && let Some(surface) = photosuite_compose::masks::combined_mask(l, b)
+        && let Some(surface) = photosplice_compose::masks::combined_mask(l, b)
     {
         return Some(PreviewMask { surface, density: 1.0 });
     }
     linked_pixel.map(|m| PreviewMask { surface: m.surface.clone(), density: m.density })
 }
 
-fn contains(l: &photosuite_doc::Layer, id: LayerId) -> bool {
+fn contains(l: &photosplice_doc::Layer, id: LayerId) -> bool {
     l.id == id || matches!(&l.content, LayerContent::Group(g) if g.children.iter().any(|c| contains(c, id)))
 }
 
-pub fn commit(app: &mut PhotosuiteApp) {
+pub fn commit(app: &mut PhotospliceApp) {
     let Some(t) = app.ui.transform.take() else { return };
     app.transform_preview = None;
     if t.selection {
@@ -536,7 +536,7 @@ pub fn commit(app: &mut PhotosuiteApp) {
 /// A transform whose layer or document went away (undo, close) ends silently; picking another tool
 /// applies it. Checked every frame and before each pointer event, so a press with a tool chosen
 /// just before it (`ui.pointer`'s `tool`) goes to that tool.
-pub fn end_if_left(app: &mut PhotosuiteApp) {
+pub fn end_if_left(app: &mut PhotospliceApp) {
     let Some(t) = &app.ui.transform else { return };
     if app.session.active().and_then(|s| s.doc.layer(LayerId(t.layer))).is_none() {
         cancel(app);
@@ -545,7 +545,7 @@ pub fn end_if_left(app: &mut PhotosuiteApp) {
     }
 }
 
-pub fn cancel(app: &mut PhotosuiteApp) {
+pub fn cancel(app: &mut PhotospliceApp) {
     let made = app.ui.transform.take().is_some_and(|t| t.made.is_some());
     app.transform_preview = None;
     if made {
@@ -554,7 +554,7 @@ pub fn cancel(app: &mut PhotosuiteApp) {
 }
 
 /// The session's starting box: where Undo stops.
-fn start_steps(app: &mut PhotosuiteApp) {
+fn start_steps(app: &mut PhotospliceApp) {
     if let (Some(t), Some(pv)) = (&app.ui.transform, app.transform_preview.as_mut()) {
         pv.steps = Steps { settled: Some(Step::of(t)), ..Steps::default() };
     }
@@ -562,7 +562,7 @@ fn start_steps(app: &mut PhotosuiteApp) {
 
 /// Record the box as an undo step whenever it comes to rest in a new state: once per drag (on
 /// release), nudge or option edit (once typing in its field ends). Call once per frame.
-pub fn track_steps(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+pub fn track_steps(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let (Some(t), Some(pv)) = (&app.ui.transform, app.transform_preview.as_mut()) else { return };
     if pv.gesture.is_some() || pv.warp_drag.is_some() || ctx.input(|i| i.pointer.any_down()) || ctx.text_edit_focused() {
         return;
@@ -572,7 +572,7 @@ pub fn track_steps(app: &mut PhotosuiteApp, ctx: &egui::Context) {
 
 /// While transforming, Undo and Redo apply to the box: `Some(enabled)` for those commands (and
 /// Toggle Last State, which would change the document under the box), `None` for the rest.
-pub fn is_enabled(app: &PhotosuiteApp, id: &str) -> Option<bool> {
+pub fn is_enabled(app: &PhotospliceApp, id: &str) -> Option<bool> {
     let t = app.ui.transform.as_ref()?;
     let steps = app.transform_preview.as_ref().map(|pv| &pv.steps);
     match id {
@@ -586,7 +586,7 @@ pub fn is_enabled(app: &PhotosuiteApp, id: &str) -> Option<bool> {
 /// While transforming, the box owns the history for every caller (menus, shortcuts, the control
 /// channel): Undo and Redo step through it, and Toggle Last State, which would change the
 /// document under the box, is refused. `None` for other commands or when not transforming.
-pub fn intercept(app: &mut PhotosuiteApp, id: &str) -> Option<Result<serde_json::Value, String>> {
+pub fn intercept(app: &mut PhotospliceApp, id: &str) -> Option<Result<serde_json::Value, String>> {
     app.ui.transform.as_ref()?;
     match id {
         "edit.undo" => Some(Ok(step(app, false))),
@@ -597,7 +597,7 @@ pub fn intercept(app: &mut PhotosuiteApp, id: &str) -> Option<Result<serde_json:
 }
 
 /// Undo (or redo) one step of the open session; nothing mid-drag or with no step to take.
-fn step(app: &mut PhotosuiteApp, redo: bool) -> serde_json::Value {
+fn step(app: &mut PhotospliceApp, redo: bool) -> serde_json::Value {
     let Some(t) = app.ui.transform.as_mut() else { return serde_json::Value::Null };
     let Some(pv) = app.transform_preview.as_mut().filter(|pv| pv.gesture.is_none() && pv.warp_drag.is_none()) else {
         return serde_json::Value::Null;
@@ -660,7 +660,7 @@ struct Gesture {
 }
 
 /// Pointer input while transforming. Returns false when no transform is active.
-pub fn pointer(app: &mut PhotosuiteApp, ev: ToolEvent, mods: egui::Modifiers) -> bool {
+pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers) -> bool {
     let Some(t) = app.ui.transform.clone() else { return false };
     let tol = handle_tolerance(app);
     if t.warp.is_some() {
@@ -941,7 +941,7 @@ fn split_cursor(tool: SplitTool) -> CursorIcon {
 
 /// Armed split tool, or Option held: the guide tracks the pointer and the split lands on release.
 /// Returns false when this event is an ordinary control-point drag.
-fn split_gesture(app: &mut PhotosuiteApp, ev: ToolEvent, mods: egui::Modifiers) -> bool {
+fn split_gesture(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers) -> bool {
     let armed = app.transform_preview.as_ref().and_then(|p| p.split_tool);
     let placing = app.transform_preview.as_ref().is_some_and(|p| p.split_placing);
     match ev {
@@ -986,7 +986,7 @@ fn split_gesture(app: &mut PhotosuiteApp, ev: ToolEvent, mods: egui::Modifiers) 
 /// Drags a warp control point. Anchors (patch corners) carry their handles along. Preset warps
 /// turn into a custom mesh on the first drag. An armed split tool (or Option) places a split
 /// where the pointer is released instead of moving a point.
-fn warp_pointer(app: &mut PhotosuiteApp, ev: ToolEvent, tol: f64, mods: egui::Modifiers) {
+fn warp_pointer(app: &mut PhotospliceApp, ev: ToolEvent, tol: f64, mods: egui::Modifiers) {
     if split_gesture(app, ev, mods) {
         return;
     }
@@ -1028,7 +1028,7 @@ fn warp_pointer(app: &mut PhotosuiteApp, ev: ToolEvent, tol: f64, mods: egui::Mo
 }
 
 /// Runs a warp-edit command against the mesh in the open Warp session and writes the mesh back.
-pub fn edit_session_warp(app: &mut PhotosuiteApp, id: &str, params: &serde_json::Value) -> Result<(), String> {
+pub fn edit_session_warp(app: &mut PhotospliceApp, id: &str, params: &serde_json::Value) -> Result<(), String> {
     let Some(w) = app.ui.transform.as_ref().and_then(|t| t.warp.clone()) else { return Err("not warping".into()) };
     let mut p = if params.is_object() { params.clone() } else { json!({}) };
     if p.get("warp").is_none() {
@@ -1049,7 +1049,7 @@ pub fn edit_session_warp(app: &mut PhotosuiteApp, id: &str, params: &serde_json:
 }
 
 /// Applies a split-warp command to the mesh being edited (at the box centre unless `at`).
-pub fn split(app: &mut PhotosuiteApp, id: &str, at: Option<[f64; 2]>) -> Result<(), String> {
+pub fn split(app: &mut PhotospliceApp, id: &str, at: Option<[f64; 2]>) -> Result<(), String> {
     let mut p = json!({});
     if let Some(a) = at {
         p["at"] = json!(a);
@@ -1059,7 +1059,7 @@ pub fn split(app: &mut PhotosuiteApp, id: &str, at: Option<[f64; 2]>) -> Result<
 
 /// Cursor for hovering a document point while transforming. `alt` is Option, which arms a quick
 /// split while a warp is active.
-pub fn cursor(app: &PhotosuiteApp, p: [f64; 2], alt: bool) -> Option<CursorIcon> {
+pub fn cursor(app: &PhotospliceApp, p: [f64; 2], alt: bool) -> Option<CursorIcon> {
     let t = app.ui.transform.as_ref()?;
     let tol = handle_tolerance(app);
     if let Some(w) = &t.warp {
@@ -1087,7 +1087,7 @@ pub fn cursor(app: &PhotosuiteApp, p: [f64; 2], alt: bool) -> Option<CursorIcon>
 }
 
 /// Warped preview of the moving pixels plus the box, handles and reference point.
-pub fn draw_overlay(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform) {
+pub fn draw_overlay(app: &PhotospliceApp, painter: &egui::Painter, xf: &ViewXform) {
     let (Some(t), Some(pv)) = (&app.ui.transform, &app.transform_preview) else { return };
     let scr = |q: [f64; 2]| xf.to_screen(q[0] as f32, q[1] as f32);
     if let Some(w) = &t.warp {
@@ -1270,7 +1270,7 @@ const ACTIONS_W: f32 = 140.0;
 
 /// Options bar while transforming: reference point X/Y, W/H %, angle, interpolation, and, pinned
 /// to the right, the warp switch, cancel and commit.
-pub fn options_bar(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
+pub fn options_bar(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
     let Some(t) = app.ui.transform.clone() else { return };
     let bar = ui.available_rect_before_wrap();
     let split = (bar.right() - ACTIONS_W).max(bar.left());
@@ -1290,7 +1290,7 @@ pub fn options_bar(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
     transform_actions(app, &mut row, t.warp.is_some());
 }
 
-fn transform_fields(app: &mut PhotosuiteApp, ui: &mut egui::Ui, t: &TransformSession) {
+fn transform_fields(app: &mut PhotospliceApp, ui: &mut egui::Ui, t: &TransformSession) {
     let tk = crate::theme::Tokens::get(ui.ctx());
     let (sx, sy, angle, _) = readout(t);
     let lbl = |ui: &mut egui::Ui, s: &str| {
@@ -1350,7 +1350,7 @@ fn transform_fields(app: &mut PhotosuiteApp, ui: &mut egui::Ui, t: &TransformSes
 }
 
 /// Options bar fields in Warp mode: style, bend, the split icons and the grid menu.
-fn warp_fields(app: &mut PhotosuiteApp, ui: &mut egui::Ui, w: &Warp) {
+fn warp_fields(app: &mut PhotospliceApp, ui: &mut egui::Ui, w: &Warp) {
     let tk = crate::theme::Tokens::get(ui.ctx());
     let lbl = |ui: &mut egui::Ui, s: &str| {
         ui.label(egui::RichText::new(s).color(tk.text_dim).size(12.0));
@@ -1486,7 +1486,7 @@ fn split_icon(ui: &mut egui::Ui, kind: &str, tip: &str, on: bool) -> egui::Respo
 }
 
 /// Warp switch, cancel and commit, kept on the right of the options bar.
-fn transform_actions(app: &mut PhotosuiteApp, ui: &mut egui::Ui, warping: bool) {
+fn transform_actions(app: &mut PhotospliceApp, ui: &mut egui::Ui, warping: bool) {
     ui.add_space(8.0);
     let commit_tip = if warping {
         crate::i18n::fmt(tl!("Commit warp ({key})"), &[("key", &crate::shortcuts::pretty("Enter"))])
@@ -1517,7 +1517,7 @@ fn transform_actions(app: &mut PhotosuiteApp, ui: &mut egui::Ui, warping: bool) 
 }
 
 /// Scale the box along its own axes about the reference point.
-fn scale_about_pivot(app: &mut PhotosuiteApp, kx: f64, ky: f64) {
+fn scale_about_pivot(app: &mut PhotospliceApp, kx: f64, ky: f64) {
     let Some(s) = app.ui.transform.as_mut() else { return };
     let Some(h) = Homography::rect_to_quad([0.0, 0.0, 1.0, 1.0], s.quad) else { return };
     let Some(inv) = h.inverse() else { return };
@@ -1529,7 +1529,7 @@ fn scale_about_pivot(app: &mut PhotosuiteApp, kx: f64, ky: f64) {
     s.quad = [m(0.0, 0.0), m(1.0, 0.0), m(1.0, 1.0), m(0.0, 1.0)];
 }
 
-fn rotate_about_pivot(app: &mut PhotosuiteApp, da: f64) {
+fn rotate_about_pivot(app: &mut PhotospliceApp, da: f64) {
     let Some(s) = app.ui.transform.as_mut() else { return };
     let (sn, cs) = da.sin_cos();
     let c = s.pivot;
@@ -1563,11 +1563,11 @@ mod tests {
     fn transform_bar_pins_warp_cancel_and_commit() {
         use egui_kittest::Harness;
         use egui_kittest::kittest::Queryable;
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.ui.transform = Some(session());
         let width = 720.0;
         let mut h = Harness::builder().with_size(vec2(width, 48.0)).build_ui_state(
-            |ui, app: &mut PhotosuiteApp| {
+            |ui, app: &mut PhotospliceApp| {
                 if !ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                     return;
                 }
@@ -1575,7 +1575,7 @@ mod tests {
             },
             app,
         );
-        PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::Anthracite);
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::Anthracite);
         h.run_steps(6);
         let commit = h.get_by_label("Commit transform").rect();
         let cancel = h.get_by_label("Cancel transform").rect();
@@ -1648,19 +1648,19 @@ mod tests {
 
     #[test]
     fn split_tool_places_the_line_where_the_pointer_releases() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.session.execute("file.new", json!({"width": 64, "height": 64})).unwrap();
         app.sync_views();
         app.session.execute("layer.new.layer", json!({})).unwrap();
         app.session
             .edit("paint", |doc, a| {
-                doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photosuite_geom::Rect::new(8, 8, 32, 32), &[1.0, 0.0, 0.0, 1.0]);
+                doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photosplice_geom::Rect::new(8, 8, 32, 32), &[1.0, 0.0, 0.0, 1.0]);
                 Ok(())
             })
             .unwrap();
         begin_warp(&mut app, &egui::Context::default()).unwrap();
         app.transform_preview.as_mut().unwrap().split_tool = Some(SplitTool::Vertical);
-        let knots = |app: &PhotosuiteApp| app.ui.transform.as_ref().unwrap().warp.as_ref().unwrap().mesh.as_ref().unwrap().us.clone();
+        let knots = |app: &PhotospliceApp| app.ui.transform.as_ref().unwrap().warp.as_ref().unwrap().mesh.as_ref().unwrap().us.clone();
         assert_eq!(knots(&app).len(), 2);
         let mods = egui::Modifiers::NONE;
         warp_pointer(&mut app, ToolEvent::Down { x: 20.0, y: 20.0, pressure: 1.0 }, 2.0, mods);
@@ -1685,13 +1685,13 @@ mod tests {
 
     #[test]
     fn split_of_a_grid_cuts_one_section_and_keeps_the_rest() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.session.execute("file.new", json!({"width": 64, "height": 64})).unwrap();
         app.sync_views();
         app.session.execute("layer.new.layer", json!({})).unwrap();
         app.session
             .edit("paint", |doc, a| {
-                doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photosuite_geom::Rect::new(8, 8, 32, 32), &[1.0, 0.0, 0.0, 1.0]);
+                doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photosplice_geom::Rect::new(8, 8, 32, 32), &[1.0, 0.0, 0.0, 1.0]);
                 Ok(())
             })
             .unwrap();
@@ -1770,13 +1770,13 @@ mod tests {
 
     #[test]
     fn begin_and_commit_through_the_engine() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.session.execute("file.new", json!({"width": 64, "height": 64})).unwrap();
         app.sync_views();
         app.session.execute("layer.new.layer", json!({})).unwrap();
         app.session
             .edit("paint", |doc, a| {
-                doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photosuite_geom::Rect::new(8, 8, 24, 24), &[1.0, 0.0, 0.0, 1.0]);
+                doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photosplice_geom::Rect::new(8, 8, 24, 24), &[1.0, 0.0, 0.0, 1.0]);
                 Ok(())
             })
             .unwrap();
@@ -1797,8 +1797,8 @@ mod tests {
     #[test]
     fn free_transform_a_copy() {
         let ctx = egui::Context::default();
-        let bounds = |app: &PhotosuiteApp, i: usize| app.session.active().unwrap().doc.layers[i].surface().unwrap().content_bounds();
-        let mut app = app_with_square(64, photosuite_geom::Rect::new(8, 8, 24, 24));
+        let bounds = |app: &PhotospliceApp, i: usize| app.session.active().unwrap().doc.layers[i].surface().unwrap().content_bounds();
+        let mut app = app_with_square(64, photosplice_geom::Rect::new(8, 8, 24, 24));
         let (layers, steps) = (app.session.active().unwrap().doc.layers.len(), app.session.active().unwrap().history.past_len());
         crate::menus::invoke(&mut app, &ctx, "edit.freeTransformCopy", json!({})).unwrap();
         assert_eq!(app.ui.transform.as_ref().unwrap().made, Some(MadeLayer::Copy));
@@ -1816,8 +1816,8 @@ mod tests {
         commit(&mut app);
         let st = app.session.active().unwrap();
         assert_eq!((st.doc.layers.len(), st.history.past_len()), (layers + 1, steps + 1));
-        assert_eq!(bounds(&app, layers - 1), photosuite_geom::Rect::new(8, 8, 24, 24), "the original stays");
-        assert_eq!(bounds(&app, layers), photosuite_geom::Rect::new(28, 8, 44, 24), "the copy moved");
+        assert_eq!(bounds(&app, layers - 1), photosplice_geom::Rect::new(8, 8, 24, 24), "the original stays");
+        assert_eq!(bounds(&app, layers), photosplice_geom::Rect::new(28, 8, 44, 24), "the copy moved");
         app.session.undo();
         assert_eq!(app.session.active().unwrap().doc.layers.len(), layers, "one undo removes copy and move");
         // With a selection: Layer via Copy, so only the selected pixels are copied.
@@ -1831,11 +1831,11 @@ mod tests {
     /// #670: picking another tool applies the open transform, as one history step.
     #[test]
     fn picking_another_tool_applies_the_transform() {
-        let mut app = app_with_square(64, photosuite_geom::Rect::new(8, 8, 24, 24));
+        let mut app = app_with_square(64, photosplice_geom::Rect::new(8, 8, 24, 24));
         app.ui.tool = Tool::Move;
         let steps = app.session.active().unwrap().history.past_len();
         let mut h = egui_kittest::Harness::builder().with_size(vec2(1200.0, 800.0)).with_max_steps(64).build_eframe(move |cc| {
-            PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
+            PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
             app
         });
         h.run_steps(4);
@@ -1853,14 +1853,14 @@ mod tests {
         assert!(app.ui.transform.is_none() && app.transform_preview.is_none());
         let st = app.session.active().unwrap();
         assert_eq!(st.history.past_len(), steps + 1);
-        assert_eq!(st.doc.layer(st.active_layer.unwrap()).unwrap().surface().unwrap().content_bounds(), photosuite_geom::Rect::new(28, 8, 44, 24));
+        assert_eq!(st.doc.layer(st.active_layer.unwrap()).unwrap().surface().unwrap().content_bounds(), photosplice_geom::Rect::new(28, 8, 44, 24));
     }
 
     /// A control-channel stroke that picks another tool applies the box first, then paints.
     #[test]
     fn a_pointer_request_with_another_tool_applies_the_transform_first() {
         let ctx = egui::Context::default();
-        let mut app = app_with_square(64, photosuite_geom::Rect::new(8, 8, 24, 24));
+        let mut app = app_with_square(64, photosplice_geom::Rect::new(8, 8, 24, 24));
         app.ui.tool = Tool::Move;
         crate::menus::invoke(&mut app, &ctx, "edit.freeTransform", json!({})).unwrap();
         if let Some(t) = app.ui.transform.as_mut() {
@@ -1879,14 +1879,14 @@ mod tests {
     }
 
     /// Drags with real pointer events (snapping off so the drops land exactly).
-    fn press_drag(app: &mut PhotosuiteApp, from: [f64; 2], to: [f64; 2], m: egui::Modifiers) {
+    fn press_drag(app: &mut PhotospliceApp, from: [f64; 2], to: [f64; 2], m: egui::Modifiers) {
         crate::canvas::tool_event(app, ToolEvent::Down { x: from[0], y: from[1], pressure: 1.0 }, m);
         crate::canvas::tool_event(app, ToolEvent::Up { x: to[0], y: to[1] }, m);
     }
 
     #[test]
     fn distort_mode_moves_one_corner_and_ignores_rotate_and_edges() {
-        let mut app = app_with_square(64, photosuite_geom::Rect::new(8, 8, 24, 24));
+        let mut app = app_with_square(64, photosplice_geom::Rect::new(8, 8, 24, 24));
         app.ui.extras.snap = false;
         let ctx = egui::Context::default();
         crate::menus::invoke(&mut app, &ctx, "edit.transform.distort", json!({})).unwrap();
@@ -1919,7 +1919,7 @@ mod tests {
         assert!(!corner_mods(true, corner, egui::Modifiers::COMMAND).shift);
         // Through the box: a plain corner drag on a 16×16 square.
         for (legacy, proportional) in [(false, true), (true, false)] {
-            let mut app = app_with_square(64, photosuite_geom::Rect::new(8, 8, 24, 24));
+            let mut app = app_with_square(64, photosplice_geom::Rect::new(8, 8, 24, 24));
             app.ui.extras.snap = false;
             app.session.prefs.edit(|p| p.general.use_legacy_free_transform = legacy);
             begin(&mut app, &egui::Context::default()).unwrap();
@@ -1933,7 +1933,7 @@ mod tests {
 
     #[test]
     fn right_click_while_transforming_switches_the_mode() {
-        let mut app = app_with_square(64, photosuite_geom::Rect::new(8, 8, 24, 24));
+        let mut app = app_with_square(64, photosplice_geom::Rect::new(8, 8, 24, 24));
         let ctx = egui::Context::default();
         begin(&mut app, &ctx).unwrap();
         assert!(crate::canvas_tool_menu::open_transform(&mut app, [10.0, 10.0]));
@@ -1944,8 +1944,8 @@ mod tests {
         assert_eq!(app.ui.transform.as_ref().unwrap().mode, TransformMode::Distort);
     }
 
-    fn app_with_square(size: u32, fill: photosuite_geom::Rect) -> PhotosuiteApp {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+    fn app_with_square(size: u32, fill: photosplice_geom::Rect) -> PhotospliceApp {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.session.execute("file.new", json!({"width": size, "height": size})).unwrap();
         app.sync_views();
         app.session.execute("layer.new.layer", json!({})).unwrap();
@@ -1970,7 +1970,7 @@ mod tests {
     #[test]
     fn preview_texture_is_full_resolution() {
         // #91: the preview used to be sampled down to 2048 px, so big layers looked blurry at 100%.
-        let mut app = app_with_square(3000, photosuite_geom::Rect::new(10, 20, 2810, 2420));
+        let mut app = app_with_square(3000, photosplice_geom::Rect::new(10, 20, 2810, 2420));
         let ctx = gpu_ctx();
         begin(&mut app, &ctx).unwrap();
         let pv = app.transform_preview.as_ref().unwrap();
@@ -1994,7 +1994,7 @@ mod tests {
 
     #[test]
     fn alt_click_moves_the_reference_point_and_edges_skew() {
-        let mut app = app_with_square(64, photosuite_geom::Rect::new(8, 8, 24, 24));
+        let mut app = app_with_square(64, photosplice_geom::Rect::new(8, 8, 24, 24));
         let ctx = egui::Context::default();
         begin(&mut app, &ctx).unwrap();
         assert!(pointer(&mut app, ToolEvent::Down { x: 40.0, y: 40.0, pressure: 1.0 }, egui::Modifiers::ALT));
@@ -2016,12 +2016,12 @@ mod tests {
         assert_eq!((s.quad[1], s.quad[2]), ([100.0, -10.0], [100.0, 60.0]));
     }
 
-    /// `cargo test --release -p photosuite-ui-egui transform_preview_bench -- --ignored --nocapture`
+    /// `cargo test --release -p photosplice-ui-egui transform_preview_bench -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn transform_preview_bench() {
         let (w, h) = (6000, 4000);
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.session.execute("file.new", json!({"width": w, "height": h})).unwrap();
         app.sync_views();
         app.session.execute("layer.new.layer", json!({})).unwrap();
@@ -2059,11 +2059,11 @@ mod tests {
 
     #[test]
     fn transform_selection_moves_only_the_outline() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.session.execute("file.new", json!({"width": 64, "height": 64})).unwrap();
         app.sync_views();
         app.session.execute("select.rect", json!({"x": 8, "y": 8, "width": 16, "height": 16})).unwrap();
-        let px0 = app.session.active().unwrap().doc.layers[0].surface().unwrap().read_region(photosuite_geom::Rect::new(0, 0, 64, 64));
+        let px0 = app.session.active().unwrap().doc.layers[0].surface().unwrap().read_region(photosplice_geom::Rect::new(0, 0, 64, 64));
         let ctx = egui::Context::default();
         crate::menus::invoke(&mut app, &ctx, "select.transformSelection", json!({})).unwrap();
         let t = app.ui.transform.as_ref().unwrap();
@@ -2074,18 +2074,18 @@ mod tests {
         let st = app.session.active().unwrap();
         let b = st.doc.selection.as_ref().unwrap().content_bounds();
         assert!(b.width().abs_diff(32) <= 2 && b.x0.abs_diff(0) <= 1, "{b:?}");
-        assert_eq!(st.doc.layers[0].surface().unwrap().read_region(photosuite_geom::Rect::new(0, 0, 64, 64)), px0);
+        assert_eq!(st.doc.layers[0].surface().unwrap().read_region(photosplice_geom::Rect::new(0, 0, 64, 64)), px0);
     }
 
     #[test]
     fn warp_mode_drags_anchor_with_handles_splits_and_commits() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.session.execute("file.new", json!({"width": 64, "height": 64})).unwrap();
         app.sync_views();
         app.session.execute("layer.new.layer", json!({})).unwrap();
         app.session
             .edit("paint", |doc, a| {
-                doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photosuite_geom::Rect::new(8, 8, 32, 32), &[1.0, 0.0, 0.0, 1.0]);
+                doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photosplice_geom::Rect::new(8, 8, 32, 32), &[1.0, 0.0, 0.0, 1.0]);
                 Ok(())
             })
             .unwrap();
@@ -2118,7 +2118,7 @@ mod tests {
 
     #[test]
     fn replacing_the_warp_mesh_cancels_a_pending_point_drag() {
-        let mut app = app_with_square(64, photosuite_geom::Rect::new(8, 8, 32, 32));
+        let mut app = app_with_square(64, photosplice_geom::Rect::new(8, 8, 32, 32));
         let ctx = egui::Context::default();
         begin_warp(&mut app, &ctx).unwrap();
         for _ in 0..3 {
@@ -2139,13 +2139,13 @@ mod tests {
     /// step); grabbing a point turns it into a custom mesh.
     #[test]
     fn a_press_on_a_preset_warp_converts_it_only_when_it_grabs_a_point() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.session.execute("file.new", json!({"width": 64, "height": 64})).unwrap();
         app.sync_views();
         app.session.execute("layer.new.layer", json!({})).unwrap();
         app.session
             .edit("paint", |doc, a| {
-                doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photosuite_geom::Rect::new(8, 8, 32, 32), &[1.0, 0.0, 0.0, 1.0]);
+                doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photosplice_geom::Rect::new(8, 8, 32, 32), &[1.0, 0.0, 0.0, 1.0]);
                 Ok(())
             })
             .unwrap();
@@ -2164,13 +2164,13 @@ mod tests {
     // ---- Layer masks (#205) ----
 
     /// `app_with_square` (red over 8..24) plus a reveal-all mask hiding x < 16.
-    fn masked_app(linked: bool) -> PhotosuiteApp {
-        let mut app = app_with_square(64, photosuite_geom::Rect::new(8, 8, 24, 24));
+    fn masked_app(linked: bool) -> PhotospliceApp {
+        let mut app = app_with_square(64, photosplice_geom::Rect::new(8, 8, 24, 24));
         app.session.execute("layer.layerMask.revealAll", json!({})).unwrap();
         app.session
             .edit("mask", |doc, a| {
                 let m = doc.layer_mut(a.unwrap()).unwrap().mask.as_mut().unwrap();
-                m.surface.fill_rect(photosuite_geom::Rect::new(0, 0, 16, 64), &[0.0]);
+                m.surface.fill_rect(photosplice_geom::Rect::new(0, 0, 16, 64), &[0.0]);
                 m.linked = linked;
                 Ok(())
             })
@@ -2188,7 +2188,7 @@ mod tests {
             let app = masked_app(linked);
             let st = app.session.active().unwrap();
             let id = st.active_layer.unwrap();
-            let b = photosuite_geom::Rect::new(8, 8, 24, 24);
+            let b = photosplice_geom::Rect::new(8, 8, 24, 24);
             let (img, _) = preview_image(&st.doc, id, None, b, 4096);
             // Texel x = doc x − 8: x 10 is hidden by the mask, x 20 shows.
             assert_eq!(texel_alpha(&img, 12, 4), 255);
@@ -2202,8 +2202,8 @@ mod tests {
         let st = app.session.active().unwrap();
         let sel = st.doc.selection.clone().unwrap();
         let id = st.active_layer.unwrap();
-        let (lifted, _) = photosuite_engine::transform_cmds::split_selected(st.doc.layer(id).unwrap().surface().unwrap(), &sel);
-        let b = photosuite_geom::Rect::new(8, 8, 20, 24);
+        let (lifted, _) = photosplice_engine::transform_cmds::split_selected(st.doc.layer(id).unwrap().surface().unwrap(), &sel);
+        let b = photosplice_geom::Rect::new(8, 8, 20, 24);
         let (img, _) = preview_image(&st.doc, id, Some(&lifted), b, 4096);
         assert_eq!(texel_alpha(&img, 2, 4), 0, "masked");
         assert_eq!(texel_alpha(&img, 10, 4), 255, "revealed");
@@ -2230,7 +2230,7 @@ mod tests {
         let l = st.doc.layer(st.active_layer.unwrap()).unwrap();
         let m = &l.mask.as_ref().unwrap().surface;
         assert!(m.sample_channel(4, 30, 0) > 0.99 && m.sample_channel(30, 30, 0) < 0.01, "mask moved 20 px right");
-        assert_eq!(l.surface().unwrap().content_bounds(), photosuite_geom::Rect::new(8, 8, 24, 24), "pixels untouched");
+        assert_eq!(l.surface().unwrap().content_bounds(), photosplice_geom::Rect::new(8, 8, 24, 24), "pixels untouched");
         // Warp mode doesn't apply to a lone mask.
         app.ui.mask_target = true;
         begin(&mut app, &ctx).unwrap();

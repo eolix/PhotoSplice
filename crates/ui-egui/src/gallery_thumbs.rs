@@ -1,16 +1,16 @@
 //! Filter Gallery thumbnails: every filter on the same picture (the beach, `assets/img/beach.jpg`),
 //! whatever the document, as PS-JS showed them. They are rendered at the cells' size in physical
 //! pixels, with each filter's defaults and black / white colours, so a set depends only on that
-//! size: it is kept in memory, and on desktop in `…/app.photosuite/filter-gallery-thumbnails.json`
+//! size: it is kept in memory, and on desktop in `…/app.photosplice/filter-gallery-thumbnails.json`
 //! (PNGs, base64), and rendered again only when the size changes (another display density) or the
 //! app or a filter changes ([`signature`]).
 
 use std::sync::Arc;
 
-use photosuite_algo::GalleryFilter;
-use photosuite_color::PixelFormat;
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_algo::GalleryFilter;
+use photosplice_color::PixelFormat;
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 use serde_json::{Value, json};
 
 /// The picture every thumbnail shows.
@@ -62,7 +62,7 @@ pub fn signature(px: [usize; 2]) -> String {
 
 /// The picture as a `w × h` surface: scaled to cover it (bicubic) and centred.
 fn sample(px: [usize; 2]) -> Option<Surface> {
-    let img = photosuite_codecs::decode(SAMPLE_JPG).ok()?;
+    let img = photosplice_codecs::decode(SAMPLE_JPG).ok()?;
     let (sw, sh) = img.dimensions();
     let rgba = img.to_rgba8();
     let mut src = Surface::new(PixelFormat::RGBA8);
@@ -70,7 +70,7 @@ fn sample(px: [usize; 2]) -> Option<Surface> {
     src.write_region(Rect::new(0, 0, sw as i32, sh as i32), &data);
     let (w, h) = (px[0] as f64, px[1] as f64);
     let k = (w / f64::from(sw.max(1))).max(h / f64::from(sh.max(1)));
-    let scaled = photosuite_algo::resample::resize_surface(&src, k, k, photosuite_algo::resample::Resample::Bicubic);
+    let scaled = photosplice_algo::resample::resize_surface(&src, k, k, photosplice_algo::resample::Resample::Bicubic);
     let b = scaled.content_bounds();
     let (x0, y0) = (b.x0 + (b.width() as i32 - px[0] as i32) / 2, b.y0 + (b.height() as i32 - px[1] as i32) / 2);
     let mut out = Surface::new(PixelFormat::RGBA8);
@@ -144,8 +144,8 @@ fn to_json(set: &ThumbSet) -> Option<Vec<u8>> {
     for (f, img) in GalleryFilter::ALL.iter().zip(&set.images) {
         let img = img.as_ref()?;
         let data: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect();
-        let image = photosuite_codecs::Image::from_u8(img.size[0] as u32, img.size[1] as u32, photosuite_codecs::ChannelLayout::Rgba, data).ok()?;
-        let png = photosuite_codecs::encode(&image, photosuite_codecs::Format::Png, &photosuite_codecs::EncodeOptions::default()).ok()?;
+        let image = photosplice_codecs::Image::from_u8(img.size[0] as u32, img.size[1] as u32, photosplice_codecs::ChannelLayout::Rgba, data).ok()?;
+        let png = photosplice_codecs::encode(&image, photosplice_codecs::Format::Png, &photosplice_codecs::EncodeOptions::default()).ok()?;
         thumbs.insert(f.key().to_string(), json!(base64::engine::general_purpose::STANDARD.encode(png)));
     }
     serde_json::to_vec(&json!({"signature": set.signature, "thumbnails": thumbs})).ok()
@@ -165,7 +165,7 @@ fn from_json(bytes: &[u8], signature: &str) -> Option<Vec<egui::ColorImage>> {
         .iter()
         .map(|f| {
             let png = base64::engine::general_purpose::STANDARD.decode(thumbs.get(f.key())?.as_str()?).ok()?;
-            let img = photosuite_codecs::decode_as(photosuite_codecs::Format::Png, &png).ok()?;
+            let img = photosplice_codecs::decode_as(photosplice_codecs::Format::Png, &png).ok()?;
             (img.dimensions() == (w, h)).then(|| egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &img.to_rgba8()))
         })
         .collect()
@@ -203,7 +203,7 @@ mod tests {
         let mut set = take(None, &sig, None);
         while render_some(&mut set, px, &[3], 8) > 0 {}
         assert!(set.complete());
-        let dir = std::env::temp_dir().join(format!("photosuite-gallery-thumbs-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("photosplice-gallery-thumbs-{}", std::process::id()));
         let file = dir.join("filter-gallery-thumbnails.json");
         store(&mut set, Some(&file));
         let first = set.images[0].clone();

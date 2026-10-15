@@ -1,5 +1,5 @@
 use super::*;
-use photosuite_doc::ColorMode;
+use photosplice_doc::ColorMode;
 
 fn session(w: u32, h: u32, depth: u32) -> Session {
     let mut s = Session::new();

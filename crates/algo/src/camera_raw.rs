@@ -835,7 +835,7 @@ fn calibrate(px: &mut [[f32; 4]], w: usize, p: &CameraRaw) {
 /// Resamples the pixels through a Lens Correction map (Optics and Geometry): bilinear on
 /// premultiplied values, transparent where the map leaves the frame.
 fn warp(px: &mut [[f32; 4]], w: usize, h: usize, lc: &crate::lens::LensCorrection) {
-    let map = crate::lens::LensMap::new(lc, photosuite_geom::Rect::new(0, 0, w as i32, h as i32));
+    let map = crate::lens::LensMap::new(lc, photosplice_geom::Rect::new(0, 0, w as i32, h as i32));
     let src: Vec<[f32; 4]> = px.iter().map(|q| [q[0] * q[3], q[1] * q[3], q[2] * q[3], q[3]]).collect();
     let at = |x: i64, y: i64| -> [f32; 4] {
         if x < 0 || y < 0 || x >= w as i64 || y >= h as i64 { [0.0; 4] } else { src[y as usize * w + x as usize] }

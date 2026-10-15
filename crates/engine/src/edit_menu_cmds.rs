@@ -5,11 +5,11 @@
 //! Check Spelling is not implemented: it needs a word list per language, and no permissively
 //! licensed dictionary small enough to bundle (or a pure-Rust checker with one) was available.
 
-use photosuite_color::{BlendMode, PixelFormat};
-use photosuite_doc::vector::Path;
-use photosuite_doc::{DocId, Document, Layer, LayerContent, LayerId};
-use photosuite_geom::Rect;
-use photosuite_raster::{Surface, from_rgba_into, to_rgba};
+use photosplice_color::{BlendMode, PixelFormat};
+use photosplice_doc::vector::Path;
+use photosplice_doc::{DocId, Document, Layer, LayerContent, LayerId};
+use photosplice_geom::Rect;
+use photosplice_raster::{Surface, from_rgba_into, to_rgba};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -184,7 +184,7 @@ pub fn fade_surface(before: &Surface, after: &mut Surface, area: Rect, mode: Ble
         } else {
             let rb = to_rgba(&fmt, pb);
             let ra = to_rgba(&fmt, pa);
-            let blended = photosuite_color::blend::composite(mode, rb, ra, 1.0);
+            let blended = photosplice_color::blend::composite(mode, rb, ra, 1.0);
             let mut o = [0.0f32; 4];
             lerp_premul(&rb, &blended, &mut o, true);
             let mut enc = [0.0f32; 8];
@@ -259,7 +259,7 @@ fn purge(s: &mut Session, what: &str) -> Result<Value> {
         }
     }
     if what == "all" {
-        let fx = photosuite_compose::purge_effect_cache();
+        let fx = photosplice_compose::purge_effect_cache();
         if fx > 0 {
             freed += fx;
             items.push("effect cache");
@@ -282,7 +282,7 @@ fn can_purge_histories(s: &Session) -> std::result::Result<(), String> {
 fn can_purge_all(s: &Session) -> std::result::Result<(), String> {
     can_purge_histories(s)
         .or_else(|_| can_purge_clipboard(s))
-        .or_else(|_| if photosuite_compose::effect_cache_bytes() > 0 { Ok(()) } else { Err("nothing to purge".into()) })
+        .or_else(|_| if photosplice_compose::effect_cache_bytes() > 0 { Ok(()) } else { Err("nothing to purge".into()) })
 }
 
 // ------------------------------------------------------------------ Content-Aware Fill
@@ -322,7 +322,7 @@ fn rect_param(p: &Value, key: &str, cmd: &str) -> Result<Rect> {
 }
 
 fn content_aware_fill(s: &mut Session, p: &Value) -> Result<Value> {
-    use photosuite_algo::content_aware::{FillOptions, color_level, fill_with, rotation_level};
+    use photosplice_algo::content_aware::{FillOptions, color_level, fill_with, rotation_level};
     let cmd = "edit.contentAwareFill";
     let id = pixel_layer(s).map_err(EngineError::Other)?;
     let st = s.active().ok_or(EngineError::NoDocument)?;
@@ -475,7 +475,7 @@ fn apply_content_aware_fill(
 // ------------------------------------------------------------------ Content-Aware Scale
 
 fn content_aware_scale(s: &mut Session, p: &Value) -> Result<Value> {
-    use photosuite_algo::seam::{carve_with, resize_bilinear, skin_mask};
+    use photosplice_algo::seam::{carve_with, resize_bilinear, skin_mask};
     let cmd = "edit.contentAwareScale";
     let id = pixel_layer(s).map_err(EngineError::Other)?;
     let st = s.active().ok_or(EngineError::NoDocument)?;
@@ -858,11 +858,11 @@ fn preset_manager(s: &mut Session, p: &Value) -> Result<Value> {
 pub struct PresetFile {
     pub format: String,
     pub version: u32,
-    pub brushes: Vec<photosuite_paint::BrushPreset>,
+    pub brushes: Vec<photosplice_paint::BrushPreset>,
     pub custom_shapes: Vec<CustomShape>,
 }
 
-pub const PRESET_FORMAT: &str = "photosuite-presets";
+pub const PRESET_FORMAT: &str = "photosplice-presets";
 
 fn export_import(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "edit.presets.exportImportPresets";

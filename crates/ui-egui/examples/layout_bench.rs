@@ -5,14 +5,14 @@
 //! import path.
 //!
 //! ```sh
-//! cargo run --release -p photosuite-ui-egui --example layout_bench -- [--reps 9] [--json out.json] [--direct] [--navigator] [--size 4000x3000]
+//! cargo run --release -p photosplice-ui-egui --example layout_bench -- [--reps 9] [--json out.json] [--direct] [--navigator] [--size 4000x3000]
 //! ```
 //!
-//! The real `PhotosuiteApp` runs in an offscreen egui_kittest harness on wgpu (the GPU canvas
+//! The real `PhotospliceApp` runs in an offscreen egui_kittest harness on wgpu (the GPU canvas
 //! path, with the device the app requests). Interactions go through real input where the harness
 //! can reach it (key shortcuts, pointer drags and clicks on the canvas) and otherwise through the
 //! command a panel runs (`layer.select`, `layer.setProps`), then the frames that follow. Each row
-//! is the median / p90 / max of a frame's time over the repetitions; `PHOTOSUITE_GPU_SYNC` makes
+//! is the median / p90 / max of a frame's time over the repetitions; `PHOTOSPLICE_GPU_SYNC` makes
 //! the canvas wait for the GPU, so a frame's time includes its composite. Move drags report the
 //! press, the pointer-move frames and the release (the commit) separately. `--direct` skips the
 //! PSD round trip; `--navigator` also shows the Navigator panel; `--spin idle|select|tool|move-
@@ -26,13 +26,13 @@ use std::time::Instant;
 
 use egui::{Event, Key, Modifiers, PointerButton, Pos2};
 use egui_kittest::kittest::Queryable;
-use photosuite_doc::{LayerContent, LayerId};
-use photosuite_ui_egui::canvas::ViewXform;
-use photosuite_ui_egui::state::Tool;
-use photosuite_ui_egui::{PhotosuiteApp, Services};
+use photosplice_doc::{LayerContent, LayerId};
+use photosplice_ui_egui::canvas::ViewXform;
+use photosplice_ui_egui::state::Tool;
+use photosplice_ui_egui::{PhotospliceApp, Services};
 use serde_json::{Value, json};
 
-type H = egui_kittest::Harness<'static, PhotosuiteApp>;
+type H = egui_kittest::Harness<'static, PhotospliceApp>;
 
 fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
@@ -85,7 +85,7 @@ fn screen(h: &H, x: f64, y: f64) -> Pos2 {
     let app = h.state();
     let idx = app.session.active_index().unwrap_or(0);
     let v = &app.ui.views[idx];
-    let rect = photosuite_ui_egui::rulers::content_rect(app, app.last_canvas_rect);
+    let rect = photosplice_ui_egui::rulers::content_rect(app, app.last_canvas_rect);
     ViewXform { rect, zoom: v.zoom, center: v.center, flip: app.ui.view.flip_horizontal }.to_screen(x as f32, y as f32)
 }
 
@@ -123,7 +123,7 @@ fn move_rows(rows: &mut Rows, label: &str, drags: &[Vec<f64>]) {
     rows.add(&format!("Move {label}: release (commit)"), pick(&|d| d.len().checked_sub(2).and_then(|i| d.get(i)).copied().into_iter().collect()));
 }
 
-fn contains(l: &photosuite_doc::Layer, t: LayerId) -> bool {
+fn contains(l: &photosplice_doc::Layer, t: LayerId) -> bool {
     l.id == t || l.children().is_some_and(|c| c.iter().any(|k| contains(k, t)))
 }
 
@@ -131,12 +131,12 @@ fn contains(l: &photosuite_doc::Layer, t: LayerId) -> bool {
 fn point_on(h: &H, id: LayerId) -> Option<[f64; 2]> {
     let st = h.state().session.active()?;
     let l = st.doc.layer(id)?;
-    let b = photosuite_engine::layer_multi_cmds::layer_bounds(l)?;
+    let b = photosplice_engine::layer_multi_cmds::layer_bounds(l)?;
     let (cx, cy) = ((b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2);
     for r in 0..60 {
         for (dx, dy) in [(0, 0), (r, 0), (-r, 0), (0, r), (0, -r)] {
             let (x, y) = (cx + dx * 3, cy + dy * 3);
-            if photosuite_engine::pick_cmds::layers_at(&st.doc, x, y).first().is_some_and(|&t| contains(l, t)) {
+            if photosplice_engine::pick_cmds::layers_at(&st.doc, x, y).first().is_some_and(|&t| contains(l, t)) {
                 return Some([x as f64 + 0.5, y as f64 + 0.5]);
             }
         }
@@ -160,16 +160,16 @@ fn main() {
         doc
     } else {
         let t = Instant::now();
-        let psd = photosuite_io::export(&doc, "layout.psd", &Default::default()).expect("psd export").bytes;
+        let psd = photosplice_io::export(&doc, "layout.psd", &Default::default()).expect("psd export").bytes;
         let t_save = ms(t);
         let t = Instant::now();
-        let r = photosuite_io::import("layout.psd", &psd).expect("psd import");
+        let r = photosplice_io::import("layout.psd", &psd).expect("psd import");
         println!("PSD: {:.1} MB, save {t_save:.0} ms, open {:.0} ms ({} warnings)", psd.len() as f64 / 1e6, ms(t), r.warnings.len());
         // PSD export writes engine-made smart objects as pixels (no SoLd yet): convert them back,
         // as a Photoshop-made file would have them.
-        let mut s = photosuite_engine::Session::new();
+        let mut s = photosplice_engine::Session::new();
         s.open_document(r.document, None);
-        let smart = |l: &photosuite_doc::Layer| l.name == "Logo" || (l.name.starts_with("Product ") && !l.name.contains('—') && !l.is_group());
+        let smart = |l: &photosplice_doc::Layer| l.name == "Logo" || (l.name.starts_with("Product ") && !l.name.contains('—') && !l.is_group());
         let ids: Vec<u64> = s.active().map(|st| st.doc.walk().iter().filter(|(_, _, l)| smart(l)).map(|(_, _, l)| l.id.0).collect()).unwrap_or_default();
         for id in ids {
             s.execute("layer.smartObjects.convertToSmartObject", json!({"layer": id})).expect("convert");
@@ -193,9 +193,9 @@ fn main() {
     let ppp: f32 = arg(&args, "--ppp").and_then(|v| v.parse().ok()).unwrap_or(1.0);
     let t = Instant::now();
     let builder = egui_kittest::Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_pixels_per_point(ppp);
-    let mut h: H = builder.wgpu_setup(photosuite_ui_egui::gpu_canvas::wgpu_setup()).build_eframe(move |cc| {
-        PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Services::default());
+    let mut h: H = builder.wgpu_setup(photosplice_ui_egui::gpu_canvas::wgpu_setup()).build_eframe(move |cc| {
+        PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Services::default());
         if let Some(rs) = cc.wgpu_render_state.as_ref() {
             rs.device.set_device_lost_callback(|r, m| eprintln!("GPU device lost ({r:?}): {m}"));
             app.set_wgpu(rs.clone());
@@ -373,7 +373,7 @@ fn shots(h: &mut H, dir: &str, ppp: f32, [group, headline]: [LayerId; 2]) {
     for (what, id) in [("card", group), ("headline", headline)] {
         for view in ["fit", "100"] {
             select(h, id);
-            if let Some(b) = h.state().session.active().and_then(|s| s.doc.layer(id)).and_then(photosuite_engine::layer_multi_cmds::layer_bounds) {
+            if let Some(b) = h.state().session.active().and_then(|s| s.doc.layer(id)).and_then(photosplice_engine::layer_multi_cmds::layer_bounds) {
                 let app = h.state_mut();
                 let v = &mut app.ui.views[0];
                 if view == "100" {
@@ -460,13 +460,13 @@ fn spin(h: &mut H, what: &str, [pixel, text, shape, group, smart, headline]: [La
     }
 }
 
-/// Run again with `PHOTOSUITE_GPU_SYNC=1` unless it is set (the workspace forbids the `unsafe`
+/// Run again with `PHOTOSPLICE_GPU_SYNC=1` unless it is set (the workspace forbids the `unsafe`
 /// that setting it in-process needs).
 fn reexec_with_gpu_sync() {
-    if std::env::var_os("PHOTOSUITE_GPU_SYNC").is_some() {
+    if std::env::var_os("PHOTOSPLICE_GPU_SYNC").is_some() {
         return;
     }
     let exe = std::env::current_exe().expect("exe");
-    let status = std::process::Command::new(exe).args(std::env::args().skip(1)).env("PHOTOSUITE_GPU_SYNC", "1").status().expect("re-exec");
+    let status = std::process::Command::new(exe).args(std::env::args().skip(1)).env("PHOTOSPLICE_GPU_SYNC", "1").status().expect("re-exec");
     std::process::exit(status.code().unwrap_or(1));
 }

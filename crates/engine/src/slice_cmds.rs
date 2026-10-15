@@ -3,16 +3,16 @@
 //! View › Clear Slices.
 //!
 //! The document stores user and layer-based slices (`Document::slices`); auto slices are derived
-//! (`photosuite_doc::slices::resolve`). Layer-based slices follow their layer: after every
+//! (`photosplice_doc::slices::resolve`). Layer-based slices follow their layer: after every
 //! command [`refresh`] re-fits them to the layer's bounds including layer effects, plus outsets,
 //! without a history step of their own (the change is implied by the edit that moved the layer).
 //! Slices are addressed by stored id (`"slice"`) or by their displayed number (`"number"`).
 
 use std::sync::Arc;
 
-use photosuite_doc::slices::{self, ResolvedSlice, Slice, SliceKind, SliceOrigin};
-use photosuite_doc::{Document, Layer, LayerContent};
-use photosuite_geom::Rect;
+use photosplice_doc::slices::{self, ResolvedSlice, Slice, SliceKind, SliceOrigin};
+use photosplice_doc::{Document, Layer, LayerContent};
+use photosplice_geom::Rect;
 use serde_json::{Value, json};
 
 use crate::commands::{CommandSpec, layer_param};
@@ -76,12 +76,12 @@ pub fn layer_bounds(l: &Layer) -> Rect {
                 }
             }),
         },
-        _ => photosuite_doc::comps::position_bounds(l),
+        _ => photosplice_doc::comps::position_bounds(l),
     };
-    if own.is_empty() || !photosuite_compose::effects::has_effects(l) {
+    if own.is_empty() || !photosplice_compose::effects::has_effects(l) {
         return own;
     }
-    own.inflate(photosuite_compose::effects::margin(l))
+    own.inflate(photosplice_compose::effects::margin(l))
 }
 
 fn layer_slice_rect(doc: &Document, s: &Slice) -> Option<Rect> {

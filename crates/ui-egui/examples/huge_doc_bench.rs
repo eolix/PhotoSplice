@@ -7,12 +7,12 @@
 //! document):
 //!
 //! ```sh
-//! cargo build --release -p photosuite-ui-egui --example huge_doc_bench
+//! cargo build --release -p photosplice-ui-egui --example huge_doc_bench
 //! for op in full view; do
 //!   /usr/bin/time -l target/release/examples/huge_doc_bench --size 20000x20000 --op $op 2>&1 | grep -E 'ms|MB|maximum resident|peak memory'
 //! done
 //! # The CPU fallback, for comparison:
-//! PHOTOSUITE_CPU_COMPOSE=1 /usr/bin/time -l target/release/examples/huge_doc_bench --op full
+//! PHOTOSPLICE_CPU_COMPOSE=1 /usr/bin/time -l target/release/examples/huge_doc_bench --op full
 //! ```
 //!
 //! `full`: the first refresh (every page uploaded, every effect map built) and three repeats.
@@ -22,10 +22,10 @@
 use std::time::Instant;
 
 use eframe::egui_wgpu::RenderState;
-use photosuite_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
-use photosuite_doc::{Adjustment, Document, Effect, FxCommon, FxPaint, Layer, LayerContent, Shadow, StrokeFx, StrokePosition, TextLayer};
-use photosuite_geom::{Rect, Size};
-use photosuite_ui_egui::gpu_canvas::GpuCanvas;
+use photosplice_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
+use photosplice_doc::{Adjustment, Document, Effect, FxCommon, FxPaint, Layer, LayerContent, Shadow, StrokeFx, StrokePosition, TextLayer};
+use photosplice_geom::{Rect, Size};
+use photosplice_ui_egui::gpu_canvas::GpuCanvas;
 use rayon::prelude::*;
 
 fn arg(args: &[String], name: &str) -> Option<String> {
@@ -87,7 +87,7 @@ fn text(name: &str, r: Rect) -> Layer {
             distance: 12.0,
             spread: 0.0,
             size: 16.0,
-            contour: photosuite_doc::Contour::Linear,
+            contour: photosplice_doc::Contour::Linear,
             anti_alias: false,
             noise: 0.0,
             knocks_out: true,
@@ -134,7 +134,7 @@ fn build(w: u32, h: u32) -> Document {
             distance: 20.0,
             spread: 0.0,
             size: 24.0,
-            contour: photosuite_doc::Contour::Linear,
+            contour: photosplice_doc::Contour::Linear,
             anti_alias: false,
             noise: 0.0,
             knocks_out: true,
@@ -161,7 +161,7 @@ fn build(w: u32, h: u32) -> Document {
 
 /// A headless GPU canvas on a device created like the app's.
 fn canvas() -> Option<(GpuCanvas, RenderState)> {
-    let setup = photosuite_ui_egui::gpu_canvas::wgpu_setup();
+    let setup = photosplice_ui_egui::gpu_canvas::wgpu_setup();
     let rs = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| egui_kittest::wgpu::create_render_state(setup, Default::default()))).ok()?;
     let l = rs.device.limits();
     eprintln!("adapter: {} (max texture {})", rs.adapter.get_info().name, l.max_texture_dimension_2d);
@@ -190,7 +190,7 @@ fn main() {
     println!("document {w}×{h} ({:.0} MP), {} layers, built in {:.0} ms", (w as f64 * h as f64) / 1e6, doc.walk().len(), ms(t));
 
     // The compositor budget the app would use: Memory Usage (default 8 GB, `--memory-mb`) less
-    // the document's pixels, within a quarter of RAM (`PHOTOSUITE_RAM_MB` simulates a smaller
+    // the document's pixels, within a quarter of RAM (`PHOTOSPLICE_RAM_MB` simulates a smaller
     // machine). The view is the first viewport (`view`) or the whole document (`full`).
     let allowance = arg(&args, "--memory-mb").and_then(|v| v.parse::<u64>().ok()).unwrap_or(8192) << 20;
     let pixels: u64 = doc
@@ -199,8 +199,8 @@ fn main() {
         .flat_map(|(_, _, l)| l.surface().into_iter().chain(l.mask.as_ref().map(|m| &m.surface)))
         .map(|s| s.tiles().map(|(_, t)| t.bytes().len() as u64).sum::<u64>())
         .sum();
-    let ram = photosuite_ui_egui::gpu_canvas::physical_memory();
-    let budget = photosuite_ui_egui::gpu_canvas::memory_budget(allowance, pixels, ram);
+    let ram = photosplice_ui_egui::gpu_canvas::physical_memory();
+    let budget = photosplice_ui_egui::gpu_canvas::memory_budget(allowance, pixels, ram);
     g.set_memory_budget(budget);
     println!("RAM {} MB, document pixels {} MB, Memory Usage {} MB -> GPU budget {} MB", ram.unwrap_or(0) >> 20, pixels >> 20, allowance >> 20, budget >> 20);
     let first_view = Rect::from_xywh((w as f32 * 0.1) as i32, (h as f32 * 0.1) as i32, 2560, 1440);

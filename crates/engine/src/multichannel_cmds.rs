@@ -2,7 +2,7 @@
 //!
 //! A Multichannel document has no layers: its image is a set of ink channels, kept as spot
 //! channels in [`Document::channels`] (value = ink density, 1 = solid; the compositor prints them
-//! over white, see `photosuite_compose::multichannel`). Like Photoshop the conversion flattens and
+//! over white, see `photosplice_compose::multichannel`). Like Photoshop the conversion flattens and
 //! turns each colour channel into an ink:
 //!
 //! * RGB → Cyan, Magenta, Yellow (the red, green and blue data read as ink: density = 1 − value);
@@ -14,9 +14,9 @@
 //! the count matches the target (3 → RGB / Lab, 4 → CMYK, 1 → Grayscale), the inverse of the
 //! above; otherwise the printed look is converted.
 
-use photosuite_color::{Color, ColorMode, PixelFormat};
-use photosuite_doc::{AlphaChannel, Document, Layer, LayerContent};
-use photosuite_raster::Surface;
+use photosplice_color::{Color, ColorMode, PixelFormat};
+use photosplice_doc::{AlphaChannel, Document, Layer, LayerContent};
+use photosplice_raster::Surface;
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
@@ -48,7 +48,7 @@ fn flattened_planes(doc: &Document) -> Vec<Vec<f32>> {
     let cc = fmt.mode.color_channels();
     let canvas = doc.bounds();
     let n = canvas.width() as usize * canvas.height() as usize;
-    let white = photosuite_raster::from_rgba(&fmt, [1.0, 1.0, 1.0, 1.0]);
+    let white = photosplice_raster::from_rgba(&fmt, [1.0, 1.0, 1.0, 1.0]);
     let mut planes = vec![Vec::with_capacity(n); cc];
     let plain = match doc.layers.as_slice() {
         [l] if l.visible
@@ -56,7 +56,7 @@ fn flattened_planes(doc: &Document) -> Vec<Vec<f32>> {
             && l.fill_opacity >= 1.0
             && l.mask.is_none()
             && l.vector_mask.is_none()
-            && !photosuite_compose::effects::has_effects(l) =>
+            && !photosplice_compose::effects::has_effects(l) =>
         {
             match &l.content {
                 LayerContent::Raster(s) if s.format().mode == fmt.mode => Some(s),
@@ -75,9 +75,9 @@ fn flattened_planes(doc: &Document) -> Vec<Vec<f32>> {
             }
         }
     } else {
-        let buf = photosuite_compose::flatten(doc).over_background([1.0, 1.0, 1.0]);
+        let buf = photosplice_compose::flatten(doc).over_background([1.0, 1.0, 1.0]);
         for p in &buf.px {
-            let v = photosuite_raster::from_rgba(&fmt, *p);
+            let v = photosplice_raster::from_rgba(&fmt, *p);
             for (c, plane) in planes.iter_mut().enumerate() {
                 plane.push(v[c]);
             }
@@ -161,7 +161,7 @@ pub(crate) fn convert_from(s: &mut Session, mode: ColorMode, _p: &Value) -> Resu
         let shown = (!reinterpret).then(|| {
             let mut d = doc.clone();
             d.channels = inks.clone();
-            photosuite_compose::flatten(&d)
+            photosplice_compose::flatten(&d)
         });
         doc.mode = mode;
         let fmt = doc.pixel_format();
@@ -169,7 +169,7 @@ pub(crate) fn convert_from(s: &mut Session, mode: ColorMode, _p: &Value) -> Resu
         let mut data = vec![0.0f32; n * (cc + 1)];
         if let Some(buf) = &shown {
             for (px, p) in data.chunks_exact_mut(cc + 1).zip(&buf.px) {
-                px.copy_from_slice(&photosuite_raster::from_rgba(&fmt, [p[0], p[1], p[2], 1.0])[..cc + 1]);
+                px.copy_from_slice(&photosplice_raster::from_rgba(&fmt, [p[0], p[1], p[2], 1.0])[..cc + 1]);
             }
         } else {
             for (k, ch) in inks.iter().enumerate() {

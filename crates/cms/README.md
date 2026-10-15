@@ -1,13 +1,13 @@
-# photosuite-cms
+# photosplice-cms
 
-Pure-Rust ICC colour management for PhotoSuite. No workspace dependencies (L0, publishable),
+Pure-Rust ICC colour management for PhotoSplice. No workspace dependencies (L0, publishable),
 no C, no `unsafe`. Implemented from the public ICC.1:2010 (v4.3) and ICC.1:2001-04 (v2)
 specifications, CIE 15, and Adobe's published black point compensation paper.
 
 ## API
 
 ```rust
-use photosuite_cms::{Builtin, Intent, Profile, Transform};
+use photosplice_cms::{Builtin, Intent, Profile, Transform};
 
 let src = Profile::parse(&icc_bytes)?;                    // v2/v4: matrix/TRC, gray TRC, mft1/mft2/mAB/mBA
 let dst = Builtin::CoatedCmyk.profile();
@@ -52,22 +52,22 @@ t.eval(&[1.0, 0.0, 0.0], &mut out);                        // exact single colou
 | `rec2020` | Rec. 2020 primaries, Rec. 709 OETF |
 | `gray-gamma-2.2`, `sgray` | gray gamma 2.2; gray with the sRGB curve (default gray working space) |
 | `lab-d50` | Lab identity (v4 encoding) |
-| `coated-cmyk` | **PhotoSuite Coated CMYK (synthetic, 300% TAC, medium GCR)** — default CMYK |
+| `coated-cmyk` | **PhotoSplice Coated CMYK (synthetic, 300% TAC, medium GCR)** — default CMYK |
 
 ### The CMYK profile
 
 Adobe's CMYK profiles (U.S. Web Coated SWOP, Coated FOGRA39) are proprietary, and the freely
 downloadable characterisation-based profiles (ECI/FOGRA, colord, Ghostscript) carry
-redistribution conditions or unclear licences, so PhotoSuite generates its own
+redistribution conditions or unclear licences, so PhotoSplice generates its own
 (`src/synth.rs`): a Yule–Nielsen modified Neugebauer model (n = 2) over the 16 overprints with
 ISO 12647-2 coated-paper Lab aims for paper/C/M/Y/RGB overprints, parabolic dot gain (14 % CMY,
 17 % K at 50 %), GCR black generation (starts at 20 % gray component, K max 95 %), total ink
 limit 300 %, perceptual tables with L* black-point scaling and soft chroma compression against a
-sampled gamut boundary. `profiles/photosuite-coated-cmyk.icc` (237 KB, AToB 11⁴ lut16, BToA
+sampled gamut boundary. `profiles/photosplice-coated-cmyk.icc` (237 KB, AToB 11⁴ lut16, BToA
 21³ lut16) is that output, dedicated to the public domain (CC0-1.0). Regenerate with
 
 ```sh
-PHOTOSUITE_REGEN_PROFILES=1 cargo test -p photosuite-cms --release --test regen
+PHOTOSPLICE_REGEN_PROFILES=1 cargo test -p photosplice-cms --release --test regen
 ```
 
 It is a plausible coated-offset profile, not a measured characterisation: use your printer's

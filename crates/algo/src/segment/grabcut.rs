@@ -6,7 +6,7 @@
 //! "assign components → learn GMMs → min cut" steps with the contrast-sensitive smoothness term
 //! `γ e^{−β‖z_m − z_n‖²} / dist(m, n)` (γ = 50, β from the mean squared neighbour difference).
 
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 
 use super::gmm::{DEFAULT_REG, Gmm};
 use super::{FREE, HARD_BG, HARD_FG, Region, RgbImage, Sampler, contrast_beta, data_costs, grid_cut, subsample};

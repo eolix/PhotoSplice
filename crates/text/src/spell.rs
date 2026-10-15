@@ -285,16 +285,16 @@ mod tests {
     #[test]
     fn misspellings_and_user_words() {
         let d = Dictionary::from_list("#10\nhello\nworld\nParis\n");
-        let text = "Hello wrld, Paris paris photosuite 42x";
+        let text = "Hello wrld, Paris paris photosplice 42x";
         let m: Vec<String> = d.misspellings(text, &none()).into_iter().map(|m| m.word).collect();
-        assert_eq!(m, vec!["wrld", "paris", "photosuite"]);
-        let user: HashSet<String> = ["photosuite".to_string()].into();
+        assert_eq!(m, vec!["wrld", "paris", "photosplice"]);
+        let user: HashSet<String> = ["photosplice".to_string()].into();
         assert_eq!(d.misspellings(text, &user).len(), 2);
         let mm = &d.misspellings(text, &none())[0];
         assert_eq!(&text[mm.start..mm.end], "wrld");
     }
 
-    /// `cargo test --release -p photosuite-text -- --ignored --nocapture spell_timing`
+    /// `cargo test --release -p photosplice-text -- --ignored --nocapture spell_timing`
     #[test]
     #[ignore]
     fn spell_timing() {

@@ -3,7 +3,7 @@
 //! below to the selection. They follow the Layers panel's rows, top to bottom: a group's row comes
 //! before its children, and the children of a collapsed group are skipped.
 
-use photosuite_doc::{Document, Layer, LayerContent, LayerId};
+use photosplice_doc::{Document, Layer, LayerContent, LayerId};
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;

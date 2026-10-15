@@ -7,7 +7,7 @@
 //! guided filter (image as guide) so it follows object edges, cleaned, and upsampled with a soft
 //! edge.
 
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 
 use super::{Region, Sampler, clean_mask};
 use crate::matting::{box_mean, guided_filter_color};

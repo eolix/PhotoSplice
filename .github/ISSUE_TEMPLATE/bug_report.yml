@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        PhotoSuite aims to match Photoshop's behaviour. If you know what
+        PhotoSplice aims to match Photoshop's behaviour. If you know what
         Photoshop does in the same situation, saying so turns a report into a
         specification.
 
@@ -32,7 +32,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: PhotoSuite version
+      label: PhotoSplice version
       description: Shown under the application's About entry.
       placeholder: "0.9.18"
     validations:
@@ -68,7 +68,7 @@ body:
         - TIFF / GIF / BMP / TGA
         - PDF
         - Camera raw
-        - PhotoSuite document (.pcraft)
+        - PhotoSplice document (.pcraft)
         - Other
     validations:
       required: true
@@ -87,7 +87,7 @@ body:
     attributes:
       label: Console output
       description: |
-        Run PhotoSuite from a terminal (with RUST_LOG=info) and paste what it
+        Run PhotoSplice from a terminal (with RUST_LOG=info) and paste what it
         prints around the problem. This is rendered as code, so no backticks are
         needed.
       render: text

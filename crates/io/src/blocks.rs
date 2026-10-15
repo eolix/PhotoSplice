@@ -1,11 +1,11 @@
 //! Tagged-block helpers: the preserved block-list encoding, fills, text,
 //! smart objects, locks and label colors.
 
-use photosuite_color::{Color, ColorMode};
-use photosuite_doc::{BlendIf, BlendRange, Fill, GradientStyle, LabelColor, Locks};
-use photosuite_geom::Affine;
-use photosuite_psd::descriptor::{Descriptor, Id, UnicodeString, Value, VersionedDescriptor};
-use photosuite_psd::layer::BlendingRanges;
+use photosplice_color::{Color, ColorMode};
+use photosplice_doc::{BlendIf, BlendRange, Fill, GradientStyle, LabelColor, Locks};
+use photosplice_geom::Affine;
+use photosplice_psd::descriptor::{Descriptor, Id, UnicodeString, Value, VersionedDescriptor};
+use photosplice_psd::layer::BlendingRanges;
 
 /// `brst` (channel blending restrictions): a list of big-endian u32 channel indices left out of
 /// blending → a bit mask (bit `i` = channel `i`; indices above 31 are ignored).
@@ -50,7 +50,7 @@ pub fn ranges_from_blend_if(b: &BlendIf, channels: usize) -> BlendingRanges {
 
 /// `lspf` bits (Adobe spec: bit 0 transparency, 1 composite, 2 position).
 /// Artboard (bit 3, `0x08`, as reference files write it) and "all" (bit 31) are undocumented.
-/// Older PhotoSuite builds wrote the artboard lock at bit 4 (`0x10`); that value is still
+/// Older PhotoSplice builds wrote the artboard lock at bit 4 (`0x10`); that value is still
 /// accepted on read so those files keep their lock, and is rewritten at `0x08`.
 pub fn locks_from_lspf(v: u32) -> Locks {
     Locks { transparency: v & 1 != 0, pixels: v & 2 != 0, position: v & 4 != 0, artboard: v & 0x08 != 0 || v & 0x10 != 0, all: v & 0x8000_0000 != 0 }
@@ -285,7 +285,7 @@ pub(crate) fn gradient_stops_editable(grad: &Descriptor, method: Option<&[u8]>) 
     let mut raw = gradient_stops_raw(grad);
     let m = crate::gradient_bake::Method::from_code(method);
     // Lab stops (Lab documents) interpolate in L*a*b*, which only baking reproduces.
-    let lab = raw.stops.iter().all(|(_, c)| c.mode == photosuite_color::ColorMode::Lab);
+    let lab = raw.stops.iter().all(|(_, c)| c.mode == photosplice_color::ColorMode::Lab);
     if raw.stops.len() >= 2 && !raw.noise && (raw.smooth > 0.0 || m != crate::gradient_bake::Method::Classic || lab) {
         raw.stops = crate::gradient_bake::bake_keeping_inks(std::mem::take(&mut raw.stops), &raw.mids, raw.smooth, m);
         raw.mids.clear();
@@ -593,9 +593,9 @@ pub(crate) fn with_pattern_placement(mut d: Descriptor, angle: f32, link: bool, 
 /// rect `0..w × 0..h`. Mapping the source rect instead counted the overhang twice and stretched
 /// the placement (storytold/photocraft@5ed75876). A degenerate or non-finite box falls back to the
 /// source rect.
-pub(crate) fn placed_frame(warp: Option<&photosuite_geom::warp::Warp>, w: f64, h: f64) -> [f64; 4] {
+pub(crate) fn placed_frame(warp: Option<&photosplice_geom::warp::Warp>, w: f64, h: f64) -> [f64; 4] {
     let rect = [0.0, 0.0, w, h];
-    let Some(m) = warp.filter(|wp| wp.style == photosuite_geom::warp::WarpStyle::Custom).and_then(|wp| wp.mesh.as_ref()).filter(|m| m.points.len() == 16)
+    let Some(m) = warp.filter(|wp| wp.style == photosplice_geom::warp::WarpStyle::Custom).and_then(|wp| wp.mesh.as_ref()).filter(|m| m.points.len() == 16)
     else {
         return rect;
     };
@@ -605,7 +605,7 @@ pub(crate) fn placed_frame(warp: Option<&photosuite_geom::warp::Warp>, w: f64, h
     if ok { b } else { rect }
 }
 
-pub fn parse_placed_warp(key: &[u8; 4], data: &[u8]) -> Option<photosuite_geom::warp::Warp> {
+pub fn parse_placed_warp(key: &[u8; 4], data: &[u8]) -> Option<photosplice_geom::warp::Warp> {
     if key != b"SoLd" && key != b"SoLE" {
         return None;
     }
@@ -613,17 +613,17 @@ pub fn parse_placed_warp(key: &[u8; 4], data: &[u8]) -> Option<photosuite_geom::
     warp_from_desc(get_desc(&d, "warp")?)
 }
 
-/// A placed layer's `warp` descriptor as a [`photosuite_geom::warp::Warp`]: `None` for no warp
+/// A placed layer's `warp` descriptor as a [`photosplice_geom::warp::Warp`]: `None` for no warp
 /// and for warps the model can't hold (a multi-patch mesh, "quilt").
-pub(crate) fn warp_from_desc(w: &Descriptor) -> Option<photosuite_geom::warp::Warp> {
+pub(crate) fn warp_from_desc(w: &Descriptor) -> Option<photosplice_geom::warp::Warp> {
     warp_of(w).flatten()
 }
 
 /// A `warp` descriptor (the `SoLd` key, or the whole descriptor after a `PlLd` record's corners)
 /// as a warp: `Some(None)` for no warp (`warpNone`, or a warp that moves nothing), `None` when it
 /// can't be read (an unknown style, missing bounds, a mesh the model can't hold).
-fn warp_of(w: &Descriptor) -> Option<Option<photosuite_geom::warp::Warp>> {
-    use photosuite_geom::warp::{BezierMesh, Warp, WarpStyle};
+fn warp_of(w: &Descriptor) -> Option<Option<photosplice_geom::warp::Warp>> {
+    use photosplice_geom::warp::{BezierMesh, Warp, WarpStyle};
     let style = enum_of(w, "warpStyle").and_then(|v| WarpStyle::parse(&String::from_utf8_lossy(v)))?;
     if style == WarpStyle::None {
         return Some(None);
@@ -700,7 +700,7 @@ pub fn parse_smart(key: &[u8; 4], data: &[u8]) -> (String, Affine) {
             // A custom warp frames the box of its control points as stored: a lower-order patch's
             // box, not the box of the cubic grid it is raised to (whose inner points move in).
             let frame = match (&warp, get_desc(&d, "warp").and_then(stored_mesh_box)) {
-                (Some(wp), Some(b)) if wp.style == photosuite_geom::warp::WarpStyle::Custom => b,
+                (Some(wp), Some(b)) if wp.style == photosplice_geom::warp::WarpStyle::Custom => b,
                 _ => placed_frame(warp.as_ref(), w, h),
             };
             affine = corners_affine(&p, frame).unwrap_or(Affine::IDENTITY);
@@ -746,7 +746,7 @@ pub fn corners_affine(p: &[f64; 8], frame: [f64; 4]) -> Option<Affine> {
 /// size; position and rotation stay right, only Replace Contents and re-renders depend on the
 /// scale. Import and export (which keeps an unedited record verbatim) both place a `PlLd` layer
 /// with this.
-pub fn plld_transform(p: &[f64; 8], size: Option<(f64, f64)>, warp: Option<&photosuite_geom::warp::Warp>) -> (Affine, Option<[f64; 9]>) {
+pub fn plld_transform(p: &[f64; 8], size: Option<(f64, f64)>, warp: Option<&photosplice_geom::warp::Warp>) -> (Affine, Option<[f64; 9]>) {
     let (w, h) = size.unwrap_or_else(|| ((p[2] - p[0]).hypot(p[3] - p[1]), (p[6] - p[0]).hypot(p[7] - p[1])));
     let perspective = corners_perspective([[p[0], p[1]], [p[2], p[3]], [p[4], p[5]], [p[6], p[7]]], (w, h));
     let frame = if perspective.is_some() { [0.0, 0.0, w, h] } else { placed_frame(warp, w, h) };
@@ -786,7 +786,7 @@ pub enum PlldWarp {
     /// No warp: `warpNone`, a warp that moves nothing, or a record that ends at its corners.
     None,
     /// The warp, in source pixels like the `SoLd` one.
-    Warp(photosuite_geom::warp::Warp),
+    Warp(photosplice_geom::warp::Warp),
     /// A warp is stored but can't be read (or the record itself can't be): re-rendering the
     /// layer from its source would drop it.
     Unreadable,
@@ -836,7 +836,7 @@ pub fn corners_perspective(q: [[f64; 2]; 4], (w, h): (f64, f64)) -> Option<[f64;
     if (0..2).all(|i| (q[0][i] + q[2][i] - q[1][i] - q[3][i]).abs() <= tol) || w <= 0.0 || h <= 0.0 {
         return None;
     }
-    photosuite_algo::transform::Homography::rect_to_quad([0.0, 0.0, w, h], q).map(|m| m.0)
+    photosplice_algo::transform::Homography::rect_to_quad([0.0, 0.0, w, h], q).map(|m| m.0)
 }
 
 /// `masterFXSwitch` from an `lfx2` block (defaults to `true`).
@@ -857,16 +857,16 @@ mod tests {
     /// gives 128 (storytold/photocraft@9237a8bd).
     #[test]
     fn gradient_fill_reads_the_interpolation_method() {
-        use photosuite_color::Color;
-        use photosuite_doc::{Fill, GradientStyle};
-        use photosuite_psd::descriptor::{Id, Value};
+        use photosplice_color::Color;
+        use photosplice_doc::{Fill, GradientStyle};
+        use photosplice_psd::descriptor::{Id, Value};
         let f = Fill::gradient(vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], 0.0, 1.0, GradientStyle::Linear, false);
         let (k, data) = super::write_fill(&f);
         let d = super::parse_prefix_versioned(&data).unwrap();
         let mid = |code: &str| {
             let d = d.clone().with("gradientsInterpolationMethod", Value::Enumerated { type_id: Id::new("gradientInterpolationMethodType"), value: Id::new(code) });
             let back = super::fill_from_desc(&k, &d).unwrap();
-            let ramp = photosuite_compose::gradient_fill::Ramp::new(&back).unwrap();
+            let ramp = photosplice_compose::gradient_fill::Ramp::new(&back).unwrap();
             (ramp.sample(0.5)[0] * 255.0).round()
         };
         assert_eq!(mid("Gcls"), 128.0);
@@ -880,8 +880,8 @@ mod tests {
     /// alpha) and survive a write; the ramp's alpha follows them.
     #[test]
     fn gradient_fill_opacity_stops_become_alpha() {
-        use photosuite_color::Color;
-        use photosuite_doc::{Fill, GradientStyle};
+        use photosplice_color::Color;
+        use photosplice_doc::{Fill, GradientStyle};
         let red = Color::rgba(1.0, 0.0, 0.0, 1.0);
         let f = Fill::gradient(vec![(0.0, red), (1.0, Color { alpha: 0.0, ..red })], 90.0, 1.0, GradientStyle::Linear, false);
         let (k, data) = super::write_fill(&f);
@@ -889,7 +889,7 @@ mod tests {
         let Fill::Gradient { stops, opacity_stops, .. } = &back else { panic!("gradient") };
         assert_eq!(opacity_stops, &vec![(0.0, 1.0), (1.0, 0.0)]);
         assert!(stops.iter().all(|s| s.1.c[0] == 1.0 && s.1.c[1] == 0.0));
-        let ramp = photosuite_compose::gradient_fill::Ramp::new(&back).unwrap();
+        let ramp = photosplice_compose::gradient_fill::Ramp::new(&back).unwrap();
         assert_eq!(ramp.sample(0.0)[3], 1.0);
         assert!(ramp.sample(1.0)[3] < 0.01);
         // Opaque gradients come back without opacity stops.
@@ -900,8 +900,8 @@ mod tests {
 
     #[test]
     fn lab_descriptor_colours_round_trip() {
-        use photosuite_color::ColorMode;
-        use photosuite_psd::descriptor::{Descriptor, Value};
+        use photosplice_color::ColorMode;
+        use photosplice_psd::descriptor::{Descriptor, Value};
         let d = Descriptor::new("LbCl").with("Lmnc", Value::Double(19.07)).with("A   ", Value::Double(52.29)).with("B   ", Value::Double(-85.08));
         let c = super::color_from_desc(&d).unwrap();
         assert_eq!(c.mode, ColorMode::Lab);
@@ -917,8 +917,8 @@ mod tests {
 
     #[test]
     fn blending_ranges_map_to_blend_if() {
-        use photosuite_doc::{BlendIf, BlendRange};
-        use photosuite_psd::layer::BlendingRanges;
+        use photosplice_doc::{BlendIf, BlendRange};
+        use photosplice_psd::layer::BlendingRanges;
         // Full ranges (what every layer without Blend If carries) → the default setting.
         assert_eq!(super::blend_if_from_ranges(&BlendingRanges::full(3)), BlendIf::default());
         assert_eq!(super::blend_if_from_ranges(&BlendingRanges::default()), BlendIf::default());
@@ -958,8 +958,8 @@ mod tests {
 
     #[test]
     fn placed_layer_warp_is_read() {
-        use photosuite_geom::warp::WarpStyle;
-        use photosuite_psd::descriptor::ObjectArray;
+        use photosplice_geom::warp::WarpStyle;
+        use photosplice_psd::descriptor::ObjectArray;
         let e = |t: &str, v: &str| Value::Enumerated { type_id: Id::new(t), value: Id::new(v) };
         let bounds = Descriptor::new("Rctn")
             .with("Top ", Value::UnitFloat { unit: *b"#Pxl", value: 0.0 })
@@ -1006,7 +1006,7 @@ mod tests {
     /// box of the points as stored, so the transform stays the identity here.
     #[test]
     fn lower_order_warp_patches_are_read() {
-        use photosuite_psd::descriptor::ObjectArray;
+        use photosplice_psd::descriptor::ObjectArray;
         let e = |t: &str, v: &str| Value::Enumerated { type_id: Id::new(t), value: Id::new(v) };
         let px = |v: f64| Value::UnitFloat { unit: *b"#Pxl", value: v };
         let bounds = Descriptor::new("Rctn").with("Top ", px(0.0)).with("Left", px(0.0)).with("Btom", px(30.0)).with("Rght", px(60.0));
@@ -1057,7 +1057,7 @@ mod tests {
         for bits in [0u32, 1, 2, 4, 8, 0x0D, 0x8000_0000, 0x8000_000F] {
             assert_eq!(lspf_from_locks(&locks_from_lspf(bits)), bits);
         }
-        // Older PhotoSuite files wrote the artboard lock at 0x10; it reads back as artboard
+        // Older PhotoSplice files wrote the artboard lock at 0x10; it reads back as artboard
         // and is rewritten at the reference value 0x08.
         assert!(locks_from_lspf(0x10).artboard);
         assert_eq!(lspf_from_locks(&locks_from_lspf(0x10)), 0x08);
@@ -1166,7 +1166,7 @@ mod more_tests {
     #[test]
     fn plld_corners_frame_a_spilled_custom_warp_like_sold() {
         use crate::smart_map::{PlacedSpec, parse_sold, plld_bytes, sold_bytes};
-        use photosuite_geom::warp::{BezierMesh, Warp};
+        use photosplice_geom::warp::{BezierMesh, Warp};
         let bounds = [0.0, 0.0, 50.0, 25.0];
         let mut mesh = BezierMesh::identity(bounds, 1, 1);
         mesh.points[0] = [-10.0, -5.0];
@@ -1228,7 +1228,7 @@ mod more_tests {
     #[test]
     fn plld_warps_round_trip() {
         use crate::smart_map::{PlacedSpec, plld_bytes};
-        use photosuite_geom::warp::{BezierMesh, Warp, WarpStyle};
+        use photosplice_geom::warp::{BezierMesh, Warp, WarpStyle};
         let bounds = [0.0, 0.0, 60.0, 30.0];
         let mut arc = Warp::preset(WarpStyle::Arc, 40.0, bounds);
         arc.vertical = true;
@@ -1260,7 +1260,7 @@ mod more_tests {
     #[test]
     fn plld_unreadable_warps() {
         use crate::smart_map::{PlacedSpec, plld_bytes};
-        use photosuite_geom::warp::{Warp, WarpStyle};
+        use photosplice_geom::warp::{Warp, WarpStyle};
         let arc = Warp::preset(WarpStyle::Arc, 40.0, [0.0, 0.0, 4.0, 4.0]);
         let spec = PlacedSpec {
             idnt: "id",

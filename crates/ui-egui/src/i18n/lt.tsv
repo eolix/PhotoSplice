@@ -1,6 +1,6 @@
 # Lietuvių (lt) catalog. Columns, separated by a TAB:  context <TAB> source <TAB> translation
 #
-# Lietuvių translations for PhotoSuite UI.
+# Lietuvių translations for PhotoSplice UI.
 
 	File	Failas
 	Edit	Redaguoti
@@ -663,7 +663,7 @@
 	Timeline	Laiko juosta
 	Tool Presets	Įrankių nustatymai
 	Tools	Įrankiai
-	About PhotoSuite	Apie PhotoSuite
+	About PhotoSplice	Apie PhotoSplice
 	Website	Svetainė
 	Report an Issue…	Pranešti apie problemą…
 	WIA Support…	WIA palaikymas…
@@ -1179,9 +1179,9 @@
 	Perspective Warp is not active	„Perspective Warp“ neaktyvus
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Perspektyvinis deformavimas: pieškite plokštumas išilgai vaizdo perspektyvos, tada perjunkite į deformaciją
 	Photo Filter	Foto filtras
-	PhotoSuite	PhotoSuite
-	PhotoSuite Manages Colors	„PhotoSuite“ valdo spalvas
-	PhotoSuite — an open-source, native image editor written in Rust.	„PhotoSuite“ – atvirojo kodo vaizdų rengyklė, parašyta „Rust“
+	PhotoSplice	PhotoSplice
+	PhotoSplice Manages Colors	„PhotoSplice“ valdo spalvas
+	PhotoSplice — an open-source, native image editor written in Rust.	„PhotoSplice“ – atvirojo kodo vaizdų rengyklė, parašyta „Rust“
 	Pin Depth:	Smeigtuko gylis:
 	Pixel Length:	Pikselio ilgis:
 	Pixels/Centimeter	Pikseliai / centimetras
@@ -1561,7 +1561,7 @@
 	Pen Tilt	Rašiklio pakreipimas
 	Pen Tool	Rašiklio įrankis
 	Photo	Nuotrauka
-	PhotoSuite website	PhotoSuite svetainė
+	PhotoSplice website	PhotoSplice svetainė
 	Picas	Picas
 	Pillow Emboss	Išgaubimas pagalvėle
 	Pixel Replacement	Pikselių pakeitimas
@@ -1868,7 +1868,7 @@
 	System Info…	Sistemos informacija…
 	System Info	Sistemos informacija
 	More panels	Daugiau plokščių
-	These settings aren't available in PhotoSuite yet.	Šie nustatymai dar nepasiekiami „PhotoSuite“
+	These settings aren't available in PhotoSplice yet.	Šie nustatymai dar nepasiekiami „PhotoSplice“
 	Graphics	Grafika
 	Reset GPU Backend	Iš naujo nustatykite GPU užpakalinę programą
 	Applies at next launch.	Taikoma kito paleidimo metu
@@ -2009,7 +2009,7 @@
 	Opening…	Atidaroma…
 	Patch	Lopas
 	Patch:	Lopas:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite naudoja CPU vaizdų komponavimo variklį. Langas vis tiek gali naudoti jūsų grafikos adapterį.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice naudoja CPU vaizdų komponavimo variklį. Langas vis tiek gali naudoti jūsų grafikos adapterį.
 	Play Action	Leisti operaciją
 	Reading…	Skaitoma…
 	Record Action	Įrašyti operaciją

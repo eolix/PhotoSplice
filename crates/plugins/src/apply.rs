@@ -1,8 +1,8 @@
 //! Running a filter plug-in over a surface, band by band.
 
-use photosuite_color::{ColorMode, PixelFormat, SampleType};
-use photosuite_geom::{Rect, TILE_SIZE, TileCoord};
-use photosuite_raster::Surface;
+use photosplice_color::{ColorMode, PixelFormat, SampleType};
+use photosplice_geom::{Rect, TILE_SIZE, TileCoord};
+use photosplice_raster::Surface;
 use serde_json::{Value, json};
 
 use crate::manifest::Area;

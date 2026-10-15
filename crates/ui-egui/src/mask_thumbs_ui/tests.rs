@@ -7,11 +7,11 @@ use egui_kittest::kittest::Queryable;
 use serde_json::json;
 
 use super::{MaskKind, THUMB_VECTOR, recorded, vector_thumb_image};
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 
 /// A 200×100 document: "Masked" (pixel + vector mask) and a "Badge" shape layer.
-fn session() -> (photosuite_engine::Session, u64, u64) {
-    let mut s = photosuite_engine::Session::new();
+fn session() -> (photosplice_engine::Session, u64, u64) {
+    let mut s = photosplice_engine::Session::new();
     s.execute("file.new", json!({"width": 200, "height": 100})).unwrap();
     let masked = s.execute("layer.new.layer", json!({"name": "Masked"})).unwrap()["layer"].as_u64().unwrap();
     s.execute("edit.fill", json!({"contents": "color", "color": "#336699"})).unwrap();
@@ -24,10 +24,10 @@ fn session() -> (photosuite_engine::Session, u64, u64) {
     (s, masked, shape)
 }
 
-fn harness(session: photosuite_engine::Session, tab: usize, ppp: f32, dock_width: f32) -> Harness<'static, PhotosuiteApp> {
+fn harness(session: photosplice_engine::Session, tab: usize, ppp: f32, dock_width: f32) -> Harness<'static, PhotospliceApp> {
     let mut h = Harness::builder().with_size(vec2(1440.0, 1000.0)).with_pixels_per_point(ppp).with_max_steps(64).build_eframe(move |cc| {
-        PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-        PhotosuiteApp::new(session, crate::Services::default())
+        PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+        PhotospliceApp::new(session, crate::Services::default())
     });
     let ctx = h.ctx.clone();
     let (req, _rx) = crate::control::ControlRequest::new(
@@ -39,7 +39,7 @@ fn harness(session: photosuite_engine::Session, tab: usize, ppp: f32, dock_width
     h
 }
 
-fn click_with(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2, modifiers: Modifiers) {
+fn click_with(h: &mut Harness<'_, PhotospliceApp>, at: Pos2, modifiers: Modifiers) {
     h.hover_at(at);
     h.event(egui::Event::ModifiersChanged(modifiers));
     h.run_steps(1);
@@ -51,9 +51,9 @@ fn click_with(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2, modifiers: Modifiers
     h.run_steps(2);
 }
 
-fn layer(h: &Harness<'_, PhotosuiteApp>, id: u64) -> photosuite_doc::Layer {
+fn layer(h: &Harness<'_, PhotospliceApp>, id: u64) -> photosplice_doc::Layer {
     let st = h.state().session.active().unwrap();
-    st.doc.layer(photosuite_doc::LayerId(id)).unwrap().clone()
+    st.doc.layer(photosplice_doc::LayerId(id)).unwrap().clone()
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn rows_show_both_mask_thumbnails_with_chains_and_cache_the_vector_one() {
         assert!(thumbs[0].1.right() <= chains[1].1.left() + 0.01);
         let row = crate::layer_row_ui::recorded(&h.ctx).into_iter().find(|r| r.layer == masked).unwrap();
         assert!(row.name.unwrap().left() >= thumbs[1].1.right(), "@{ppp}x the name starts after the masks");
-        assert!(h.state().thumbs.contains_key(&(photosuite_doc::LayerId(masked), THUMB_VECTOR)), "vector thumbnail cached");
+        assert!(h.state().thumbs.contains_key(&(photosplice_doc::LayerId(masked), THUMB_VECTOR)), "vector thumbnail cached");
     }
 }
 
@@ -79,7 +79,7 @@ fn rows_show_both_mask_thumbnails_with_chains_and_cache_the_vector_one() {
 fn deleting_the_vector_mask_prunes_its_thumbnail() {
     let (s, masked, _) = session();
     let mut h = harness(s, 0, 1.0, 290.0);
-    let key = (photosuite_doc::LayerId(masked), THUMB_VECTOR);
+    let key = (photosplice_doc::LayerId(masked), THUMB_VECTOR);
     assert!(h.state().thumbs.contains_key(&key));
     h.state_mut().run("layer.vectorMask.delete", json!({"layer": masked})).unwrap();
     h.run_steps(3);
@@ -97,8 +97,8 @@ fn the_chain_toggles_linking_and_it_survives_psd() {
     click_with(&mut h, p, Modifiers::NONE);
     assert!(!layer(&h, masked).vector_mask.unwrap().linked);
     let doc = (*h.state().session.active().unwrap().doc).clone();
-    let bytes = photosuite_io::export(&doc, "m.psd", &Default::default()).unwrap().bytes;
-    let back = photosuite_io::import("m.psd", &bytes).unwrap().document;
+    let bytes = photosplice_io::export(&doc, "m.psd", &Default::default()).unwrap().bytes;
+    let back = photosplice_io::import("m.psd", &bytes).unwrap().document;
     let l = back.walk().into_iter().map(|(_, _, l)| l.clone()).find(|l| l.name == "Masked").unwrap();
     assert!(!l.mask.unwrap().linked && !l.vector_mask.unwrap().linked, "unlinked state round-trips PSD");
     // Clicking the (now empty) chain slot links again.
@@ -124,7 +124,7 @@ fn shift_click_disables_a_mask() {
 fn vector_thumbnail_is_white_inside_grey_outside_at_the_document_aspect() {
     let (s, masked, _) = session();
     let doc = s.active().unwrap().doc.clone();
-    let vm = doc.layer(photosuite_doc::LayerId(masked)).unwrap().vector_mask.clone().unwrap();
+    let vm = doc.layer(photosplice_doc::LayerId(masked)).unwrap().vector_mask.clone().unwrap();
     let img = vector_thumb_image(&doc, &vm, 64);
     let at = |x: usize, y: usize| img.pixels[y * 64 + x];
     // 200×100 doc in 64 px: 0.32 scale, rows 16..48. The mask covers x 20..120, y 10..90.
@@ -191,7 +191,7 @@ fn panels_never_panic_on_odd_documents() {
     // Rows render for a 1×1 and a very wide document, and the fitted thumbnails stay finite.
     for (w, hgt) in [(1, 1), (2000, 3)] {
         for tab in 0..3 {
-            let mut s = photosuite_engine::Session::new();
+            let mut s = photosplice_engine::Session::new();
             s.execute("file.new", json!({"width": w, "height": hgt})).unwrap();
             s.execute("layer.new.layer", json!({})).unwrap();
             s.execute("layer.layerMask.hideAll", json!({})).unwrap();
@@ -207,29 +207,29 @@ fn panels_never_panic_on_odd_documents() {
 // #196: ⌥-click mask view, ⌘-click vector mask to select, vector-mask target brackets.
 
 /// The session above with a black dot painted into the layer mask at (50, 50).
-fn dotted() -> (photosuite_engine::Session, u64, u64) {
+fn dotted() -> (photosplice_engine::Session, u64, u64) {
     let (mut s, masked, shape) = session();
     s.execute("paint.stroke", json!({"points": [[50, 50]], "size": 20, "hardness": 1.0, "color": "#000000", "target": "mask"})).unwrap();
     (s, masked, shape)
 }
 
-fn mask_rect(h: &Harness<'_, PhotosuiteApp>, id: u64, kind: MaskKind) -> Rect {
+fn mask_rect(h: &Harness<'_, PhotospliceApp>, id: u64, kind: MaskKind) -> Rect {
     recorded(&h.ctx, id).unwrap().0.into_iter().find(|(k, _)| *k == kind).unwrap().1
 }
 
 /// The layer thumbnail sits left of the first chain (see `paint`).
-fn layer_thumb_center(h: &Harness<'_, PhotosuiteApp>, id: u64) -> Pos2 {
+fn layer_thumb_center(h: &Harness<'_, PhotospliceApp>, id: u64) -> Pos2 {
     let first = recorded(&h.ctx, id).unwrap().0[0].1;
     pos2(first.left() - 4.0 - super::CHAIN_W - first.width() / 2.0, first.center().y)
 }
 
-fn mask_view(h: &Harness<'_, PhotosuiteApp>) -> serde_json::Value {
-    photosuite_engine::inspect::document(h.state().session.active().unwrap())["layerMaskView"].clone()
+fn mask_view(h: &Harness<'_, PhotospliceApp>) -> serde_json::Value {
+    photosplice_engine::inspect::document(h.state().session.active().unwrap())["layerMaskView"].clone()
 }
 
-fn canvas_px(h: &Harness<'_, PhotosuiteApp>) -> Option<Vec<egui::Color32>> {
+fn canvas_px(h: &Harness<'_, PhotospliceApp>) -> Option<Vec<egui::Color32>> {
     let st = h.state().session.active().unwrap();
-    crate::channel_view::render(&st.doc, &st.channel_view, photosuite_geom::Rect::new(0, 0, 200, 100), 1, false)
+    crate::channel_view::render(&st.doc, &st.channel_view, photosplice_geom::Rect::new(0, 0, 200, 100), 1, false)
 }
 
 fn near(a: Rect, b: Rect) -> bool {
@@ -301,7 +301,7 @@ fn command_click_a_vector_mask_loads_its_path_as_a_selection() {
     let (s, masked, _) = session();
     let mut h = harness(s, 0, 1.0, 290.0);
     let r = mask_rect(&h, masked, MaskKind::Vector);
-    let sel = |h: &Harness<'_, PhotosuiteApp>| h.state().session.active().unwrap().doc.selection.clone();
+    let sel = |h: &Harness<'_, PhotospliceApp>| h.state().session.active().unwrap().doc.selection.clone();
     click_with(&mut h, r.center(), Modifiers::COMMAND);
     let b = sel(&h).expect("⌘-click selects the path").content_bounds();
     assert_eq!((b.x0, b.y0, b.width(), b.height()), (20, 10, 100, 80));
@@ -374,9 +374,9 @@ fn mask_view_gestures_fail_gracefully_without_a_mask() {
     assert_eq!(mask_view(&h), serde_json::Value::Null);
     h.run_steps(2);
     // A stale view (layer gone) draws nothing instead of panicking.
-    h.state_mut().session.active_mut().unwrap().channel_view.layer_mask = Some(photosuite_engine::mask_view_cmds::LayerMaskView {
-        layer: photosuite_doc::LayerId(987_654),
-        mode: photosuite_engine::mask_view_cmds::MaskViewMode::Gray,
+    h.state_mut().session.active_mut().unwrap().channel_view.layer_mask = Some(photosplice_engine::mask_view_cmds::LayerMaskView {
+        layer: photosplice_doc::LayerId(987_654),
+        mode: photosplice_engine::mask_view_cmds::MaskViewMode::Gray,
     });
     assert!(canvas_px(&h).is_none());
     h.run_steps(2);

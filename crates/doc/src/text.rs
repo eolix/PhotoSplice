@@ -1,5 +1,5 @@
 //! Typed style model for type (text) layers: character runs, paragraph runs, point/box shape and
-//! warp. Pure data; layout and rendering live in `photosuite-text`.
+//! warp. Pure data; layout and rendering live in `photosplice-text`.
 //!
 //! Units follow Photoshop's Character/Paragraph panels: sizes, leading, indents and spacing are in
 //! **points** (converted to pixels with the document resolution: `px = pt * dpi / 72`), tracking
@@ -9,7 +9,7 @@
 //! to `text.len()` is normalised by [`crate::TextLayer::char_runs`] (the last run is stretched or
 //! truncated), so edits never produce unstyled text.
 
-use photosuite_color::Color;
+use photosplice_color::Color;
 use serde::{Deserialize, Serialize};
 
 /// Kerning mode (Photoshop: Metrics, Optical, 0).
@@ -287,7 +287,7 @@ pub enum AntiAlias {
 }
 
 /// Warp text settings (Photoshop `warp` descriptor), applied to the glyph outlines by
-/// `photosuite-text` (see its `warp` module) and round-tripped through PSD.
+/// `photosplice-text` (see its `warp` module) and round-tripped through PSD.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TextWarp {
     /// `warpNone`, `warpArc`, `warpFlag`, …

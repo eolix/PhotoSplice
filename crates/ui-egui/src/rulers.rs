@@ -3,10 +3,10 @@
 //! commands (`view.newGuide` / `view.moveGuide` / `view.deleteGuide`).
 
 use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, pos2, vec2};
-use photosuite_doc::Document;
+use photosplice_doc::Document;
 use serde_json::json;
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::ViewXform;
 use crate::theme::Tokens;
 
@@ -14,12 +14,12 @@ pub const RULER: f32 = 16.0;
 
 /// A `#rrggbb` preference colour.
 fn pref_color(s: &str, fallback: Color32) -> Color32 {
-    photosuite_engine::prefs::parse_hex(s).map_or(fallback, |c| Color32::from_rgb(c[0], c[1], c[2]))
+    photosplice_engine::prefs::parse_hex(s).map_or(fallback, |c| Color32::from_rgb(c[0], c[1], c[2]))
 }
 
 /// Draw a line in a Guides/Grid preference style (lines, dashed lines, dots).
-fn styled_line(painter: &egui::Painter, a: Pos2, b: Pos2, stroke: Stroke, style: photosuite_engine::prefs::LineStyle) {
-    use photosuite_engine::prefs::LineStyle;
+fn styled_line(painter: &egui::Painter, a: Pos2, b: Pos2, stroke: Stroke, style: photosplice_engine::prefs::LineStyle) {
+    use photosplice_engine::prefs::LineStyle;
     match style {
         LineStyle::Lines => {
             painter.line_segment([a, b], stroke);
@@ -56,7 +56,7 @@ pub struct GuideDrag {
 }
 
 /// Canvas area left after the rulers.
-pub fn content_rect(app: &PhotosuiteApp, rect: Rect) -> Rect {
+pub fn content_rect(app: &PhotospliceApp, rect: Rect) -> Rect {
     if app.ui.extras.rulers { Rect::from_min_max(rect.min + vec2(RULER, RULER), rect.max) } else { rect }
 }
 
@@ -68,7 +68,7 @@ fn tick_step(zoom: f32) -> f64 {
 
 /// View › Show › Grid, from Preferences › Guides, Grid & Slices (spacing, subdivisions, colour,
 /// style). Photoshop's default is a gridline every inch with 4 subdivisions.
-pub fn draw_grid(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform, doc: &Document) {
+pub fn draw_grid(app: &PhotospliceApp, painter: &egui::Painter, xf: &ViewXform, doc: &Document) {
     let g = &app.session.prefs().guides_grid_and_slices;
     let ppi = app.session.prefs().units_and_rulers.point_size.per_inch();
     let major = g.major_px(doc.resolution_dpi.max(1.0) as f64, doc.size.width as f64, ppi);
@@ -93,7 +93,7 @@ pub fn draw_grid(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform, d
     }
 }
 
-pub fn draw_guides(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform, doc: &Document) {
+pub fn draw_guides(app: &PhotospliceApp, painter: &egui::Painter, xf: &ViewXform, doc: &Document) {
     let clip = painter.clip_rect();
     let drag = app.guide_drag;
     let g = &app.session.prefs().guides_grid_and_slices;
@@ -123,7 +123,7 @@ pub fn draw_guides(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform,
 }
 
 /// Existing guide under a document point (within 4 screen px).
-pub fn guide_at(app: &PhotosuiteApp, x: f64, y: f64) -> Option<(bool, usize)> {
+pub fn guide_at(app: &PhotospliceApp, x: f64, y: f64) -> Option<(bool, usize)> {
     if !app.ui.extras.guides || app.ui.extras.lock_guides {
         return None;
     }
@@ -143,7 +143,7 @@ pub fn guide_at(app: &PhotosuiteApp, x: f64, y: f64) -> Option<(bool, usize)> {
 }
 
 /// Finish a guide drag: create, move, or delete (dropped outside the canvas).
-pub fn finish_drag(app: &mut PhotosuiteApp, d: GuideDrag) {
+pub fn finish_drag(app: &mut PhotospliceApp, d: GuideDrag) {
     let Some(size) = app.session.active().map(|s| s.doc.size) else { return };
     let extent = if d.vertical { size.width } else { size.height } as f64;
     let orientation = if d.vertical { "vertical" } else { "horizontal" };
@@ -162,7 +162,7 @@ pub fn finish_drag(app: &mut PhotosuiteApp, d: GuideDrag) {
 
 /// Rulers along the top and left of `full` (the canvas rect before `content_rect`), with the
 /// pointer position marked; dragging out of a ruler creates a guide.
-pub fn draw_rulers(app: &mut PhotosuiteApp, ui: &mut egui::Ui, full: Rect, xf: &ViewXform) {
+pub fn draw_rulers(app: &mut PhotospliceApp, ui: &mut egui::Ui, full: Rect, xf: &ViewXform) {
     let t = Tokens::get(ui.ctx());
     let top = Rect::from_min_max(pos2(full.left() + RULER, full.top()), pos2(full.right(), full.top() + RULER));
     let left = Rect::from_min_max(pos2(full.left(), full.top() + RULER), pos2(full.left() + RULER, full.bottom()));
@@ -181,7 +181,7 @@ pub fn draw_rulers(app: &mut PhotosuiteApp, ui: &mut egui::Ui, full: Rect, xf: &
     let (unit, ppi) = (ur.rulers, ur.point_size.per_inch());
     let (dpi, size) =
         app.session.active().map_or((72.0, [1.0, 1.0]), |d| (d.doc.resolution_dpi.max(1.0) as f64, [d.doc.size.width as f64, d.doc.size.height as f64]));
-    let whole = unit == photosuite_engine::prefs::Unit::Pixels;
+    let whole = unit == photosplice_engine::prefs::Unit::Pixels;
     let label = |v: f64, step: f64| -> String { if step >= 1.0 || whole { format!("{}", v.round() as i64) } else { crate::widgets::fmt_num2(v) } };
     for (vertical, extent) in [(false, size[0]), (true, size[1])] {
         let px_per_unit = unit.to_px(1.0, dpi, extent, ppi).max(1e-9);
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn guide_drags_create_move_and_delete() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.session.execute("file.new", json!({"width": 200, "height": 100})).unwrap();
         app.sync_views();
         finish_drag(&mut app, GuideDrag { vertical: true, index: None, pos: 50.0 });

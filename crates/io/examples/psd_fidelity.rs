@@ -6,8 +6,8 @@
 //! also reports descriptor key paths (and EngineData `/Keys`) that were lost or added.
 //!
 //! ```sh
-//! cargo run --release -p photosuite-io --example psd_fidelity -- corpus/photoshop corpus/psd-tools
-//! cargo run --release -p photosuite-io --example psd_fidelity -- file.psd            # one file, per-layer detail
+//! cargo run --release -p photosplice-io --example psd_fidelity -- corpus/photoshop corpus/psd-tools
+//! cargo run --release -p photosplice-io --example psd_fidelity -- file.psd            # one file, per-layer detail
 //! TOP=40 …                                                                            # descriptor paths listed per key
 //! REGEN=1 …                                                                           # as if every layer were edited
 //! PAIR=1 … a.psd b.psd                                                                # compare two files as they are (b against a)
@@ -17,15 +17,15 @@
 //! `REGEN=1` flips each layer's effects master switch, nudges fill colours / angles / scales,
 //! drops the verbatim adjustment and shape-path blocks the importer keeps, rebuilds each type layer's `TySh` the way a text edit does, and
 //! nudges each smart object's transform, so the export regenerates everything from the document model. The lost
-//! descriptor paths are then what an edit in PhotoSuite would lose.
+//! descriptor paths are then what an edit in PhotoSplice would lose.
 use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
-use photosuite_psd::PsdFile;
-use photosuite_psd::descriptor::{Descriptor, Value, VersionedDescriptor};
-use photosuite_psd::layer::LayerRecord;
-use photosuite_psd::tagged::TaggedBlock;
+use photosplice_psd::PsdFile;
+use photosplice_psd::descriptor::{Descriptor, Value, VersionedDescriptor};
+use photosplice_psd::layer::LayerRecord;
+use photosplice_psd::tagged::TaggedBlock;
 
 #[derive(Default)]
 struct Stat {
@@ -271,12 +271,12 @@ impl Census {
             return;
         };
         let run = catch_unwind(AssertUnwindSafe(|| {
-            let (mut doc, _) = photosuite_io::psd_to_document(&orig);
+            let (mut doc, _) = photosplice_io::psd_to_document(&orig);
             if std::env::var_os("REGEN").is_some() {
                 let dpi = doc.resolution_dpi;
                 regenerate(&mut doc.layers, dpi);
             }
-            let (exp, warnings) = photosuite_io::document_to_psd_with(&doc, &Default::default());
+            let (exp, warnings) = photosplice_io::document_to_psd_with(&doc, &Default::default());
             let bytes = exp.to_bytes().map_err(|e| e.to_string())?;
             if let Some(out) = std::env::var_os("OUT") {
                 std::fs::write(out, &bytes).map_err(|e| e.to_string())?;
@@ -362,8 +362,8 @@ impl Census {
 
 /// A fill changed by a hair, so the export regenerates its block (merged onto the original, as
 /// for a real edit).
-fn nudge(f: &mut photosuite_doc::Fill) {
-    use photosuite_doc::Fill;
+fn nudge(f: &mut photosplice_doc::Fill) {
+    use photosplice_doc::Fill;
     match f {
         Fill::Solid(c) => c.c[0] = (c.c[0] + 1e-4).min(1.0) - if c.c[0] >= 1.0 { 2e-4 } else { 0.0 },
         Fill::Gradient { angle, .. } => *angle += 1e-3,
@@ -372,16 +372,16 @@ fn nudge(f: &mut photosuite_doc::Fill) {
 }
 
 /// See `REGEN=1` above.
-fn regenerate(layers: &mut [photosuite_doc::Layer], dpi: f32) {
-    use photosuite_doc::LayerContent;
+fn regenerate(layers: &mut [photosplice_doc::Layer], dpi: f32) {
+    use photosplice_doc::LayerContent;
     for l in layers {
         if !l.effects.items.is_empty() {
             l.effects.enabled = !l.effects.enabled;
         }
-        l.psd_blocks.retain(|(k, _)| !photosuite_io::ADJUSTMENT_KEYS.contains(&k));
+        l.psd_blocks.retain(|(k, _)| !photosplice_io::ADJUSTMENT_KEYS.contains(&k));
         match &mut l.content {
             LayerContent::Group(g) => regenerate(&mut g.children, dpi),
-            LayerContent::Text(t) if t.psd_raw.is_some() => t.psd_raw = Some(std::sync::Arc::new(photosuite_text::psd::build_tysh(t, dpi, None))),
+            LayerContent::Text(t) if t.psd_raw.is_some() => t.psd_raw = Some(std::sync::Arc::new(photosplice_text::psd::build_tysh(t, dpi, None))),
             LayerContent::Smart(sm) => sm.transform.m[4] += 1e-6,
             LayerContent::Fill(f) => nudge(f),
             LayerContent::Shape(sh) => {

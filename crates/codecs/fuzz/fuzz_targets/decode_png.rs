@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use photosuite_codecs::{decode_as_with, DecodeOptions, Format, Limits};
+use photosplice_codecs::{decode_as_with, DecodeOptions, Format, Limits};
 
 fuzz_target!(|data: &[u8]| {
     let opts = DecodeOptions {

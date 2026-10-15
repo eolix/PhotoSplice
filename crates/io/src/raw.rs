@@ -1,19 +1,19 @@
-//! Camera raw files via `photosuite-raw`: developed to a 16-bit RGB document
+//! Camera raw files via `photosplice-raw`: developed to a 16-bit RGB document
 //! in ProPhoto RGB (the embedded profile is the built-in ProPhoto-compatible
 //! profile), or, for raw variants not decoded yet, the camera's embedded
 //! JPEG preview with a warning.
 
 use std::sync::Arc;
 
-use photosuite_codecs::{self as codecs, ChannelLayout, Format, Image};
-use photosuite_raw::{DevelopOptions, Limits, RawError};
+use photosplice_codecs::{self as codecs, ChannelLayout, Format, Image};
+use photosplice_raw::{DevelopOptions, Limits, RawError};
 
 use crate::flat::image_to_document;
 use crate::{ImportResult, IoError};
 
-/// `true` if `bytes` are a camera raw file `photosuite-raw` recognises.
+/// `true` if `bytes` are a camera raw file `photosplice-raw` recognises.
 pub fn is_raw(bytes: &[u8]) -> bool {
-    photosuite_raw::is_raw(bytes)
+    photosplice_raw::is_raw(bytes)
 }
 
 /// The decode limits shared with the flat codecs.
@@ -25,7 +25,7 @@ fn limits() -> Limits {
 /// A raw file's embedded JPEG preview, turned upright. Its own EXIF orientation wins when it
 /// has one; otherwise the raw's IFD0 orientation applies (TIFF-based raws record it there, and
 /// their previews are usually stored as the sensor reads out). Developed raws are oriented by
-/// `photosuite-raw` and carry no EXIF, so nothing is turned twice.
+/// `photosplice-raw` and carry no EXIF, so nothing is turned twice.
 fn upright_preview(raw: &[u8], jpeg: &[u8]) -> Result<Image, IoError> {
     let img = codecs::decode_as_with(Format::Jpeg, jpeg, &codecs::DecodeOptions { keep_orientation: true, ..Default::default() })?;
     let own = img.meta.exif.as_deref().map_or(1, codecs::exif_orientation);
@@ -42,11 +42,11 @@ pub fn import_raw(name: &str, bytes: &[u8]) -> Result<ImportResult, IoError> {
 /// JPEG or PSD keeps its own (Lens Correction's Auto tab and Camera Raw read it; saving keeps it).
 /// From the file's TIFF structure where it has one (CR2, NEF, ARW, DNG, PEF, RW2, ORF), else the
 /// embedded preview's (CR3, RAF), with the decoder's make and model filling any gap.
-pub(crate) fn camera_exif(bytes: &[u8], info: &photosuite_raw::RawInfo) -> Option<Vec<u8>> {
-    use photosuite_algo::exif;
+pub(crate) fn camera_exif(bytes: &[u8], info: &photosplice_raw::RawInfo) -> Option<Vec<u8>> {
+    use photosplice_algo::exif;
     let mut ci = exif::read(bytes);
     if (ci.make.is_none() || ci.lens.is_none() || ci.focal_length.is_none())
-        && let Some(e) = photosuite_raw::embedded_preview(bytes).and_then(|p| codecs::jpeg_exif(p.jpeg))
+        && let Some(e) = photosplice_raw::embedded_preview(bytes).and_then(|p| codecs::jpeg_exif(p.jpeg))
     {
         let p = exif::read(&e);
         ci.make = ci.make.or(p.make);
@@ -65,12 +65,12 @@ pub(crate) fn camera_exif(bytes: &[u8], info: &photosuite_raw::RawInfo) -> Optio
 
 /// Develops a raw file with explicit settings.
 pub fn import_raw_with(name: &str, bytes: &[u8], opts: &DevelopOptions) -> Result<ImportResult, IoError> {
-    let format = photosuite_raw::identify(bytes).map(|f| f.name()).unwrap_or("camera raw");
-    match photosuite_raw::develop(bytes, opts) {
+    let format = photosplice_raw::identify(bytes).map(|f| f.name()).unwrap_or("camera raw");
+    match photosplice_raw::develop(bytes, opts) {
         Ok(dev) => {
             let img = Image::from_u16(dev.width, dev.height, ChannelLayout::Rgb, &dev.rgb)?;
             let mut r = image_to_document(name, &img)?;
-            r.document.icc_profile = Some(Arc::new(photosuite_cms::Builtin::ProPhotoCompat.profile().to_bytes().to_vec()));
+            r.document.icc_profile = Some(Arc::new(photosplice_cms::Builtin::ProPhotoCompat.profile().to_bytes().to_vec()));
             r.document.metadata.exif = camera_exif(bytes, &dev.info).map(Arc::new);
             // "Canon" + "Canon EOS 80D" reads as "Canon EOS 80D".
             let camera = match (dev.info.make.as_deref(), dev.info.model.as_deref()) {
@@ -81,12 +81,12 @@ pub fn import_raw_with(name: &str, bytes: &[u8], opts: &DevelopOptions) -> Resul
                 "{format}{} developed with default settings ({} demosaic, as-shot white balance) into 16-bit {}",
                 if camera.is_empty() { String::new() } else { format!(" from {camera}") },
                 opts.demosaic.id(),
-                photosuite_raw::OUTPUT_SPACE
+                photosplice_raw::OUTPUT_SPACE
             ));
             r.warnings.extend(dev.warnings);
             Ok(r)
         }
-        Err(RawError::Unsupported(reason)) => match photosuite_raw::embedded_preview(bytes) {
+        Err(RawError::Unsupported(reason)) => match photosplice_raw::embedded_preview(bytes) {
             Some(p) => {
                 let img = upright_preview(bytes, p.jpeg)?;
                 let mut r = image_to_document(name, &img)?;

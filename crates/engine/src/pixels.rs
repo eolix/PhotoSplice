@@ -1,14 +1,14 @@
 //! Destructive pixel operations on layers (Image → Adjustments, flips, fills).
 
-use photosuite_compose::{Buffer, adjust};
-use photosuite_doc::{Adjustment, Document, Layer, LayerContent};
-use photosuite_geom::Rect;
-use photosuite_raster::{Surface, from_rgba, to_rgba};
+use photosplice_compose::{Buffer, adjust};
+use photosplice_doc::{Adjustment, Document, Layer, LayerContent};
+use photosplice_geom::Rect;
+use photosplice_raster::{Surface, from_rgba, to_rgba};
 
 /// Apply an adjustment destructively to a surface, weighted by an optional selection.
 /// Applies `adj` to a surface (any colour model and depth, via straight RGBA) through the
 /// selection; `mode` is the document's, for the tone transfer (e.g. Exposure in Grayscale).
-pub fn adjust_surface(s: &mut Surface, adj: &Adjustment, selection: Option<&Surface>, mode: photosuite_color::ColorMode) {
+pub fn adjust_surface(s: &mut Surface, adj: &Adjustment, selection: Option<&Surface>, mode: photosplice_color::ColorMode) {
     let r = s.content_bounds();
     if r.is_empty() {
         return;
@@ -21,7 +21,7 @@ pub fn adjust_surface(s: &mut Surface, adj: &Adjustment, selection: Option<&Surf
 /// the mask's default value), and without a selection the default changes too, since a mask
 /// reaches past the canvas: Invert turns a reveal-all mask into a hide-all one (#780).
 pub fn adjust_mask(s: &mut Surface, adj: &Adjustment, selection: Option<&Surface>) {
-    let mode = photosuite_color::ColorMode::Grayscale;
+    let mode = photosplice_color::ColorMode::Grayscale;
     if let Some(sel) = selection {
         let r = sel.content_bounds();
         if !r.is_empty() {
@@ -43,7 +43,7 @@ pub fn adjust_mask(s: &mut Surface, adj: &Adjustment, selection: Option<&Surface
 }
 
 /// `s`'s pixels over `r` (untouched ones included) with `adj` applied through the selection, encoded.
-fn adjusted(s: &Surface, r: Rect, adj: &Adjustment, selection: Option<&Surface>, mode: photosuite_color::ColorMode) -> Vec<f32> {
+fn adjusted(s: &Surface, r: Rect, adj: &Adjustment, selection: Option<&Surface>, mode: photosplice_color::ColorMode) -> Vec<f32> {
     let fmt = s.format();
     let n = fmt.channels();
     let raw = s.read_region(r);
@@ -51,7 +51,7 @@ fn adjusted(s: &Surface, r: Rect, adj: &Adjustment, selection: Option<&Surface>,
     let orig = buf.clone();
     // 32-bit documents get the float behaviour of an adjustment layer there (Levels doesn't clip);
     // integer depths keep the unrounded, clipped curves.
-    let depth = (fmt.sample == photosuite_color::SampleType::F32).then_some(fmt.sample);
+    let depth = (fmt.sample == photosplice_color::SampleType::F32).then_some(fmt.sample);
     adjust::apply_depth(adj, &mut buf, adjust::Transfer::for_document(mode, fmt.sample), depth);
     let w = r.width() as usize;
     let mut out = Vec::with_capacity(raw.len());
@@ -59,7 +59,7 @@ fn adjusted(s: &Surface, r: Rect, adj: &Adjustment, selection: Option<&Surface>,
         let k = selection.map_or(1.0, |sel| sel.sample_channel(r.x0 + (i % w) as i32, r.y0 + (i / w) as i32, 0));
         let mixed: [f32; 4] = std::array::from_fn(|c| o[c] + (a[c] - o[c]) * k);
         let mut enc = [0.0f32; 8];
-        let m = photosuite_raster::from_rgba_into(&fmt, mixed, &mut enc);
+        let m = photosplice_raster::from_rgba_into(&fmt, mixed, &mut enc);
         out.extend_from_slice(&enc[..m]);
     }
     out
@@ -89,7 +89,7 @@ pub fn fill_surface(s: &mut Surface, area: Rect, color: [f32; 4], selection: Opt
         }
         o[3] = if lock_transparency { d[3] } else { oa };
         let mut enc = [0.0f32; 8];
-        photosuite_raster::from_rgba_into(&fmt, o, &mut enc);
+        photosplice_raster::from_rgba_into(&fmt, o, &mut enc);
         px.copy_from_slice(&enc[..n]);
     }
     s.write_region(area, &region);
@@ -132,12 +132,12 @@ pub fn remap_surface(s: &Surface, map: impl Fn(i32, i32) -> (i32, i32)) -> Surfa
 }
 
 /// Merge `upper` onto `lower` producing a raster layer (Layer → Merge Down).
-pub fn merge_down(doc_bounds: Rect, lower: &Layer, upper: &Layer, format: photosuite_color::PixelFormat) -> Layer {
+pub fn merge_down(doc_bounds: Rect, lower: &Layer, upper: &Layer, format: photosplice_color::PixelFormat) -> Layer {
     let area = [lower, upper].iter().map(|l| l.surface().map(|s| s.content_bounds()).unwrap_or(doc_bounds)).fold(Rect::EMPTY, |a, b| a.union(&b));
     let stack = vec![lower.clone(), upper.clone()];
     let mut tmp = Document::new("merge", doc_bounds.size(), format.mode, format.sample);
     tmp.layers = stack;
-    let buf = photosuite_compose::render(&tmp, area);
+    let buf = photosplice_compose::render(&tmp, area);
     let mut s = Surface::new(format);
     let data: Vec<f32> = buf.px.iter().flat_map(|p| from_rgba(&format, *p)).collect();
     if !area.is_empty() {

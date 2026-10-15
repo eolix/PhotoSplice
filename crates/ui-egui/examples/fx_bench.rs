@@ -1,7 +1,7 @@
-//! Layer-effect compositing benchmark: CPU (`photosuite-compose`) vs GPU (`photosuite-gpu`).
+//! Layer-effect compositing benchmark: CPU (`photosplice-compose`) vs GPU (`photosplice-gpu`).
 //!
 //! ```sh
-//! cargo run --release -p photosuite-ui-egui --example fx_bench -- [--size 7360x4912] [--psd file.psd]
+//! cargo run --release -p photosplice-ui-egui --example fx_bench -- [--size 7360x4912] [--psd file.psd]
 //! ```
 //!
 //! Builds a synthetic document (default 36 MP) with text layers carrying drop shadow + stroke +
@@ -13,11 +13,11 @@
 use std::time::Instant;
 
 use eframe::wgpu;
-use photosuite_color::{BlendMode, Color, ColorMode, SampleType};
-use photosuite_doc::{
+use photosplice_color::{BlendMode, Color, ColorMode, SampleType};
+use photosplice_doc::{
     Adjustment, Bevel, BevelStyle, BevelTechnique, Contour, Document, Effect, FxCommon, FxPaint, Layer, LayerContent, StrokeFx, StrokePosition,
 };
-use photosuite_geom::{Rect, Size};
+use photosplice_geom::{Rect, Size};
 use serde_json::json;
 
 fn arg(args: &[String], name: &str) -> Option<String> {
@@ -91,9 +91,9 @@ fn synthetic(w: u32, h: u32) -> Document {
     d.layers.push(blob);
 
     // Text layers through the engine (real glyph rasterization).
-    let mut s = photosuite_engine::Session::new();
+    let mut s = photosplice_engine::Session::new();
     s.add_document(d, None);
-    let lines = ["PhotoSuite", "Layer Effects", "on the GPU", "Drop Shadow", "Stroke", "Bevel & Emboss", "36 megapixels", "interactive"];
+    let lines = ["PhotoSplice", "Layer Effects", "on the GPU", "Drop Shadow", "Stroke", "Bevel & Emboss", "36 megapixels", "interactive"];
     let rows = lines.len() as u32;
     for (i, t) in lines.iter().enumerate() {
         let y = (h / (rows + 1)) * (i as u32 + 1);
@@ -118,7 +118,7 @@ fn synthetic(w: u32, h: u32) -> Document {
             saturation: 10.0,
             lightness: 0.0,
             colorize: false,
-            ranges: photosuite_doc::adjust::HueRange::defaults(),
+            ranges: photosplice_doc::adjust::HueRange::defaults(),
         }),
     );
     adj.opacity = 0.9;
@@ -129,7 +129,7 @@ fn synthetic(w: u32, h: u32) -> Document {
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    comp: photosuite_gpu::Compositor,
+    comp: photosplice_gpu::Compositor,
     adapter: String,
 }
 
@@ -140,9 +140,9 @@ fn gpu() -> Option<Gpu> {
             .ok()?;
     eprintln!("adapter: {:?}", adapter.get_info().name);
     // The limits the app requests (see `gpu_canvas::use_adapter_limits`).
-    let limits = photosuite_ui_egui::gpu_canvas::device_limits(&adapter);
+    let limits = photosplice_ui_egui::gpu_canvas::device_limits(&adapter);
     let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_limits: limits, ..Default::default() })).ok()?;
-    let comp = photosuite_gpu::Compositor::new(&device);
+    let comp = photosplice_gpu::Compositor::new(&device);
     Some(Gpu { device, queue, comp, adapter: adapter.get_info().name })
 }
 
@@ -155,7 +155,7 @@ fn gpu_time(g: &mut Gpu, doc: &Document, region: Rect) -> Result<f64, String> {
 
 fn cpu_time(doc: &Document, region: Rect) -> f64 {
     let t = Instant::now();
-    let b = photosuite_compose::render(doc, region);
+    let b = photosplice_compose::render(doc, region);
     std::hint::black_box(&b);
     t.elapsed().as_secs_f64() * 1000.0
 }
@@ -166,14 +166,14 @@ fn compare(files: &[String]) {
     let mut worst_all = 0.0f32;
     for p in files {
         let Ok(bytes) = std::fs::read(p) else { continue };
-        let Ok(r) = photosuite_io::import(p, &bytes) else {
+        let Ok(r) = photosplice_io::import(p, &bytes) else {
             println!("{p}: import failed");
             continue;
         };
         let doc = r.document;
-        let fx = doc.walk().iter().filter(|(_, _, l)| photosuite_compose::effects::has_effects(l)).count();
-        let cpu = photosuite_compose::flatten(&doc);
-        match photosuite_gpu::render_to_vec(&mut g.comp, &g.device, &g.queue, &doc, doc.bounds()) {
+        let fx = doc.walk().iter().filter(|(_, _, l)| photosplice_compose::effects::has_effects(l)).count();
+        let cpu = photosplice_compose::flatten(&doc);
+        match photosplice_gpu::render_to_vec(&mut g.comp, &g.device, &g.queue, &doc, doc.bounds()) {
             Ok(out) => {
                 let mut worst = (0.0f32, 0usize);
                 for (i, (c, o)) in cpu.px.iter().zip(&out).enumerate() {
@@ -220,7 +220,7 @@ fn main() {
     let no_cpu = args.iter().any(|a| a == "--no-cpu");
     let mut doc = if let Some(p) = arg(&args, "--psd") {
         let bytes = std::fs::read(&p).expect("read --psd");
-        photosuite_io::import(&p, &bytes).expect("import").document
+        photosplice_io::import(&p, &bytes).expect("import").document
     } else {
         let (w, h) = arg(&args, "--size").and_then(|s| s.split_once('x').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))).unwrap_or((7360, 4912));
         synthetic(w, h)
@@ -250,7 +250,7 @@ fn main() {
     };
     // `--json out.json` (`cargo xtask perf`): one row per case and compositor, with samples and
     // the peak RSS while the case ran.
-    let rss = photosuite_testkit::perf::RssSampler::start(std::time::Duration::from_millis(2));
+    let rss = photosplice_testkit::perf::RssSampler::start(std::time::Duration::from_millis(2));
     let mut json_rows: Vec<serde_json::Value> = Vec::new();
     // Each case: `edit` mutates the document, then both compositors refresh `region`.
     let mut case = |doc: &mut Document, what: &str, n: usize, edit: &mut dyn FnMut(&mut Document, usize) -> Rect, cpu_too: bool| {
@@ -269,10 +269,10 @@ fn main() {
         }
         let peak = rss.peak();
         if !gs.is_empty() {
-            json_rows.push(photosuite_testkit::perf::row(&format!("{what} (GPU)"), &gs, peak, None));
+            json_rows.push(photosplice_testkit::perf::row(&format!("{what} (GPU)"), &gs, peak, None));
         }
         if !cs.is_empty() {
-            json_rows.push(photosuite_testkit::perf::row(&format!("{what} (CPU)"), &cs, peak, None));
+            json_rows.push(photosplice_testkit::perf::row(&format!("{what} (CPU)"), &cs, peak, None));
         }
         show(
             what,
@@ -297,7 +297,7 @@ fn main() {
         "full refresh, cold effect caches",
         1,
         &mut |_, _| {
-            photosuite_compose::purge_effect_cache();
+            photosplice_compose::purge_effect_cache();
             full
         },
         true,
@@ -318,7 +318,7 @@ fn main() {
     );
     // Brush dabs on a plain layer and on the effect layer: the canvas refreshes the damage rect
     // grown by the effect reach (`canvas::effect_reach`).
-    let margin = doc.walk().iter().map(|(_, _, l)| photosuite_compose::effects::margin(l)).max().unwrap_or(0);
+    let margin = doc.walk().iter().map(|(_, _, l)| photosplice_compose::effects::margin(l)).max().unwrap_or(0);
     let (w, h) = (full.width() as i32, full.height() as i32);
     case(
         &mut doc,
@@ -344,7 +344,7 @@ fn main() {
             let Some(src) = t.cache.as_ref() else { return Rect::EMPTY };
             let b = src.content_bounds();
             let to = Rect::new(b.x0 + 7, b.y0, b.x1 + 7, b.y1);
-            let mut moved = photosuite_raster::Surface::new(src.format());
+            let mut moved = photosplice_raster::Surface::new(src.format());
             moved.write_region(to, &src.read_region(b));
             t.cache = Some(moved);
             b.union(&to).inflate(margin)
@@ -366,8 +366,8 @@ fn main() {
     );
     if let Some(out) = arg(&args, "--json") {
         let context = json!({"width": w, "height": h, "gpu_adapter": adapter});
-        let report = photosuite_testkit::perf::report("fx_bench", context, json_rows, Some(&rss));
-        if let Err(e) = photosuite_testkit::perf::write_report(&out, &report) {
+        let report = photosplice_testkit::perf::report("fx_bench", context, json_rows, Some(&rss));
+        if let Err(e) = photosplice_testkit::perf::write_report(&out, &report) {
             eprintln!("{e}");
             std::process::exit(1);
         }

@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# བོད་ཡིག translations for PhotoSuite UI.
+# བོད་ཡིག translations for PhotoSplice UI.
 
 	File	བཀྲིས་བདེ་ལེགས།
 	Edit	བཟོ་སྒྲིག
@@ -672,7 +672,7 @@
 	Timeline	དུས་ཚོད།
 	Tool Presets	ཡོ་ཆས་སྔོན་སྒྲིག
 	Tools	ལག་ཆ།
-	About PhotoSuite	པར་རིས་བཟོ་རྩལ་གྱི་སྐོར།
+	About PhotoSplice	པར་རིས་བཟོ་རྩལ་གྱི་སྐོར།
 	Website	དྲ་ཚིགས།
 	Report an Issue…	གནད་དོན་སྙན་སེང་ཞུས།…
 	WIA Support…	WIA རྒྱབ་སྐྱོར།…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	མཐོང་ཚུལ་གཡོ་འགུལ་དེ་ཤུགས་ལྡན་མིན།
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	མཐོང་ཚུལ་གཡོ་སྒྱུ། པར་རིས་ཀྱི་མཐོང་ཚུལ་བརྒྱུད་ནས་གནམ་གྲུ་འབྲི་རྗེས་གཡོ་འགུལ་ལ་བསྒྱུར།
 	Photo Filter	དཔར་ཚགས།
-	PhotoSuite	པར་རིས་བཟོ་རྩལ།
-	PhotoSuite Manages Colors	པར་རིས་བཟོ་རྩལ་གྱིས་ཚོན་མདོག་དོ་དམ་བྱེད།
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite — རས་ཊི་སྐད་ཡིག་ནང་བྲིས་པའི་ཁ་ཕྱེ་བའི་ཐོན་ཁུངས་དང་ས་གནས་ཀྱི་པར་རིས་རྩོམ་སྒྲིག་པ་ཞིག་རེད།
+	PhotoSplice	པར་རིས་བཟོ་རྩལ།
+	PhotoSplice Manages Colors	པར་རིས་བཟོ་རྩལ་གྱིས་ཚོན་མདོག་དོ་དམ་བྱེད།
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice — རས་ཊི་སྐད་ཡིག་ནང་བྲིས་པའི་ཁ་ཕྱེ་བའི་ཐོན་ཁུངས་དང་ས་གནས་ཀྱི་པར་རིས་རྩོམ་སྒྲིག་པ་ཞིག་རེད།
 	Pin Depth:	གཏིང་ཚད།
 	Pixel Length:	པར་རིས་རིང་ཚད།
 	Pixels/Centimeter	པིག་སེལ་/སེནཊི་མི་ཊར།
@@ -1570,7 +1570,7 @@
 	Pen Tilt	སྨྱུག་གུག་གུག་པ།
 	Pen Tool	སྨྱུ་གུའི་ལག་ཆ།
 	Photo	འདྲ་པར།
-	PhotoSuite website	པར་རིས་བཟོ་རྩལ་གྱི་དྲ་ཚིགས།
+	PhotoSplice website	པར་རིས་བཟོ་རྩལ་གྱི་དྲ་ཚིགས།
 	Picas	པི་ཀ་སི།
 	Pillow Emboss	འབོལ་འབུར།
 	Pixel Replacement	པིག་སེལ་ཚབ་བརྗེ།
@@ -1877,7 +1877,7 @@
 	System Info…	མ་ལག་གི་ཆ་འཕྲིན།…
 	System Info	མ་ལག་ཆ་འཕྲིན།
 	More panels	ཤོག་བུ་མང་བ།
-	These settings aren't available in PhotoSuite yet.	སྒྲིག་སྟངས་འདི་དག་ད་དུང་པར་རིས་བཟོ་རྩལ་ནང་དུ་མེད་པ་རེད།
+	These settings aren't available in PhotoSplice yet.	སྒྲིག་སྟངས་འདི་དག་ད་དུང་པར་རིས་བཟོ་རྩལ་ནང་དུ་མེད་པ་རེད།
 	Graphics	རི་མོ།
 	Reset GPU Backend	GPUརྒྱབ་ཕྱོགས་སླར་སྒྲིག་བྱེད།
 	Applies at next launch.	འགོ་འཛུགས་རྗེས་མར་འཇུག་སྤྱོད་བྱེད།
@@ -2018,7 +2018,7 @@
 	Opening…	ཁ་འབྱེད་བཞིན།…
 	Patch	ལྷན་པ།
 	Patch:	ལྷན་པ:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite ཡིས་ CPU པར་རིས་སྡེབ་སྦྱོར་ཆས་བེད་སྤྱོད་བྱེད་བཞིན་ཡོད། སྒེའུ་ཁུང་གིས་ད་དུང་ཁྱེད་ཀྱི་རི་མོའི་སྒྲིག་ཆས་བེད་སྤྱོད་བྱེད་སྲིད།
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice ཡིས་ CPU པར་རིས་སྡེབ་སྦྱོར་ཆས་བེད་སྤྱོད་བྱེད་བཞིན་ཡོད། སྒེའུ་ཁུང་གིས་ད་དུང་ཁྱེད་ཀྱི་རི་མོའི་སྒྲིག་ཆས་བེད་སྤྱོད་བྱེད་སྲིད།
 	Play Action	ལས་འགུལ་འཁྲབ།
 	Reading…	ཀློག་བཞིན།…
 	Record Action	ལས་འགུལ་ཐོ་འགོད།

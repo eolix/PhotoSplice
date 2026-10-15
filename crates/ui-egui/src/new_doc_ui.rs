@@ -155,13 +155,13 @@ fn recent_doc(v: &Value) -> Option<RecentDoc> {
 }
 
 /// The Recent tab's documents, newest first.
-pub fn recent(app: &crate::PhotosuiteApp) -> Vec<RecentDoc> {
+pub fn recent(app: &crate::PhotospliceApp) -> Vec<RecentDoc> {
     app.session.prefs().recent_new_documents.iter().filter_map(recent_doc).take(RECENT_MAX).collect()
 }
 
 /// After Create: put this document's settings at the top of Recent (once: making the same
 /// document again moves it up), and keep the newest [`RECENT_MAX`].
-pub fn remember(app: &mut crate::PhotosuiteApp, f: &Map<String, Value>) {
+pub fn remember(app: &mut crate::PhotospliceApp, f: &Map<String, Value>) {
     let mut entry = Map::new();
     for k in RECENT_KEYS {
         if let Some(v) = f.get(k) {
@@ -186,7 +186,7 @@ pub fn remember(app: &mut crate::PhotosuiteApp, f: &Map<String, Value>) {
 
 /// The New Document dialog's starting fields: the last document made here (Photoshop opens on
 /// it), else the defaults.
-pub fn initial_fields(app: &crate::PhotosuiteApp) -> Map<String, Value> {
+pub fn initial_fields(app: &crate::PhotospliceApp) -> Map<String, Value> {
     let mut f = crate::state::UiState::new_document_fields();
     if let Some(r) = recent(app).into_iter().next() {
         f.extend(r.fields);
@@ -501,13 +501,13 @@ mod tests {
         assert_eq!(p["height"], 3508);
         assert_eq!(p["resolution"], 300.0);
         assert!(p.get("__preset").is_none() && p.get("__unit").is_none());
-        let mut s = photosuite_engine::Session::new();
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", p).unwrap();
         let d = &s.active().unwrap().doc;
         assert_eq!((d.size.width, d.size.height, d.resolution_dpi), (2480, 3508, 300.0));
     }
-    fn app() -> crate::PhotosuiteApp {
-        crate::PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default())
+    fn app() -> crate::PhotospliceApp {
+        crate::PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default())
     }
 
     #[test]
@@ -570,21 +570,21 @@ mod tests {
     /// The real dialog (#254): a typed size must reach `file.new`, however it is confirmed.
     mod dialog {
         use super::super::{CATEGORIES, apply_preset};
-        use crate::PhotosuiteApp;
+        use crate::PhotospliceApp;
         use crate::state::{DialogKind, UiState};
         use egui::accesskit::Role;
         use egui_kittest::{Harness, kittest::Queryable};
 
-        fn harness() -> Harness<'static, PhotosuiteApp> {
-            let app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        fn harness() -> Harness<'static, PhotospliceApp> {
+            let app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
             let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_ui_state(|ui, app| crate::dialogs::show(app, ui.ctx()), app);
-            PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+            PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
             h.state_mut().ui.open_dialog(DialogKind::NewDocument, UiState::new_document_fields());
             h.run_steps(3);
             h
         }
 
-        fn click_at(h: &mut Harness<'static, PhotosuiteApp>, at: egui::Pos2) {
+        fn click_at(h: &mut Harness<'static, PhotospliceApp>, at: egui::Pos2) {
             h.hover_at(at);
             h.run_steps(1);
             h.drag_at(at);
@@ -594,12 +594,12 @@ mod tests {
         }
 
         /// The Width (0), Height (1) and Resolution (2) fields.
-        fn field(h: &Harness<'static, PhotosuiteApp>, i: usize) -> egui::Rect {
+        fn field(h: &Harness<'static, PhotospliceApp>, i: usize) -> egui::Rect {
             h.query_all_by_role(Role::SpinButton).nth(i).map(|n| n.rect()).expect("a size field")
         }
 
         /// Click into field `i` (which selects its text) and type `text`, as a user does.
-        fn type_into(h: &mut Harness<'static, PhotosuiteApp>, i: usize, text: &str) {
+        fn type_into(h: &mut Harness<'static, PhotospliceApp>, i: usize, text: &str) {
             let r = field(h, i);
             click_at(h, r.center());
             for c in text.chars() {
@@ -608,21 +608,21 @@ mod tests {
             }
         }
 
-        fn fields(h: &Harness<'static, PhotosuiteApp>) -> serde_json::Map<String, serde_json::Value> {
+        fn fields(h: &Harness<'static, PhotospliceApp>) -> serde_json::Map<String, serde_json::Value> {
             h.state().ui.dialogs.first().map(|d| d.fields.clone()).expect("the dialog is open")
         }
 
-        fn set_fields(h: &mut Harness<'static, PhotosuiteApp>, f: serde_json::Map<String, serde_json::Value>) {
+        fn set_fields(h: &mut Harness<'static, PhotospliceApp>, f: serde_json::Map<String, serde_json::Value>) {
             h.state_mut().ui.dialogs[0].fields = f;
             h.run_steps(2);
         }
 
-        fn enter(h: &mut Harness<'static, PhotosuiteApp>) {
+        fn enter(h: &mut Harness<'static, PhotospliceApp>) {
             h.key_press(egui::Key::Enter);
             h.run_steps(3);
         }
 
-        fn created(h: &Harness<'static, PhotosuiteApp>) -> (u32, u32, f32) {
+        fn created(h: &Harness<'static, PhotospliceApp>) -> (u32, u32, f32) {
             assert!(h.state().ui.dialogs.is_empty(), "the dialog closed");
             let d = &h.state().session.active().expect("a new document").doc;
             (d.size.width, d.size.height, d.resolution_dpi)
@@ -744,9 +744,9 @@ mod tests {
         #[test]
         fn dialog_keeps_its_size_across_tabs_and_fits_small_windows() {
             for size in [egui::vec2(1440.0, 900.0), egui::vec2(1280.0, 720.0)] {
-                let app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+                let app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
                 let mut h = Harness::builder().with_size(size).build_ui_state(|ui, app| crate::dialogs::show(app, ui.ctx()), app);
-                PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+                PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
                 h.state_mut().ui.open_dialog(DialogKind::NewDocument, UiState::new_document_fields());
                 h.run_steps(3);
                 let mut bottoms = Vec::new();

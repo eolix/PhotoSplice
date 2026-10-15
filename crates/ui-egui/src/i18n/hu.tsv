@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# Magyar translations for PhotoSuite UI.
+# Magyar translations for PhotoSplice UI.
 
 	File	Fájl
 	Edit	Szerkesztés
@@ -672,7 +672,7 @@
 	Timeline	Idővonal
 	Tool Presets	Eszközkészletek
 	Tools	Eszközök
-	About PhotoSuite	A PhotoSuiteról
+	About PhotoSplice	A PhotoSpliceról
 	Website	Weboldal
 	Report an Issue…	Probléma bejelentése…
 	WIA Support…	WIA támogatás…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	A Perspective Warp nem aktív
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Perspektivikus vetemítés: rajzoljon síkokat a kép perspektívája mentén, majd váltson át a vetemítésre
 	Photo Filter	Fotószűrő
-	PhotoSuite	PhotoSuite
-	PhotoSuite Manages Colors	A PhotoSuite kezeli a színeket
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite — egy nyílt forráskódú, natív képszerkesztő Rust nyelven
+	PhotoSplice	PhotoSplice
+	PhotoSplice Manages Colors	A PhotoSplice kezeli a színeket
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice — egy nyílt forráskódú, natív képszerkesztő Rust nyelven
 	Pin Depth:	Pin mélység:
 	Pixel Length:	Pixel hossz:
 	Pixels/Centimeter	Pixel/centiméter
@@ -1570,7 +1570,7 @@
 	Pen Tilt	Pen Tilt
 	Pen Tool	Toll eszköz
 	Photo	Fénykép
-	PhotoSuite website	PhotoSuite weboldal
+	PhotoSplice website	PhotoSplice weboldal
 	Picas	Picas
 	Pillow Emboss	Párna Dombor
 	Pixel Replacement	Pixel csere
@@ -1877,7 +1877,7 @@
 	System Info…	Rendszer információ…
 	System Info	Rendszerinformáció
 	More panels	Még több panel
-	These settings aren't available in PhotoSuite yet.	Ezek a beállítások még nem érhetők el a PhotoSuiteban
+	These settings aren't available in PhotoSplice yet.	Ezek a beállítások még nem érhetők el a PhotoSpliceban
 	Graphics	Grafika
 	Reset GPU Backend	GPU-háttér visszaállítása
 	Applies at next launch.	A következő indításkor érvényes
@@ -2018,7 +2018,7 @@
 	Opening…	Megnyitás…
 	Patch	Folt
 	Patch:	Folt:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	A PhotoSuite a CPU-s képkompozitort használja. Az ablak továbbra is használhatja a grafikus adaptert.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	A PhotoSplice a CPU-s képkompozitort használja. Az ablak továbbra is használhatja a grafikus adaptert.
 	Play Action	Művelet lejátszása
 	Reading…	Olvasás…
 	Record Action	Művelet rögzítése

@@ -6,7 +6,7 @@
 //! textures and grids anchored at the image origin). Planes are row-major, `w × h` bytes.
 //! Neighbourhood primitives clamp coordinates to the image unless they say otherwise.
 //!
-//! The box mean and the two rank filters are ports of the PhotoSuite authors' WebAssembly
+//! The box mean and the two rank filters are ports of the PhotoSplice authors' WebAssembly
 //! kernels; their cost does not grow with the window. Rows run in parallel where the rows of a
 //! pass are independent.
 

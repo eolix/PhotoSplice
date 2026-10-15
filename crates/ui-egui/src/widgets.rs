@@ -1,4 +1,4 @@
-//! Custom widgets for the PhotoSuite look: cards with pill tabs, thin sliders with round knobs,
+//! Custom widgets for the PhotoSplice look: cards with pill tabs, thin sliders with round knobs,
 //! monospace value fields with dimmed units, toggle switches, primary/secondary buttons.
 
 use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
@@ -756,7 +756,7 @@ mod tests {
             },
             false,
         );
-        crate::PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        crate::PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
         h.ctx.set_os(os);
         *h.state_mut() = true;
         h.run();

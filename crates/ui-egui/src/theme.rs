@@ -12,7 +12,7 @@ use egui::{Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId,
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// The themes PhotoSuite ships. Each declares four base colours and a few surfaces; every other
+/// The themes PhotoSplice ships. Each declares four base colours and a few surfaces; every other
 /// token is derived from them in [`Tokens::for_kind`], so a palette stays internally consistent
 /// and a new one needs only the bases.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,7 +222,7 @@ pub struct Tokens {
 }
 
 impl Tokens {
-    /// Derive every token from the palette's bases, the way PhotoSuite does: hover and active
+    /// Derive every token from the palette's bases, the way PhotoSplice does: hover and active
     /// fills mix toward the text colour so they lift on dark palettes and deepen on light ones,
     /// and muted text mixes back toward the panel.
     pub fn for_kind(kind: ThemeKind) -> Self {
@@ -258,7 +258,7 @@ impl Tokens {
             radius_sm: 3.0,
             radius: 5.0,
             radius_lg: 7.0,
-            // PhotoSuite is Photoshop-shaped too, so it keeps the tab-strip grammar: panel tab
+            // PhotoSplice is Photoshop-shaped too, so it keeps the tab-strip grammar: panel tab
             // strips, flat panels, pill buttons. Only the palette changes.
             bevel: false,
             pro: true,
@@ -269,7 +269,7 @@ impl Tokens {
 
 
     pub fn get(ctx: &egui::Context) -> Tokens {
-        ctx.data(|d| d.get_temp::<Tokens>(egui::Id::new("photosuite-theme"))).unwrap_or_else(|| Tokens::for_kind(ThemeKind::default()))
+        ctx.data(|d| d.get_temp::<Tokens>(egui::Id::new("photosplice-theme"))).unwrap_or_else(|| Tokens::for_kind(ThemeKind::default()))
     }
 
     /// Is this a dark palette? Measured from the chrome rather than listed, so a new palette
@@ -282,8 +282,8 @@ impl Tokens {
 
     /// The Layers panel's tint for a layer colour label (Photoshop colours the eye column):
     /// muted swatches on dark palettes, light tints on light ones. `None` for no label.
-    pub fn label_color(&self, label: photosuite_doc::LabelColor) -> Option<Color32> {
-        use photosuite_doc::LabelColor as L;
+    pub fn label_color(&self, label: photosplice_doc::LabelColor) -> Option<Color32> {
+        use photosplice_doc::LabelColor as L;
         let rgb: u32 = match label {
             L::None => return None,
             L::Red => 0x9c3b3b,
@@ -326,10 +326,10 @@ fn set_fonts(ctx: &egui::Context, scale: f32) {
     let add = |fonts: &mut FontDefinitions, name: &str, bytes: &'static [u8]| {
         fonts.font_data.insert(name.to_owned(), Arc::new(FontData::from_static(bytes).tweak(tweak.clone())));
     };
-    add(&mut fonts, "Inter", photosuite_text::fonts::INTER_REGULAR);
-    add(&mut fonts, "Inter-Medium", photosuite_text::fonts::INTER_MEDIUM);
-    add(&mut fonts, "Inter-SemiBold", photosuite_text::fonts::INTER_SEMIBOLD);
-    add(&mut fonts, "JetBrainsMono", photosuite_text::fonts::JETBRAINS_MONO_REGULAR);
+    add(&mut fonts, "Inter", photosplice_text::fonts::INTER_REGULAR);
+    add(&mut fonts, "Inter-Medium", photosplice_text::fonts::INTER_MEDIUM);
+    add(&mut fonts, "Inter-SemiBold", photosplice_text::fonts::INTER_SEMIBOLD);
+    add(&mut fonts, "JetBrainsMono", photosplice_text::fonts::JETBRAINS_MONO_REGULAR);
     fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "Inter".to_owned());
     fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "JetBrainsMono".to_owned());
     // Named weights fall back to the default stack for missing glyphs.
@@ -355,7 +355,7 @@ pub fn mono(size: f32) -> FontId {
 /// Apply a theme to egui's global style and publish its tokens.
 pub fn apply(ctx: &egui::Context, kind: ThemeKind) {
     let t = Tokens::for_kind(kind);
-    ctx.data_mut(|d| d.insert_temp(egui::Id::new("photosuite-theme"), t));
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("photosplice-theme"), t));
     // The system title bar follows: dark under the dark themes on Windows, and the Adwaita frame
     // winit draws on GNOME's Wayland. Not on macOS, where the title bar is the app's own and an
     // app-wide appearance would also restyle the native menus and file dialogs.
@@ -493,7 +493,7 @@ mod tests {
 
 /// Development feature: live design-token overrides.
 ///
-/// Set `PHOTOSUITE_THEME_FILE=/path/tokens.json` in a debug build; the file is polled and applied
+/// Set `PHOTOSPLICE_THEME_FILE=/path/tokens.json` in a debug build; the file is polled and applied
 /// on change, so colours, radii and sizes can be tuned without recompiling. Keys are `Tokens` field
 /// names; values are `"#rrggbb"`, `"#rrggbbaa"` or numbers. Compiled out of release builds.
 #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
@@ -511,7 +511,7 @@ pub mod live {
 
     impl LiveTokens {
         pub fn from_env() -> Self {
-            Self { path: std::env::var_os("PHOTOSUITE_THEME_FILE").map(Into::into), ..Default::default() }
+            Self { path: std::env::var_os("PHOTOSPLICE_THEME_FILE").map(Into::into), ..Default::default() }
         }
 
         /// Re-apply overrides if the file changed. Returns true when tokens were updated.
@@ -536,7 +536,7 @@ pub mod live {
                     super::apply(ctx, kind);
                     let mut t = Tokens::get(ctx);
                     let unknown = apply_overrides(&mut t, &v);
-                    ctx.data_mut(|d| d.insert_temp(egui::Id::new("photosuite-theme"), t));
+                    ctx.data_mut(|d| d.insert_temp(egui::Id::new("photosplice-theme"), t));
                     if !unknown.is_empty() {
                         log::warn!("unknown token keys: {unknown:?}");
                     }

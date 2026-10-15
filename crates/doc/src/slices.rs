@@ -6,7 +6,7 @@
 //! rectangles that fill the rest of the canvas, recomputed whenever they are needed, exactly like
 //! Photoshop regenerates them after every slice edit.
 
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 use serde::{Deserialize, Serialize};
 
 use crate::{Document, LayerId};

@@ -3,11 +3,11 @@
 //! Rulers & Grids toggles. Every edit dispatches an engine or view command, so the panel stays thin.
 
 use egui::{Align2, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
-use photosuite_doc::{ColorMode, Document, Layer, LayerId, SampleType};
+use photosplice_doc::{ColorMode, Document, Layer, LayerId, SampleType};
 use serde_json::{Value, json};
 
 use crate::theme::Tokens;
-use crate::{PhotosuiteApp, icons, widgets};
+use crate::{PhotospliceApp, icons, widgets};
 
 /// The Background layer: the locked, opaque raster layer at the bottom of the stack, whatever
 /// its (localized) name ([`Document::background`]).
@@ -115,7 +115,7 @@ fn dim_field(ui: &mut egui::Ui, text: &str) {
     ui.painter().text(r.left_center() + vec2(6.0, 0.0), Align2::LEFT_CENTER, text, crate::theme::mono(12.0), t.text_faint);
 }
 
-pub fn properties(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
+pub fn properties(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let Some(st) = app.session.active() else { return };
     let (w, h, mode, depth, dpi) = (st.doc.size.width, st.doc.size.height, st.doc.mode, st.doc.depth, st.doc.resolution_dpi);
@@ -271,10 +271,10 @@ pub fn properties(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_doc::Document;
+    use photosplice_doc::Document;
 
-    fn doc_with_background() -> photosuite_engine::Session {
-        let mut s = photosuite_engine::Session::new();
+    fn doc_with_background() -> photosplice_engine::Session {
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", json!({"width": 40, "height": 20, "background": "white"})).unwrap();
         s
     }
@@ -296,7 +296,7 @@ mod tests {
 
     #[test]
     fn transparent_documents_have_no_background() {
-        let mut s = photosuite_engine::Session::new();
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", json!({"width": 40, "height": 20, "background": "transparent"})).unwrap();
         let st = s.active().unwrap();
         let d: &Document = &st.doc;
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn document_dropdowns_map_to_live_mode_commands() {
         for id in MODES.iter().map(|m| m.2).chain(DEPTHS.iter().map(|d| d.2)) {
-            assert!(photosuite_engine::commands::find(id).is_some(), "{id} is not an engine command");
+            assert!(photosplice_engine::commands::find(id).is_some(), "{id} is not an engine command");
         }
     }
 

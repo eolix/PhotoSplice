@@ -9,12 +9,12 @@
 //! OK runs `filter.liquify` with the same strokes and gets the same field.
 
 use egui::{Color32, Pos2, Rect as ERect, Sense, Stroke, TextureHandle, pos2, vec2};
-use photosuite_algo::liquify::{LiquifyField, LiquifyStroke, LiquifyTool, ProxyImage, auto_cell};
-use photosuite_doc::LayerId;
-use photosuite_geom::Rect;
+use photosplice_algo::liquify::{LiquifyField, LiquifyStroke, LiquifyTool, ProxyImage, auto_cell};
+use photosplice_doc::LayerId;
+use photosplice_geom::Rect;
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::ToolEvent;
 use crate::theme::Tokens;
 use crate::widgets;
@@ -337,7 +337,7 @@ impl LiquifyDialog {
 }
 
 /// Opens the dialog on the active layer.
-pub fn open(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), String> {
+pub fn open(app: &mut PhotospliceApp, ctx: &egui::Context) -> Result<(), String> {
     let (layer, surf, _) = crate::distort_ui::active_pixels(app)?;
     let st = app.session.active().ok_or("no document")?;
     let canvas = st.doc.bounds();
@@ -382,21 +382,21 @@ pub fn open(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), String> 
 }
 
 /// Keeps the brush settings for the next time Liquify opens, also after a restart.
-fn remember(app: &mut PhotosuiteApp, opts: &LiquifyOpts) {
+fn remember(app: &mut PhotospliceApp, opts: &LiquifyOpts) {
     let v = opts.to_json();
     app.session.prefs.edit(|p| p.dialogs.insert(REMEMBERED.into(), v));
 }
 
 /// Cancel (button, Esc or the control channel): the document is untouched; the brush settings
 /// are kept.
-pub fn cancel(app: &mut PhotosuiteApp) {
+pub fn cancel(app: &mut PhotospliceApp) {
     if let Some(d) = app.distort.liquify.take() {
         remember(app, &d.opts);
     }
 }
 
 /// OK: runs `filter.liquify` with the recorded strokes (one history step).
-pub fn commit(app: &mut PhotosuiteApp) {
+pub fn commit(app: &mut PhotospliceApp) {
     let Some(mut d) = app.distort.liquify.take() else { return };
     remember(app, &d.opts);
     d.end();
@@ -408,7 +408,7 @@ pub fn commit(app: &mut PhotosuiteApp) {
 }
 
 /// Control channel: `filter.liquify {"ui": {...}}` while the dialog is open.
-pub fn control(app: &mut PhotosuiteApp, ui: &Value) -> Result<Value, String> {
+pub fn control(app: &mut PhotospliceApp, ui: &Value) -> Result<Value, String> {
     if ui.get("commit").and_then(Value::as_bool) == Some(true) {
         commit(app);
         return Ok(json!({"committed": true}));
@@ -443,7 +443,7 @@ pub fn control(app: &mut PhotosuiteApp, ui: &Value) -> Result<Value, String> {
 
 /// Pointer in document coordinates (from the preview or the control channel). Alt = subtract
 /// from the freeze mask (lasso only); Shift adds, same as no modifier.
-pub fn pointer(app: &mut PhotosuiteApp, ev: ToolEvent, mods: egui::Modifiers) {
+pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers) {
     let now = crate::gpu_canvas::now_ms();
     let Some(d) = app.distort.liquify.as_mut() else { return };
     match ev {
@@ -479,7 +479,7 @@ pub fn pointer(app: &mut PhotosuiteApp, ev: ToolEvent, mods: egui::Modifiers) {
     }
 }
 
-pub fn keys(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+pub fn keys(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let Some(d) = app.distort.liquify.as_mut() else { return };
     let cmd_shift = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
     if ctx.input_mut(|i| i.consume_key(cmd_shift, egui::Key::Z)) {
@@ -556,11 +556,11 @@ fn shortcut(t: LiquifyTool) -> &'static str {
     }
 }
 
-fn load_backdrop(app: &PhotosuiteApp, ctx: &egui::Context, layer: LayerId, canvas: Rect) -> Option<TextureHandle> {
+fn load_backdrop(app: &PhotospliceApp, ctx: &egui::Context, layer: LayerId, canvas: Rect) -> Option<TextureHandle> {
     let st = app.session.active()?;
     let doc = crate::distort_ui::without_layer(&st.doc, layer);
-    let buf = photosuite_compose::render(&doc, canvas);
-    let mut s = photosuite_raster::Surface::new(photosuite_color::PixelFormat::RGBA8);
+    let buf = photosplice_compose::render(&doc, canvas);
+    let mut s = photosplice_raster::Surface::new(photosplice_color::PixelFormat::RGBA8);
     let flat: Vec<f32> = buf.px.iter().flat_map(|p| *p).collect();
     s.write_region(canvas, &flat);
     Some(ctx.load_texture("liquify-backdrop", crate::distort_ui::surface_image(&s, canvas, PROXY_SIDE), egui::TextureOptions::LINEAR))
@@ -570,7 +570,7 @@ fn load_backdrop(app: &PhotosuiteApp, ctx: &egui::Context, layer: LayerId, canva
 const DIALOG_MAX: egui::Vec2 = vec2(1280.0, 860.0);
 
 /// Draws the dialog (a large modal over the document, like Lens Correction's) while it is open.
-pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
     let Some(heading) = app.distort.liquify.as_ref().map(|d| {
         let pct = if d.zoom > 0.0 { d.zoom * 100.0 } else { 100.0 };
@@ -860,8 +860,8 @@ fn draw_mesh(d: &LiquifyDialog, painter: &egui::Painter, area: ERect) {
 mod tests {
     use super::*;
 
-    fn app_with_layer() -> PhotosuiteApp {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+    fn app_with_layer() -> PhotospliceApp {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         app.session.execute("file.new", json!({"width": 120, "height": 80, "depth": 8})).unwrap();
         app.session.execute("layer.new.layer", json!({})).unwrap();
         app.session
@@ -991,7 +991,7 @@ mod tests {
         let mut app = app_with_layer();
         open(&mut app, &ctx).unwrap();
         control(&mut app, &json!({"tool": "forwardWarp", "size": 40})).unwrap();
-        let draw = |app: &mut PhotosuiteApp, x: f64| {
+        let draw = |app: &mut PhotospliceApp, x: f64| {
             for ev in
                 [ToolEvent::Down { x, y: 40.0, pressure: 1.0 }, ToolEvent::Move { x: x + 14.0, y: 40.0, pressure: 1.0 }, ToolEvent::Up { x: x + 14.0, y: 40.0 }]
             {
@@ -1026,7 +1026,7 @@ mod tests {
         let mut app = app_with_layer();
         open(&mut app, &ctx).unwrap();
         control(&mut app, &json!({"tool": "lassoMask"})).unwrap();
-        let lasso = |app: &mut PhotosuiteApp, m: egui::Modifiers, r: [f64; 4]| {
+        let lasso = |app: &mut PhotospliceApp, m: egui::Modifiers, r: [f64; 4]| {
             pointer(app, ToolEvent::Down { x: r[0], y: r[1], pressure: 1.0 }, m);
             for (x, y) in [(r[2], r[1]), (r[2], r[3]), (r[0], r[3])] {
                 pointer(app, ToolEvent::Move { x, y, pressure: 1.0 }, m);

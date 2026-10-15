@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# Српски језик translations for PhotoSuite UI.
+# Српски језик translations for PhotoSplice UI.
 
 	File	Датотека
 	Edit	Измени
@@ -672,7 +672,7 @@
 	Timeline	Временска линија
 	Tool Presets	Подешавање алата
 	Tools	Алати
-	About PhotoSuite	О ПхотоЦрафту
+	About PhotoSplice	О ПхотоЦрафту
 	Website	Вебсите
 	Report an Issue…	Пријавите проблем…
 	WIA Support…	ВИА подршка…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Перспецтиве Варп није активан
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Перспецтиве Варп: нацртајте равни дуж перспективе слике, а затим пређите на Варп
 	Photo Filter	Фото филтар
-	PhotoSuite	ПхотоЦрафт
-	PhotoSuite Manages Colors	ПхотоЦрафт управља бојама
-	PhotoSuite — an open-source, native image editor written in Rust.	ПхотоЦрафт — изворни уређивач слика отвореног кода написан у Русту
+	PhotoSplice	ПхотоЦрафт
+	PhotoSplice Manages Colors	ПхотоЦрафт управља бојама
+	PhotoSplice — an open-source, native image editor written in Rust.	ПхотоЦрафт — изворни уређивач слика отвореног кода написан у Русту
 	Pin Depth:	Дубина игле:
 	Pixel Length:	Дужина пиксела:
 	Pixels/Centimeter	Пиксели/центиметар
@@ -1570,7 +1570,7 @@
 	Pen Tilt	Пен Тилт
 	Pen Tool	Пен Тоол
 	Photo	Фотографија
-	PhotoSuite website	ПхотоЦрафт веб-сајт
+	PhotoSplice website	ПхотоЦрафт веб-сајт
 	Picas	Пицас
 	Pillow Emboss	Мекано клесање
 	Pixel Replacement	Замена пиксела
@@ -1877,7 +1877,7 @@
 	System Info…	Информације о систему…
 	System Info	Информације о систему
 	More panels	Више панела
-	These settings aren't available in PhotoSuite yet.	Ова подешавања још увек нису доступна у ПхотоЦрафт-у
+	These settings aren't available in PhotoSplice yet.	Ова подешавања још увек нису доступна у ПхотоЦрафт-у
 	Graphics	Графика
 	Reset GPU Backend	Ресетујте позадину ГПУ-а
 	Applies at next launch.	Примењује се при следећем лансирању
@@ -2018,7 +2018,7 @@
 	Opening…	Отварање…
 	Patch	Закрпа
 	Patch:	Закрпа:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite слаже слику помоћу CPU-а. Прозор и даље може да користи графички адаптер.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice слаже слику помоћу CPU-а. Прозор и даље може да користи графички адаптер.
 	Play Action	Пусти акцију
 	Reading…	Читање…
 	Record Action	Сними акцију

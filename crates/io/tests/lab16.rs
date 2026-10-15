@@ -2,12 +2,12 @@
 //! on the full 0..65535 range. Layer pixels, the merged image and patterns use that scale, and
 //! the documents' a*/b* stay on the 8-bit scale `(a + 128) / 255` at every depth.
 
-use photosuite_color::{ColorMode, PixelFormat, SampleType};
-use photosuite_doc::{Document, Layer, LayerContent};
-use photosuite_geom::{Rect, Size};
-use photosuite_io::*;
-use photosuite_psd::PsdFile;
-use photosuite_raster::Surface;
+use photosplice_color::{ColorMode, PixelFormat, SampleType};
+use photosplice_doc::{Document, Layer, LayerContent};
+use photosplice_geom::{Rect, Size};
+use photosplice_io::*;
+use photosplice_psd::PsdFile;
+use photosplice_raster::Surface;
 
 /// a* = 52.29, b* = −85.08 (a gradient stop of psd-tools 4x4_16bit_lab) on the document scale.
 const A: f32 = (52.29 + 128.0) / 255.0;
@@ -60,8 +60,8 @@ fn lab_round_trips_at_every_depth() {
         let p = back.layers[0].surface().unwrap().pixel(2, 0);
         let tol = if depth == SampleType::U8 { 0.5 / 255.0 + 1e-6 } else { 2e-5 };
         assert!((p[1] - A).abs() <= tol && (p[2] - B).abs() <= tol, "{depth:?}: {p:?}");
-        let a = photosuite_compose::flatten(&doc).px;
-        let b = photosuite_compose::flatten(&back).px;
+        let a = photosplice_compose::flatten(&doc).px;
+        let b = photosplice_compose::flatten(&back).px;
         for (x, y) in a.iter().zip(&b) {
             for c in 0..4 {
                 assert!((x[c] - y[c]).abs() <= 1.0 / 255.0, "{depth:?}: {x:?} vs {y:?}");

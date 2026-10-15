@@ -1,9 +1,9 @@
 //! Rasterizes a [`TextLayout`] into a document-space [`Surface`] of any pixel format.
 
-use photosuite_color::{Color, PixelFormat};
-use photosuite_doc::text::AntiAlias;
-use photosuite_geom::{Affine, Rect};
-use photosuite_raster::Surface;
+use photosplice_color::{Color, PixelFormat};
+use photosplice_doc::text::AntiAlias;
+use photosplice_geom::{Affine, Rect};
+use photosplice_raster::Surface;
 use skrifa::instance::{LocationRef, NormalizedCoord, Size};
 use skrifa::outline::{DrawSettings, HintingInstance, HintingOptions, SmoothMode, Target};
 use skrifa::{GlyphId, MetadataProvider};
@@ -273,7 +273,7 @@ fn glyph_xform(layout: &TextLayout, g: &PlacedGlyph, face_skew_deg: f32) -> Xfor
 /// The warp to apply to `layer` laid out as `layout` (None when it has no warp, `warpNone` or a
 /// flat one), over the box its `TySh` records while that still holds its text (the box Reference
 /// warps over), else the layout's line box.
-pub fn layout_warp(layout: &TextLayout, layer: &photosuite_doc::TextLayer) -> Option<Warp> {
+pub fn layout_warp(layout: &TextLayout, layer: &photosplice_doc::TextLayer) -> Option<Warp> {
     let warp = layer.warp.as_ref()?;
     let stored = layer.psd_raw.as_deref().and_then(|d| crate::psd::tysh_text_box(d, &layer.text));
     Warp::new(warp, stored.or_else(|| layout.bounds())?)
@@ -286,7 +286,7 @@ fn color_in(format: &PixelFormat, c: &Color) -> Vec<f32> {
         c.c[..n].to_vec()
     } else {
         let [r, g, b] = c.to_rgb();
-        let mut v = photosuite_raster::from_rgba(&PixelFormat { alpha: false, ..*format }, [r, g, b, 1.0]);
+        let mut v = photosplice_raster::from_rgba(&PixelFormat { alpha: false, ..*format }, [r, g, b, 1.0]);
         v.truncate(n);
         v
     }
@@ -472,7 +472,7 @@ pub fn outlines(layout: &TextLayout, transform: &Affine, warp: Option<&Warp>) ->
 #[cfg(test)]
 mod tests {
     use super::{MAX_PIXELS, rect_from_bounds};
-    use photosuite_geom::Rect;
+    use photosplice_geom::Rect;
 
     #[test]
     fn bounds_are_clipped_without_overflow_and_oversized_rectangles_rejected() {

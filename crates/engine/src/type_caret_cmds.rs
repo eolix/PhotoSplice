@@ -4,9 +4,9 @@
 //! touches text space; offsets are character indices, the same unit as `type.edit` and
 //! `type.setStyle`. The Type tool calls the same word, line and hit-test helpers.
 
-use photosuite_doc::{Affine, Document, LayerContent, LayerId};
-use photosuite_geom::{Point, Rect};
-use photosuite_text::TextLayout;
+use photosplice_doc::{Affine, Document, LayerContent, LayerId};
+use photosplice_geom::{Point, Rect};
+use photosplice_text::TextLayout;
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
@@ -76,7 +76,7 @@ fn frame(doc: &Document, id: LayerId, cmd: &str) -> Result<Frame> {
     let ink = t.cache.as_ref().map(|c| c.content_bounds()).filter(|r| !r.is_empty());
     let dpi = doc.resolution_dpi;
     let layout = {
-        let mut eng = photosuite_text::shared().lock().unwrap_or_else(|e| e.into_inner());
+        let mut eng = photosplice_text::shared().lock().unwrap_or_else(|e| e.into_inner());
         eng.layout(t, dpi)
     };
     Ok(Frame { id, text, transform, ink, layout })
@@ -96,7 +96,7 @@ impl Frame {
     /// Same hit as the Type tool, without its zoom slop: the laid-out line boxes or the rendered ink.
     fn contains(&self, x: f64, y: f64) -> bool {
         let (tx, ty) = to_text(self.transform, x, y);
-        photosuite_text::text_point_inside(&self.layout, tx, ty, 0.0)
+        photosplice_text::text_point_inside(&self.layout, tx, ty, 0.0)
             || self.ink.is_some_and(|r| x >= f64::from(r.x0) && x <= f64::from(r.x1) && y >= f64::from(r.y0) && y <= f64::from(r.y1))
     }
 }
@@ -116,7 +116,7 @@ fn topmost(doc: &Document, x: f64, y: f64) -> Option<Frame> {
 /// every line; when a rotation makes document x independent of the column, the caret's own
 /// column is kept (there is nothing to solve for).
 fn column(layout: &TextLayout, aff: Affine, text: &str, index: usize, doc_x: Option<f64>) -> f32 {
-    let (x, top, bottom) = layout.caret(photosuite_text::byte_index(text, index));
+    let (x, top, bottom) = layout.caret(photosplice_text::byte_index(text, index));
     let Some(doc_x) = doc_x else { return x };
     let y = f64::from(top + bottom) * 0.5;
     let [a, _, c, _, e, _] = aff.m;
@@ -142,7 +142,7 @@ fn hit_test(s: &Session, p: &Value) -> Result<Value> {
         _ => topmost(&doc, x, y).ok_or_else(|| bad(CMD, "no type layer under the point"))?,
     };
     let (tx, ty) = to_text(frame.transform, x, y);
-    let (index, line) = photosuite_text::hit_char(&frame.layout, &frame.text, tx, ty);
+    let (index, line) = photosplice_text::hit_char(&frame.layout, &frame.text, tx, ty);
     Ok(json!({ "layer": frame.id.0, "index": index, "line": line, "inside": frame.contains(x, y) }))
 }
 
@@ -153,11 +153,11 @@ fn caret(s: &Session, p: &Value) -> Result<Value> {
     let doc = s.active().ok_or(EngineError::NoDocument)?.doc.clone();
     let frame = frame(&doc, id, CMD)?;
     check_index(&frame.text, index, CMD)?;
-    let byte = photosuite_text::byte_index(&frame.text, index);
+    let byte = photosplice_text::byte_index(&frame.text, index);
     let seg = frame.layout.caret_segment(byte);
     let p0 = doc_point(frame.transform, seg[0].0, seg[0].1, CMD)?;
     let p1 = doc_point(frame.transform, seg[1].0, seg[1].1, CMD)?;
-    let line = photosuite_text::line_index(&frame.layout, byte);
+    let line = photosplice_text::line_index(&frame.layout, byte);
     Ok(json!({ "index": index, "line": line, "segment": [p0, p1] }))
 }
 
@@ -171,15 +171,15 @@ fn navigate(s: &Session, p: &Value) -> Result<Value> {
     let frame = frame(&doc, id, CMD)?;
     check_index(&frame.text, index, CMD)?;
     let next = match mov {
-        "wordPrev" => photosuite_text::word_boundary(&frame.text, index, false),
-        "wordNext" => photosuite_text::word_boundary(&frame.text, index, true),
+        "wordPrev" => photosplice_text::word_boundary(&frame.text, index, false),
+        "wordNext" => photosplice_text::word_boundary(&frame.text, index, true),
         "linePrev" | "lineNext" => {
             let dir = if mov == "linePrev" { -1 } else { 1 };
             let x = column(&frame.layout, frame.transform, &frame.text, index, doc_x);
-            photosuite_text::line_step(&frame.layout, &frame.text, index, x, dir)
+            photosplice_text::line_step(&frame.layout, &frame.text, index, x, dir)
         }
-        "lineStart" => photosuite_text::line_edge(&frame.layout, &frame.text, index, false),
-        "lineEnd" => photosuite_text::line_edge(&frame.layout, &frame.text, index, true),
+        "lineStart" => photosplice_text::line_edge(&frame.layout, &frame.text, index, false),
+        "lineEnd" => photosplice_text::line_edge(&frame.layout, &frame.text, index, true),
         "start" => 0,
         "end" => frame.text.chars().count(),
         other => {

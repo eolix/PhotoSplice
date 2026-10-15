@@ -7,11 +7,11 @@
 //! serialisable UI state so the control channel can read and drive it).
 
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, RichText, Stroke, pos2, vec2};
-use photosuite_doc::{Document, Ruler};
+use photosplice_doc::{Document, Ruler};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::{ToolEvent, ViewXform};
 use crate::state::Tool;
 use crate::theme::Tokens;
@@ -74,7 +74,7 @@ pub fn handles(id: &str) -> bool {
     PANELS.contains(&id)
 }
 
-pub fn checked(app: &PhotosuiteApp, id: &str) -> Option<bool> {
+pub fn checked(app: &PhotospliceApp, id: &str) -> Option<bool> {
     match id {
         "window.panel.measurementLog" => Some(app.ui.analysis.measurement_log),
         "window.panel.notes" => Some(app.ui.analysis.notes),
@@ -82,7 +82,7 @@ pub fn checked(app: &PhotosuiteApp, id: &str) -> Option<bool> {
         "image.analysis.countTool" => Some(app.ui.tool == Tool::Count),
         _ => {
             // View › Proof Setup simulations: checked while that proof is shown.
-            let kind = id.strip_prefix("view.proofSetup.").and_then(photosuite_engine::proof_sim::ProofKind::from_id)?;
+            let kind = id.strip_prefix("view.proofSetup.").and_then(photosplice_engine::proof_sim::ProofKind::from_id)?;
             let d = app.session.active()?;
             let pv = app.session.color.proof(d.doc.id);
             Some(pv.enabled && pv.setup.kind == kind)
@@ -100,7 +100,7 @@ fn fields(v: Value) -> Map<String, Value> {
 
 /// Menu front ends: panel toggles, tool selection, dialogs and pickers in front of the engine's
 /// analysis commands. `None` when `id` isn't ours (or the engine should run it directly).
-pub fn menu(app: &mut PhotosuiteApp, id: &str, params: &Value) -> Option<Result<Value, String>> {
+pub fn menu(app: &mut PhotospliceApp, id: &str, params: &Value) -> Option<Result<Value, String>> {
     let a = &mut app.ui.analysis;
     match id {
         "window.panel.measurementLog" | "window.panel.notes" => {
@@ -163,7 +163,7 @@ pub fn menu(app: &mut PhotosuiteApp, id: &str, params: &Value) -> Option<Result<
                 Ok(picked) => picked,
                 Err(e) => return Some(Err(e)),
             };
-            let r = photosuite_engine::notes_cmds::import_notes_from(&mut app.session, &name, &bytes).map_err(|e| e.to_string());
+            let r = photosplice_engine::notes_cmds::import_notes_from(&mut app.session, &name, &bytes).map_err(|e| e.to_string());
             if r.is_ok() {
                 app.ui.analysis.notes = true;
                 app.sync_views();
@@ -175,7 +175,7 @@ pub fn menu(app: &mut PhotosuiteApp, id: &str, params: &Value) -> Option<Result<
     })
 }
 
-fn open(app: &mut PhotosuiteApp, kind: &str, f: Value) -> Result<Value, String> {
+fn open(app: &mut PhotospliceApp, kind: &str, f: Value) -> Result<Value, String> {
     app.ui.analysis.dialog = Some((kind.to_string(), fields(f)));
     Ok(json!({"dialog": kind}))
 }
@@ -188,7 +188,7 @@ fn suggested_length(d: &Document) -> f64 {
 }
 
 /// Export the Measurement Log (or the given rows) as CSV through the save picker.
-fn export_log(app: &mut PhotosuiteApp, rows: Option<Vec<u64>>) -> Result<Value, String> {
+fn export_log(app: &mut PhotospliceApp, rows: Option<Vec<u64>>) -> Result<Value, String> {
     let p = rows.map_or(json!({}), |r| json!({"rows": r}));
     let csv = app.run("measurementLog.export", p)?;
     let text = csv["csv"].as_str().unwrap_or_default().to_string();
@@ -200,7 +200,7 @@ fn export_log(app: &mut PhotosuiteApp, rows: Option<Vec<u64>>) -> Result<Value, 
 
 // ------------------------------------------------------------------ tools
 
-fn tolerance(app: &PhotosuiteApp) -> f64 {
+fn tolerance(app: &PhotospliceApp) -> f64 {
     7.0 / f64::from(app.current_zoom().max(0.01))
 }
 
@@ -219,12 +219,12 @@ fn constrain(from: [f64; 2], to: [f64; 2], shift: bool) -> [f64; 2] {
     [from[0] + l * a.cos(), from[1] + l * a.sin()]
 }
 
-fn set_ruler(app: &mut PhotosuiteApp, r: Ruler) {
+fn set_ruler(app: &mut PhotospliceApp, r: Ruler) {
     let _ = app.run("image.analysis.rulerTool", json!({"start": r.start, "end": r.end, "protractor": r.protractor}));
 }
 
 /// Pointer input for the Ruler, Count and Note tools. Returns true when consumed.
-pub fn pointer(app: &mut PhotosuiteApp, ev: ToolEvent, mods: egui::Modifiers) -> bool {
+pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers) -> bool {
     let tool = app.ui.tool;
     if !matches!(tool, Tool::Ruler | Tool::Count | Tool::Note) {
         return false;
@@ -349,7 +349,7 @@ fn handle(painter: &egui::Painter, p: Pos2) {
 }
 
 /// Ruler line (while the Ruler tool is active), count markers and note icons.
-pub fn draw_overlay(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform) {
+pub fn draw_overlay(app: &PhotospliceApp, painter: &egui::Painter, xf: &ViewXform) {
     let Some(doc) = app.session.active().map(|d| d.doc.clone()) else { return };
     let v = &app.ui.view;
     if app.ui.tool == Tool::Ruler
@@ -413,13 +413,13 @@ fn readout(ui: &mut egui::Ui, label: &str, value: Option<f64>) {
 }
 
 /// Options bar of the Ruler, Count and Note tools. Returns true when drawn.
-pub fn options_bar(app: &mut PhotosuiteApp, ui: &mut egui::Ui, tool: Tool) -> bool {
+pub fn options_bar(app: &mut PhotospliceApp, ui: &mut egui::Ui, tool: Tool) -> bool {
     let Some(doc) = app.session.active().map(|d| d.doc.clone()) else { return matches!(tool, Tool::Ruler | Tool::Count | Tool::Note) };
     match tool {
         Tool::Ruler => {
             let sc = doc.measurement.scale.clone();
             let f = if app.ui.analysis.use_measurement_scale { sc.factor() } else { 1.0 };
-            let info = doc.measurement.ruler.map(|r| photosuite_engine::analysis_cmds::ruler_info(&r, &sc));
+            let info = doc.measurement.ruler.map(|r| photosplice_engine::analysis_cmds::ruler_info(&r, &sc));
             let g = |k: &str| info.as_ref().and_then(|i| i[k].as_f64());
             readout(ui, "X:", g("x").map(|v| v * f));
             readout(ui, "Y:", g("y").map(|v| v * f));
@@ -530,7 +530,7 @@ pub(crate) fn title_row(ui: &mut egui::Ui, title: &str) -> bool {
 }
 
 /// A floating panel window; `movable` follows Window › Workspace › Lock Workspace.
-pub(crate) fn panel_window(app: &PhotosuiteApp, ctx: &egui::Context, id: &str, title: &str, offset: egui::Vec2, width: f32, body: impl FnOnce(&mut egui::Ui)) {
+pub(crate) fn panel_window(app: &PhotospliceApp, ctx: &egui::Context, id: &str, title: &str, offset: egui::Vec2, width: f32, body: impl FnOnce(&mut egui::Ui)) {
     let t = Tokens::get(ctx);
     let canvas = app.last_canvas_rect;
     egui::Window::new(title)
@@ -550,7 +550,7 @@ pub(crate) fn panel_window(app: &PhotosuiteApp, ctx: &egui::Context, id: &str, t
 }
 
 /// Draws the open panels and dialogs.
-pub fn windows(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+pub fn windows(app: &mut PhotospliceApp, ctx: &egui::Context) {
     if app.ui.analysis.measurement_log {
         let mut act: Option<(&str, Value)> = None;
         let mut close = false;
@@ -578,11 +578,11 @@ pub fn windows(app: &mut PhotosuiteApp, ctx: &egui::Context) {
                     }
                 });
             });
-            let cols: Vec<&str> = photosuite_engine::analysis_cmds::log_columns(&rows).into_iter().filter(|c| *c != "histogram").collect();
+            let cols: Vec<&str> = photosplice_engine::analysis_cmds::log_columns(&rows).into_iter().filter(|c| *c != "histogram").collect();
             egui::ScrollArea::both().max_height(220.0).max_width(620.0).show(ui, |ui| {
                 egui::Grid::new("mlog-grid").striped(true).spacing(vec2(10.0, 2.0)).show(ui, |ui| {
                     for c in &cols {
-                        let name = photosuite_engine::analysis_cmds::COLUMNS.iter().find(|x| x.0 == *c).map_or(*c, |x| x.1);
+                        let name = photosplice_engine::analysis_cmds::COLUMNS.iter().find(|x| x.0 == *c).map_or(*c, |x| x.1);
                         ui.label(RichText::new(name).color(t.text_dim).size(10.5).strong());
                     }
                     ui.end_row();
@@ -642,7 +642,7 @@ pub fn windows(app: &mut PhotosuiteApp, ctx: &egui::Context) {
     }
 }
 
-fn notes_panel(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+fn notes_panel(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let notes = app.session.active().map(|d| d.doc.notes.clone()).unwrap_or_default();
     let n = notes.len();
     let mut sel = app.ui.analysis.note_selected.filter(|i| *i < n).or((n > 0).then_some(0));
@@ -741,7 +741,7 @@ pub fn dialog_command(kind: &str, f: &Map<String, Value>) -> Option<(&'static st
     })
 }
 
-fn dialog(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+fn dialog(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let Some((kind, mut f)) = app.ui.analysis.dialog.clone() else { return };
     let t = Tokens::get(ctx);
     let title = match kind.as_str() {
@@ -791,8 +791,8 @@ fn dialog(app: &mut PhotosuiteApp, ctx: &egui::Context) {
                                     .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
                                     .unwrap_or_default();
                                 let mut changed = false;
-                                for key in photosuite_engine::analysis_cmds::available(source) {
-                                    let name = photosuite_engine::analysis_cmds::COLUMNS.iter().find(|c| c.0 == key).map_or(key, |c| c.1);
+                                for key in photosplice_engine::analysis_cmds::available(source) {
+                                    let name = photosplice_engine::analysis_cmds::COLUMNS.iter().find(|c| c.0 == key).map_or(key, |c| c.1);
                                     let mut on = list.iter().any(|x| x == key);
                                     if crate::widgets::checkbox(ui, &mut on, name).changed() {
                                         list.retain(|x| x != key);
@@ -853,32 +853,32 @@ fn dialog(app: &mut PhotosuiteApp, ctx: &egui::Context) {
 pub(crate) mod tests {
     use super::*;
 
-    fn app() -> (PhotosuiteApp, egui::Context) {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+    fn app() -> (PhotospliceApp, egui::Context) {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({"width": 200, "height": 100})).unwrap();
         (app, egui::Context::default())
     }
 
     /// Draw `f` for a few frames (fonts load on the first).
-    pub(crate) fn render(app: &mut PhotosuiteApp, ctx: &egui::Context, f: fn(&mut PhotosuiteApp, &egui::Context)) {
-        PhotosuiteApp::setup_context(ctx, Default::default());
+    pub(crate) fn render(app: &mut PhotospliceApp, ctx: &egui::Context, f: fn(&mut PhotospliceApp, &egui::Context)) {
+        PhotospliceApp::setup_context(ctx, Default::default());
         for _ in 0..3 {
             let mut o = ctx.run_ui(Default::default(), |ui| f(app, ui.ctx()));
             o.textures_delta.clear();
         }
     }
 
-    fn down(app: &mut PhotosuiteApp, x: f64, y: f64, m: egui::Modifiers) {
+    fn down(app: &mut PhotospliceApp, x: f64, y: f64, m: egui::Modifiers) {
         crate::canvas::tool_event(app, ToolEvent::Down { x, y, pressure: 1.0 }, m);
     }
-    fn mv(app: &mut PhotosuiteApp, x: f64, y: f64, m: egui::Modifiers) {
+    fn mv(app: &mut PhotospliceApp, x: f64, y: f64, m: egui::Modifiers) {
         crate::canvas::tool_event(app, ToolEvent::Move { x, y, pressure: 1.0 }, m);
     }
-    fn up(app: &mut PhotosuiteApp, x: f64, y: f64) {
+    fn up(app: &mut PhotospliceApp, x: f64, y: f64) {
         crate::canvas::tool_event(app, ToolEvent::Up { x, y }, egui::Modifiers::NONE);
     }
 
-    fn ruler(app: &PhotosuiteApp) -> Option<Ruler> {
+    fn ruler(app: &PhotospliceApp) -> Option<Ruler> {
         app.session.active().unwrap().doc.measurement.ruler
     }
 
@@ -910,7 +910,7 @@ pub(crate) mod tests {
     #[test]
     fn arbitrary_rotation_starts_at_the_ruler_angle() {
         let (mut app, ctx) = app();
-        let open = |app: &mut PhotosuiteApp| {
+        let open = |app: &mut PhotospliceApp| {
             let r = crate::menus::invoke(app, &ctx, "image.rotation.arbitrary", json!({})).unwrap();
             let f = &app.ui.dialog_mut(r["dialog"].as_u64().unwrap()).unwrap().fields;
             (f["angle"].as_f64().unwrap(), f["direction"].clone())
@@ -943,7 +943,7 @@ pub(crate) mod tests {
         down(&mut app, 10.0, 10.0, egui::Modifiers::ALT);
         mv(&mut app, 60.0, 10.0, none);
         up(&mut app, 60.0, 10.0);
-        let info = photosuite_engine::analysis_cmds::ruler_info(&ruler(&app).unwrap(), &Default::default());
+        let info = photosplice_engine::analysis_cmds::ruler_info(&ruler(&app).unwrap(), &Default::default());
         assert!((info["angle"].as_f64().unwrap() - 90.0).abs() < 1e-6, "{info}");
         // A click without a drag far away starts a new line and clears it.
         down(&mut app, 150.0, 80.0, none);
@@ -960,7 +960,7 @@ pub(crate) mod tests {
         up(&mut app, 20.0, 20.0);
         down(&mut app, 50.0, 50.0, egui::Modifiers::NONE);
         up(&mut app, 50.0, 50.0);
-        let pts = |app: &PhotosuiteApp| app.session.active().unwrap().doc.measurement.count_groups[0].points.clone();
+        let pts = |app: &PhotospliceApp| app.session.active().unwrap().doc.measurement.count_groups[0].points.clone();
         assert_eq!(pts(&app).len(), 2);
         // Drag marker 1.
         down(&mut app, 20.5, 20.5, egui::Modifiers::NONE);

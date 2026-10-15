@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 
-use photosuite_color::PixelFormat;
-use photosuite_doc::vector::ShapeLayer;
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_color::PixelFormat;
+use photosplice_doc::vector::ShapeLayer;
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 
 /// (fill, stroke), last use, and the shape's pixels the stroke was fitted to (kept alive so
 /// their tile addresses, part of the key, can't be reused).
@@ -50,7 +50,7 @@ pub fn split(sh: &ShapeLayer, canvas: Rect) -> Option<(Surface, Surface)> {
     let fmt = PixelFormat::RGBA8;
     let fill_only = ShapeLayer { stroke: None, cache: None, ..sh.clone() };
     let stroke_only = ShapeLayer { fill: None, cache: None, ..sh.clone() };
-    let mut parts = (photosuite_vector::render_shape(&fill_only, fmt, canvas), photosuite_vector::render_shape(&stroke_only, fmt, canvas));
+    let mut parts = (photosplice_vector::render_shape(&fill_only, fmt, canvas), photosplice_vector::render_shape(&stroke_only, fmt, canvas));
     if let Some(cache) = &sh.cache {
         fit_stroke(&parts.0, &mut parts.1, cache, canvas);
     }

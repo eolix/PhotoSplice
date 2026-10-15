@@ -1,19 +1,19 @@
 //! Liquify / Puppet / Perspective timings on a 24 MP image.
 //!
 //! ```sh
-//! cargo run --release -p photosuite-algo --example bench_liquify
+//! cargo run --release -p photosplice-algo --example bench_liquify
 //! ```
 
 use std::time::Instant;
 
-use photosuite_algo::liquify::{LiquifyField, LiquifyStroke, LiquifyTool, ProxyImage, apply_liquify, auto_cell};
-use photosuite_algo::perspective::{PerspectiveMap, Plane};
-use photosuite_algo::puppet::{PuppetDensity, PuppetMode, PuppetPin, PuppetWarp, deform, render};
-use photosuite_algo::transform::Interp;
-use photosuite_algo::warp::warp_mesh_surface;
-use photosuite_color::PixelFormat;
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_algo::liquify::{LiquifyField, LiquifyStroke, LiquifyTool, ProxyImage, apply_liquify, auto_cell};
+use photosplice_algo::perspective::{PerspectiveMap, Plane};
+use photosplice_algo::puppet::{PuppetDensity, PuppetMode, PuppetPin, PuppetWarp, deform, render};
+use photosplice_algo::transform::Interp;
+use photosplice_algo::warp::warp_mesh_surface;
+use photosplice_color::PixelFormat;
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 
 fn main() {
     let (w, h) = (6000, 4000);
@@ -103,12 +103,12 @@ fn main() {
         expansion: 2.0,
     };
     let t = Instant::now();
-    let (solver, v, order) = deform(&s, b, &pw, photosuite_algo::puppet::ITERATIONS);
+    let (solver, v, order) = deform(&s, b, &pw, photosplice_algo::puppet::ITERATIONS);
     println!(
         "puppet mesh {} verts / {} tris + ARAP ({} rounds): {:.1} ms",
         solver.mesh.verts.len(),
         solver.mesh.tris.len(),
-        photosuite_algo::puppet::ITERATIONS,
+        photosplice_algo::puppet::ITERATIONS,
         t.elapsed().as_secs_f64() * 1e3
     );
     let dst: Vec<[f64; 2]> = pw.pins.iter().map(|p| p.dst).collect();

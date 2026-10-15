@@ -3,7 +3,7 @@
 
 mod common;
 use common::*;
-use photosuite_codecs::*;
+use photosplice_codecs::*;
 
 const W: u32 = 24;
 const H: u32 = 16;

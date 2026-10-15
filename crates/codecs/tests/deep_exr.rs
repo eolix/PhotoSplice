@@ -4,9 +4,9 @@
 //! panic. Real files from `corpus/exr/` (copied in by hand, not pinned) are checked when
 //! they exist.
 
-use photosuite_codecs::CodecError;
-use photosuite_codecs::f16;
-use photosuite_codecs::{Limits, decode, decode_deep_exr};
+use photosplice_codecs::CodecError;
+use photosplice_codecs::f16;
+use photosplice_codecs::{Limits, decode, decode_deep_exr};
 use std::io::Write as _;
 
 // ---------------------------------------------------------------------------------------------
@@ -276,9 +276,9 @@ const COUNTS_ONE: &[u32] = &[1; 16]; // for a 4x4 image
 fn rgba_flat(bytes: &[u8]) -> Vec<f32> {
     let img = decode(bytes).expect("decodes");
     let s = img.to_f32_samples().expect("f32");
-    assert_eq!(img.layout(), photosuite_codecs::ChannelLayout::Rgba);
-    assert_eq!(img.sample_type(), photosuite_codecs::SampleType::F32);
-    assert!(img.warnings.iter().any(|w| matches!(w, photosuite_codecs::DecodeWarning::DeepFlattened { .. })));
+    assert_eq!(img.layout(), photosplice_codecs::ChannelLayout::Rgba);
+    assert_eq!(img.sample_type(), photosplice_codecs::SampleType::F32);
+    assert!(img.warnings.iter().any(|w| matches!(w, photosplice_codecs::DecodeWarning::DeepFlattened { .. })));
     s
 }
 
@@ -466,7 +466,7 @@ fn half_channels_round_trip() {
     });
     let deep = decode_deep_exr(&bytes, &Limits::none()).expect("deep");
     for c in &deep.channels {
-        assert_eq!(c.sample, photosuite_codecs::SampleType::F16, "{}", c.name);
+        assert_eq!(c.sample, photosplice_codecs::SampleType::F16, "{}", c.name);
     }
     let a = deep.channel("A").expect("A");
     assert_eq!(a.samples.len(), 16);
@@ -490,7 +490,7 @@ fn without_alpha_front_sample_is_opaque() {
         }
     });
     let img = decode(&bytes).expect("decodes");
-    assert_eq!(img.layout(), photosuite_codecs::ChannelLayout::Rgb);
+    assert_eq!(img.layout(), photosplice_codecs::ChannelLayout::Rgb);
     let px = img.to_f32_samples().expect("f32");
     // Even pixels: the front sample (z=2) is (r 0.4, g 0.2, b 0.9).
     assert!((px[0] - 0.4).abs() < 1e-6 && (px[1] - 0.2).abs() < 1e-6 && (px[2] - 0.9).abs() < 1e-6);
@@ -544,9 +544,9 @@ fn hostile_sizes_and_offsets_error() {
     let tight = Limits { max_alloc: 64, ..Limits::none() };
     assert!(matches!(decode_deep_exr(&bytes, &tight), Err(CodecError::LimitExceeded(_))));
     // A non-deep file is unsupported for decode_deep.
-    let flat = photosuite_codecs::encode(
-        &photosuite_codecs::Image::from_u8(2, 2, photosuite_codecs::ChannelLayout::Rgba, [128; 16].to_vec()).expect("img"),
-        photosuite_codecs::Format::OpenExr,
+    let flat = photosplice_codecs::encode(
+        &photosplice_codecs::Image::from_u8(2, 2, photosplice_codecs::ChannelLayout::Rgba, [128; 16].to_vec()).expect("img"),
+        photosplice_codecs::Format::OpenExr,
         &Default::default(),
     )
     .expect("encode");
@@ -622,6 +622,6 @@ fn real_deep_files_decode() {
         assert!(deep.total_samples() > 0, "{}: no samples", path.display());
         let flat = img.to_f32_samples().expect("f32");
         assert_eq!(flat.len(), deep.width as usize * deep.height as usize * 4);
-        assert!(img.warnings.iter().any(|w| matches!(w, photosuite_codecs::DecodeWarning::DeepFlattened { .. })));
+        assert!(img.warnings.iter().any(|w| matches!(w, photosplice_codecs::DecodeWarning::DeepFlattened { .. })));
     }
 }

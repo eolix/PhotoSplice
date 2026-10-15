@@ -6,11 +6,11 @@
 
 use std::sync::Arc;
 
-use photosuite_color::{ColorMode, PixelFormat, SampleType};
-use photosuite_doc::{Document, Pattern};
-use photosuite_geom::Rect;
-use photosuite_psd::patterns::{PsdPattern, block_key, mode_channels, parse_pattern_block, write_pattern_block};
-use photosuite_raster::Surface;
+use photosplice_color::{ColorMode, PixelFormat, SampleType};
+use photosplice_doc::{Document, Pattern};
+use photosplice_geom::Rect;
+use photosplice_psd::patterns::{PsdPattern, block_key, mode_channels, parse_pattern_block, write_pattern_block};
+use photosplice_raster::Surface;
 
 use crate::pixels::{deinterleave, interleave, max_sample, psd_depth, sample_for_depth, zero_sample};
 
@@ -124,7 +124,7 @@ pub fn from_global_blocks(doc: &Document) -> Vec<Pattern> {
 
 /// Global blocks to write: the raw ones while they still match [`Document::patterns`], else the
 /// raw pattern blocks replaced by one written from the document (at the first one's position).
-pub fn export_global_blocks(doc: &Document) -> Vec<photosuite_doc::PsdGlobalBlock> {
+pub fn export_global_blocks(doc: &Document) -> Vec<photosplice_doc::PsdGlobalBlock> {
     let raw = &doc.metadata.psd_global_blocks;
     if from_global_blocks(doc) == doc.patterns {
         return raw.clone();
@@ -151,19 +151,19 @@ pub fn export_global_blocks(doc: &Document) -> Vec<photosuite_doc::PsdGlobalBloc
 
 /// Reads a `.pat` pattern file.
 pub fn read_pat(bytes: &[u8]) -> Result<Vec<Pattern>, String> {
-    let ps = photosuite_psd::patterns::parse_pat_file(bytes).map_err(|e| format!("not a readable .pat file: {e}"))?;
+    let ps = photosplice_psd::patterns::parse_pat_file(bytes).map_err(|e| format!("not a readable .pat file: {e}"))?;
     Ok(ps.iter().filter_map(from_psd).collect())
 }
 
 /// Writes patterns as a `.pat` file.
 pub fn write_pat(patterns: &[Pattern]) -> Result<Vec<u8>, String> {
-    photosuite_psd::patterns::write_pat_file(&patterns.iter().map(to_psd).collect::<Vec<_>>()).map_err(|e| e.to_string())
+    photosplice_psd::patterns::write_pat_file(&patterns.iter().map(to_psd).collect::<Vec<_>>()).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_color::SampleType;
+    use photosplice_color::SampleType;
 
     fn pattern(mode: ColorMode, s: SampleType, alpha: bool) -> Pattern {
         let fmt = PixelFormat::new(mode, s, alpha);
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn export_reuses_raw_blocks_until_patterns_change() {
-        let mut d = Document::new("x", photosuite_geom::Size { width: 4, height: 4 }, ColorMode::Rgb, SampleType::U8);
+        let mut d = Document::new("x", photosplice_geom::Size { width: 4, height: 4 }, ColorMode::Rgb, SampleType::U8);
         let p = pattern(ColorMode::Rgb, SampleType::U8, false);
         let raw = write_pattern_block(&[to_psd(&p)]).unwrap();
         d.metadata.psd_global_blocks = vec![(*b"8BIM", *b"Txt2", Arc::new(vec![1])), (*b"8BIM", *b"Patt", Arc::new(raw.clone()))];

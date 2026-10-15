@@ -1,9 +1,9 @@
 //! Gradient geometry and stop sampling shared by gradient fills, gradient effects (in
-//! `photosuite-compose`) and shape layers filled or stroked with a gradient (here), so every
+//! `photosplice-compose`) and shape layers filled or stroked with a gradient (here), so every
 //! gradient Photoshop draws from the same settings lands on the same pixels.
 
-use photosuite_doc::GradientStyle;
-use photosuite_geom::Rect;
+use photosplice_doc::GradientStyle;
+use photosplice_geom::Rect;
 
 /// The lengths a 100 % gradient at `angle` spans in a `w` × `h` frame: the chord (Linear and
 /// Reflected) and the ellipse-norm length (Radial, Angle, Diamond; its half is the radius).

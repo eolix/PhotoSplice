@@ -3,10 +3,10 @@
 //! Formulas are documented approximations of Photoshop behaviour. Exact matching is tuned in
 //! milestone M7 against Photoshop-rendered PSD composites (the oracle in `testkit`).
 
-use photosuite_color::SampleType;
-use photosuite_color::convert::{D50, SRGB_TO_XYZ_D50, XYZ_D50_TO_SRGB, mat3_mul, rgb_to_gray, srgb_to_linear};
-use photosuite_doc::Adjustment;
-use photosuite_doc::adjust::{CurvePoint, HueRange, LevelsChannel, ToneSpace, lut3d_len};
+use photosplice_color::SampleType;
+use photosplice_color::convert::{D50, SRGB_TO_XYZ_D50, XYZ_D50_TO_SRGB, mat3_mul, rgb_to_gray, srgb_to_linear};
+use photosplice_doc::Adjustment;
+use photosplice_doc::adjust::{CurvePoint, HueRange, LevelsChannel, ToneSpace, lut3d_len};
 
 use crate::Buffer;
 
@@ -27,12 +27,12 @@ impl Transfer {
     /// Default transfer for a document's colour mode and depth. 32-bit samples are linear, and
     /// Photoshop's Exposure works on them as stored (photoshop corpus rgb32 and gray32
     /// exposure.psd: within 0.5/255, against 69/255 through the 2.2 curve).
-    pub fn for_document(mode: photosuite_color::ColorMode, depth: photosuite_color::SampleType) -> Self {
-        if depth == photosuite_color::SampleType::F32 {
+    pub fn for_document(mode: photosplice_color::ColorMode, depth: photosplice_color::SampleType) -> Self {
+        if depth == photosplice_color::SampleType::F32 {
             return Transfer::Gamma(1.0);
         }
         match mode {
-            photosuite_color::ColorMode::Grayscale | photosuite_color::ColorMode::Duotone | photosuite_color::ColorMode::Bitmap => Transfer::Gamma(1.732),
+            photosplice_color::ColorMode::Grayscale | photosplice_color::ColorMode::Duotone | photosplice_color::ColorMode::Bitmap => Transfer::Gamma(1.732),
             _ => Transfer::Srgb,
         }
     }
@@ -47,13 +47,13 @@ impl Transfer {
     }
     fn decode(self, v: f32) -> f32 {
         match self {
-            Transfer::Srgb => photosuite_color::convert::srgb_to_linear(v.max(0.0)),
+            Transfer::Srgb => photosplice_color::convert::srgb_to_linear(v.max(0.0)),
             Transfer::Gamma(g) => v.max(0.0).powf(g),
         }
     }
     fn encode(self, v: f32) -> f32 {
         match self {
-            Transfer::Srgb => photosuite_color::convert::linear_to_srgb(v.max(0.0)),
+            Transfer::Srgb => photosplice_color::convert::linear_to_srgb(v.max(0.0)),
             Transfer::Gamma(g) => v.max(0.0).powf(1.0 / g),
         }
     }
@@ -152,7 +152,7 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
             let set_lum = *preserve_luminosity && !linear_doc;
             map_rgb(buf, |c| {
                 let f = mat3_mul(&m, c.map(|v| transfer.decode(v))).map(|v| transfer.encode(v));
-                let f = if set_lum { photosuite_color::blend::set_lum(f, photosuite_color::blend::lum(c)) } else { f };
+                let f = if set_lum { photosplice_color::blend::set_lum(f, photosplice_color::blend::lum(c)) } else { f };
                 f.map(|v| v.clamp(0.0, 1.0))
             })
         }
@@ -161,7 +161,7 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
             match tint {
                 // The tint colour at the grey's luminosity, as the Color blend mode does
                 // (Photoshop corpus black-white-tint.psd, rgb16).
-                Some(t) => photosuite_color::blend::set_lum(*t, g).map(|v| v.clamp(0.0, 1.0)),
+                Some(t) => photosplice_color::blend::set_lum(*t, g).map(|v| v.clamp(0.0, 1.0)),
                 None => [g; 3],
             }
         }),
@@ -255,7 +255,7 @@ pub fn tone_luts_depth(adj: &Adjustment, depth: Option<SampleType>) -> [Vec<f32>
 /// through the conversions the document's surfaces use. The change is added as a difference of
 /// two round trips, so channels a curve leaves alone (and out-of-gamut colours) stay exact.
 fn tone_in_space(space: ToneSpace, luts: &[Vec<f32>; 4], c: [f32; 3]) -> [f32; 3] {
-    use photosuite_color::convert::{cmyk_to_rgb, lab_to_srgb, rgb_to_cmyk, srgb_to_lab};
+    use photosplice_color::convert::{cmyk_to_rgb, lab_to_srgb, rgb_to_cmyk, srgb_to_lab};
     let (before, after) = match space {
         ToneSpace::Cmyk => {
             let ink = rgb_to_cmyk(c);
@@ -1052,7 +1052,7 @@ mod brightness_contrast_tests {
     #[test]
     fn legacy_order_depends_on_the_contrast_sign() {
         let at = |b: f32, c: f32, v: f32| {
-            let mut buf = Buffer { rect: photosuite_geom::Rect::new(0, 0, 1, 1), px: vec![[v, v, v, 1.0]] };
+            let mut buf = Buffer { rect: photosplice_geom::Rect::new(0, 0, 1, 1), px: vec![[v, v, v, 1.0]] };
             apply_depth(&Adjustment::BrightnessContrast { brightness: b, contrast: c, legacy: true }, &mut buf, Transfer::Srgb, None);
             buf.px[0][0] * 255.0
         };
@@ -1067,7 +1067,7 @@ mod brightness_contrast_tests {
 #[cfg(test)]
 mod tone_tests {
     use super::*;
-    use photosuite_geom::Rect;
+    use photosplice_geom::Rect;
 
     fn ramp() -> Buffer {
         let rect = Rect::new(0, 0, 8, 8);
@@ -1196,7 +1196,7 @@ mod tone_tests {
     /// rgb8/gradient-map.psd: pure blue at 28/255 on the black → white map, not Rec.601's 29).
     #[test]
     fn gradient_map_level_weights() {
-        let mut b = Buffer { rect: photosuite_geom::Rect::new(0, 0, 1, 1), px: vec![[0.0, 0.0, 1.0, 1.0]] };
+        let mut b = Buffer { rect: photosplice_geom::Rect::new(0, 0, 1, 1), px: vec![[0.0, 0.0, 1.0, 1.0]] };
         apply(&Adjustment::GradientMap { stops: vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])], reverse: false, dither: false, ink_stops: Vec::new() }, &mut b);
         assert!((b.px[0][0] - 0.11).abs() < 1e-3, "{:?}", b.px[0]);
     }

@@ -4,7 +4,7 @@
 
 mod common;
 use common::*;
-use photosuite_codecs::*;
+use photosplice_codecs::*;
 
 fn with_tags(layout: ChannelLayout, sample: SampleType) -> Image {
     let mut img = synth(9, 7, layout, sample, 5, 0.3);

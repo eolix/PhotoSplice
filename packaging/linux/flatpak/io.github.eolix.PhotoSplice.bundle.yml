@@ -1,7 +1,7 @@
 # Flatpak manifest for the single-file bundle attached to every GitHub release
-# (photosuite-<version>-linux-<arch>.flatpak). Build it with packaging/linux/flatpak-bundle.sh.
+# (photosplice-<version>-linux-<arch>.flatpak). Build it with packaging/linux/flatpak-bundle.sh.
 #
-# It repackages the release's own Linux tarball (photosuite-<version>-linux-<arch>.tar.gz,
+# It repackages the release's own Linux tarball (photosplice-<version>-linux-<arch>.tar.gz,
 # built on Ubuntu 22.04 by package.sh) instead of compiling Rust inside flatpak-builder: no
 # network and no vendored crate sources during the build, a few seconds instead of 20+ minutes,
 # and byte-for-byte the same binaries as the AppImage/deb/rpm. The script unpacks the tarball
@@ -9,13 +9,13 @@
 # Wayland, xkbcommon and Vulkan at runtime; the freedesktop runtime has all of them, and the
 # GPU driver comes from its org.freedesktop.Platform.GL extension.
 #
-# io.github.eolix.PhotoSuite.yml (same directory) is the from-source manifest for Flathub. Keep
+# io.github.eolix.PhotoSplice.yml (same directory) is the from-source manifest for Flathub. Keep
 # runtime-version and finish-args identical in both (packaging-lint checks this).
-id: io.github.eolix.PhotoSuite
+id: io.github.eolix.PhotoSplice
 runtime: org.freedesktop.Platform
 runtime-version: '26.08'
 sdk: org.freedesktop.Sdk
-command: photosuite
+command: photosplice
 finish-args:
   # Display: Wayland first; X11 only when no Wayland compositor is running.
   - --socket=wayland
@@ -31,21 +31,21 @@ finish-args:
   - --filesystem=xdg-pictures
   - --filesystem=xdg-documents
   # Deliberately not granted: network (the optional --control server listens on 127.0.0.1 in
-  # the sandbox; `flatpak override --user --share=network io.github.eolix.PhotoSuite` exposes it to
+  # the sandbox; `flatpak override --user --share=network io.github.eolix.PhotoSplice` exposes it to
   # host agents) and home/host filesystem access.
 modules:
-  - name: photosuite
+  - name: photosplice
     buildsystem: simple
     build-commands:
-      - install -Dm755 bin/photosuite /app/bin/photosuite
-      - install -Dm644 share/applications/io.github.eolix.PhotoSuite.desktop /app/share/applications/io.github.eolix.PhotoSuite.desktop
+      - install -Dm755 bin/photosplice /app/bin/photosplice
+      - install -Dm644 share/applications/io.github.eolix.PhotoSplice.desktop /app/share/applications/io.github.eolix.PhotoSplice.desktop
       # .pcraft, .psb and .qoi; the runtime's shared-mime-info already knows PSD and the rest.
-      - install -Dm644 share/mime/packages/io.github.eolix.PhotoSuite.xml /app/share/mime/packages/io.github.eolix.PhotoSuite.xml
+      - install -Dm644 share/mime/packages/io.github.eolix.PhotoSplice.xml /app/share/mime/packages/io.github.eolix.PhotoSplice.xml
       # Already has the release's version and date substituted by package.sh.
-      - install -Dm644 share/metainfo/io.github.eolix.PhotoSuite.metainfo.xml /app/share/metainfo/io.github.eolix.PhotoSuite.metainfo.xml
-      - mkdir -p /app/share/icons /app/share/doc && cp -R share/icons/hicolor /app/share/icons/ && cp -R share/doc/photosuite /app/share/doc/
-      # LUTs, lens profiles and preset libraries (found beside the binary at ../share/photosuite/resources).
-      - cp -R share/photosuite /app/share/
+      - install -Dm644 share/metainfo/io.github.eolix.PhotoSplice.metainfo.xml /app/share/metainfo/io.github.eolix.PhotoSplice.metainfo.xml
+      - mkdir -p /app/share/icons /app/share/doc && cp -R share/icons/hicolor /app/share/icons/ && cp -R share/doc/photosplice /app/share/doc/
+      # LUTs, lens profiles and preset libraries (found beside the binary at ../share/photosplice/resources).
+      - cp -R share/photosplice /app/share/
     sources:
       - type: dir
         path: stage

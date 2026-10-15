@@ -5,7 +5,7 @@
 //! Buffers are straight RGBA in 0..=1, row-major. Median cut follows Heckbert (1982); k-means
 //! refinement is Lloyd's algorithm; error diffusion is Floyd & Steinberg (1976).
 
-use photosuite_color::convert::srgb_to_lab;
+use photosplice_color::convert::srgb_to_lab;
 use serde::{Deserialize, Serialize};
 
 pub type Rgb8 = [u8; 3];
@@ -262,7 +262,7 @@ fn nearest_f(centers: &[[f32; 3]], p: [f32; 3]) -> usize {
 }
 
 fn lab_to_rgb8(lab: [f32; 3]) -> Rgb8 {
-    photosuite_color::convert::lab_to_srgb(lab).map(to8)
+    photosplice_color::convert::lab_to_srgb(lab).map(to8)
 }
 
 /// Builds the palette for `px`. `colors` is the requested count (2..=256) for the computed

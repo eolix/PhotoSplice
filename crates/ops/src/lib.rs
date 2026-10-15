@@ -1,6 +1,6 @@
 //! Undo/redo history.
 //!
-//! Because pixel tiles are `Arc`-shared copy-on-write (see `photosuite-raster`), a full
+//! Because pixel tiles are `Arc`-shared copy-on-write (see `photosplice-raster`), a full
 //! [`Document`] clone costs O(layers + tiles) pointer copies, not pixel copies. History therefore
 //! stores whole-document snapshots per transaction, which is simple, obviously correct, and the
 //! same approach Photoshop's History panel exposes to users (one state per step).
@@ -13,7 +13,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
-use photosuite_doc::{Document, LayerId};
+use photosplice_doc::{Document, LayerId};
 
 /// The layers a state targeted when it was created: the active ("key") layer and every selected
 /// layer. Undo and redo bring them back with the state's document, as the reference app does;
@@ -201,7 +201,7 @@ impl History {
 
 /// Bytes of the pixel tiles of `doc` (layers, masks, alpha channels) not already in `seen`.
 fn tile_bytes(doc: &Document, seen: &mut HashSet<usize>) -> usize {
-    let mut add = |s: &photosuite_doc::Surface| s.tiles().filter(|(_, t)| seen.insert(Arc::as_ptr(t) as usize)).map(|(_, t)| t.bytes().len()).sum::<usize>();
+    let mut add = |s: &photosplice_doc::Surface| s.tiles().filter(|(_, t)| seen.insert(Arc::as_ptr(t) as usize)).map(|(_, t)| t.bytes().len()).sum::<usize>();
     let mut n = 0;
     for (_, _, l) in doc.walk() {
         if let Some(s) = l.surface() {
@@ -220,7 +220,7 @@ fn tile_bytes(doc: &Document, seen: &mut HashSet<usize>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_doc::{Color, ColorMode, Layer, SampleType, Size};
+    use photosplice_doc::{Color, ColorMode, Layer, SampleType, Size};
 
     fn base() -> Document {
         Document::with_background("h", Size::new(64, 64), ColorMode::Rgb, SampleType::U8, Color::WHITE)

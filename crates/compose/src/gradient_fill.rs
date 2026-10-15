@@ -2,14 +2,14 @@
 //! and the on-canvas geometry of the Gradient tool's live gradients, where a start and an end
 //! point stand for the fill's angle, scale and centre offset.
 //!
-//! The mapping matches the Gradient tool's destructive drag (`photosuite_algo::paint`): a
+//! The mapping matches the Gradient tool's destructive drag (`photosplice_algo::paint`): a
 //! Linear gradient runs from the start (t = 0) to the end point (t = 1); Radial, Angle,
 //! Reflected and Diamond gradients are centred on the start point and reach t = 1 at the end
 //! point's distance. A fill made from a drag therefore renders the same pixels as painting that
 //! drag (see the tests).
 
-use photosuite_doc::{Fill, GradientStyle};
-use photosuite_geom::Rect;
+use photosplice_doc::{Fill, GradientStyle};
+use photosplice_geom::Rect;
 
 use crate::effects::gradient_units;
 
@@ -52,7 +52,7 @@ impl Ramp {
     }
 }
 
-pub use photosuite_vector::gradient::midpoint_remap;
+pub use photosplice_vector::gradient::midpoint_remap;
 
 fn sample_color(stops: &[(f32, [f32; 4])], mids: &[f32], t: f32) -> [f32; 4] {
     match crate::adjust::locate(stops, t) {
@@ -79,7 +79,7 @@ fn sample_opacity(stops: &[(f32, f32)], t: f32) -> f32 {
 
 /// Adds one level of the shared dither noise to a colour (as the Gradient tool does).
 pub fn dither(c: &mut [f32; 4], x: i32, y: i32) {
-    let n = (photosuite_color::dither_noise(x, y) - 0.5) / 255.0;
+    let n = (photosplice_color::dither_noise(x, y) - 0.5) / 255.0;
     for ch in c.iter_mut().take(3) {
         // A Lab document's colour outside sRGB stays outside (`Color::to_rgb_unclamped`).
         *ch = if (0.0..=1.0).contains(ch) { (*ch + n).clamp(0.0, 1.0) } else { *ch + n };
@@ -184,7 +184,7 @@ pub fn from_handles(style: GradientStyle, from: [f32; 2], to: [f32; 2], frame: R
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_doc::Color;
+    use photosplice_doc::Color;
 
     const STYLES: [GradientStyle; 5] = [GradientStyle::Linear, GradientStyle::Radial, GradientStyle::Angle, GradientStyle::Reflected, GradientStyle::Diamond];
 

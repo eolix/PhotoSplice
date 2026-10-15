@@ -7,14 +7,14 @@
 //! character's script (`ctx.add_font`, active from the next frame, which it requests). Fonts are
 //! appended at the lowest priority to every family, so Latin text keeps Inter.
 //!
-//! Script order follows the UI locale ([`photosuite_text::cjk::script_order`]): Kana prefers a
+//! Script order follows the UI locale ([`photosplice_text::cjk::script_order`]): Kana prefers a
 //! Japanese font, Hangul a Korean one, Bopomofo a Traditional Chinese one, and Han the
 //! locale's script (Japanese forms only for a Japanese locale). At most one font is read per
 //! frame, each file at most once, and once every script has been tried the scan stops.
 
 use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
 use egui::{FontData, FontFamily, FontId, Shape};
-use photosuite_text::cjk::{self, CjkChar, CjkScript, FontFile};
+use photosplice_text::cjk::{self, CjkChar, CjkScript, FontFile};
 use std::path::PathBuf;
 
 /// Skip absurdly large files (a corrupt or non-font path must not eat memory).
@@ -208,7 +208,7 @@ pub struct CjkFontPlugin(pub CjkFallback);
 
 impl egui::Plugin for CjkFontPlugin {
     fn debug_name(&self) -> &'static str {
-        "photosuite-cjk-fonts"
+        "photosplice-cjk-fonts"
     }
 
     fn output_hook(&mut self, ctx: &egui::Context, output: &mut egui::FullOutput) {
@@ -247,7 +247,7 @@ mod tests {
     fn fake_dir() -> PathBuf {
         let mut g = DIR.lock().unwrap();
         g.get_or_insert_with(|| {
-            let dir = std::env::temp_dir().join(format!("photosuite-cjk-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("photosplice-cjk-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("font.ttf"), include_bytes!("../../../assets/fonts/Inter-Regular.ttf")).unwrap();
             std::fs::write(dir.join("empty.ttf"), b"").unwrap();

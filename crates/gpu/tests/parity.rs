@@ -1,11 +1,11 @@
 //! GPU vs CPU parity: every blend mode, adjustment, group/clip/mask/fill combination must match
 //! the reference compositor within 2/255 (premultiplied). Skips when no GPU adapter exists.
 
-use photosuite_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
-use photosuite_doc::adjust::{CurvePoint, HueRange, LevelsChannel};
-use photosuite_doc::{Adjustment, Document, Fill, GradientStyle, Layer, LayerContent, LayerMask};
-use photosuite_geom::{Rect, Size};
-use photosuite_gpu::{Compositor, render_to_vec};
+use photosplice_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
+use photosplice_doc::adjust::{CurvePoint, HueRange, LevelsChannel};
+use photosplice_doc::{Adjustment, Document, Fill, GradientStyle, Layer, LayerContent, LayerMask};
+use photosplice_geom::{Rect, Size};
+use photosplice_gpu::{Compositor, render_to_vec};
 
 const TOL: f32 = 1.0 / 255.0;
 
@@ -91,7 +91,7 @@ fn noise_layer(name: &str, fmt: PixelFormat, rect: Rect, seed: u32, min_alpha: f
 
 fn mask(rect: Rect, seed: u32, default: f32) -> LayerMask {
     let mut m = LayerMask::reveal_all();
-    m.surface = photosuite_raster::Surface::with_default(PixelFormat::GRAY8, &[default]);
+    m.surface = photosplice_raster::Surface::with_default(PixelFormat::GRAY8, &[default]);
     let data: Vec<f32> = (0..rect.width() * rect.height()).map(|i| rnd(seed, i)).collect();
     m.surface.write_region(rect, &data);
     m.density = 0.8;
@@ -122,11 +122,11 @@ fn worst_diff(cpu: &[[f32; 4]], gpu: &[[f32; 4]]) -> (f32, usize) {
 
 /// GPU (whole textures, then pages) vs CPU over `rect`: Err with the worst pixel if over the
 /// tolerance, else the stats of the unpaged render.
-fn diff_rect(g: &mut Gpu, doc: &Document, rect: Rect, what: &str) -> Result<photosuite_gpu::Stats, String> {
-    let cpu = photosuite_compose::render(doc, rect);
+fn diff_rect(g: &mut Gpu, doc: &Document, rect: Rect, what: &str) -> Result<photosplice_gpu::Stats, String> {
+    let cpu = photosplice_compose::render(doc, rect);
     let mut first = None;
     for (label, comp) in [("", &mut g.comp), (" (paged)", &mut g.paged)] {
-        let (out, stats) = photosuite_gpu::render_to_vec_stats(comp, &g.device, &g.queue, doc, rect).map_err(|e| format!("{what}{label}: {e}"))?;
+        let (out, stats) = photosplice_gpu::render_to_vec_stats(comp, &g.device, &g.queue, doc, rect).map_err(|e| format!("{what}{label}: {e}"))?;
         let worst = worst_diff(&cpu.px, &out);
         let w = rect.width() as usize;
         let (x, y) = (rect.x0 + (worst.1 % w) as i32, rect.y0 + (worst.1 / w) as i32);
@@ -431,7 +431,7 @@ fn formats_offsets_and_chunks() {
     check(&mut g, &d, "cmyk");
 
     // Wider than one chunk.
-    let w = photosuite_gpu::CHUNK + 100;
+    let w = photosplice_gpu::CHUNK + 100;
     let mut d = base_doc(w, 24);
     let mut l = noise_layer("top", PixelFormat::RGBA8, Rect::new(0, 0, w as i32, 24), 55, 0.0);
     l.blend = BlendMode::Color;
@@ -448,7 +448,7 @@ fn incremental_updates_follow_the_document() {
     // Paint into one tile of the top layer: only that tile uploads.
     let top = d.layers[1].surface_mut().unwrap();
     top.fill_rect(Rect::new(10, 10, 60, 60), &[1.0, 0.0, 0.0, 1.0]);
-    let before = photosuite_gpu::render_to_vec(&mut g.comp, &g.device, &g.queue, &d, Rect::new(0, 0, 1, 1)).unwrap();
+    let before = photosplice_gpu::render_to_vec(&mut g.comp, &g.device, &g.queue, &d, Rect::new(0, 0, 1, 1)).unwrap();
     assert_eq!(before.len(), 1);
     check(&mut g, &d, "after paint");
     // Remove all tiles of the top layer, hide nothing: the GPU must clear them.
@@ -461,8 +461,8 @@ fn incremental_updates_follow_the_document() {
 
 // ---- layer effects --------------------------------------------------------------------------
 
-use photosuite_doc::adjust::CurvePoint as Cp;
-use photosuite_doc::{
+use photosplice_doc::adjust::CurvePoint as Cp;
+use photosplice_doc::{
     Bevel, BevelStyle, BevelTechnique, Contour, Effect, FxCommon, FxPaint, Glow, GlowSource, GlowTechnique, Gradient, Pattern, Satin, Shadow, StrokeFx,
     StrokePosition,
 };
@@ -537,7 +537,7 @@ fn blob(name: &str, fmt: PixelFormat, cx: f32, cy: f32, r: f32, color: [f32; 3])
             let bar = ((r * 0.25 - fy.abs()) + 0.5).clamp(0.0, 1.0) * ((r + 10.0 - fx.abs()) * 0.7).clamp(0.0, 1.0);
             let a = (disc * hole).max(bar * 0.7);
             let rgba = [color[0] * (0.7 + 0.3 * (fx / r).abs()), color[1], color[2] * (0.8 + 0.2 * (fy / r)), a];
-            let px = photosuite_raster::from_rgba(&fmt, rgba);
+            let px = photosplice_raster::from_rgba(&fmt, rgba);
             data.extend_from_slice(&px);
         }
     }
@@ -628,7 +628,7 @@ fn stroke(size: f32, position: StrokePosition, paint: FxPaint) -> StrokeFx {
 }
 
 fn checker_pattern() -> Pattern {
-    let mut s = photosuite_raster::Surface::new(PixelFormat::RGBA8);
+    let mut s = photosplice_raster::Surface::new(PixelFormat::RGBA8);
     s.fill_rect(Rect::new(0, 0, 6, 5), &[0.9, 0.2, 0.1, 1.0]);
     s.fill_rect(Rect::new(0, 0, 3, 3), &[0.1, 0.3, 0.9, 0.6]);
     s.fill_rect(Rect::new(3, 3, 6, 5), &[0.2, 0.8, 0.3, 1.0]);
@@ -723,7 +723,7 @@ fn effect_cases() -> Vec<(&'static str, Vec<Effect>)> {
         (
             "bevel texture",
             vec![Effect::BevelEmboss(Bevel {
-                texture: Some(photosuite_doc::BevelTexture {
+                texture: Some(photosplice_doc::BevelTexture {
                     name: "checker".into(),
                     id: String::new(),
                     scale: 1.4,
@@ -738,7 +738,7 @@ fn effect_cases() -> Vec<(&'static str, Vec<Effect>)> {
         (
             "bevel contour",
             vec![Effect::BevelEmboss(Bevel {
-                contour: Some(photosuite_doc::BevelContour { contour: contour(), range: 0.6, anti_alias: false }),
+                contour: Some(photosplice_doc::BevelContour { contour: contour(), range: 0.6, anti_alias: false }),
                 ..bevel(BevelStyle::Emboss, true, 9.0, 1.0)
             })],
         ),
@@ -834,11 +834,11 @@ fn effect_cases() -> Vec<(&'static str, Vec<Effect>)> {
 }
 
 /// GPU vs CPU over the whole document: Err with the worst pixel if over the tolerance.
-fn fx_diff(g: &mut Gpu, doc: &Document, what: &str) -> Result<photosuite_gpu::Stats, String> {
+fn fx_diff(g: &mut Gpu, doc: &Document, what: &str) -> Result<photosplice_gpu::Stats, String> {
     diff_rect(g, doc, doc.bounds(), what)
 }
 
-fn fx_check(g: &mut Gpu, doc: &Document, what: &str) -> photosuite_gpu::Stats {
+fn fx_check(g: &mut Gpu, doc: &Document, what: &str) -> photosplice_gpu::Stats {
     fx_diff(g, doc, what).unwrap_or_else(|e| panic!("{e}"))
 }
 
@@ -938,7 +938,7 @@ fn layer_effects_on_groups_clipping_and_fills() {
     let mut d = fx_doc(90, 70, SampleType::U8);
     let mut solid = Layer::new("solid", LayerContent::Fill(Fill::Solid(Color::rgb(0.2, 0.5, 0.8))));
     let mut m = LayerMask::reveal_all();
-    m.surface = photosuite_raster::Surface::with_default(PixelFormat::GRAY8, &[0.0]);
+    m.surface = photosplice_raster::Surface::with_default(PixelFormat::GRAY8, &[0.0]);
     m.surface.fill_rect(Rect::new(20, 15, 60, 50), &[1.0]);
     solid.mask = Some(m);
     solid.effects.items = vec![ds.clone(), st.clone(), bv];
@@ -984,7 +984,7 @@ fn layer_effects_update_incrementally() {
     let moved = {
         let src = d.layers[1].surface().unwrap();
         let b = src.content_bounds();
-        let mut dst = photosuite_raster::Surface::new(src.format());
+        let mut dst = photosplice_raster::Surface::new(src.format());
         dst.write_region(Rect::new(b.x0 + 17, b.y0 - 9, b.x1 + 17, b.y1 - 9), &src.read_region(b));
         dst
     };
@@ -999,14 +999,14 @@ fn layer_effects_update_incrementally() {
 #[test]
 fn layer_effects_on_shape_layers() {
     let Some(mut g) = gpu() else { return };
-    use photosuite_doc::vector::{Path, ShapeLayer, Subpath};
+    use photosplice_doc::vector::{Path, ShapeLayer, Subpath};
     for alpha in [1.0, 0.55] {
         let mut d = fx_doc(90, 70, SampleType::U8);
         let path = Path::new(vec![Subpath::polygon(&[(14.3, 12.6), (70.2, 18.1), (60.7, 58.4), (24.9, 50.2)])]);
         let mut fill = Color::rgb(0.3, 0.6, 0.9);
         fill.alpha = alpha;
         let mut sh = ShapeLayer { path, fill: Some(Fill::Solid(fill)), stroke: None, live: None, cache: None, psd_raw: None };
-        sh.cache = Some(photosuite_vector::render_shape(&sh, d.pixel_format(), d.bounds()));
+        sh.cache = Some(photosplice_vector::render_shape(&sh, d.pixel_format(), d.bounds()));
         let mut l = Layer::new("shape", LayerContent::Shape(sh));
         l.effects.items = vec![
             Effect::Stroke(stroke(3.0, StrokePosition::Outside, FxPaint::Color(Color::rgb(1.0, 1.0, 1.0)))),
@@ -1025,7 +1025,7 @@ fn stroke_effects_on_filled_and_stroked_shapes() {
     // stroke instances with gradient frames, and a vector stroke above the interior effects with
     // clipped layers and a mask.
     let Some(mut g) = gpu() else { return };
-    use photosuite_doc::vector::{Path, ShapeLayer, ShapeStroke, StrokeAlign, Subpath};
+    use photosplice_doc::vector::{Path, ShapeLayer, ShapeStroke, StrokeAlign, Subpath};
     for (fill_kind, vector_stroke, masked) in [(0, false, false), (1, false, true), (0, true, false), (1, true, true)] {
         let mut d = fx_doc(90, 70, SampleType::U8);
         let path = Path::new(vec![Subpath::polygon(&[(14.3, 12.6), (70.2, 18.1), (60.7, 58.4), (24.9, 50.2)])]);
@@ -1043,7 +1043,7 @@ fn stroke_effects_on_filled_and_stroked_shapes() {
             ..ShapeStroke::default()
         });
         let mut sh = ShapeLayer { path, fill: Some(fill), stroke: stroke_v, live: None, cache: None, psd_raw: None };
-        sh.cache = Some(photosuite_vector::render_shape(&sh, d.pixel_format(), d.bounds()));
+        sh.cache = Some(photosplice_vector::render_shape(&sh, d.pixel_format(), d.bounds()));
         let mut l = Layer::new("shape", LayerContent::Shape(sh));
         if masked {
             l.mask = Some(mask(Rect::new(0, 0, 90, 70), 7, 0.6));
@@ -1052,7 +1052,7 @@ fn stroke_effects_on_filled_and_stroked_shapes() {
             Effect::Stroke(stroke(2.0, StrokePosition::Outside, FxPaint::Color(Color::rgb(1.0, 1.0, 1.0)))),
             Effect::Stroke(stroke(5.0, StrokePosition::Outside, FxPaint::Gradient(gradient()))),
             Effect::Stroke(stroke(3.0, StrokePosition::Inside, FxPaint::Gradient(gradient()))),
-            Effect::ColorOverlay { common: photosuite_doc::FxCommon::new(BlendMode::Multiply, 0.7), color: Color::rgb(0.2, 0.2, 0.9) },
+            Effect::ColorOverlay { common: photosplice_doc::FxCommon::new(BlendMode::Multiply, 0.7), color: Color::rgb(0.2, 0.2, 0.9) },
             Effect::DropShadow(shadow(BlendMode::Multiply, 0.7, 120.0, 4.0, 5.0, 0.0)),
         ];
         d.layers.push(l);
@@ -1100,14 +1100,14 @@ fn channel_restrictions() {
     l.excluded_channels = 1;
     d.layers.push(l);
     check(&mut g, &d, "gray channels");
-    let flat = photosuite_compose::flatten(&d);
-    let bg = photosuite_compose::render_layer(&d.layers[0], d.bounds());
+    let flat = photosplice_compose::flatten(&d);
+    let bg = photosplice_compose::render_layer(&d.layers[0], d.bounds());
     assert!(flat.px.iter().zip(&bg.px).all(|(a, b)| (a[0] - b[0]).abs() < 1e-6));
 }
 
 /// A type layer whose rendered pixels are `src`'s (blends with the text gamma).
 fn as_text(src: Layer) -> Layer {
-    let t = photosuite_doc::TextLayer { cache: src.surface().cloned(), ..Default::default() };
+    let t = photosplice_doc::TextLayer { cache: src.surface().cloned(), ..Default::default() };
     let mut l = Layer::new(&src.name, LayerContent::Text(t));
     l.blend = src.blend;
     l.opacity = src.opacity;
@@ -1137,10 +1137,10 @@ fn type_layers_blend_with_text_gamma() {
         check(&mut g, &d, &format!("text {mode:?}"));
         // Another gamma (Color Settings), and off.
         for gamma in [1.8, 1.0] {
-            photosuite_compose::psblend::set_text_gamma(gamma);
+            photosplice_compose::psblend::set_text_gamma(gamma);
             check(&mut g, &d, &format!("text {mode:?} gamma {gamma}"));
         }
-        photosuite_compose::psblend::set_text_gamma(photosuite_compose::psblend::TEXT_GAMMA);
+        photosplice_compose::psblend::set_text_gamma(photosplice_compose::psblend::TEXT_GAMMA);
     }
     // With effects (the merge of the layer onto its exterior effects).
     let mut d = fx_doc(96, 80, SampleType::U8);
@@ -1175,7 +1175,7 @@ fn type_layers_blend_with_text_gamma() {
     e.layers.push(c);
     fx_check(&mut g, &e, "clipped text emboss");
     // The gamma changes edge pixels against a linear mix.
-    let flat = photosuite_compose::flatten(&d);
+    let flat = photosplice_compose::flatten(&d);
     let mut lin = d.clone();
     let raster = {
         let LayerContent::Text(t) = &lin.layers[1].content else { unreachable!() };
@@ -1184,7 +1184,7 @@ fn type_layers_blend_with_text_gamma() {
         r
     };
     lin.layers[1] = raster;
-    let flat_lin = photosuite_compose::flatten(&lin);
+    let flat_lin = photosplice_compose::flatten(&lin);
     assert!(flat.px.iter().zip(&flat_lin.px).any(|(a, b)| (a[0] - b[0]).abs() > 0.02));
 }
 
@@ -1204,8 +1204,8 @@ fn blend_mode_extremes() {
                     for k in 0..3 {
                         let (x, y) = ((i * 3 + k) as i32, j as i32 * 3);
                         let r = Rect::from_xywh(x, y, 1, 3);
-                        bg.surface_mut().unwrap().fill_rect(r, &photosuite_raster::from_rgba(&fmt, [b, b, b, 1.0]));
-                        top.surface_mut().unwrap().fill_rect(r, &photosuite_raster::from_rgba(&fmt, [s, s, s, [1.0, 0.6, 0.2][k]]));
+                        bg.surface_mut().unwrap().fill_rect(r, &photosplice_raster::from_rgba(&fmt, [b, b, b, 1.0]));
+                        top.surface_mut().unwrap().fill_rect(r, &photosplice_raster::from_rgba(&fmt, [s, s, s, [1.0, 0.6, 0.2][k]]));
                     }
                 }
             }
@@ -1220,13 +1220,13 @@ fn blend_mode_extremes() {
 #[test]
 fn stroked_shapes_with_clipped_layers() {
     let Some(mut g) = gpu() else { return };
-    use photosuite_doc::vector::{Path, ShapeLayer, ShapeStroke, Subpath};
+    use photosplice_doc::vector::{Path, ShapeLayer, ShapeStroke, Subpath};
     for (blend, masked) in [(BlendMode::Normal, false), (BlendMode::Multiply, true)] {
         let mut d = base_doc(80, 64);
         let path = Path::new(vec![Subpath::polygon(&[(10.3, 8.6), (66.2, 12.1), (58.7, 54.4), (16.9, 48.2)])]);
         let stroke = ShapeStroke { width: 5.0, paint: Fill::Solid(Color::rgb(0.9, 0.9, 0.1)), ..Default::default() };
         let mut sh = ShapeLayer { path, fill: Some(Fill::Solid(Color::rgb(0.2, 0.3, 0.8))), stroke: Some(stroke), live: None, cache: None, psd_raw: None };
-        sh.cache = Some(photosuite_vector::render_shape(&sh, d.pixel_format(), d.bounds()));
+        sh.cache = Some(photosplice_vector::render_shape(&sh, d.pixel_format(), d.bounds()));
         let mut l = Layer::new("shape", LayerContent::Shape(sh));
         l.blend = blend;
         l.opacity = 0.9;
@@ -1237,7 +1237,7 @@ fn stroked_shapes_with_clipped_layers() {
         c.clipped = true;
         c.blend = BlendMode::Screen;
         d.layers.extend([l, c]);
-        let st = photosuite_gpu::render_to_vec_stats(&mut g.comp, &g.device, &g.queue, &d, d.bounds());
+        let st = photosplice_gpu::render_to_vec_stats(&mut g.comp, &g.device, &g.queue, &d, d.bounds());
         assert!(st.is_ok(), "planned on the GPU");
         check(&mut g, &d, &format!("stroked shape + clipped {blend:?} masked {masked}"));
     }
@@ -1246,7 +1246,7 @@ fn stroked_shapes_with_clipped_layers() {
 #[test]
 fn artboards() {
     let Some(mut g) = gpu() else { return };
-    use photosuite_doc::{Artboard, ArtboardBackground};
+    use photosplice_doc::{Artboard, ArtboardBackground};
     let backgrounds = [
         ArtboardBackground::White,
         ArtboardBackground::Transparent,
@@ -1297,12 +1297,12 @@ fn pattern_fill_layers() {
         d.layers.push(l.clone());
         // With effects, and a missing pattern (transparent).
         let mut fx = l.clone();
-        fx.id = photosuite_doc::LayerId::fresh();
+        fx.id = photosplice_doc::LayerId::fresh();
         fx.effects.items = vec![Effect::DropShadow(shadow(BlendMode::Multiply, 0.6, 90.0, 3.0, 4.0, 0.0))];
         fx.mask = Some(mask(Rect::new(20, 10, 50, 40), 62, 0.0));
         d.layers.push(fx);
         let mut missing = l;
-        missing.id = photosuite_doc::LayerId::fresh();
+        missing.id = photosplice_doc::LayerId::fresh();
         missing.content = LayerContent::Fill(Fill::Pattern { name: "nope".into(), id: "nope".into(), scale: 1.0, angle: 0.0, link: true, phase: (0.0, 0.0) });
         d.layers.push(missing);
         fx_check(&mut g, &d, &format!("pattern fill link {link} scale {scale} angle {angle}"));
@@ -1331,11 +1331,11 @@ fn lab_documents_mix_in_lab() {
     let mut d = Document::new("lab", Size::new(2, 1), ColorMode::Lab, SampleType::U8);
     let fmt = d.pixel_format();
     let mut a = Layer::raster("a", fmt);
-    a.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 2, 1), &photosuite_raster::from_rgba(&fmt, [0.0, 0.0, 1.0, 1.0]));
+    a.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 2, 1), &photosplice_raster::from_rgba(&fmt, [0.0, 0.0, 1.0, 1.0]));
     let mut b = Layer::raster("b", fmt);
-    b.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 2, 1), &photosuite_raster::from_rgba(&fmt, [1.0, 1.0, 0.0, 0.5]));
+    b.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 2, 1), &photosplice_raster::from_rgba(&fmt, [1.0, 1.0, 0.0, 0.5]));
     d.layers = vec![a, b];
-    let p = photosuite_compose::flatten(&d).px[0];
+    let p = photosplice_compose::flatten(&d).px[0];
     assert!((p[0] - 0.5).abs() > 0.05 || (p[2] - 0.5).abs() > 0.05, "{p:?}");
 }
 
@@ -1356,7 +1356,7 @@ fn rgba16f_fallback_path_renders() {
     top.opacity = 0.8;
     d.layers.push(top);
     d.layers.push(Layer::new("adj", LayerContent::Adjustment(Adjustment::BrightnessContrast { brightness: 30.0, contrast: 40.0, legacy: false })));
-    let cpu = photosuite_compose::flatten(&d);
+    let cpu = photosplice_compose::flatten(&d);
     let out = render_to_vec(&mut comp, &device, &queue, &d, d.bounds()).expect("16f render");
     let mut worst = 0.0f32;
     for (c, o) in cpu.px.iter().zip(&out) {
@@ -1434,18 +1434,18 @@ fn documents_larger_than_the_texture_limit() {
     assert!(g.paged.supports(&d).is_ok());
     // Every pass sees page borders, and effect maps and blurs crossing them.
     check(&mut g, &d, "big document");
-    let s = photosuite_gpu::render_to_vec_stats(&mut g.paged, &g.device, &g.queue, &d, d.bounds()).unwrap().1;
+    let s = photosplice_gpu::render_to_vec_stats(&mut g.paged, &g.device, &g.queue, &d, d.bounds()).unwrap().1;
     assert!(s.cells >= 20 && s.chunks == s.cells, "{s:?}");
     // A viewport off the page grid covers only its cells.
     let view = Rect::new(300, 330, 790, 610);
     diff_rect(&mut g, &d, view, "viewport").unwrap_or_else(|e| panic!("{e}"));
-    let s = photosuite_gpu::render_to_vec_stats(&mut g.paged, &g.device, &g.queue, &d, view).unwrap().1;
+    let s = photosplice_gpu::render_to_vec_stats(&mut g.paged, &g.device, &g.queue, &d, view).unwrap().1;
     assert_eq!(s.cells, 6, "{s:?}");
     // A dab across a page corner on the effect layer, and an edit elsewhere.
     d.layers[3].surface_mut().unwrap().fill_rect(Rect::new(500, 490, 530, 530), &[0.1, 0.1, 0.9, 1.0]);
     d.layers[2].surface_mut().unwrap().fill_rect(Rect::new(250, 250, 270, 270), &[0.0, 0.0, 0.0, 0.0]);
     check(&mut g, &d, "after dabs");
-    let s = photosuite_gpu::render_to_vec_stats(&mut g.paged, &g.device, &g.queue, &d, d.bounds()).unwrap().1;
+    let s = photosplice_gpu::render_to_vec_stats(&mut g.paged, &g.device, &g.queue, &d, d.bounds()).unwrap().1;
     assert_eq!((s.tiles_uploaded, s.fx_shapes), (0, 0), "nothing changed since the last render: {s:?}");
 }
 
@@ -1460,8 +1460,8 @@ fn pages_are_evicted_under_the_budget() {
     let page = u64::from(g.paged.page_size()).pow(2) * 4;
     g.paged.set_resident_budget(page);
     for round in 0..3 {
-        let cpu = photosuite_compose::flatten(&d);
-        let (out, s) = photosuite_gpu::render_to_vec_stats(&mut g.paged, &g.device, &g.queue, &d, d.bounds()).unwrap();
+        let cpu = photosplice_compose::flatten(&d);
+        let (out, s) = photosplice_gpu::render_to_vec_stats(&mut g.paged, &g.device, &g.queue, &d, d.bounds()).unwrap();
         let worst = worst_diff(&cpu.px, &out);
         assert!(worst.0 <= TOL, "round {round}: max diff {:.2}/255 at {}", worst.0 * 255.0, worst.1);
         assert!(s.evicted > 0, "round {round}: {s:?}");
@@ -1481,7 +1481,7 @@ fn the_focused_view_stays_resident_after_a_full_refresh() {
     let mut comp = Compositor::try_new_with_format(&g.device, wgpu::TextureFormat::Rgba32Float).unwrap();
     comp.set_texture_limit(PAGED_LIMIT);
     let view = Rect::new(520, 300, 760, 500);
-    photosuite_gpu::render_to_vec(&mut comp, &g.device, &g.queue, &d, view).unwrap();
+    photosplice_gpu::render_to_vec(&mut comp, &g.device, &g.queue, &d, view).unwrap();
     // A budget holding just the view's pages: a full refresh evicts as it goes, and draws the
     // view's cells last, so the next edit in the view uploads nothing.
     // The working set of a region is what rendering it makes resident.
@@ -1491,11 +1491,11 @@ fn the_focused_view_stays_resident_after_a_full_refresh() {
     assert!(comp.fits_budget(&d, view) && !comp.fits_budget(&d, d.bounds()));
     comp.set_focus(Some(view));
     for _ in 0..2 {
-        let s = photosuite_gpu::render_to_vec_stats(&mut comp, &g.device, &g.queue, &d, d.bounds()).unwrap().1;
+        let s = photosplice_gpu::render_to_vec_stats(&mut comp, &g.device, &g.queue, &d, d.bounds()).unwrap().1;
         assert!(s.evicted > 0, "{s:?}");
-        let (out, s) = photosuite_gpu::render_to_vec_stats(&mut comp, &g.device, &g.queue, &d, view).unwrap();
+        let (out, s) = photosplice_gpu::render_to_vec_stats(&mut comp, &g.device, &g.queue, &d, view).unwrap();
         assert_eq!(s.tiles_uploaded, 0, "{s:?}");
-        let cpu = photosuite_compose::render(&d, view);
+        let cpu = photosplice_compose::render(&d, view);
         assert!(worst_diff(&cpu.px, &out).0 <= TOL);
     }
 }

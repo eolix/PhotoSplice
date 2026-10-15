@@ -5,9 +5,9 @@
 //! The built-in groups are our own designs, built from the same effect params as
 //! `layer.layerStyle.*`.
 
-use photosuite_color::{BlendMode, ColorMode, SampleType};
-use photosuite_doc::{Document, Effect, Layer, Size};
-use photosuite_geom::Rect;
+use photosplice_color::{BlendMode, ColorMode, SampleType};
+use photosplice_doc::{Document, Effect, Layer, Size};
+use photosplice_geom::Rect;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -156,12 +156,12 @@ fn list(s: &mut Session, _: &Value) -> Result<Value> {
 }
 
 /// Target layers: `"layers": [ids]`, `"layer": id`, else every selected layer.
-fn targets(s: &Session, p: &Value) -> Vec<photosuite_doc::LayerId> {
+fn targets(s: &Session, p: &Value) -> Vec<photosplice_doc::LayerId> {
     if let Some(a) = p.get("layers").and_then(Value::as_array) {
-        return a.iter().filter_map(Value::as_u64).map(photosuite_doc::LayerId).collect();
+        return a.iter().filter_map(Value::as_u64).map(photosplice_doc::LayerId).collect();
     }
     if let Some(id) = p.get("layer").and_then(Value::as_u64) {
-        return vec![photosuite_doc::LayerId(id)];
+        return vec![photosplice_doc::LayerId(id)];
     }
     crate::layer_multi_cmds::selected(s)
 }
@@ -323,7 +323,7 @@ pub fn thumbnail(s: &Session, style: &StylePreset, size: u32) -> Vec<u8> {
         l.fill_opacity = f;
     }
     doc.layers.push(l);
-    photosuite_compose::render(&doc, doc.bounds()).to_rgba8().pixels
+    photosplice_compose::render(&doc, doc.bounds()).to_rgba8().pixels
 }
 
 pub fn specs() -> Vec<CommandSpec> {

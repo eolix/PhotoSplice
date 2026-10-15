@@ -6,11 +6,11 @@
 //! so the PSD `TySh` data (and with it warp, anti-aliasing and the OpenType flags) is regenerated
 //! and the layer saves as editable text.
 
-use photosuite_doc::text::{AntiAlias, FontFeature, Orientation, TextAlign, TextShape, TextWarp};
-use photosuite_doc::vector::{Knot, Path, PathOp, Subpath};
-use photosuite_doc::{Affine, Document, Fill, Layer, LayerContent, LayerId, ShapeLayer, TextLayer};
-use photosuite_geom::Point;
-use photosuite_text::render::PathEl;
+use photosplice_doc::text::{AntiAlias, FontFeature, Orientation, TextAlign, TextShape, TextWarp};
+use photosplice_doc::vector::{Knot, Path, PathOp, Subpath};
+use photosplice_doc::{Affine, Document, Fill, Layer, LayerContent, LayerId, ShapeLayer, TextLayer};
+use photosplice_geom::Point;
+use photosplice_text::render::PathEl;
 use serde_json::{Value, json};
 
 use crate::commands::{CommandSpec, layer_param};
@@ -95,8 +95,8 @@ fn with_text<R>(s: &mut Session, p: &Value, label: &str, f: impl FnOnce(&mut Tex
     })
 }
 
-fn layout(doc: &Document, t: &TextLayer) -> photosuite_text::TextLayout {
-    photosuite_text::shared().lock().unwrap_or_else(|e| e.into_inner()).layout(t, doc.resolution_dpi)
+fn layout(doc: &Document, t: &TextLayer) -> photosplice_text::TextLayout {
+    photosplice_text::shared().lock().unwrap_or_else(|e| e.into_inner()).layout(t, doc.resolution_dpi)
 }
 
 /// `m ∘ translate(tx, ty)`.
@@ -293,9 +293,9 @@ fn contours(els: &[PathEl]) -> Vec<Vec<Knot>> {
 /// which reproduces the nonzero fill under Photoshop's per-subpath path operations.
 pub fn text_path(doc: &Document, t: &TextLayer) -> Path {
     let l = layout(doc, t);
-    let warp = photosuite_text::render::layout_warp(&l, t);
+    let warp = photosplice_text::render::layout_warp(&l, t);
     let mut subpaths = Vec::new();
-    for glyph in photosuite_text::render::outlines(&l, &t.transform, warp.as_ref()) {
+    for glyph in photosplice_text::render::outlines(&l, &t.transform, warp.as_ref()) {
         let cs = contours(&glyph);
         let Some(outer) = cs.iter().map(|k| signed_area(k)).max_by(|a, b| a.abs().total_cmp(&b.abs())) else { continue };
         let (fills, holes): (Vec<_>, Vec<_>) = cs.into_iter().partition(|k| signed_area(k).signum() == outer.signum());
@@ -341,7 +341,7 @@ fn warp_text(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "type.warpText";
     let style = p.get("style").and_then(Value::as_str).unwrap_or("arc");
     let psd =
-        photosuite_text::warp::psd_style(style).ok_or_else(|| EngineError::BadParams { cmd: cmd.into(), msg: format!("unknown warp style \"{style}\"") })?;
+        photosplice_text::warp::psd_style(style).ok_or_else(|| EngineError::BadParams { cmd: cmd.into(), msg: format!("unknown warp style \"{style}\"") })?;
     let f = |k: &str, d: f64| p.get(k).and_then(Value::as_f64).unwrap_or(d).clamp(-100.0, 100.0) as f32;
     let warp = (psd != "warpNone").then(|| TextWarp {
         style: psd.into(),
@@ -361,7 +361,7 @@ fn warp_text(s: &mut Session, p: &Value) -> Result<Value> {
 // ---------- OpenType toggles ----------
 
 /// Is the OpenType toggle `tag` on for a character style? (`liga`/`dlig` have dedicated fields.)
-pub fn feature_on(st: &photosuite_doc::text::CharStyle, tag: &str) -> bool {
+pub fn feature_on(st: &photosplice_doc::text::CharStyle, tag: &str) -> bool {
     match tag {
         "liga" => st.ligatures,
         "dlig" => st.discretionary_ligatures,
@@ -369,7 +369,7 @@ pub fn feature_on(st: &photosuite_doc::text::CharStyle, tag: &str) -> bool {
     }
 }
 
-fn set_feature(st: &mut photosuite_doc::text::CharStyle, tag: &str, on: bool) {
+fn set_feature(st: &mut photosplice_doc::text::CharStyle, tag: &str, on: bool) {
     match tag {
         "liga" => st.ligatures = on,
         "dlig" => st.discretionary_ligatures = on,
@@ -432,7 +432,7 @@ fn update_all(s: &mut Session) -> Result<Value> {
 }
 
 fn installed_families() -> Vec<String> {
-    photosuite_text::shared().lock().unwrap_or_else(|e| e.into_inner()).fonts.families().into_iter().map(|f| f.to_lowercase()).collect()
+    photosplice_text::shared().lock().unwrap_or_else(|e| e.into_inner()).fonts.families().into_iter().map(|f| f.to_lowercase()).collect()
 }
 
 /// Font families used by type layers that the font database cannot supply (neither by family
@@ -440,7 +440,7 @@ fn installed_families() -> Vec<String> {
 pub fn missing_fonts(doc: &Document) -> Vec<String> {
     let have = installed_families();
     let mut out: Vec<String> = Vec::new();
-    let mut eng = photosuite_text::shared().lock().unwrap_or_else(|e| e.into_inner());
+    let mut eng = photosplice_text::shared().lock().unwrap_or_else(|e| e.into_inner());
     for (_, _, l) in doc.walk() {
         if let LayerContent::Text(t) = &l.content {
             for r in t.char_runs() {
@@ -466,7 +466,7 @@ fn replace_fonts(s: &mut Session, map: &serde_json::Map<String, Value>, all: boo
         if !missing.iter().any(|m| m == f) {
             return None;
         }
-        map.get(f).and_then(Value::as_str).map(str::to_string).or_else(|| all.then(|| photosuite_text::fonts::DEFAULT_FAMILY.to_string()))
+        map.get(f).and_then(Value::as_str).map(str::to_string).or_else(|| all.then(|| photosplice_text::fonts::DEFAULT_FAMILY.to_string()))
     };
     let ids: Vec<LayerId> = d.doc.walk().into_iter().filter(|(_, _, l)| matches!(l.content, LayerContent::Text(_))).map(|(_, _, l)| l.id).collect();
     if missing.is_empty() {

@@ -6,14 +6,14 @@ use egui::{Key, Modifiers, PointerButton, Pos2, vec2};
 use egui_kittest::Harness;
 use serde_json::json;
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::ViewXform;
 use crate::state::Tool;
 
 /// A 400 × 300 document with a 100 × 60 red rectangle on its own layer at (100, 100), the Move
 /// tool active, at 100 %.
-fn harness() -> Harness<'static, PhotosuiteApp> {
-    let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+fn harness() -> Harness<'static, PhotospliceApp> {
+    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
     app.run("file.new", json!({"width": 400, "height": 300})).unwrap();
     app.run("layer.new.layer", json!({})).unwrap();
     app.run("select.rect", json!({"x": 100, "y": 100, "width": 100, "height": 60})).unwrap();
@@ -23,7 +23,7 @@ fn harness() -> Harness<'static, PhotosuiteApp> {
     app.ui.extras.rulers = false;
     app.ui.tool = Tool::Move;
     let mut h = Harness::builder().with_size(vec2(1000.0, 700.0)).build_ui_state(
-        |ui, app: &mut PhotosuiteApp| {
+        |ui, app: &mut PhotospliceApp| {
             let ctx = ui.ctx().clone();
             if !ctx.fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                 return;
@@ -33,7 +33,7 @@ fn harness() -> Harness<'static, PhotosuiteApp> {
         },
         app,
     );
-    PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+    PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
     h.run_steps(4);
     let v = &mut h.state_mut().ui.views[0];
     v.zoom = 1.0;
@@ -43,7 +43,7 @@ fn harness() -> Harness<'static, PhotosuiteApp> {
     h
 }
 
-fn screen(h: &Harness<'static, PhotosuiteApp>, p: [f64; 2]) -> Pos2 {
+fn screen(h: &Harness<'static, PhotospliceApp>, p: [f64; 2]) -> Pos2 {
     let app = h.state();
     let v = &app.ui.views[0];
     let xf = ViewXform { rect: crate::rulers::content_rect(app, app.last_canvas_rect), zoom: v.zoom, center: v.center, flip: app.ui.view.flip_horizontal };
@@ -51,7 +51,7 @@ fn screen(h: &Harness<'static, PhotosuiteApp>, p: [f64; 2]) -> Pos2 {
 }
 
 /// Press at document point `from`, drag to `to` in a few steps and release.
-fn drag(h: &mut Harness<'static, PhotosuiteApp>, from: [f64; 2], to: [f64; 2]) {
+fn drag(h: &mut Harness<'static, PhotospliceApp>, from: [f64; 2], to: [f64; 2]) {
     let (a, b) = (screen(h, from), screen(h, to));
     h.event(egui::Event::PointerMoved(a));
     h.run_steps(1);
@@ -65,21 +65,21 @@ fn drag(h: &mut Harness<'static, PhotosuiteApp>, from: [f64; 2], to: [f64; 2]) {
     h.run_steps(3);
 }
 
-fn begin(h: &mut Harness<'static, PhotosuiteApp>) {
+fn begin(h: &mut Harness<'static, PhotospliceApp>) {
     let ctx = h.ctx.clone();
     crate::menus::invoke(h.state_mut(), &ctx, "edit.freeTransform", json!({})).unwrap();
     h.run_steps(2);
 }
 
-fn quad(h: &Harness<'static, PhotosuiteApp>) -> [[f64; 2]; 4] {
+fn quad(h: &Harness<'static, PhotospliceApp>) -> [[f64; 2]; 4] {
     h.state().ui.transform.as_ref().expect("transforming").quad
 }
 
-fn history(h: &Harness<'static, PhotosuiteApp>) -> usize {
+fn history(h: &Harness<'static, PhotospliceApp>) -> usize {
     h.state().session.active().unwrap().history.entries().len()
 }
 
-fn key(h: &mut Harness<'static, PhotosuiteApp>, m: Modifiers, k: Key) {
+fn key(h: &mut Harness<'static, PhotospliceApp>, m: Modifiers, k: Key) {
     h.key_press_modifiers(m, k);
     h.run_steps(2);
 }
@@ -132,7 +132,7 @@ fn undo_steps_back_through_the_transform_not_the_document() {
 
 /// `engine.execute` over the control channel as a programmatic
 /// caller: the result's `ok` flag.
-fn execute(h: &mut Harness<'static, PhotosuiteApp>, command: &str) -> bool {
+fn execute(h: &mut Harness<'static, PhotospliceApp>, command: &str) -> bool {
     let ctx = h.ctx.clone();
     let (req, _rx) = crate::control::ControlRequest::new("engine.execute", json!({"command": command}));
     let crate::control::Outcome::Done(reply) = crate::control::handle(h.state_mut(), &ctx, &req) else {
@@ -170,7 +170,7 @@ fn automation_undo_steps_through_the_transform() {
     assert_eq!(history(&h), steps - 1, "the fill is undone");
 }
 
-fn width(h: &Harness<'static, PhotosuiteApp>) -> u32 {
+fn width(h: &Harness<'static, PhotospliceApp>) -> u32 {
     let st = h.state().session.active().unwrap();
     st.doc.layer(st.active_layer.unwrap()).unwrap().surface().unwrap().content_bounds().width()
 }

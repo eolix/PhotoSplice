@@ -7,8 +7,8 @@
 //! content bounds (artboards: of the board), so applying a comp moves a layer by the difference
 //! between that and where it is now.
 
-use photosuite_color::{BlendMode, Color};
-use photosuite_geom::Rect;
+use photosplice_color::{BlendMode, Color};
+use photosplice_geom::Rect;
 use serde::{Deserialize, Serialize};
 
 use crate::{Document, Effects, Layer, LayerContent, LayerId};

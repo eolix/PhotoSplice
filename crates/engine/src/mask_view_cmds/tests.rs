@@ -1,5 +1,5 @@
 use super::*;
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 
 /// 40×20 document: Background, then "Masked" (red, mask hiding the left half) on top.
 fn session() -> (Session, u64, u64) {
@@ -45,7 +45,7 @@ fn modes_toggle_and_show_in_inspect_without_history() {
 fn a_mask_view_never_alters_pixels() {
     let (mut s, masked, _) = session();
     let before = s.active().unwrap().doc.clone();
-    let px = |s: &Session| photosuite_compose::render(&s.active().unwrap().doc, Rect::new(0, 0, 40, 20)).px;
+    let px = |s: &Session| photosplice_compose::render(&s.active().unwrap().doc, Rect::new(0, 0, 40, 20)).px;
     let composite = px(&s);
     for mode in ["gray", "overlay", "toggleOverlay", "toggleGray", "off"] {
         s.execute(ID, json!({"layer": masked, "mode": mode})).unwrap();
@@ -58,7 +58,7 @@ fn a_mask_view_never_alters_pixels() {
 fn painting_in_mask_view_paints_the_mask() {
     let (mut s, masked, _) = session();
     s.execute(ID, json!({"mode": "gray"})).unwrap();
-    let id = photosuite_doc::LayerId(masked);
+    let id = photosplice_doc::LayerId(masked);
     let pixels_before = s.active().unwrap().doc.layer(id).unwrap().surface().unwrap().clone();
     s.execute("paint.stroke", json!({"points": [[30, 10]], "size": 6, "hardness": 1.0, "color": "#000000"})).unwrap();
     let l = s.active().unwrap().doc.layer(id).unwrap().clone();
@@ -83,7 +83,7 @@ fn the_view_ends_with_its_layer_or_mask() {
     assert!(s.active().unwrap().channel_view.layer_mask.is_none());
     // ⌥-clicking a mask of an unselected layer selects it.
     s.execute(ID, json!({"layer": masked, "mode": "overlay"})).unwrap();
-    assert_eq!(s.active().unwrap().active_layer, Some(photosuite_doc::LayerId(masked)));
+    assert_eq!(s.active().unwrap().active_layer, Some(photosplice_doc::LayerId(masked)));
     s.execute("layer.layerMask.delete", json!({})).unwrap();
     assert!(s.active().unwrap().channel_view.layer_mask.is_none(), "deleting the mask ends the view");
     s.undo();

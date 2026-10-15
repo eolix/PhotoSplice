@@ -4,13 +4,13 @@
 mod common;
 
 use common::*;
-use photosuite_color::{BlendMode, ColorMode, SampleType};
-use photosuite_io::*;
-use photosuite_psd::{PixelData, PsdBuilder, PsdFile};
+use photosplice_color::{BlendMode, ColorMode, SampleType};
+use photosplice_io::*;
+use photosplice_psd::{PixelData, PsdBuilder, PsdFile};
 
 const TOL: f32 = 1.0 / 255.0 + 1e-4;
 
-fn check_export_oracle(d: &photosuite_doc::Document, tol: f32) {
+fn check_export_oracle(d: &photosplice_doc::Document, tol: f32) {
     let r = export(d, "x.psd", &ExportOptions::default()).unwrap();
     let f = PsdFile::from_bytes(&r.bytes).unwrap();
     let merged = merged_composite(&f).unwrap();
@@ -19,7 +19,7 @@ fn check_export_oracle(d: &photosuite_doc::Document, tol: f32) {
     // composite (no separation of a screen colour in between).
     // Lab composites keep colours outside sRGB; compare what is shown.
     let shown = |px: Vec<[f32; 4]>| -> Vec<[f32; 4]> { px.into_iter().map(|p| p.map(|v| v.clamp(0.0, 1.0))).collect() };
-    let ours = shown(photosuite_compose::flatten(&d2).px);
+    let ours = shown(photosplice_compose::flatten(&d2).px);
     let m = max_diff(&ours, &shown(merged));
     assert!(m <= tol, "max diff {m} > {tol}");
 }
@@ -46,17 +46,17 @@ oracle!(oracle_cmyk8, ColorMode::Cmyk, SampleType::U8, Features::PIXELS, 3.0 / 2
 oracle!(oracle_lab8, ColorMode::Lab, SampleType::U8, Features::PIXELS, 16.0 / 255.0);
 
 /// Builds a PSD with the *builder* (independent writer) whose merged image
-/// is produced by photosuite-compose, then checks import + flatten against it.
+/// is produced by photosplice-compose, then checks import + flatten against it.
 fn builder_oracle(depth: u16, mode: ColorMode) {
     let sample = if depth == 16 { SampleType::U16 } else { SampleType::U8 };
     let d = gen_doc(mode, sample, Features { groups: false, masks: true, adjustments: false, fills: false, all_blends: true, extras: false });
-    let flat = photosuite_compose::flatten(&d);
+    let flat = photosplice_compose::flatten(&d);
     let to_pixels = |px: &[[f32; 4]]| -> PixelData {
         let fmt = d.pixel_format();
         let vals: Vec<f32> = px
             .iter()
             .flat_map(|p| {
-                let v = photosuite_raster::from_rgba(&fmt, *p);
+                let v = photosplice_raster::from_rgba(&fmt, *p);
                 v.into_iter()
             })
             .collect();
@@ -68,8 +68,8 @@ fn builder_oracle(depth: u16, mode: ColorMode) {
         }
     };
     let mut b = PsdBuilder::new(d.size.width, d.size.height).depth(depth).color_mode(match mode {
-        ColorMode::Grayscale => photosuite_psd::ColorMode::Grayscale,
-        _ => photosuite_psd::ColorMode::Rgb,
+        ColorMode::Grayscale => photosplice_psd::ColorMode::Grayscale,
+        _ => photosplice_psd::ColorMode::Rgb,
     });
     for l in &d.layers {
         let s = l.surface().unwrap();
@@ -78,10 +78,10 @@ fn builder_oracle(depth: u16, mode: ColorMode) {
             Vec::new()
         } else {
             let fmt = s.format();
-            s.read_region(r).chunks_exact(fmt.channels()).map(|p| photosuite_raster::to_rgba(&fmt, p)).collect()
+            s.read_region(r).chunks_exact(fmt.channels()).map(|p| photosplice_raster::to_rgba(&fmt, p)).collect()
         };
-        let mut spec = photosuite_psd::LayerSpec::new(l.name.clone(), r.x0, r.y0, r.width(), r.height(), to_pixels(&buf));
-        spec.blend_mode = photosuite_psd::BlendMode::from_key(l.blend.psd_key());
+        let mut spec = photosplice_psd::LayerSpec::new(l.name.clone(), r.x0, r.y0, r.width(), r.height(), to_pixels(&buf));
+        spec.blend_mode = photosplice_psd::BlendMode::from_key(l.blend.psd_key());
         spec.opacity = (l.opacity * 255.0).round() as u8;
         spec.fill_opacity = Some((l.fill_opacity * 255.0).round() as u8);
         spec.visible = l.visible;
@@ -89,8 +89,8 @@ fn builder_oracle(depth: u16, mode: ColorMode) {
         if let Some(m) = &l.mask {
             let mr = m.surface.content_bounds();
             let data = m.surface.read_region(mr).iter().map(|v| (v * 255.0).round() as u8).collect();
-            spec.mask = Some(photosuite_psd::MaskSpec {
-                rect: photosuite_psd::Rect { top: mr.y0, left: mr.x0, bottom: mr.y1, right: mr.x1 },
+            spec.mask = Some(photosplice_psd::MaskSpec {
+                rect: photosplice_psd::Rect { top: mr.y0, left: mr.x0, bottom: mr.y1, right: mr.x1 },
                 data,
                 default_color: (m.surface.default_pixel()[0] * 255.0).round() as u8,
                 disabled: !m.enabled,
@@ -105,7 +105,7 @@ fn builder_oracle(depth: u16, mode: ColorMode) {
     let d2 = import("b.psd", &bytes).unwrap().document;
     // Lab composites keep colours outside sRGB; compare what is shown.
     let shown = |px: Vec<[f32; 4]>| -> Vec<[f32; 4]> { px.into_iter().map(|p| p.map(|v| v.clamp(0.0, 1.0))).collect() };
-    let ours = shown(photosuite_compose::flatten(&d2).px);
+    let ours = shown(photosplice_compose::flatten(&d2).px);
     let m = max_diff(&ours, &shown(merged));
     // Density/feather of masks are not written by the builder; the generated
     // doc uses them only on a disabled mask, so results must match.
@@ -135,10 +135,10 @@ fn every_blend_mode_single_layer_oracle() {
         if m == BlendMode::Dissolve {
             continue;
         }
-        let mut d = photosuite_doc::Document::new("b", photosuite_geom::Size::new(8, 8), ColorMode::Rgb, SampleType::U8);
+        let mut d = photosplice_doc::Document::new("b", photosplice_geom::Size::new(8, 8), ColorMode::Rgb, SampleType::U8);
         let fmt = d.pixel_format();
         d.layers.push(raster("bg", fmt, d.bounds(), 1, false));
-        let mut top = raster("top", fmt, photosuite_geom::Rect::new(2, 2, 7, 7), 9, true);
+        let mut top = raster("top", fmt, photosplice_geom::Rect::new(2, 2, 7, 7), 9, true);
         top.blend = m;
         top.opacity = g(190);
         d.layers.push(top);
@@ -155,15 +155,15 @@ fn hidden_and_clipped_affect_composite() {
     for l in &mut d2.layers {
         l.visible = true;
     }
-    let other = photosuite_compose::flatten(&d2).px;
+    let other = photosplice_compose::flatten(&d2).px;
     assert!(max_diff(&other, &merged) > 0.0, "unhiding a layer must change the composite");
 }
 
 #[test]
 fn merged_alpha_written_when_transparent() {
-    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(4, 4), ColorMode::Rgb, SampleType::U8);
+    let mut d = photosplice_doc::Document::new("t", photosplice_geom::Size::new(4, 4), ColorMode::Rgb, SampleType::U8);
     let fmt = d.pixel_format();
-    d.layers.push(raster("half", fmt, photosuite_geom::Rect::new(0, 0, 2, 4), 3, true));
+    d.layers.push(raster("half", fmt, photosplice_geom::Rect::new(0, 0, 2, 4), 3, true));
     let f = document_to_psd(&d);
     assert_eq!(f.header.channels, 4);
     assert!(f.merged_has_alpha());
@@ -171,8 +171,8 @@ fn merged_alpha_written_when_transparent() {
     assert_eq!(merged[3][3], 0.0);
 
     // U8 rounding must not erase transparency that is representable in the exported U16 plane.
-    let mut near = photosuite_doc::Document::new("near opaque", photosuite_geom::Size::new(1, 1), ColorMode::Rgb, SampleType::U16);
-    let mut layer = photosuite_doc::Layer::raster("pixel", near.pixel_format());
+    let mut near = photosplice_doc::Document::new("near opaque", photosplice_geom::Size::new(1, 1), ColorMode::Rgb, SampleType::U16);
+    let mut layer = photosplice_doc::Layer::raster("pixel", near.pixel_format());
     layer.surface_mut().unwrap().fill_rect(near.bounds(), &[1.0, 0.0, 0.0, 65500.0 / 65535.0]);
     near.layers.push(layer);
     let out = export(&near, "near.psd", &ExportOptions::default()).unwrap();

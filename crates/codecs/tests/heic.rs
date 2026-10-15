@@ -2,7 +2,7 @@
 //! `tests/fixtures/heic/README.md`. HEVC is lossy and 4:2:0, so colours are checked with a
 //! tolerance and away from the band edges.
 
-use photosuite_codecs::*;
+use photosplice_codecs::*;
 
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(format!("{}/tests/fixtures/heic/{name}.heic", env!("CARGO_MANIFEST_DIR"))).unwrap()

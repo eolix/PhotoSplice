@@ -3,10 +3,10 @@
 //! background). Everything that changes the document is `layer.artboard.set` and friends.
 
 use egui::{Align2, Color32, Pos2, Rect, Stroke};
-use photosuite_doc::{ArtboardBackground, Document, Layer};
+use photosplice_doc::{ArtboardBackground, Document, Layer};
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::ViewXform;
 use crate::theme::Tokens;
 
@@ -14,7 +14,7 @@ use crate::theme::Tokens;
 /// boards' x edges, split around the boards they cross).
 pub fn pasteboard_rects(xf: &ViewXform, doc: &Document) -> Vec<Rect> {
     let canvas = doc.bounds();
-    let boards: Vec<photosuite_geom::Rect> = doc.artboards().iter().map(|b| b.2.rect.intersect(&canvas)).filter(|r| !r.is_empty()).collect();
+    let boards: Vec<photosplice_geom::Rect> = doc.artboards().iter().map(|b| b.2.rect.intersect(&canvas)).filter(|r| !r.is_empty()).collect();
     let mut xs: Vec<i32> = vec![canvas.x0, canvas.x1];
     for b in &boards {
         xs.extend([b.x0, b.x1]);
@@ -29,19 +29,19 @@ pub fn pasteboard_rects(xf: &ViewXform, doc: &Document) -> Vec<Rect> {
         let mut y = canvas.y0;
         for (a, b) in spans {
             if a > y {
-                out.push(xf.doc_rect(photosuite_geom::Rect::new(x0, y, x1, a)));
+                out.push(xf.doc_rect(photosplice_geom::Rect::new(x0, y, x1, a)));
             }
             y = y.max(b);
         }
         if y < canvas.y1 {
-            out.push(xf.doc_rect(photosuite_geom::Rect::new(x0, y, x1, canvas.y1)));
+            out.push(xf.doc_rect(photosplice_geom::Rect::new(x0, y, x1, canvas.y1)));
         }
     }
     out
 }
 
 /// Board outlines and names (the active board's name is highlighted, as in Photoshop).
-pub fn draw_frames(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform) {
+pub fn draw_frames(app: &PhotospliceApp, painter: &egui::Painter, xf: &ViewXform) {
     let Some(st) = app.session.active() else { return };
     let t = Tokens::get(painter.ctx());
     let active = st.active_layer.and_then(|id| st.doc.artboard_of(id));
@@ -55,7 +55,7 @@ pub fn draw_frames(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform)
 }
 
 /// View › Fit Artboard on Screen: zoom to the active artboard (or the first one).
-pub fn fit_artboard(app: &mut PhotosuiteApp) -> Result<Value, String> {
+pub fn fit_artboard(app: &mut PhotospliceApp) -> Result<Value, String> {
     let i = app.session.active_index().ok_or("no document")?;
     let st = app.session.active().ok_or("no document")?;
     let id = st.active_layer.and_then(|l| st.doc.artboard_of(l)).or_else(|| st.doc.artboards().last().map(|b| b.0)).ok_or("the document has no artboards")?;
@@ -71,7 +71,7 @@ pub fn fit_artboard(app: &mut PhotosuiteApp) -> Result<Value, String> {
 }
 
 /// Properties panel for an artboard.
-pub fn properties(app: &mut PhotosuiteApp, ui: &mut egui::Ui, layer: &Layer) {
+pub fn properties(app: &mut PhotospliceApp, ui: &mut egui::Ui, layer: &Layer) {
     let Some(a) = layer.artboard().cloned() else { return };
     let t = Tokens::get(ui.ctx());
     let key = |k: &str| format!("artboard-{}-{k}", layer.id.0);
@@ -80,7 +80,7 @@ pub fn properties(app: &mut PhotosuiteApp, ui: &mut egui::Ui, layer: &Layer) {
     ui.add_space(4.0);
     let mut preset = a.preset.clone();
     let mut opts: Vec<(String, &str)> = vec![(String::new(), tl!("Custom"))];
-    opts.extend(photosuite_engine::artboard_cmds::PRESETS.iter().map(|(n, _, _)| (n.to_string(), *n)));
+    opts.extend(photosplice_engine::artboard_cmds::PRESETS.iter().map(|(n, _, _)| (n.to_string(), *n)));
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(tl!("Size")).color(t.text_dim).size(12.0));
         if crate::widgets::dropdown(ui, &key("preset"), &mut preset, &opts, 150.0) && !preset.is_empty() {
@@ -139,8 +139,8 @@ mod tests {
     use super::*;
     use crate::menus::{invoke as menu, is_live, menu_items};
 
-    fn app() -> (PhotosuiteApp, egui::Context) {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+    fn app() -> (PhotospliceApp, egui::Context) {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({"width": 100, "height": 50})).unwrap();
         app.sync_views();
         (app, egui::Context::default())
@@ -174,7 +174,7 @@ mod tests {
         ] {
             assert!(is_live(id), "{id}");
         }
-        let enabled = |app: &PhotosuiteApp, id: &str| menu_items(app).into_iter().find(|i| i.id == id).is_some_and(|i| i.enabled);
+        let enabled = |app: &PhotospliceApp, id: &str| menu_items(app).into_iter().find(|i| i.id == id).is_some_and(|i| i.enabled);
         assert!(!enabled(&app, "view.fitArtboardOnScreen"));
         // Menu clicks without params open dialogs for the parameterised commands.
         let r = menu(&mut app, &ctx, "layer.new.artboard", json!({})).unwrap();

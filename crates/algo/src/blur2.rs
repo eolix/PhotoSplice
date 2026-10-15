@@ -6,7 +6,7 @@
 
 use std::f32::consts::{PI, TAU};
 
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 
 use crate::fxutil::{MAXC, luma, native, ncol, premul_window, smoothstep, unpremul_px, xy};
 use crate::image::Image;

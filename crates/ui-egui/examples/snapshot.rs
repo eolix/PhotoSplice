@@ -1,7 +1,7 @@
-//! Render the full PhotoSuite UI offscreen (no window, no focus stealing) and save a PNG.
+//! Render the full PhotoSplice UI offscreen (no window, no focus stealing) and save a PNG.
 //!
 //! ```sh
-//! cargo run --release -p photosuite-ui-egui --example snapshot -- \
+//! cargo run --release -p photosplice-ui-egui --example snapshot -- \
 //!     --out ui.png --size 1440x900 --scale 2 --open photo.jpg \
 //!     --script '[["ui.set", {"tool": "type"}], ["ui.menu.invoke", {"id": "image.imageSize"}]]'
 //! ```
@@ -14,8 +14,8 @@
 //! and document-tab menus that are outside the document-coordinate control pointer.
 //! `--click-at X,Y` opens a screen-space menu (for example the top Select menu) after the script.
 
-use photosuite_ui_egui::control::{ControlRequest, Outcome, handle};
-use photosuite_ui_egui::{PhotosuiteApp, Services};
+use photosplice_ui_egui::control::{ControlRequest, Outcome, handle};
+use photosplice_ui_egui::{PhotospliceApp, Services};
 use serde_json::Value;
 
 fn arg(args: &[String], name: &str) -> Option<String> {
@@ -33,21 +33,21 @@ fn main() {
         arg(&args, "--script").map(|s| serde_json::from_str::<Vec<(String, Value)>>(&s).expect("--script must be [[method, params], …]")).unwrap_or_default();
 
     let services = Services {
-        import: Some(Box::new(|name: &str, bytes: &[u8]| photosuite_io::import(name, bytes).map(|r| (r.document, r.warnings)).map_err(|e| e.to_string()))),
-        export: Some(Box::new(|doc: &photosuite_doc::Document, path: &str, settings: &photosuite_ui_egui::ExportSettings| {
-            let mut opts = photosuite_io::ExportOptions::default();
+        import: Some(Box::new(|name: &str, bytes: &[u8]| photosplice_io::import(name, bytes).map(|r| (r.document, r.warnings)).map_err(|e| e.to_string()))),
+        export: Some(Box::new(|doc: &photosplice_doc::Document, path: &str, settings: &photosplice_ui_egui::ExportSettings| {
+            let mut opts = photosplice_io::ExportOptions::default();
             if let Some(q) = settings.jpeg_quality {
                 opts.encode.jpeg_quality = q;
             }
-            photosuite_io::export(doc, path, &opts).map(|r| (r.bytes, r.warnings)).map_err(|e| e.to_string())
+            photosplice_io::export(doc, path, &opts).map(|r| (r.bytes, r.warnings)).map_err(|e| e.to_string())
         })),
-        write: Some(Box::new(|path: &str, bytes: &[u8]| photosuite_format::atomic_write(std::path::Path::new(path), bytes).map_err(|e| e.to_string()))),
+        write: Some(Box::new(|path: &str, bytes: &[u8]| photosplice_format::atomic_write(std::path::Path::new(path), bytes).map_err(|e| e.to_string()))),
         ..Default::default()
     };
     let open = arg(&args, "--open");
     // Lens profiles from the source tree, as the app reads them from its resources.
     let lensdb = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/lensfun/lens-database.json");
-    photosuite_engine::lens_cmds::set_lens_database_loader(Box::new(move || std::fs::read(&lensdb).ok()));
+    photosplice_engine::lens_cmds::set_lens_database_loader(Box::new(move || std::fs::read(&lensdb).ok()));
     let safe_gpu = args.iter().any(|a| a == "--safe-gpu");
     // `--background-jobs`: long commands run as background jobs, as in the desktop app (#210).
     let background_jobs = args.iter().any(|a| a == "--background-jobs");
@@ -55,8 +55,8 @@ fn main() {
     let settle_ms: u64 = arg(&args, "--settle-ms").and_then(|s| s.parse().ok()).unwrap_or(0);
     let mut harness =
         egui_kittest::Harness::builder().with_size(egui::vec2(w, h)).with_pixels_per_point(scale).with_max_steps(64).wgpu().build_eframe(move |cc| {
-            PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-            let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), services);
+            PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+            let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), services);
             app.background_jobs = background_jobs;
             // `--safe-gpu`: the CPU canvas, as the desktop app's `--safe-gpu` launch.
             if safe_gpu {

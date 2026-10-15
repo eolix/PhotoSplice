@@ -4,8 +4,8 @@
 //! size of their bounds — the same visual result Photoshop's Frame tool produces for this command.
 //! Headless and scriptable like every other command.
 
-use photosuite_doc::{LayerId, LayerMask, PixelFormat};
-use photosuite_geom::Rect;
+use photosplice_doc::{LayerId, LayerMask, PixelFormat};
+use photosplice_geom::Rect;
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
@@ -90,8 +90,8 @@ pub fn specs() -> Vec<CommandSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_doc::{Layer, LayerContent};
-    use photosuite_geom::Rect;
+    use photosplice_doc::{Layer, LayerContent};
+    use photosplice_geom::Rect;
 
     fn session() -> (Session, LayerId, LayerId) {
         let mut s = Session::new();
@@ -100,9 +100,9 @@ mod tests {
             .edit("setup", |doc, _| {
                 let fmt = doc.pixel_format();
                 let mut a = Layer::raster("A", fmt);
-                a.surface_mut().unwrap().fill_rect(Rect::new(4, 4, 24, 24), &photosuite_raster::from_rgba(&fmt, [1.0, 0.0, 0.0, 1.0]));
+                a.surface_mut().unwrap().fill_rect(Rect::new(4, 4, 24, 24), &photosplice_raster::from_rgba(&fmt, [1.0, 0.0, 0.0, 1.0]));
                 let mut b = Layer::raster("B", fmt);
-                b.surface_mut().unwrap().fill_rect(Rect::new(30, 20, 50, 40), &photosuite_raster::from_rgba(&fmt, [0.0, 0.0, 1.0, 1.0]));
+                b.surface_mut().unwrap().fill_rect(Rect::new(30, 20, 50, 40), &photosplice_raster::from_rgba(&fmt, [0.0, 0.0, 1.0, 1.0]));
                 let (ia, ib) = (a.id, b.id);
                 doc.layers.push(a);
                 doc.layers.push(b);

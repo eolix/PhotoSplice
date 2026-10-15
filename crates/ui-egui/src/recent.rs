@@ -1,7 +1,7 @@
 //! Recent files on the Home screen: a thumbnail and "how long ago" for each.
 //!
 //! Thumbnails live outside the preferences file, which is saved often and should stay small: one
-//! PNG per recent file in `…/app.photosuite/recent-thumbs/`, pruned to the list. PNG, so a
+//! PNG per recent file in `…/app.photosplice/recent-thumbs/`, pruned to the list. PNG, so a
 //! transparent document keeps its transparency instead of turning black.
 
 /// Card thumbnails are 180 pt; this covers a 2× display.
@@ -19,16 +19,16 @@ pub fn thumb_name(path: &str) -> String {
 }
 
 /// Encode a document's composite as a thumbnail PNG.
-pub fn thumbnail_png(doc: &photosuite_doc::Document) -> Option<Vec<u8>> {
-    let buf = photosuite_compose::thumbnail_buffer(doc, THUMB_PX);
+pub fn thumbnail_png(doc: &photosplice_doc::Document) -> Option<Vec<u8>> {
+    let buf = photosplice_compose::thumbnail_buffer(doc, THUMB_PX);
     let img = crate::canvas::buffer_to_image(&buf);
     let (w, h) = (img.size[0] as u32, img.size[1] as u32);
     if w == 0 || h == 0 {
         return None;
     }
     let data: Vec<u8> = img.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect();
-    let image = photosuite_codecs::Image::from_u8(w, h, photosuite_codecs::ChannelLayout::Rgba, data).ok()?;
-    photosuite_codecs::encode(&image, photosuite_codecs::Format::Png, &photosuite_codecs::EncodeOptions::default()).ok()
+    let image = photosplice_codecs::Image::from_u8(w, h, photosplice_codecs::ChannelLayout::Rgba, data).ok()?;
+    photosplice_codecs::encode(&image, photosplice_codecs::Format::Png, &photosplice_codecs::EncodeOptions::default()).ok()
 }
 
 /// Delete thumbnails whose file is no longer on the recent list, so none outlives its entry.
@@ -54,7 +54,7 @@ pub fn texture(ctx: &egui::Context, dir: &std::path::Path, path: &str) -> Option
     {
         return Some(tex.id());
     }
-    let image = photosuite_codecs::decode(&std::fs::read(&file).ok()?).ok()?;
+    let image = photosplice_codecs::decode(&std::fs::read(&file).ok()?).ok()?;
     let color = egui::ColorImage::from_rgba_unmultiplied([image.width() as usize, image.height() as usize], &image.to_rgba8());
     let tex = ctx.load_texture(format!("recent-{}", thumb_name(path)), color, egui::TextureOptions::LINEAR);
     let id = tex.id();
@@ -68,7 +68,7 @@ pub fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
-/// "41 minutes ago", as PhotoSuite wrote it — in English there too, so no catalogue rows.
+/// "41 minutes ago", as PhotoSplice wrote it — in English there too, so no catalogue rows.
 pub fn age_text(opened_ms: u64, now_ms: u64) -> String {
     if opened_ms == 0 {
         return String::new();
@@ -89,7 +89,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ages_read_like_photosuites() {
+    fn ages_read_like_photosplices() {
         let m = 60_000;
         assert_eq!(age_text(0, 10 * m), "");
         assert_eq!(age_text(10 * m, 10 * m + 30_000), "Just now");
@@ -111,15 +111,15 @@ mod tests {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod disk_tests {
-    use crate::PhotosuiteApp;
+    use crate::PhotospliceApp;
 
     /// Opening a file records when, writes its thumbnail, and clearing the list removes both.
     #[test]
     fn opening_a_file_writes_its_thumbnail_and_clearing_removes_it() {
-        let dir = std::env::temp_dir().join(format!("photosuite-recent-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("photosplice-recent-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let services = crate::Services { recent_thumbs_dir: Some(dir.clone()), ..Default::default() };
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), services);
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), services);
         app.run("file.new", serde_json::json!({"width": 64, "height": 48})).unwrap();
         let path = "/work/card.png";
         if let Some(st) = app.session.active_mut() {
@@ -128,7 +128,7 @@ mod disk_tests {
         app.push_recent(path);
         let thumb = dir.join(super::thumb_name(path));
         assert!(thumb.is_file(), "thumbnail written");
-        assert!(photosuite_codecs::decode(&std::fs::read(&thumb).unwrap()).is_ok(), "and readable");
+        assert!(photosplice_codecs::decode(&std::fs::read(&thumb).unwrap()).is_ok(), "and readable");
         assert!(app.session.prefs().recent_opened.get(path).copied().unwrap_or(0) > 0, "opened time recorded");
         app.clear_recent();
         assert!(!thumb.exists(), "clearing the list removes the thumbnail");

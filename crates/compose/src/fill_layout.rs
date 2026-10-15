@@ -11,8 +11,8 @@
 //! [`effects::gradient_t`] (and the GPU's `gradient_t`) already take, so both compositors share
 //! one layout.
 
-use photosuite_doc::GradientStyle;
-use photosuite_geom::Rect;
+use photosplice_doc::GradientStyle;
+use photosplice_geom::Rect;
 
 use crate::effects;
 

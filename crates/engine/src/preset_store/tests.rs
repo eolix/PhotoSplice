@@ -1,5 +1,5 @@
 use super::*;
-use photosuite_psd::abr::{AbrSample, LegacyBrush, LegacyTip, write_v12};
+use photosplice_psd::abr::{AbrSample, LegacyBrush, LegacyTip, write_v12};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -149,18 +149,18 @@ fn commands_persist_and_delete_removes_from_disk() {
     s.execute("brush.presets.save", json!({"name": "Scribble"})).unwrap();
     assert_eq!(dir.files().iter().filter(|f| f.starts_with("tips/")).count(), 1);
     let (t, _) = session(&dir);
-    let p = photosuite_paint::presets::find(&t.tools.presets, "Scribble").expect("saved preset reloads");
+    let p = photosplice_paint::presets::find(&t.tools.presets, "Scribble").expect("saved preset reloads");
     assert_eq!(p.brush.tip, s.tools.brush.tip);
 
     // Rename through the Preset Manager, then delete.
     s.execute("edit.presets.presetManager", json!({"action": "rename", "kind": "brushes", "name": "Scribble", "newName": "Doodle"})).unwrap();
     let (t, _) = session(&dir);
-    assert!(photosuite_paint::presets::find(&t.tools.presets, "Doodle").is_some());
-    assert!(photosuite_paint::presets::find(&t.tools.presets, "Scribble").is_none());
+    assert!(photosplice_paint::presets::find(&t.tools.presets, "Doodle").is_some());
+    assert!(photosplice_paint::presets::find(&t.tools.presets, "Scribble").is_none());
     s.execute("brush.presets.delete", json!({"name": "Doodle"})).unwrap();
     assert_eq!(dir.files(), [INDEX_FILE], "the group file and its tip are gone");
     let (t, _) = session(&dir);
-    assert!(photosuite_paint::presets::find(&t.tools.presets, "Doodle").is_none());
+    assert!(photosplice_paint::presets::find(&t.tools.presets, "Doodle").is_none());
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn imported_abr_group_persists() {
         true,
     )
     .unwrap();
-    let data = photosuite_paint::tile::b64_encode(&abr);
+    let data = photosplice_paint::tile::b64_encode(&abr);
     s.execute("brush.presets.importAbr", json!({"data": data, "group": "Legacy Set"})).unwrap();
     let (t, w) = session(&dir);
     assert!(w.is_empty(), "{w:?}");
@@ -207,8 +207,8 @@ fn deleted_builtins_stay_deleted_and_overrides_replace_them() {
     s.tools.brush.size = 77.0;
     s.execute("brush.presets.save", json!({"name": second})).unwrap();
     let (t, _) = session(&dir);
-    assert!(photosuite_paint::presets::find(&t.tools.presets, &first).is_none());
-    let p = photosuite_paint::presets::find(&t.tools.presets, &second).unwrap();
+    assert!(photosplice_paint::presets::find(&t.tools.presets, &first).is_none());
+    let p = photosplice_paint::presets::find(&t.tools.presets, &second).unwrap();
     assert_eq!((p.builtin, p.brush.size), (false, 77.0));
     assert_eq!(t.tools.presets.iter().filter(|p| p.name.eq_ignore_ascii_case(&second)).count(), 1);
     // No built-in is ever written.
@@ -290,8 +290,8 @@ fn corrupt_and_oversized_files_are_skipped_with_a_warning() {
     be.write(&tip_file(&h), b"PCTIP1\x10garbage").unwrap();
     let (mut t, w) = session(&dir);
     assert_eq!(w.len(), 4, "{w:?}");
-    assert!(photosuite_paint::presets::find(&t.tools.presets, "Good").is_some());
-    assert!(photosuite_paint::presets::find(&t.tools.presets, "Lost").is_none());
+    assert!(photosplice_paint::presets::find(&t.tools.presets, "Good").is_some());
+    assert!(photosplice_paint::presets::find(&t.tools.presets, "Lost").is_none());
     // The broken files are left alone for the user (never deleted by a sync).
     t.execute("brush.presets.save", json!({"name": "Another"})).unwrap();
     let files = dir.files();
@@ -333,7 +333,7 @@ fn backends_refuse_paths_outside_the_store() {
     assert_ne!(group_file_name("a/b"), group_file_name("a_b"));
 }
 
-/// `cargo test --release -p photosuite-engine --lib preset_store::tests::bench_load_500 -- --ignored --nocapture`
+/// `cargo test --release -p photosplice-engine --lib preset_store::tests::bench_load_500 -- --ignored --nocapture`
 #[test]
 #[ignore]
 fn bench_load_500_sampled_presets() {

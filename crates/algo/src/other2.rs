@@ -1,7 +1,7 @@
 //! Filter › Other: Custom (5×5 convolution) and HSB/HSL.
 
-use photosuite_color::ColorMode;
-use photosuite_geom::Rect;
+use photosplice_color::ColorMode;
+use photosplice_geom::Rect;
 
 use crate::fxutil::{ncol, rgba, set_rgba, xy};
 use crate::image::Image;

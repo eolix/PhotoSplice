@@ -393,7 +393,7 @@ mod tests {
     }
 
     /// Strings shown as they are in every language, so no catalogue needs a row for them: the
-    /// theme names are proper nouns, as they were in PhotoSuite.
+    /// theme names are proper nouns, as they were in PhotoSplice.
     const KEEP_AS_IS: &[&str] = &["Midnight", "Anthracite", "Slate", "Pearl", "Aubergine", "Ocean"];
 
     /// Languages that claim complete menus have an entry for every label and path segment.
@@ -408,7 +408,7 @@ mod tests {
             strings.extend(path.iter().copied());
             strings.insert(label);
         }
-        for c in photosuite_engine::command_specs().iter().filter(|c| !c.menu.is_empty()) {
+        for c in photosplice_engine::command_specs().iter().filter(|c| !c.menu.is_empty()) {
             strings.extend(c.menu.iter().copied());
             strings.insert(c.label);
         }
@@ -428,7 +428,7 @@ mod tests {
     /// they are (names, units) are listed in `KEEP_AS_IS`.
     ///
     /// A translation report, not a gate: new labels wait for their translations, so CI skips it.
-    /// Run it with `cargo test -p photosuite-ui-egui --lib every_tl_literal -- --ignored`.
+    /// Run it with `cargo test -p photosplice-ui-egui --lib every_tl_literal -- --ignored`.
     #[test]
     #[ignore = "translation report: run with --ignored"]
     fn every_tl_literal_is_translated() {
@@ -472,7 +472,7 @@ mod tests {
     #[test]
     fn blend_mode_names_are_translated() {
         for l in LANGUAGES.iter().filter(|l| l.complete_menus) {
-            for m in std::iter::once(photosuite_color::BlendMode::PassThrough).chain(photosuite_color::BlendMode::LAYER_MODES) {
+            for m in std::iter::once(photosplice_color::BlendMode::PassThrough).chain(photosplice_color::BlendMode::LAYER_MODES) {
                 assert!(l.catalog().plain(m.label()).is_some(), "{}: blend mode {:?}", l.code, m.label());
             }
         }

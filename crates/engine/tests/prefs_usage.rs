@@ -14,7 +14,7 @@
 //! - or `self.<snake_key>` in an inherent `impl` of the section's struct in `prefs.rs` (helpers
 //!   such as `TransparencyAndGamut::colors`).
 
-use photosuite_engine::prefs::{HIDDEN_UNTIL_IMPLEMENTED, Preferences};
+use photosplice_engine::prefs::{HIDDEN_UNTIL_IMPLEMENTED, Preferences};
 use std::path::{Path, PathBuf};
 
 fn snake(camel: &str) -> String {

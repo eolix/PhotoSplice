@@ -2,9 +2,9 @@
 <!-- shared-mime-info definitions for types the system database may not have.
      Installed to /usr/share/mime/packages/ (update-mime-database runs on install). -->
 <mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
-  <mime-type type="application/x-photosuite">
-    <comment>PhotoSuite document</comment>
-    <icon name="io.github.eolix.PhotoSuite"/>
+  <mime-type type="application/x-photosplice">
+    <comment>PhotoSplice document</comment>
+    <icon name="io.github.eolix.PhotoSplice"/>
     <glob pattern="*.pcraft"/>
   </mime-type>
   <mime-type type="image/x-psb">

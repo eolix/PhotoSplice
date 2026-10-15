@@ -6,18 +6,18 @@ use egui::accesskit::Role;
 use egui::{Key, Modifiers, PointerButton, Pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use photosuite_doc::LayerContent;
+use photosplice_doc::LayerContent;
 use serde_json::json;
 
 use super::{Focus, Outcome, bindings, set_dry_run, take_log};
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::shortcuts::parse;
 use crate::state::Tool;
 
 /// Background, a filled pixel layer "paint" (active, with a selection), a type layer and a group
 /// holding a layer: what a real layout PSD looks like.
-fn realistic() -> photosuite_engine::Session {
-    let mut s = photosuite_engine::Session::new();
+fn realistic() -> photosplice_engine::Session {
+    let mut s = photosplice_engine::Session::new();
     s.execute("file.new", json!({"width": 240, "height": 160})).unwrap();
     s.execute("layer.new.layer", json!({"name": "in-group"})).unwrap();
     s.execute("layer.groupLayers", json!({"name": "group"})).unwrap();
@@ -34,10 +34,10 @@ fn services() -> crate::Services {
     crate::Services { export: Some(Box::new(|_, _, _| Err("tests don't write files".into()))), ..Default::default() }
 }
 
-fn harness() -> Harness<'static, PhotosuiteApp> {
+fn harness() -> Harness<'static, PhotospliceApp> {
     let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_max_steps(64).build_eframe(|cc| {
-        PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-        PhotosuiteApp::new(realistic(), services())
+        PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+        PhotospliceApp::new(realistic(), services())
     });
     h.run_steps(8);
     h
@@ -58,7 +58,7 @@ fn platform(m: Modifiers) -> Modifiers {
     out
 }
 
-fn press(h: &mut Harness<'_, PhotosuiteApp>, sc: &str) {
+fn press(h: &mut Harness<'_, PhotospliceApp>, sc: &str) {
     let sc = parse(sc).unwrap_or_else(|| panic!("unparsable shortcut {sc}"));
     let m = platform(sc.modifiers);
     h.event(egui::Event::ModifiersChanged(m));
@@ -68,7 +68,7 @@ fn press(h: &mut Harness<'_, PhotosuiteApp>, sc: &str) {
     h.run_steps(2);
 }
 
-fn click(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2) {
+fn click(h: &mut Harness<'_, PhotospliceApp>, at: Pos2) {
     h.hover_at(at);
     h.run_steps(1);
     h.event(egui::Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
@@ -77,7 +77,7 @@ fn click(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2) {
     h.run_steps(3);
 }
 
-fn active_name(h: &Harness<'_, PhotosuiteApp>) -> String {
+fn active_name(h: &Harness<'_, PhotospliceApp>) -> String {
     let st = h.state().session.active().unwrap();
     st.active_layer.and_then(|id| st.doc.layer(id)).map(|l| l.name.clone()).unwrap_or_default()
 }
@@ -95,7 +95,7 @@ enum Place {
     FocusedWidget,
 }
 
-fn put_focus(h: &mut Harness<'_, PhotosuiteApp>, place: Place) {
+fn put_focus(h: &mut Harness<'_, PhotospliceApp>, place: Place) {
     match place {
         Place::Canvas => {
             let c = h.state().last_canvas_rect.center();
@@ -138,7 +138,7 @@ fn same(shown: &str, bound: &str) -> bool {
 }
 
 /// Every shortcut shown in the menus (and the shell's unlisted ones), with whether it is live.
-fn displayed(app: &PhotosuiteApp) -> Vec<(String, String, bool)> {
+fn displayed(app: &PhotospliceApp) -> Vec<(String, String, bool)> {
     let mut v: Vec<(String, String, bool)> = crate::menus::menu_items(app)
         .into_iter()
         .filter(|i| i.id != "---")
@@ -230,7 +230,7 @@ fn common_shortcuts_work_after_clicking_panels() {
     for place in [Place::Canvas, Place::LayersRow, Place::FocusedWidget, Place::OpacityField] {
         let mut h = harness();
         put_focus(&mut h, place);
-        let count = |h: &Harness<'_, PhotosuiteApp>| h.state().session.active().unwrap().doc.walk().len();
+        let count = |h: &Harness<'_, PhotospliceApp>| h.state().session.active().unwrap().doc.walk().len();
         let n = count(&h);
         press(&mut h, "Cmd+J");
         assert_eq!(count(&h), n + 1, "{place:?}: ⌘J duplicates the layer");
@@ -326,7 +326,7 @@ fn brush_keys_can_be_rebound() {
     app.ui.tool = Tool::Brush;
     app.run("tools.setBrush", json!({"brush": {"size": 40, "hardness": 0.5}})).unwrap();
     app.run("edit.keyboardShortcuts", json!({"set": {"tools.increaseBrushSize": "Alt+W", "tools.increaseBrushHardness": "Alt+Shift+W"}})).unwrap();
-    let brush = |h: &Harness<'_, PhotosuiteApp>| (h.state().session.tools.brush.size, h.state().session.tools.brush.hardness);
+    let brush = |h: &Harness<'_, PhotospliceApp>| (h.state().session.tools.brush.size, h.state().session.tools.brush.hardness);
     press(&mut h, "]");
     press(&mut h, "Shift+]");
     assert_eq!(brush(&h), (40.0, 0.5), "the old keys are free");
@@ -349,11 +349,11 @@ type Saved = std::rc::Rc<std::cell::RefCell<Vec<Vec<u8>>>>;
 
 /// [`harness`] with a document that saves in place, an exporter writing its top-level layer count
 /// and a writer recording it; then one new layer on top (history to undo).
-fn saving_harness() -> (Harness<'static, PhotosuiteApp>, Saved) {
+fn saving_harness() -> (Harness<'static, PhotospliceApp>, Saved) {
     let saved = Saved::default();
     let out = saved.clone();
     let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_max_steps(64).build_eframe(move |cc| {
-        PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
+        PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
         let services = crate::Services {
             export: Some(Box::new(|doc, _, _| Ok((doc.layers.len().to_string().into_bytes(), Vec::new())))),
             write: Some(Box::new(move |_, bytes| {
@@ -365,20 +365,20 @@ fn saving_harness() -> (Harness<'static, PhotosuiteApp>, Saved) {
         let mut session = realistic();
         session.active_mut().unwrap().path = Some("/tmp/layout.psd".into());
         session.execute("layer.new.layer", json!({"name": "added"})).unwrap();
-        PhotosuiteApp::new(session, services)
+        PhotospliceApp::new(session, services)
     });
     h.run_steps(8);
     put_focus(&mut h, Place::Canvas);
     (h, saved)
 }
 
-fn layer_count(h: &Harness<'_, PhotosuiteApp>) -> usize {
+fn layer_count(h: &Harness<'_, PhotospliceApp>) -> usize {
     h.state().session.active().unwrap().doc.layers.len()
 }
 
 /// Press `shortcuts` one after another within a single frame (`Harness::event` runs a frame per
 /// event).
-fn press_in_one_frame(h: &mut Harness<'_, PhotosuiteApp>, shortcuts: &[&str]) {
+fn press_in_one_frame(h: &mut Harness<'_, PhotospliceApp>, shortcuts: &[&str]) {
     let events = &mut h.input_mut().events;
     for sc in shortcuts {
         let sc = parse(sc).unwrap();
@@ -391,7 +391,7 @@ fn press_in_one_frame(h: &mut Harness<'_, PhotosuiteApp>, shortcuts: &[&str]) {
     h.run_steps(2);
 }
 
-fn logged(h: &Harness<'_, PhotosuiteApp>) -> Vec<String> {
+fn logged(h: &Harness<'_, PhotospliceApp>) -> Vec<String> {
     take_log(&h.ctx).into_iter().map(|(id, _)| id).collect()
 }
 

@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# Română translations for PhotoSuite UI.
+# Română translations for PhotoSplice UI.
 
 	File	Fișier
 	Edit	Editare
@@ -672,7 +672,7 @@
 	Timeline	Cronologie
 	Tool Presets	Presetări de unealtă
 	Tools	Unelte
-	About PhotoSuite	Despre PhotoSuite
+	About PhotoSplice	Despre PhotoSplice
 	Website	Site-ul web
 	Report an Issue…	Raportați o problemă…
 	WIA Support…	Suport WIA…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Perspective Warp nu este activ
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Deformare perspectivă: desenați avioane de-a lungul perspectivei imaginii, apoi comutați la Deformare
 	Photo Filter	Filtru de fotografie
-	PhotoSuite	PhotoSuite
-	PhotoSuite Manages Colors	PhotoSuite gestionează culorile
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite — un editor de imagini nativ, open source, scris în Rust
+	PhotoSplice	PhotoSplice
+	PhotoSplice Manages Colors	PhotoSplice gestionează culorile
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice — un editor de imagini nativ, open source, scris în Rust
 	Pin Depth:	Adâncimea pinului:
 	Pixel Length:	Lungimea pixelilor:
 	Pixels/Centimeter	Pixeli/Centimetru
@@ -1570,7 +1570,7 @@
 	Pen Tilt	Înclinarea stiloului
 	Pen Tool	Instrument stilou
 	Photo	Imagine
-	PhotoSuite website	Site-ul PhotoSuite
+	PhotoSplice website	Site-ul PhotoSplice
 	Picas	Picas
 	Pillow Emboss	Relief pernă
 	Pixel Replacement	Înlocuirea pixelilor
@@ -1877,7 +1877,7 @@
 	System Info…	Informații de sistem…
 	System Info	Informații de sistem
 	More panels	Mai multe panouri
-	These settings aren't available in PhotoSuite yet.	Aceste setări nu sunt încă disponibile în PhotoSuite
+	These settings aren't available in PhotoSplice yet.	Aceste setări nu sunt încă disponibile în PhotoSplice
 	Graphics	Grafică
 	Reset GPU Backend	Resetați GPU Backend
 	Applies at next launch.	Se aplică la următoarea lansare
@@ -2018,7 +2018,7 @@
 	Opening…	Se deschide…
 	Patch	Petic
 	Patch:	Petic:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite folosește compozitorul de imagini pe CPU. Fereastra poate folosi în continuare placa grafică.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice folosește compozitorul de imagini pe CPU. Fereastra poate folosi în continuare placa grafică.
 	Play Action	Redă acțiunea
 	Reading…	Se citește…
 	Record Action	Înregistrează acțiunea

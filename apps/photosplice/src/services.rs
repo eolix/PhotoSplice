@@ -1,17 +1,17 @@
 //! Native platform services: file dialogs (rfd), filesystem, codecs.
 
-use photosuite_codecs::{ChannelLayout, EncodeOptions, Image, SampleType as CS};
-use photosuite_color::{ColorMode, SampleType};
-use photosuite_doc::{Document, Layer, Size};
-use photosuite_format::RecoveryStore;
-use photosuite_geom::Rect;
-use photosuite_ui_egui::{Recovered, Services};
+use photosplice_codecs::{ChannelLayout, EncodeOptions, Image, SampleType as CS};
+use photosplice_color::{ColorMode, SampleType};
+use photosplice_doc::{Document, Layer, Size};
+use photosplice_format::RecoveryStore;
+use photosplice_geom::Rect;
+use photosplice_ui_egui::{Recovered, Services};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-/// Everything File › Open reads: PhotoSuite and Photoshop documents, flat images, and Photoshop
+/// Everything File › Open reads: PhotoSplice and Photoshop documents, flat images, and Photoshop
 /// brushes (.abr) and gradients (.grd), which go to the preset libraries.
 const OPEN_EXTS: &[&str] = &[
     "pcraft", "psd", "psb", "psdt", "png", "jpg", "jpeg", "tif", "tiff", "webp", "gif", "bmp", "tga", "ico", "qoi", "exr", "hdr", "pbm", "pgm", "ppm", "pam",
@@ -43,7 +43,7 @@ fn save_filters(suggested: &str) -> Vec<(&'static str, &'static [&'static str])>
     v
 }
 
-/// Per-user settings directory: `PHOTOSUITE_CONFIG_DIR`, else `<exe dir>/PhotoSuiteData` in
+/// Per-user settings directory: `PHOTOSPLICE_CONFIG_DIR`, else `<exe dir>/PhotoSpliceData` in
 /// portable mode, else the platform convention. Everything the app persists lives under it; see
 /// [`crate::app_dirs`].
 pub fn config_dir() -> Option<PathBuf> {
@@ -55,7 +55,7 @@ pub fn prefs_file() -> Option<PathBuf> {
 }
 
 /// The brush preset store (one file per preset group plus tip bitmaps; see
-/// `photosuite_engine::preset_store`).
+/// `photosplice_engine::preset_store`).
 pub fn presets_dir() -> Option<PathBuf> {
     config_dir().map(|d| d.join("Presets"))
 }
@@ -65,37 +65,37 @@ fn recovery_dir() -> Option<PathBuf> {
 }
 
 /// Write `bytes` crash-safely (temp file beside the target, fsync, rename, directory fsync; see
-/// [`photosuite_format::atomic`]). Every document write (Save, Save As, Export, Save for Web) and
+/// [`photosplice_format::atomic`]). Every document write (Save, Save As, Export, Save for Web) and
 /// the preferences go through here, so a failed or interrupted save never destroys the old file.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    photosuite_format::atomic_write(path, bytes).map_err(|e| e.to_string())
+    photosplice_format::atomic_write(path, bytes).map_err(|e| e.to_string())
 }
 
 /// Where the bundled resources live, first match wins:
 ///
-/// 1. `PHOTOSUITE_RESOURCES`, to point a build at another copy;
+/// 1. `PHOTOSPLICE_RESOURCES`, to point a build at another copy;
 /// 2. the app bundle, `Contents/Resources/resources` on macOS;
 /// 3. a `resources` folder beside the executable (Windows, portable installs), or
-///    `../share/photosuite/resources` relative to it (Linux and FreeBSD packages);
+///    `../share/photosplice/resources` relative to it (Linux and FreeBSD packages);
 /// 4. `resources/` in the source checkout, for development builds.
 pub fn resources_dir() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("PHOTOSUITE_RESOURCES").map(PathBuf::from).filter(|p| p.is_dir()) {
+    if let Some(p) = std::env::var_os("PHOTOSPLICE_RESOURCES").map(PathBuf::from).filter(|p| p.is_dir()) {
         return Some(p);
     }
     let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
     let candidates = [
         exe_dir.join("../Resources/resources"),
         exe_dir.join("resources"),
-        exe_dir.join("../share/photosuite/resources"),
+        exe_dir.join("../share/photosplice/resources"),
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../resources"),
     ];
     candidates.into_iter().find(|p| p.is_dir()).and_then(|p| p.canonicalize().ok())
 }
 
 /// The preset libraries in `resources/` and the panel groups they become (see
-/// `photosuite_ui_egui::bundled`). Licences are beside each file and in THIRD-PARTY-NOTICES.md.
-pub fn bundled_libraries() -> Vec<photosuite_ui_egui::bundled::Library> {
-    use photosuite_ui_egui::bundled::{Kind, Library};
+/// `photosplice_ui_egui::bundled`). Licences are beside each file and in THIRD-PARTY-NOTICES.md.
+pub fn bundled_libraries() -> Vec<photosplice_ui_egui::bundled::Library> {
+    use photosplice_ui_egui::bundled::{Kind, Library};
     let Some(root) = resources_dir() else { return Vec::new() };
     [
         (Kind::Gradients, "uiGradients", "gradients/uigradients.grd"),
@@ -117,7 +117,7 @@ pub fn bundled_libraries() -> Vec<photosuite_ui_egui::bundled::Library> {
 /// time Lens Correction needs them; without the file it keeps its generic profiles.
 pub fn register_lens_profiles() {
     let Some(path) = resources_dir().map(|d| d.join("lensfun/lens-database.json")) else { return };
-    photosuite_engine::lens_cmds::set_lens_database_loader(Box::new(move || match std::fs::read(&path) {
+    photosplice_engine::lens_cmds::set_lens_database_loader(Box::new(move || match std::fs::read(&path) {
         Ok(b) => Some(b),
         Err(e) => {
             log::warn!("lens profiles not loaded from {}: {e}", path.display());
@@ -173,40 +173,40 @@ fn image_from_files(paths: &[PathBuf]) -> Option<(u32, u32, Vec<u8>)> {
         // TGA has no magic number and is only guessed from the header, so trust the extension
         // too before reading what may be a large non-image file.
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        match photosuite_codecs::detect(&head)? {
-            photosuite_codecs::Format::Tga if photosuite_codecs::from_extension(ext) != Some(photosuite_codecs::Format::Tga) => return None,
+        match photosplice_codecs::detect(&head)? {
+            photosplice_codecs::Format::Tga if photosplice_codecs::from_extension(ext) != Some(photosplice_codecs::Format::Tga) => return None,
             _ => {}
         }
-        let img = photosuite_codecs::decode(&std::fs::read(&path).ok()?).ok()?;
+        let img = photosplice_codecs::decode(&std::fs::read(&path).ok()?).ok()?;
         Some((img.width(), img.height(), img.to_rgba8()))
     })
 }
 
-pub fn native(automation: Option<photosuite_automation::AuthorizedWorkspace>) -> Services {
+pub fn native(automation: Option<photosplice_automation::AuthorizedWorkspace>) -> Services {
     let clip: Rc<RefCell<Option<arboard::Clipboard>>> = Rc::default();
     let automation_read = automation.clone().map(|workspace| {
         Box::new(move |path: &str| {
             let bytes = workspace.read(path).map_err(|error| error.to_string())?;
             let name = Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or(path).to_string();
             Ok((name, bytes))
-        }) as photosuite_ui_egui::AutomationReadFn
+        }) as photosplice_ui_egui::AutomationReadFn
     });
     let automation_write = automation.clone().map(|workspace| {
-        Box::new(move |path: &str, bytes: &[u8]| workspace.write(path, bytes).map_err(|error| error.to_string())) as photosuite_ui_egui::AutomationWriteFn
+        Box::new(move |path: &str, bytes: &[u8]| workspace.write(path, bytes).map_err(|error| error.to_string())) as photosplice_ui_egui::AutomationWriteFn
     });
-    let step: fn(&str, &serde_json::Value) -> photosuite_engine::Result<()> = photosuite_automation::workspace::authorize_desktop_engine_step;
+    let step: fn(&str, &serde_json::Value) -> photosplice_engine::Result<()> = photosplice_automation::workspace::authorize_desktop_engine_step;
     let automation_authorize = automation.is_some().then_some(step);
     let automation_command = automation.map(|_| {
         Box::new(|id: &str, params: &serde_json::Value| {
-            photosuite_automation::workspace::authorize_desktop_engine_command(id, params).map_err(|error| error.to_string())
-        }) as photosuite_ui_egui::AutomationCommandFn
+            photosplice_automation::workspace::authorize_desktop_engine_command(id, params).map_err(|error| error.to_string())
+        }) as photosplice_ui_egui::AutomationCommandFn
     });
     Services {
         import: Some(Box::new(|name: &str, bytes: &[u8]| {
-            crate::crash_guard::guard("Open", || photosuite_io::import(name, bytes).map(|r| (r.document, r.warnings)).map_err(|e| e.to_string()))
+            crate::crash_guard::guard("Open", || photosplice_io::import(name, bytes).map(|r| (r.document, r.warnings)).map_err(|e| e.to_string()))
         })),
-        export: Some(Box::new(|doc: &Document, path: &str, settings: &photosuite_ui_egui::ExportSettings| {
-            let mut opts = photosuite_io::ExportOptions::default();
+        export: Some(Box::new(|doc: &Document, path: &str, settings: &photosplice_ui_egui::ExportSettings| {
+            let mut opts = photosplice_io::ExportOptions::default();
             if let Some(q) = settings.jpeg_quality {
                 opts.encode.jpeg_quality = q;
             }
@@ -217,12 +217,12 @@ pub fn native(automation: Option<photosuite_automation::AuthorizedWorkspace>) ->
             opts.tiff_layers = settings.tiff_layers;
             opts.pdf_discard_editing = !settings.pdf_editing;
             opts.selected_layers = settings.selected_layers.clone();
-            crate::crash_guard::guard("Export", || photosuite_io::export(doc, path, &opts).map(|r| (r.bytes, r.warnings)).map_err(|e| e.to_string()))
+            crate::crash_guard::guard("Export", || photosplice_io::export(doc, path, &opts).map(|r| (r.bytes, r.warnings)).map_err(|e| e.to_string()))
         })),
         pick_open: Some(Box::new(|| {
-            let path = rfd::FileDialog::new().add_filter("All Formats", OPEN_EXTS).add_filter("PhotoSuite", &["pcraft"]).pick_file()?;
+            let path = rfd::FileDialog::new().add_filter("All Formats", OPEN_EXTS).add_filter("PhotoSplice", &["pcraft"]).pick_file()?;
             // A read failure goes back to the app, which reports it like any other open failure.
-            let bytes = photosuite_format::read_file(&path).map_err(|e| e.to_string());
+            let bytes = photosplice_format::read_file(&path).map_err(|e| e.to_string());
             Some((path.to_string_lossy().to_string(), bytes))
         })),
         pick_file: Some(Box::new(|filter: &str, exts: &[&str]| {
@@ -235,7 +235,7 @@ pub fn native(automation: Option<photosuite_automation::AuthorizedWorkspace>) ->
         pick_open_paths: Some(Box::new(|| {
             rfd::FileDialog::new()
                 .add_filter("All Formats", OPEN_EXTS)
-                .add_filter("PhotoSuite", &["pcraft"])
+                .add_filter("PhotoSplice", &["pcraft"])
                 .pick_files()
                 .map(|paths| paths.into_iter().map(|path| path.to_string_lossy().into_owned()).collect())
         })),
@@ -257,7 +257,7 @@ pub fn native(automation: Option<photosuite_automation::AuthorizedWorkspace>) ->
         automation_authorize,
         encode_png: Some(Box::new(|w, h, rgba| {
             let img = Image::from_u8(w, h, ChannelLayout::Rgba, rgba.to_vec()).map_err(|e| e.to_string())?;
-            photosuite_codecs::encode(&img, photosuite_codecs::Format::Png, &EncodeOptions::default()).map_err(|e| e.to_string())
+            photosplice_codecs::encode(&img, photosplice_codecs::Format::Png, &EncodeOptions::default()).map_err(|e| e.to_string())
         })),
         inbox: None,
         open_url: Some(Box::new(|url: &str| open::that(url).map_err(|e| e.to_string()))),
@@ -304,10 +304,10 @@ pub fn native(automation: Option<photosuite_automation::AuthorizedWorkspace>) ->
     }
 }
 
-/// Flat-image import via photosuite-codecs (kept for reference/tests; the app uses photosuite-io).
+/// Flat-image import via photosplice-codecs (kept for reference/tests; the app uses photosplice-io).
 #[allow(dead_code)]
 pub fn import_flat(name: &str, bytes: &[u8]) -> Result<Document, String> {
-    let img = photosuite_codecs::decode(bytes).map_err(|e| e.to_string())?;
+    let img = photosplice_codecs::decode(bytes).map_err(|e| e.to_string())?;
     let (w, h) = (img.width(), img.height());
     let depth = match img.sample_type() {
         CS::U8 => SampleType::U8,
@@ -349,8 +349,8 @@ pub fn import_flat(name: &str, bytes: &[u8]) -> Result<Document, String> {
 
 #[allow(dead_code)]
 pub fn export_flat(doc: &Document, path: &str) -> Result<Vec<u8>, String> {
-    let format = photosuite_codecs::from_extension(path).ok_or_else(|| format!("unknown file type for {path}"))?;
-    let buf = photosuite_compose::flatten(doc);
+    let format = photosplice_codecs::from_extension(path).ok_or_else(|| format!("unknown file type for {path}"))?;
+    let buf = photosplice_compose::flatten(doc);
     let (w, h) = (buf.rect.width(), buf.rect.height());
     let data: Vec<f32> = buf.px.iter().flat_map(|p| *p).collect();
     let img = match doc.depth {
@@ -363,15 +363,15 @@ pub fn export_flat(doc: &Document, path: &str) -> Result<Vec<u8>, String> {
         Some(icc) if doc.mode == ColorMode::Rgb => img.with_icc(Some((**icc).clone())),
         _ => img,
     };
-    photosuite_codecs::encode(&img, format, &EncodeOptions::default()).map_err(|e| e.to_string())
+    photosplice_codecs::encode(&img, format, &EncodeOptions::default()).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_engine::Session;
-    use photosuite_format::list_recovery;
-    use photosuite_ui_egui::{PhotosuiteApp, prefs_ui};
+    use photosplice_engine::Session;
+    use photosplice_format::list_recovery;
+    use photosplice_ui_egui::{PhotospliceApp, prefs_ui};
     use serde_json::json;
 
     /// "Export As" formats must lead with their own filter, or the save panel appends the first one's extension (`photo.webp.psd`).
@@ -388,32 +388,32 @@ mod tests {
 
     /// One app launch with crash recovery in `dir` (dropping it is the crash: background writes
     /// already queued finish, nothing else runs).
-    fn launch(dir: &Path) -> PhotosuiteApp {
-        PhotosuiteApp::new(Session::new(), recovery_services(Some(dir.to_path_buf())))
+    fn launch(dir: &Path) -> PhotospliceApp {
+        PhotospliceApp::new(Session::new(), recovery_services(Some(dir.to_path_buf())))
     }
 
     /// The first pixel of each open document, and whether it's unsaved.
-    fn open_docs(app: &PhotosuiteApp) -> Vec<([f32; 4], bool)> {
-        app.session.documents().iter().map(|d| (photosuite_compose::flatten(&d.doc).px.first().copied().unwrap_or_default(), d.is_dirty())).collect()
+    fn open_docs(app: &PhotospliceApp) -> Vec<([f32; 4], bool)> {
+        app.session.documents().iter().map(|d| (photosplice_compose::flatten(&d.doc).px.first().copied().unwrap_or_default(), d.is_dirty())).collect()
     }
 
-    fn index_of(app: &PhotosuiteApp, color: [f32; 4]) -> usize {
+    fn index_of(app: &PhotospliceApp, color: [f32; 4]) -> usize {
         open_docs(app).iter().position(|(c, _)| *c == color).unwrap()
     }
 
-    fn new_doc(app: &mut PhotosuiteApp, color: &str) {
+    fn new_doc(app: &mut PhotospliceApp, color: &str) {
         app.run("file.new", json!({"width": 4, "height": 4})).unwrap();
         app.run("edit.fill", json!({"color": color})).unwrap();
     }
 
-    fn autosave(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+    fn autosave(app: &mut PhotospliceApp, ctx: &egui::Context) {
         prefs_ui::autosave_now(app);
         prefs_ui::tick(app, ctx);
     }
 
     #[test]
     fn recovered_documents_survive_a_second_crash_until_saved_or_closed() {
-        let dir = std::env::temp_dir().join(format!("photosuite-recovery-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("photosplice-recovery-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let ctx = egui::Context::default();
         // Launch 1: two unsaved documents are autosaved, then the app crashes.
@@ -455,7 +455,7 @@ mod tests {
         prefs_ui::tick(&mut app, &ctx);
         let left = list_recovery(&dir);
         assert_eq!(left.len(), 1);
-        assert_eq!(photosuite_compose::flatten(&photosuite_format::recover(&left[0]).unwrap()).px.first().copied(), Some(GREEN));
+        assert_eq!(photosplice_compose::flatten(&photosplice_format::recover(&left[0]).unwrap()).px.first().copied(), Some(GREEN));
         let green = index_of(&app, GREEN);
         app.run("file.close", json!({"document": green})).unwrap();
         prefs_ui::tick(&mut app, &ctx);
@@ -468,7 +468,7 @@ mod tests {
 
     fn temp(tag: &str) -> PathBuf {
         static N: AtomicUsize = AtomicUsize::new(0);
-        let d = std::env::temp_dir().join(format!("photosuite-services-{tag}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        let d = std::env::temp_dir().join(format!("photosplice-services-{tag}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -476,7 +476,7 @@ mod tests {
 
     fn red_png(w: u32, h: u32) -> Vec<u8> {
         let img = Image::from_u8(w, h, ChannelLayout::Rgba, [255u8, 0, 0, 255].repeat((w * h) as usize)).unwrap();
-        photosuite_codecs::encode(&img, photosuite_codecs::Format::Png, &EncodeOptions::default()).unwrap()
+        photosplice_codecs::encode(&img, photosplice_codecs::Format::Png, &EncodeOptions::default()).unwrap()
     }
 
     /// A 1×1 uncompressed 32-bit TGA (TGA has no magic number).

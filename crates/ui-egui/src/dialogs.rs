@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::state::{Dialog, DialogKind};
 use crate::widgets::{ButtonRole, DialogButton, dialog_buttons};
 
@@ -150,7 +150,7 @@ pub fn free_press(ctx: &egui::Context, canvas: egui::Rect) -> Option<egui::Pos2>
     })
 }
 
-pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let dialogs = app.ui.dialogs.clone();
     let mut shown = Vec::new();
     for d in dialogs {
@@ -207,14 +207,14 @@ pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
                     }
                 }
                 DialogKind::About => {
-                    ui.label(tl!("PhotoSuite — an open-source, native image editor written in Rust."));
-                    ui.label(crate::i18n::fmt(tl!("Version {version}"), &[("version", &photosuite_engine::build_info::long_version())]));
+                    ui.label(tl!("PhotoSplice — an open-source, native image editor written in Rust."));
+                    ui.label(crate::i18n::fmt(tl!("Version {version}"), &[("version", &photosplice_engine::build_info::long_version())]));
                     ui.add_space(12.0);
                     ui.vertical_centered(|ui| {
                         crate::links::link_row(app, ui);
                     });
                     ui.add_space(10.0);
-                    ui.weak("egui · wgpu · photosuite-engine");
+                    ui.weak("egui · wgpu · photosplice-engine");
                 }
                 DialogKind::Command if crate::fill_ui::owns(&fields) => crate::fill_ui::body(app, ui, &mut fields),
                 DialogKind::Command if crate::rasterize_prompt::owns(&fields) => crate::rasterize_prompt::body(ui, &fields),
@@ -342,7 +342,7 @@ pub fn title(d: &Dialog) -> String {
         DialogKind::NewDocument => "New Document".into(),
         DialogKind::About if d.fields.get("systemInfo").and_then(Value::as_bool) == Some(true) => "System Info".into(),
         DialogKind::About if crate::notices_ui::owns(&d.fields) => "Third-Party Notices".into(),
-        DialogKind::About => "About PhotoSuite".into(),
+        DialogKind::About => "About PhotoSplice".into(),
         DialogKind::LayerStyle => "Layer Style".into(),
         DialogKind::Command => d.fields.get("__label").and_then(Value::as_str).unwrap_or("Command").trim_end_matches('…').to_string(),
         DialogKind::Error => "Error".into(),
@@ -350,7 +350,7 @@ pub fn title(d: &Dialog) -> String {
 }
 
 /// Confirm a dialog: run its action and close it. Used by the OK button and by automation.
-pub fn confirm(app: &mut PhotosuiteApp, id: u64) -> Result<Value, String> {
+pub fn confirm(app: &mut PhotospliceApp, id: u64) -> Result<Value, String> {
     let d = app.ui.close_dialog(id).ok_or_else(|| format!("no dialog {id}"))?;
     match d.kind {
         DialogKind::NewDocument => {
@@ -385,7 +385,7 @@ pub fn confirm(app: &mut PhotosuiteApp, id: u64) -> Result<Value, String> {
 /// Open the parameter dialog of `command`: the adjustment editor for `image.adjustments.*`, the
 /// schema dialog for filters, the Color Range dialog for `select.colorRange`, otherwise a bare
 /// confirm dialog.
-pub fn open_command_dialog(app: &mut PhotosuiteApp, command: &str, label: &str) -> u64 {
+pub fn open_command_dialog(app: &mut PhotospliceApp, command: &str, label: &str) -> u64 {
     if command == crate::color_range_ui::COMMAND {
         return crate::color_range_ui::open(app);
     }
@@ -414,7 +414,7 @@ mod tests {
     fn dialogs_open_centred_and_share_one_frame() {
         use egui_kittest::{Harness, kittest::Queryable};
 
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.run("file.new", serde_json::json!({"width": 64, "height": 48})).unwrap();
         let mut h = Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
             |ui, app| {
@@ -423,7 +423,7 @@ mod tests {
             },
             app,
         );
-        PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
         h.state_mut().ui.open_dialog(DialogKind::LayerStyle, serde_json::Map::new());
         h.run_steps(4);
         let bounds = crate::widgets::dialog_bounds(&h.ctx);
@@ -450,9 +450,9 @@ mod tests {
     fn dragging_the_title_bar_moves_the_dialog() {
         use egui_kittest::{Harness, kittest::Queryable};
 
-        let app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         let mut harness = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_ui_state(|ui, app| show(app, ui.ctx()), app);
-        PhotosuiteApp::setup_context(&harness.ctx, crate::theme::ThemeKind::ALL[0]);
+        PhotospliceApp::setup_context(&harness.ctx, crate::theme::ThemeKind::ALL[0]);
         harness.state_mut().ui.open_dialog(DialogKind::LayerStyle, serde_json::Map::new());
         harness.run_steps(3);
         let before = harness.get_by_label("Layer Style").rect();

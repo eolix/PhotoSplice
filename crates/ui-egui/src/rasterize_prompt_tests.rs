@@ -1,13 +1,13 @@
 use egui::Modifiers;
-use photosuite_doc::LayerContent;
+use photosplice_doc::LayerContent;
 use serde_json::json;
 
 use super::*;
 use crate::canvas::tool_event;
 
 /// A document whose active layer is a `kind` layer over a white Background.
-fn app_with(kind: Kind) -> PhotosuiteApp {
-    let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+fn app_with(kind: Kind) -> PhotospliceApp {
+    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
     app.run("file.new", json!({"width": 120, "height": 80})).unwrap();
     match kind {
         Kind::Type => app.run("type.create", json!({"x": 10, "y": 40, "text": "Hello"})).map(|_| ()),
@@ -24,21 +24,21 @@ fn app_with(kind: Kind) -> PhotosuiteApp {
     app
 }
 
-fn active_content(app: &PhotosuiteApp) -> &'static str {
+fn active_content(app: &PhotospliceApp) -> &'static str {
     let st = app.session.active().unwrap();
     st.doc.layer(st.active_layer.unwrap()).unwrap().content.kind_name()
 }
 
-fn past(app: &PhotosuiteApp) -> usize {
+fn past(app: &PhotospliceApp) -> usize {
     app.session.active().unwrap().history.past_len()
 }
 
-fn click(app: &mut PhotosuiteApp, x: f64, y: f64) {
+fn click(app: &mut PhotospliceApp, x: f64, y: f64) {
     tool_event(app, ToolEvent::Down { x, y, pressure: 1.0 }, Modifiers::NONE);
     tool_event(app, ToolEvent::Up { x, y }, Modifiers::NONE);
 }
 
-fn prompt(app: &PhotosuiteApp) -> Option<&crate::state::Dialog> {
+fn prompt(app: &PhotospliceApp) -> Option<&crate::state::Dialog> {
     app.ui.dialogs.iter().find(|d| owns(&d.fields))
 }
 
@@ -152,7 +152,7 @@ fn the_control_channel_sees_and_confirms_the_prompt() {
     let mut app = app_with(Kind::Shape);
     let ctx = egui::Context::default();
     app.ui.tool = Tool::Pencil;
-    let call = |app: &mut PhotosuiteApp, method: &str, params: serde_json::Value| {
+    let call = |app: &mut PhotospliceApp, method: &str, params: serde_json::Value| {
         let (req, _rx) = crate::control::ControlRequest::new(method, params);
         match crate::control::handle(app, &ctx, &req) {
             crate::control::Outcome::Done(v) => v,

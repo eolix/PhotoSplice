@@ -1,4 +1,4 @@
-//! `plugin.*` commands: sandboxed WebAssembly filter plug-ins (`photosuite-plugins`).
+//! `plugin.*` commands: sandboxed WebAssembly filter plug-ins (`photosplice-plugins`).
 //!
 //! Plug-ins are installed per process (`plugin.install`, or the Plug-ins preference folder),
 //! listed with `plugin.list` and run with `plugin.run` on the active pixel layer, a targeted
@@ -7,9 +7,9 @@
 
 use std::sync::Mutex;
 
-use photosuite_doc::{LayerContent, SmartFilter};
-use photosuite_plugins::{Plugin, registry};
-use photosuite_raster::Surface;
+use photosplice_doc::{LayerContent, SmartFilter};
+use photosplice_plugins::{Plugin, registry};
+use photosplice_raster::Surface;
 use serde_json::{Map, Value, json};
 
 use crate::commands::CommandSpec;
@@ -22,7 +22,7 @@ fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
     EngineError::BadParams { cmd: cmd.into(), msg: msg.into() }
 }
 
-fn err(e: photosuite_plugins::Error) -> EngineError {
+fn err(e: photosplice_plugins::Error) -> EngineError {
     EngineError::Other(e.to_string())
 }
 
@@ -59,7 +59,7 @@ fn plugin_params(p: &Value) -> Value {
 
 fn plugin_by_id(cmd: &str, p: &Value) -> Result<std::sync::Arc<Plugin>> {
     let id = p.get("id").and_then(Value::as_str).ok_or_else(|| bad(cmd, "missing `id` (see plugin.list)"))?;
-    registry::get(id).ok_or_else(|| err(photosuite_plugins::Error::NotFound(id.into())))
+    registry::get(id).ok_or_else(|| err(photosplice_plugins::Error::NotFound(id.into())))
 }
 
 fn run(s: &mut Session, p: &Value) -> Result<Value> {
@@ -87,7 +87,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
                 let sf = SmartFilter {
                     command: RUN.into(),
                     params: json!({"id": id, "params": resolved}),
-                    blend: photosuite_color::BlendMode::Normal,
+                    blend: photosplice_color::BlendMode::Normal,
                     opacity: 1.0,
                     visible: true,
                 };
@@ -102,7 +102,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
 /// Smart-filter re-render of a recorded `plugin.run` (see `filters::apply_filter_to_surface`).
 /// `None` when `command` isn't a plug-in run or the plug-in isn't installed (the smart filter is
 /// then skipped, as for other unknown filters) or fails.
-pub(crate) fn apply_to_surface(command: &str, params: &Value, surf: &Surface, selection: Option<&Surface>, canvas: photosuite_geom::Rect) -> Option<Surface> {
+pub(crate) fn apply_to_surface(command: &str, params: &Value, surf: &Surface, selection: Option<&Surface>, canvas: photosplice_geom::Rect) -> Option<Surface> {
     if command != RUN {
         return None;
     }
@@ -148,7 +148,7 @@ fn install(_s: &mut Session, p: &Value) -> Result<Value> {
             return Err(bad(CMD, "`data` is larger than the module limit"));
         }
         let bytes = b64_decode(data).ok_or_else(|| bad(CMD, "`data` is not valid base64"))?;
-        Plugin::load(&bytes, photosuite_plugins::Limits::default()).map_err(err)?
+        Plugin::load(&bytes, photosplice_plugins::Limits::default()).map_err(err)?
     } else if let Some(path) = p.get("path") {
         let path = path.as_str().filter(|s| !s.is_empty()).ok_or_else(|| bad(CMD, "`path` must be a file path"))?;
         load_path(path)?
@@ -164,7 +164,7 @@ fn install(_s: &mut Session, p: &Value) -> Result<Value> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn load_path(path: &str) -> Result<Plugin> {
-    registry::load_file(std::path::Path::new(path), photosuite_plugins::Limits::default()).map_err(err)
+    registry::load_file(std::path::Path::new(path), photosplice_plugins::Limits::default()).map_err(err)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -254,7 +254,7 @@ pub fn specs() -> Vec<CommandSpec> {
             enabled: always,
             run: |_, p| {
                 let id = p.get("id").and_then(Value::as_str).ok_or_else(|| bad("plugin.remove", "missing `id`"))?;
-                if registry::remove(id) { Ok(json!({"removed": id})) } else { Err(err(photosuite_plugins::Error::NotFound(id.into()))) }
+                if registry::remove(id) { Ok(json!({"removed": id})) } else { Err(err(photosplice_plugins::Error::NotFound(id.into()))) }
             },
             journal: false,
         },

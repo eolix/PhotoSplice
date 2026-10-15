@@ -10,15 +10,15 @@
 //! mask to load it as a selection, and click the vector mask to target it (brackets).
 
 use egui::{Color32, Painter, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
-use photosuite_doc::{Document, Layer, LayerId, VectorMask};
+use photosplice_doc::{Document, Layer, LayerId, VectorMask};
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::theme::Tokens;
 
 /// Width of the link-chain slot in front of a mask thumbnail.
 pub const CHAIN_W: f32 = 12.0;
-/// Thumbnail cache kinds (the second half of `PhotosuiteApp::thumbs` keys).
+/// Thumbnail cache kinds (the second half of `PhotospliceApp::thumbs` keys).
 pub const THUMB_LAYER: u8 = 0;
 pub const THUMB_MASK: u8 = 1;
 pub const THUMB_VECTOR: u8 = 2;
@@ -95,7 +95,7 @@ impl MaskRects {
 /// gap), advancing `*x` past them, and push chain clicks as commands.
 #[allow(clippy::too_many_arguments)]
 pub fn paint(
-    app: &mut PhotosuiteApp,
+    app: &mut PhotospliceApp,
     ctx: &egui::Context,
     ui: &egui::Ui,
     painter: &Painter,
@@ -185,7 +185,7 @@ pub fn click_command(l: &Layer, kind: MaskKind, m: egui::Modifiers) -> Option<(S
     }
     if m.alt {
         let mode = if m.shift { "toggleOverlay" } else { "toggleGray" };
-        return (kind == MaskKind::Pixel && l.mask.is_some()).then(|| (photosuite_engine::mask_view_cmds::ID.into(), json!({"layer": l.id.0, "mode": mode})));
+        return (kind == MaskKind::Pixel && l.mask.is_some()).then(|| (photosplice_engine::mask_view_cmds::ID.into(), json!({"layer": l.id.0, "mode": mode})));
     }
     if !m.shift {
         return None;
@@ -205,8 +205,8 @@ pub fn load_params(l: &Layer, kind: MaskKind, m: egui::Modifiers) -> Value {
 }
 
 /// The active layer of `st` has a vector mask (shape layers' paths are content, not masks).
-pub fn has_vector_mask(st: &photosuite_engine::DocState) -> bool {
-    st.active_layer.and_then(|id| st.doc.layer(id)).is_some_and(|l| l.vector_mask.is_some() && !matches!(l.content, photosuite_doc::LayerContent::Shape(_)))
+pub fn has_vector_mask(st: &photosplice_engine::DocState) -> bool {
+    st.active_layer.and_then(|id| st.doc.layer(id)).is_some_and(|l| l.vector_mask.is_some() && !matches!(l.content, photosplice_doc::LayerContent::Shape(_)))
 }
 
 /// Photoshop's target brackets: corner marks just outside thumbnail `r`.
@@ -234,7 +234,7 @@ pub fn brackets(ctx: &egui::Context) -> Option<Rect> {
 pub fn vector_fingerprint(m: &VectorMask) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let mut mix = |v: u64| h = (h ^ v).wrapping_mul(0x100_0000_01b3);
-    mix(u64::from(m.path.inverted) | u64::from(m.path.fill_rule == photosuite_doc::FillRule::EvenOdd) << 1);
+    mix(u64::from(m.path.inverted) | u64::from(m.path.fill_rule == photosplice_doc::FillRule::EvenOdd) << 1);
     mix(u64::from(m.density.to_bits()));
     for s in &m.path.subpaths {
         mix(u64::from(s.closed) | (s.op as u64) << 1 | (s.knots.len() as u64) << 8);
@@ -255,9 +255,9 @@ pub fn vector_thumb_image(doc: &Document, m: &VectorMask, side: usize) -> egui::
     let (w, h) = (f64::from(doc.size.width.max(1)), f64::from(doc.size.height.max(1)));
     let s = side as f64 / w.max(h);
     let (ox, oy) = ((side as f64 - w * s) / 2.0, (side as f64 - h * s) / 2.0);
-    let shown = VectorMask { path: m.path.transform(&photosuite_geom::Affine { m: [s, 0.0, 0.0, s, ox, oy] }), enabled: true, ..m.clone() };
+    let shown = VectorMask { path: m.path.transform(&photosplice_geom::Affine { m: [s, 0.0, 0.0, s, ox, oy] }), enabled: true, ..m.clone() };
     let n = side as i32;
-    let values = photosuite_vector::vector_mask_values(&shown, photosuite_geom::Rect::new(0, 0, n, n));
+    let values = photosplice_vector::vector_mask_values(&shown, photosplice_geom::Rect::new(0, 0, n, n));
     let (x0, y0, x1, y1) = (ox.floor() as usize, oy.floor() as usize, (ox + w * s).ceil() as usize, (oy + h * s).ceil() as usize);
     let mut px = vec![Color32::TRANSPARENT; side * side];
     for (i, p) in px.iter_mut().enumerate() {
@@ -271,7 +271,7 @@ pub fn vector_thumb_image(doc: &Document, m: &VectorMask, side: usize) -> egui::
     egui::ColorImage::new([side, side], px)
 }
 
-impl PhotosuiteApp {
+impl PhotospliceApp {
     /// Cached thumbnail of `l`'s vector mask (see [`vector_thumb_image`]).
     pub fn vector_mask_thumb(&mut self, ctx: &egui::Context, doc: &Document, id: LayerId, m: &VectorMask) -> egui::TextureId {
         let rev = vector_fingerprint(m) ^ (u64::from(doc.size.width) << 40) ^ (u64::from(doc.size.height) << 20);

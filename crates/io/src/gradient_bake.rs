@@ -8,7 +8,7 @@
 //! colours (end tangents at half the chord slope); Perceptual interpolates in Oklab, Linear in
 //! linear light, Classic in sRGB. Stop midpoints remap each segment piecewise-linearly.
 
-use photosuite_color::{Color, ColorMode};
+use photosplice_color::{Color, ColorMode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Method {

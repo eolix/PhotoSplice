@@ -4,22 +4,22 @@
 
 use egui::{Modifiers, PointerButton, Pos2, vec2};
 use egui_kittest::Harness;
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 use serde_json::json;
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::ViewXform;
 use crate::state::Tool;
 
-fn harness() -> Harness<'static, PhotosuiteApp> {
-    let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+fn harness() -> Harness<'static, PhotospliceApp> {
+    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
     app.run("file.new", json!({"width": 400, "height": 300})).unwrap();
     app.sync_views();
     app.ui.extras.rulers = false;
     app.ui.tool = Tool::PolygonLasso;
     // 60 fps, so a double-click's two clicks fall inside egui's 0.3 s window.
     let mut h = Harness::builder().with_size(vec2(1000.0, 700.0)).with_step_dt(1.0 / 60.0).build_ui_state(
-        |ui, app: &mut PhotosuiteApp| {
+        |ui, app: &mut PhotospliceApp| {
             let ctx = ui.ctx().clone();
             if !ctx.fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                 return;
@@ -29,7 +29,7 @@ fn harness() -> Harness<'static, PhotosuiteApp> {
         },
         app,
     );
-    PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+    PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
     h.run_steps(4);
     // 100 %: one document pixel per point.
     let v = &mut h.state_mut().ui.views[0];
@@ -40,20 +40,20 @@ fn harness() -> Harness<'static, PhotosuiteApp> {
     h
 }
 
-fn screen(h: &Harness<'static, PhotosuiteApp>, x: f32, y: f32) -> Pos2 {
+fn screen(h: &Harness<'static, PhotospliceApp>, x: f32, y: f32) -> Pos2 {
     let app = h.state();
     let v = &app.ui.views[0];
     let xf = ViewXform { rect: crate::rulers::content_rect(app, app.last_canvas_rect), zoom: v.zoom, center: v.center, flip: app.ui.view.flip_horizontal };
     xf.to_screen(x, y)
 }
 
-fn button(h: &mut Harness<'static, PhotosuiteApp>, p: Pos2, down: bool, m: Modifiers) {
+fn button(h: &mut Harness<'static, PhotospliceApp>, p: Pos2, down: bool, m: Modifiers) {
     h.event(egui::Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: down, modifiers: m });
     h.run_steps(1);
 }
 
 /// A click at document point `(x, y)`, the pointer still between press and release.
-fn click(h: &mut Harness<'static, PhotosuiteApp>, x: f32, y: f32, m: Modifiers) {
+fn click(h: &mut Harness<'static, PhotospliceApp>, x: f32, y: f32, m: Modifiers) {
     let p = screen(h, x, y);
     h.event(egui::Event::PointerMoved(p));
     h.run_steps(1);
@@ -61,13 +61,13 @@ fn click(h: &mut Harness<'static, PhotosuiteApp>, x: f32, y: f32, m: Modifiers) 
     button(h, p, false, m);
 }
 
-fn double_click(h: &mut Harness<'static, PhotosuiteApp>, x: f32, y: f32) {
+fn double_click(h: &mut Harness<'static, PhotospliceApp>, x: f32, y: f32) {
     click(h, x, y, Modifiers::NONE);
     click(h, x, y, Modifiers::NONE);
     h.run_steps(1);
 }
 
-fn selection(h: &Harness<'static, PhotosuiteApp>) -> Option<Rect> {
+fn selection(h: &Harness<'static, PhotospliceApp>) -> Option<Rect> {
     h.state().session.active().unwrap().doc.selection.as_ref().map(|s| s.content_bounds())
 }
 
@@ -120,7 +120,7 @@ fn double_click_on_the_first_vertex_keeps_the_new_selection() {
 }
 
 /// Three clicks and Enter: a triangle with corners at the first three points.
-fn triangle(h: &mut Harness<'static, PhotosuiteApp>, x: f32, y: f32, m: Modifiers) {
+fn triangle(h: &mut Harness<'static, PhotospliceApp>, x: f32, y: f32, m: Modifiers) {
     h.event(egui::Event::ModifiersChanged(m));
     h.run_steps(1);
     for (dx, dy) in [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)] {
@@ -133,7 +133,7 @@ fn triangle(h: &mut Harness<'static, PhotosuiteApp>, x: f32, y: f32, m: Modifier
     h.run_steps(2);
 }
 
-fn steps(h: &Harness<'static, PhotosuiteApp>) -> usize {
+fn steps(h: &Harness<'static, PhotospliceApp>) -> usize {
     h.state().session.active().unwrap().history.entries().len()
 }
 

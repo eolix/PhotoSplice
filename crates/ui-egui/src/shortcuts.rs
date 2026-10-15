@@ -3,7 +3,7 @@
 use egui::{Key, KeyboardShortcut, Modifiers};
 use serde_json::json;
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::state::Tool;
 
 /// Parse `Cmd+Shift+N` style strings. `Cmd` maps to ⌘ on macOS and Ctrl elsewhere.
@@ -54,26 +54,26 @@ pub fn pretty(s: &str) -> String {
 
 /// The command's effective shortcut in the platform's notation (`Ctrl+N`), or `None` when
 /// the command has no binding (the user removed it in Edit › Keyboard Shortcuts).
-pub fn shortcut_label(app: &PhotosuiteApp, command: &str) -> Option<String> {
+pub fn shortcut_label(app: &PhotospliceApp, command: &str) -> Option<String> {
     effective_shortcut(app, command, default_shortcut(command).as_deref()).map(|s| pretty(&s))
 }
 
 /// `label` (English, shown in the UI language) followed by the command's effective shortcut
 /// (`New document…     Ctrl+N`); bare `label` when the binding was removed.
-pub fn command_label(app: &PhotosuiteApp, label: &str, command: &str) -> String {
+pub fn command_label(app: &PhotospliceApp, label: &str, command: &str) -> String {
     let label = tl!(label);
     shortcut_label(app, command).map_or_else(|| label.to_string(), |sc| format!("{label}     {sc}"))
 }
 
 /// `label` (English, shown in the UI language) with the command's effective shortcut in
 /// parentheses (`Rulers  (Ctrl+R)`); bare `label` when the binding was removed.
-pub fn tip_label(app: &PhotosuiteApp, label: &str, command: &str) -> String {
+pub fn tip_label(app: &PhotospliceApp, label: &str, command: &str) -> String {
     let label = tl!(label);
     shortcut_label(app, command).map_or_else(|| label.to_string(), |sc| format!("{label}  ({sc})"))
 }
 
 /// The shortcut in effect for a command: the user's override, else `default`.
-pub fn effective_shortcut(app: &PhotosuiteApp, id: &str, default: Option<&str>) -> Option<String> {
+pub fn effective_shortcut(app: &PhotospliceApp, id: &str, default: Option<&str>) -> Option<String> {
     app.session.prefs().shortcut(id, default).map(str::to_string)
 }
 
@@ -83,9 +83,9 @@ pub fn default_shortcut(id: &str) -> Option<String> {
         .iter()
         .find(|c| c.0 == id)
         .and_then(|c| c.3)
-        .or_else(|| photosuite_engine::commands::find(id).and_then(|c| c.shortcut))
+        .or_else(|| photosplice_engine::commands::find(id).and_then(|c| c.shortcut))
         .or_else(|| crate::menu_catalog::CATALOG.iter().find(|c| c.3 == id).and_then(|c| c.2))
-        .or_else(|| photosuite_engine::prefs::TEMPORARY_TOOLS.iter().find(|t| t.0 == id).map(|t| t.2))
+        .or_else(|| photosplice_engine::prefs::TEMPORARY_TOOLS.iter().find(|t| t.0 == id).map(|t| t.2))
         .map(str::to_string)
 }
 
@@ -140,7 +140,7 @@ pub fn consume(ctx: &egui::Context, sc: &KeyboardShortcut) -> bool {
 pub const NAV_COMMANDS: [&str; 4] = ["view.zoomIn", "view.zoomOut", "view.fitOnScreen", "view.actualPixels"];
 
 /// ⌘+ / ⌘- / ⌘0 / ⌘1 (or their Edit › Keyboard Shortcuts overrides). Returns true when one ran.
-fn nav_keys(app: &mut PhotosuiteApp, ctx: &egui::Context) -> bool {
+fn nav_keys(app: &mut PhotospliceApp, ctx: &egui::Context) -> bool {
     for id in NAV_COMMANDS {
         let sc = crate::menus::UI_COMMANDS.iter().find(|c| c.0 == id).and_then(|c| parse(app.session.prefs().shortcut(id, c.3)?));
         if let Some(sc) = sc
@@ -227,7 +227,7 @@ pub fn clipboard_keys(ctx: &egui::Context, typing: bool, raw: &mut egui::RawInpu
     raw.events = out;
 }
 
-pub fn handle(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+pub fn handle(app: &mut PhotospliceApp, ctx: &egui::Context) {
     // An open menu owns the keyboard (arrows, ↩, Esc), like a native menu.
     if crate::menu_nav::is_open(ctx) {
         return;
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn labels_show_the_effective_shortcut_in_platform_notation() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         let new = command_label(&app, "New document…", "file.new");
         if cfg!(target_os = "macos") {
             assert_eq!(new, "New document…     ⌘N");
@@ -464,7 +464,7 @@ mod tests {
     fn windows_shift_delete_fills_instead_of_cutting() {
         let shift = Modifiers::SHIFT;
         let ctrl = Modifiers::CTRL | Modifiers::COMMAND;
-        let app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         let bound = |held| {
             let (key, mods) = clipboard_press(&egui::Event::Cut, held, true)?;
             assert_eq!((key, mods), (Key::Delete, held));
@@ -525,7 +525,7 @@ mod tests {
 
     #[test]
     fn every_registered_shortcut_parses() {
-        for c in photosuite_engine::command_specs() {
+        for c in photosplice_engine::command_specs() {
             if let Some(sc) = c.shortcut {
                 assert!(parse(sc).is_some(), "{}: {sc}", c.id);
             }
@@ -540,7 +540,7 @@ mod tests {
     #[test]
     fn no_duplicate_shortcuts() {
         let mut seen = std::collections::HashMap::new();
-        let all = photosuite_engine::command_specs()
+        let all = photosplice_engine::command_specs()
             .iter()
             .filter_map(|c| c.shortcut.map(|s| (c.id, s)))
             .chain(crate::menus::UI_COMMANDS.iter().filter_map(|(id, _, _, s)| s.map(|s| (*id, s))));

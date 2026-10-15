@@ -3,10 +3,10 @@
 //! widths that make field rows fill the panel, and the Quick Actions each layer kind offers.
 
 use egui::{Rect, Sense, pos2, vec2};
-use photosuite_doc::{Layer, LayerContent};
+use photosplice_doc::{Layer, LayerContent};
 
 use crate::theme::{self, Tokens};
-use crate::{PhotosuiteApp, widgets};
+use crate::{PhotospliceApp, widgets};
 
 /// Height of a section header row.
 pub const SECTION_H: f32 = 24.0;
@@ -144,13 +144,13 @@ pub fn quick_actions(content: &LayerContent) -> &'static [(&'static str, &'stati
 
 /// The Quick Actions shown right now: the kind's list, limited to commands that exist and are
 /// enabled (Convert to Paragraph Text only for point type, and vice versa).
-pub fn visible_quick_actions(app: &PhotosuiteApp, content: &LayerContent) -> Vec<(&'static str, &'static str)> {
+pub fn visible_quick_actions(app: &PhotospliceApp, content: &LayerContent) -> Vec<(&'static str, &'static str)> {
     quick_actions(content).iter().copied().filter(|(_, id)| crate::menus::is_live(id) && crate::menus::is_enabled(app, id)).collect()
 }
 
 /// Quick Actions section body: full-width buttons, two per row when the panel is wide enough.
 /// Returns the command to run (through the menus, so ones with dialogs open them).
-pub fn quick_actions_ui(app: &PhotosuiteApp, ui: &mut egui::Ui, content: &LayerContent) -> Option<&'static str> {
+pub fn quick_actions_ui(app: &PhotospliceApp, ui: &mut egui::Ui, content: &LayerContent) -> Option<&'static str> {
     let actions = visible_quick_actions(app, content);
     if actions.is_empty() || !section(ui, "quick", "Quick Actions") {
         return None;

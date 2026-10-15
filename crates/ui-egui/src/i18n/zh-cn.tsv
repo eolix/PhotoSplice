@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# 简体中文 translations for PhotoSuite UI.
+# 简体中文 translations for PhotoSplice UI.
 
 	File	文件
 	Edit	编辑
@@ -672,7 +672,7 @@
 	Timeline	时间轴
 	Tool Presets	工具预设
 	Tools	工具
-	About PhotoSuite	关于照片工艺
+	About PhotoSplice	关于照片工艺
 	Website	网站
 	Report an Issue…	报告问题…
 	WIA Support…	WIA 支持…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	透视变形未激活
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	透视变形：沿着图像的透视绘制平面，然后切换到变形
 	Photo Filter	图片滤镜
-	PhotoSuite	摄影工艺
-	PhotoSuite Manages Colors	PhotoSuite 管理颜色
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite — 一个用 Rust 编写的开源本机图像编辑器。
+	PhotoSplice	摄影工艺
+	PhotoSplice Manages Colors	PhotoSplice 管理颜色
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice — 一个用 Rust 编写的开源本机图像编辑器。
 	Pin Depth:	销钉深度：
 	Pixel Length:	像素长度：
 	Pixels/Centimeter	像素/厘米
@@ -1570,7 +1570,7 @@
 	Pen Tilt	笔倾斜
 	Pen Tool	钢笔工具
 	Photo	照片
-	PhotoSuite website	摄影艺术网站
+	PhotoSplice website	摄影艺术网站
 	Picas	毕卡斯
 	Pillow Emboss	枕状浮雕
 	Pixel Replacement	像素替换
@@ -1877,7 +1877,7 @@
 	System Info…	系统信息…
 	System Info	系统信息
 	More panels	更多面板
-	These settings aren't available in PhotoSuite yet.	这些设置在 PhotoSuite 中尚不可用。
+	These settings aren't available in PhotoSplice yet.	这些设置在 PhotoSplice 中尚不可用。
 	Graphics	图形
 	Reset GPU Backend	重置 GPU 后端
 	Applies at next launch.	适用于下次启动。
@@ -2018,7 +2018,7 @@
 	Opening…	正在打开…
 	Patch	修补
 	Patch:	修补：
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite 正在使用 CPU 图像合成器。窗口仍可能使用您的显卡。
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice 正在使用 CPU 图像合成器。窗口仍可能使用您的显卡。
 	Play Action	播放动作
 	Reading…	正在读取…
 	Record Action	记录动作

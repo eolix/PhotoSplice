@@ -3,7 +3,7 @@
 
 mod common;
 use common::*;
-use photosuite_codecs::*;
+use photosplice_codecs::*;
 
 // ---------------------------------------------------------------------------
 // PNG Adam7

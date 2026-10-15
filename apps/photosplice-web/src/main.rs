@@ -1,6 +1,6 @@
-//! PhotoSuite in the browser.
+//! PhotoSplice in the browser.
 //!
-//! Runs the same [`photosuite_ui_egui::PhotosuiteApp`] as the desktop app through eframe's web
+//! Runs the same [`photosplice_ui_egui::PhotospliceApp`] as the desktop app through eframe's web
 //! runner (wgpu: WebGPU where available, WebGL2 otherwise). Build with `trunk build --release`
 //! from this directory; see `docs/development.md` ("Web build").
 //!
@@ -11,7 +11,7 @@
 //! - saving/exporting triggers a browser download;
 //! - dropped files are read asynchronously by `web::WebShell` and delivered through the inbox.
 //!
-//! URL query flags: `?cpu` forces the CPU canvas path (same as `PHOTOSUITE_CPU_CANVAS=1`);
+//! URL query flags: `?cpu` forces the CPU canvas path (same as `PHOTOSPLICE_CPU_CANVAS=1`);
 //! `?webgl` forces the WebGL2 backend instead of WebGPU.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
@@ -26,7 +26,7 @@ fn main() {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
-    eprintln!("photosuite-web only runs in the browser: build it with `trunk build --release` in apps/photosuite-web");
+    eprintln!("photosplice-web only runs in the browser: build it with `trunk build --release` in apps/photosplice-web");
 }
 
 #[cfg(test)]
@@ -37,9 +37,9 @@ mod tests {
     #[test]
     fn loading_page_offers_a_reload_when_startup_stalls() {
         let html = include_str!("../index.html");
-        let (_, hint) = html.split_once("<p id=\"photosuite_stalled\">").expect("stalled-startup hint in the loading element");
+        let (_, hint) = html.split_once("<p id=\"photosplice_stalled\">").expect("stalled-startup hint in the loading element");
         assert!(hint.contains("failed to") && hint.contains("<a href=\"\">Reload</a>"), "{hint}");
-        assert!(html.contains("animation: photosuite-stalled"), "the hint appears after a delay");
+        assert!(html.contains("animation: photosplice-stalled"), "the hint appears after a delay");
         assert!(!html.contains("<script"), "trunk injects the generated loader; the page has no script of its own");
     }
 }

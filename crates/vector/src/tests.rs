@@ -1,6 +1,6 @@
-use photosuite_color::{Color, PixelFormat, SampleType};
-use photosuite_doc::{Fill, FillRule, LineCap, LineJoin, Path, PathOp, ShapeLayer, ShapeStroke, StrokeAlign, Subpath, VectorMask};
-use photosuite_geom::Rect;
+use photosplice_color::{Color, PixelFormat, SampleType};
+use photosplice_doc::{Fill, FillRule, LineCap, LineJoin, Path, PathOp, ShapeLayer, ShapeStroke, StrokeAlign, Subpath, VectorMask};
+use photosplice_geom::Rect;
 
 use crate::*;
 
@@ -33,7 +33,7 @@ fn rect_area_exact_and_rotated() {
     let got = area(&cov(&p, Rect::new(0, 0, 200, 100)));
     assert!((got - 100.45 * 50.2).abs() < 1e-2, "{got}");
     // Rotated square: area preserved.
-    let rot = p.transform(&photosuite_geom::Affine::rotate(0.4).then(&photosuite_geom::Affine::translate(60.0, 30.0)));
+    let rot = p.transform(&photosplice_geom::Affine::rotate(0.4).then(&photosplice_geom::Affine::translate(60.0, 30.0)));
     let got = area(&cov(&rot, Rect::new(-100, -100, 400, 400)));
     assert!((got - 100.45 * 50.2).abs() / (100.45 * 50.2) < 1e-4, "{got}");
 }
@@ -193,15 +193,15 @@ fn render_shape_formats_and_paint() {
         ..Default::default()
     };
     for sample in SampleType::ALL {
-        for mode in [photosuite_color::ColorMode::Rgb, photosuite_color::ColorMode::Grayscale, photosuite_color::ColorMode::Cmyk] {
+        for mode in [photosplice_color::ColorMode::Rgb, photosplice_color::ColorMode::Grayscale, photosplice_color::ColorMode::Cmyk] {
             let fmt = PixelFormat::new(mode, sample, true);
             let s = render_shape(&sh, fmt, Rect::new(0, 0, 20, 20));
             assert_eq!(s.format(), fmt);
             assert_eq!(s.content_bounds(), Rect::new(1, 1, 13, 13));
-            let centre = photosuite_raster::to_rgba(&fmt, &s.pixel(7, 7));
-            let edge = photosuite_raster::to_rgba(&fmt, &s.pixel(2, 7));
+            let centre = photosplice_raster::to_rgba(&fmt, &s.pixel(7, 7));
+            let edge = photosplice_raster::to_rgba(&fmt, &s.pixel(2, 7));
             assert!((centre[3] - 1.0).abs() < 1e-3);
-            if mode == photosuite_color::ColorMode::Rgb {
+            if mode == photosplice_color::ColorMode::Rgb {
                 assert!(centre[0] > 0.99 && centre[2] < 0.01);
                 assert!(edge[2] > 0.99, "{edge:?}");
             }
@@ -216,7 +216,7 @@ fn render_shape_formats_and_paint() {
 fn gradient_fill_spans_bounds() {
     let sh = ShapeLayer {
         path: shapes::rect(0.0, 0.0, 100.0, 10.0),
-        fill: Some(Fill::gradient(vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], 0.0, 1.0, photosuite_doc::GradientStyle::Linear, false)),
+        fill: Some(Fill::gradient(vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], 0.0, 1.0, photosplice_doc::GradientStyle::Linear, false)),
         ..Default::default()
     };
     let rgba = CompiledShape::new(&sh, DEFAULT_TOLERANCE).render_rgba(Rect::new(0, 0, 100, 10));
@@ -293,10 +293,10 @@ fn perf_6016() {
         let r = 2400.0 + 500.0 * (t * 37.0).sin() + 200.0 * (t * 101.0).cos();
         let (x, y) = (3008.0 + r * t.cos(), 3008.0 + r * t.sin());
         let d = 6.0;
-        knots.push(photosuite_doc::Knot::smooth(
-            photosuite_geom::Point::new(x, y),
-            photosuite_geom::Point::new(x - d * t.sin(), y + d * t.cos()),
-            photosuite_geom::Point::new(x + d * t.sin(), y - d * t.cos()),
+        knots.push(photosplice_doc::Knot::smooth(
+            photosplice_geom::Point::new(x, y),
+            photosplice_geom::Point::new(x - d * t.sin(), y + d * t.cos()),
+            photosplice_geom::Point::new(x + d * t.sin(), y - d * t.cos()),
         ));
     }
     let mut path = Path::new(vec![Subpath { closed: true, knots, op: PathOp::Combine }]);
@@ -373,7 +373,7 @@ fn joined_subpaths_fill_as_one_component() {
 #[test]
 fn gradient_fill_opacity_midpoints_and_inverted_frame() {
     // Opacity stops fade the fill; a midpoint moves the colour halfway point.
-    let mut fill = Fill::gradient(vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], 0.0, 1.0, photosuite_doc::GradientStyle::Linear, false);
+    let mut fill = Fill::gradient(vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], 0.0, 1.0, photosplice_doc::GradientStyle::Linear, false);
     if let Fill::Gradient { opacity_stops, midpoints, .. } = &mut fill {
         *opacity_stops = vec![(0.0, 1.0), (1.0, 0.0)];
         *midpoints = vec![0.25];

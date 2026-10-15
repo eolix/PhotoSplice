@@ -1,4 +1,4 @@
-//! Crash-safe file replacement: the one way PhotoSuite writes a document to disk.
+//! Crash-safe file replacement: the one way PhotoSplice writes a document to disk.
 //!
 //! [`atomic_write`] never truncates the destination. It writes a temporary file in the **same
 //! directory**, flushes it to stable storage (`sync_all`), renames it over the destination and,

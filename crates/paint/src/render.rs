@@ -10,9 +10,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use photosuite_color::{BlendMode, PixelFormat};
-use photosuite_geom::Rect;
-use photosuite_raster::{Surface, from_rgba_into, to_rgba};
+use photosplice_color::{BlendMode, PixelFormat};
+use photosplice_geom::Rect;
+use photosplice_raster::{Surface, from_rgba_into, to_rgba};
 
 use crate::brush::{BrushSettings, MaskMode, Pattern, TipShape};
 use crate::dynamics::DabGenerator;
@@ -675,7 +675,7 @@ impl StrokeRenderer {
                     } else {
                         let d = to_rgba(&fmt, px);
                         let sr = to_rgba(&fmt, &src[..n]);
-                        let mut o = photosuite_color::blend::composite(b.mode, d, sr, k);
+                        let mut o = photosplice_color::blend::composite(b.mode, d, sr, k);
                         if lock_transparency {
                             o[3] = d[3];
                         }

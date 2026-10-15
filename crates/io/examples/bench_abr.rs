@@ -2,16 +2,16 @@
 //! RLE-compressed tips, full dynamics descriptors), then paint a 5000-dab stroke with an imported
 //! brush on a 6000×6000 RGBA8 layer.
 //!
-//! `cargo run --release -p photosuite-io --example bench_abr`
+//! `cargo run --release -p photosplice-io --example bench_abr`
 #![allow(clippy::unwrap_used)]
 
 use std::time::Instant;
 
-use photosuite_color::PixelFormat;
-use photosuite_paint::{StrokePoint, render_stroke};
-use photosuite_psd::abr::{AbrSample, write_v6};
-use photosuite_psd::descriptor::{Descriptor, UnicodeString, Value};
-use photosuite_raster::Surface;
+use photosplice_color::PixelFormat;
+use photosplice_paint::{StrokePoint, render_stroke};
+use photosplice_psd::abr::{AbrSample, write_v6};
+use photosplice_psd::descriptor::{Descriptor, UnicodeString, Value};
+use photosplice_raster::Surface;
 
 fn prc(v: f64) -> Value {
     Value::UnitFloat { unit: *b"#Prc", value: v }
@@ -62,7 +62,7 @@ fn main() {
     // `--write <path>`: also save a small showcase file (procedural tips) for UI snapshots.
     let args: Vec<String> = std::env::args().collect();
     if let Some(path) = args.iter().position(|a| a == "--write").and_then(|i| args.get(i + 1)) {
-        use photosuite_paint::procedural::*;
+        use photosplice_paint::procedural::*;
         let tips = [("Leafy", leaf_tip(96)), ("Charcoal Stick", charcoal_tip(96, 3)), ("Sea Sponge", sponge_tip(96, 5)), ("Star Burst", star_tip(96))];
         let samples: Vec<AbrSample> = tips
             .iter()
@@ -99,7 +99,7 @@ fn main() {
     let mut imp = None;
     for _ in 0..5 {
         let t = Instant::now();
-        imp = Some(photosuite_io::abr_map::read_abr(&bytes, "Bench").unwrap());
+        imp = Some(photosplice_io::abr_map::read_abr(&bytes, "Bench").unwrap());
         best = best.min(t.elapsed().as_secs_f64() * 1000.0);
     }
     let imp = imp.unwrap();
@@ -116,7 +116,7 @@ fn main() {
             StrokePoint::new(200.0 + t * (size - 400.0), size / 2.0 + (t * 24.0).sin() * 1500.0, (0.3 + 0.7 * (t * 25.0).sin().abs()) as f32)
         })
         .collect();
-    let dabs = photosuite_paint::dabs(&photosuite_paint::Stroke { brush: brush.clone(), points: pts.clone() }).len();
+    let dabs = photosplice_paint::dabs(&photosplice_paint::Stroke { brush: brush.clone(), points: pts.clone() }).len();
     let t = Instant::now();
     render_stroke(&mut s, &brush, &pts, None, false, 1.0);
     println!("Stroke: {dabs} primary dabs (scatter count 2), {:.1} ms", t.elapsed().as_secs_f64() * 1000.0);

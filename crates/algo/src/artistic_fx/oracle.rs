@@ -13,11 +13,11 @@
 //! block means (which ignores grain). `GALLERY_FILTER` (comma-separated keys) limits the run;
 //! `GALLERY_OUT` (a folder) receives our renders.
 //!
-//! `GALLERY_REF=dir cargo test -p photosuite-algo --lib artistic_fx::oracle -- --ignored --nocapture`
+//! `GALLERY_REF=dir cargo test -p photosplice-algo --lib artistic_fx::oracle -- --ignored --nocapture`
 
-use photosuite_color::{ColorMode, PixelFormat, SampleType};
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_color::{ColorMode, PixelFormat, SampleType};
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 use serde_json::Value;
 
 use crate::artistic::{GalleryEffect, GalleryFilter, GalleryParamKind};

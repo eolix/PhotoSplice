@@ -1,13 +1,13 @@
 //! Pen tablet pressure, tilt, rotation and eraser end on macOS and Linux X11 (issue #79).
 //!
-//! winit 0.30 drops tablet data on both, so `photosuite-tablet` reads it beside winit (an AppKit
+//! winit 0.30 drops tablet data on both, so `photosplice-tablet` reads it beside winit (an AppKit
 //! local event monitor; XInput2 raw events on a second X connection) and this module writes each
 //! sample into the UI's [`StylusFeed`], where the canvas reads it exactly like the web runner's
 //! Pointer Events and automation's simulated pen. Windows needs nothing here: winit forwards
 //! `WM_POINTER` pressure as touch force. Wayland has no tablet input yet (see the crate docs).
 
-use photosuite_tablet::Sample;
-use photosuite_ui_egui::stylus::{PenSample, StylusFeed};
+use photosplice_tablet::Sample;
+use photosplice_ui_egui::stylus::{PenSample, StylusFeed};
 
 /// A tablet sample as the UI's pen sample.
 pub fn pen_sample(s: Sample) -> PenSample {
@@ -22,8 +22,8 @@ pub fn sink(feed: StylusFeed) -> impl Fn(Option<Sample>) + Send + 'static {
 /// Install the AppKit tablet monitor (main thread, before the event loop). Keep the result until
 /// the event loop returns. On failure this logs why: pens then paint like a mouse.
 #[cfg(target_os = "macos")]
-pub fn install_macos(feed: &StylusFeed) -> Option<photosuite_tablet::macos::Monitor> {
-    photosuite_tablet::macos::Monitor::install(sink(feed.clone())).map_err(|e| log::warn!("{e}")).ok()
+pub fn install_macos(feed: &StylusFeed) -> Option<photosplice_tablet::macos::Monitor> {
+    photosplice_tablet::macos::Monitor::install(sink(feed.clone())).map_err(|e| log::warn!("{e}")).ok()
 }
 
 /// Start the XInput2 reader when eframe runs on X11. On Wayland, `$DISPLAY` is Xwayland, which
@@ -35,7 +35,7 @@ pub fn spawn_x11(feed: &StylusFeed, display: Option<DisplayKind>) {
         log::info!("tablet pressure: not available on this display server ({display:?}); Wayland is a follow-up to #79");
         return;
     }
-    if let Err(e) = photosuite_tablet::x11::spawn(None, sink(feed.clone())) {
+    if let Err(e) = photosplice_tablet::x11::spawn(None, sink(feed.clone())) {
         log::warn!("{e}");
     }
 }
@@ -65,10 +65,10 @@ impl DisplayKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_tablet::{Update, appkit, xi};
-    use photosuite_ui_egui::PhotosuiteApp;
-    use photosuite_ui_egui::canvas::{ToolEvent, tool_event};
-    use photosuite_ui_egui::state::Tool;
+    use photosplice_tablet::{Update, appkit, xi};
+    use photosplice_ui_egui::PhotospliceApp;
+    use photosplice_ui_egui::canvas::{ToolEvent, tool_event};
+    use photosplice_ui_egui::state::Tool;
     use serde_json::{Value, json};
 
     #[test]
@@ -90,7 +90,7 @@ mod tests {
     /// A light-to-heavy pen stroke must paint thin and faint at the light end and wide and opaque
     /// at the heavy end (Size and Opacity on Pen Pressure); a mouse paints full strength.
     fn pressure_stroke(mut next: impl FnMut(f32) -> Option<Sample>) -> (f64, f64, f64, f64) {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         let feed = app.stylus.feed.clone();
         let sink = sink(feed);
         app.session.execute("file.new", json!({"width": 240, "height": 80, "background": "white"})).unwrap();
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn use_tablet_pressure_off_paints_like_a_mouse() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         app.session.execute("prefs.set", json!({"path": "tools.useTabletPressure", "value": false})).unwrap();
         // The canvas copies the preference each frame; do what it does.
         app.stylus.use_pressure = app.session.prefs().tools.use_tablet_pressure;
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn eraser_end_switches_to_the_eraser_and_back() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         let sink = sink(app.stylus.feed.clone());
         let mut st = appkit::State::default();
         let mut send = |e: appkit::RawEvent| {
@@ -185,17 +185,17 @@ mod tests {
         let prox = |device, entering| appkit::RawEvent { kind: appkit::event_type::TABLET_PROXIMITY, device, entering, ..Default::default() };
         app.ui.tool = Tool::Brush;
         send(prox(appkit::device::PEN, true));
-        assert!(!photosuite_ui_egui::stylus::Stylus::sync_eraser_tool(&mut app));
+        assert!(!photosplice_ui_egui::stylus::Stylus::sync_eraser_tool(&mut app));
         assert_eq!(app.ui.tool, Tool::Brush, "the tip changes nothing");
         send(prox(appkit::device::PEN, false));
         send(prox(appkit::device::ERASER, true));
-        assert!(photosuite_ui_egui::stylus::Stylus::sync_eraser_tool(&mut app));
+        assert!(photosplice_ui_egui::stylus::Stylus::sync_eraser_tool(&mut app));
         assert_eq!(app.ui.tool, Tool::Eraser);
         // Mouse moves in between change nothing; the tip coming back restores the Brush.
         send(appkit::RawEvent { kind: appkit::event_type::MOUSE_MOVED, ..Default::default() });
-        assert!(!photosuite_ui_egui::stylus::Stylus::sync_eraser_tool(&mut app));
+        assert!(!photosplice_ui_egui::stylus::Stylus::sync_eraser_tool(&mut app));
         send(prox(appkit::device::PEN, true));
-        assert!(photosuite_ui_egui::stylus::Stylus::sync_eraser_tool(&mut app));
+        assert!(photosplice_ui_egui::stylus::Stylus::sync_eraser_tool(&mut app));
         assert_eq!(app.ui.tool, Tool::Brush);
     }
 }

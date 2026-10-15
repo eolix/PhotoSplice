@@ -1,6 +1,6 @@
-//! # photosuite-vector
+//! # photosplice-vector
 //!
-//! Rasterization of vector data from `photosuite-doc`: paths (with Photoshop path operations),
+//! Rasterization of vector data from `photosplice-doc`: paths (with Photoshop path operations),
 //! shape layers (fill + stroke), vector masks, and the inverse direction (tracing a coverage
 //! mask back into a path for "Make Work Path").
 //!
@@ -25,10 +25,10 @@ pub mod shapes;
 pub mod stroke;
 pub mod trace;
 
-use photosuite_color::{ColorMode, PixelFormat};
-use photosuite_doc::{Fill, FillRule, GradientStyle, Path, PathOp, ShapeLayer, ShapeStroke, StrokeAlign, VectorMask};
-use photosuite_geom::{Rect, TILE_SIZE};
-use photosuite_raster::Surface;
+use photosplice_color::{ColorMode, PixelFormat};
+use photosplice_doc::{Fill, FillRule, GradientStyle, Path, PathOp, ShapeLayer, ShapeStroke, StrokeAlign, VectorMask};
+use photosplice_geom::{Rect, TILE_SIZE};
+use photosplice_raster::Surface;
 
 pub mod gradient;
 
@@ -232,7 +232,7 @@ impl Paint {
     /// Paint for a model fill, with gradients laid out over `bounds` (`x0, y0, x1, y1`).
     /// Patterns are not rendered yet (transparent), matching the compositor.
     pub fn from_fill(f: &Fill, bounds: (f64, f64, f64, f64)) -> Paint {
-        let rgba = |c: &photosuite_color::Color| {
+        let rgba = |c: &photosplice_color::Color| {
             let v = c.to_rgb();
             [v[0], v[1], v[2], c.alpha]
         };
@@ -399,7 +399,7 @@ impl CompiledShape {
             let mut vals = vec![0.0f32; rgba.len() * ch];
             for (p, o) in rgba.iter().zip(vals.chunks_exact_mut(ch)) {
                 if p[3] > 0.0 {
-                    photosuite_raster::from_rgba_into(&format, *p, o);
+                    photosplice_raster::from_rgba_into(&format, *p, o);
                 }
             }
             let alpha = format.alpha;

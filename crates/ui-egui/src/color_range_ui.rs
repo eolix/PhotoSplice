@@ -12,10 +12,10 @@
 use std::sync::Arc;
 
 use egui::{Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
-use photosuite_doc::{DocId, Document};
+use photosplice_doc::{DocId, Document};
 use serde_json::{Map, Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::state::DialogKind;
 use crate::theme::Tokens;
 use crate::widgets;
@@ -81,8 +81,8 @@ pub fn controls(f: &Map<String, Value>) -> Controls {
 
 /// Open the dialog with Photoshop's defaults (Sampled Colors, Fuzziness 40, the foreground colour
 /// as the sample until the eyedropper picks one).
-pub fn open(app: &mut PhotosuiteApp) -> u64 {
-    let label = photosuite_engine::commands::find(COMMAND).map_or(tl!("Color Range…"), |c| c.label);
+pub fn open(app: &mut PhotospliceApp) -> u64 {
+    let label = photosplice_engine::commands::find(COMMAND).map_or(tl!("Color Range…"), |c| c.label);
     let mut f = Map::new();
     f.insert("__colorRange".into(), json!(true));
     f.insert("__label".into(), json!(label));
@@ -146,7 +146,7 @@ pub fn params(f: &Map<String, Value>) -> Value {
 }
 
 /// OK: run the command on the document (one history step).
-pub fn confirm(app: &mut PhotosuiteApp, f: &Map<String, Value>) -> Result<Value, String> {
+pub fn confirm(app: &mut PhotospliceApp, f: &Map<String, Value>) -> Result<Value, String> {
     app.color_range = None;
     app.run(COMMAND, params(f))
 }
@@ -172,11 +172,11 @@ fn hash(text: &str) -> u64 {
 
 /// The selection mask `params` would make, on the proxy: the engine command run on a scratch
 /// session (Out Of Gamut uses the document's own proof setup).
-fn proxy_mask(app: &PhotosuiteApp, proxy: &Document, k: u32, params: &Value) -> Result<Vec<f32>, String> {
+fn proxy_mask(app: &PhotospliceApp, proxy: &Document, k: u32, params: &Value) -> Result<Vec<f32>, String> {
     let area = proxy.bounds();
     if params.get("select").and_then(Value::as_str) == Some("outOfGamut") {
         let pv = app.session.color.proof(proxy.id);
-        let (m, _) = photosuite_engine::color_cmds::gamut_mask(proxy, &pv.setup, pv.gamut_threshold).map_err(|e| e.to_string())?;
+        let (m, _) = photosplice_engine::color_cmds::gamut_mask(proxy, &pv.setup, pv.gamut_threshold).map_err(|e| e.to_string())?;
         let invert = params.get("invert").and_then(Value::as_bool).unwrap_or(false);
         return Ok(m.iter().map(|v| f32::from(*v) / 255.0).map(|v| if invert { 1.0 - v } else { v }).collect());
     }
@@ -197,7 +197,7 @@ fn proxy_mask(app: &PhotosuiteApp, proxy: &Document, k: u32, params: &Value) -> 
             }
         }
     }
-    let mut s = photosuite_engine::Session::new();
+    let mut s = photosplice_engine::Session::new();
     s.tools = app.session.tools.clone();
     let mut doc = proxy.clone();
     doc.selection = None;
@@ -207,11 +207,11 @@ fn proxy_mask(app: &PhotosuiteApp, proxy: &Document, k: u32, params: &Value) -> 
     }
     s.execute(COMMAND, p).map_err(|e| e.to_string())?;
     let d = s.active().ok_or("no preview document")?;
-    Ok(photosuite_algo::selection::mask_from_surface(d.doc.selection.as_ref(), area))
+    Ok(photosplice_algo::selection::mask_from_surface(d.doc.selection.as_ref(), area))
 }
 
 /// Record why the preview failed (logged once per new reason), or clear it.
-fn report(app: &mut PhotosuiteApp, error: Option<String>) {
+fn report(app: &mut PhotospliceApp, error: Option<String>) {
     let Some(p) = app.color_range.as_mut() else { return };
     if p.error != error {
         if let Some(e) = &error {
@@ -223,7 +223,7 @@ fn report(app: &mut PhotosuiteApp, error: Option<String>) {
 
 /// Refresh the cached proxy / textures for the active document and the dialog's params. Returns
 /// (texture to show, its size in proxy pixels, k).
-fn preview(app: &mut PhotosuiteApp, ctx: &egui::Context, f: &Map<String, Value>) -> Option<(egui::TextureId, [usize; 2], u32)> {
+fn preview(app: &mut PhotospliceApp, ctx: &egui::Context, f: &Map<String, Value>) -> Option<(egui::TextureId, [usize; 2], u32)> {
     let (doc_id, revision, doc) = {
         let st = app.session.active()?;
         (st.doc.id, st.revision, st.doc.clone())
@@ -244,7 +244,7 @@ fn preview(app: &mut PhotosuiteApp, ctx: &egui::Context, f: &Map<String, Value>)
     let (w, h) = (proxy.size.width as usize, proxy.size.height as usize);
     if image_view {
         if app.color_range.as_ref().is_some_and(|p| p.image.is_none()) {
-            let thumb = photosuite_compose::thumbnail(&proxy, proxy.size.width.max(proxy.size.height));
+            let thumb = photosplice_compose::thumbnail(&proxy, proxy.size.width.max(proxy.size.height));
             let size = [thumb.width as usize, thumb.height as usize];
             if size != [w, h] || thumb.pixels.len() != w * h * 4 {
                 report(app, Some(format!("the image thumbnail is {}×{}, expected {w}×{h}", thumb.width, thumb.height)));
@@ -318,7 +318,7 @@ fn set_points(f: &mut Map<String, Value>, k: &str, pts: &[[f64; 2]]) {
 }
 
 /// Dialog body.
-pub fn body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
+pub fn body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     let t = Tokens::get(ui.ctx());
     let c = controls(f);
     let select = s(f, "select", "sampledColors").to_string();
@@ -461,7 +461,7 @@ pub fn body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
 
 /// An eyedropper click at document pixel `at`: the plain eyedropper replaces the samples, the
 /// + one (or Shift) adds one, the − one (or Alt) subtracts one.
-pub fn pick(app: &PhotosuiteApp, f: &mut Map<String, Value>, at: [f64; 2], mods: egui::Modifiers) {
+pub fn pick(app: &PhotospliceApp, f: &mut Map<String, Value>, at: [f64; 2], mods: egui::Modifiers) {
     let Some(st) = app.session.active() else { return };
     let (w, h) = (f64::from(st.doc.size.width.max(1)), f64::from(st.doc.size.height.max(1)));
     let [x, y] = at;
@@ -498,26 +498,26 @@ mod tests {
         Harness,
         kittest::{NodeT, Queryable},
     };
-    use photosuite_doc::{Color, ColorMode, SampleType, Size};
-    use photosuite_geom::Rect as GRect;
+    use photosplice_doc::{Color, ColorMode, SampleType, Size};
+    use photosplice_geom::Rect as GRect;
 
     /// 40 × 30: red block (0..20, 0..15), blue block (20..40, 0..15), black and white below.
-    fn app_with_doc() -> PhotosuiteApp {
+    fn app_with_doc() -> PhotospliceApp {
         let mut doc = Document::with_background("cr", Size::new(40, 30), ColorMode::Rgb, SampleType::U8, Color::WHITE);
         let bg = doc.layers[0].surface_mut().unwrap();
         bg.fill_rect(GRect::new(0, 0, 20, 15), &[1.0, 0.0, 0.0, 1.0]);
         bg.fill_rect(GRect::new(20, 0, 40, 15), &[0.0, 0.0, 1.0, 1.0]);
         bg.fill_rect(GRect::new(0, 15, 20, 30), &[0.0, 0.0, 0.0, 1.0]);
-        let mut s = photosuite_engine::Session::new();
+        let mut s = photosplice_engine::Session::new();
         s.add_document(doc, None);
-        PhotosuiteApp::new(s, crate::Services::default())
+        PhotospliceApp::new(s, crate::Services::default())
     }
 
-    fn coverage(app: &PhotosuiteApp, x: i32, y: i32) -> f32 {
+    fn coverage(app: &PhotospliceApp, x: i32, y: i32) -> f32 {
         app.session.active().unwrap().doc.selection.as_ref().map_or(0.0, |s| s.sample_channel(x, y, 0))
     }
 
-    fn harness(app: PhotosuiteApp) -> Harness<'static, PhotosuiteApp> {
+    fn harness(app: PhotospliceApp) -> Harness<'static, PhotospliceApp> {
         let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_ui_state(
             |ui, app| {
                 crate::menus::menu_bar(app, ui);
@@ -525,27 +525,27 @@ mod tests {
             },
             app,
         );
-        PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
         h.run_steps(2);
         h
     }
 
-    fn dialog_id(app: &PhotosuiteApp) -> u64 {
+    fn dialog_id(app: &PhotospliceApp) -> u64 {
         app.ui.dialogs.iter().find(|d| owns(&d.fields)).map(|d| d.id).expect("Color Range dialog open")
     }
 
-    fn set(h: &mut Harness<'static, PhotosuiteApp>, key: &str, v: Value) {
+    fn set(h: &mut Harness<'static, PhotospliceApp>, key: &str, v: Value) {
         let id = dialog_id(h.state());
         h.state_mut().ui.dialog_mut(id).unwrap().fields.insert(key.into(), v);
         h.run_steps(3);
     }
 
     /// OK / Cancel are painted buttons without accessibility labels; the dialog's keys do the same.
-    fn ok(h: &mut Harness<'static, PhotosuiteApp>) {
+    fn ok(h: &mut Harness<'static, PhotospliceApp>) {
         h.key_press(egui::Key::Enter);
     }
 
-    fn click(h: &mut Harness<'static, PhotosuiteApp>, at: egui::Pos2) {
+    fn click(h: &mut Harness<'static, PhotospliceApp>, at: egui::Pos2) {
         h.hover_at(at);
         h.run_steps(1);
         h.drag_at(at);
@@ -553,7 +553,7 @@ mod tests {
         h.drop_at(at);
     }
 
-    fn disabled(h: &Harness<'static, PhotosuiteApp>, label: &str) -> bool {
+    fn disabled(h: &Harness<'static, PhotospliceApp>, label: &str) -> bool {
         h.get_by_label(label).accesskit_node().is_disabled()
     }
 
@@ -613,7 +613,7 @@ mod tests {
         open(h.state_mut());
         h.run_steps(4);
         let area = egui::Id::new(("dialog", dialog_id(h.state())));
-        let height = |h: &Harness<'static, PhotosuiteApp>| h.ctx.memory(|m| m.area_rect(area)).map_or(0.0, |r| r.height());
+        let height = |h: &Harness<'static, PhotospliceApp>| h.ctx.memory(|m| m.area_rect(area)).map_or(0.0, |r| r.height());
         set(&mut h, "select", json!("outOfGamut"));
         let short = height(&h);
         set(&mut h, "select", json!("midtones"));
@@ -688,13 +688,13 @@ mod tests {
         open(h.state_mut());
         h.run_steps(4);
         // 40 × 30 at 200 pt: 5 pt per pixel; the image is centred vertically (150 pt tall).
-        let at = |h: &Harness<'static, PhotosuiteApp>, x: f32, y: f32| {
+        let at = |h: &Harness<'static, PhotospliceApp>, x: f32, y: f32| {
             h.get_by_label("Color Range preview").rect().left_top() + egui::vec2(x * 5.0 + 2.5, 25.0 + y * 5.0 + 2.5)
         };
         let p = at(&h, 30.0, 5.0);
         click(&mut h, p);
         h.run_steps(2);
-        let f = |h: &Harness<'static, PhotosuiteApp>| h.state().ui.dialogs.iter().find(|d| owns(&d.fields)).unwrap().fields.clone();
+        let f = |h: &Harness<'static, PhotospliceApp>| h.state().ui.dialogs.iter().find(|d| owns(&d.fields)).unwrap().fields.clone();
         assert_eq!(points(&f(&h), "points"), vec![[30.0, 5.0]]);
         // Add to Sample: the red block too; the selection then covers both.
         h.get_by_label("Add to Sample").click();
@@ -754,7 +754,7 @@ mod tests {
     #[test]
     fn opens_and_previews_in_the_full_app_without_a_gpu() {
         let mut h = Harness::builder().with_size(egui::vec2(1024.0, 600.0)).build_eframe(|cc| {
-            PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
+            PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
             assert!(cc.wgpu_render_state.is_none(), "this test covers the no-GPU path");
             app_with_doc()
         });

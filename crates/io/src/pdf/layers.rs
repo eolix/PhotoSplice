@@ -30,12 +30,12 @@ use hayro::hayro_interpret::{
 use hayro::hayro_syntax::page::Page;
 use hayro::kurbo::{self, Affine as KAffine, BezPath, PathEl, Shape};
 use hayro::vello_cpu::{self, Pixmap, RenderContext};
-use photosuite_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
-use photosuite_doc::text::{CharStyle, TextRun, TextShape};
-use photosuite_doc::vector::{FillRule, Knot, LineCap, LineJoin, Path, PathOp, ShapeLayer, ShapeStroke, StrokeAlign, Subpath, VectorMask};
-use photosuite_doc::{Document, Fill, Layer, LayerContent, TextLayer};
-use photosuite_geom::{Affine, Point, Rect, Size};
-use photosuite_raster::Surface;
+use photosplice_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
+use photosplice_doc::text::{CharStyle, TextRun, TextShape};
+use photosplice_doc::vector::{FillRule, Knot, LineCap, LineJoin, Path, PathOp, ShapeLayer, ShapeStroke, StrokeAlign, Subpath, VectorMask};
+use photosplice_doc::{Document, Fill, Layer, LayerContent, TextLayer};
+use photosplice_geom::{Affine, Point, Rect, Size};
+use photosplice_raster::Surface;
 
 use super::render::{GlobalState, RenderCache, RenderSettings, Renderer};
 
@@ -275,7 +275,7 @@ impl<'g> LayerBuilder<'g> {
         let mut l = Layer::new("Gradient Fill", LayerContent::Fill(Fill::Solid(Color::BLACK)));
         l.vector_mask = mask;
         l.blend = to_blend(props.blend_mode);
-        let frame = photosuite_compose::fill_frame(&l, self.bounds());
+        let frame = photosplice_compose::fill_frame(&l, self.bounds());
         l.content = LayerContent::Fill(super::shading::fill(g, frame));
         self.push_layer(l);
         true
@@ -312,7 +312,7 @@ impl<'g> LayerBuilder<'g> {
 
     fn flush_shape(&mut self) {
         let Some(mut s) = self.shape.take() else { return };
-        s.shape.cache = Some(photosuite_vector::render_shape(&s.shape, self.fmt, self.bounds()));
+        s.shape.cache = Some(photosplice_vector::render_shape(&s.shape, self.fmt, self.bounds()));
         let name = match (&s.shape.fill, &s.shape.stroke) {
             (Some(_), Some(_)) | (Some(_), None) => "Shape",
             (None, _) => "Stroke",
@@ -597,7 +597,7 @@ impl<'g> LayerBuilder<'g> {
         }
         let data = g.font_data();
         let ps = self.postscript_name(g);
-        let mut engine = photosuite_text::shared().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut engine = photosplice_text::shared().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let guess = ps.as_ref().map(|ps| engine.fonts.resolve_postscript(ps));
         let installed = guess.as_ref().filter(|r| r.exact || engine.fonts.has_family(&r.family)).map(|r| (r.family.clone(), r.weight, r.italic));
         let face = installed.or_else(|| {

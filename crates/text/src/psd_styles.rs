@@ -11,8 +11,8 @@
 //! resolved attributes, so the text looks the same whatever a reader makes of the reference).
 //! Named sheets are written with fully resolved attributes too. Unverified against Photoshop.
 
-use photosuite_doc::text::{CharStyle, ParagraphStyle};
-use photosuite_doc::{TextLayer, TextStyles};
+use photosplice_doc::text::{CharStyle, ParagraphStyle};
+use photosplice_doc::{TextLayer, TextStyles};
 
 use crate::engine_data::Value as E;
 use crate::psd::{char_style, engine_data, para_style, paragraph_properties, parse_tysh, postscript_for, style_sheet_data, write_tysh};
@@ -245,7 +245,7 @@ pub fn write_style_sheets(tysh: &[u8], layer: &TextLayer, styles: &TextStyles, d
     let raw = crate::engine_data::write(&e);
     {
         let item = t.text.items.iter_mut().find(|(k, _)| k.is("EngineData"))?;
-        item.1 = photosuite_psd::descriptor::Value::RawData(raw)
+        item.1 = photosplice_psd::descriptor::Value::RawData(raw)
     }
     Some(write_tysh(&t))
 }
@@ -253,8 +253,8 @@ pub fn write_style_sheets(tysh: &[u8], layer: &TextLayer, styles: &TextStyles, d
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_doc::text::{TextAlign, TextRun};
-    use photosuite_doc::text_styles::{CharacterStyleDef, ParagraphStyleDef, diff_attrs};
+    use photosplice_doc::text::{TextAlign, TextRun};
+    use photosplice_doc::text_styles::{CharacterStyleDef, ParagraphStyleDef, diff_attrs};
 
     #[test]
     fn named_sheets_round_trip() {
@@ -275,7 +275,7 @@ mod tests {
         let mut layer = TextLayer {
             text: "plain bold".into(),
             runs: vec![TextRun { len: 6, style: base.clone() }, TextRun { len: 4, style: emph }],
-            paragraphs: vec![photosuite_doc::text::ParagraphRun { len: 10, style: styles.resolve_para(Some(2)) }],
+            paragraphs: vec![photosplice_doc::text::ParagraphRun { len: 10, style: styles.resolve_para(Some(2)) }],
             ..Default::default()
         };
         layer.sync_summary();

@@ -1,7 +1,7 @@
-use photosuite_color::{ColorMode, PixelFormat, SampleType};
-use photosuite_doc::{Document, LayerId, Pattern};
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_color::{ColorMode, PixelFormat, SampleType};
+use photosplice_doc::{Document, LayerId, Pattern};
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 use serde_json::{Value, json};
 
 use crate::Session;

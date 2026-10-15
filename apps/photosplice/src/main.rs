@@ -1,6 +1,6 @@
-//! PhotoSuite desktop app.
+//! PhotoSplice desktop app.
 //!
-//! Usage: `photosuite [--control <port>] [--control-token <64-hex> |
+//! Usage: `photosplice [--control <port>] [--control-token <64-hex> |
 //! --control-token-file <path>] [--automation-read-root <dir>]
 //! [--automation-write-root <dir>] [--safe-gpu] [files…]`
 //!
@@ -8,9 +8,9 @@
 //! where the platform has one) for this launch, e.g. after a graphics driver crash. A start that
 //! crashes inside the driver also falls back by itself next time (see `gpu_startup`).
 //!
-//! `--control <port>` (or `PHOTOSUITE_CONTROL_PORT`) starts a localhost JSON-lines control server.
+//! `--control <port>` (or `PHOTOSPLICE_CONTROL_PORT`) starts a localhost JSON-lines control server.
 //! The first line must authenticate; subsequent request lines get reply lines.
-//! `{"id":1,"ok":true,"result":…}`. See `photosuite_ui_egui::control` for the methods.
+//! `{"id":1,"ok":true,"result":…}`. See `photosplice_ui_egui::control` for the methods.
 
 // Release builds on Windows are GUI-subsystem apps, so launching from the Start Menu or Explorer
 // doesn't open a console window. (`--version` output then only shows when redirected.)
@@ -36,20 +36,20 @@ mod services;
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 mod tablet;
 
-use photosuite_engine::Session;
-use photosuite_ui_egui::PhotosuiteApp;
+use photosplice_engine::Session;
+use photosplice_ui_egui::PhotospliceApp;
 
 /// Matches the `.desktop` file and hicolor icon name, so Wayland docks pick up the icon.
-const APP_ID: &str = "io.github.eolix.PhotoSuite";
+const APP_ID: &str = "io.github.eolix.PhotoSplice";
 
-/// Parse a `--control` / `PHOTOSUITE_CONTROL_PORT` value. An unparseable port is an error that
+/// Parse a `--control` / `PHOTOSPLICE_CONTROL_PORT` value. An unparseable port is an error that
 /// names the value (issue #701): silently running with no control server leaves a launcher or
 /// agent unable to tell a typo from a successful grant.
 fn parse_control_port(value: &str, source: &str) -> Result<u16, String> {
     value.trim().parse().map_err(|_| format!("{source}: `{value}` is not a valid port (expected a number from 0 to 65535)"))
 }
 
-/// Process exit status for the collected `--control` / `PHOTOSUITE_CONTROL_PORT` errors: `None`
+/// Process exit status for the collected `--control` / `PHOTOSPLICE_CONTROL_PORT` errors: `None`
 /// when there are none, else 2 (a command-line usage error), never 0.
 fn control_args_exit_code(errors: &[String]) -> Option<i32> {
     if errors.is_empty() { None } else { Some(2) }
@@ -60,16 +60,16 @@ fn main() -> eframe::Result {
     crash_guard::install_hook();
     let mut control_port: Option<u16> = None;
     let mut control_arg_errors: Vec<String> = Vec::new();
-    if let Some(value) = std::env::var("PHOTOSUITE_CONTROL_PORT").ok().filter(|v| !v.trim().is_empty()) {
-        match parse_control_port(&value, "PHOTOSUITE_CONTROL_PORT") {
+    if let Some(value) = std::env::var("PHOTOSPLICE_CONTROL_PORT").ok().filter(|v| !v.trim().is_empty()) {
+        match parse_control_port(&value, "PHOTOSPLICE_CONTROL_PORT") {
             Ok(port) => control_port = Some(port),
             Err(error) => control_arg_errors.push(error),
         }
     }
     let mut control_token = None;
     let mut control_token_file = None;
-    let mut automation_read_root = std::env::var_os("PHOTOSUITE_AUTOMATION_READ_ROOT").map(std::path::PathBuf::from);
-    let mut automation_write_root = std::env::var_os("PHOTOSUITE_AUTOMATION_WRITE_ROOT").map(std::path::PathBuf::from);
+    let mut automation_read_root = std::env::var_os("PHOTOSPLICE_AUTOMATION_READ_ROOT").map(std::path::PathBuf::from);
+    let mut automation_write_root = std::env::var_os("PHOTOSPLICE_AUTOMATION_WRITE_ROOT").map(std::path::PathBuf::from);
     let mut files = Vec::new();
     let mut safe_gpu = false;
     let mut args = std::env::args().skip(1);
@@ -88,7 +88,7 @@ fn main() -> eframe::Result {
             "--automation-write-root" => automation_write_root = args.next().map(std::path::PathBuf::from),
             "--safe-gpu" => safe_gpu = true,
             "--version" => {
-                println!("photosuite {}", photosuite_engine::build_info::long_version());
+                println!("photosplice {}", photosplice_engine::build_info::long_version());
                 return Ok(());
             }
             // Old macOS passes a process serial number when launched from Finder.
@@ -102,7 +102,7 @@ fn main() -> eframe::Result {
     // Exit status 2 is the usual command-line usage error, so a launcher sees the failure.
     if let Some(code) = control_args_exit_code(&control_arg_errors) {
         for error in &control_arg_errors {
-            eprintln!("photosuite: {error}");
+            eprintln!("photosplice: {error}");
         }
         std::process::exit(code);
     }
@@ -116,25 +116,25 @@ fn main() -> eframe::Result {
     }
 
     let control = if let Some(port) = control_port {
-        let (supplied, token_file) = photosuite_automation::security::token_inputs(control_token, control_token_file);
-        let token = match photosuite_automation::security::server_token(supplied.as_deref(), token_file.as_deref()) {
+        let (supplied, token_file) = photosplice_automation::security::token_inputs(control_token, control_token_file);
+        let token = match photosplice_automation::security::server_token(supplied.as_deref(), token_file.as_deref()) {
             Ok(token) => token,
             Err(e) => {
-                eprintln!("photosuite: cannot configure control authentication: {e}");
+                eprintln!("photosplice: cannot configure control authentication: {e}");
                 return Ok(());
             }
         };
         if let Some(path) = token_file {
-            eprintln!("photosuite: control token file: {}", path.display());
+            eprintln!("photosplice: control token file: {}", path.display());
         } else if supplied.is_none() {
-            eprintln!("photosuite: control token: {token}");
+            eprintln!("photosplice: control token: {token}");
         } else {
-            eprintln!("photosuite: using supplied control token");
+            eprintln!("photosplice: using supplied control token");
         }
-        let workspace = match photosuite_automation::AuthorizedWorkspace::new(automation_read_root.as_deref(), automation_write_root.as_deref()) {
+        let workspace = match photosplice_automation::AuthorizedWorkspace::new(automation_read_root.as_deref(), automation_write_root.as_deref()) {
             Ok(workspace) => workspace,
             Err(error) => {
-                eprintln!("photosuite: cannot configure automation workspace: {error}");
+                eprintln!("photosplice: cannot configure automation workspace: {error}");
                 return Ok(());
             }
         };
@@ -152,7 +152,7 @@ fn main() -> eframe::Result {
     // Pen tablet samples on macOS (AppKit event monitor, before winit sees each event) and X11
     // (started once eframe says which display server it is on). The monitor lives until the event
     // loop returns.
-    let stylus_feed = photosuite_ui_egui::stylus::StylusFeed::default();
+    let stylus_feed = photosplice_ui_egui::stylus::StylusFeed::default();
     #[cfg(target_os = "macos")]
     let _tablet = tablet::install_macos(&stylus_feed);
 
@@ -160,13 +160,13 @@ fn main() -> eframe::Result {
     // where the platform has no reader).
     let monitor = monitor_profile::detect_async();
     // Brush presets load in the background; the app attaches them when they arrive.
-    let presets = services::presets_dir().map(photosuite_engine::preset_store::open_dir_async);
+    let presets = services::presets_dir().map(photosplice_engine::preset_store::open_dir_async);
     services::register_lens_profiles();
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_icon(app_icon::window_icon())
             .with_app_id(APP_ID)
-            .with_title(photosuite_ui_egui::APP_NAME)
+            .with_title(photosplice_ui_egui::APP_NAME)
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([760.0, 480.0])
             .with_drag_and_drop(true)
@@ -200,7 +200,7 @@ fn main() -> eframe::Result {
             Some(v) => format!("env:{v}"),
             None => plan.backend.name().to_string(),
         };
-        let marker = gpu_startup::Marker { backend, version: photosuite_engine::build_info::long_version().to_string(), ..Default::default() };
+        let marker = gpu_startup::Marker { backend, version: photosplice_engine::build_info::long_version().to_string(), ..Default::default() };
         if let Err(e) = s.write(marker) {
             log::warn!("GPU startup marker: {e}");
         }
@@ -210,35 +210,35 @@ fn main() -> eframe::Result {
     gpu_startup::configure(&mut options.wgpu_options.wgpu_setup, &plan, os, sentinel.clone(), gpu_note.clone());
     let sentinel_ms = t_sentinel.elapsed().as_secs_f64() * 1000.0;
     log::info!("GPU startup: {:?} ({sentinel_ms:.2} ms)", plan);
-    let retry_cpu = !safe_gpu && plan.backend != photosuite_engine::prefs::GpuBackend::Cpu;
+    let retry_cpu = !safe_gpu && plan.backend != photosplice_engine::prefs::GpuBackend::Cpu;
     let app_created = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let created_in_callback = app_created.clone();
     let started_sentinel = sentinel.clone();
     let result = eframe::run_native(
-        "PhotoSuite",
+        "PhotoSplice",
         options,
         Box::new(move |cc| {
             created_in_callback.store(true, std::sync::atomic::Ordering::Relaxed);
             let automation = control.as_ref().map(|(_, _, workspace)| workspace.clone());
             let mut services = services::native(automation);
             services.preset_store = presets;
-            let mut app = PhotosuiteApp::new(Session::new(), services);
-            app.bundled = photosuite_ui_egui::bundled::State::new(services::bundled_libraries());
+            let mut app = PhotospliceApp::new(Session::new(), services);
+            app.bundled = photosplice_ui_egui::bundled::State::new(services::bundled_libraries());
             app.integrated_titlebar = cfg!(target_os = "macos");
             // Windows and Linux keep the system title bar, which shows the window title.
             app.os_title_bar = !cfg!(target_os = "macos");
             // Long commands and file opens run as background jobs with progress and Cancel (#210).
-            app.background_jobs = std::env::var_os("PHOTOSUITE_INLINE_JOBS").is_none();
+            app.background_jobs = std::env::var_os("PHOTOSPLICE_INLINE_JOBS").is_none();
             // Displays and their profiles (#569): wait briefly so the first frames already use
             // the right profile; a slower reading is applied when it arrives, and the shell reads
             // again when the displays may have changed.
             if let Some(rx) = monitor {
                 app.services.read_displays = Some(std::sync::Arc::new(monitor_profile::detect_async));
                 match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-                    Ok(r) => photosuite_ui_egui::monitor_status::apply(&mut app, r),
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => photosuite_ui_egui::monitor_status::pending(&mut app, rx),
+                    Ok(r) => photosplice_ui_egui::monitor_status::apply(&mut app, r),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => photosplice_ui_egui::monitor_status::pending(&mut app, rx),
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                        photosuite_ui_egui::monitor_status::apply(&mut app, Err("the display profile reader stopped without an answer".into()));
+                        photosplice_ui_egui::monitor_status::apply(&mut app, Err("the display profile reader stopped without an answer".into()));
                     }
                 }
             }
@@ -255,32 +255,32 @@ fn main() -> eframe::Result {
             if let Some(rs) = cc.wgpu_render_state.clone() {
                 app.perf.gpu_info.set_adapter(&rs.adapter.get_info());
                 let software_window = rs.adapter.get_info().device_type == eframe::wgpu::DeviceType::Cpu;
-                if software_window && mode != photosuite_engine::prefs::RenderingMode::Cpu {
+                if software_window && mode != photosplice_engine::prefs::RenderingMode::Cpu {
                     app.perf.gpu_info.fallback = Some("No compatible hardware graphics adapter; using software graphics.".into());
                 }
                 if !software_window
-                    && plan.backend != photosuite_engine::prefs::GpuBackend::Cpu
-                    && std::env::var_os("PHOTOSUITE_CPU_CANVAS").is_none()
-                    && app.session.prefs().performance.effective_rendering_mode() != photosuite_engine::prefs::RenderingMode::Cpu
+                    && plan.backend != photosplice_engine::prefs::GpuBackend::Cpu
+                    && std::env::var_os("PHOTOSPLICE_CPU_CANVAS").is_none()
+                    && app.session.prefs().performance.effective_rendering_mode() != photosplice_engine::prefs::RenderingMode::Cpu
                 {
                     app.set_wgpu(rs);
                 } else {
                     // The window still draws with wgpu: record its errors instead of panicking.
-                    let _ = photosuite_ui_egui::gpu_canvas::DeviceHealth::watch(&rs.device);
+                    let _ = photosplice_ui_egui::gpu_canvas::DeviceHealth::watch(&rs.device);
                 }
             }
-            let fallback_reason = std::env::var("PHOTOSUITE_GPU_STARTUP_FAILURE").ok().or_else(|| {
-                (app.perf.gpu_info.canvas == "cpu" && mode != photosuite_engine::prefs::RenderingMode::Cpu)
+            let fallback_reason = std::env::var("PHOTOSPLICE_GPU_STARTUP_FAILURE").ok().or_else(|| {
+                (app.perf.gpu_info.canvas == "cpu" && mode != photosplice_engine::prefs::RenderingMode::Cpu)
                     .then(|| app.perf.gpu_info.fallback.clone())
                     .flatten()
             });
             if let Some(reason) = fallback_reason {
-                photosuite_ui_egui::gpu_status::queue_fallback_notice(&mut app, &reason);
+                photosplice_ui_egui::gpu_status::queue_fallback_notice(&mut app, &reason);
             }
             app.perf.span("gpuSentinel", sentinel_ms);
             // Once the first frames rendered: clear the marker, and keep a crash fallback.
             let remember_cpu =
-                std::env::var_os("PHOTOSUITE_GPU_STARTUP_FAILURE").is_some() || (plan.remember && plan.backend == photosuite_engine::prefs::GpuBackend::Cpu);
+                std::env::var_os("PHOTOSPLICE_GPU_STARTUP_FAILURE").is_some() || (plan.remember && plan.backend == photosplice_engine::prefs::GpuBackend::Cpu);
             let remember = plan.remember.then_some(plan.backend);
             app.on_started(move |app| {
                 if let Some(s) = started_sentinel.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
@@ -318,16 +318,16 @@ fn main() -> eframe::Result {
             app.stylus.feed = stylus_feed;
             #[cfg(target_os = "linux")]
             tablet::spawn_x11(&app.stylus.feed, tablet::DisplayKind::of(cc));
-            // Paths on the command line (Linux/Windows file associations, `photosuite a.psd`).
+            // Paths on the command line (Linux/Windows file associations, `photosplice a.psd`).
             app.open_paths(&files);
             // Portable marker found but its data folder isn't writable (#228): say where settings went.
             if let Some(w) = &app_dirs::current().warning {
-                photosuite_ui_egui::notices::post(&mut app, "Portable mode is off", vec![w.clone()], false);
+                photosplice_ui_egui::notices::post(&mut app, "Portable mode is off", vec![w.clone()], false);
             }
             #[cfg(target_os = "macos")]
             {
                 // The NSApp exists by now, so the real menu bar can be installed. The in-window
-                // egui bar stands down (see `PhotosuiteApp::native_menu_bar`).
+                // egui bar stands down (see `PhotospliceApp::native_menu_bar`).
                 if let Some(menu) = native_menu::NativeMenu::install(&app, &cc.egui_ctx) {
                     app.native_menu_bar = true;
                     return Ok(Box::new(native_menu::WithNativeMenu { app, menu }));
@@ -356,7 +356,7 @@ fn main() -> eframe::Result {
                 .args(std::env::args_os().skip(1))
                 .arg("--safe-gpu")
                 .env_remove("WGPU_BACKEND")
-                .env("PHOTOSUITE_GPU_STARTUP_FAILURE", &reason)
+                .env("PHOTOSPLICE_GPU_STARTUP_FAILURE", &reason)
                 .spawn();
             match launched {
                 Ok(_) => return Ok(()),
@@ -382,7 +382,7 @@ mod control_port_tests {
     fn control_port_accepts_valid_numbers() {
         assert_eq!(parse_control_port("50494", "--control"), Ok(50494));
         assert_eq!(parse_control_port(" 8080 ", "--control"), Ok(8080));
-        assert_eq!(parse_control_port("0", "PHOTOSUITE_CONTROL_PORT"), Ok(0));
+        assert_eq!(parse_control_port("0", "PHOTOSPLICE_CONTROL_PORT"), Ok(0));
     }
 
     #[test]

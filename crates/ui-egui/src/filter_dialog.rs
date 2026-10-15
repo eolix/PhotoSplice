@@ -5,10 +5,10 @@
 
 use std::sync::Arc;
 
-use photosuite_doc::Document;
+use photosplice_doc::Document;
 use serde_json::{Map, Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::theme::Tokens;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -167,11 +167,11 @@ pub fn has_dialog(command: &str) -> bool {
                 | "layer.layerStyle.globalLight"
                 | "image.mode.colorTable"
         ))
-        && photosuite_engine::commands::find(command).is_some_and(|c| !parse_spec(c.params).is_empty())
+        && photosplice_engine::commands::find(command).is_some_and(|c| !parse_spec(c.params).is_empty())
 }
 
-pub fn open(app: &mut PhotosuiteApp, command: &str) -> Option<u64> {
-    let spec = photosuite_engine::commands::find(command)?;
+pub fn open(app: &mut PhotospliceApp, command: &str) -> Option<u64> {
+    let spec = photosplice_engine::commands::find(command)?;
     let mut fields = Map::new();
     fields.insert("__command".into(), json!(command));
     fields.insert("__label".into(), json!(spec.label));
@@ -214,9 +214,9 @@ pub fn open(app: &mut PhotosuiteApp, command: &str) -> Option<u64> {
 /// Lens Correction: the measured profiles that fit the photograph (its camera's mount and focal
 /// length, from EXIF; every lens when the camera is unknown) as `__choices.lens`, with the one EXIF
 /// names preselected.
-fn lens_choices(app: &PhotosuiteApp, fields: &mut Map<String, Value>) {
-    let Some(db) = photosuite_engine::lens_cmds::lens_database() else { return };
-    let info = app.session.active().and_then(|d| d.doc.metadata.exif.as_ref().map(|e| photosuite_algo::exif::read(e)));
+fn lens_choices(app: &PhotospliceApp, fields: &mut Map<String, Value>) {
+    let Some(db) = photosplice_engine::lens_cmds::lens_database() else { return };
+    let info = app.session.active().and_then(|d| d.doc.metadata.exif.as_ref().map(|e| photosplice_algo::exif::read(e)));
     let camera = info.as_ref().and_then(|i| db.match_camera(i.make.as_deref(), i.model.as_deref()));
     let focal = info.as_ref().and_then(|i| i.focal_length).unwrap_or(0.0);
     let mut names = vec![String::new()];
@@ -229,9 +229,9 @@ fn lens_choices(app: &PhotosuiteApp, fields: &mut Map<String, Value>) {
 }
 
 /// Arbitrary rotation starts at the angle that straightens the ruler line, when there is one.
-fn straighten_defaults(app: &PhotosuiteApp, fields: &mut Map<String, Value>) {
+fn straighten_defaults(app: &PhotospliceApp, fields: &mut Map<String, Value>) {
     let Some(r) = app.session.active().and_then(|d| d.doc.measurement.ruler) else { return };
-    let rot = photosuite_engine::analysis_cmds::straighten_angle(&r);
+    let rot = photosplice_engine::analysis_cmds::straighten_angle(&r);
     // A ruler read from a damaged file could hold non-finite ends: keep the 0° default then.
     if !rot.is_finite() {
         return;
@@ -242,7 +242,7 @@ fn straighten_defaults(app: &PhotosuiteApp, fields: &mut Map<String, Value>) {
 
 /// A filter dialog with live preview for `command` whose parameters follow `spec` (registry
 /// notation) instead of the command's own; `fixed` params (e.g. a plug-in id) are passed through.
-pub fn open_with_spec(app: &mut PhotosuiteApp, command: &str, label: &str, spec: &str, fixed: Map<String, Value>) -> u64 {
+pub fn open_with_spec(app: &mut PhotospliceApp, command: &str, label: &str, spec: &str, fixed: Map<String, Value>) -> u64 {
     let mut fields = fixed;
     fields.insert("__command".into(), json!(command));
     fields.insert("__label".into(), json!(label));
@@ -293,7 +293,7 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     // Plug-in dialogs carry their own spec (from the plug-in's manifest).
     let spec = match f.get("__spec").and_then(Value::as_str) {
         Some(s) => s.to_string(),
-        None => match photosuite_engine::commands::find(&cmd) {
+        None => match photosplice_engine::commands::find(&cmd) {
             Some(c) => c.params.to_string(),
             None => return,
         },
@@ -444,9 +444,9 @@ pub fn params_of(f: &Map<String, Value>) -> Value {
 }
 
 /// Compute a preview document: run `command` with `params` on the proxy (scaled) copy of `doc`.
-pub fn preview_document(doc: &Document, active: Option<photosuite_doc::LayerId>, command: &str, params: &Value, k: u32) -> Option<Document> {
+pub fn preview_document(doc: &Document, active: Option<photosplice_doc::LayerId>, command: &str, params: &Value, k: u32) -> Option<Document> {
     let proxy = crate::proxy::proxy_document(doc, k);
-    let mut s = photosuite_engine::Session::new();
+    let mut s = photosplice_engine::Session::new();
     s.add_document(proxy, None);
     if let Some(id) = active {
         s.select_layer(id).ok()?;
@@ -469,7 +469,7 @@ pub fn preview_document(doc: &Document, active: Option<photosuite_doc::LayerId>,
 
 /// Cached preview state on the app.
 pub struct FilterPreview {
-    pub doc: photosuite_doc::DocId,
+    pub doc: photosplice_doc::DocId,
     pub revision: u64,
     pub hash: u64,
     pub k: u32,
@@ -483,8 +483,8 @@ mod tests {
     #[test]
     fn lens_correction_offers_measured_profiles() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/lensfun/lens-database.json");
-        photosuite_engine::lens_cmds::set_lens_database_json(&std::fs::read(path).unwrap()).unwrap();
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        photosplice_engine::lens_cmds::set_lens_database_json(&std::fs::read(path).unwrap()).unwrap();
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
         let id = open(&mut app, "filter.lensCorrection").unwrap();
         let d = app.ui.dialog_mut(id).unwrap();
@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn every_filter_command_spec_parses() {
-        for c in photosuite_engine::command_specs().iter().filter(|c| c.id.starts_with("filter.")) {
+        for c in photosplice_engine::command_specs().iter().filter(|c| c.id.starts_with("filter.")) {
             let _ = parse_spec(c.params);
         }
         assert!(has_dialog("filter.blur.gaussianBlur"));
@@ -561,13 +561,13 @@ mod tests {
     fn preview_runs_engine_command_on_proxy() {
         let mut doc = Document::with_background(
             "p",
-            photosuite_doc::Size::new(64, 64),
-            photosuite_doc::ColorMode::Rgb,
-            photosuite_doc::SampleType::U8,
-            photosuite_doc::Color::WHITE,
+            photosplice_doc::Size::new(64, 64),
+            photosplice_doc::ColorMode::Rgb,
+            photosplice_doc::SampleType::U8,
+            photosplice_doc::Color::WHITE,
         );
         let bg = doc.layers[0].id;
-        doc.layers[0].surface_mut().unwrap().fill_rect(photosuite_geom::Rect::new(0, 0, 32, 64), &[0.0, 0.0, 0.0, 1.0]);
+        doc.layers[0].surface_mut().unwrap().fill_rect(photosplice_geom::Rect::new(0, 0, 32, 64), &[0.0, 0.0, 0.0, 1.0]);
         let out = preview_document(&doc, Some(bg), "filter.blur.gaussianBlur", &json!({"radius": 4.0}), 1).unwrap();
         let p = out.layers[0].surface().unwrap().pixel(32, 32);
         assert!(p[0] > 0.2 && p[0] < 0.8, "edge blurred: {p:?}");
@@ -576,13 +576,13 @@ mod tests {
 
     #[test]
     fn preview_stays_inside_the_selection_at_every_proxy_factor() {
-        use photosuite_doc::SampleType;
+        use photosplice_doc::SampleType;
         for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
             let mut doc =
-                Document::with_background("p", photosuite_doc::Size::new(64, 64), photosuite_doc::ColorMode::Rgb, depth, photosuite_doc::Color::gray(0.5));
+                Document::with_background("p", photosplice_doc::Size::new(64, 64), photosplice_doc::ColorMode::Rgb, depth, photosplice_doc::Color::gray(0.5));
             let bg = doc.layers[0].id;
-            let mut sel = photosuite_raster::Surface::new(photosuite_doc::PixelFormat::GRAY8);
-            sel.fill_rect(photosuite_geom::Rect::new(0, 0, 32, 64), &[1.0]);
+            let mut sel = photosplice_raster::Surface::new(photosplice_doc::PixelFormat::GRAY8);
+            sel.fill_rect(photosplice_geom::Rect::new(0, 0, 32, 64), &[1.0]);
             doc.selection = Some(sel);
             for k in [1, 2, 4] {
                 let out = preview_document(&doc, Some(bg), "filter.noise.addNoise", &json!({"amount": 100.0}), k).unwrap();

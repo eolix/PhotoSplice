@@ -2,17 +2,17 @@
 //!
 //! A warp is a [`Warp`] (preset style + bend/distortions, or a custom bicubic Bezier mesh)
 //! defined over a source box in document space. Pixel layers are resampled once
-//! (`photosuite_algo::warp`); smart objects store the warp in their source space and re-render
+//! (`photosplice_algo::warp`); smart objects store the warp in their source space and re-render
 //! from the source, so editing a smart object's warp never degrades it.
 //!
 //! The split and grid commands edit a mesh: either one passed in (`"warp"`, returned edited —
 //! what the Free Transform warp UI uses) or the active smart object's stored warp (a history step).
 
-use photosuite_algo::transform::{Homography, Interp};
-use photosuite_algo::warp::{warp_mesh_gray, warp_mesh_surface};
-use photosuite_doc::{Document, Layer, LayerContent, LayerId, Locks, Rect};
-use photosuite_geom::warp::{BezierMesh, Warp, WarpStyle};
-use photosuite_raster::Surface;
+use photosplice_algo::transform::{Homography, Interp};
+use photosplice_algo::warp::{warp_mesh_gray, warp_mesh_surface};
+use photosplice_doc::{Document, Layer, LayerContent, LayerId, Locks, Rect};
+use photosplice_geom::warp::{BezierMesh, Warp, WarpStyle};
+use photosplice_raster::Surface;
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
@@ -160,7 +160,7 @@ fn warp_layer(doc_sel: Option<&Surface>, group: Locks, l: &mut Layer, w: &Warp, 
                         // Content outside the warp box stays where it is.
                         let fmt = surf.format();
                         let warped = warp_mesh_surface(surf, rect, &map, interp);
-                        let mut rest = surf.convert(photosuite_color::PixelFormat::new(fmt.mode, fmt.sample, true));
+                        let mut rest = surf.convert(photosplice_color::PixelFormat::new(fmt.mode, fmt.sample, true));
                         crate::pixels::clear_surface(&mut rest, rect, None);
                         crate::transform_cmds::composite_over(&mut rest, &warped);
                         rest.prune();

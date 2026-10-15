@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Build and package PhotoSuite for Linux (<arch> is x86_64 or aarch64):
+# Build and package PhotoSplice for Linux (<arch> is x86_64 or aarch64):
 #
-#   $DIST/photosuite-<version>-linux-<arch>.AppImage  any distro with glibc >= the build host's
-#   $DIST/photosuite-<version>-linux-<arch>.deb       Debian, Ubuntu, Mint, Pop!_OS, ...
-#   $DIST/photosuite-<version>-linux-<arch>.rpm       Fedora, openSUSE, RHEL, ...
-#   $DIST/photosuite-<version>-linux-<arch>.pkg.tar.zst  Arch Linux, Manjaro, EndeavourOS, ...
-#   $DIST/photosuite-<version>-linux-<arch>.tar.gz    plain FHS-style tree (bin/, share/)
+#   $DIST/photosplice-<version>-linux-<arch>.AppImage  any distro with glibc >= the build host's
+#   $DIST/photosplice-<version>-linux-<arch>.deb       Debian, Ubuntu, Mint, Pop!_OS, ...
+#   $DIST/photosplice-<version>-linux-<arch>.rpm       Fedora, openSUSE, RHEL, ...
+#   $DIST/photosplice-<version>-linux-<arch>.pkg.tar.zst  Arch Linux, Manjaro, EndeavourOS, ...
+#   $DIST/photosplice-<version>-linux-<arch>.tar.gz    plain FHS-style tree (bin/, share/)
 #
 # Usage: packaging/linux/package.sh [--skip-build] [--formats "appimage deb rpm arch tar"]
 #
@@ -15,13 +15,13 @@
 # and zsyncmake (package zsync) for the AppImage's .zsync if appimagetool doesn't write it.
 #
 # The AppImage carries update information for AppImageUpdate: the newest GitHub release of
-# $PHOTOSUITE_UPDATE_REPO (default: $GITHUB_REPOSITORY in CI, else eolix/photosuite), found
+# $PHOTOSPLICE_UPDATE_REPO (default: $GITHUB_REPOSITORY in CI, else eolix/photosplice), found
 # through the .zsync published beside it. packaging/linux/verify-appimage.sh checks the result.
 set -euo pipefail
 # shellcheck source=../env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
 HERE="$ROOT/packaging/linux"
-APP_ID=io.github.eolix.PhotoSuite
+APP_ID=io.github.eolix.PhotoSplice
 
 SKIP_BUILD=0
 FORMATS="appimage deb rpm arch tar"
@@ -40,13 +40,13 @@ case "$ARCH" in
   aarch64 | arm64) ARCH=aarch64; DEB_ARCH=arm64 ;;
   *) echo "unsupported architecture $ARCH" >&2; exit 2 ;;
 esac
-export PHOTOSUITE_MAINTAINER="${PHOTOSUITE_MAINTAINER:-PhotoSuite maintainers <photosplice@gmail.com>}"
-BASENAME="photosuite-$VERSION-linux-$ARCH"
+export PHOTOSPLICE_MAINTAINER="${PHOTOSPLICE_MAINTAINER:-PhotoSplice maintainers <photosplice@gmail.com>}"
+BASENAME="photosplice-$VERSION-linux-$ARCH"
 
-echo "==> PhotoSuite $VERSION for Linux $ARCH ($FORMATS)"
+echo "==> PhotoSplice $VERSION for Linux $ARCH ($FORMATS)"
 
 if [ "$SKIP_BUILD" = 0 ]; then
-  (cd "$ROOT" && cargo build --release --locked -p photosuite)
+  (cd "$ROOT" && cargo build --release --locked -p photosplice)
 fi
 BIN="$CARGO_TARGET_DIR/release"
 WORK="$CARGO_TARGET_DIR/linux-package"
@@ -54,18 +54,18 @@ STAGE="$WORK/root"
 rm -rf "$WORK"
 
 # ---- stage an FHS tree (shared by every format) -------------------------------------------------
-install -Dm755 "$BIN/photosuite" "$STAGE/usr/bin/photosuite"
-copy_resources "$STAGE/usr/share/photosuite/resources"
-strip "$STAGE/usr/bin/photosuite" 2>/dev/null || true
+install -Dm755 "$BIN/photosplice" "$STAGE/usr/bin/photosplice"
+copy_resources "$STAGE/usr/share/photosplice/resources"
+strip "$STAGE/usr/bin/photosplice" 2>/dev/null || true
 install -Dm644 "$HERE/$APP_ID.desktop" "$STAGE/usr/share/applications/$APP_ID.desktop"
 install -Dm644 "$HERE/$APP_ID.mime.xml" "$STAGE/usr/share/mime/packages/$APP_ID.xml"
 mkdir -p "$STAGE/usr/share/metainfo"
-sed -e "s/@VERSION@/$VERSION/g" -e "s/@DATE@/$PHOTOSUITE_BUILD_DATE/g" \
+sed -e "s/@VERSION@/$VERSION/g" -e "s/@DATE@/$PHOTOSPLICE_BUILD_DATE/g" \
   "$HERE/$APP_ID.metainfo.xml.in" >"$STAGE/usr/share/metainfo/$APP_ID.metainfo.xml"
 mkdir -p "$STAGE/usr/share/icons"
 cp -R "$ROOT/assets/app-icon/hicolor" "$STAGE/usr/share/icons/"
-mkdir -p "$STAGE/usr/share/doc/photosuite"
-copy_docs "$STAGE/usr/share/doc/photosuite"
+mkdir -p "$STAGE/usr/share/doc/photosplice"
+copy_docs "$STAGE/usr/share/doc/photosplice"
 
 # Lints: reported, but a style warning in the metadata doesn't stop a release.
 if command -v desktop-file-validate >/dev/null; then
@@ -92,7 +92,7 @@ if has deb || has rpm || has arch; then
   export NFPM_ARCH="$DEB_ARCH"
   # nfpm expands env vars in fields like `version` and `arch`, but not in `contents[].src` or
   # `archlinux.packager`.
-  sed -e "s|\${STAGE}|$STAGE|g" -e "s|\${PHOTOSUITE_MAINTAINER}|$PHOTOSUITE_MAINTAINER|g" "$HERE/nfpm.yaml" >"$WORK/nfpm.yaml"
+  sed -e "s|\${STAGE}|$STAGE|g" -e "s|\${PHOTOSPLICE_MAINTAINER}|$PHOTOSPLICE_MAINTAINER|g" "$HERE/nfpm.yaml" >"$WORK/nfpm.yaml"
   for fmt in deb rpm; do
     if has "$fmt"; then (cd "$ROOT" && nfpm package -f "$WORK/nfpm.yaml" -p "$fmt" -t "$DIST/$BASENAME.$fmt"); fi
   done
@@ -106,7 +106,7 @@ fi
 
 # ---- AppImage -----------------------------------------------------------------------------------
 if has appimage; then
-  APPDIR="$WORK/PhotoSuite.AppDir"
+  APPDIR="$WORK/PhotoSplice.AppDir"
   # The whole staged tree, licences and notices included (NOTICE must travel with the binary).
   cp -R "$STAGE" "$APPDIR"
   # AppRun is a script, not a symlink: it installs the .desktop entry and icons into
@@ -135,8 +135,8 @@ if has appimage; then
   # Delta updates: `gh-releases-zsync` resolves the newest release through the GitHub API, so
   # the channel doesn't go stale when the version in the file name changes. The file name is a
   # glob for that reason, and must match the asset each release publishes.
-  UPDATE_REPO="${PHOTOSUITE_UPDATE_REPO:-${GITHUB_REPOSITORY:-eolix/photosuite}}"
-  UPDATE_INFO="gh-releases-zsync|${UPDATE_REPO%%/*}|${UPDATE_REPO#*/}|latest|photosuite-*-linux-$ARCH.AppImage.zsync"
+  UPDATE_REPO="${PHOTOSPLICE_UPDATE_REPO:-${GITHUB_REPOSITORY:-eolix/photosplice}}"
+  UPDATE_INFO="gh-releases-zsync|${UPDATE_REPO%%/*}|${UPDATE_REPO#*/}|latest|photosplice-*-linux-$ARCH.AppImage.zsync"
   rm -f "$OUT" "$OUT.zsync"
   # Extract-and-run: works without FUSE (containers, CI). The output embeds the static runtime,
   # so users don't need libfuse2 either. `-u` embeds the update information and writes the
@@ -153,6 +153,6 @@ if has appimage; then
   echo "wrote $OUT"
 fi
 
-"$STAGE/usr/bin/photosuite" --version
+"$STAGE/usr/bin/photosplice" --version
 echo "==> done"
 ls -lh "$DIST"

@@ -3,22 +3,22 @@
 //! * parameter parsing for Selective Color and Color Lookup (both also adjustment layers; their
 //!   commands are generated with the other kinds in `commands.rs`),
 //! * the destructive-only adjustments: Shadows/Highlights, Replace Color, Match Color and HDR
-//!   Toning (maths in `photosuite_algo::tone`).
+//!   Toning (maths in `photosplice_algo::tone`).
 //!
 //! Destructive adjustments convert the target (layer pixels, or a targeted alpha channel /
 //! Quick Mask) to straight RGBA, so every colour model and bit depth is handled, and blend the
 //! result through the selection like the other Image › Adjustments commands.
 
-use photosuite_algo::tone::{self, HdrToning, MatchColor, ShadowsHighlights};
-use photosuite_doc::{Adjustment, Document, Layer, LayerContent, Rect};
-use photosuite_raster::{Surface, from_rgba_into, to_rgba};
+use photosplice_algo::tone::{self, HdrToning, MatchColor, ShadowsHighlights};
+use photosplice_doc::{Adjustment, Document, Layer, LayerContent, Rect};
+use photosplice_raster::{Surface, from_rgba_into, to_rgba};
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
 use crate::{EngineError, Result, Session};
 
 /// Built-in Color Lookup looks `(id, label)`.
-pub use photosuite_cms::lutfile::BUILTIN as LOOKS;
+pub use photosplice_cms::lutfile::BUILTIN as LOOKS;
 
 /// Selective Color range keys in storage order.
 pub const RANGES: [&str; 9] = ["reds", "yellows", "greens", "cyans", "blues", "magentas", "whites", "neutrals", "blacks"];
@@ -73,26 +73,26 @@ pub fn lookup_from_params(p: &Value, base: Option<&Adjustment>) -> Result<Adjust
         Some(Adjustment::ColorLookup { name, lut, size, tetrahedral, dither }) => (name.clone(), lut.clone(), *size, *tetrahedral, *dither),
         _ => (String::new(), None, 0, false, false),
     };
-    let mut loaded: Option<(photosuite_cms::lutfile::LutFile, String)> = None;
+    let mut loaded: Option<(photosplice_cms::lutfile::LutFile, String)> = None;
     if let Some(id) = p.get("lut").and_then(Value::as_str) {
         if id == "none" || id.is_empty() {
             name.clear();
             lut = None;
             size = 0;
         } else {
-            let f = photosuite_cms::lutfile::builtin(id).ok_or_else(|| bad(CMD, format!("unknown look `{id}` (built-ins: {})", builtin_ids())))?;
+            let f = photosplice_cms::lutfile::builtin(id).ok_or_else(|| bad(CMD, format!("unknown look `{id}` (built-ins: {})", builtin_ids())))?;
             let label = f.title.clone();
             loaded = Some((f, label));
         }
     }
     if let Some(text) = p.get("data").and_then(Value::as_str) {
         let file_name = p.get("fileName").and_then(Value::as_str).unwrap_or("lut.cube");
-        let f = photosuite_cms::lutfile::parse(file_name, text.as_bytes()).map_err(|e| bad(CMD, e.0))?;
+        let f = photosplice_cms::lutfile::parse(file_name, text.as_bytes()).map_err(|e| bad(CMD, e.0))?;
         loaded = Some((f, base_name(file_name)));
     }
     if let Some(path) = p.get("file").and_then(Value::as_str).filter(|s| !s.is_empty()) {
         let bytes = read_file(path).ok_or_else(|| bad(CMD, format!("can't read {path}")))?;
-        let f = photosuite_cms::lutfile::parse(path, &bytes).map_err(|e| bad(CMD, format!("{path}: {}", e.0)))?;
+        let f = photosplice_cms::lutfile::parse(path, &bytes).map_err(|e| bad(CMD, format!("{path}: {}", e.0)))?;
         loaded = Some((f, base_name(path)));
     }
     if let Some((f, label)) = loaded {
@@ -113,7 +113,7 @@ pub fn lookup_from_params(p: &Value, base: Option<&Adjustment>) -> Result<Adjust
 }
 
 fn builtin_ids() -> String {
-    photosuite_cms::lutfile::BUILTIN.iter().map(|b| b.0).collect::<Vec<_>>().join(", ")
+    photosplice_cms::lutfile::BUILTIN.iter().map(|b| b.0).collect::<Vec<_>>().join(", ")
 }
 
 fn base_name(path: &str) -> String {
@@ -258,12 +258,12 @@ fn stats_pixels(doc: &Document, layer: Option<u64>, use_selection: bool) -> Resu
     let area = doc.bounds();
     let px: Vec<[f32; 4]> = match layer {
         Some(id) => {
-            let l = doc.layer(photosuite_doc::LayerId(id)).ok_or(EngineError::NoLayer(photosuite_doc::LayerId(id)))?;
-            photosuite_compose::render_layer(l, area).px
+            let l = doc.layer(photosplice_doc::LayerId(id)).ok_or(EngineError::NoLayer(photosplice_doc::LayerId(id)))?;
+            photosplice_compose::render_layer(l, area).px
         }
-        None => photosuite_compose::flatten(doc).px,
+        None => photosplice_compose::flatten(doc).px,
     };
-    let mask = doc.selection.as_ref().filter(|_| use_selection).map(|sel| photosuite_algo::selection::mask_from_surface(Some(sel), area));
+    let mask = doc.selection.as_ref().filter(|_| use_selection).map(|sel| photosplice_algo::selection::mask_from_surface(Some(sel), area));
     Ok((px, mask))
 }
 
@@ -290,7 +290,7 @@ fn match_color(s: &mut Session, p: &Value) -> Result<Value> {
     let target_sel = p.get("useSelectionInTarget").and_then(Value::as_bool).unwrap_or(false);
     let sel = s.active().and_then(|d| d.doc.selection.clone());
     rgba_edit(s, "Match Color", p, |px, r| {
-        let mask: Option<Vec<f32>> = sel.as_ref().filter(|_| target_sel).map(|sel| photosuite_algo::selection::mask_from_surface(Some(sel), r));
+        let mask: Option<Vec<f32>> = sel.as_ref().filter(|_| target_sel).map(|sel| photosplice_algo::selection::mask_from_surface(Some(sel), r));
         let Some(target) = tone::lab_stats(px, mask.as_deref()) else {
             return;
         };
@@ -319,12 +319,12 @@ fn hdr_toning(s: &mut Session, p: &Value) -> Result<Value> {
     };
     // Like Photoshop, HDR Toning flattens the image first (one history step).
     s.edit("HDR Toning", |doc, active| {
-        let buf = photosuite_compose::flatten(doc).over_background([1.0, 1.0, 1.0]);
+        let buf = photosplice_compose::flatten(doc).over_background([1.0, 1.0, 1.0]);
         let (w, hgt) = (buf.rect.width() as usize, buf.rect.height() as usize);
         let mut px = buf.px;
         tone::hdr_toning(&mut px, w, hgt, &h);
         let fmt = doc.pixel_format();
-        let data: Vec<f32> = px.iter().flat_map(|q| photosuite_raster::from_rgba(&fmt, *q)).collect();
+        let data: Vec<f32> = px.iter().flat_map(|q| photosplice_raster::from_rgba(&fmt, *q)).collect();
         let mut bg = Layer::raster("Background", fmt);
         bg.locks.transparency = true;
         bg.locks.position = true;
@@ -339,7 +339,7 @@ fn hdr_toning(s: &mut Session, p: &Value) -> Result<Value> {
 
 /// The Color Lookup built-ins (id, label) for UIs and agents.
 fn list_looks(_: &mut Session, _: &Value) -> Result<Value> {
-    Ok(json!(photosuite_cms::lutfile::BUILTIN.iter().map(|(id, label)| json!({"id": id, "label": label})).collect::<Vec<_>>()))
+    Ok(json!(photosplice_cms::lutfile::BUILTIN.iter().map(|(id, label)| json!({"id": id, "label": label})).collect::<Vec<_>>()))
 }
 
 macro_rules! spec {

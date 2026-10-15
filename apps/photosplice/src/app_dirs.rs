@@ -2,30 +2,30 @@
 //! autosaves and the GPU startup marker all live under the one directory [`config_dir`] returns.
 //!
 //! In order:
-//! 1. `PHOTOSUITE_CONFIG_DIR`, when set (tests, agents, custom setups).
+//! 1. `PHOTOSPLICE_CONFIG_DIR`, when set (tests, agents, custom setups).
 //! 2. **Portable mode** (#228): a marker file ([`PORTABLE_MARKERS`]) beside the executable puts
-//!    everything in `<exe dir>/PhotoSuiteData`, so a portable copy on a USB stick leaves nothing in
+//!    everything in `<exe dir>/PhotoSpliceData`, so a portable copy on a USB stick leaves nothing in
 //!    `%APPDATA%`. The Windows portable zip ships with `portable.txt`; the MSI doesn't. If that
 //!    folder can't be written (read-only medium, Program Files), the app warns and falls back.
 //! 3. The platform convention, in a folder named [`CONFIG_FOLDER`]: macOS
-//!    `~/Library/Application Support/app.photosuite`, Windows `%APPDATA%\app.photosuite`, Linux
-//!    `$XDG_CONFIG_HOME/app.photosuite` or `~/.config/app.photosuite`.
+//!    `~/Library/Application Support/app.photosplice`, Windows `%APPDATA%\app.photosplice`, Linux
+//!    `$XDG_CONFIG_HOME/app.photosplice` or `~/.config/app.photosplice`.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// Files beside the executable that switch on portable mode (either one; contents are ignored).
-pub const PORTABLE_MARKERS: [&str; 2] = ["portable.txt", "PhotoSuite.portable"];
+pub const PORTABLE_MARKERS: [&str; 2] = ["portable.txt", "PhotoSplice.portable"];
 /// The data folder created beside the executable in portable mode.
-pub const PORTABLE_DATA_DIR: &str = "PhotoSuiteData";
+pub const PORTABLE_DATA_DIR: &str = "PhotoSpliceData";
 
 /// How [`DataDir::dir`] was chosen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// `PHOTOSUITE_CONFIG_DIR`.
+    /// `PHOTOSPLICE_CONFIG_DIR`.
     Override,
-    /// `<exe dir>/PhotoSuiteData`.
+    /// `<exe dir>/PhotoSpliceData`.
     Portable,
     /// The platform's per-user config directory.
     Platform,
@@ -49,7 +49,7 @@ pub fn current() -> &'static DataDir {
         let d = resolve(|k| std::env::var_os(k), exe.as_deref().and_then(Path::parent));
         if let Some(w) = &d.warning {
             log::warn!("{w}");
-            eprintln!("photosuite: {w}");
+            eprintln!("photosplice: {w}");
         }
         log::info!("settings directory ({:?}): {:?}", d.mode, d.dir);
         d
@@ -63,7 +63,7 @@ pub fn config_dir() -> Option<PathBuf> {
 
 /// Resolve the data directory from the environment (`env`) and the executable's folder.
 pub fn resolve(env: impl Fn(&str) -> Option<OsString>, exe_dir: Option<&Path>) -> DataDir {
-    if let Some(d) = env("PHOTOSUITE_CONFIG_DIR").filter(|d| !d.is_empty()) {
+    if let Some(d) = env("PHOTOSPLICE_CONFIG_DIR").filter(|d| !d.is_empty()) {
         return DataDir { dir: Some(PathBuf::from(d)), mode: Mode::Override, warning: None };
     }
     let platform = platform_dir(&env);
@@ -84,7 +84,7 @@ pub fn resolve(env: impl Fn(&str) -> Option<OsString>, exe_dir: Option<&Path>) -
 
 /// The folder name under the platform's per-user application data directory.
 ///
-/// This is PhotoSuite's identifier. Earlier PhotoSuite releases used the same folder and their
+/// This is PhotoSplice's identifier. Earlier PhotoSplice releases used the same folder and their
 /// files may still be there, so nothing written here may reuse one of their names:
 ///
 /// | Earlier releases (do not write) | This app |
@@ -98,7 +98,7 @@ pub fn resolve(env: impl Fn(&str) -> Option<OsString>, exe_dir: Option<&Path>) -
 /// Should a cache of either kind ever land on disk here, name it `filter-gallery-thumbs.json`,
 /// `recent-files-thumbs.json` and `recent-thumbs/`. `config_name_does_not_collide_with_earlier_releases`
 /// pins the list.
-pub const CONFIG_FOLDER: &str = "app.photosuite";
+pub const CONFIG_FOLDER: &str = "app.photosplice";
 
 /// File and folder names earlier releases wrote in [`CONFIG_FOLDER`].
 #[cfg(test)]
@@ -144,7 +144,7 @@ mod tests {
 
     fn temp(tag: &str) -> PathBuf {
         static N: AtomicUsize = AtomicUsize::new(0);
-        let d = std::env::temp_dir().join(format!("photosuite-app-dirs-{tag}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
+        let d = std::env::temp_dir().join(format!("photosplice-app-dirs-{tag}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -190,7 +190,7 @@ mod tests {
     fn either_marker_keeps_everything_beside_the_exe() {
         for marker in PORTABLE_MARKERS {
             let root = temp("portable");
-            let exe = root.join("PhotoSuite");
+            let exe = root.join("PhotoSplice");
             std::fs::create_dir_all(&exe).unwrap();
             std::fs::write(exe.join(marker), b"").unwrap();
             let d = resolve(fake_home(&root), Some(&exe));
@@ -245,7 +245,7 @@ mod tests {
         std::fs::create_dir_all(&exe).unwrap();
         std::fs::write(exe.join("portable.txt"), b"").unwrap();
         let custom = root.join("custom");
-        let d = resolve(env_of(&[("PHOTOSUITE_CONFIG_DIR", &custom)]), Some(&exe));
+        let d = resolve(env_of(&[("PHOTOSPLICE_CONFIG_DIR", &custom)]), Some(&exe));
         assert_eq!((d.mode, d.dir), (Mode::Override, Some(custom)));
         assert!(!exe.join(PORTABLE_DATA_DIR).exists());
         let _ = std::fs::remove_dir_all(&root);
@@ -256,7 +256,7 @@ mod tests {
         let d = resolve(|_| None, None);
         assert_eq!((d.mode, d.dir), (Mode::Platform, None));
         let empty = PathBuf::new();
-        let d = resolve(env_of(&[("PHOTOSUITE_CONFIG_DIR", &empty), ("HOME", &empty), ("APPDATA", &empty)]), None);
+        let d = resolve(env_of(&[("PHOTOSPLICE_CONFIG_DIR", &empty), ("HOME", &empty), ("APPDATA", &empty)]), None);
         assert_eq!(d.dir, None, "empty variables are ignored");
     }
 
@@ -265,7 +265,7 @@ mod tests {
     /// thumbnail cache is not.
     #[test]
     fn config_name_does_not_collide_with_earlier_releases() {
-        assert_eq!(CONFIG_FOLDER, "app.photosuite", "the folder earlier releases use");
+        assert_eq!(CONFIG_FOLDER, "app.photosplice", "the folder earlier releases use");
         for ours in OUR_NAMES {
             assert!(
                 !LEGACY_NAMES.contains(ours),

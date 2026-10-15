@@ -19,13 +19,13 @@
 //! precise glows and chiselled bevels use an exact Euclidean distance transform. Soft falloffs
 //! are two box blurs (a tent).
 
-use photosuite_color::blend::BlendMode;
-use photosuite_doc::Pattern;
-use photosuite_doc::{
+use photosplice_color::blend::BlendMode;
+use photosplice_doc::Pattern;
+use photosplice_doc::{
     Bevel, BevelStyle, BevelTechnique, Contour, Effect, FxPaint, GlobalLight, Glow, GlowSource, GlowTechnique, Gradient, Layer, Shadow,
     StrokePosition,
 };
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 
 use crate::pattern::{PREPARED_PATTERN_BYTES, Placement, PreparedPatterns};
 use crate::{Buffer, psblend};
@@ -457,7 +457,7 @@ pub fn glow_lut(g: &Glow) -> Option<Vec<f32>> {
 /// bevel (whose height runs from ½ at the edge to 1). Photoshop corpus
 /// bevel-inner-contour-ramp-peak: lit for 4 px from the edge, shaded to 14 px (the size), as
 /// a ramp peak over `h ∈ [½, 1]` gives; the old `min(h / range, 1)` put it all outside the shape.
-pub fn bevel_contour_lut(c: &photosuite_doc::effects::BevelContour) -> Vec<f32> {
+pub fn bevel_contour_lut(c: &photosplice_doc::effects::BevelContour) -> Vec<f32> {
     let base = contour_lut(&c.contour);
     let r = if c.range.is_finite() { c.range.clamp(0.01, 1.0) } else { 1.0 };
     let n = 4096;
@@ -546,7 +546,7 @@ fn apply_contour(m: Map, c: &Contour) -> Map {
     }
 }
 
-fn rgb(c: &photosuite_color::Color) -> [f32; 3] {
+fn rgb(c: &photosplice_color::Color) -> [f32; 3] {
     // In a CMYK document's projected passes, the colour's inks stand in (see `cmyk`).
     crate::cmyk::project_color(c).unwrap_or_else(|| c.to_rgb_unclamped())
 }
@@ -559,7 +559,7 @@ fn offset(angle: f32, distance: f32) -> (f32, f32) {
 }
 
 // The gradient geometry is shared with the vector renderer (shape layers).
-pub use photosuite_vector::gradient::{gradient_t, gradient_units};
+pub use photosplice_vector::gradient::{gradient_t, gradient_units};
 
 /// Samples colour and opacity stops at `t`.
 pub fn sample_gradient(g: &Gradient, t: f32) -> [f32; 4] {
@@ -1182,7 +1182,7 @@ pub struct FxMaps {
 
 impl FxMaps {
     /// The frame of a gradient stroke `st` of this layer (see [`stroke_frame`]), if built.
-    pub fn stroke_frame(&self, st: &photosuite_doc::StrokeFx) -> Option<Rect> {
+    pub fn stroke_frame(&self, st: &photosplice_doc::StrokeFx) -> Option<Rect> {
         self.frames.iter().find(|f| f.0 == stroke_widths(st).1.to_bits()).map(|f| f.1)
     }
 }
@@ -1218,7 +1218,7 @@ impl FxMaps {
     }
 }
 
-fn satin_map(shape: &Map, s: &photosuite_doc::effects::Satin) -> Map {
+fn satin_map(shape: &Map, s: &photosplice_doc::effects::Satin) -> Map {
     let (dx, dy) = offset(s.angle, s.distance);
     let mut a = shape.shifted(dx, dy, 0.0);
     let mut b = shape.shifted(-dx, -dy, 0.0);
@@ -1317,7 +1317,7 @@ pub(crate) fn build_maps_prepared(
             _ => Vec::new(),
         })
         .collect();
-    let vector_shape = matches!(layer.content, photosuite_doc::LayerContent::Shape(_));
+    let vector_shape = matches!(layer.content, photosplice_doc::LayerContent::Shape(_));
     // Without an outline (unfilled shapes), estimate the vector outline from local coverage.
     let outline = crate::effect_outline(layer).is_some();
     let vdout = (has_stroke && vector_shape && !outline).then(|| dist_outside_by(&local_coverage(&shape), Metric::Chamfer));
@@ -1386,7 +1386,7 @@ pub(crate) fn composite_with_effects_prepared(
         }
     }
     let items: Vec<&Effect> = layer.effects.items.iter().filter(|e| e.enabled()).collect();
-    let vector_shape = matches!(layer.content, photosuite_doc::LayerContent::Shape(_));
+    let vector_shape = matches!(layer.content, photosplice_doc::LayerContent::Shape(_));
     // Multiple instances: the first listed is on top, so paint in reverse.
     let rev = || items.iter().copied().enumerate().rev();
 
@@ -1486,14 +1486,14 @@ pub(crate) fn composite_with_effects_prepared(
     }
     // Strokes. Inside parts are painted over the layer (bottom instance first); outside parts
     // are slid beneath it, so the first listed (top) instance is processed first.
-    let strokes: Vec<&photosuite_doc::StrokeFx> = items.iter().filter_map(|e| if let Effect::Stroke(s) = e { Some(s) } else { None }).collect();
+    let strokes: Vec<&photosplice_doc::StrokeFx> = items.iter().filter_map(|e| if let Effect::Stroke(s) = e { Some(s) } else { None }).collect();
     let (din, dout) = match (&maps.din, &maps.dout) {
         (Some(a), Some(b)) if !strokes.is_empty() => (maps.crop_vec(a, big, 0.0), maps.crop_vec(b, big, FAR)),
         _ => (Vec::new(), Vec::new()),
     };
     let widths = stroke_widths;
     // A gradient stroke aligned with the layer spans the stroke's own extent.
-    let frame = |st: &photosuite_doc::StrokeFx| maps.stroke_frame(st).unwrap_or(sb);
+    let frame = |st: &photosplice_doc::StrokeFx| maps.stroke_frame(st).unwrap_or(sb);
     for st in strokes.iter().rev().copied() {
         let (in_w, _) = widths(st);
         if in_w <= 0.0 {
@@ -1629,7 +1629,7 @@ pub fn outline_share(cov: f32, l: f32) -> f32 {
 }
 
 /// (inside width, outside width) of a stroke.
-pub fn stroke_widths(st: &photosuite_doc::StrokeFx) -> (f32, f32) {
+pub fn stroke_widths(st: &photosplice_doc::StrokeFx) -> (f32, f32) {
     match st.position {
         StrokePosition::Outside => (0.0, st.size),
         StrokePosition::Inside => (st.size, 0.0),
@@ -1718,7 +1718,7 @@ pub fn distance_field(kind: FieldKind, alpha: Vec<f32>, w: usize, h: usize) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_doc::GradientStyle;
+    use photosplice_doc::GradientStyle;
 
     #[test]
     fn edt_is_exact() {
@@ -1867,10 +1867,10 @@ mod tests {
             altitude: 30.0,
             use_global_light: false,
             gloss_contour: Contour::Linear,
-            highlight: photosuite_doc::FxCommon::new(BlendMode::Screen, 0.75),
-            highlight_color: photosuite_color::Color::WHITE,
-            shadow: photosuite_doc::FxCommon::new(BlendMode::Multiply, 0.75),
-            shadow_color: photosuite_color::Color::BLACK,
+            highlight: photosplice_doc::FxCommon::new(BlendMode::Screen, 0.75),
+            highlight_color: photosplice_color::Color::WHITE,
+            shadow: photosplice_doc::FxCommon::new(BlendMode::Multiply, 0.75),
+            shadow_color: photosplice_color::Color::BLACK,
             contour: None,
             texture: None,
         }
@@ -1968,14 +1968,14 @@ mod tests {
     fn stroke_emboss_shades_the_stroke() {
         let n = 48;
         let shape = square(n, 12, 36);
-        let stroke = Effect::Stroke(photosuite_doc::StrokeFx {
-            common: photosuite_doc::FxCommon::new(BlendMode::Normal, 1.0),
+        let stroke = Effect::Stroke(photosplice_doc::StrokeFx {
+            common: photosplice_doc::FxCommon::new(BlendMode::Normal, 1.0),
             size: 6.0,
             position: StrokePosition::Outside,
-            paint: FxPaint::Color(photosuite_doc::Color::BLACK),
+            paint: FxPaint::Color(photosplice_doc::Color::BLACK),
         });
         let emboss = Effect::BevelEmboss(Bevel { size: 5.0, ..bevel_of(BevelStyle::StrokeEmboss, BevelTechnique::Smooth) });
-        let mut layer = Layer::raster("l", photosuite_color::PixelFormat::RGBA8);
+        let mut layer = Layer::raster("l", photosplice_color::PixelFormat::RGBA8);
         layer.effects.items = vec![stroke, emboss.clone()];
         let maps = build_maps(&layer, shape.v.clone(), Rect::new(0, 0, n as i32, n as i32), &GlobalLight::default(), &no_tex());
         let (hi, sh) = (&maps.per[1][0], &maps.per[1][1]);
@@ -2081,21 +2081,21 @@ mod tests {
         // A contour reshapes the profile (here a ramp folded at its middle).
         let mut c = plain.clone();
         let fold = vec![
-            photosuite_doc::adjust::CurvePoint { input: 0.0, output: 0.0 },
-            photosuite_doc::adjust::CurvePoint { input: 0.5, output: 1.0 },
-            photosuite_doc::adjust::CurvePoint { input: 1.0, output: 0.0 },
+            photosplice_doc::adjust::CurvePoint { input: 0.0, output: 0.0 },
+            photosplice_doc::adjust::CurvePoint { input: 0.5, output: 1.0 },
+            photosplice_doc::adjust::CurvePoint { input: 1.0, output: 0.0 },
         ];
-        c.contour = Some(photosuite_doc::BevelContour { contour: Contour::Custom { name: "fold".into(), points: fold }, range: 1.0, anti_alias: false });
+        c.contour = Some(photosplice_doc::BevelContour { contour: Contour::Custom { name: "fold".into(), points: fold }, range: 1.0, anti_alias: false });
         let (b, _) = bevel_maps(&shape, &c, &l, &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
         let diff: f32 = a[1].v.iter().zip(&b[1].v).map(|(x, y)| (x - y).abs()).sum();
         assert!(diff > 5.0, "{diff}");
         // A striped texture lights the flat middle.
-        let mut sf = photosuite_raster::Surface::new(photosuite_color::PixelFormat::RGBA8);
+        let mut sf = photosplice_raster::Surface::new(photosplice_color::PixelFormat::RGBA8);
         sf.fill_rect(Rect::new(0, 0, 4, 2), &[0.0, 0.0, 0.0, 1.0]);
         sf.fill_rect(Rect::new(0, 2, 4, 4), &[1.0, 1.0, 1.0, 1.0]);
         let pats = [Pattern::new("stripes", sf, 4, 4)];
         let mut t = plain.clone();
-        t.texture = Some(photosuite_doc::BevelTexture {
+        t.texture = Some(photosplice_doc::BevelTexture {
             name: "stripes".into(),
             id: String::new(),
             scale: 1.0,
@@ -2122,15 +2122,15 @@ mod tests {
         let peak = Contour::Custom {
             name: "ramp peak".into(),
             points: vec![
-                photosuite_doc::adjust::CurvePoint { input: 0.0, output: 0.0 },
-                photosuite_doc::adjust::CurvePoint { input: 128.0 / 255.0, output: 1.0 },
-                photosuite_doc::adjust::CurvePoint { input: 1.0, output: 0.0 },
+                photosplice_doc::adjust::CurvePoint { input: 0.0, output: 0.0 },
+                photosplice_doc::adjust::CurvePoint { input: 128.0 / 255.0, output: 1.0 },
+                photosplice_doc::adjust::CurvePoint { input: 1.0, output: 0.0 },
             ],
         };
         let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::Smooth);
         (b.size, b.angle) = (14.0, 120.0);
         let mut c = b.clone();
-        c.contour = Some(photosuite_doc::BevelContour { contour: peak.clone(), range: 0.5, anti_alias: false });
+        c.contour = Some(photosplice_doc::BevelContour { contour: peak.clone(), range: 0.5, anti_alias: false });
         let (m, _) = bevel_maps(&shape, &c, &l, &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
         let at = |map: &Map, d: usize| map.v[32 * 64 + 8 + d];
         // Photoshop's highlight amounts at 1-3 px: (0.38, 0.42, 0.51 − 0.35 fill) / (0.65 × 75 %).
@@ -2151,8 +2151,8 @@ mod tests {
     #[test]
     fn glow_range_stretches_the_contour() {
         let mut g = Glow {
-            common: photosuite_doc::FxCommon::new(BlendMode::Screen, 1.0),
-            paint: FxPaint::Color(photosuite_color::Color::WHITE),
+            common: photosplice_doc::FxCommon::new(BlendMode::Screen, 1.0),
+            paint: FxPaint::Color(photosplice_color::Color::WHITE),
             technique: GlowTechnique::Softer,
             spread: 0.0,
             size: 10.0,
@@ -2187,8 +2187,8 @@ mod tests {
 
     fn shadow(noise: f32, origin: (i32, i32)) -> Map {
         let s = Shadow {
-            common: photosuite_doc::FxCommon::new(BlendMode::Multiply, 1.0),
-            color: photosuite_color::Color::BLACK,
+            common: photosplice_doc::FxCommon::new(BlendMode::Multiply, 1.0),
+            color: photosplice_color::Color::BLACK,
             angle: 0.0,
             use_global_light: false,
             distance: 0.0,
@@ -2229,8 +2229,8 @@ mod tests {
     #[test]
     fn glow_noise_follows_the_contour_and_range() {
         let g = |noise: f32| Glow {
-            common: photosuite_doc::FxCommon::new(BlendMode::Screen, 1.0),
-            paint: FxPaint::Color(photosuite_color::Color::WHITE),
+            common: photosplice_doc::FxCommon::new(BlendMode::Screen, 1.0),
+            paint: FxPaint::Color(photosplice_color::Color::WHITE),
             technique: GlowTechnique::Softer,
             spread: 0.0,
             size: 6.0,
@@ -2253,8 +2253,8 @@ mod tests {
     #[test]
     fn precise_glow_profile_matches_reference() {
         let g = Glow {
-            common: photosuite_doc::FxCommon::new(BlendMode::Screen, 1.0),
-            paint: FxPaint::Color(photosuite_color::Color::WHITE),
+            common: photosplice_doc::FxCommon::new(BlendMode::Screen, 1.0),
+            paint: FxPaint::Color(photosplice_color::Color::WHITE),
             technique: GlowTechnique::Precise,
             spread: 0.4,
             size: 16.0,

@@ -7,8 +7,8 @@
 //! channel after the first). Resource 1007 has 14-byte records (a padding byte), no version and
 //! no spot kind. Photoshop lists the merged transparency first.
 
-use photosuite_color::{Color, ColorMode};
-use photosuite_doc::{AlphaChannel, ColorIndicates};
+use photosplice_color::{Color, ColorMode};
+use photosplice_doc::{AlphaChannel, ColorIndicates};
 
 pub(crate) const DISPLAY_INFO: u16 = 1077;
 pub(crate) const DISPLAY_INFO_OLD: u16 = 1007;
@@ -108,8 +108,8 @@ pub(crate) fn decode_color(space: u16, c: [u16; 4]) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_color::PixelFormat;
-    use photosuite_raster::Surface;
+    use photosplice_color::PixelFormat;
+    use photosplice_raster::Surface;
 
     #[test]
     fn display_info_roundtrip() {

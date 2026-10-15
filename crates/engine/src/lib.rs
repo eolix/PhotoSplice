@@ -1,4 +1,4 @@
-//! The PhotoSuite engine façade: open documents, history, and the command registry.
+//! The PhotoSplice engine façade: open documents, history, and the command registry.
 //!
 //! Every user-visible action is a command with a stable id (Photoshop-style, such as
 //! `layer.newAdjustmentLayer.invert`) and JSON parameters. Every frontend goes through the same
@@ -97,14 +97,14 @@ mod wia_cmds;
 
 use std::sync::Arc;
 
-use photosuite_doc::{Document, LayerId};
-use photosuite_ops::{History, LayerTarget};
+use photosplice_doc::{Document, LayerId};
+use photosplice_ops::{History, LayerTarget};
 use serde_json::Value;
 
 pub use commands::{CommandSpec, command_specs};
-pub use photosuite_doc as doc;
-pub use photosuite_paint as paint;
-pub use photosuite_paint::BrushSettings;
+pub use photosplice_doc as doc;
+pub use photosplice_paint as paint;
+pub use photosplice_paint::BrushSettings;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -129,13 +129,13 @@ pub type Result<T> = std::result::Result<T, EngineError>;
 
 /// The pixels of a raster layer (typically one a command just created), as an error instead
 /// of a panic if the layer has none.
-pub(crate) fn pixels_mut(l: &mut photosuite_doc::Layer) -> Result<&mut photosuite_raster::Surface> {
+pub(crate) fn pixels_mut(l: &mut photosplice_doc::Layer) -> Result<&mut photosplice_raster::Surface> {
     let id = l.id;
     l.surface_mut().ok_or_else(|| EngineError::Other(format!("layer {id:?} has no pixels")))
 }
 
 /// The active document's active layer, for `enabled` predicates.
-pub(crate) fn active_layer_of(s: &Session) -> std::result::Result<&photosuite_doc::Layer, String> {
+pub(crate) fn active_layer_of(s: &Session) -> std::result::Result<&photosplice_doc::Layer, String> {
     let d = s.active().ok_or("no document open")?;
     d.active_layer.and_then(|id| d.doc.layer(id)).ok_or_else(|| "no active layer".into())
 }
@@ -175,7 +175,7 @@ pub struct DocState {
     pub revision: u64,
     pub saved_revision: u64,
     /// Area changed by the latest revision (None = assume everything changed).
-    pub last_damage: Option<photosuite_geom::Rect>,
+    pub last_damage: Option<photosplice_geom::Rect>,
     /// Coalescing key of the latest history step (see [`Session::execute`]'s `coalesce` param).
     pub coalesce: Option<String>,
     /// Channels panel: targeted channel and eye toggles (view state, not history).
@@ -263,17 +263,17 @@ impl DocState {
 pub struct ToolState {
     pub foreground: [f32; 4],
     pub background: [f32; 4],
-    pub brush: photosuite_paint::BrushSettings,
+    pub brush: photosplice_paint::BrushSettings,
     /// Brush presets (built-ins plus user presets; see `brush.presets.*`).
-    pub presets: Vec<photosuite_paint::BrushPreset>,
+    pub presets: Vec<photosplice_paint::BrushPreset>,
     /// Bumped whenever `presets` changes ([`Session::brush_presets_changed`]); the preset store
     /// syncs when it moves.
     pub presets_rev: u64,
     /// Mixer Brush paint carried between strokes.
-    pub mixer: photosuite_paint::mixer::MixerState,
+    pub mixer: photosplice_paint::mixer::MixerState,
     /// The coalescing key of the running `tools.setBrush` gesture and the brush before it, so the
     /// gesture journals as one call ([`brush_cmds::coalesce_journal`]).
-    pub brush_gesture: Option<(String, photosuite_paint::BrushSettings)>,
+    pub brush_gesture: Option<(String, photosplice_paint::BrushSettings)>,
 }
 
 impl Default for ToolState {
@@ -282,11 +282,11 @@ impl Default for ToolState {
             foreground: [0.0, 0.0, 0.0, 1.0],
             background: [1.0, 1.0, 1.0, 1.0],
             // Photoshop's Brush tool starts at 10 % Smoothing.
-            brush: photosuite_paint::BrushSettings {
-                smoothing: photosuite_paint::brush::Smoothing { amount: 0.1, ..Default::default() },
+            brush: photosplice_paint::BrushSettings {
+                smoothing: photosplice_paint::brush::Smoothing { amount: 0.1, ..Default::default() },
                 ..Default::default()
             },
-            presets: photosuite_paint::presets::builtin(),
+            presets: photosplice_paint::presets::builtin(),
             presets_rev: 0,
             mixer: Default::default(),
             brush_gesture: None,
@@ -306,16 +306,16 @@ pub struct Session {
     /// Pixels copied with Edit › Copy / Cut (shared by all documents, like Photoshop).
     pub clipboard: Option<edit_cmds::Clip>,
     /// Layer › Layer Style › Copy Layer Style: effects, blend mode and fill opacity.
-    pub style_clipboard: Option<(photosuite_doc::Effects, photosuite_color::BlendMode, f32)>,
+    pub style_clipboard: Option<(photosplice_doc::Effects, photosplice_color::BlendMode, f32)>,
     /// Shape path context menu: copied vector fill and stroke styles.
-    pub path_fill_clipboard: Option<photosuite_doc::Fill>,
-    pub path_stroke_clipboard: Option<photosuite_doc::ShapeStroke>,
+    pub path_fill_clipboard: Option<photosplice_doc::Fill>,
+    pub path_stroke_clipboard: Option<photosplice_doc::ShapeStroke>,
     /// Colour management: proofing state, monitor profile, display transforms.
     pub color: color_cmds::ColorState,
     /// Open Edit Contents documents and the smart objects they update.
     pub smart_links: Vec<smart_cmds::SmartLink>,
     /// Type › Save Default Type Styles: character and paragraph style new type layers start from.
-    pub type_defaults: Option<(photosuite_doc::text::CharStyle, photosuite_doc::text::ParagraphStyle)>,
+    pub type_defaults: Option<(photosplice_doc::text::CharStyle, photosplice_doc::text::ParagraphStyle)>,
     /// Quick Mask Options (colour, opacity, colour indicates) used when entering Quick Mask.
     pub quick_mask_options: channel_cmds::QuickMaskOptions,
     /// Colour channel the running command may change (a single colour channel is targeted).
@@ -400,7 +400,7 @@ impl Session {
     pub fn add_document(&mut self, mut doc: Document, path: Option<String>) -> usize {
         // Persisted IDs can overlap the allocator, so check every replacement too.
         while self.docs.iter().any(|st| st.doc.id == doc.id) {
-            doc.id = photosuite_doc::DocId::fresh();
+            doc.id = photosplice_doc::DocId::fresh();
         }
         let mut st = DocState::new(doc, path);
         st.history.max_states = self.prefs.get().performance.history_states.max(1) as usize;
@@ -513,7 +513,7 @@ impl Session {
         if clean {
             st.saved_revision = st.revision;
         }
-        st.last_damage = Some(photosuite_geom::Rect::EMPTY);
+        st.last_damage = Some(photosplice_geom::Rect::EMPTY);
         Ok(())
     }
 

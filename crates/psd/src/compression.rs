@@ -11,7 +11,7 @@ use crate::header::{Version, row_bytes};
 use crate::io::{Reader, WriteExt};
 
 /// Maximum number of decoded bytes a single decode call may produce: 8 GiB on
-/// 64-bit targets, 2 GiB elsewhere (the same budget as `photosuite-codecs`'
+/// 64-bit targets, 2 GiB elsewhere (the same budget as `photosplice-codecs`'
 /// default `Limits::max_alloc`).
 ///
 /// The decoders bound their output by their input on their own (RLE expands

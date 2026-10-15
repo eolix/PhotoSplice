@@ -1,7 +1,7 @@
 //! Layer tree reconstruction.
 
-use photosuite_psd::testgen;
-use photosuite_psd::*;
+use photosplice_psd::testgen;
+use photosplice_psd::*;
 
 fn rec(name: &str, kind: Option<SectionType>) -> LayerRecord {
     let mut r = LayerRecord { name: name.as_bytes().to_vec(), ..Default::default() };

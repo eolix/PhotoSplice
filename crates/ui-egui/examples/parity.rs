@@ -1,13 +1,13 @@
 //! Print Photoshop menu parity and optionally write the Markdown report.
 //!
 //! ```sh
-//! cargo run -p photosuite-ui-egui --example parity -- [--write docs/parity.md] [--json]
+//! cargo run -p photosplice-ui-egui --example parity -- [--write docs/parity.md] [--json]
 //! ```
 //! Usually run through `cargo xtask parity`.
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let p = photosuite_ui_egui::parity::compute();
+    let p = photosplice_ui_egui::parity::compute();
     if args.iter().any(|a| a == "--json") {
         println!("{}", serde_json::to_string_pretty(&p).expect("serialize parity"));
         return;

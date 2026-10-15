@@ -4,7 +4,7 @@
 //! Groups hold pattern **ids**. Library patterns that are in no group (newly defined or imported)
 //! are shown in a trailing "Patterns" group; ids whose pattern was deleted are dropped.
 
-use photosuite_doc::{Fill, LayerContent};
+use photosplice_doc::{Fill, LayerContent};
 use serde_json::{Value, json};
 
 use super::{Group, always, bad, edit_groups, group_index, req_str, str_param};
@@ -35,7 +35,7 @@ pub fn sync(s: &mut Session) {
 }
 
 /// The selected pattern, if it is still in the library.
-pub fn current(s: &Session) -> Option<&photosuite_doc::Pattern> {
+pub fn current(s: &Session) -> Option<&photosplice_doc::Pattern> {
     let id = s.presets.pattern.as_deref()?;
     s.patterns.items.iter().find(|p| p.id == id)
 }
@@ -59,12 +59,12 @@ fn list(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(json!({"groups": groups, "current": current(s).map(|p| p.id.clone())}))
 }
 
-fn pattern_key(s: &Session, p: &Value, cmd: &str) -> Result<photosuite_doc::Pattern> {
+fn pattern_key(s: &Session, p: &Value, cmd: &str) -> Result<photosplice_doc::Pattern> {
     let key = str_param(p, "pattern").unwrap_or("");
     crate::pattern_cmds::resolve(s, key).ok_or_else(|| bad(cmd, format!("no pattern \"{key}\" (see pattern.presets.list)")))
 }
 
-fn active_pattern_fill(s: &Session) -> Option<photosuite_doc::LayerId> {
+fn active_pattern_fill(s: &Session) -> Option<photosplice_doc::LayerId> {
     let d = s.active()?;
     let id = d.active_layer?;
     matches!(d.doc.layer(id)?.content, LayerContent::Fill(Fill::Pattern { .. })).then_some(id)

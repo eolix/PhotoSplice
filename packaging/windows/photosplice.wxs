@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  PhotoSplice MSI (WiX Toolset v5: `dotnet tool install -g wix`). Built by package.ps1:
+
+    wix build photosplice.wxs -arch x64 -ext WixToolset.UI.wixext -d Version=1.2.3 -d BinDir=... -d IconPath=... -o out.msi
+
+  A setup wizard (WiX's InstallDir dialogs: Welcome, Destination Folder, our Shortcuts page,
+  Ready to Install, progress, Completed); per-machine install, into Program Files unless another
+  folder is chosen (remembered for upgrades); a Start Menu shortcut, and a desktop one unless it
+  is unticked; `.pcraft` owned by PhotoSplice, and PhotoSplice offered under "Open with" for
+  PSD/PSB and the image formats it reads (without taking over the user's default app for them).
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package
+      Name="PhotoSplice"
+      Manufacturer="PhotoSplice"
+      Version="$(var.Version)"
+      UpgradeCode="6B57301F-97D4-4F8B-AB45-1BDFC4A5D7DE"
+      Scope="perMachine"
+      Compressed="yes"
+      Language="1033">
+    <SummaryInformation Description="PhotoSplice image editor" Manufacturer="PhotoSplice" />
+    <!-- Same-version upgrades let successive pre-releases of one X.Y.Z replace each other
+         (MSI versions are numeric, so 1.2.3-rc.1 and 1.2.3-rc.2 are both 1.2.3). -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+        DowngradeErrorMessage="A newer version of PhotoSplice is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- MSI caches this icon using its Id as the filename. Advertised shortcuts to an
+         .exe need an .exe icon identifier (ICE50), even when the source is an ICO. -->
+    <Icon Id="PhotospliceIcon.exe" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="PhotospliceIcon.exe" />
+    <Property Id="ARPURLINFOABOUT" Value="https://photosplice.com" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://photosplice.com" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/eolix/photosplice/issues" />
+
+    <!-- The wizard. No licence page: MIT OR Apache-2.0 asks nothing of someone installing it. -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <UIRef Id="PhotospliceShortcutsUI" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT" Value="PhotoSplice is installed. Start it from the Start menu or the desktop shortcut." />
+    <!-- Ticked unless unticked on the Shortcuts page (an unticked checkbox clears the property). -->
+    <Property Id="INSTALLDESKTOPSHORTCUT" Value="1" />
+    <!-- An upgrade goes where the last install went. -->
+    <Property Id="INSTALLFOLDER">
+      <RegistrySearch Id="PreviousInstallFolder" Root="HKLM" Key="Software\PhotoSplice" Name="InstallDir" Type="raw" />
+    </Property>
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="PhotoSplice">
+        <Directory Id="RESOURCESFOLDER" Name="resources" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+    <StandardDirectory Id="DesktopFolder" />
+
+    <Feature Id="Main" Title="PhotoSplice" Level="1">
+      <ComponentGroupRef Id="PhotospliceFiles" />
+      <ComponentGroupRef Id="PhotospliceResources" />
+      <ComponentGroupRef Id="PhotospliceNotices" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <ComponentGroup Id="PhotospliceFiles" Directory="INSTALLFOLDER">
+      <Component Id="PhotospliceApp" Guid="0F1B97BA-BC0A-4E0B-8115-C90723589AF3">
+        <File Id="PhotospliceExe" Source="$(var.BinDir)\photosplice.exe" KeyPath="yes">
+          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="PhotoSplice"
+              Description="PhotoSplice image editor" WorkingDirectory="INSTALLFOLDER" Advertise="yes"
+              Icon="PhotospliceIcon.exe" IconIndex="0" />
+        </File>
+
+        <!-- .pcraft: the native document format; PhotoSplice is its default app. -->
+        <ProgId Id="Photosplice.Document" Description="PhotoSplice Document" Icon="PhotospliceExe" IconIndex="0">
+          <Extension Id="pcraft" ContentType="application/x-photosplice">
+            <Verb Id="open" Command="Open" TargetFile="PhotospliceExe" Argument="&quot;%1&quot;" />
+          </Extension>
+        </ProgId>
+        <!-- PSD/PSB and images: offered under "Open with", never forced as the default. -->
+        <ProgId Id="Photosplice.PhotoshopDocument" Description="Photoshop Document" Icon="PhotospliceExe" IconIndex="0" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Photosplice.PhotoshopDocument\shell\open\command" Value="&quot;[#PhotospliceExe]&quot; &quot;%1&quot;" Type="string" />
+        <ProgId Id="Photosplice.Image" Description="Image" Icon="PhotospliceExe" IconIndex="0" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Photosplice.Image\shell\open\command" Value="&quot;[#PhotospliceExe]&quot; &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.psd\OpenWithProgids" Name="Photosplice.PhotoshopDocument" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.psb\OpenWithProgids" Name="Photosplice.PhotoshopDocument" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.png\OpenWithProgids" Name="Photosplice.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.jpg\OpenWithProgids" Name="Photosplice.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.jpeg\OpenWithProgids" Name="Photosplice.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.tif\OpenWithProgids" Name="Photosplice.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.tiff\OpenWithProgids" Name="Photosplice.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.webp\OpenWithProgids" Name="Photosplice.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.gif\OpenWithProgids" Name="Photosplice.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.bmp\OpenWithProgids" Name="Photosplice.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.tga\OpenWithProgids" Name="Photosplice.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.exr\OpenWithProgids" Name="Photosplice.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.hdr\OpenWithProgids" Name="Photosplice.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.avif\OpenWithProgids" Name="Photosplice.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.heic\OpenWithProgids" Name="Photosplice.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.heif\OpenWithProgids" Name="Photosplice.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.qoi\OpenWithProgids" Name="Photosplice.Image" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.ico\OpenWithProgids" Name="Photosplice.Image" Value="" Type="string" />
+
+        <!-- "Open with" app list and the Run dialog (Win+R "photosplice"). -->
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe" Name="FriendlyAppName" Value="PhotoSplice" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\shell\open\command" Value="&quot;[#PhotospliceExe]&quot; &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\SupportedTypes" Name=".pcraft" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\SupportedTypes" Name=".psd" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\SupportedTypes" Name=".psb" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\SupportedTypes" Name=".png" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\SupportedTypes" Name=".jpg" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\SupportedTypes" Name=".jpeg" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\SupportedTypes" Name=".tif" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\SupportedTypes" Name=".tiff" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\SupportedTypes" Name=".webp" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\SupportedTypes" Name=".gif" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\SupportedTypes" Name=".bmp" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\SupportedTypes" Name=".tga" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\SupportedTypes" Name=".exr" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\SupportedTypes" Name=".hdr" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\SupportedTypes" Name=".avif" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\SupportedTypes" Name=".heic" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\SupportedTypes" Name=".heif" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\SupportedTypes" Name=".qoi" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photosplice.exe\SupportedTypes" Name=".ico" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\photosplice.exe" Value="[#PhotospliceExe]" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\PhotoSplice" Name="InstallDir" Value="[INSTALLFOLDER]" Type="string" />
+      </Component>
+
+      <!-- On the all-users desktop (a per-machine install), when ticked on the Shortcuts page. -->
+      <Component Id="PhotospliceDesktopShortcut" Directory="DesktopFolder" Guid="5C2E8F0A-3D71-4B6E-9A54-7E1F2B9C0D43" Condition="INSTALLDESKTOPSHORTCUT">
+        <Shortcut Id="DesktopShortcut" Name="PhotoSplice" Description="PhotoSplice image editor" Target="[#PhotospliceExe]"
+            WorkingDirectory="INSTALLFOLDER" Icon="PhotospliceIcon.exe" IconIndex="0" />
+        <RegistryValue Root="HKLM" Key="Software\PhotoSplice" Name="DesktopShortcut" Value="1" Type="integer" KeyPath="yes" />
+      </Component>
+
+    </ComponentGroup>
+  </Fragment>
+  <Fragment>
+    <!-- The Shortcuts page, between Destination Folder and Ready to Install. The Publish orders
+         override WixUI_InstallDir's own (the last NewDialog of a button wins): Welcome goes
+         straight to Destination Folder (no licence page), and Destination Folder's Next to here
+         once the folder is valid. Dialog units and button places are those of the other pages. -->
+    <UI Id="PhotospliceShortcutsUI">
+      <Dialog Id="ShortcutsDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Shortcuts" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes" Text="Choose where to start [ProductName] from." />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="StartMenuNote" Type="Text" X="20" Y="60" Width="330" Height="15" NoPrefix="yes" Text="[ProductName] is always added to the Start menu." />
+        <Control Id="DesktopShortcut" Type="CheckBox" X="20" Y="82" Width="330" Height="17" Property="INSTALLDESKTOPSHORTCUT" CheckBoxValue="1" Text="Create a &amp;desktop shortcut" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)">
+          <Publish Event="NewDialog" Value="InstallDirDlg" />
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)">
+          <Publish Event="NewDialog" Value="VerifyReadyDlg" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="2" Condition="NOT Installed" />
+      <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2" />
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="ShortcutsDlg" Order="5" Condition="WIXUI_DONTVALIDATEPATH OR WIXUI_INSTALLDIR_VALID=&quot;1&quot;" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="ShortcutsDlg" Order="3" Condition="NOT Installed" />
+    </UI>
+  </Fragment>
+  <Fragment>
+    <!-- LUTs, lens profiles and preset libraries (the app reads them from resources\ beside the exe),
+         each folder with its licence beside it. -->
+    <ComponentGroup Id="PhotospliceResources" Directory="RESOURCESFOLDER">
+      <Files Include="$(var.BinDir)\resources\**" />
+    </ComponentGroup>
+    <!-- NOTICE must travel with the binary (Apache-2.0 4(d)); licences and third-party notices too. -->
+    <ComponentGroup Id="PhotospliceNotices" Directory="INSTALLFOLDER">
+      <Files Include="$(var.BinDir)\notices\*" />
+    </ComponentGroup>
+  </Fragment>
+</Wix>

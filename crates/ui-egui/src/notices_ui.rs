@@ -1,4 +1,4 @@
-//! Help › Third-Party Notices: the attribution and licence notices shipped with PhotoSuite, in
+//! Help › Third-Party Notices: the attribution and licence notices shipped with PhotoSplice, in
 //! two tabs: `THIRD-PARTY-NOTICES.md` (fonts, icons, presets, data) and `THIRD-PARTY-CRATES.md`
 //! (the Rust crates, with their licence texts). Both are compiled in, so every build, the web
 //! one too, carries them where a recipient of the binary can read them.
@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn body_renders_both_tabs() {
         let ctx = egui::Context::default();
-        crate::PhotosuiteApp::setup_context(&ctx, crate::theme::ThemeKind::ALL[0]);
+        crate::PhotospliceApp::setup_context(&ctx, crate::theme::ThemeKind::ALL[0]);
         let mut f = fields();
         for tab in [0, 1, 7] {
             f.insert("__tab".into(), json!(tab));

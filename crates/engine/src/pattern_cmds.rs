@@ -4,15 +4,15 @@
 //! Two places hold patterns, as in Photoshop:
 //! - the **library** ([`PatternLibrary`], on the [`Session`]): built-in procedural patterns plus
 //!   defined and imported ones. Library edits are app state, not document history.
-//! - the **document** ([`photosuite_doc::Document::patterns`]): the patterns its layers use
+//! - the **document** ([`photosplice_doc::Document::patterns`]): the patterns its layers use
 //!   (saved in PSD `Patt` blocks and `.pcraft`). Commands that apply a pattern copy it into the
 //!   document in the same history step, so a document always renders on its own.
 //!
 //! Patterns are referenced by `"pattern": id | name` (document first, then library).
 
-use photosuite_color::{ColorMode, PixelFormat, SampleType};
-use photosuite_doc::{Color, Document, Fill, Layer, LayerContent, Pattern, Rect};
-use photosuite_raster::Surface;
+use photosplice_color::{ColorMode, PixelFormat, SampleType};
+use photosplice_doc::{Color, Document, Fill, Layer, LayerContent, Pattern, Rect};
+use photosplice_raster::Surface;
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
@@ -118,11 +118,11 @@ pub fn resolve(s: &Session, key: &str) -> Option<Pattern> {
         return crate::presets::patterns::current(s).or(s.patterns.items.first()).cloned();
     }
     if let Some(d) = s.active()
-        && let Some(p) = photosuite_doc::pattern::find(&d.doc.patterns, key, key)
+        && let Some(p) = photosplice_doc::pattern::find(&d.doc.patterns, key, key)
     {
         return Some(p.clone());
     }
-    photosuite_doc::pattern::find(&s.patterns.items, key, key).cloned()
+    photosplice_doc::pattern::find(&s.patterns.items, key, key).cloned()
 }
 
 pub(crate) fn resolve_param(s: &Session, cmd: &str, p: &Value) -> Result<Pattern> {
@@ -140,8 +140,8 @@ pub fn ensure_in_doc(doc: &mut Document, pat: &Pattern) {
 /// Resolves the pattern of a Pattern Overlay / pattern stroke built from params (its `name`
 /// holds the requested key) into a real pattern: returns the effect with name and id filled in,
 /// plus the pattern to copy into the document.
-pub fn resolve_effect(s: &Session, fx: photosuite_doc::Effect) -> Result<(photosuite_doc::Effect, Option<Pattern>)> {
-    use photosuite_doc::Effect;
+pub fn resolve_effect(s: &Session, fx: photosplice_doc::Effect) -> Result<(photosplice_doc::Effect, Option<Pattern>)> {
+    use photosplice_doc::Effect;
     match fx {
         Effect::PatternOverlay { common, name, id, scale, angle, link, phase } => {
             let key = if id.is_empty() { name } else { id };
@@ -170,13 +170,13 @@ fn list(s: &mut Session, _: &Value) -> Result<Value> {
 
 /// The visible composite over `r` as a surface in the document's pixel format (with alpha).
 fn composite_surface(doc: &Document, r: Rect) -> Surface {
-    let buf = photosuite_compose::render(doc, r);
+    let buf = photosplice_compose::render(doc, r);
     let df = doc.pixel_format();
     let fmt = PixelFormat::new(df.mode, df.sample, true);
     let n = fmt.channels();
     let mut px = vec![0.0f32; buf.px.len() * n];
     for (o, p) in px.chunks_exact_mut(n).zip(&buf.px) {
-        photosuite_raster::from_rgba_into(&fmt, *p, o);
+        photosplice_raster::from_rgba_into(&fmt, *p, o);
     }
     let mut s = Surface::new(fmt);
     s.write_region(Rect::new(0, 0, r.width() as i32, r.height() as i32), &px);
@@ -234,7 +234,7 @@ fn define(s: &mut Session, p: &Value) -> Result<Value> {
 fn library_index(s: &Session, cmd: &str, p: &Value) -> Result<usize> {
     let key = p.get("pattern").and_then(Value::as_str).ok_or_else(|| bad(cmd, "missing `pattern` (id or name)"))?;
     let found =
-        photosuite_doc::pattern::find(&s.patterns.items, key, key).map(|f| f.id.clone()).ok_or_else(|| bad(cmd, format!("no library pattern \"{key}\"")))?;
+        photosplice_doc::pattern::find(&s.patterns.items, key, key).map(|f| f.id.clone()).ok_or_else(|| bad(cmd, format!("no library pattern \"{key}\"")))?;
     Ok(s.patterns.items.iter().position(|q| q.id == found).unwrap_or(0))
 }
 
@@ -265,7 +265,7 @@ fn delete(s: &mut Session, p: &Value) -> Result<Value> {
 /// Reads a `.pat` file's patterns (no session needed, so it can run on a background thread).
 pub fn read_pattern_file(path: &str) -> std::result::Result<Vec<Pattern>, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
-    photosuite_io::pattern_map::read_pat(&bytes)
+    photosplice_io::pattern_map::read_pat(&bytes)
 }
 
 /// Adds `pats` to the library (replacing same-id patterns) and makes them the panel group
@@ -287,7 +287,7 @@ fn import(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "pattern.import";
     let path = p.get("path").and_then(Value::as_str).ok_or_else(|| bad(cmd, "missing `path` (.pat file)"))?;
     let bytes = std::fs::read(path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
-    let pats = photosuite_io::pattern_map::read_pat(&bytes).map_err(EngineError::Other)?;
+    let pats = photosplice_io::pattern_map::read_pat(&bytes).map_err(EngineError::Other)?;
     let mut ids = Vec::new();
     for pat in pats {
         ids.push(pat.id.clone());
@@ -308,7 +308,7 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
         }
         None => s.patterns.items.clone(),
     };
-    let bytes = photosuite_io::pattern_map::write_pat(&pats).map_err(EngineError::Other)?;
+    let bytes = photosplice_io::pattern_map::write_pat(&pats).map_err(EngineError::Other)?;
     crate::file_cmds::write_file(path, &bytes)?;
     Ok(json!({"path": path, "count": pats.len(), "bytes": bytes.len()}))
 }
@@ -348,9 +348,9 @@ fn brush_texture(s: &mut Session, p: &Value) -> Result<Value> {
             l * q[3] + (1.0 - q[3])
         })
         .collect();
-    let tile = photosuite_paint::GrayTile::from_f32(pat.width, pat.height, &lum);
+    let tile = photosplice_paint::GrayTile::from_f32(pat.width, pat.height, &lum);
     let t = &mut s.tools.brush.texture;
-    t.pattern = photosuite_paint::Pattern::Tile(tile);
+    t.pattern = photosplice_paint::Pattern::Tile(tile);
     t.enabled = p.get("enabled").and_then(Value::as_bool).unwrap_or(true);
     if let Some(sc) = p.get("scale").and_then(Value::as_f64) {
         t.scale = (sc as f32 / 100.0).clamp(0.01, 10.0);
@@ -455,7 +455,7 @@ pub fn specs() -> Vec<CommandSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_doc::LayerId;
+    use photosplice_doc::LayerId;
 
     fn session(depth: u64) -> Session {
         let mut s = Session::new();
@@ -464,7 +464,7 @@ mod tests {
     }
 
     fn pixel(s: &Session, x: i32, y: i32) -> [f32; 4] {
-        let b = photosuite_compose::render(&s.active().unwrap().doc, Rect::new(x, y, x + 1, y + 1));
+        let b = photosplice_compose::render(&s.active().unwrap().doc, Rect::new(x, y, x + 1, y + 1));
         b.px[0]
     }
 
@@ -570,6 +570,6 @@ mod tests {
         assert_eq!(st.doc.layer(st.active_layer.unwrap()).unwrap().effects.items.len(), 2);
         s.execute("brush.texturePattern", json!({"pattern": "Dots", "scale": 50})).unwrap();
         assert!(s.tools.brush.texture.enabled);
-        assert!(matches!(s.tools.brush.texture.pattern, photosuite_paint::Pattern::Tile(_)));
+        assert!(matches!(s.tools.brush.texture.pattern, photosplice_paint::Pattern::Tile(_)));
     }
 }

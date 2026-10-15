@@ -8,8 +8,8 @@
 //! bristle streaks, which together with the smoothed luminance form a height
 //! map shaded by a directional light.
 
-use photosuite_color::ColorMode;
-use photosuite_geom::Rect;
+use photosplice_color::ColorMode;
+use photosplice_geom::Rect;
 
 use crate::Ctx;
 use crate::fxutil::{MAXC, gauss_blur_n, ncol, premul_window, unpremul_px};

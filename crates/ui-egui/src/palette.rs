@@ -3,7 +3,7 @@
 use egui::{Align2, Color32, CornerRadius, RichText, Sense, Stroke, vec2};
 
 use crate::theme::{self, Tokens};
-use crate::{PhotosuiteApp, icons};
+use crate::{PhotospliceApp, icons};
 
 /// Case-insensitive subsequence match score (higher is better); None = no match.
 pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
@@ -36,7 +36,7 @@ pub fn fuzzy_score(query: &str, text: &str) -> Option<i32> {
     Some(score - (t.len() as i32 / 8))
 }
 
-pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     if !app.ui.palette_open {
         return;
     }
@@ -185,11 +185,11 @@ mod tests {
     use serde_json::json;
 
     use super::fuzzy_score;
-    use crate::PhotosuiteApp;
+    use crate::PhotospliceApp;
 
     #[test]
     fn open_palette_interrupts_the_ime_only_when_it_takes_focus() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
         // Fonts bind on the next pass; this one opens nothing.
@@ -219,8 +219,8 @@ mod tests {
     fn palette_opens_the_keyboard_shortcuts_dialog() {
         for with_doc in [false, true] {
             let mut h = Harness::builder().with_size(vec2(1200.0, 800.0)).with_max_steps(64).build_eframe(|cc| {
-                PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-                PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default())
+                PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+                PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default())
             });
             if with_doc {
                 h.state_mut().run("file.new", json!({"width": 64, "height": 64})).unwrap();

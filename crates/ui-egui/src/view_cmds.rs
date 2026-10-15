@@ -10,7 +10,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::state::DialogKind;
 
 /// View › Show flags (Photoshop defaults).
@@ -196,8 +196,8 @@ fn snap_slot<'a>(s: &'a mut SnapTo, key: &str) -> Option<&'a mut bool> {
 }
 
 /// Window › <panel>: (panel, dock tab) for panels that live as tabs of a dock card.
-fn panel_tab(app: &PhotosuiteApp, id: &str) -> Option<(&'static str, usize)> {
-    // None of PhotoSuite's palettes use Photoshop's tab-strip chrome.
+fn panel_tab(app: &PhotospliceApp, id: &str) -> Option<(&'static str, usize)> {
+    // None of PhotoSplice's palettes use Photoshop's tab-strip chrome.
     let _ = app;
     let pro = false;
     Some(match id {
@@ -221,7 +221,7 @@ fn panel_tab(app: &PhotosuiteApp, id: &str) -> Option<(&'static str, usize)> {
     })
 }
 
-fn panel_state<'a>(app: &'a mut PhotosuiteApp, panel: &str) -> (&'a mut bool, &'a mut usize) {
+fn panel_state<'a>(app: &'a mut PhotospliceApp, panel: &str) -> (&'a mut bool, &'a mut usize) {
     let (p, t) = (&mut app.ui.panels, &mut app.ui.dock_tabs);
     match panel {
         "navigator" => (&mut p.navigator, &mut t.navigator),
@@ -299,7 +299,7 @@ pub fn handles(id: &str) -> bool {
     )
 }
 
-pub fn is_enabled(app: &PhotosuiteApp, id: &str) -> Option<bool> {
+pub fn is_enabled(app: &PhotospliceApp, id: &str) -> Option<bool> {
     if !handles(id) && !wraps(id) {
         return None;
     }
@@ -322,7 +322,7 @@ pub fn is_enabled(app: &PhotosuiteApp, id: &str) -> Option<bool> {
     })
 }
 
-pub fn checked(app: &PhotosuiteApp, id: &str) -> Option<bool> {
+pub fn checked(app: &PhotospliceApp, id: &str) -> Option<bool> {
     let o = &app.ui.view;
     if let Some(k) = id.strip_prefix("view.show.") {
         let mut s = o.show;
@@ -379,15 +379,15 @@ pub fn checked(app: &PhotosuiteApp, id: &str) -> Option<bool> {
 }
 
 /// Checkmarks of the Type menu's anti-aliasing, orientation and OpenType items.
-fn type_checked(app: &PhotosuiteApp, id: &str) -> Option<bool> {
-    use photosuite_doc::LayerContent;
+fn type_checked(app: &PhotospliceApp, id: &str) -> Option<bool> {
+    use photosplice_doc::LayerContent;
     let st = app.session.active()?;
     let LayerContent::Text(t) = &st.doc.layer(st.active_layer?)?.content else { return None };
     if let Some(k) = id.strip_prefix("type.antiAlias.") {
-        return Some(photosuite_engine::type_extra_cmds::aa_name(t.antialias) == k);
+        return Some(photosplice_engine::type_extra_cmds::aa_name(t.antialias) == k);
     }
     if let Some(k) = id.strip_prefix("type.orientation.") {
-        return Some((t.orientation == photosuite_doc::text::Orientation::Vertical) == (k == "vertical"));
+        return Some((t.orientation == photosplice_doc::text::Orientation::Vertical) == (k == "vertical"));
     }
     let tag = match id.strip_prefix("type.openType.")? {
         "standardLigatures" => "liga",
@@ -402,7 +402,7 @@ fn type_checked(app: &PhotosuiteApp, id: &str) -> Option<bool> {
         "fractions" => "frac",
         _ => return None,
     };
-    Some(t.char_runs().first().is_some_and(|r| photosuite_engine::type_extra_cmds::feature_on(&r.style, tag)))
+    Some(t.char_runs().first().is_some_and(|r| photosplice_engine::type_extra_cmds::feature_on(&r.style, tag)))
 }
 
 /// Engine commands that get a dialog or file picker here when invoked without parameters.
@@ -442,7 +442,7 @@ fn no_params(p: &Value) -> bool {
 
 /// Run a View/Window/Type shell command, or front an engine command with its dialog. `None` when
 /// `id` isn't ours.
-pub fn invoke(app: &mut PhotosuiteApp, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
+pub fn invoke(app: &mut PhotospliceApp, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
     if wraps(id) {
         return front(app, id, params);
     }
@@ -456,7 +456,7 @@ fn flag_param(p: &Value, cur: bool) -> bool {
     p.get("on").and_then(Value::as_bool).unwrap_or(!cur)
 }
 
-fn run(app: &mut PhotosuiteApp, ctx: &egui::Context, id: &str, p: &Value) -> Result<Value, String> {
+fn run(app: &mut PhotospliceApp, ctx: &egui::Context, id: &str, p: &Value) -> Result<Value, String> {
     if let Some((panel, tab)) = panel_tab(app, id) {
         let group = crate::dock::Group::from_key(panel);
         let collapsed = group.is_some_and(|g| app.ui.dock.is_collapsed(g));
@@ -570,10 +570,10 @@ fn run(app: &mut PhotosuiteApp, ctx: &egui::Context, id: &str, p: &Value) -> Res
 }
 
 /// View › Fit Layer(s) on Screen: zoom and centre on the selected layers' bounds.
-fn fit_layers(app: &mut PhotosuiteApp) -> Result<Value, String> {
+fn fit_layers(app: &mut PhotospliceApp) -> Result<Value, String> {
     let i = app.session.active_index().ok_or("no document")?;
     let st = app.session.active().ok_or("no document")?;
-    let mut b = photosuite_geom::Rect::EMPTY;
+    let mut b = photosplice_geom::Rect::EMPTY;
     for id in st.selected_layers() {
         if let Some(r) = st.doc.layer(id).and_then(|l| l.surface()).map(|s| s.content_bounds()) {
             b = if b.is_empty() { r } else { b.union(&r) };
@@ -591,7 +591,7 @@ fn fit_layers(app: &mut PhotosuiteApp) -> Result<Value, String> {
     Ok(json!({"zoom": v.zoom, "bounds": [b.x0, b.y0, b.x1, b.y1]}))
 }
 
-fn float_window(app: &mut PhotosuiteApp, doc: usize, offset: usize) -> u64 {
+fn float_window(app: &mut PhotospliceApp, doc: usize, offset: usize) -> u64 {
     let wid = app.ui.alloc_id();
     let mut view = app.ui.views.get(doc).cloned().unwrap_or_default();
     view.fit_pending = offset > 0 || view.fit_pending;
@@ -599,7 +599,7 @@ fn float_window(app: &mut PhotosuiteApp, doc: usize, offset: usize) -> u64 {
     wid
 }
 
-fn arrange(app: &mut PhotosuiteApp, k: &str) -> Result<Value, String> {
+fn arrange(app: &mut PhotospliceApp, k: &str) -> Result<Value, String> {
     if LAYOUTS.contains(&k) {
         app.ui.view.arrange = k.to_string();
         // Each document fits its new cell.
@@ -636,7 +636,7 @@ fn arrange(app: &mut PhotosuiteApp, k: &str) -> Result<Value, String> {
             };
             app.ui.views.iter_mut().for_each(apply);
             app.ui.windows.iter_mut().for_each(|w| apply(&mut w.view));
-            // Views never rotate in PhotoSuite, so Match Rotation has nothing to align.
+            // Views never rotate in PhotoSplice, so Match Rotation has nothing to align.
             Ok(json!({"zoom": src.zoom, "center": src.center, "rotation": 0}))
         }
         _ => Err(format!("unknown arrangement {k}")),
@@ -682,7 +682,7 @@ pub fn cells(layout: &str, rect: egui::Rect, n: usize) -> Option<Vec<egui::Rect>
 // ---------- dialogs and pickers in front of engine commands ----------
 
 /// A generic form dialog that runs `command` with its fields on OK (rendered by [`form_body`]).
-fn form(app: &mut PhotosuiteApp, command: &str, label: &str, fields: Value, choices: Value) -> u64 {
+fn form(app: &mut PhotospliceApp, command: &str, label: &str, fields: Value, choices: Value) -> u64 {
     let mut f = Map::new();
     f.insert("__command".into(), json!(command));
     f.insert("__label".into(), json!(label));
@@ -758,11 +758,11 @@ pub fn form_body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
 }
 
 /// Folder the batch dialogs start from: next to the active document, else the working directory.
-fn default_dir(app: &PhotosuiteApp) -> String {
+fn default_dir(app: &PhotospliceApp) -> String {
     app.session.active().and_then(|d| d.path.as_deref()).and_then(|p| p.rfind(['/', '\\']).map(|i| p[..i].to_string())).unwrap_or_else(|| ".".into())
 }
 
-fn front(app: &mut PhotosuiteApp, id: &str, params: &Value) -> Option<Result<Value, String>> {
+fn front(app: &mut PhotospliceApp, id: &str, params: &Value) -> Option<Result<Value, String>> {
     if id == "file.closeAll" || id == "file.closeOthers" {
         // Keep the remaining document's view (views are index-aligned with documents).
         let keep = app.session.active_index().and_then(|i| app.ui.views.get(i).cloned());
@@ -793,8 +793,8 @@ fn front(app: &mut PhotosuiteApp, id: &str, params: &Value) -> Option<Result<Val
     }
     let doc = app.session.active().map(|d| (d.doc.size.width, d.doc.size.height, d.doc.name.clone()));
     let dir = default_dir(app);
-    let label = photosuite_engine::commands::find(id).map_or(id, |c| c.label);
-    let dialog = |app: &mut PhotosuiteApp, fields: Value, choices: Value| Some(Ok(json!({"dialog": form(app, id, label, fields, choices)})));
+    let label = photosplice_engine::commands::find(id).map_or(id, |c| c.label);
+    let dialog = |app: &mut PhotospliceApp, fields: Value, choices: Value| Some(Ok(json!({"dialog": form(app, id, label, fields, choices)})));
     match id {
         "file.openAs" => {
             app.open_dialog_file();
@@ -831,7 +831,7 @@ fn front(app: &mut PhotosuiteApp, id: &str, params: &Value) -> Option<Result<Val
             dialog(app, json!({"columns": 8, "gutter": 20, "rows": 0, "rowGutter": 0, "margin": 0, "centerColumns": false, "clearExisting": false}), json!({}))
         }
         "type.warpText" => {
-            let styles: Vec<&str> = std::iter::once("none").chain(photosuite_text::warp::STYLES.iter().map(|(_, s)| *s)).collect();
+            let styles: Vec<&str> = std::iter::once("none").chain(photosplice_text::warp::STYLES.iter().map(|(_, s)| *s)).collect();
             dialog(
                 app,
                 json!({"style": "arc", "orientation": "horizontal", "bend": 50.0, "horizontalDistortion": 0.0, "verticalDistortion": 0.0}),
@@ -863,7 +863,7 @@ fn front(app: &mut PhotosuiteApp, id: &str, params: &Value) -> Option<Result<Val
         }
         "layer.new.artboard" => {
             let (w, h, _) = doc?;
-            let presets: Vec<&str> = std::iter::once("").chain(photosuite_engine::artboard_cmds::PRESETS.iter().map(|p| p.0)).collect();
+            let presets: Vec<&str> = std::iter::once("").chain(photosplice_engine::artboard_cmds::PRESETS.iter().map(|p| p.0)).collect();
             dialog(
                 app,
                 json!({"name": "", "preset": "", "width": w, "height": h, "background": "white"}),
@@ -914,9 +914,9 @@ fn front(app: &mut PhotosuiteApp, id: &str, params: &Value) -> Option<Result<Val
             let st = app.session.active()?;
             let d = &st.doc;
             let mode = d.pixel_format().mode;
-            let mut chans: Vec<String> = vec![photosuite_engine::channel_cmds::composite_name(mode).to_string()];
+            let mut chans: Vec<String> = vec![photosplice_engine::channel_cmds::composite_name(mode).to_string()];
             if mode.color_channels() > 1 {
-                chans.extend(photosuite_engine::channel_cmds::color_names(mode).iter().map(|n| n.to_string()));
+                chans.extend(photosplice_engine::channel_cmds::color_names(mode).iter().map(|n| n.to_string()));
             }
             chans.extend(d.channels.iter().map(|c| c.name.clone()));
             let alphas: Vec<String> = std::iter::once("new".to_string()).chain(d.channels.iter().map(|c| c.name.clone())).collect();
@@ -976,7 +976,7 @@ fn front(app: &mut PhotosuiteApp, id: &str, params: &Value) -> Option<Result<Val
 
 /// File › Save a Copy: pick a name, encode with the export service, write; the document's path
 /// and saved state are untouched.
-fn save_a_copy(app: &mut PhotosuiteApp) -> Result<Value, String> {
+fn save_a_copy(app: &mut PhotospliceApp) -> Result<Value, String> {
     let st = app.session.active().ok_or("no document")?;
     let stem = st.doc.name.rsplit_once('.').map_or(st.doc.name.as_str(), |(a, _)| a).to_string();
     let suggested = format!("{stem} copy.psd");

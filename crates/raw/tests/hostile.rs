@@ -1,8 +1,8 @@
 //! Truncated and corrupted raw files must fail cleanly, never panic, and
 //! never allocate beyond the limits.
 
-use photosuite_raw::testgen::{Cr2Spec, DngSpec, DngStorage, mosaic, orf, rw2, scene, sony_craw, tiff_ep};
-use photosuite_raw::*;
+use photosplice_raw::testgen::{Cr2Spec, DngSpec, DngStorage, mosaic, orf, rw2, scene, sony_craw, tiff_ep};
+use photosplice_raw::*;
 
 fn samples() -> Vec<Vec<u8>> {
     let (w, h) = (24, 12);

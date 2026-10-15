@@ -19,7 +19,7 @@ pub use platform::service;
 mod platform {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSApplication, NSEvent, NSWindow};
-    use photosuite_ui_egui::CursorPosFn;
+    use photosplice_ui_egui::CursorPosFn;
 
     pub fn service(_cc: &eframe::CreationContext<'_>) -> Option<CursorPosFn> {
         Some(Box::new(|ctx: &egui::Context| in_window_points().map(|(x, y)| egui::pos2(x as f32, y as f32) / ctx.zoom_factor())))
@@ -46,7 +46,7 @@ mod platform {
 #[cfg(target_os = "linux")]
 mod platform {
     use eframe::wgpu::rwh::{HasWindowHandle, RawWindowHandle};
-    use photosuite_ui_egui::CursorPosFn;
+    use photosplice_ui_egui::CursorPosFn;
     use x11rb::protocol::xproto::ConnectionExt;
     use x11rb::rust_connection::RustConnection;
 
@@ -81,7 +81,7 @@ mod platform {
 
 #[cfg(target_os = "windows")]
 mod platform {
-    use photosuite_ui_egui::CursorPosFn;
+    use photosplice_ui_egui::CursorPosFn;
 
     pub fn service(_cc: &eframe::CreationContext<'_>) -> Option<CursorPosFn> {
         Some(Box::new(|ctx: &egui::Context| {
@@ -104,7 +104,7 @@ fn client_points(screen_px: egui::Pos2, inner_min: egui::Pos2, ppp: f32) -> egui
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 mod platform {
-    use photosuite_ui_egui::CursorPosFn;
+    use photosplice_ui_egui::CursorPosFn;
 
     pub fn service(_cc: &eframe::CreationContext<'_>) -> Option<CursorPosFn> {
         None

@@ -4,12 +4,12 @@
 #[cfg(feature = "corpus")]
 use std::path::PathBuf;
 
-use photosuite_color::{ColorMode, SampleType};
-use photosuite_doc::{Document, MeasurementScale, Note};
-use photosuite_geom::Size;
-use photosuite_io::annotations_map::MEASUREMENT_SCALE;
-use photosuite_io::{ExportOptions, export, import};
-use photosuite_psd::PsdFile;
+use photosplice_color::{ColorMode, SampleType};
+use photosplice_doc::{Document, MeasurementScale, Note};
+use photosplice_geom::Size;
+use photosplice_io::annotations_map::MEASUREMENT_SCALE;
+use photosplice_io::{ExportOptions, export, import};
+use photosplice_psd::PsdFile;
 
 #[cfg(feature = "corpus")]
 fn corpus(rel: &str) -> Vec<u8> {
@@ -49,7 +49,7 @@ fn corpus_notes_import_and_verbatim_export() {
 #[test]
 fn measurement_scale_roundtrips_through_psd() {
     for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
-        let mut doc = Document::with_background("m", Size::new(16, 8), ColorMode::Rgb, depth, photosuite_color::Color::rgb(1.0, 1.0, 1.0));
+        let mut doc = Document::with_background("m", Size::new(16, 8), ColorMode::Rgb, depth, photosplice_color::Color::rgb(1.0, 1.0, 1.0));
         let f = PsdFile::from_bytes(&to_psd(&doc)).unwrap();
         assert!(f.resource(MEASUREMENT_SCALE).is_none());
         doc.measurement.scale = MeasurementScale { pixel_length: 120.0, logical_length: 3.0, units: "cm".into() };

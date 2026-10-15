@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "apps/*", "xtask"]
-default-members = ["crates/*", "apps/photosuite", "xtask"]
+default-members = ["crates/*", "apps/photosplice", "xtask"]
 
 [workspace.package]
 version = "0.9.21"
@@ -11,29 +11,29 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 # internal
-photosuite-geom = { path = "crates/geom" }
-photosuite-color = { path = "crates/color" }
-photosuite-cms = { path = "crates/cms" }
-photosuite-raster = { path = "crates/raster" }
-photosuite-doc = { path = "crates/doc" }
-photosuite-ops = { path = "crates/ops" }
-photosuite-psd = { path = "crates/psd" }
-photosuite-codecs = { path = "crates/codecs" }
-photosuite-raw = { path = "crates/raw" }
-photosuite-compose = { path = "crates/compose" }
-photosuite-gpu = { path = "crates/gpu" }
-photosuite-paint = { path = "crates/paint" }
-photosuite-algo = { path = "crates/algo" }
-photosuite-io = { path = "crates/io" }
-photosuite-text = { path = "crates/text" }
-photosuite-vector = { path = "crates/vector" }
-photosuite-format = { path = "crates/format" }
-photosuite-automation = { path = "crates/automation" }
-photosuite-plugins = { path = "crates/plugins" }
-photosuite-engine = { path = "crates/engine" }
-photosuite-ui-egui = { path = "crates/ui-egui" }
-photosuite-testkit = { path = "crates/testkit" }
-photosuite-tablet = { path = "crates/tablet" }
+photosplice-geom = { path = "crates/geom" }
+photosplice-color = { path = "crates/color" }
+photosplice-cms = { path = "crates/cms" }
+photosplice-raster = { path = "crates/raster" }
+photosplice-doc = { path = "crates/doc" }
+photosplice-ops = { path = "crates/ops" }
+photosplice-psd = { path = "crates/psd" }
+photosplice-codecs = { path = "crates/codecs" }
+photosplice-raw = { path = "crates/raw" }
+photosplice-compose = { path = "crates/compose" }
+photosplice-gpu = { path = "crates/gpu" }
+photosplice-paint = { path = "crates/paint" }
+photosplice-algo = { path = "crates/algo" }
+photosplice-io = { path = "crates/io" }
+photosplice-text = { path = "crates/text" }
+photosplice-vector = { path = "crates/vector" }
+photosplice-format = { path = "crates/format" }
+photosplice-automation = { path = "crates/automation" }
+photosplice-plugins = { path = "crates/plugins" }
+photosplice-engine = { path = "crates/engine" }
+photosplice-ui-egui = { path = "crates/ui-egui" }
+photosplice-testkit = { path = "crates/testkit" }
+photosplice-tablet = { path = "crates/tablet" }
 
 # external
 thiserror = "2"
@@ -73,7 +73,7 @@ codegen-units = 1
 # Interactive development profile (macOS quick loop: `cargo dev`, scripts/dev-macos.sh).
 #
 # `--release` links with thin LTO and one codegen unit, which is slow to rebuild, and it
-# compiles out `debug_assertions` — which is what gates the PHOTOSUITE_THEME_FILE live
+# compiles out `debug_assertions` — which is what gates the PHOTOSPLICE_THEME_FILE live
 # design-token overrides in `crates/ui-egui/src/theme.rs`. This profile keeps the dev family's
 # debug assertions and incremental compilation, and buys back interactive speed by optimising
 # dependencies and the pixel crates instead of using LTO.
@@ -92,20 +92,20 @@ incremental = false
 opt-level = 2
 
 # The pixel path stays at opt-level 3, as in the wasm-release profile below.
-[profile.devfast.package.photosuite-raster]
+[profile.devfast.package.photosplice-raster]
 opt-level = 3
-[profile.devfast.package.photosuite-color]
+[profile.devfast.package.photosplice-color]
 opt-level = 3
-[profile.devfast.package.photosuite-cms]
+[profile.devfast.package.photosplice-cms]
 opt-level = 3
-[profile.devfast.package.photosuite-compose]
+[profile.devfast.package.photosplice-compose]
 opt-level = 3
-[profile.devfast.package.photosuite-algo]
+[profile.devfast.package.photosplice-algo]
 opt-level = 3
-[profile.devfast.package.photosuite-paint]
+[profile.devfast.package.photosplice-paint]
 opt-level = 3
 
-# The browser build (apps/photosuite-web, `data-cargo-profile` in its index.html). Hosts cap the
+# The browser build (apps/photosplice-web, `data-cargo-profile` in its index.html). Hosts cap the
 # size of a single file (Cloudflare Pages/Workers: 25 MiB), and the wasm is downloaded on every
 # visit, so this profile optimizes for size: fat LTO, and opt-level "s" for everything except the
 # pixel-processing crates, which keep opt-level 3 so filters and compositing stay fast. panic
@@ -122,15 +122,15 @@ strip = "debuginfo"
 [profile.wasm-release.package."*"]
 opt-level = "s"
 
-[profile.wasm-release.package.photosuite-raster]
+[profile.wasm-release.package.photosplice-raster]
 opt-level = 3
-[profile.wasm-release.package.photosuite-color]
+[profile.wasm-release.package.photosplice-color]
 opt-level = 3
-[profile.wasm-release.package.photosuite-cms]
+[profile.wasm-release.package.photosplice-cms]
 opt-level = 3
-[profile.wasm-release.package.photosuite-compose]
+[profile.wasm-release.package.photosplice-compose]
 opt-level = 3
-[profile.wasm-release.package.photosuite-algo]
+[profile.wasm-release.package.photosplice-algo]
 opt-level = 3
-[profile.wasm-release.package.photosuite-paint]
+[profile.wasm-release.package.photosplice-paint]
 opt-level = 3

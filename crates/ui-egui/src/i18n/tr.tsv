@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# Türkçe translations for PhotoSuite UI.
+# Türkçe translations for PhotoSplice UI.
 
 	File	Dosya
 	Edit	Düzenle
@@ -672,7 +672,7 @@
 	Timeline	Zaman çizelgesi
 	Tool Presets	Araç Ön Ayarları
 	Tools	Araçlar
-	About PhotoSuite	PhotoSuite Hakkında
+	About PhotoSplice	PhotoSplice Hakkında
 	Website	Web sitesi
 	Report an Issue…	Bir Sorun Bildirin…
 	WIA Support…	WIA Desteği…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Perspektif Çarpıtma etkin değil
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Perspektif Çarpıtma: görüntünün perspektifi boyunca düzlemler çizin, ardından Çarpıtma'ya geçin
 	Photo Filter	Fotoğraf Filtresi
-	PhotoSuite	Fotoğraf Craft
-	PhotoSuite Manages Colors	PhotoSuite Renkleri Yönetir
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite — Rust'ta yazılmış açık kaynaklı, yerel bir resim düzenleyici
+	PhotoSplice	Fotoğraf Craft
+	PhotoSplice Manages Colors	PhotoSplice Renkleri Yönetir
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice — Rust'ta yazılmış açık kaynaklı, yerel bir resim düzenleyici
 	Pin Depth:	Pim Derinliği:
 	Pixel Length:	Piksel Uzunluğu:
 	Pixels/Centimeter	Piksel/Santimetre
@@ -1570,7 +1570,7 @@
 	Pen Tilt	Kalem Eğimi
 	Pen Tool	Kalem Aracı
 	Photo	Fotoğraf
-	PhotoSuite website	PhotoSuite web sitesi
+	PhotoSplice website	PhotoSplice web sitesi
 	Picas	Pikalar
 	Pillow Emboss	Yastık Kabartma
 	Pixel Replacement	Piksel Değiştirme
@@ -1877,7 +1877,7 @@
 	System Info…	Sistem Bilgisi…
 	System Info	Sistem Bilgisi
 	More panels	Daha fazla panel
-	These settings aren't available in PhotoSuite yet.	Bu ayarlar henüz PhotoSuite'ta mevcut değildir
+	These settings aren't available in PhotoSplice yet.	Bu ayarlar henüz PhotoSplice'ta mevcut değildir
 	Graphics	Grafik
 	Reset GPU Backend	GPU Arka Uçunu Sıfırla
 	Applies at next launch.	Bir sonraki açılışta geçerlidir
@@ -2018,7 +2018,7 @@
 	Opening…	Açılıyor…
 	Patch	Yama
 	Patch:	Yama:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite, CPU görüntü birleştiricisini kullanıyor. Pencere yine de grafik bağdaştırıcınızı kullanabilir.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice, CPU görüntü birleştiricisini kullanıyor. Pencere yine de grafik bağdaştırıcınızı kullanabilir.
 	Play Action	Eylemi Oynat
 	Reading…	Okunuyor…
 	Record Action	Eylemi Kaydet

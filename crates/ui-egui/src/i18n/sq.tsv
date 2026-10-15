@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# Shqip translations for PhotoSuite UI.
+# Shqip translations for PhotoSplice UI.
 
 	File	Skedar
 	Edit	Redakto
@@ -672,7 +672,7 @@
 	Timeline	Afati kohor
 	Tool Presets	Paracaktimet e mjeteve
 	Tools	Veglat
-	About PhotoSuite	Rreth PhotoSuite
+	About PhotoSplice	Rreth PhotoSplice
 	Website	Faqja e internetit
 	Report an Issue…	Raportoni një problem…
 	WIA Support…	Mbështetja WIA…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Perspective Warp nuk është aktiv
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Deformimi i perspektivës: vizatoni rrafshet përgjatë perspektivës së imazhit, më pas kaloni në Warp
 	Photo Filter	Foto Filtruesi
-	PhotoSuite	PhotoSuite
-	PhotoSuite Manages Colors	PhotoSuite menaxhon ngjyrat
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite - një redaktues imazhi me burim të hapur, i shkruar në Rust
+	PhotoSplice	PhotoSplice
+	PhotoSplice Manages Colors	PhotoSplice menaxhon ngjyrat
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice - një redaktues imazhi me burim të hapur, i shkruar në Rust
 	Pin Depth:	Thellësia e pinit:
 	Pixel Length:	Gjatësia e pikselit:
 	Pixels/Centimeter	Piksele/Centimetër
@@ -1570,7 +1570,7 @@
 	Pen Tilt	Animi i stilolapsit
 	Pen Tool	Mjeti i stilolapsit
 	Photo	Foto
-	PhotoSuite website	Faqja e internetit PhotoSuite
+	PhotoSplice website	Faqja e internetit PhotoSplice
 	Picas	Pika
 	Pillow Emboss	Jastëk Stampim
 	Pixel Replacement	Zëvendësimi i pikselit
@@ -1877,7 +1877,7 @@
 	System Info…	Informacioni i sistemit…
 	System Info	Informacioni i Sistemit
 	More panels	Më shumë panele
-	These settings aren't available in PhotoSuite yet.	Këto cilësime nuk ofrohen ende në PhotoSuite
+	These settings aren't available in PhotoSplice yet.	Këto cilësime nuk ofrohen ende në PhotoSplice
 	Graphics	Grafika
 	Reset GPU Backend	Rivendos GPU Backend
 	Applies at next launch.	Zbatohet në fillimin e ardhshëm
@@ -2018,7 +2018,7 @@
 	Opening…	Po hapet…
 	Patch	Arnë
 	Patch:	Arnë:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite po përdor kompozitorin e imazheve me CPU. Dritarja mund të vazhdojë të përdorë përshtatësin tuaj grafik.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice po përdor kompozitorin e imazheve me CPU. Dritarja mund të vazhdojë të përdorë përshtatësin tuaj grafik.
 	Play Action	Luaj veprimin
 	Reading…	Po lexohet…
 	Record Action	Regjistro veprimin

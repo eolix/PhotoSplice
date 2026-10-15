@@ -3,11 +3,11 @@
 The desktop app listens on `127.0.0.1:<port>` (loopback only). Start it with a token file so the credential is not exposed in the process command line:
 
 ```sh
-photosuite --control 7878 --control-token-file /private/path/photosuite-control.token \
+photosplice --control 7878 --control-token-file /private/path/photosplice-control.token \
   --automation-read-root /work/project --automation-write-root /work/project
 ```
 
-If the file does not exist, PhotoSuite creates it with a fresh 256-bit token. On Unix the new file is mode `0600`; on Windows, protect it with an appropriate user-only ACL. An existing file is reused. If neither a token nor token file is configured, PhotoSuite generates a token for that launch and writes it to standard error. `PHOTOSUITE_CONTROL_TOKEN` and `PHOTOSUITE_CONTROL_TOKEN_FILE` are the environment-variable equivalents.
+If the file does not exist, PhotoSplice creates it with a fresh 256-bit token. On Unix the new file is mode `0600`; on Windows, protect it with an appropriate user-only ACL. An existing file is reused. If neither a token nor token file is configured, PhotoSplice generates a token for that launch and writes it to standard error. `PHOTOSPLICE_CONTROL_TOKEN` and `PHOTOSPLICE_CONTROL_TOKEN_FILE` are the environment-variable equivalents.
 
 The first request on every TCP connection must authenticate. No other method is dispatched before this succeeds:
 
@@ -28,7 +28,7 @@ Each reply is one JSON line with the same `id`:
 {"id": 2, "ok": false, "error": "unknown tool `foo`"}
 ```
 
-The transport is `apps/photosuite/src/control_server.rs`, and the handlers are in `crates/ui-egui/src/control.rs`. The token, size limits and file-access checks are in `crates/automation`.
+The transport is `apps/photosplice/src/control_server.rs`, and the handlers are in `crates/ui-egui/src/control.rs`. The token, size limits and file-access checks are in `crates/automation`.
 
 ## Methods
 
@@ -102,15 +102,15 @@ shortcuts, hidden and coloured menu items, autosave interval and crash recovery,
 log text file. GPU on/off and the GPU tile size apply at the next launch.
 
 The desktop app stores them in `preferences.json` in the platform config directory (macOS
-`~/Library/Application Support/PhotoSuite`, Windows `%APPDATA%\PhotoSuite`, Linux
-`$XDG_CONFIG_HOME/photosuite`; override with `PHOTOSUITE_CONFIG_DIR`); autosaves go to its
-`Recovery` folder. In portable mode (a `portable.txt` or `PhotoSuite.portable` file beside the
-executable, as in the Windows portable zip) that directory is `PhotoSuiteData` next to the
+`~/Library/Application Support/PhotoSplice`, Windows `%APPDATA%\PhotoSplice`, Linux
+`$XDG_CONFIG_HOME/photosplice`; override with `PHOTOSPLICE_CONFIG_DIR`); autosaves go to its
+`Recovery` folder. In portable mode (a `portable.txt` or `PhotoSplice.portable` file beside the
+executable, as in the Windows portable zip) that directory is `PhotoSpliceData` next to the
 executable instead. The web build keeps them in `localStorage`.
 
 User and imported (`.abr`) brush presets live in the config directory's `Presets` folder: one
 `.pcbrushes` JSON file per preset group, content-addressed tip bitmaps under `tips/`, and an
-`index.json` with the group order and deleted built-ins (see `photosuite_engine::preset_store`).
+`index.json` with the group order and deleted built-ins (see `photosplice_engine::preset_store`).
 The store loads in the background at launch and syncs after every brush preset change; built-ins
 are never written. The web build keeps brush presets for the session
 only. Gradient presets (including imported `.grd` groups) persist with the preferences.

@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Check MSI icon references without building or installing PhotoSuite.
+  Check MSI icon references without building or installing PhotoSplice.
 
 .DESCRIPTION
   ICE50 requires advertised shortcut icon identifiers to have the target file's extension.
@@ -8,7 +8,7 @@
   can display a generic document icon even when the ICO data and application are valid.
 #>
 param(
-  [string] $WxsPath = (Join-Path $PSScriptRoot 'photosuite.wxs')
+  [string] $WxsPath = (Join-Path $PSScriptRoot 'photosplice.wxs')
 )
 $ErrorActionPreference = 'Stop'
 [xml] $Wxs = Get-Content -LiteralPath $WxsPath -Raw

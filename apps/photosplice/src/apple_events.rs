@@ -1,6 +1,6 @@
 //! macOS open-documents and quit Apple events.
 //!
-//! Finder double-clicks, Open With, drops on the Dock icon and `open -a PhotoSuite file.psd` don't
+//! Finder double-clicks, Open With, drops on the Dock icon and `open -a PhotoSplice file.psd` don't
 //! pass paths on the command line: LaunchServices sends the running (or just-launched) app a
 //! `kAEOpenDocuments` ('odoc') Apple event. winit 0.30 doesn't handle it and owns the
 //! `NSApplicationDelegate`, and handling it ourselves needs Objective-C class declarations, i.e.
@@ -10,7 +10,7 @@
 //! polls every frame.
 
 use fmv_macos_events::{Event, Inbox, Registration};
-use photosuite_ui_egui::OsEvent;
+use photosplice_ui_egui::OsEvent;
 
 /// Keeps the Apple-event handlers registered; hold it until the event loop returns.
 pub struct AppleEvents {
@@ -27,7 +27,7 @@ impl AppleEvents {
     }
 
     /// The queue the UI drains (see `Services::os_events`); events arriving later wake `ctx`.
-    pub fn connect(&self, ctx: &egui::Context) -> photosuite_ui_egui::OsEventsFn {
+    pub fn connect(&self, ctx: &egui::Context) -> photosplice_ui_egui::OsEventsFn {
         let ctx = ctx.clone();
         self.inbox.set_wake(move || ctx.request_repaint());
         let inbox = self.inbox.clone();

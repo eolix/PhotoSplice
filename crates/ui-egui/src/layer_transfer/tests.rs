@@ -4,17 +4,17 @@ use egui::accesskit::Role;
 use egui::{Modifiers, PointerButton, Pos2, Rect, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use photosuite_doc::LayerId;
+use photosplice_doc::LayerId;
 use serde_json::json;
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::ViewXform;
 use crate::state::Tool;
 
 /// "source-doc" (40×30) with a red 10×10 square at (4, 6) on layer "paint", and "dest-doc"
 /// (60×50). The source is active.
-fn harness() -> (Harness<'static, PhotosuiteApp>, LayerId) {
-    let mut s = photosuite_engine::Session::new();
+fn harness() -> (Harness<'static, PhotospliceApp>, LayerId) {
+    let mut s = photosplice_engine::Session::new();
     s.execute("file.new", json!({"width": 40, "height": 30, "name": "source-doc"})).unwrap();
     let paint = LayerId(s.execute("layer.new.layer", json!({"name": "paint"})).unwrap()["layer"].as_u64().unwrap());
     s.execute("select.rect", json!({"x": 4, "y": 6, "width": 10, "height": 10})).unwrap();
@@ -23,21 +23,21 @@ fn harness() -> (Harness<'static, PhotosuiteApp>, LayerId) {
     s.execute("file.new", json!({"width": 60, "height": 50, "name": "dest-doc"})).unwrap();
     s.set_active(0);
     let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_max_steps(64).build_eframe(move |cc| {
-        PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-        PhotosuiteApp::new(s, crate::Services::default())
+        PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+        PhotospliceApp::new(s, crate::Services::default())
     });
     h.run_steps(8);
     (h, paint)
 }
 
 /// A document tab, found by its accessible title ("name @ 100% (…)", see `pro_tabs`).
-fn tab(h: &Harness<'_, PhotosuiteApp>, name: &str) -> Pos2 {
+fn tab(h: &Harness<'_, PhotospliceApp>, name: &str) -> Pos2 {
     h.get_by_label_contains(&format!("{name} @")).rect().center()
 }
 
 /// Press at `path[0]`, move through the rest (a few frames at each) and release at the last
 /// point with `release` held.
-fn drag_along(h: &mut Harness<'_, PhotosuiteApp>, path: &[Pos2], release: Modifiers) {
+fn drag_along(h: &mut Harness<'_, PhotospliceApp>, path: &[Pos2], release: Modifiers) {
     let first = path[0];
     h.event(egui::Event::PointerMoved(first));
     h.run_steps(1);
@@ -59,17 +59,17 @@ fn drag_along(h: &mut Harness<'_, PhotosuiteApp>, path: &[Pos2], release: Modifi
 }
 
 /// The copy in "dest-doc" (its active layer) and its bounds.
-fn copy(h: &Harness<'_, PhotosuiteApp>) -> (String, Rect) {
+fn copy(h: &Harness<'_, PhotospliceApp>) -> (String, Rect) {
     let st = h.state().session.active().unwrap();
     assert_eq!(st.doc.name, "dest-doc", "the destination is shown");
     let l = st.active_layer.and_then(|id| st.doc.layer(id)).unwrap();
-    let b = photosuite_engine::layer_multi_cmds::layer_bounds(l).unwrap();
+    let b = photosplice_engine::layer_multi_cmds::layer_bounds(l).unwrap();
     (l.name.clone(), Rect::from_min_max(egui::pos2(b.x0 as f32, b.y0 as f32), egui::pos2(b.x1 as f32, b.y1 as f32)))
 }
 
-fn source_square(h: &Harness<'_, PhotosuiteApp>, paint: LayerId) -> photosuite_geom::Rect {
+fn source_square(h: &Harness<'_, PhotospliceApp>, paint: LayerId) -> photosplice_geom::Rect {
     let doc = &h.state().session.documents()[0].doc;
-    photosuite_engine::layer_multi_cmds::layer_bounds(doc.layer(paint).unwrap()).unwrap()
+    photosplice_engine::layer_multi_cmds::layer_bounds(doc.layer(paint).unwrap()).unwrap()
 }
 
 #[test]

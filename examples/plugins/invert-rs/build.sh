@@ -4,6 +4,6 @@
 set -eu
 cd "$(dirname "$0")"
 cargo build --release --target wasm32-unknown-unknown
-out=target/wasm32-unknown-unknown/release/photosuite_plugin_invert.wasm
+out=target/wasm32-unknown-unknown/release/photosplice_plugin_invert.wasm
 cp "$out" ../../../crates/plugins/tests/fixtures/invert.wasm
 echo "built $out ($(wc -c < "$out") bytes) -> crates/plugins/tests/fixtures/invert.wasm"

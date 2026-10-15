@@ -1,9 +1,9 @@
 //! Camera Raw Filter descriptors observed in real PSD files (filter version 18.4, process 6).
 //! Verified develop controls are editable. Other processing versions
 //! or settings retain the entire filter through the existing opaque-filter path.
-use photosuite_algo::camera_raw::CameraRaw;
-use photosuite_doc::SmartFilter;
-use photosuite_psd::descriptor::{Descriptor, UnicodeString, Value};
+use photosplice_algo::camera_raw::CameraRaw;
+use photosplice_doc::SmartFilter;
+use photosplice_psd::descriptor::{Descriptor, UnicodeString, Value};
 use serde_json::{Value as J, json};
 
 use super::{blend_options, from_hex, get_desc, int, rgbc, set, to_hex};
@@ -71,7 +71,7 @@ const ARRAYS: &[(&str, &[&str])] = &[
 ];
 const CURVES: &[(&str, &str)] = &[("pointCurve", "Crv "), ("pointCurveRed", "CrvR"), ("pointCurveGreen", "CrvG"), ("pointCurveBlue", "CrvB")];
 
-// These controls have no PhotoSuite counterpart yet. Their observed neutral values can be
+// These controls have no PhotoSplice counterpart yet. Their observed neutral values can be
 // retained in the template; active values must keep the entire filter opaque.
 const NEUTRAL_ONLY: &[(&str, i32)] = &[("LNRC", 0), ("CNRS", 50), ("MDis", 0), ("VigA", 0), ("VigM", 50), ("crfs", 100), ("TMMs", 0), ("PGTM", 0), ("RGBt", 0)];
 
@@ -118,7 +118,7 @@ fn read_number(d: &Descriptor, key: &str) -> Option<f64> {
 
 fn read_curve(value: &Value) -> Option<J> {
     let Value::List(values) = value else { return None };
-    if values.len() < 4 || !values.len().is_multiple_of(2) || values.len() > photosuite_algo::camera_raw::MAX_CURVE_POINTS * 2 {
+    if values.len() < 4 || !values.len().is_multiple_of(2) || values.len() > photosplice_algo::camera_raw::MAX_CURVE_POINTS * 2 {
         return None;
     }
     let points: Option<Vec<[f32; 2]>> = values
@@ -131,7 +131,7 @@ fn read_curve(value: &Value) -> Option<J> {
         })
         .collect();
     let points = points?;
-    photosuite_algo::camera_raw::validate_curve(&points).ok()?;
+    photosplice_algo::camera_raw::validate_curve(&points).ok()?;
     if points == [[0.0, 0.0], [255.0, 255.0]] {
         return Some(json!([]));
     }
@@ -186,7 +186,7 @@ pub(super) fn import_params(item: &Descriptor) -> Option<J> {
     }
     let mut params = descriptor_params(get_desc(item, "Fltr")?)?;
     let mut template = item.clone();
-    let neutral = SmartFilter { command: String::new(), params: J::Null, blend: photosuite_color::BlendMode::Normal, opacity: 1.0, visible: true };
+    let neutral = SmartFilter { command: String::new(), params: J::Null, blend: photosplice_color::BlendMode::Normal, opacity: 1.0, visible: true };
     set(&mut template, "blendOptions", blend_options(&neutral));
     set(&mut template, "enab", Value::Boolean(true));
     let bytes = template.to_bytes();
@@ -222,7 +222,7 @@ fn write_number(d: &mut Descriptor, key: &str, value: &J) -> Result<(), String> 
     if !number_range(key).contains(&number) {
         return Err(format!("Camera Raw {key} is outside the supported range"));
     }
-    // PSD stores these as integer slider levels; PhotoSuite's sliders are continuous. Rounding
+    // PSD stores these as integer slider levels; PhotoSplice's sliders are continuous. Rounding
     // (at most half a level) keeps the filter instead of leaving it out of the PSD.
     // Hue 360 is the same angle as 0.
     let value = match key {
@@ -249,7 +249,7 @@ pub(super) fn export_item(params: &J) -> Result<Descriptor, String> {
     }
     // Bound variable-sized curves before deserialization allocates their point arrays.
     for (param, _) in CURVES {
-        if params.get(*param).and_then(J::as_array).is_some_and(|v| v.len() > photosuite_algo::camera_raw::MAX_CURVE_POINTS) {
+        if params.get(*param).and_then(J::as_array).is_some_and(|v| v.len() > photosplice_algo::camera_raw::MAX_CURVE_POINTS) {
             return Err(format!("Camera Raw `{param}` has too many points"));
         }
     }
@@ -300,7 +300,7 @@ pub(super) fn export_item(params: &J) -> Result<Descriptor, String> {
                 set(
                     &mut d,
                     "WBal",
-                    Value::Enumerated { type_id: photosuite_psd::descriptor::Id::new("WBal"), value: photosuite_psd::descriptor::Id::new("Cst ") },
+                    Value::Enumerated { type_id: photosplice_psd::descriptor::Id::new("WBal"), value: photosplice_psd::descriptor::Id::new("Cst ") },
                 );
             }
         }
@@ -325,7 +325,7 @@ pub(super) fn export_item(params: &J) -> Result<Descriptor, String> {
             if levels.is_empty() {
                 levels = vec![[0.0, 0.0], [255.0, 255.0]];
             }
-            photosuite_algo::camera_raw::validate_curve(&levels).map_err(|e| format!("Camera Raw `{param}`: {e}"))?;
+            photosplice_algo::camera_raw::validate_curve(&levels).map_err(|e| format!("Camera Raw `{param}`: {e}"))?;
             let values = levels.iter().flatten().map(|v| Value::Integer(*v as i32)).collect();
             set(&mut d, key, Value::List(values));
         }
@@ -346,7 +346,7 @@ pub(super) fn export_item(params: &J) -> Result<Descriptor, String> {
 mod tests {
     use super::*;
     use crate::smart_map::{UNSUPPORTED_FILTER, filter_from_item, item_for_filter};
-    use photosuite_color::BlendMode;
+    use photosplice_color::BlendMode;
 
     // Parameter values observed in the supplied 18.4 PSD. No source pixels or private
     // document metadata are included in this synthetic regression fixture.
@@ -398,7 +398,7 @@ mod tests {
     fn all_controls_item() -> Descriptor {
         let mut item = source_item();
         let mut d = get_desc(&item, "Fltr").unwrap().clone();
-        set(&mut d, "WBal", Value::Enumerated { type_id: photosuite_psd::descriptor::Id::new("WBal"), value: photosuite_psd::descriptor::Id::new("Cst ") });
+        set(&mut d, "WBal", Value::Enumerated { type_id: photosplice_psd::descriptor::Id::new("WBal"), value: photosplice_psd::descriptor::Id::new("Cst ") });
         set(&mut d, "ShpR", Value::Double(1.2));
         for (key, value) in [
             ("Temp", -26),
@@ -514,13 +514,13 @@ mod tests {
     #[test]
     #[ignore = "requires a user-supplied Camera Raw PSD"]
     fn all_sliders_fixture() {
-        let path = std::env::var("PHOTOSUITE_CAMERA_RAW_PSD").expect("set PHOTOSUITE_CAMERA_RAW_PSD");
+        let path = std::env::var("PHOTOSPLICE_CAMERA_RAW_PSD").expect("set PHOTOSPLICE_CAMERA_RAW_PSD");
         let doc = crate::import("fixture.psd", &std::fs::read(path).unwrap()).unwrap().document;
         let original = doc
             .walk()
             .into_iter()
             .find_map(|(_, _, layer)| {
-                let photosuite_doc::LayerContent::Smart(sm) = &layer.content else { return None };
+                let photosplice_doc::LayerContent::Smart(sm) = &layer.content else { return None };
                 sm.smart_filters.iter().find_map(|f| {
                     let item = item_for_filter(f).ok()?;
                     get_desc(&item, "Fltr").is_some_and(|d| d.class_id.is(CLASS)).then_some(item)

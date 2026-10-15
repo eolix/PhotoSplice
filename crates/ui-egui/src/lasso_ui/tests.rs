@@ -2,15 +2,15 @@ use super::*;
 use crate::canvas::tool_event;
 use serde_json::json;
 
-fn app() -> PhotosuiteApp {
-    let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+fn app() -> PhotospliceApp {
+    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
     app.run("file.new", json!({"width": 400, "height": 300})).unwrap();
     app.sync_views();
     app.ui.tool = Tool::Lasso;
     app
 }
 
-fn event(app: &mut PhotosuiteApp, kind: &str, x: f64, y: f64, mods: Modifiers) {
+fn event(app: &mut PhotospliceApp, kind: &str, x: f64, y: f64, mods: Modifiers) {
     let ev = match kind {
         "down" => ToolEvent::Down { x, y, pressure: 1.0 },
         "up" => ToolEvent::Up { x, y },
@@ -19,7 +19,7 @@ fn event(app: &mut PhotosuiteApp, kind: &str, x: f64, y: f64, mods: Modifiers) {
     tool_event(app, ev, mods);
 }
 
-fn begin(app: &mut PhotosuiteApp, mods: Modifiers) {
+fn begin(app: &mut PhotospliceApp, mods: Modifiers) {
     event(app, "down", 50.0, 50.0, mods);
     event(app, "move", 90.0, 40.0, mods);
     event(app, "move", 120.0, 50.0, mods);
@@ -101,9 +101,9 @@ fn tool_or_document_switch_discards_pending_outline() {
     assert!(app.session.active().unwrap().doc.selection.is_none());
 }
 
-fn harness() -> egui_kittest::Harness<'static, PhotosuiteApp> {
+fn harness() -> egui_kittest::Harness<'static, PhotospliceApp> {
     let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_ui_state(
-        |ui, app: &mut PhotosuiteApp| {
+        |ui, app: &mut PhotospliceApp| {
             let ctx = ui.ctx().clone();
             if !ctx.fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                 return;
@@ -113,7 +113,7 @@ fn harness() -> egui_kittest::Harness<'static, PhotosuiteApp> {
         },
         app(),
     );
-    PhotosuiteApp::setup_context(&h.ctx, Default::default());
+    PhotospliceApp::setup_context(&h.ctx, Default::default());
     h.run_steps(4);
     let v = &mut h.state_mut().ui.views[0];
     v.zoom = 1.0;
@@ -123,7 +123,7 @@ fn harness() -> egui_kittest::Harness<'static, PhotosuiteApp> {
     h
 }
 
-fn mouse(h: &mut egui_kittest::Harness<'static, PhotosuiteApp>, kind: &str, x: f32, y: f32, mods: Modifiers) {
+fn mouse(h: &mut egui_kittest::Harness<'static, PhotospliceApp>, kind: &str, x: f32, y: f32, mods: Modifiers) {
     let app = h.state();
     let v = &app.ui.views[0];
     let xf = ViewXform { rect: crate::rulers::content_rect(app, app.last_canvas_rect), zoom: v.zoom, center: v.center, flip: false };
@@ -181,12 +181,12 @@ fn a_drag_inside_the_selection_moves_it() {
     let mut app = app();
     app.ui.extras.snap = false;
     app.run("select.rect", json!({"x": 100, "y": 100, "width": 50, "height": 40})).unwrap();
-    let bounds = |app: &PhotosuiteApp| app.session.active().unwrap().doc.selection.as_ref().map(|s| s.content_bounds());
+    let bounds = |app: &PhotospliceApp| app.session.active().unwrap().doc.selection.as_ref().map(|s| s.content_bounds());
     event(&mut app, "down", 120.0, 120.0, Modifiers::NONE);
     event(&mut app, "move", 130.0, 125.0, Modifiers::NONE);
     event(&mut app, "up", 130.0, 125.0, Modifiers::NONE);
     assert!(!active(&app));
-    assert_eq!(bounds(&app), Some(photosuite_geom::Rect::new(110, 105, 160, 145)));
+    assert_eq!(bounds(&app), Some(photosplice_geom::Rect::new(110, 105, 160, 145)));
 
     let mut h = harness();
     h.state_mut().ui.extras.snap = false;
@@ -197,5 +197,5 @@ fn a_drag_inside_the_selection_moves_it() {
     mouse(&mut h, "move", 130.0, 125.0, Modifiers::NONE);
     mouse(&mut h, "up", 130.0, 125.0, Modifiers::NONE);
     assert!(h.state().drag.is_none());
-    assert_eq!(bounds(h.state()), Some(photosuite_geom::Rect::new(110, 105, 160, 145)));
+    assert_eq!(bounds(h.state()), Some(photosplice_geom::Rect::new(110, 105, 160, 145)));
 }

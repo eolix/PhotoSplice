@@ -2,22 +2,22 @@
 
 use std::sync::{Arc, Mutex};
 
-use photosuite_codecs::{ChannelLayout, EncodeOptions, Image};
-use photosuite_doc::Document;
-use photosuite_engine::Session;
-use photosuite_ui_egui::theme::ThemeKind;
-use photosuite_ui_egui::{PhotosuiteApp, Services};
+use photosplice_codecs::{ChannelLayout, EncodeOptions, Image};
+use photosplice_doc::Document;
+use photosplice_engine::Session;
+use photosplice_ui_egui::theme::ThemeKind;
+use photosplice_ui_egui::{PhotospliceApp, Services};
 use wasm_bindgen::JsCast as _;
 
 type Inbox = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
-/// Everything File › Open reads: PhotoSuite and Photoshop documents, flat images, and Photoshop
+/// Everything File › Open reads: PhotoSplice and Photoshop documents, flat images, and Photoshop
 /// brushes (.abr) and gradients (.grd), which go to the preset libraries.
 const OPEN_EXTS: &[&str] = &[
     "pcraft", "psd", "psb", "psdt", "png", "jpg", "jpeg", "tif", "tiff", "webp", "gif", "bmp", "tga", "ico", "qoi", "exr", "hdr", "pbm", "pgm", "ppm", "pam",
     "pfm", "heic", "heif", "hif", "dng", "cr2", "cr3", "nef", "nrw", "arw", "pef", "orf", "rw2", "raf", "abr", "grd", "asl",
 ];
-const CANVAS_ID: &str = "photosuite_canvas";
+const CANVAS_ID: &str = "photosplice_canvas";
 
 pub fn start() {
     eframe::WebLogger::init(log::LevelFilter::Info).ok();
@@ -33,7 +33,7 @@ pub fn start() {
         let q = query();
         let force_cpu = q.contains("cpu");
         let mut options = eframe::WebOptions::default();
-        photosuite_ui_egui::gpu_canvas::use_adapter_limits(&mut options.wgpu_options.wgpu_setup);
+        photosplice_ui_egui::gpu_canvas::use_adapter_limits(&mut options.wgpu_options.wgpu_setup);
         if q.contains("webgl")
             && let eframe::egui_wgpu::WgpuSetup::CreateNew(create) = &mut options.wgpu_options.wgpu_setup
         {
@@ -45,25 +45,25 @@ pub fn start() {
                 canvas,
                 options,
                 Box::new(move |cc| {
-                    PhotosuiteApp::setup_context(&cc.egui_ctx, ThemeKind::Midnight);
+                    PhotospliceApp::setup_context(&cc.egui_ctx, ThemeKind::Midnight);
                     let inbox: Inbox = Arc::default();
-                    let mut app = PhotosuiteApp::new(Session::new(), services(inbox.clone(), cc.egui_ctx.clone()));
+                    let mut app = PhotospliceApp::new(Session::new(), services(inbox.clone(), cc.egui_ctx.clone()));
                     listen_pen(&pen_target, app.stylus.feed.clone());
                     app.set_theme(&cc.egui_ctx, ThemeKind::Midnight);
                     if let Some(rs) = cc.wgpu_render_state.clone()
                         && !force_cpu
                     {
-                        log::info!("photosuite-web: wgpu backend {:?}", rs.adapter.get_info().backend);
+                        log::info!("photosplice-web: wgpu backend {:?}", rs.adapter.get_info().backend);
                         app.set_wgpu(rs);
                     }
                     Ok(Box::new(WebShell { app, inbox }))
                 }),
             )
             .await;
-        if let Some(el) = document.get_element_by_id("photosuite_loading") {
+        if let Some(el) = document.get_element_by_id("photosplice_loading") {
             match result {
                 Ok(()) => el.remove(),
-                Err(e) => el.set_inner_html(&format!("<p>PhotoSuite failed to start: {e:?}</p><p>A browser with WebGPU or WebGL2 is required.</p>")),
+                Err(e) => el.set_inner_html(&format!("<p>PhotoSplice failed to start: {e:?}</p><p>A browser with WebGPU or WebGL2 is required.</p>")),
             }
         }
     });
@@ -72,8 +72,8 @@ pub fn start() {
 /// Pen pressure, tilt, twist and the eraser button from Pointer Events (eframe forwards none of them for pens) into
 /// the app's stylus feed. The sample is kept through `pointerup` so the stroke's last points keep
 /// their pressure; hovering, a mouse, or leaving the canvas clears it.
-fn listen_pen(target: &web_sys::HtmlCanvasElement, feed: photosuite_ui_egui::stylus::StylusFeed) {
-    use photosuite_ui_egui::stylus::PenSample;
+fn listen_pen(target: &web_sys::HtmlCanvasElement, feed: photosplice_ui_egui::stylus::StylusFeed) {
+    use photosplice_ui_egui::stylus::PenSample;
     use wasm_bindgen::closure::Closure;
     for kind in ["pointerdown", "pointermove", "pointerup", "pointercancel", "pointerleave"] {
         let feed = feed.clone();
@@ -106,7 +106,7 @@ fn query() -> String {
 /// Wraps the app to read dropped files asynchronously (browsers can't read them synchronously,
 /// so the app's own drop path can't handle them) and feed them through the inbox.
 struct WebShell {
-    app: PhotosuiteApp,
+    app: PhotospliceApp,
     inbox: Inbox,
 }
 
@@ -138,9 +138,9 @@ impl eframe::App for WebShell {
 fn services(inbox: Inbox, ctx: egui::Context) -> Services {
     let open_inbox = inbox.clone();
     Services {
-        import: Some(Box::new(|name: &str, bytes: &[u8]| photosuite_io::import(name, bytes).map(|r| (r.document, r.warnings)).map_err(|e| e.to_string()))),
-        export: Some(Box::new(|doc: &Document, path: &str, settings: &photosuite_ui_egui::ExportSettings| {
-            let mut opts = photosuite_io::ExportOptions::default();
+        import: Some(Box::new(|name: &str, bytes: &[u8]| photosplice_io::import(name, bytes).map(|r| (r.document, r.warnings)).map_err(|e| e.to_string()))),
+        export: Some(Box::new(|doc: &Document, path: &str, settings: &photosplice_ui_egui::ExportSettings| {
+            let mut opts = photosplice_io::ExportOptions::default();
             if let Some(q) = settings.jpeg_quality {
                 opts.encode.jpeg_quality = q;
             }
@@ -151,7 +151,7 @@ fn services(inbox: Inbox, ctx: egui::Context) -> Services {
             opts.tiff_layers = settings.tiff_layers;
             opts.pdf_discard_editing = !settings.pdf_editing;
             opts.selected_layers = settings.selected_layers.clone();
-            photosuite_io::export(doc, path, &opts).map(|r| (r.bytes, r.warnings)).map_err(|e| e.to_string())
+            photosplice_io::export(doc, path, &opts).map(|r| (r.bytes, r.warnings)).map_err(|e| e.to_string())
         })),
         pick_open: Some(Box::new(move || {
             let inbox = open_inbox.clone();
@@ -174,7 +174,7 @@ fn services(inbox: Inbox, ctx: egui::Context) -> Services {
         write: Some(Box::new(|path: &str, bytes: &[u8]| download(path, bytes))),
         encode_png: Some(Box::new(|w, h, rgba| {
             let img = Image::from_u8(w, h, ChannelLayout::Rgba, rgba.to_vec()).map_err(|e| e.to_string())?;
-            photosuite_codecs::encode(&img, photosuite_codecs::Format::Png, &EncodeOptions::default()).map_err(|e| e.to_string())
+            photosplice_codecs::encode(&img, photosplice_codecs::Format::Png, &EncodeOptions::default()).map_err(|e| e.to_string())
         })),
         inbox: Some(inbox),
         // Preferences live in the browser's localStorage.
@@ -184,7 +184,7 @@ fn services(inbox: Inbox, ctx: egui::Context) -> Services {
     }
 }
 
-const PREFS_KEY: &str = "photosuite.preferences";
+const PREFS_KEY: &str = "photosplice.preferences";
 
 fn local_storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok().flatten()
@@ -193,7 +193,7 @@ fn local_storage() -> Option<web_sys::Storage> {
 /// Trigger a browser download of `bytes` named after the last component of `path`.
 fn download(path: &str, bytes: &[u8]) -> Result<(), String> {
     let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
-    let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "photosuite".into());
+    let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "photosplice".into());
     let window = web_sys::window().ok_or("no window")?;
     let document = window.document().ok_or("no document")?;
     let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));

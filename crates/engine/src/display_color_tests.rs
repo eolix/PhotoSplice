@@ -3,12 +3,12 @@
 
 use std::sync::Arc;
 
-use photosuite_cms::synth::{CmykParams, cmyk_profile};
-use photosuite_cms::{Builtin, Intent, Profile, Transform};
-use photosuite_color::{Color, ColorMode, PixelFormat, SampleType};
-use photosuite_doc::{Document, Layer, LayerContent, Size};
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_cms::synth::{CmykParams, cmyk_profile};
+use photosplice_cms::{Builtin, Intent, Profile, Transform};
+use photosplice_color::{Color, ColorMode, PixelFormat, SampleType};
+use photosplice_doc::{Document, Layer, LayerContent, Size};
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 use serde_json::json;
 
 use crate::Session;
@@ -48,7 +48,7 @@ fn test_cmyk() -> Profile {
 
 /// What the CPU canvas shows at the centre pixel (RGBA8).
 fn shown(s: &Session, d: &Document) -> [f32; 3] {
-    let buf = photosuite_compose::flatten(d);
+    let buf = photosplice_compose::flatten(d);
     let img = s.color.canvas_display(d).unwrap().to_rgba8(&buf);
     let i = (4 * d.size.width as usize + 4) * 4;
     [0, 1, 2].map(|k| img.pixels[i + k] as f32)
@@ -141,15 +141,15 @@ fn embedded_cmyk_profile_is_used_for_display_and_flat_export() {
     // Untagged documents keep the built-in coated CMYK.
     assert!(close(shown(&s, &cmyk_doc(None, ink)), coated, TOL));
     // Flat export of the (layered) document writes sRGB through the embedded profile.
-    let r = photosuite_io::export(&d, "out.png", &photosuite_io::ExportOptions::default()).unwrap();
-    let img = photosuite_codecs::decode(&r.bytes).unwrap().convert(photosuite_codecs::ChannelLayout::Rgba, photosuite_codecs::SampleType::U8);
+    let r = photosplice_io::export(&d, "out.png", &photosplice_io::ExportOptions::default()).unwrap();
+    let img = photosplice_codecs::decode(&r.bytes).unwrap().convert(photosplice_codecs::ChannelLayout::Rgba, photosplice_codecs::SampleType::U8);
     let px = &img.data()[(4 * 8 + 4) * 4..][..3];
     assert!(close([px[0] as f32, px[1] as f32, px[2] as f32], want, TOL), "export {px:?} vs {want:?}");
     // A single-layer CMYK document exported to a format without CMYK converts the same way.
     let mut one = d.clone();
     one.layers.truncate(1);
-    let r = photosuite_io::export(&one, "out.png", &photosuite_io::ExportOptions::default()).unwrap();
-    let img = photosuite_codecs::decode(&r.bytes).unwrap().convert(photosuite_codecs::ChannelLayout::Rgba, photosuite_codecs::SampleType::U8);
+    let r = photosplice_io::export(&one, "out.png", &photosplice_io::ExportOptions::default()).unwrap();
+    let img = photosplice_codecs::decode(&r.bytes).unwrap().convert(photosplice_codecs::ChannelLayout::Rgba, photosplice_codecs::SampleType::U8);
     let px = &img.data()[(4 * 8 + 4) * 4..][..3];
     assert!(close([px[0] as f32, px[1] as f32, px[2] as f32], want, TOL), "single-layer export {px:?} vs {want:?}");
 }
@@ -162,12 +162,12 @@ fn linear_documents_are_encoded_for_the_texture() {
     let cd = s.color.canvas_display(&d).unwrap();
     assert!(cd.encode_srgb && cd.transform.is_none(), "linear sRGB = sRGB primaries: encoding is all it takes");
     assert!(close(shown(&s, &d), [123.5; 3], 1.0), "{:?}", shown(&s, &d));
-    let buf = photosuite_compose::flatten(&d);
+    let buf = photosplice_compose::flatten(&d);
     let tex = cd.texture_buffer(&buf);
     assert!((tex.px[0][0] - 0.4845).abs() < 1e-3);
     // An sRGB document is passed through untouched.
     let srgb = rgb_doc(None, [0.2; 3], SampleType::F32);
-    let b2 = photosuite_compose::flatten(&srgb);
+    let b2 = photosplice_compose::flatten(&srgb);
     assert!(matches!(s.color.canvas_display(&srgb).unwrap().texture_buffer(&b2), std::borrow::Cow::Borrowed(_)));
 }
 
@@ -177,8 +177,8 @@ fn exr_round_trip_is_linear() {
     // An sRGB document exported to EXR is linearised; re-opened it is tagged linear sRGB and
     // displays as before.
     let d = rgb_doc(None, [0.5, 0.25, 0.75], SampleType::F32);
-    let r = photosuite_io::export(&d, "x.exr", &photosuite_io::ExportOptions::default()).unwrap();
-    let back = photosuite_io::import("x.exr", &r.bytes).unwrap().document;
+    let r = photosplice_io::export(&d, "x.exr", &photosplice_io::ExportOptions::default()).unwrap();
+    let back = photosplice_io::import("x.exr", &r.bytes).unwrap().document;
     let icc = back.icc_profile.clone().expect("tagged");
     assert_eq!(Profile::parse(&icc).unwrap().content_hash(), Builtin::LinearSrgb.profile().content_hash());
     let v = back.layers[0].surface().unwrap().pixel(1, 1);
@@ -253,7 +253,7 @@ fn monitor_status_says_what_is_applied() {
     // Bytes that aren't a profile, a non-RGB profile, one that can't be a destination and none
     // at all fall back to sRGB with the reason.
     let mut link = Builtin::Srgb.profile().clone();
-    link.class = photosuite_cms::ProfileClass::DeviceLink;
+    link.class = photosplice_cms::ProfileClass::DeviceLink;
     let link = link.with_encoded_bytes();
     for (icc, why) in [
         (Some(vec![0u8; 16]), "can't be read"),
@@ -337,9 +337,9 @@ fn each_display_gets_its_own_profile() {
 fn saved_monitor_profile_that_is_gone_is_reported() {
     // Preferences load settings without validating them: a saved .icc path deleted since.
     let mut s = Session::new();
-    s.color.settings.monitor_profile = "/nonexistent/photosuite/display.icc".into();
+    s.color.settings.monitor_profile = "/nonexistent/photosplice/display.icc".into();
     let st = s.color.monitor_status();
-    assert_eq!((st.requested.as_str(), st.source), ("/nonexistent/photosuite/display.icc", "fallback"));
+    assert_eq!((st.requested.as_str(), st.source), ("/nonexistent/photosplice/display.icc", "fallback"));
     assert!(st.reason.as_deref().unwrap_or("").contains("cannot read profile"), "{st:?}");
     assert_eq!(s.color.monitor().content_hash(), Builtin::Srgb.profile().content_hash());
 }

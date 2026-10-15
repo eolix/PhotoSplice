@@ -1,6 +1,6 @@
-//! Sandboxed WebAssembly plug-ins for PhotoSuite.
+//! Sandboxed WebAssembly plug-ins for PhotoSplice.
 //!
-//! A plug-in is a WebAssembly module that implements the PhotoSuite plug-in ABI (v1, documented
+//! A plug-in is a WebAssembly module that implements the PhotoSplice plug-in ABI (v1, documented
 //! in `docs/plugins.md`). It runs in [`wasmi`], a pure-Rust interpreter, with:
 //!
 //! - **no host imports**: no WASI, file system, network, clock or randomness. A module that
@@ -15,7 +15,7 @@
 //!
 //! Pixels are handed over as interleaved, normalised `f32` samples in the document's own colour
 //! model (bit-depth and colour-mode agnostic), in horizontal bands so the copy stays bounded.
-//! [`Plugin::apply`] runs a filter on a [`photosuite_raster::Surface`], blending by the selection.
+//! [`Plugin::apply`] runs a filter on a [`photosplice_raster::Surface`], blending by the selection.
 //! The process-wide [`registry`] holds the installed plug-ins.
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]

@@ -6,12 +6,12 @@ mod common;
 use std::sync::Arc;
 
 use common::*;
-use photosuite_cms::{Builtin, ColorSpace, Profile};
-use photosuite_color::{ColorMode, SampleType};
-use photosuite_io::*;
+use photosplice_cms::{Builtin, ColorSpace, Profile};
+use photosplice_color::{ColorMode, SampleType};
+use photosplice_io::*;
 
-fn single(mode: ColorMode, depth: SampleType, alpha: bool) -> photosuite_doc::Document {
-    let mut d = photosuite_doc::Document::new("s", photosuite_geom::Size::new(9, 6), mode, depth);
+fn single(mode: ColorMode, depth: SampleType, alpha: bool) -> photosplice_doc::Document {
+    let mut d = photosplice_doc::Document::new("s", photosplice_geom::Size::new(9, 6), mode, depth);
     let fmt = d.pixel_format();
     d.layers.push(raster("Background", fmt, d.bounds(), 3, alpha));
     d
@@ -89,8 +89,8 @@ fn cmyk_to_png_is_colour_managed_and_tagged_srgb() {
 /// (storytold/photocraft@5290930e).
 #[test]
 fn cmyk_fills_survive_psd_roundtrip_at_every_depth() {
-    use photosuite_doc::{Color, Document, Fill, GradientStyle, Layer, LayerContent};
-    let icc = photosuite_cms::synth::cmyk_profile(&photosuite_cms::synth::CmykParams {
+    use photosplice_doc::{Color, Document, Fill, GradientStyle, Layer, LayerContent};
+    let icc = photosplice_cms::synth::cmyk_profile(&photosplice_cms::synth::CmykParams {
         tvi: [0.26, 0.26, 0.26, 0.3],
         grid_a2b: 5,
         grid_b2a: 9,
@@ -116,13 +116,13 @@ fn cmyk_fills_survive_psd_roundtrip_at_every_depth() {
                     *offset = (0.1, -0.2);
                     *dither = true;
                 }
-                let mut doc = Document::new("CMYK fill", photosuite_geom::Size::new(9, 6), ColorMode::Cmyk, depth);
+                let mut doc = Document::new("CMYK fill", photosplice_geom::Size::new(9, 6), ColorMode::Cmyk, depth);
                 doc.icc_profile = profile.clone();
                 doc.layers.push(Layer::new("Fill", LayerContent::Fill(fill)));
-                let expected = photosuite_compose::flatten(&doc).px;
+                let expected = photosplice_compose::flatten(&doc).px;
                 let bytes = export(&doc, "x.psd", &ExportOptions::default()).unwrap().bytes;
                 let back = import("x.psd", &bytes).unwrap().document;
-                let diff = max_diff(&expected, &photosuite_compose::flatten(&back).px);
+                let diff = max_diff(&expected, &photosplice_compose::flatten(&back).px);
                 // Within one level of the document's depth (the file stores quantized inks).
                 let tolerance = match depth {
                     SampleType::U8 => 1.0 / 255.0,
@@ -133,7 +133,7 @@ fn cmyk_fills_survive_psd_roundtrip_at_every_depth() {
                 assert_eq!(back.icc_profile, doc.icc_profile);
                 if style.is_none() {
                     let cache = &back.layers[0].fill_cache.as_ref().unwrap().surface;
-                    let native = photosuite_raster::Surface::with_default(doc.pixel_format(), &[a.c[0], a.c[1], a.c[2], a.c[3], a.alpha]);
+                    let native = photosplice_raster::Surface::with_default(doc.pixel_format(), &[a.c[0], a.c[1], a.c[2], a.c[3], a.alpha]);
                     for (got, want) in cache.read_region(doc.bounds()).iter().zip(native.read_region(doc.bounds())) {
                         let tolerance = if depth == SampleType::F32 { 1e-6 } else { 0.0 };
                         assert!((got - want).abs() <= tolerance, "{depth:?}: {got} vs {want}");
@@ -148,15 +148,15 @@ fn cmyk_fills_survive_psd_roundtrip_at_every_depth() {
 /// not the default one (storytold/photocraft@cf83e058).
 #[test]
 fn rgb_fill_colours_separate_through_the_document_cmyk_profile() {
-    use photosuite_cms::{Intent, Transform, synth};
-    use photosuite_doc::{Color, Document, Fill, Layer, LayerContent};
+    use photosplice_cms::{Intent, Transform, synth};
+    use photosplice_doc::{Color, Document, Fill, Layer, LayerContent};
     let profile = synth::cmyk_profile(&synth::CmykParams { tvi: [0.26, 0.26, 0.26, 0.3], grid_a2b: 5, grid_b2a: 9, ..Default::default() });
     let profile = Profile::parse(&profile.to_bytes()).unwrap();
     let rgb = [0.2, 0.4, 0.6];
     let mut expected = [0.0; 4];
     Transform::new(Builtin::Srgb.profile(), &profile, Intent::RelativeColorimetric, true).unwrap().eval_fast(&rgb, &mut expected);
     for depth in SampleType::ALL {
-        let mut doc = Document::new("RGB fill", photosuite_geom::Size::new(1, 1), ColorMode::Cmyk, depth);
+        let mut doc = Document::new("RGB fill", photosplice_geom::Size::new(1, 1), ColorMode::Cmyk, depth);
         doc.icc_profile = Some(profile.to_bytes());
         doc.layers.push(Layer::new("Fill", LayerContent::Fill(Fill::Solid(Color::rgb(rgb[0], rgb[1], rgb[2])))));
         let bytes = export(&doc, "x.psd", &ExportOptions::default()).unwrap().bytes;

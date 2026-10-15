@@ -8,7 +8,7 @@
 // Effects walk several per-pixel planes in lockstep; index loops read clearest.
 #![allow(clippy::needless_range_loop)]
 
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 
 use crate::Ctx;
 use crate::artistic::GalleryEffect;
@@ -89,8 +89,8 @@ mod oracle;
 
 #[cfg(test)]
 mod tests {
-    use photosuite_color::{ColorMode, PixelFormat, SampleType};
-    use photosuite_raster::Surface;
+    use photosplice_color::{ColorMode, PixelFormat, SampleType};
+    use photosplice_raster::Surface;
 
     use super::*;
     use crate::{FilterParams, apply_tiled};
@@ -178,7 +178,7 @@ mod tests {
         assert_eq!(e.get("relief"), 50.0);
     }
 
-    /// Release timing on 24 MP: `cargo test -p photosuite-algo --release bench_gallery -- --ignored --nocapture`.
+    /// Release timing on 24 MP: `cargo test -p photosplice-algo --release bench_gallery -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn bench_gallery() {
@@ -211,7 +211,7 @@ mod tests {
         println!("{:>18}: {total:>7.0} ms", "total");
     }
 
-    /// Visual check: `GALLERY_RAW=src.raw GALLERY_W=480 GALLERY_H=322 cargo test -p photosuite-algo --release gallery_sheet -- --ignored`
+    /// Visual check: `GALLERY_RAW=src.raw GALLERY_W=480 GALLERY_H=322 cargo test -p photosplice-algo --release gallery_sheet -- --ignored`
     /// writes `<key>.raw` (RGB8) beside the input for every filter.
     #[test]
     #[ignore]

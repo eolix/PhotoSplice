@@ -1,5 +1,5 @@
 //! Photoshop-exact blend functions where they differ from the generic
-//! reference in `photosuite_color::blend`, plus the compositing formula.
+//! reference in `photosplice_color::blend`, plus the compositing formula.
 //!
 //! Derived from Photoshop's rendered composites in the corpus oracle
 //! (psd-tools `blend-modes/*.psd`):
@@ -12,7 +12,7 @@
 //!   the familiar `cb + cs >= 1` rule; the asymmetric edge cases (black
 //!   source over white → white, white over black → black) match Photoshop.
 
-use photosuite_color::blend::{self as generic, BlendMode};
+use photosplice_color::blend::{self as generic, BlendMode};
 
 fn vivid_light_ps(cb: f32, cs: f32) -> f32 {
     if cs <= 0.5 {
@@ -113,12 +113,12 @@ pub fn composite(mode: BlendMode, mut backdrop: [f32; 4], mut source: [f32; 4], 
     let ao = as_ + ab * (1.0 - as_);
     let lab = LAB_MIX.with(|l| l.get());
     if mode == BlendMode::Normal && lab && ab > 0.0 && ao > 0.0 {
-        let lb = photosuite_color::convert::srgb_to_lab([backdrop[0], backdrop[1], backdrop[2]]);
-        let ls = photosuite_color::convert::srgb_to_lab([source[0], source[1], source[2]]);
+        let lb = photosplice_color::convert::srgb_to_lab([backdrop[0], backdrop[1], backdrop[2]]);
+        let ls = photosplice_color::convert::srgb_to_lab([source[0], source[1], source[2]]);
         let kb = ab * (1.0 - as_) / ao;
         let k = as_ / ao;
         let m: [f32; 3] = std::array::from_fn(|i| lb[i] * kb + ls[i] * k);
-        let r = photosuite_color::convert::lab_to_srgb_unclamped(m);
+        let r = photosplice_color::convert::lab_to_srgb_unclamped(m);
         return [r[0], r[1], r[2], ao];
     }
     if lab && mode != BlendMode::Normal {
@@ -184,13 +184,13 @@ pub fn text_gamma() -> f32 {
 /// float-color.
 #[inline]
 pub fn text_encode(v: f32, gamma: f32) -> f32 {
-    photosuite_color::convert::srgb_to_linear(v.max(0.0)).powf(1.0 / gamma)
+    photosplice_color::convert::srgb_to_linear(v.max(0.0)).powf(1.0 / gamma)
 }
 
 /// Inverse of [`text_encode`].
 #[inline]
 pub fn text_decode(v: f32, gamma: f32) -> f32 {
-    photosuite_color::convert::linear_to_srgb(v.max(0.0).powf(gamma))
+    photosplice_color::convert::linear_to_srgb(v.max(0.0).powf(gamma))
 }
 
 /// [`composite`] with the coverage mix done in the text blending space of `gamma`

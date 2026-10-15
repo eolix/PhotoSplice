@@ -2,17 +2,17 @@
 //! (A), and the Pen with ⌘/Ctrl (Direct Selection) or ⌥/Alt (Convert Point).
 
 use egui::Modifiers;
-use photosuite_doc::vector::Path;
-use photosuite_geom::Point;
+use photosplice_doc::vector::Path;
+use photosplice_geom::Point;
 use serde_json::json;
 
 use super::{Drag, PathRef};
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::{ToolEvent, tool_event};
 use crate::state::Tool;
 
-fn app(tool: Tool) -> PhotosuiteApp {
-    let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+fn app(tool: Tool) -> PhotospliceApp {
+    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
     app.session.execute("file.new", json!({"width": 200, "height": 200})).unwrap();
     app.sync_views();
     app.ui.tool = tool;
@@ -20,7 +20,7 @@ fn app(tool: Tool) -> PhotosuiteApp {
 }
 
 /// A square work path; knot 1 at (120, 40) is smooth with horizontal handles.
-fn with_path(app: &mut PhotosuiteApp) {
+fn with_path(app: &mut PhotospliceApp) {
     let path = json!({"subpaths": [{"closed": true, "knots": [
         [40, 40],
         {"anchor": [120, 40], "in": [100, 40], "out": [140, 40], "smooth": true},
@@ -30,19 +30,19 @@ fn with_path(app: &mut PhotosuiteApp) {
     app.run("path.set", json!({"name": "work", "path": path})).unwrap();
 }
 
-fn work(app: &PhotosuiteApp) -> Path {
+fn work(app: &PhotospliceApp) -> Path {
     app.session.active().unwrap().doc.work_path.clone().unwrap()
 }
 
-fn anchor(app: &PhotosuiteApp, k: usize) -> Point {
+fn anchor(app: &PhotospliceApp, k: usize) -> Point {
     work(app).subpaths[0].knots[k].anchor
 }
 
-fn steps(app: &PhotosuiteApp) -> usize {
+fn steps(app: &PhotospliceApp) -> usize {
     app.session.active().unwrap().history.entries().len()
 }
 
-fn drag(app: &mut PhotosuiteApp, from: [f64; 2], to: [f64; 2], mods: Modifiers) {
+fn drag(app: &mut PhotospliceApp, from: [f64; 2], to: [f64; 2], mods: Modifiers) {
     tool_event(app, ToolEvent::Down { x: from[0], y: from[1], pressure: 1.0 }, mods);
     let mid = [(from[0] + to[0]) / 2.0, (from[1] + to[1]) / 2.0];
     tool_event(app, ToolEvent::Move { x: mid[0], y: mid[1], pressure: 1.0 }, mods);
@@ -50,7 +50,7 @@ fn drag(app: &mut PhotosuiteApp, from: [f64; 2], to: [f64; 2], mods: Modifiers) 
     tool_event(app, ToolEvent::Up { x: to[0], y: to[1] }, mods);
 }
 
-fn click(app: &mut PhotosuiteApp, at: [f64; 2], mods: Modifiers) {
+fn click(app: &mut PhotospliceApp, at: [f64; 2], mods: Modifiers) {
     drag(app, at, at, mods);
 }
 
@@ -141,7 +141,7 @@ fn pen_with_alt_converts_points() {
     let mut app = app(Tool::Pen);
     with_path(&mut app);
     click(&mut app, [120.0, 40.0], Modifiers::ALT);
-    assert_eq!(work(&app).subpaths[0].knots[1], photosuite_doc::Knot::corner(120.0, 40.0), "⌥-click makes a corner");
+    assert_eq!(work(&app).subpaths[0].knots[1], photosplice_doc::Knot::corner(120.0, 40.0), "⌥-click makes a corner");
     drag(&mut app, [40.0, 120.0], [40.0, 140.0], Modifiers::ALT);
     let k = work(&app).subpaths[0].knots[3];
     assert_eq!((k.in_ctrl, k.out_ctrl, k.smooth), (Point::new(40.0, 100.0), Point::new(40.0, 140.0), true), "⌥-drag pulls out smooth handles");

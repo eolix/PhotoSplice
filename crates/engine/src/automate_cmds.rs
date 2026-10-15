@@ -2,7 +2,7 @@
 //! and Script Events Manager, plus the session state the File-menu commands share
 //! ([`FileMenuState`]).
 //!
-//! "Scripts" are PhotoSuite action scripts: JSON (`[[id, params], …]`, `{"steps": …}` or a
+//! "Scripts" are PhotoSplice action scripts: JSON (`[[id, params], …]`, `{"steps": …}` or a
 //! droplet) or a plain-text list with one `command.id {json params}` per line (`#` comments).
 //! Droplets are JSON files (`.pcdroplet`) holding an action plus batch options;
 //! `file.automate.runDroplet` runs one on files and folders.
@@ -11,7 +11,7 @@
 //! bound in Preferences (`scriptEvents`) and fired by [`fire_event`]: the engine fires New,
 //! Close, Print and Export itself; the app shell fires Start, Open and Save.
 
-use photosuite_doc::{DocId, Layer, LayerContent};
+use photosplice_doc::{DocId, Layer, LayerContent};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -294,7 +294,7 @@ fn create_droplet(s: &mut Session, p: &Value) -> Result<Value> {
             options.insert(k.into(), v.clone());
         }
     }
-    let droplet = json!({"photosuiteDroplet": 1, "name": name, "action": {"name": name, "steps": steps_json}, "options": options});
+    let droplet = json!({"photospliceDroplet": 1, "name": name, "action": {"name": name, "steps": steps_json}, "options": options});
     let text = serde_json::to_string_pretty(&droplet).unwrap_or_default();
     write_file(&path, text.as_bytes())?;
     let _ = s;
@@ -306,8 +306,8 @@ fn run_droplet(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "file.automate.runDroplet";
     let path = p.get("droplet").or_else(|| p.get("path")).and_then(Value::as_str).ok_or_else(|| bad(cmd, "missing \"droplet\""))?;
     let v: Value = serde_json::from_slice(&read_file(path)?).map_err(|e| bad(cmd, format!("{path}: {e}")))?;
-    if v.get("photosuiteDroplet").is_none() {
-        return Err(bad(cmd, format!("{path} is not a PhotoSuite droplet")));
+    if v.get("photospliceDroplet").is_none() {
+        return Err(bad(cmd, format!("{path} is not a PhotoSplice droplet")));
     }
     let steps = v.get("action").and_then(|a| a.get("steps")).cloned().ok_or_else(|| bad(cmd, "droplet has no action"))?;
     let opts = v.get("options").cloned().unwrap_or(json!({}));
@@ -340,7 +340,7 @@ fn run_droplet(s: &mut Session, p: &Value) -> Result<Value> {
 fn statistics(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "file.scripts.statistics";
     let mode = p.get("mode").or_else(|| p.get("stackMode")).and_then(Value::as_str).unwrap_or("median");
-    let sm = photosuite_doc::StackMode::ALL
+    let sm = photosplice_doc::StackMode::ALL
         .into_iter()
         .find(|m| m.id().eq_ignore_ascii_case(mode))
         .ok_or_else(|| bad(cmd, format!("unknown stack mode `{mode}`")))?;
@@ -354,7 +354,7 @@ fn statistics(s: &mut Session, p: &Value) -> Result<Value> {
         let name = s.active().map(|d| d.doc.name.clone()).unwrap_or_default();
         s.edit("Convert to Smart Object", |doc, active| {
             let children = std::mem::take(&mut doc.layers);
-            let group = Layer::new(name.clone(), LayerContent::Group(photosuite_doc::Group { children, expanded: true, artboard: None, divider_blocks: Vec::new() }));
+            let group = Layer::new(name.clone(), LayerContent::Group(photosplice_doc::Group { children, expanded: true, artboard: None, divider_blocks: Vec::new() }));
             let smart = crate::smart_cmds::layer_to_smart(doc, &group)?;
             *active = Some(smart.id);
             doc.layers = vec![smart];
@@ -405,7 +405,7 @@ fn contact_sheet(s: &mut Session, p: &Value) -> Result<Value> {
     let across = p.get("placeAcrossFirst").and_then(Value::as_bool).unwrap_or(true);
     let rotate = p.get("rotateForBestFit").and_then(Value::as_bool).unwrap_or(false);
     let caption = p.get("caption").and_then(Value::as_bool).unwrap_or(true);
-    let font = p.get("font").and_then(Value::as_str).unwrap_or(photosuite_text::fonts::DEFAULT_FAMILY).to_string();
+    let font = p.get("font").and_then(Value::as_str).unwrap_or(photosplice_text::fonts::DEFAULT_FAMILY).to_string();
     let font_pt = f("fontSize", 12.0);
     let flatten = p.get("flatten").and_then(Value::as_bool).unwrap_or(false);
     let mode = p.get("mode").and_then(Value::as_str).unwrap_or("rgb").to_string();
@@ -431,7 +431,7 @@ fn contact_sheet(s: &mut Session, p: &Value) -> Result<Value> {
             let (c, r) = if across { (k % cols, k / cols) } else { (k / rows, k % rows) };
             let x0 = hs + f64::from(c) * (cell_w + hs);
             let y0 = vs + f64::from(r) * (cell_h + vs);
-            let thumb = (|| -> Result<photosuite_doc::Surface> {
+            let thumb = (|| -> Result<photosplice_doc::Surface> {
                 let bytes = read_file(path)?;
                 let src = import(&file_name(path), &bytes)?;
                 let mut t = Session::new();
@@ -446,16 +446,16 @@ fn contact_sheet(s: &mut Session, p: &Value) -> Result<Value> {
                 let (tw, th) = ((w * k).round().max(1.0), (h * k).round().max(1.0));
                 t.execute("image.imageSize", json!({"width": tw, "height": th, "resample": "bicubic"}))?;
                 let d = &t.active().ok_or(EngineError::NoDocument)?.doc;
-                let buf = photosuite_compose::flatten(d);
+                let buf = photosplice_compose::flatten(d);
                 let ox = (x0 + (cell_w - tw) / 2.0).round() as i32;
                 let oy = (y0 + (box_h - th) / 2.0).round() as i32;
                 let n = fmt.channels();
                 let mut data = vec![0.0f32; buf.px.len() * n];
                 for (px, out) in buf.px.iter().zip(data.chunks_exact_mut(n)) {
-                    photosuite_raster::from_rgba_into(&fmt, *px, out);
+                    photosplice_raster::from_rgba_into(&fmt, *px, out);
                 }
-                let mut surf = photosuite_doc::Surface::new(fmt);
-                surf.write_region(photosuite_geom::Rect::new(ox, oy, ox + tw as i32, oy + th as i32), &data);
+                let mut surf = photosplice_doc::Surface::new(fmt);
+                surf.write_region(photosplice_geom::Rect::new(ox, oy, ox + tw as i32, oy + th as i32), &data);
                 Ok(surf)
             })();
             let surf = match thumb {

@@ -1,4 +1,4 @@
-//! # photosuite-psd
+//! # photosplice-psd
 //!
 //! Faithful, lossless reader and writer for Adobe Photoshop PSD (version 1)
 //! and PSB (version 2, "large document format") files.
@@ -22,7 +22,7 @@
 //! (dimensions ≤ 300000, bounded allocations, bounded descriptor nesting).
 //!
 //! ```
-//! use photosuite_psd::{LayerSpec, PixelData, PsdBuilder, PsdFile};
+//! use photosplice_psd::{LayerSpec, PixelData, PsdBuilder, PsdFile};
 //!
 //! let mut b = PsdBuilder::new(2, 1);
 //! b.push_layer(LayerSpec::new("Red", 0, 0, 2, 1, PixelData::Rgba8(vec![255, 0, 0, 255, 255, 0, 0, 128])));
@@ -34,7 +34,7 @@
 //! let layer = file.layer(0).unwrap();
 //! assert_eq!(layer.name(), "Red");
 //! assert_eq!(layer.rgba8()?.data[7], 128);
-//! # Ok::<(), photosuite_psd::PsdError>(())
+//! # Ok::<(), photosplice_psd::PsdError>(())
 //! ```
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

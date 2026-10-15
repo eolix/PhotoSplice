@@ -2,7 +2,7 @@
 
 mod common;
 use common::*;
-use photosuite_codecs::*;
+use photosplice_codecs::*;
 use proptest::prelude::*;
 
 fn tight() -> DecodeOptions {

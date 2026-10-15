@@ -1,14 +1,14 @@
 //! Timing: smart selection on a large synthetic RGBA8 layer (default 6016×6016): a textured
 //! disc (radius = 1/3 of the size) on a noisy background.
-//! `cargo run --release -p photosuite-algo --example bench_smartselect [size]`
+//! `cargo run --release -p photosplice-algo --example bench_smartselect [size]`
 use std::time::Instant;
 
-use photosuite_algo::matting::{self, RefineParams};
-use photosuite_algo::segment::{Rng, SurfaceSampler, focus, grabcut, quick, subject};
-use photosuite_algo::selection::{Region, SelectionMode, combine_region};
-use photosuite_color::PixelFormat;
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_algo::matting::{self, RefineParams};
+use photosplice_algo::segment::{Rng, SurfaceSampler, focus, grabcut, quick, subject};
+use photosplice_algo::selection::{Region, SelectionMode, combine_region};
+use photosplice_color::PixelFormat;
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 
 fn main() {
     let n: i32 = std::env::args().nth(1).and_then(|v| v.parse().ok()).unwrap_or(6016);

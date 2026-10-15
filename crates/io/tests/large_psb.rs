@@ -1,9 +1,9 @@
 //! Large PSB files (#375): planes past 2 GiB decode, and a channel that can't be decoded leaves
 //! its layer empty instead of painting it opaque black.
 
-use photosuite_io::psd_to_document;
-use photosuite_psd::testgen;
-use photosuite_psd::{ColorMode, Compression, LayerSpec, PixelData, PsdBuilder, Version};
+use photosplice_io::psd_to_document;
+use photosplice_psd::testgen;
+use photosplice_psd::{ColorMode, Compression, LayerSpec, PixelData, PsdBuilder, Version};
 
 /// A layer whose red channel is damaged: the warning says "treated as empty", and the layer must
 /// be empty, not opaque black (the transparency channel is still fine).
@@ -25,7 +25,7 @@ fn undecodable_channel_leaves_the_layer_empty() {
 
 /// A flattened 29000² RGB PSB: its merged image decodes to 2.52 GB, past the old 2 GiB cap, which
 /// opened it as a document with no layers. Needs about 12 GB of memory, so it is opt-in:
-/// `cargo test --release -p photosuite-io --test large_psb -- --ignored`.
+/// `cargo test --release -p photosplice-io --test large_psb -- --ignored`.
 #[test]
 #[ignore = "allocates ~12 GB; run in release"]
 fn flattened_psb_with_a_merged_image_over_2_gib_opens() {

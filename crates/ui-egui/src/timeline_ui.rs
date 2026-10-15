@@ -5,7 +5,7 @@ use egui::{RichText, vec2};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::theme::Tokens;
 
 /// Timeline panel view state.
@@ -21,7 +21,7 @@ pub struct TimelineUi {
 }
 
 /// Menu checkmark for Window › Timeline.
-pub fn checked(app: &PhotosuiteApp, id: &str) -> Option<bool> {
+pub fn checked(app: &PhotospliceApp, id: &str) -> Option<bool> {
     (id == "window.panel.timeline").then_some(app.ui.timeline.open)
 }
 
@@ -31,7 +31,7 @@ pub fn handles(id: &str) -> bool {
 }
 
 /// Toggle the Timeline panel.
-pub fn menu(app: &mut PhotosuiteApp, id: &str, _params: &Value) -> Option<Result<Value, String>> {
+pub fn menu(app: &mut PhotospliceApp, id: &str, _params: &Value) -> Option<Result<Value, String>> {
     if id == "window.panel.timeline" {
         app.ui.timeline.open = !app.ui.timeline.open;
         return Some(Ok(json!({ "open": app.ui.timeline.open })));
@@ -40,7 +40,7 @@ pub fn menu(app: &mut PhotosuiteApp, id: &str, _params: &Value) -> Option<Result
 }
 
 /// Render the Timeline panel.
-pub fn windows(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+pub fn windows(app: &mut PhotospliceApp, ctx: &egui::Context) {
     if !app.ui.timeline.open {
         return;
     }

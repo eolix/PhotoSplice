@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# Eesti translations for PhotoSuite UI.
+# Eesti translations for PhotoSplice UI.
 
 	File	Fail
 	Edit	Muuda
@@ -672,7 +672,7 @@
 	Timeline	Ajaskaala
 	Tool Presets	Tööriista eelseadistused
 	Tools	Tööriistad
-	About PhotoSuite	PhotoSuitei kohta
+	About PhotoSplice	PhotoSplicei kohta
 	Website	Veebisait
 	Report an Issue…	Teata probleemist…
 	WIA Support…	WIA tugi…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Perspective Warp ei ole aktiivne
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Perspektiivi kõverus: joonistage tasapinnad piki pildi perspektiivi, seejärel lülituge kõverusele
 	Photo Filter	Foto filter
-	PhotoSuite	PhotoSuite
-	PhotoSuite Manages Colors	PhotoSuite haldab värve
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite – avatud lähtekoodiga natiivne pildiredaktor, mis on kirjutatud Rusti keeles
+	PhotoSplice	PhotoSplice
+	PhotoSplice Manages Colors	PhotoSplice haldab värve
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice – avatud lähtekoodiga natiivne pildiredaktor, mis on kirjutatud Rusti keeles
 	Pin Depth:	Pin sügavus:
 	Pixel Length:	Piksli pikkus:
 	Pixels/Centimeter	Pikslit/sentimeeter
@@ -1570,7 +1570,7 @@
 	Pen Tilt	Pliiatsi kallutamine
 	Pen Tool	Pliiatsi tööriist
 	Photo	Foto
-	PhotoSuite website	PhotoSuitei veebisait
+	PhotoSplice website	PhotoSplicei veebisait
 	Picas	Picas
 	Pillow Emboss	Sisse vajutatud
 	Pixel Replacement	Pikslite vahetus
@@ -1877,7 +1877,7 @@
 	System Info…	Süsteemi teave…
 	System Info	Süsteemi teave
 	More panels	Veel paneele
-	These settings aren't available in PhotoSuite yet.	Need seaded pole PhotoSuiteis veel saadaval
+	These settings aren't available in PhotoSplice yet.	Need seaded pole PhotoSpliceis veel saadaval
 	Graphics	Graafika
 	Reset GPU Backend	Lähtestage GPU taustaprogramm
 	Applies at next launch.	Kehtib järgmisel käivitamisel
@@ -2018,7 +2018,7 @@
 	Opening…	Avamine…
 	Patch	Paikamine
 	Patch:	Paikamine:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite kasutab CPU-pildikompositorit. Aken võib endiselt kasutada teie graafikaadapterit.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice kasutab CPU-pildikompositorit. Aken võib endiselt kasutada teie graafikaadapterit.
 	Play Action	Esita tegevus
 	Reading…	Lugemine…
 	Record Action	Lindista tegevus

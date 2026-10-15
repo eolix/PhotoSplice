@@ -3,13 +3,13 @@
 //! Photoshop keeps both modes flat: no layers, no alpha channels, one plane of palette indices
 //! (Indexed, 8-bit, the palette as colour-mode data: 256 reds, 256 greens, 256 blues) or of
 //! 1-bit pixels (Bitmap: 1 = black, rows padded to whole bytes). Our model edits them as an
-//! RGB 8-bit / Gray 8-bit image ([`photosuite_doc::Document::pixel_format`]); while the document
+//! RGB 8-bit / Gray 8-bit image ([`photosplice_doc::Document::pixel_format`]); while the document
 //! is still a single plain image it is written back that way, else as RGB / Grayscale with
 //! layers (with the export's "written as" warning).
 
-use photosuite_color::{ColorMode, SampleType};
-use photosuite_doc::{Document, LayerContent};
-use photosuite_psd::{ColorMode as PsdMode, Compression, Header, ImageData, PsdFile};
+use photosplice_color::{ColorMode, SampleType};
+use photosplice_doc::{Document, LayerContent};
+use photosplice_psd::{ColorMode as PsdMode, Compression, Header, ImageData, PsdFile};
 
 /// Resource 1046: the number of palette entries in use (u16).
 pub(crate) const COLOR_COUNT: u16 = 1046;
@@ -36,7 +36,7 @@ pub(crate) fn eligible(doc: &Document) -> bool {
         && l.visible
         && l.opacity >= 1.0
         && l.fill_opacity >= 1.0
-        && l.blend == photosuite_color::BlendMode::Normal
+        && l.blend == photosplice_color::BlendMode::Normal
         && l.mask.is_none()
         && l.vector_mask.is_none()
         && l.effects.items.is_empty()
@@ -44,7 +44,7 @@ pub(crate) fn eligible(doc: &Document) -> bool {
 
 /// Rewrites the exported `file` of an [`eligible`] document as a flat Indexed / Bitmap PSD.
 pub(crate) fn apply(doc: &Document, file: &mut PsdFile) {
-    let px = photosuite_compose::flatten(doc).px;
+    let px = photosplice_compose::flatten(doc).px;
     let (w, h) = (doc.size.width as usize, doc.size.height as usize);
     // The image over white, as Photoshop shows a flat file; `None` where transparent.
     let over = |p: &[f32; 4]| -> Option<[f32; 3]> { (p[3] >= 0.5).then(|| [0, 1, 2].map(|c| p[c] * p[3] + 1.0 - p[3])) };
@@ -91,10 +91,10 @@ pub(crate) fn apply(doc: &Document, file: &mut PsdFile) {
     if let (PsdMode::Indexed, Some(table)) = (mode, &doc.color_table) {
         let count = table.colors.len().min(256) as u16;
         if count < 256 {
-            file.resources.push(photosuite_psd::ImageResource::new(COLOR_COUNT, count.to_be_bytes().to_vec()));
+            file.resources.push(photosplice_psd::ImageResource::new(COLOR_COUNT, count.to_be_bytes().to_vec()));
         }
         if let Some(t) = table.transparent {
-            file.resources.push(photosuite_psd::ImageResource::new(TRANSPARENCY_INDEX, u16::from(t).to_be_bytes().to_vec()));
+            file.resources.push(photosplice_psd::ImageResource::new(TRANSPARENCY_INDEX, u16::from(t).to_be_bytes().to_vec()));
         }
     }
 }

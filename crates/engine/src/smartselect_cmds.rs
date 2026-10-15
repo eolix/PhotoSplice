@@ -1,13 +1,13 @@
 //! Smart selection commands: Quick Selection, Object Selection, Select Subject, Select and Mask
-//! (Refine Edge) and Focus Area. The algorithms live in `photosuite_algo::segment` and
-//! `photosuite_algo::matting`; these commands pick the pixels to analyse (active layer or
+//! (Refine Edge) and Focus Area. The algorithms live in `photosplice_algo::segment` and
+//! `photosplice_algo::matting`; these commands pick the pixels to analyse (active layer or
 //! composite), run them, and store the result as the selection (or a mask / new layer).
 
-use photosuite_algo::matting::{self, RefineParams};
-use photosuite_algo::segment::{Sampler, SurfaceSampler, focus, grabcut, quick, subject};
-use photosuite_algo::selection::{Region, SelectionMode, combine_region};
-use photosuite_doc::{Document, Layer, LayerContent, LayerId, LayerMask};
-use photosuite_geom::Rect;
+use photosplice_algo::matting::{self, RefineParams};
+use photosplice_algo::segment::{Sampler, SurfaceSampler, focus, grabcut, quick, subject};
+use photosplice_algo::selection::{Region, SelectionMode, combine_region};
+use photosplice_doc::{Document, Layer, LayerContent, LayerId, LayerMask};
+use photosplice_geom::Rect;
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
@@ -39,7 +39,7 @@ struct CompositeSampler<'a>(&'a Document);
 
 impl Sampler for CompositeSampler<'_> {
     fn rgba(&self, r: Rect) -> Vec<[f32; 4]> {
-        photosuite_compose::render(self.0, r).px
+        photosplice_compose::render(self.0, r).px
     }
 }
 
@@ -178,7 +178,7 @@ fn refine_edge(s: &mut Session, p: &Value) -> Result<Value> {
             let id = active.ok_or_else(|| EngineError::Other("no active layer".into()))?;
             s.edit("Select and Mask", |doc, _| {
                 let surface =
-                    region.as_ref().map(matting::region_surface).unwrap_or_else(|| photosuite_raster::Surface::new(photosuite_color::PixelFormat::GRAY8));
+                    region.as_ref().map(matting::region_surface).unwrap_or_else(|| photosplice_raster::Surface::new(photosplice_color::PixelFormat::GRAY8));
                 doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?.mask = Some(LayerMask { surface, ..LayerMask::reveal_all() });
                 doc.selection = None;
                 Ok(())
@@ -272,7 +272,7 @@ pub fn specs() -> Vec<CommandSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_algo::segment::Rng;
+    use photosplice_algo::segment::Rng;
 
     /// A document whose background shows `px(x, y)` (RGB, 0–1), at the given depth.
     fn session_with(w: u32, h: u32, depth: u32, px: impl Fn(u32, u32) -> [f32; 3]) -> Session {
@@ -424,7 +424,7 @@ mod tests {
         s
     }
 
-    fn soft_count(s: &photosuite_raster::Surface, y: i32) -> usize {
+    fn soft_count(s: &photosplice_raster::Surface, y: i32) -> usize {
         (0..80)
             .filter(|x| {
                 let v = s.sample_channel(*x, y, 0);
@@ -449,7 +449,7 @@ mod tests {
         let layers_before = s.active().unwrap().doc.layer_count();
         let r = s.execute("select.refineEdge", json!({"radius": 8, "output": "layerMask"})).unwrap();
         let d = s.active().unwrap();
-        let l = d.doc.layer(photosuite_doc::LayerId(r["layer"].as_u64().unwrap())).unwrap();
+        let l = d.doc.layer(photosplice_doc::LayerId(r["layer"].as_u64().unwrap())).unwrap();
         let m = l.mask.as_ref().unwrap();
         assert!(soft_count(&m.surface, 20) >= 4);
         assert!(m.value(5, 20) > 0.99 && m.value(75, 20) < 0.01);
@@ -462,7 +462,7 @@ mod tests {
         // New layer: pixels with the refined alpha; the source is hidden.
         let r = s.execute("select.refineEdge", json!({"radius": 8, "feather": 1, "output": "newLayer"})).unwrap();
         let d = s.active().unwrap();
-        let nid = photosuite_doc::LayerId(r["layer"].as_u64().unwrap());
+        let nid = photosplice_doc::LayerId(r["layer"].as_u64().unwrap());
         assert_eq!(d.active_layer, Some(nid));
         assert_eq!(d.doc.layer_count(), layers_before + 1);
         let nl = d.doc.layer(nid).unwrap();
@@ -479,7 +479,7 @@ mod tests {
         let r = s.execute("select.refineEdge", json!({"radius": 8, "decontaminate": true, "amount": 100})).unwrap();
         assert_eq!(r["output"], "newLayerWithMask");
         let d = s.active().unwrap();
-        let nl = d.doc.layer(photosuite_doc::LayerId(r["layer"].as_u64().unwrap())).unwrap();
+        let nl = d.doc.layer(photosplice_doc::LayerId(r["layer"].as_u64().unwrap())).unwrap();
         assert!(nl.mask.is_some());
         let px = nl.surface().unwrap().pixel(41, 20);
         let orig = d.doc.layers[0].surface().unwrap().pixel(41, 20);

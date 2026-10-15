@@ -7,12 +7,12 @@
 use std::sync::{Arc, PoisonError};
 
 use egui::{Color32, Pos2, Stroke};
-use photosuite_doc::{Document, LayerContent, LayerId, TextLayer};
-use photosuite_geom::{Affine, Point};
-use photosuite_text::TextLayout;
+use photosplice_doc::{Document, LayerContent, LayerId, TextLayer};
+use photosplice_geom::{Affine, Point};
+use photosplice_text::TextLayout;
 use serde_json::json;
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::ViewXform;
 use crate::state::TextEdit;
 
@@ -26,11 +26,11 @@ fn text_layer(doc: &Document, id: LayerId) -> Option<&TextLayer> {
 }
 
 fn byte_of(text: &str, ci: usize) -> usize {
-    photosuite_text::byte_index(text, ci)
+    photosplice_text::byte_index(text, ci)
 }
 
 /// Layout of a type layer (cached per document revision) and its text → document transform.
-pub fn layout(app: &mut PhotosuiteApp, id: LayerId) -> Option<(Arc<TextLayout>, Affine, String)> {
+pub fn layout(app: &mut PhotospliceApp, id: LayerId) -> Option<(Arc<TextLayout>, Affine, String)> {
     let st = app.session.active()?;
     let (doc, rev) = (st.doc.clone(), st.revision);
     let t = text_layer(&doc, id)?;
@@ -40,7 +40,7 @@ pub fn layout(app: &mut PhotosuiteApp, id: LayerId) -> Option<(Arc<TextLayout>, 
     {
         return Some((l.clone(), t.transform, t.text.clone()));
     }
-    let l = Arc::new(photosuite_text::shared().lock().ok()?.layout(t, doc.resolution_dpi));
+    let l = Arc::new(photosplice_text::shared().lock().ok()?.layout(t, doc.resolution_dpi));
     app.type_layout = Some((key, l.clone()));
     Some((l, t.transform, t.text.clone()))
 }
@@ -51,7 +51,7 @@ fn to_text(aff: &Affine, x: f64, y: f64) -> (f32, f32) {
 }
 
 /// Topmost visible type layer whose laid-out text contains the document point.
-fn hit_layer(app: &mut PhotosuiteApp, x: f64, y: f64) -> Option<LayerId> {
+fn hit_layer(app: &mut PhotospliceApp, x: f64, y: f64) -> Option<LayerId> {
     let doc = app.session.active()?.doc.clone();
     let slop = 6.0 / app.current_zoom().max(0.01);
     let mut ids: Vec<LayerId> =
@@ -66,7 +66,7 @@ fn hit_layer(app: &mut PhotosuiteApp, x: f64, y: f64) -> Option<LayerId> {
         });
         let Some((l, aff, _)) = layout(app, *id) else { return shown };
         let (tx, ty) = to_text(&aff, x, y);
-        shown || photosuite_text::text_point_inside(&l, tx, ty, slop)
+        shown || photosplice_text::text_point_inside(&l, tx, ty, slop)
     })
 }
 
@@ -75,7 +75,7 @@ fn hit_layer(app: &mut PhotosuiteApp, x: f64, y: f64) -> Option<LayerId> {
 /// they sit somewhere else than the glyphs the caret and selection are placed on.
 fn shows_own_layout(doc: &Document, t: &TextLayer) -> bool {
     let Some(cache) = &t.cache else { return false };
-    let mut eng = photosuite_text::shared().lock().unwrap_or_else(PoisonError::into_inner);
+    let mut eng = photosplice_text::shared().lock().unwrap_or_else(PoisonError::into_inner);
     let ours = eng.render(t, doc.resolution_dpi, doc.pixel_format()).1.surface.content_bounds();
     let have = cache.content_bounds();
     [(ours.x0, have.x0), (ours.y0, have.y0), (ours.x1, have.x1), (ours.y1, have.y1)].iter().all(|(a, b)| (a - b).abs() <= 1)
@@ -84,7 +84,7 @@ fn shows_own_layout(doc: &Document, t: &TextLayer) -> bool {
 /// Start editing an existing type layer. Like Photoshop, editing shows the text as the type
 /// engine lays it out, so a PSD layer is re-rendered first (inside the edit session's history
 /// step, so Cancel brings Photoshop's pixels back).
-fn begin_edit(app: &mut PhotosuiteApp, id: LayerId, key: &str) -> Result<(), String> {
+fn begin_edit(app: &mut PhotospliceApp, id: LayerId, key: &str) -> Result<(), String> {
     let st = app.session.active().ok_or("no document open")?;
     let doc = st.doc.clone();
     if let Some(t) = text_layer(&doc, id)
@@ -97,7 +97,7 @@ fn begin_edit(app: &mut PhotosuiteApp, id: LayerId, key: &str) -> Result<(), Str
 
 /// Edit the active type layer from its thumbnail, selecting all text like Photoshop. Reuse the
 /// current session when already editing it, so Cancel and undo still cover the whole edit.
-pub fn edit_active(app: &mut PhotosuiteApp) -> Result<(), String> {
+pub fn edit_active(app: &mut PhotospliceApp) -> Result<(), String> {
     let st = app.session.active().ok_or("no document open")?;
     let id = st.active_layer.ok_or("no active layer")?;
     let n = text_layer(&st.doc, id).ok_or("active layer is not a type layer")?.text.chars().count();
@@ -110,17 +110,17 @@ pub fn edit_active(app: &mut PhotosuiteApp) -> Result<(), String> {
         ed.anchor = 0;
         ed.caret = n;
     }
-    let vertical = app.session.active().and_then(|st| text_layer(&st.doc, id)).is_some_and(|t| t.orientation == photosuite_doc::text::Orientation::Vertical);
+    let vertical = app.session.active().and_then(|st| text_layer(&st.doc, id)).is_some_and(|t| t.orientation == photosplice_doc::text::Orientation::Vertical);
     app.ui.tool = if vertical { crate::state::Tool::VerticalType } else { crate::state::Tool::Type };
     app.ui.mask_target = false;
     app.ui.vector_mask_target = false;
     Ok(())
 }
 
-fn hit_offset(app: &mut PhotosuiteApp, id: LayerId, x: f64, y: f64) -> usize {
+fn hit_offset(app: &mut PhotospliceApp, id: LayerId, x: f64, y: f64) -> usize {
     let Some((l, aff, text)) = layout(app, id) else { return 0 };
     let (tx, ty) = to_text(&aff, x, y);
-    photosuite_text::hit_char(&l, &text, tx, ty).0
+    photosplice_text::hit_char(&l, &text, tx, ty).0
 }
 
 fn hex(c: [f32; 4]) -> String {
@@ -145,15 +145,15 @@ fn handle_sides(i: u8) -> (bool, bool, bool, bool) {
     }
 }
 
-fn box_shape(app: &PhotosuiteApp, id: LayerId) -> Option<(f32, f32, f32, f32)> {
+fn box_shape(app: &PhotospliceApp, id: LayerId) -> Option<(f32, f32, f32, f32)> {
     match app.session.active().and_then(|s| text_layer(&s.doc, id).map(|t| t.shape))? {
-        photosuite_doc::text::TextShape::Box { x, y, width, height } => Some((x, y, width, height)),
+        photosplice_doc::text::TextShape::Box { x, y, width, height } => Some((x, y, width, height)),
         _ => None,
     }
 }
 
 /// The paragraph-box handle under the document point, if the layer is paragraph text.
-fn box_handle_at(app: &mut PhotosuiteApp, id: LayerId, x: f64, y: f64) -> Option<u8> {
+fn box_handle_at(app: &mut PhotospliceApp, id: LayerId, x: f64, y: f64) -> Option<u8> {
     let (bx, by, w, h) = box_shape(app, id)?;
     let (_, aff, _) = layout(app, id)?;
     let (r, b) = (bx + w, by + h);
@@ -170,7 +170,7 @@ fn box_handle_at(app: &mut PhotosuiteApp, id: LayerId, x: f64, y: f64) -> Option
 }
 
 /// Drag handle `i` to the document point: the dragged edges follow it, the others stay put.
-fn resize_box(app: &mut PhotosuiteApp, ed: &TextEdit, i: u8, x: f64, y: f64) {
+fn resize_box(app: &mut PhotospliceApp, ed: &TextEdit, i: u8, x: f64, y: f64) {
     let id = LayerId(ed.layer);
     let Some((bx, by, w, h)) = box_shape(app, id) else { return };
     let Some((_, aff, _)) = layout(app, id) else { return };
@@ -195,7 +195,7 @@ fn resize_box(app: &mut PhotosuiteApp, ed: &TextEdit, i: u8, x: f64, y: f64) {
 }
 
 /// Pointer down with the Type tool. Returns true when the press was consumed (no box drag).
-pub fn pointer_down(app: &mut PhotosuiteApp, x: f64, y: f64, shift: bool) -> bool {
+pub fn pointer_down(app: &mut PhotospliceApp, x: f64, y: f64, shift: bool) -> bool {
     if let Some(ed) = app.ui.text_edit.clone() {
         let id = LayerId(ed.layer);
         if let Some(i) = box_handle_at(app, id, x, y) {
@@ -231,7 +231,7 @@ pub fn pointer_down(app: &mut PhotosuiteApp, x: f64, y: f64, shift: bool) -> boo
     false
 }
 
-pub fn pointer_move(app: &mut PhotosuiteApp, x: f64, y: f64) {
+pub fn pointer_move(app: &mut PhotospliceApp, x: f64, y: f64) {
     let Some(ed) = app.ui.text_edit.clone() else { return };
     if let Some(i) = ed.resize {
         resize_box(app, &ed, i, x, y);
@@ -246,7 +246,7 @@ pub fn pointer_move(app: &mut PhotosuiteApp, x: f64, y: f64) {
 }
 
 /// Pointer up. `rect` is the dragged box (document px) when no edit session consumed the press.
-pub fn pointer_up(app: &mut PhotosuiteApp, start: [f64; 2], end: [f64; 2]) {
+pub fn pointer_up(app: &mut PhotospliceApp, start: [f64; 2], end: [f64; 2]) {
     if let Some(e) = app.ui.text_edit.as_mut() {
         e.dragging = false;
         e.resize = None;
@@ -284,16 +284,16 @@ pub fn pointer_up(app: &mut PhotosuiteApp, start: [f64; 2], end: [f64; 2]) {
     }
 }
 
-fn session_key(app: &mut PhotosuiteApp) -> String {
+fn session_key(app: &mut PhotospliceApp) -> String {
     format!("type-{}", app.ui.alloc_id())
 }
 
-fn current_text(app: &PhotosuiteApp, id: LayerId) -> Option<String> {
+fn current_text(app: &PhotospliceApp, id: LayerId) -> Option<String> {
     Some(text_layer(&app.session.active()?.doc, id)?.text.clone())
 }
 
 /// Replace the selection with `s`.
-fn insert(app: &mut PhotosuiteApp, s: &str) {
+fn insert(app: &mut PhotospliceApp, s: &str) {
     let Some(ed) = app.ui.text_edit.clone() else { return };
     let (a, b) = (ed.caret.min(ed.anchor), ed.caret.max(ed.anchor));
     let s = s.replace("\r\n", "\n").replace('\r', "\n");
@@ -310,7 +310,7 @@ fn insert(app: &mut PhotosuiteApp, s: &str) {
 
 /// Alt+←/→: kern the pair before the caret by `by` (1/1000 em). No pair (caret at a text or line
 /// edge): nothing happens, like Photoshop. Not coalesced: one history step per press.
-fn kern_pair(app: &mut PhotosuiteApp, id: LayerId, caret: usize, by: f32) {
+fn kern_pair(app: &mut PhotospliceApp, id: LayerId, caret: usize, by: f32) {
     let Some(text) = current_text(app, id) else { return };
     let before = caret.checked_sub(1).and_then(|i| text.chars().nth(i));
     let after = text.chars().nth(caret);
@@ -322,7 +322,7 @@ fn kern_pair(app: &mut PhotosuiteApp, id: LayerId, caret: usize, by: f32) {
 
 /// IME composition. The preedit text is written into the layer (so it lays out and reflows like
 /// typed text) and replaced by every update; `commit` makes the result final.
-fn ime_update(app: &mut PhotosuiteApp, s: &str, commit: bool) {
+fn ime_update(app: &mut PhotospliceApp, s: &str, commit: bool) {
     let Some(ed) = app.ui.text_edit.clone() else { return };
     let Some(text) = current_text(app, LayerId(ed.layer)) else { return };
     let n = text.chars().count();
@@ -349,11 +349,11 @@ fn ime_update(app: &mut PhotosuiteApp, s: &str, commit: bool) {
 
 /// Character index of the previous / next word boundary (shared with `type.navigate`).
 fn word_boundary(text: &str, from: usize, forward: bool) -> usize {
-    photosuite_text::word_boundary(text, from, forward)
+    photosplice_text::word_boundary(text, from, forward)
 }
 
 /// Double-click: select the word under the caret.
-pub fn select_word(app: &mut PhotosuiteApp) {
+pub fn select_word(app: &mut PhotospliceApp) {
     let Some(ed) = app.ui.text_edit.clone() else { return };
     let Some(text) = current_text(app, LayerId(ed.layer)) else { return };
     let chars: Vec<char> = text.chars().collect();
@@ -371,14 +371,14 @@ pub fn select_word(app: &mut PhotosuiteApp) {
 
 /// Caret on the neighbouring line (±1; a column in vertical type), keeping the position
 /// along the line. Works in line space, so it serves both orientations.
-fn line_step(app: &mut PhotosuiteApp, id: LayerId, caret: usize, dir: i32) -> usize {
+fn line_step(app: &mut PhotospliceApp, id: LayerId, caret: usize, dir: i32) -> usize {
     let Some((l, _, text)) = layout(app, id) else { return caret };
     let x = l.caret(byte_of(&text, caret)).0;
-    photosuite_text::line_step(&l, &text, caret, x, dir)
+    photosplice_text::line_step(&l, &text, caret, x, dir)
 }
 
-fn is_vertical(app: &PhotosuiteApp, id: LayerId) -> bool {
-    app.session.active().and_then(|s| text_layer(&s.doc, id)).is_some_and(|t| t.orientation == photosuite_doc::text::Orientation::Vertical)
+fn is_vertical(app: &PhotospliceApp, id: LayerId) -> bool {
+    app.session.active().and_then(|s| text_layer(&s.doc, id)).is_some_and(|t| t.orientation == photosplice_doc::text::Orientation::Vertical)
 }
 
 /// Arrow keys follow the text flow: in vertical type ↑/↓ move along the column (previous/next
@@ -399,14 +399,14 @@ pub(crate) fn flow_key(key: egui::Key, vertical: bool) -> egui::Key {
 }
 
 /// Line start / end for the caret's line.
-fn line_edge(app: &mut PhotosuiteApp, id: LayerId, caret: usize, end: bool) -> usize {
+fn line_edge(app: &mut PhotospliceApp, id: LayerId, caret: usize, end: bool) -> usize {
     let Some((l, _, text)) = layout(app, id) else { return caret };
-    photosuite_text::line_edge(&l, &text, caret, end)
+    photosplice_text::line_edge(&l, &text, caret, end)
 }
 
 /// Keyboard input while editing. Returns true when a type edit session is active (single-key
 /// tool shortcuts must then be skipped). Handled events are removed from the frame's input.
-pub fn handle_keys(app: &mut PhotosuiteApp, ctx: &egui::Context) -> bool {
+pub fn handle_keys(app: &mut PhotospliceApp, ctx: &egui::Context) -> bool {
     let Some(ed) = app.ui.text_edit.clone() else { return false };
     let id = LayerId(ed.layer);
     let Some(text) = current_text(app, id) else {
@@ -428,7 +428,7 @@ pub fn handle_keys(app: &mut PhotosuiteApp, ctx: &egui::Context) -> bool {
         let (a, b) = (ed.caret.min(ed.anchor), ed.caret.max(ed.anchor));
         let text = current_text(app, id).unwrap_or_default();
         let n = text.chars().count();
-        let set = |app: &mut PhotosuiteApp, caret: usize, extend: bool| {
+        let set = |app: &mut PhotospliceApp, caret: usize, extend: bool| {
             if let Some(e) = app.ui.text_edit.as_mut() {
                 e.caret = caret.min(n);
                 if !extend {
@@ -541,19 +541,19 @@ pub fn handle_keys(app: &mut PhotosuiteApp, ctx: &egui::Context) -> bool {
 }
 
 /// End the editing session. A new layer left empty is deleted; a new layer is named after its text.
-pub fn commit(app: &mut PhotosuiteApp) {
+pub fn commit(app: &mut PhotospliceApp) {
     let Some(ed) = app.ui.text_edit.take() else { return };
     let Some(text) = current_text(app, LayerId(ed.layer)) else { return };
     if text.trim().is_empty() && ed.created {
         let _ = app.run("layer.delete", json!({"layer": ed.layer}));
     } else if ed.created {
-        let name = photosuite_engine::type_cmds::layer_name(&text);
+        let name = photosplice_engine::type_cmds::layer_name(&text);
         let _ = app.run("type.edit", json!({"layer": ed.layer, "name": name, "coalesce": ed.session}));
     }
 }
 
 /// Selection highlight, caret and text frame over the canvas.
-pub fn draw_overlay(app: &mut PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform) {
+pub fn draw_overlay(app: &mut PhotospliceApp, painter: &egui::Painter, xf: &ViewXform) {
     let Some(ed) = app.ui.text_edit.clone() else { return };
     let id = LayerId(ed.layer);
     let Some((l, aff, text)) = layout(app, id) else { return };
@@ -581,7 +581,7 @@ pub fn draw_overlay(app: &mut PhotosuiteApp, painter: &egui::Painter, xf: &ViewX
     let shape = app.session.active().and_then(|s| text_layer(&s.doc, id).map(|t| t.shape));
     let frame = Stroke::new(1.0, t.accent);
     match shape {
-        Some(photosuite_doc::text::TextShape::Box { x, y, width, height }) => {
+        Some(photosplice_doc::text::TextShape::Box { x, y, width, height }) => {
             let c = [scr_t(x, y), scr_t(x + width, y), scr_t(x + width, y + height), scr_t(x, y + height)];
             painter.add(egui::Shape::closed_line(c.to_vec(), frame));
             let mids = [c[0].lerp(c[1], 0.5), c[1].lerp(c[2], 0.5), c[2].lerp(c[3], 0.5), c[3].lerp(c[0], 0.5)];
@@ -646,7 +646,7 @@ pub fn draw_overlay(app: &mut PhotosuiteApp, painter: &egui::Painter, xf: &ViewX
 /// Font families (bundled + system), cached for the process.
 pub fn families() -> &'static [String] {
     static FAMILIES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    FAMILIES.get_or_init(|| photosuite_text::shared().lock().map(|mut e| e.fonts.families()).unwrap_or_default())
+    FAMILIES.get_or_init(|| photosplice_text::shared().lock().map(|mut e| e.fonts.families()).unwrap_or_default())
 }
 
 fn weight_name(w: f32) -> &'static str {
@@ -665,7 +665,7 @@ fn weight_name(w: f32) -> &'static str {
 
 /// Style names ("Regular", "Bold Italic", …) available for a family.
 pub fn styles(family: &str) -> Vec<String> {
-    let faces = photosuite_text::shared().lock().map(|mut e| e.fonts.faces(family)).unwrap_or_default();
+    let faces = photosplice_text::shared().lock().map(|mut e| e.fonts.faces(family)).unwrap_or_default();
     let mut v: Vec<(i32, bool, String)> = faces
         .iter()
         .map(|f| {
@@ -708,7 +708,7 @@ fn font_picker(ui: &mut egui::Ui, current: &mut String, width: f32) -> bool {
 }
 
 /// The type layer the options bar edits: the one being edited, else the active layer if it is type.
-fn target(app: &PhotosuiteApp) -> Option<(u64, Option<[usize; 2]>)> {
+fn target(app: &PhotospliceApp) -> Option<(u64, Option<[usize; 2]>)> {
     if let Some(ed) = &app.ui.text_edit {
         let (a, b) = (ed.caret.min(ed.anchor), ed.caret.max(ed.anchor));
         return Some((ed.layer, (a < b).then_some([a, b])));
@@ -720,7 +720,7 @@ fn target(app: &PhotosuiteApp) -> Option<(u64, Option<[usize; 2]>)> {
 
 /// Scale of the target layer's transform. Like Photoshop, sizes show and edit as the layer
 /// appears: a 12 pt layer scaled 200% (common in PSDs) reads 24 pt.
-fn shown_scale(app: &PhotosuiteApp) -> f32 {
+fn shown_scale(app: &PhotospliceApp) -> f32 {
     let Some((id, _)) = target(app) else { return 1.0 };
     let Some(t) = app.session.active().and_then(|st| text_layer(&st.doc, LayerId(id))) else { return 1.0 };
     let m = t.transform.m;
@@ -738,7 +738,7 @@ fn drag_key(ctx: &egui::Context) -> Option<String> {
 
 /// Apply character/paragraph properties to the target (selection, else whole layer) and remember
 /// them as tool defaults.
-fn apply(app: &mut PhotosuiteApp, ctx: &egui::Context, props: serde_json::Value) {
+fn apply(app: &mut PhotospliceApp, ctx: &egui::Context, props: serde_json::Value) {
     let Some((layer, range)) = target(app) else { return };
     let mut p = props;
     p["layer"] = json!(layer);
@@ -753,7 +753,7 @@ fn apply(app: &mut PhotosuiteApp, ctx: &egui::Context, props: serde_json::Value)
 
 /// While characters are selected in a type layer, a new foreground colour (Color and Swatches
 /// panels, the Color Picker) recolours them, in the editing session's history step.
-pub fn foreground_changed(app: &mut PhotosuiteApp) {
+pub fn foreground_changed(app: &mut PhotospliceApp) {
     let Some((layer, Some(range))) = target(app) else { return };
     let Some(ed) = app.ui.text_edit.as_ref() else { return };
     let p = json!({"layer": layer, "range": range, "color": hex(app.session.tools.foreground), "coalesce": ed.session});
@@ -761,7 +761,7 @@ pub fn foreground_changed(app: &mut PhotosuiteApp) {
 }
 
 /// Photoshop's Type options bar.
-pub fn options_bar(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
+pub fn options_bar(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
     let t = crate::theme::Tokens::get(ui.ctx());
     // Show the target layer's (first-run) style, else the tool defaults.
     let shown = target(app).and_then(|(id, _)| {
@@ -878,7 +878,7 @@ pub fn options_bar(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
 }
 
 /// Character and paragraph style at the target (selection start, else the layer's first run).
-fn styles_at(app: &PhotosuiteApp) -> Option<(photosuite_doc::text::CharStyle, photosuite_doc::text::ParagraphStyle)> {
+fn styles_at(app: &PhotospliceApp) -> Option<(photosplice_doc::text::CharStyle, photosplice_doc::text::ParagraphStyle)> {
     let (layer, range) = target(app)?;
     let st = app.session.active()?;
     let t = text_layer(&st.doc, LayerId(layer))?;
@@ -902,7 +902,7 @@ fn styles_at(app: &PhotosuiteApp) -> Option<(photosuite_doc::text::CharStyle, ph
 
 /// Kerning shown for the target: at a collapsed caret, the pair before it (Photoshop's
 /// Character panel); else the style at the selection.
-fn kerning_at(app: &PhotosuiteApp) -> Option<(photosuite_doc::text::Kerning, f32)> {
+fn kerning_at(app: &PhotospliceApp) -> Option<(photosplice_doc::text::Kerning, f32)> {
     let ed = app.ui.text_edit.as_ref().filter(|e| e.caret == e.anchor && e.caret > 0)?;
     let st = app.session.active()?;
     let t = text_layer(&st.doc, LayerId(ed.layer))?;
@@ -918,8 +918,8 @@ fn kerning_at(app: &PhotosuiteApp) -> Option<(photosuite_doc::text::Kerning, f32
 }
 
 /// The Character panel's kerning text: "Metrics", "Optical" or the manual value.
-pub(crate) fn kerning_label((mode, kern): (photosuite_doc::text::Kerning, f32)) -> String {
-    use photosuite_doc::text::Kerning;
+pub(crate) fn kerning_label((mode, kern): (photosplice_doc::text::Kerning, f32)) -> String {
+    use photosplice_doc::text::Kerning;
     match mode {
         _ if kern != 0.0 && kern.is_finite() => format!("{}", kern.round() as i64),
         Kerning::Metrics => "Metrics".into(),
@@ -969,7 +969,7 @@ fn kerning_field(ui: &mut egui::Ui, shown: &str, width: f32) -> Option<serde_jso
 
 /// Applies a kerning value: at a collapsed caret to the pair before it, else to the selection
 /// (or the whole layer).
-fn apply_kerning(app: &mut PhotosuiteApp, ctx: &egui::Context, v: serde_json::Value) {
+fn apply_kerning(app: &mut PhotospliceApp, ctx: &egui::Context, v: serde_json::Value) {
     match app.ui.text_edit.clone().filter(|e| e.caret == e.anchor) {
         Some(ed) if ed.caret > 0 => {
             let _ = app.run("type.edit", json!({"layer": ed.layer, "range": [ed.caret - 1, ed.caret], "kerning": v}));
@@ -1005,8 +1005,8 @@ fn num_field(ui: &mut egui::Ui, label: &str, tip: &str, v: f32, range: std::ops:
 
 /// Photoshop's paragraph alignment glyphs: four text lines whose widths/offsets show the mode
 /// (justify variants run full width, with the last line placed left/centre/right).
-fn align_glyph(p: &egui::Painter, r: egui::Rect, a: photosuite_doc::text::TextAlign, c: Color32) {
-    use photosuite_doc::text::TextAlign as A;
+fn align_glyph(p: &egui::Painter, r: egui::Rect, a: photosplice_doc::text::TextAlign, c: Color32) {
+    use photosplice_doc::text::TextAlign as A;
     let widths = [1.0, 0.62, 1.0, 0.62];
     for (i, w) in widths.iter().enumerate() {
         let y = r.top() + i as f32 * r.height() / 3.0;
@@ -1053,14 +1053,14 @@ fn cell_width(avail: f32, n: usize) -> f32 {
 }
 
 /// Properties panel sections for a type layer: Character, Paragraph and Type Options (#155).
-pub fn type_properties(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
+pub fn type_properties(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
     type_sections(app, ui, true, true);
     type_options(app, ui);
 }
 
 /// Window › Character / Paragraph (#150): the same controls as Properties, in their own dock
 /// group. Without a type layer (or a type edit) there is nothing to show.
-pub fn character_panel(app: &mut PhotosuiteApp, ui: &mut egui::Ui, paragraph: bool) {
+pub fn character_panel(app: &mut PhotospliceApp, ui: &mut egui::Ui, paragraph: bool) {
     if styles_at(app).is_none() {
         let t = crate::theme::Tokens::get(ui.ctx());
         ui.add_space(8.0);
@@ -1072,7 +1072,7 @@ pub fn character_panel(app: &mut PhotosuiteApp, ui: &mut egui::Ui, paragraph: bo
 
 /// The Character and/or Paragraph sections, with the shared collapsible headers and fields that
 /// fill the panel width (#155).
-fn type_sections(app: &mut PhotosuiteApp, ui: &mut egui::Ui, character: bool, paragraph: bool) {
+fn type_sections(app: &mut PhotospliceApp, ui: &mut egui::Ui, character: bool, paragraph: bool) {
     use crate::props_layout::{COL_GAP, LABEL_GAP, LABEL_W, field_width, section};
     use crate::theme::ROW_GAP;
     let Some((c, para)) = styles_at(app) else { return };
@@ -1166,7 +1166,7 @@ fn type_sections(app: &mut PhotosuiteApp, ui: &mut egui::Ui, character: bool, pa
         // Faux styles: T (bold)  T (italic)  TT  Tᴛ  T¹  T₁  T̲  T̶, sharing the row evenly.
         let caps = c.caps;
         let pos = c.position;
-        let toggle_pos = |p: photosuite_doc::text::BaselinePosition, name: &str| {
+        let toggle_pos = |p: photosplice_doc::text::BaselinePosition, name: &str| {
             json!({"baseline": if pos == p { "normal" } else { name }})
         };
         let toggles: [(&str, &str, bool, serde_json::Value); 8] = [
@@ -1175,17 +1175,17 @@ fn type_sections(app: &mut PhotosuiteApp, ui: &mut egui::Ui, character: bool, pa
             (
                 "TT",
                 tl!("All Caps"),
-                caps == photosuite_doc::text::Caps::AllCaps,
-                json!({"caps": if caps == photosuite_doc::text::Caps::AllCaps { "normal" } else { "allCaps" }}),
+                caps == photosplice_doc::text::Caps::AllCaps,
+                json!({"caps": if caps == photosplice_doc::text::Caps::AllCaps { "normal" } else { "allCaps" }}),
             ),
             (
                 "Tᴛ",
                 tl!("Small Caps"),
-                caps == photosuite_doc::text::Caps::SmallCaps,
-                json!({"caps": if caps == photosuite_doc::text::Caps::SmallCaps { "normal" } else { "smallCaps" }}),
+                caps == photosplice_doc::text::Caps::SmallCaps,
+                json!({"caps": if caps == photosplice_doc::text::Caps::SmallCaps { "normal" } else { "smallCaps" }}),
             ),
-            ("T", tl!("Superscript"), pos == photosuite_doc::text::BaselinePosition::Superscript, toggle_pos(photosuite_doc::text::BaselinePosition::Superscript, "superscript")),
-            ("T", tl!("Subscript"), pos == photosuite_doc::text::BaselinePosition::Subscript, toggle_pos(photosuite_doc::text::BaselinePosition::Subscript, "subscript")),
+            ("T", tl!("Superscript"), pos == photosplice_doc::text::BaselinePosition::Superscript, toggle_pos(photosplice_doc::text::BaselinePosition::Superscript, "superscript")),
+            ("T", tl!("Subscript"), pos == photosplice_doc::text::BaselinePosition::Subscript, toggle_pos(photosplice_doc::text::BaselinePosition::Subscript, "subscript")),
             ("T", "Underline", c.underline, json!({"underline": !c.underline})),
             ("T", "Strikethrough", c.strikethrough, json!({"strikethrough": !c.strikethrough})),
         ];
@@ -1229,7 +1229,7 @@ fn type_sections(app: &mut PhotosuiteApp, ui: &mut egui::Ui, character: bool, pa
         ui.add_space(ROW_GAP);
     }
     if paragraph && section(ui, "paragraph", tl!("Paragraph")) {
-        use photosuite_doc::text::TextAlign as A;
+        use photosplice_doc::text::TextAlign as A;
         let full = ui.available_width();
         let w = field_width(full, 2, LABEL_W);
         let items = [
@@ -1286,14 +1286,14 @@ fn type_sections(app: &mut PhotosuiteApp, ui: &mut egui::Ui, character: bool, pa
 }
 
 /// Type Options: anti-aliasing and orientation of the whole layer (the Type menu's commands).
-fn type_options(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
+fn type_options(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
     use crate::props_layout::{COL_GAP, LABEL_GAP};
     let Some((layer, _)) = target(app) else { return };
     let Some((aa, vertical)) = app
         .session
         .active()
         .and_then(|st| text_layer(&st.doc, LayerId(layer)))
-        .map(|t| (photosuite_engine::type_extra_cmds::aa_name(t.antialias).to_string(), t.orientation == photosuite_doc::text::Orientation::Vertical))
+        .map(|t| (photosplice_engine::type_extra_cmds::aa_name(t.antialias).to_string(), t.orientation == photosplice_doc::text::Orientation::Vertical))
     else {
         return;
     };
@@ -1316,7 +1316,7 @@ fn type_options(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
             let mut cur = aa.clone();
             let opts: Vec<(String, &str)> = ["none", "sharp", "crisp", "strong", "smooth", "windowsLcd", "windows"]
                 .into_iter()
-                .filter_map(|k| photosuite_engine::commands::find(&format!("type.antiAlias.{k}")).map(|c| (k.to_string(), c.label)))
+                .filter_map(|k| photosplice_engine::commands::find(&format!("type.antiAlias.{k}")).map(|c| (k.to_string(), c.label)))
                 .collect();
             if crate::widgets::dropdown(ui, "props-type-aa", &mut cur, &opts, dd_w) {
                 run = Some(format!("type.antiAlias.{cur}"));
@@ -1352,7 +1352,7 @@ fn type_options(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
 }
 
 /// Cancel the editing session: undo it back to where it started (removes a new layer).
-pub fn cancel(app: &mut PhotosuiteApp) {
+pub fn cancel(app: &mut PhotospliceApp) {
     let Some(ed) = app.ui.text_edit.take() else { return };
     let coalesced = app.session.active().is_some_and(|s| s.coalesce.as_deref() == Some(ed.session.as_str()));
     if coalesced {
@@ -1368,15 +1368,15 @@ mod canvas_tests;
 mod tests {
     use super::*;
 
-    fn app() -> PhotosuiteApp {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+    fn app() -> PhotospliceApp {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.session.execute("file.new", json!({"width": 400, "height": 200})).unwrap();
         app.sync_views();
         app.ui.tool = crate::state::Tool::Type;
         app
     }
 
-    fn layer_text(app: &PhotosuiteApp) -> String {
+    fn layer_text(app: &PhotospliceApp) -> String {
         let ed = app.ui.text_edit.as_ref().unwrap();
         current_text(app, LayerId(ed.layer)).unwrap()
     }
@@ -1407,7 +1407,7 @@ mod tests {
         insert(&mut app, "\n\nTitle");
         let id = app.ui.text_edit.as_ref().unwrap().layer;
         commit(&mut app);
-        let name = |app: &PhotosuiteApp| app.session.active().unwrap().doc.layers.last().unwrap().name.clone();
+        let name = |app: &PhotospliceApp| app.session.active().unwrap().doc.layers.last().unwrap().name.clone();
         assert_eq!(name(&app), "Title");
         // Edited later, outside the session that created it (#483).
         app.run("type.edit", json!({"layer": id, "text": "\nSubtitle"})).unwrap();

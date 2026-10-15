@@ -4,9 +4,9 @@
 //! channel thumbnails, histograms, file previews), where a full-resolution composite of a 200 MP
 //! document would cost seconds and gigabytes.
 
-use photosuite_doc::{Document, Layer, LayerContent, Size};
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_doc::{Document, Layer, LayerContent, Size};
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 
 /// Nearest-neighbour downsample of a surface by integer factor `k` (document coordinates / k).
 pub fn downsample(s: &Surface, k: u32) -> Surface {
@@ -91,7 +91,7 @@ pub fn proxy_faithful(doc: &Document) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_color::{Color, ColorMode, PixelFormat, SampleType};
+    use photosplice_color::{Color, ColorMode, PixelFormat, SampleType};
 
     #[test]
     fn downsample_picks_every_kth_pixel() {

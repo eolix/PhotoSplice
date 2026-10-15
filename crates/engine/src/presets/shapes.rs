@@ -1,13 +1,13 @@
 //! Window › Shapes and the Custom Shape tool: vector shape presets in groups, placed as shape
 //! layers through `shape.create`.
 //!
-//! Built-in shapes were drawn from scratch for PhotoSuite in a 100 × 100 box with a small path
+//! Built-in shapes were drawn from scratch for PhotoSplice in a 100 × 100 box with a small path
 //! language ([`parse`]): `M x y`, `L x y…`, `C x1 y1 x2 y2 x y…`, `Q x1 y1 x y…`, `Z`, plus `O cx cy r`
 //! (a circle) and `!` before `M`/`O` to subtract that subpath (holes). Shapes defined with Edit ›
 //! Define Custom Shape appear in a trailing "Custom Shapes" group.
 
-use photosuite_doc::vector::{Knot, Path, PathOp, Subpath};
-use photosuite_geom::{Affine, Point, Rect};
+use photosplice_doc::vector::{Knot, Path, PathOp, Subpath};
+use photosplice_geom::{Affine, Point, Rect};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -295,7 +295,7 @@ pub fn thumbnail(path: &Path, size: u32) -> Vec<f32> {
     let size = size.clamp(4, 512);
     let m = (size as f64 * 0.08).max(1.0);
     let fitted = fit(path, [m, m, size as f64 - 2.0 * m, size as f64 - 2.0 * m], true);
-    photosuite_vector::path_coverage(&fitted, Rect::new(0, 0, size as i32, size as i32))
+    photosplice_vector::path_coverage(&fitted, Rect::new(0, 0, size as i32, size as i32))
 }
 
 /// Map `path` (its control bounds) onto `rect` = [x, y, w, h]; `keep` preserves the aspect ratio
@@ -389,7 +389,7 @@ fn import_csh(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "shape.presets.importCsh";
     let path = req_str(p, "path", CMD)?.to_string();
     let bytes = crate::file_cmds::read_file(&path)?;
-    let shapes = photosuite_io::vector_map::read_csh(&bytes).map_err(|e| bad(CMD, e))?;
+    let shapes = photosplice_io::vector_map::read_csh(&bytes).map_err(|e| bad(CMD, e))?;
     let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Shapes".into());
     let group = str_param(p, "group").filter(|g| !g.trim().is_empty()).map(str::to_string).unwrap_or(stem);
     let items: Vec<ShapePreset> = shapes.into_iter().map(|(name, path)| ShapePreset { name, path: fit(&path, [0.0, 0.0, 100.0, 100.0], true) }).collect();

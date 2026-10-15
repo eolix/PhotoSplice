@@ -4,7 +4,7 @@
 //! preview. The files here are tiny synthetic TIFFs with the structural
 //! markers from the public TIFF/EP and DNG specifications.
 
-use photosuite_codecs::*;
+use photosplice_codecs::*;
 
 const SHORT: u16 = 3;
 const LONG: u16 = 4;

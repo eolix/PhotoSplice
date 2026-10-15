@@ -5,13 +5,13 @@
 use egui::{Color32, Stroke, vec2};
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::ViewXform;
 use crate::state::Tool;
 use crate::theme::Tokens;
 
 /// Finish a stroke with a retouching tool. Returns false if `tool` isn't one.
-pub fn finish_stroke(app: &mut PhotosuiteApp, tool: Tool, points: &[[f64; 3]], mods: egui::Modifiers) -> bool {
+pub fn finish_stroke(app: &mut PhotospliceApp, tool: Tool, points: &[[f64; 3]], mods: egui::Modifiers) -> bool {
     let o = app.ui.tool_options.clone();
     let pts = json!(points);
     let (cmd, mut p): (&str, Value) = match tool {
@@ -78,7 +78,7 @@ pub fn finish_stroke(app: &mut PhotosuiteApp, tool: Tool, points: &[[f64; 3]], m
 
 /// Patch Tool and Content-Aware Move Tool: a drag that starts inside the selection (without ⇧ or
 /// ⌥) drags the selection; any other drag draws a lasso selection.
-pub fn patch_drags_selection(app: &PhotosuiteApp, at: [f64; 2], mods: egui::Modifiers) -> bool {
+pub fn patch_drags_selection(app: &PhotospliceApp, at: [f64; 2], mods: egui::Modifiers) -> bool {
     if mods.shift || mods.alt {
         return false;
     }
@@ -88,7 +88,7 @@ pub fn patch_drags_selection(app: &PhotosuiteApp, at: [f64; 2], mods: egui::Modi
 
 /// Whole-pixel offset for a drag from `start` to `end`, limited so the dragged outline stays on the
 /// canvas (the engine rejects a patch or move that leaves it).
-pub fn patch_offset(app: &mut PhotosuiteApp, start: [f64; 2], end: [f64; 2]) -> [i32; 2] {
+pub fn patch_offset(app: &mut PhotospliceApp, start: [f64; 2], end: [f64; 2]) -> [i32; 2] {
     let (dx, dy) = ((end[0] - start[0]).round(), (end[1] - start[1]).round());
     let (dx, dy) = if dx.is_finite() && dy.is_finite() { (dx.clamp(-1e7, 1e7) as i32, dy.clamp(-1e7, 1e7) as i32) } else { (0, 0) };
     let Some((canvas, sel)) = app.session.active().and_then(|st| Some((st.doc.bounds(), st.doc.selection.clone()?))) else { return [dx, dy] };
@@ -102,7 +102,7 @@ pub fn patch_offset(app: &mut PhotosuiteApp, start: [f64; 2], end: [f64; 2]) -> 
 }
 
 /// Patch Tool: the patch was dragged from `start` to `end`.
-pub fn finish_patch(app: &mut PhotosuiteApp, start: [f64; 2], end: [f64; 2]) {
+pub fn finish_patch(app: &mut PhotospliceApp, start: [f64; 2], end: [f64; 2]) {
     let off = patch_offset(app, start, end);
     if off == [0, 0] {
         return;
@@ -120,7 +120,7 @@ pub fn finish_patch(app: &mut PhotosuiteApp, start: [f64; 2], end: [f64; 2]) {
 
 /// Content-Aware Move Tool: the selection was dragged from `start` to `end`. The engine runs it as
 /// a background job (progress dialog, Esc cancels); the selection follows the content.
-pub fn finish_content_aware_move(app: &mut PhotosuiteApp, start: [f64; 2], end: [f64; 2]) {
+pub fn finish_content_aware_move(app: &mut PhotospliceApp, start: [f64; 2], end: [f64; 2]) {
     let off = patch_offset(app, start, end);
     if off == [0, 0] {
         return;
@@ -141,7 +141,7 @@ pub fn finish_content_aware_move(app: &mut PhotosuiteApp, start: [f64; 2], end: 
 }
 
 /// Object Selection: the dragged rectangle.
-pub fn finish_object_selection(app: &mut PhotosuiteApp, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) {
+pub fn finish_object_selection(app: &mut PhotospliceApp, start: [f64; 2], end: [f64; 2], mods: egui::Modifiers) {
     let (x, y) = (start[0].min(end[0]), start[1].min(end[1]));
     let (w, h) = ((end[0] - start[0]).abs(), (end[1] - start[1]).abs());
     if w < 2.0 || h < 2.0 {
@@ -161,7 +161,7 @@ pub fn finish_object_selection(app: &mut PhotosuiteApp, start: [f64; 2], end: [f
 }
 
 /// ⌥-click with Clone Stamp / Healing Brush sets the source.
-pub fn set_source(app: &mut PhotosuiteApp, x: f64, y: f64) {
+pub fn set_source(app: &mut PhotospliceApp, x: f64, y: f64) {
     app.ui.clone_source = Some([x.round(), y.round()]);
     app.ui.clone_offset = None;
     let _ = app.run("cloneSource.set", json!({"source": [x.round(), y.round()]}));
@@ -170,7 +170,7 @@ pub fn set_source(app: &mut PhotosuiteApp, x: f64, y: f64) {
 }
 
 /// Crosshair where the clone source is sampled from for the current pointer position.
-pub fn draw_source_marker(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform) {
+pub fn draw_source_marker(app: &PhotospliceApp, painter: &egui::Painter, xf: &ViewXform) {
     if !matches!(app.ui.tool, Tool::CloneStamp | Tool::Healing) {
         return;
     }
@@ -201,7 +201,7 @@ fn pct(ui: &mut egui::Ui, label: &str, v: &mut f32) {
 }
 
 /// Options bar for the retouching and smart-selection tools. Returns false for other tools.
-pub fn options_bar(app: &mut PhotosuiteApp, ui: &mut egui::Ui, tool: Tool) -> bool {
+pub fn options_bar(app: &mut PhotospliceApp, ui: &mut egui::Ui, tool: Tool) -> bool {
     if !tool.is_brushlike() && !matches!(tool, Tool::QuickSelection | Tool::ObjectSelection | Tool::Patch | Tool::ContentAwareMove)
         || matches!(tool, Tool::Brush | Tool::Pencil | Tool::MixerBrush | Tool::Eraser)
     {
@@ -308,14 +308,14 @@ mod tests {
     use super::*;
     use crate::canvas::{ToolEvent, tool_event};
 
-    fn app() -> PhotosuiteApp {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+    fn app() -> PhotospliceApp {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({"width": 100, "height": 60})).unwrap();
         app.run("tools.setBrush", json!({"brush": {"size": 16, "hardness": 1.0}})).unwrap();
         app
     }
 
-    fn drag(app: &mut PhotosuiteApp, tool: Tool) {
+    fn drag(app: &mut PhotospliceApp, tool: Tool) {
         app.ui.tool = tool;
         let m = egui::Modifiers::NONE;
         tool_event(app, ToolEvent::Down { x: 10.0, y: 30.0, pressure: 1.0 }, m);
@@ -324,12 +324,12 @@ mod tests {
         assert!(!app.ui.status_error, "{tool:?}: {}", app.ui.status);
     }
 
-    fn active(app: &PhotosuiteApp) -> &photosuite_doc::Layer {
+    fn active(app: &PhotospliceApp) -> &photosplice_doc::Layer {
         let st = app.session.active().unwrap();
         st.active_layer.and_then(|id| st.doc.layer(id)).unwrap()
     }
 
-    fn stripes(app: &mut PhotosuiteApp, step: usize, target: &str) {
+    fn stripes(app: &mut PhotospliceApp, step: usize, target: &str) {
         for x in (0..100).step_by(step) {
             app.run("paint.pencil", json!({"points": [[x, 0], [x, 60]], "size": 2, "color": "#606060", "target": target})).unwrap();
         }
@@ -432,7 +432,7 @@ mod tests {
     fn patch_tool_lassoes_then_drags_the_patch() {
         let mut app = app();
         app.run("paint.pencil", json!({"points": [[68, 30], [74, 30]], "size": 6, "color": "#ff0000"})).unwrap();
-        let red = |app: &PhotosuiteApp| active(app).surface().unwrap().rgba(71, 30)[1] < 0.5;
+        let red = |app: &PhotospliceApp| active(app).surface().unwrap().rgba(71, 30)[1] < 0.5;
         assert!(red(&app));
         app.ui.tool = Tool::Patch;
         let m = egui::Modifiers::NONE;
@@ -462,7 +462,7 @@ mod tests {
         for (mode, keeps) in [("move", false), ("extend", true)] {
             let mut app = app();
             app.run("paint.pencil", json!({"points": [[20, 30], [24, 30]], "size": 6, "color": "#0000ff"})).unwrap();
-            let blue = |app: &PhotosuiteApp, x: i32| active(app).surface().unwrap().rgba(x, 30)[0] < 0.5;
+            let blue = |app: &PhotospliceApp, x: i32| active(app).surface().unwrap().rgba(x, 30)[0] < 0.5;
             app.ui.tool = Tool::ContentAwareMove;
             app.ui.tool_options.cam_mode = mode.into();
             app.ui.tool_options.cam_structure = 7.0;

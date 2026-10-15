@@ -599,7 +599,7 @@ mod reference {
     /// same size (the source, and Photoshop's Cutout of it); `CUTOUT_SETTINGS` its sliders as
     /// "levels/simplicity/fidelity" (default 4/4/2); `CUTOUT_OUT` (optional) receives ours.
     /// Prints the mean absolute difference per channel, in 0–255 levels.
-    /// `cargo test -p photosuite-algo --release --lib cutout::reference -- --ignored --nocapture`
+    /// `cargo test -p photosplice-algo --release --lib cutout::reference -- --ignored --nocapture`
     #[test]
     #[ignore = "needs a Photoshop reference render"]
     fn against_photoshop() {
@@ -654,7 +654,7 @@ mod reference {
 
 #[cfg(test)]
 mod bench {
-    /// `cargo test -p photosuite-algo --release --lib cutout::bench -- --ignored --nocapture`
+    /// `cargo test -p photosplice-algo --release --lib cutout::bench -- --ignored --nocapture`
     #[test]
     #[ignore = "benchmark"]
     fn cutout_24mp() {

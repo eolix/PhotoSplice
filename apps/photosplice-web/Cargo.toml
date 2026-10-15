@@ -1,6 +1,6 @@
 [package]
-name = "photosuite-web"
-description = "PhotoSuite in the browser (eframe web runner, WebGPU with WebGL2 fallback)"
+name = "photosplice-web"
+description = "PhotoSplice in the browser (eframe web runner, WebGPU with WebGL2 fallback)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,15 +10,15 @@ publish = false
 workspace = true
 
 [[bin]]
-name = "photosuite-web"
+name = "photosplice-web"
 path = "src/main.rs"
 
 [dependencies]
-photosuite-engine = { workspace = true }
-photosuite-io = { workspace = true }
-photosuite-codecs = { workspace = true }
-photosuite-doc = { workspace = true }
-photosuite-ui-egui = { workspace = true }
+photosplice-engine = { workspace = true }
+photosplice-io = { workspace = true }
+photosplice-codecs = { workspace = true }
+photosplice-doc = { workspace = true }
+photosplice-ui-egui = { workspace = true }
 egui = { workspace = true }
 log = { workspace = true }
 

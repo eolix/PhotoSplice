@@ -1,6 +1,6 @@
 use super::*;
-use photosuite_psd::abr::{LegacyBrush, write_v6, write_v12};
-use photosuite_psd::descriptor::{Id, UnicodeString};
+use photosplice_psd::abr::{LegacyBrush, write_v6, write_v12};
+use photosplice_psd::descriptor::{Id, UnicodeString};
 
 fn sample(id: &str, w: u32, h: u32, depth: u16) -> AbrSample {
     let bpp = usize::from(depth / 8);
@@ -267,7 +267,7 @@ fn tilt_scale_projection_spacing_and_mixer_fields_map() {
     // Defaults when the file says nothing.
     let p = &imp.presets[1].brush;
     assert!(p.spacing_enabled && !p.shape_dynamics.brush_projection && p.shape_dynamics.tilt_scale == 0.0);
-    assert_eq!(p.mixer, photosuite_paint::MixerSettings::default());
+    assert_eq!(p.mixer, photosplice_paint::MixerSettings::default());
     assert_eq!((p.transfer.wetness, p.transfer.mix), (Dynamic::default(), Dynamic::default()));
 }
 

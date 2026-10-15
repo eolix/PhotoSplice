@@ -3,7 +3,7 @@
 //! midtones (like the crate's other gamma controls, which use 1/gamma as the
 //! exponent). On main the value was used directly as the exponent, so the
 //! slider ran opposite to its contract.
-use photosuite_engine::Session;
+use photosplice_engine::Session;
 use serde_json::json;
 
 fn midtone_luma(gamma: f64) -> f64 {

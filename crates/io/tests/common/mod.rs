@@ -3,11 +3,11 @@
 
 use std::sync::Arc;
 
-use photosuite_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
-use photosuite_doc::adjust::{CurvePoint, LevelsChannel};
-use photosuite_doc::*;
-use photosuite_geom::{Rect, Size};
-use photosuite_raster::Surface;
+use photosplice_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
+use photosplice_doc::adjust::{CurvePoint, LevelsChannel};
+use photosplice_doc::*;
+use photosplice_geom::{Rect, Size};
+use photosplice_raster::Surface;
 
 /// Quantize to the 1/255 grid so values survive 8-bit PSD fields.
 pub fn g(v: u8) -> f32 {
@@ -145,7 +145,7 @@ pub fn gen_doc(mode: ColorMode, depth: SampleType, f: Features) -> Document {
             Adjustment::Threshold { level: g(100) },
             Adjustment::Posterize { levels: 5 },
             Adjustment::BrightnessContrast { brightness: 20.0, contrast: -10.0, legacy: false },
-            Adjustment::HueSaturation { hue: 30.0, saturation: -20.0, lightness: 5.0, colorize: false, ranges: photosuite_doc::adjust::HueRange::defaults() },
+            Adjustment::HueSaturation { hue: 30.0, saturation: -20.0, lightness: 5.0, colorize: false, ranges: photosplice_doc::adjust::HueRange::defaults() },
             Adjustment::Exposure { exposure: 0.5, offset: 0.0, gamma: 1.0 },
             Adjustment::Levels {
                 master: LevelsChannel { in_black: g(10), in_white: g(240), gamma: 1.2, out_black: 0.0, out_white: 1.0 },
@@ -320,11 +320,11 @@ pub fn max_diff(a: &[[f32; 4]], b: &[[f32; 4]]) -> f32 {
 }
 
 /// The Levels/Curves channel space a PSD of `mode` stores (its records are the document's channels).
-fn tone_space(mode: ColorMode) -> photosuite_doc::adjust::ToneSpace {
+fn tone_space(mode: ColorMode) -> photosplice_doc::adjust::ToneSpace {
     match mode {
-        ColorMode::Cmyk => photosuite_doc::adjust::ToneSpace::Cmyk,
-        ColorMode::Lab => photosuite_doc::adjust::ToneSpace::Lab,
-        _ => photosuite_doc::adjust::ToneSpace::Rgb,
+        ColorMode::Cmyk => photosplice_doc::adjust::ToneSpace::Cmyk,
+        ColorMode::Lab => photosplice_doc::adjust::ToneSpace::Lab,
+        _ => photosplice_doc::adjust::ToneSpace::Rgb,
     }
 }
 
@@ -341,7 +341,7 @@ fn tone_space(mode: ColorMode) -> photosuite_doc::adjust::ToneSpace {
 /// - blocks with inner lengths (`PlLd`, `SoLd`, `SoLE`, `lnk2`/`lnk3`/`lnkD`, `lfx2`)
 ///   re-parse exactly (`TaggedBlock::check_structure`).
 pub fn strict_block_errors(bytes: &[u8]) -> Vec<String> {
-    let file = match photosuite_psd::PsdFile::from_bytes(bytes) {
+    let file = match photosplice_psd::PsdFile::from_bytes(bytes) {
         Ok(f) => f,
         Err(e) => return vec![format!("parse: {e}")],
     };
@@ -354,7 +354,7 @@ pub fn strict_block_errors(bytes: &[u8]) -> Vec<String> {
         let body = li.unpadded_len(v).unwrap_or(1);
         let inner = li.padding.as_ref().map_or(body % 2, |p| p.len() as u64);
         let pad = match &file.layer_info_placement {
-            photosuite_psd::file::LayerInfoPlacement::GlobalBlock { padding, .. } => inner + padding.as_ref().map_or((body + inner) % 2, |p| p.len() as u64),
+            photosplice_psd::file::LayerInfoPlacement::GlobalBlock { padding, .. } => inner + padding.as_ref().map_or((body + inner) % 2, |p| p.len() as u64),
             _ => inner,
         };
         if (body + pad) % 4 != 0 {

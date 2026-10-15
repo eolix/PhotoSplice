@@ -1,13 +1,13 @@
 //! Warp Text: bends the glyph outlines of a type layer with one of Reference's fifteen warp
 //! styles (the PSD `warp` descriptor's `warpStyle`).
 //!
-//! The style math lives in `photosuite_geom::warp` (shared with Edit › Transform › Warp): the
+//! The style math lives in `photosplice_geom::warp` (shared with Edit › Transform › Warp): the
 //! Bézier patch Reference builds for each style, the identity at `bend = 0` and continuous in
 //! `bend`. The mapping is evaluated per point; the renderer subdivides long segments so straight
 //! edges bend.
 
-use photosuite_doc::text::TextWarp;
-use photosuite_geom::warp::{StyleWarp, WarpStyle};
+use photosplice_doc::text::TextWarp;
+use photosplice_geom::warp::{StyleWarp, WarpStyle};
 
 /// Warp styles in Reference's menu order: (PSD `warpStyle` value, short id used by commands).
 pub const STYLES: [(&str, &str); 15] = [
@@ -38,7 +38,7 @@ pub fn psd_style(id: &str) -> Option<&'static str> {
 }
 
 /// A warp prepared for one layout: the shared style math of
-/// [`photosuite_geom::warp::StyleWarp`] (also used by Edit › Transform › Warp) over the text box.
+/// [`photosplice_geom::warp::StyleWarp`] (also used by Edit › Transform › Warp) over the text box.
 #[derive(Clone, Copy, Debug)]
 pub struct Warp(StyleWarp);
 

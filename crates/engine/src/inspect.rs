@@ -1,6 +1,6 @@
 //! JSON views of engine state for automation, tests and debugging.
 
-use photosuite_doc::{Layer, LayerContent};
+use photosplice_doc::{Layer, LayerContent};
 use serde_json::{Value, json};
 
 use crate::{DocState, Session};
@@ -64,7 +64,7 @@ pub fn layer(l: &Layer) -> Value {
 }
 
 /// [`layer`] with a `selected` flag on every node (Layers panel multi-selection).
-fn layer_sel(l: &Layer, selected: &[photosuite_doc::LayerId]) -> Value {
+fn layer_sel(l: &Layer, selected: &[photosplice_doc::LayerId]) -> Value {
     let bounds = l.surface().map(|s| {
         let r = s.content_bounds();
         [r.x0, r.y0, r.width() as i32, r.height() as i32]
@@ -122,8 +122,8 @@ fn layer_sel(l: &Layer, selected: &[photosuite_doc::LayerId]) -> Value {
     if l.vector_mask_hides_effects {
         v["vectorMaskHidesEffects"] = json!(true);
     }
-    if l.knockout != photosuite_doc::Knockout::None {
-        v["knockout"] = json!(if l.knockout == photosuite_doc::Knockout::Shallow { "shallow" } else { "deep" });
+    if l.knockout != photosplice_doc::Knockout::None {
+        v["knockout"] = json!(if l.knockout == photosplice_doc::Knockout::Shallow { "shallow" } else { "deep" });
     }
     if l.excluded_channels != 0 {
         v["channels"] = json!((0..4).map(|i| l.excluded_channels & (1 << i) == 0).collect::<Vec<_>>());
@@ -136,7 +136,7 @@ fn layer_sel(l: &Layer, selected: &[photosuite_doc::LayerId]) -> Value {
             .ranges
             .iter()
             .enumerate()
-            .filter(|(_, r)| !r.iter().all(photosuite_doc::BlendRange::is_full))
+            .filter(|(_, r)| !r.iter().all(photosplice_doc::BlendRange::is_full))
             .map(|(i, [this, under])| json!({"channel": i, "thisLayer": this.to_bytes(), "underlying": under.to_bytes()}))
             .collect();
     }
@@ -150,8 +150,8 @@ fn layer_sel(l: &Layer, selected: &[photosuite_doc::LayerId]) -> Value {
     // Video layer (Layer › Video Layers): the frame stack behind the displayed content.
     if let Some(vid) = &l.video {
         let source = match &vid.source {
-            photosuite_doc::VideoSource::Blank => Value::String("blank".into()),
-            photosuite_doc::VideoSource::File { path } => json!({ "file": path }),
+            photosplice_doc::VideoSource::Blank => Value::String("blank".into()),
+            photosplice_doc::VideoSource::File { path } => json!({ "file": path }),
         };
         v["video"] = json!({"frames": vid.frames.len(), "fps": vid.fps, "showAltered": vid.show_altered, "source": source});
     }

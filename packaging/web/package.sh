@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Build the browser version and zip it:  $DIST/photosuite-web-<version>.zip
+# Build the browser version and zip it:  $DIST/photosplice-web-<version>.zip
 #
 # Usage: packaging/web/package.sh [--skip-build]
 #
 # Needs: trunk (brew install trunk / cargo install trunk --locked) and the wasm32-unknown-unknown
-# target. The zip holds a self-contained static site in photosuite-web-<version>/ that works
+# target. The zip holds a self-contained static site in photosplice-web-<version>/ that works
 # from any URL path and inside an <iframe>. Hosting notes: packaging/web/README.md.
 set -euo pipefail
 # shellcheck source=../env.sh
@@ -13,7 +13,7 @@ HERE="$ROOT/packaging/web"
 
 if [ "${1:-}" != "--skip-build" ]; then
   command -v trunk >/dev/null || { echo "error: trunk not found (cargo install trunk --locked)" >&2; exit 1; }
-  (cd "$ROOT/apps/photosuite-web" && trunk build --release)
+  (cd "$ROOT/apps/photosplice-web" && trunk build --release)
 fi
 
 SITE="$ROOT/dist/web"
@@ -26,8 +26,8 @@ fi
 
 # Size gate (issue #198): Cloudflare Pages/Workers reject any single file over 25 MiB, and other
 # hosts and CDNs have similar caps. Fail well before that so a regression shows up here, not at
-# upload time. Override with PHOTOSUITE_WASM_MAX_BYTES only to investigate.
-MAX_WASM_BYTES="${PHOTOSUITE_WASM_MAX_BYTES:-25165824}" # 24 MiB
+# upload time. Override with PHOTOSPLICE_WASM_MAX_BYTES only to investigate.
+MAX_WASM_BYTES="${PHOTOSPLICE_WASM_MAX_BYTES:-25165824}" # 24 MiB
 WASM_COUNT=0
 for wasm in "$SITE"/*.wasm; do
   [ -f "$wasm" ] || continue
@@ -41,7 +41,7 @@ for wasm in "$SITE"/*.wasm; do
 done
 [ "$WASM_COUNT" -gt 0 ] || { echo "error: no .wasm in $SITE" >&2; exit 1; }
 
-NAME="photosuite-web-$VERSION"
+NAME="photosplice-web-$VERSION"
 WORK="$CARGO_TARGET_DIR/web-package"
 rm -rf "$WORK"
 mkdir -p "$WORK/$NAME"

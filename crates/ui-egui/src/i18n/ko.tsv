@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# 한국어 translations for PhotoSuite UI.
+# 한국어 translations for PhotoSplice UI.
 
 	File	파일
 	Edit	편집
@@ -672,7 +672,7 @@
 	Timeline	타임라인
 	Tool Presets	도구 사전 설정
 	Tools	도구
-	About PhotoSuite	포토크래프트 소개
+	About PhotoSplice	포토크래프트 소개
 	Website	웹사이트
 	Report an Issue…	문제 보고…
 	WIA Support…	WIA 지원…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	원근 뒤틀기가 활성화되지 않았습니다
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Perspective Warp: 이미지의 원근을 따라 평면을 그린 다음 Warp로 전환합니다
 	Photo Filter	사진 필터
-	PhotoSuite	포토크래프트
-	PhotoSuite Manages Colors	PhotoSuite가 색상을 관리합니다
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite — Rust로 작성된 오픈 소스 네이티브 이미지 편집기입니다
+	PhotoSplice	포토크래프트
+	PhotoSplice Manages Colors	PhotoSplice가 색상을 관리합니다
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice — Rust로 작성된 오픈 소스 네이티브 이미지 편집기입니다
 	Pin Depth:	핀 깊이:
 	Pixel Length:	픽셀 길이:
 	Pixels/Centimeter	픽셀/센티미터
@@ -1570,7 +1570,7 @@
 	Pen Tilt	펜 기울기
 	Pen Tool	펜 도구
 	Photo	사진
-	PhotoSuite website	포토크래프트 웹사이트
+	PhotoSplice website	포토크래프트 웹사이트
 	Picas	피카스
 	Pillow Emboss	베개 엠보스
 	Pixel Replacement	픽셀 교체
@@ -1877,7 +1877,7 @@
 	System Info…	시스템 정보…
 	System Info	시스템 정보
 	More panels	더 많은 패널
-	These settings aren't available in PhotoSuite yet.	이 설정은 아직 PhotoSuite에서 사용할 수 없습니다
+	These settings aren't available in PhotoSplice yet.	이 설정은 아직 PhotoSplice에서 사용할 수 없습니다
 	Graphics	그래픽
 	Reset GPU Backend	GPU 백엔드 재설정
 	Applies at next launch.	다음 출시 시 적용됩니다
@@ -2018,7 +2018,7 @@
 	Opening…	여는 중…
 	Patch	패치
 	Patch:	패치:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite에서 CPU 이미지 합성기를 사용하고 있습니다. 창은 여전히 그래픽 어댑터를 사용할 수 있습니다.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice에서 CPU 이미지 합성기를 사용하고 있습니다. 창은 여전히 그래픽 어댑터를 사용할 수 있습니다.
 	Play Action	액션 재생
 	Reading…	읽는 중…
 	Record Action	액션 기록

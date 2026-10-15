@@ -1,5 +1,5 @@
 [package]
-name = "photosuite-vector"
+name = "photosplice-vector"
 description = "Vector paths, shape layers, strokes and vector masks → anti-aliased coverage and surfaces"
 version.workspace = true
 edition.workspace = true
@@ -10,10 +10,10 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-photosuite-geom = { workspace = true }
-photosuite-color = { workspace = true }
-photosuite-raster = { workspace = true }
-photosuite-doc = { workspace = true }
+photosplice-geom = { workspace = true }
+photosplice-color = { workspace = true }
+photosplice-raster = { workspace = true }
+photosplice-doc = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rayon = { workspace = true }

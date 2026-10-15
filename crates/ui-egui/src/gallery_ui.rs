@@ -13,13 +13,13 @@
 use std::hash::{Hash, Hasher};
 
 use egui::{Align2, Color32, FontId, Rect as ERect, Sense, Stroke, TextureHandle, pos2, vec2};
-use photosuite_algo::{FilterParams, GALLERY_CATEGORIES, GalleryFilter};
-use photosuite_doc::LayerId;
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_algo::{FilterParams, GALLERY_CATEGORIES, GalleryFilter};
+use photosplice_doc::LayerId;
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 use serde_json::{Map, Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::filter_dialog::{Kind, parse_spec};
 use crate::theme::Tokens;
 use crate::widgets;
@@ -161,10 +161,10 @@ fn sample(surf: &Surface, r: Rect, k: u32) -> Surface {
 
 /// Runs a stack on a small surface (the preview and thumbnails).
 pub(crate) fn render(src: &Surface, params: &Value) -> Surface {
-    let effects = photosuite_engine::gallery_cmds::effects_from_json(params).unwrap_or_default();
+    let effects = photosplice_engine::gallery_cmds::effects_from_json(params).unwrap_or_default();
     let b = src.content_bounds().union(&Rect::new(0, 0, 1, 1));
     let b = Rect::new(0, 0, b.x1, b.y1);
-    photosuite_algo::apply_in(src, &FilterParams::FilterGallery { effects }, b, b, None, b)
+    photosplice_algo::apply_in(src, &FilterParams::FilterGallery { effects }, b, b, None, b)
 }
 
 pub(crate) fn image(surf: &Surface, w: usize, h: usize) -> egui::ColorImage {
@@ -180,7 +180,7 @@ pub(crate) fn image(surf: &Surface, w: usize, h: usize) -> egui::ColorImage {
 /// A stack that works on the whole image is run on the whole layer, once per stack, in the
 /// background on native targets: `None` while that render runs (the last preview stays up).
 fn preview_image(d: &mut GalleryDialog, params: &Value, vis: Rect, k: u32) -> Option<egui::ColorImage> {
-    let effects = photosuite_engine::gallery_cmds::effects_from_json(params).unwrap_or_default();
+    let effects = photosplice_engine::gallery_cmds::effects_from_json(params).unwrap_or_default();
     if (FilterParams::FilterGallery { effects }).one_piece() {
         let mut ph = std::collections::hash_map::DefaultHasher::new();
         params.to_string().hash(&mut ph);
@@ -271,7 +271,7 @@ fn shrink(surf: &Surface, r: Rect, k: u32) -> egui::ColorImage {
 }
 
 /// Opens the dialog on the active layer, starting from the last gallery stack used.
-pub fn open(app: &mut PhotosuiteApp) -> Result<(), String> {
+pub fn open(app: &mut PhotospliceApp) -> Result<(), String> {
     let (layer, src, _) = crate::distort_ui::active_pixels(app)?;
     let st = app.session.active().ok_or("no document")?;
     let canvas = st.doc.bounds();
@@ -321,7 +321,7 @@ pub fn open(app: &mut PhotosuiteApp) -> Result<(), String> {
 }
 
 /// OK: runs `filter.filterGallery` with the stack (one history step).
-pub fn commit(app: &mut PhotosuiteApp) -> Result<Value, String> {
+pub fn commit(app: &mut PhotospliceApp) -> Result<Value, String> {
     let Some(d) = app.distort.gallery.take() else { return Err("the Filter Gallery is not open".into()) };
     if !d.effects.iter().any(|e| e.visible) {
         return Ok(json!({"committed": false}));
@@ -332,7 +332,7 @@ pub fn commit(app: &mut PhotosuiteApp) -> Result<Value, String> {
 }
 
 /// Control channel: `filter.filterGallery {"ui": {...}}` while the dialog is open.
-pub fn control(app: &mut PhotosuiteApp, ui: &Value) -> Result<Value, String> {
+pub fn control(app: &mut PhotospliceApp, ui: &Value) -> Result<Value, String> {
     let flag = |k: &str| ui.get(k).and_then(Value::as_bool) == Some(true);
     if flag("commit") {
         let r = commit(app)?;
@@ -464,7 +464,7 @@ fn update_thumbs(
 /// The dialog's largest size; smaller windows get a smaller one ([`widgets::tool_dialog_rect`]).
 const DIALOG_MAX: egui::Vec2 = vec2(1500.0, 950.0);
 
-pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
     let mut action: Option<&str> = None;
     let Some(d) = app.distort.gallery.as_ref() else { return };
@@ -626,7 +626,7 @@ pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
                             .and_then(Value::as_array)
                             .map(|a| a.iter().filter_map(Value::as_f64).map(|v| v as f32).collect::<Vec<_>>())
                             .filter(|v| v.len() >= 3);
-                        let neon = photosuite_algo::GalleryEffect::new(GalleryFilter::NeonGlow).color;
+                        let neon = photosplice_algo::GalleryEffect::new(GalleryFilter::NeonGlow).color;
                         let mut rgb = c.map_or([neon[0], neon[1], neon[2]], |v| [v[0], v[1], v[2]]);
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new(tl!("Glow Color")).color(t.text_dim));
@@ -707,8 +707,8 @@ pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
 mod tests {
     use super::*;
 
-    fn app() -> PhotosuiteApp {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+    fn app() -> PhotospliceApp {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         app.session.execute("file.new", json!({"width": 90, "height": 60, "depth": 16})).unwrap();
         app.session.execute("layer.new.layer", json!({})).unwrap();
         app.session
@@ -765,7 +765,7 @@ mod tests {
     /// layer, not on a shrunk copy (which loses the detail its region sizes are measured in).
     #[test]
     fn zoomed_out_preview_is_the_full_size_result_scaled_down() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         app.session.execute("file.new", json!({"width": 240, "height": 160})).unwrap();
         app.session.execute("layer.new.layer", json!({})).unwrap();
         app.session
@@ -815,7 +815,7 @@ mod tests {
         // Preview equals the engine's algorithm on the sampled pixels.
         let src = sample(&d.src, d.canvas, 1);
         let a = render(&src, &d.params());
-        let mut s2 = photosuite_engine::Session::new();
+        let mut s2 = photosplice_engine::Session::new();
         s2.add_document(app.session.active().unwrap().doc.as_ref().clone(), None);
         s2.select_layer(d.layer).unwrap();
         s2.execute("filter.filterGallery", d.params()).unwrap();

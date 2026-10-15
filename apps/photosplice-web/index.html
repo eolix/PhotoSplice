@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>PhotoSplice</title>
+  <link data-trunk rel="rust" data-bin="photosplice-web" data-cargo-profile="wasm-release" data-wasm-opt="z" data-weak-refs />
+  <style>
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #262626; }
+    #photosplice_canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+    #photosplice_loading { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+      padding: 0 16px; text-align: center; color: #b8b8b8; font: 14px system-ui, sans-serif; pointer-events: none; }
+    #photosplice_loading p { margin: 0 0 8px; max-width: 420px; line-height: 1.5; }
+    #photosplice_loading a { color: #e0e0e0; pointer-events: auto; }
+    /* The app removes this element once it runs. If the WebAssembly never downloads or doesn't match
+       this page, no Rust runs to say so, so the page itself shows what to do after a while. */
+    #photosplice_stalled { color: #8c8c8c; visibility: hidden; animation: photosplice-stalled 0s 20s forwards; }
+    @keyframes photosplice-stalled { to { visibility: visible; } }
+  </style>
+</head>
+<body>
+  <canvas id="photosplice_canvas"></canvas>
+  <div id="photosplice_loading">
+    <p>Loading PhotoSplice&hellip;</p>
+    <p id="photosplice_stalled">This is taking longer than usual. If PhotoSplice doesn't start, its files may have failed to
+      download or come from a different version of this page. <a href="">Reload</a> to try again; the browser
+      console lists what failed.</p>
+  </div>
+</body>
+</html>

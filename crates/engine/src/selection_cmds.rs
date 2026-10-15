@@ -2,9 +2,9 @@
 //! (expand/contract/border/smooth/feather), Grow, Similar, Lasso.
 //! Selections are grayscale coverage surfaces clipped to the canvas.
 
-use photosuite_algo::selection::{self as sel, SelectionMode};
-use photosuite_doc::Document;
-use photosuite_geom::Rect;
+use photosplice_algo::selection::{self as sel, SelectionMode};
+use photosplice_doc::Document;
+use photosplice_geom::Rect;
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
@@ -38,7 +38,7 @@ fn sample_pixels(s: &Session, all_layers: bool) -> Result<(Rect, Vec<[f32; 4]>)>
             surf.read_rgba_into(area, &mut px);
             Ok((area, px))
         }
-        _ => Ok((area, photosuite_compose::render(&d.doc, area).px)),
+        _ => Ok((area, photosplice_compose::render(&d.doc, area).px)),
     }
 }
 
@@ -64,7 +64,7 @@ pub(crate) fn sample_rgba8(s: &Session, all_layers: bool) -> Result<(Rect, Vec<[
         (false, Some(surf)) => Ok((area, sel::rgba8_image(surf, area))),
         _ => {
             let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-            Ok((area, photosuite_compose::render(&d.doc, area).px.iter().map(|p| p.map(q)).collect()))
+            Ok((area, photosplice_compose::render(&d.doc, area).px.iter().map(|p| p.map(q)).collect()))
         }
     }
 }

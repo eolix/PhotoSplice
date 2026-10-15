@@ -2,11 +2,11 @@
 //!
 //! Photoshop blends a CMYK document channel by channel on its stored values (1 − ink), not on a
 //! screen conversion: blending two layers' inks that way reproduces its merged CMYK image within
-//! 1-3 levels for every separable mode (`photosuite-io` example `cmyk_probe` on psd-tools
+//! 1-3 levels for every separable mode (`photosplice-io` example `cmyk_probe` on psd-tools
 //! `cmyk-blend-modes.psd`), while the same blends of their RGB conversions miss almost every
 //! pixel. The working pixel here is `[1 − C, 1 − M, 1 − Y, 1 − K, alpha]` (straight alpha), and
 //! the composite turns into screen RGB once, at the end, through the document's CMYK profile
-//! (the caller's [`photosuite_color::convert::with_cmyk_space`] scope).
+//! (the caller's [`photosplice_color::convert::with_cmyk_space`] scope).
 //!
 //! Adjustments work on the inks too: Levels and Curves through their CMYK records, Invert,
 //! Posterize and Brightness/Contrast through one curve for every ink, Threshold and Gradient Map
@@ -19,12 +19,12 @@
 //! draws it over the backdrop's RGB conversion, and only the pixels it changed take the result
 //! back, separated through the profile. Untouched pixels keep their exact inks.
 
-use photosuite_color::ColorMode;
-use photosuite_color::blend::BlendMode;
-use photosuite_color::convert::{cmyk_to_rgb, rgb_to_cmyk};
-use photosuite_doc::{Adjustment, Color, Fill, Layer, LayerContent};
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_color::ColorMode;
+use photosplice_color::blend::BlendMode;
+use photosplice_color::convert::{cmyk_to_rgb, rgb_to_cmyk};
+use photosplice_doc::{Adjustment, Color, Fill, Layer, LayerContent};
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 
 use crate::{Buffer, Ctx};
 
@@ -139,7 +139,7 @@ fn two_passes(buf: &mut CBuf, draw: impl Fn(&mut Buffer)) {
 /// Whether `l`'s layer effects can be drawn in two projected passes: every enabled effect blends
 /// with a separable mode, and no bevel texture (its height comes from the pattern's luminance).
 fn effects_native(l: &Layer) -> bool {
-    use photosuite_doc::Effect;
+    use photosplice_doc::Effect;
     // Masks that hide effects: drawn by the RGB compositor (an island).
     if crate::effects_unmasked(l).is_some() {
         return false;
@@ -179,8 +179,8 @@ fn ko_leave() {
 }
 
 /// What a knockout of `kind` reveals over `rect` (see `knockout::backdrop`).
-fn ko_backdrop(kind: photosuite_doc::Knockout, rect: Rect) -> Option<CBuf> {
-    use photosuite_doc::Knockout;
+fn ko_backdrop(kind: photosplice_doc::Knockout, rect: Rect) -> Option<CBuf> {
+    use photosplice_doc::Knockout;
     KNOCKOUT.with(|k| {
         let k = k.borrow();
         let (px, r, _) = match kind {
@@ -299,7 +299,7 @@ fn native(l: &Layer, clipped: &[Layer], cx: &Ctx) -> bool {
 /// Adjustments evaluated on the inks: each ink's complement through a curve of its own (Levels
 /// and Curves in their CMYK records) or the same curve for all four.
 fn native_adjustment(a: &Adjustment) -> bool {
-    use photosuite_doc::adjust::ToneSpace;
+    use photosplice_doc::adjust::ToneSpace;
     matches!(
         a,
         Adjustment::Invert
@@ -378,7 +378,7 @@ fn adjust(a: &Adjustment, buf: &mut CBuf, cx: &Ctx) {
     // cmyk8/channel-mixer.psd: every ink within 0.0011); a mixer made here mixes the records
     // its RGB matrix stands for, as it is saved.
     if let Adjustment::ChannelMixer { matrix, cmyk, .. } = a {
-        let m = cmyk.unwrap_or_else(|| photosuite_doc::adjust::cmyk_mixer_records(matrix));
+        let m = cmyk.unwrap_or_else(|| photosplice_doc::adjust::cmyk_mixer_records(matrix));
         for p in &mut buf.px {
             let ink = inks(p);
             let out: [f32; 4] = std::array::from_fn(|o| (m[o][..4].iter().zip(&ink).map(|(k, v)| k * v).sum::<f32>() + m[o][4]).clamp(0.0, 1.0));
@@ -434,7 +434,7 @@ fn layer(l: &Layer, clipped: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
 
 /// An artboard: its background and the group, composited only inside the board (as
 /// [`crate::composite_artboard`]).
-fn artboard(l: &Layer, ab: &photosuite_doc::Artboard, clipped: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
+fn artboard(l: &Layer, ab: &photosplice_doc::Artboard, clipped: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
     let board = ab.rect.intersect(&backdrop.rect);
     if board.is_empty() {
         return;
@@ -545,7 +545,7 @@ fn plain(l: &Layer, clipped: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
                 return;
             }
             // Knockout (see `knockout`): the shape first reveals what it knocks out to.
-            if l.knockout != photosuite_doc::Knockout::None
+            if l.knockout != photosplice_doc::Knockout::None
                 && let Some(kb) = ko_backdrop(l.knockout, rect)
             {
                 for ((b, s), k) in backdrop.px.iter_mut().zip(&src.px).zip(&kb.px) {
@@ -749,8 +749,8 @@ fn island(backdrop: &mut CBuf, draw: impl FnOnce(&mut Buffer)) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_color::SampleType;
-    use photosuite_doc::{Document, Effect, Size};
+    use photosplice_color::SampleType;
+    use photosplice_doc::{Document, Effect, Size};
 
     /// A 4 × 1 CMYK document with a bottom layer of `base` inks over all of it.
     fn doc(base: [f32; 4]) -> Document {
@@ -843,7 +843,7 @@ mod tests {
     #[test]
     fn colour_adjustments_keep_k() {
         let mut d = doc([0.1, 0.6, 0.3, 0.45]);
-        d.layers.push(Layer::new("h", LayerContent::Adjustment(Adjustment::HueSaturation { hue: 60.0, saturation: 20.0, lightness: 0.0, colorize: false, ranges: photosuite_doc::adjust::HueRange::defaults() })));
+        d.layers.push(Layer::new("h", LayerContent::Adjustment(Adjustment::HueSaturation { hue: 60.0, saturation: 20.0, lightness: 0.0, colorize: false, ranges: photosplice_doc::adjust::HueRange::defaults() })));
         let got = inks_at(&d, 0);
         assert!((got[3] - 0.45).abs() < 1e-6, "{got:?}");
         assert!((got[0] - 0.1).abs() > 0.05 || (got[1] - 0.6).abs() > 0.05, "hue moved the colour: {got:?}");
@@ -856,7 +856,7 @@ mod tests {
         let mut d = doc([0.0; 4]);
         let mut t = top(&d, [0.5, 0.0, 0.0, 0.0], BlendMode::Normal);
         t.effects.items = vec![Effect::ColorOverlay {
-            common: photosuite_doc::FxCommon::new(BlendMode::Multiply, 0.5),
+            common: photosplice_doc::FxCommon::new(BlendMode::Multiply, 0.5),
             color: Color { mode: ColorMode::Cmyk, c: [0.0, 0.0, 0.0, 1.0], alpha: 1.0 },
         }];
         d.layers.push(t);
@@ -894,7 +894,7 @@ mod tests {
         let mut d = doc([0.0, 0.0, 0.0, 0.75]);
         let mut t = top(&d, [0.0, 1.0, 1.0, 0.0], BlendMode::Normal);
         t.effects.items = vec![Effect::ColorOverlay {
-            common: photosuite_doc::FxCommon::new(BlendMode::Color, 0.2),
+            common: photosplice_doc::FxCommon::new(BlendMode::Color, 0.2),
             color: Color { mode: ColorMode::Cmyk, c: [1.0, 0.0, 0.0, 0.0], alpha: 1.0 },
         }];
         assert!(!effects_native(&t));

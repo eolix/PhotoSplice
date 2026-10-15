@@ -1,21 +1,21 @@
 #!/bin/sh
-# PhotoSuite AppImage entry point (packaging/linux/AppRun; installed by package.sh).
+# PhotoSplice AppImage entry point (packaging/linux/AppRun; installed by package.sh).
 #
 # On Wayland the compositor resolves a window's dock icon by taking the window's
-# app_id (io.github.eolix.PhotoSuite) and looking up an installed .desktop file.
+# app_id (io.github.eolix.PhotoSplice) and looking up an installed .desktop file.
 # An AppImage installs nothing, so every AppImage run would otherwise show the
 # generic "Wayland" icon (#593). Best-effort desktop integration: on first run
 # (and whenever the AppImage's path changes) install the .desktop entry and the
 # hicolor icons into $XDG_DATA_HOME, then launch. Every failure here must leave
-# the launch untouched. Opt out with PHOTOSUITE_NO_DESKTOP_INTEGRATION=1.
+# the launch untouched. Opt out with PHOTOSPLICE_NO_DESKTOP_INTEGRATION=1.
 
 set -u
 
 APPDIR="$(dirname "$(readlink -f "$0")")"
-DESK_ID=io.github.eolix.PhotoSuite
+DESK_ID=io.github.eolix.PhotoSplice
 
 integrate() {
-  case "${PHOTOSUITE_NO_DESKTOP_INTEGRATION:-}" in
+  case "${PHOTOSPLICE_NO_DESKTOP_INTEGRATION:-}" in
     1 | true | yes) return 0 ;;
   esac
   # The AppImage runtime exports $APPIMAGE; without it (an extracted AppDir) there
@@ -69,4 +69,4 @@ integrate() {
 }
 
 integrate
-exec "$APPDIR/usr/bin/photosuite" "$@"
+exec "$APPDIR/usr/bin/photosplice" "$@"

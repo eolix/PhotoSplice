@@ -1,5 +1,5 @@
 //! Layered TIFF: Photoshop layer data carried in the TIFF tags 37724 (`ImageSourceData`) and
-//! 34377 (image resources), see [`photosuite_psd::tiff`].
+//! 34377 (image resources), see [`photosplice_psd::tiff`].
 //!
 //! Import rebuilds a PSD model from the TIFF's pixels plus those two tags and hands it to the
 //! PSD importer, so everything the PSD path understands (groups, masks, effects, type, shapes,
@@ -10,12 +10,12 @@
 
 use std::sync::Arc;
 
-use photosuite_codecs::{self as codecs, ChannelLayout, Format, Image, SampleType as CSample};
-use photosuite_color::ColorMode;
-use photosuite_doc::Document;
-use photosuite_psd::resources::ids;
-use photosuite_psd::tiff::{ByteOrder, ImageSourceData, resources_from_bytes, resources_to_bytes};
-use photosuite_psd::{ColorMode as PsdMode, Compression, Header, ImageData, ImageResource, ResolutionInfo};
+use photosplice_codecs::{self as codecs, ChannelLayout, Format, Image, SampleType as CSample};
+use photosplice_color::ColorMode;
+use photosplice_doc::Document;
+use photosplice_psd::resources::ids;
+use photosplice_psd::tiff::{ByteOrder, ImageSourceData, resources_from_bytes, resources_to_bytes};
+use photosplice_psd::{ColorMode as PsdMode, Compression, Header, ImageData, ImageResource, ResolutionInfo};
 
 use crate::flat::{csample, image_to_document, layout_for, single_layer, try_buffer};
 use crate::psd_export::{PsdExportOptions, document_to_psd_with};
@@ -32,7 +32,7 @@ pub fn would_write_layers(doc: &Document) -> bool {
 
 /// Documents a layered TIFF can hold: the TIFF composite must be in the document's model so
 /// that the layer channels inside the tag match it (Lab TIFFs are not decoded or encoded by
-/// `photosuite-codecs`), and there must be layers to keep (a Multichannel document has none:
+/// `photosplice-codecs`), and there must be layers to keep (a Multichannel document has none:
 /// its channels are the image).
 fn layered_mode(doc: &Document) -> bool {
     matches!(doc.pixel_format().mode, ColorMode::Grayscale | ColorMode::Rgb | ColorMode::Cmyk) && doc.mode != ColorMode::Multichannel && !doc.layers.is_empty()
@@ -104,8 +104,8 @@ pub(crate) fn import_layered(name: &str, img: &Image, layers: &[u8]) -> Result<I
     let image_data = ImageData { compression: Compression::Raw, data };
     let file = isd.into_psd(header, resources, image_data);
     // The same nesting cap as a PSD (storytold/photocraft@fd351918).
-    if crate::psd_import::group_depth(&file) > photosuite_doc::MAX_GROUP_DEPTH {
-        return Err(crate::IoError::Unsupported(format!("layer groups nested deeper than {}", photosuite_doc::MAX_GROUP_DEPTH)));
+    if crate::psd_import::group_depth(&file) > photosplice_doc::MAX_GROUP_DEPTH {
+        return Err(crate::IoError::Unsupported(format!("layer groups nested deeper than {}", photosplice_doc::MAX_GROUP_DEPTH)));
     }
     let (mut doc, w) = psd_to_document(&file);
     crate::text_import::prepare(&mut doc);

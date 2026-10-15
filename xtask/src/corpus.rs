@@ -4,12 +4,12 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::corpus_pins::{self, AG_PSD_COMMIT, PHOTOSUITE_CORPUS_COMMIT, PNGSUITE_URL, PSD_TOOLS_COMMIT};
+use crate::corpus_pins::{self, AG_PSD_COMMIT, PHOTOSPLICE_CORPUS_COMMIT, PNGSUITE_URL, PSD_TOOLS_COMMIT};
 use crate::pinned::USER_AGENT;
 use crate::{cargo, root, run};
 
 /// Crates with corpus tests (behind their `corpus` feature).
-pub const CORPUS_CRATES: &[&str] = &["photosuite-psd", "photosuite-codecs", "photosuite-io", "photosuite-engine"];
+pub const CORPUS_CRATES: &[&str] = &["photosplice-psd", "photosplice-codecs", "photosplice-io", "photosplice-engine"];
 
 /// Paths whose changes make `test-corpus --changed` run (the file-format and rendering crates).
 const CRITICAL: &[&str] = &["crates/psd/", "crates/io/", "crates/codecs/", "crates/compose/", "crates/gpu/", "crates/text/", "crates/format/"];
@@ -47,14 +47,14 @@ pub fn cmd(args: &[&str]) -> Result<(), String> {
     Ok(())
 }
 
-/// The authoring clone of photocraft-corpus: `$PHOTOSUITE_CORPUS_REPO`, else `../photocraft-corpus`.
+/// The authoring clone of photocraft-corpus: `$PHOTOSPLICE_CORPUS_REPO`, else `../photocraft-corpus`.
 fn local_clone() -> Result<PathBuf, String> {
-    if let Some(p) = std::env::var_os("PHOTOSUITE_CORPUS_REPO").filter(|v| !v.is_empty()) {
+    if let Some(p) = std::env::var_os("PHOTOSPLICE_CORPUS_REPO").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(p));
     }
     let sibling = root().parent().map(|p| p.join("photocraft-corpus"));
     sibling.filter(|s| s.join("photoshop").is_dir()).ok_or_else(|| {
-        "no local photocraft-corpus clone: expected ../photocraft-corpus next to this checkout, or set PHOTOSUITE_CORPUS_REPO=<path>".to_string()
+        "no local photocraft-corpus clone: expected ../photocraft-corpus next to this checkout, or set PHOTOSPLICE_CORPUS_REPO=<path>".to_string()
     })
 }
 
@@ -89,9 +89,9 @@ fn list() {
   cargo xtask test-corpus       fetch, then run every corpus test (--release --features corpus)
 
   corpus/photoshop/  [{}] our Photoshop-authored oracles (MIT OR Apache-2.0), from
-                     https://github.com/storytold/photocraft-corpus at {PHOTOSUITE_CORPUS_COMMIT}
+                     https://github.com/storytold/photocraft-corpus at {PHOTOSPLICE_CORPUS_COMMIT}
                      manifest xtask/photoshop-corpus.sha256. Fetch: --photoshop
-                     (--photoshop --local copies from ../photocraft-corpus or $PHOTOSUITE_CORPUS_REPO)
+                     (--photoshop --local copies from ../photocraft-corpus or $PHOTOSPLICE_CORPUS_REPO)
   corpus/psd/        [{}] 170 small psd-tools + ag-psd files (MIT), psd-tools@{} and
                      ag-psd@{}, manifest xtask/psd-corpus.sha256. Fetch: --psd
   corpus/psd-tools/  [{}] the full psd-tools test set (MIT) at {PSD_TOOLS_COMMIT}
@@ -167,7 +167,7 @@ pub fn test_cmd(args: &[&str]) -> Result<(), String> {
         match *a {
             "-p" | "--package" => {
                 let name = it.next().ok_or("-p needs a crate name")?;
-                let full = if name.starts_with("photosuite-") { (*name).to_string() } else { format!("photosuite-{name}") };
+                let full = if name.starts_with("photosplice-") { (*name).to_string() } else { format!("photosplice-{name}") };
                 if !CORPUS_CRATES.contains(&full.as_str()) {
                     return Err(format!("{full} has no corpus tests (crates: {})", CORPUS_CRATES.join(", ")));
                 }

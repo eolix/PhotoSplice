@@ -6,9 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 use std::time::SystemTime;
 
-use photosuite_color::{PixelFormat, SampleType};
-use photosuite_doc::Document;
-use photosuite_raster::{Rgba8Image, Tile};
+use photosplice_color::{PixelFormat, SampleType};
+use photosplice_doc::Document;
+use photosplice_raster::{Rgba8Image, Tile};
 
 use crate::convert::{self, Fetch, Loader, Sink, is_valid_hash, swap_to_le};
 use crate::manifest::{ContentM, FORMAT_VERSION, Hash, LayerM, Manifest};
@@ -45,9 +45,9 @@ fn hash_bytes(b: &[u8]) -> Hash {
 }
 
 fn png(img: &Rgba8Image) -> Result<Vec<u8>> {
-    let image = photosuite_codecs::Image::from_u8(img.width, img.height, photosuite_codecs::ChannelLayout::Rgba, img.pixels.clone())
+    let image = photosplice_codecs::Image::from_u8(img.width, img.height, photosplice_codecs::ChannelLayout::Rgba, img.pixels.clone())
         .map_err(|e| FormatError::Unsupported(format!("preview: {e}")))?;
-    photosuite_codecs::encode(&image, photosuite_codecs::Format::Png, &Default::default()).map_err(|e| FormatError::Unsupported(format!("preview: {e}")))
+    photosplice_codecs::encode(&image, photosplice_codecs::Format::Png, &Default::default()).map_err(|e| FormatError::Unsupported(format!("preview: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -514,7 +514,7 @@ impl PcraftWriter {
         }
         let manifest = Manifest {
             format_version: FORMAT_VERSION,
-            generator: format!("photosuite-format {}", env!("CARGO_PKG_VERSION")),
+            generator: format!("photosplice-format {}", env!("CARGO_PKG_VERSION")),
             document,
             thumbnail: opts.thumbnail.as_ref().map(|_| THUMB.to_owned()),
             composite: opts.composite.as_ref().map(|_| COMPOSITE.to_owned()),

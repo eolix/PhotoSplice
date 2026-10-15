@@ -13,7 +13,7 @@
 //!     after the item: u8 flag; if set rect, u64 length, u16 compression, data
 //! ```
 //!
-//! Photoshop puts one item in each section. Files written by earlier PhotoSuite versions put
+//! Photoshop puts one item in each section. Files written by earlier PhotoSplice versions put
 //! every item in one section; both read.
 //!
 //! The slots hold the unfiltered placed pixels (colour channels from slot 0, transparency in the
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(fx.to_bytes(), bytes);
     }
 
-    /// Older PhotoSuite files hold every item in one section; they still read.
+    /// Older PhotoSplice files hold every item in one section; they still read.
     #[test]
     fn reads_several_items_in_one_section() {
         let items = vec![item("a-1", true), item("b-2", false)];

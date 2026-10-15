@@ -1,6 +1,6 @@
-//! Throughput check: `cargo test -p photosuite-cms --release --test bench -- --ignored --nocapture`.
+//! Throughput check: `cargo test -p photosplice-cms --release --test bench -- --ignored --nocapture`.
 
-use photosuite_cms::{Builtin, Intent, Transform};
+use photosplice_cms::{Builtin, Intent, Transform};
 
 #[test]
 #[ignore]

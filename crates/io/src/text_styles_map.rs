@@ -1,13 +1,13 @@
 //! Character and paragraph styles ⇄ the PSD text engine's style sheets (see
-//! `photosuite_text::psd_styles`). Import merges the named sheets of every type layer into the
+//! `photosplice_text::psd_styles`). Import merges the named sheets of every type layer into the
 //! document's [`TextStyles`] by name and sets the runs' style references; export rewrites each
 //! type layer's sheets from the document's styles. Files without named styles are left as they
 //! are (byte-exact).
 
 use std::collections::HashMap;
 
-use photosuite_doc::text_styles::{CharacterStyleDef, ParagraphStyleDef, diff_attrs};
-use photosuite_doc::{Document, LayerContent, LayerId, TextLayer, TextStyles};
+use photosplice_doc::text_styles::{CharacterStyleDef, ParagraphStyleDef, diff_attrs};
+use photosplice_doc::{Document, LayerContent, LayerId, TextLayer, TextStyles};
 
 /// Builds `doc.text_styles` from the type layers' engine data and links the runs.
 pub fn import(doc: &mut Document) -> Vec<String> {
@@ -20,10 +20,10 @@ pub fn import(doc: &mut Document) -> Vec<String> {
     for id in ids {
         let Some(LayerContent::Text(t)) = doc.layer_mut(id).map(|l| &mut l.content) else { continue };
         let Some(raw) = t.psd_raw.clone() else { continue };
-        if !photosuite_text::psd_styles::has_named_sheets(&raw) {
+        if !photosplice_text::psd_styles::has_named_sheets(&raw) {
             continue;
         }
-        let Some(sh) = photosuite_text::psd_styles::read_style_sheets(&raw, dpi) else { continue };
+        let Some(sh) = photosplice_text::psd_styles::read_style_sheets(&raw, dpi) else { continue };
         let mut cmap: HashMap<usize, u32> = HashMap::new();
         for (ix, name, st) in &sh.char_sheets {
             let id = if let Some(id) = char_ids.get(name).copied() {
@@ -99,8 +99,8 @@ fn link(
 /// `styles`; None when neither the document nor the data has named styles (write as is).
 pub fn export_tysh(data: &[u8], t: &TextLayer, styles: &TextStyles, dpi: f32) -> Option<Vec<u8>> {
     let named = !styles.character.is_empty() || !styles.paragraph.is_empty();
-    if !named && !photosuite_text::psd_styles::has_named_sheets(data) {
+    if !named && !photosplice_text::psd_styles::has_named_sheets(data) {
         return None;
     }
-    photosuite_text::psd_styles::write_style_sheets(data, t, styles, dpi)
+    photosplice_text::psd_styles::write_style_sheets(data, t, styles, dpi)
 }

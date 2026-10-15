@@ -1,4 +1,4 @@
-use photosuite_codecs::{Image, decode, exif_orientation, upright_exif};
+use photosplice_codecs::{Image, decode, exif_orientation, upright_exif};
 
 fn classic_white_is_zero() -> Vec<u8> {
     let width = 4u16;

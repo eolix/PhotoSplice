@@ -6,7 +6,7 @@
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::{Map, Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::state::DialogKind;
 use crate::theme::Tokens;
 
@@ -14,8 +14,8 @@ const UNITS: [(&str, &str); 7] =
     [("px", "Pixels"), ("percent", "Percent"), ("in", "Inches"), ("cm", "Centimeters"), ("mm", "Millimeters"), ("pt", "Points"), ("pica", "Picas")];
 
 /// Dialog unit for the Units & Rulers preference.
-fn pref_unit(u: photosuite_engine::prefs::Unit) -> &'static str {
-    use photosuite_engine::prefs::Unit;
+fn pref_unit(u: photosplice_engine::prefs::Unit) -> &'static str {
+    use photosplice_engine::prefs::Unit;
     match u {
         Unit::Pixels => "px",
         Unit::Percent => "percent",
@@ -28,8 +28,8 @@ fn pref_unit(u: photosuite_engine::prefs::Unit) -> &'static str {
 }
 
 /// Image Size resampling for Preferences › General › Image Interpolation.
-fn pref_resample(i: photosuite_engine::prefs::Interpolation) -> &'static str {
-    use photosuite_engine::prefs::Interpolation;
+fn pref_resample(i: photosplice_engine::prefs::Interpolation) -> &'static str {
+    use photosplice_engine::prefs::Interpolation;
     match i {
         Interpolation::Nearest => "nearest",
         Interpolation::Bilinear => "bilinear",
@@ -44,12 +44,12 @@ pub fn is_sizing(command: &str) -> bool {
     matches!(command, "image.imageSize" | "image.canvasSize")
 }
 
-pub fn open(app: &mut PhotosuiteApp, command: &str) -> Option<u64> {
+pub fn open(app: &mut PhotospliceApp, command: &str) -> Option<u64> {
     let unit = pref_unit(app.session.prefs().units_and_rulers.rulers);
     let resample = pref_resample(app.session.prefs().general.image_interpolation);
     let d = &app.session.active()?.doc;
     let (w, h, res) = (d.size.width as f64, d.size.height as f64, d.resolution_dpi as f64);
-    let label = photosuite_engine::commands::find(command).map(|c| c.label).unwrap_or("Image Size…");
+    let label = photosplice_engine::commands::find(command).map(|c| c.label).unwrap_or("Image Size…");
     let mut f = Map::new();
     f.insert("__command".into(), json!(command));
     f.insert("__label".into(), json!(label));
@@ -385,19 +385,19 @@ mod tests {
 
     #[test]
     fn dialog_maps_to_engine_command() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.session.execute("file.new", json!({"width": 200, "height": 100})).unwrap();
         let id = open(&mut app, "image.imageSize").unwrap();
         let d = app.ui.dialog_mut(id).unwrap();
         d.fields.insert("width".into(), json!(100));
         d.fields.insert("height".into(), json!(50));
         crate::dialogs::confirm(&mut app, id).unwrap();
-        assert_eq!(app.session.active().unwrap().doc.size, photosuite_doc::Size::new(100, 50));
+        assert_eq!(app.session.active().unwrap().doc.size, photosplice_doc::Size::new(100, 50));
         let id = open(&mut app, "image.canvasSize").unwrap();
         let d = app.ui.dialog_mut(id).unwrap();
         d.fields.insert("width".into(), json!(120));
         d.fields.insert("anchor".into(), json!("topLeft"));
         crate::dialogs::confirm(&mut app, id).unwrap();
-        assert_eq!(app.session.active().unwrap().doc.size, photosuite_doc::Size::new(120, 50));
+        assert_eq!(app.session.active().unwrap().doc.size, photosplice_doc::Size::new(120, 50));
     }
 }

@@ -2,7 +2,7 @@
 //! edit panels on the right: Basic, Curve, Detail, Color Mixer, Color Grading, Effects).
 //!
 //! The dialog is a large modal over the document, at most 1400 × 900 pt. The preview runs
-//! [`photosuite_algo::camera_raw::develop`] on a CPU proxy of the layer, sized to the preview
+//! [`photosplice_algo::camera_raw::develop`] on a CPU proxy of the layer, sized to the preview
 //! (`pixel_scale` keeps pixel radii true to the full image), recomputed when a
 //! control changes. OK runs `filter.cameraRaw` with the non-default settings, so the result is
 //! one history step (or a smart filter on a smart object) and exactly replayable.
@@ -12,12 +12,12 @@
 //! "cancel":true}}}`; the reply describes the dialog.
 
 use egui::{Color32, FontId, Pos2, Rect as ERect, Sense, Stroke, TextureHandle, pos2, vec2};
-use photosuite_algo::camera_raw::{CameraRaw, Wheel, curve_lut};
-use photosuite_doc::LayerId;
-use photosuite_geom::Rect;
+use photosplice_algo::camera_raw::{CameraRaw, Wheel, curve_lut};
+use photosplice_doc::LayerId;
+use photosplice_geom::Rect;
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::theme::Tokens;
 use crate::widgets;
 
@@ -47,7 +47,7 @@ pub struct CameraRawDialog {
     /// The White Balance eyedropper is armed: a click on the preview neutralises that spot.
     pub wb_pick: bool,
     /// Opened on a camera file as it was opened: OK says Open, Cancel closes the file again.
-    pub opened_file: Option<photosuite_doc::DocId>,
+    pub opened_file: Option<photosplice_doc::DocId>,
     /// The one expanded panel (an accordion), by its shown title; Basic to begin with.
     pub open_section: Option<String>,
     /// The developed preview's red, green and blue histograms (alpha-weighted, display levels).
@@ -99,7 +99,7 @@ impl CameraRawDialog {
             n += q[3];
         }
         if n > 0.0 {
-            let (t, tn) = photosuite_algo::camera_raw::neutral_white_balance(sum.map(|v| v / n));
+            let (t, tn) = photosplice_algo::camera_raw::neutral_white_balance(sum.map(|v| v / n));
             self.params.temperature = t;
             self.params.tint = tn;
             self.dirty = true;
@@ -116,7 +116,7 @@ impl CameraRawDialog {
         let mut px = self.proxy.clone();
         let mut p = self.params.clone();
         p.pixel_scale = (self.pw as f32 / self.full_w.max(1) as f32).min(1.0);
-        photosuite_algo::camera_raw::develop(&mut px, self.pw, self.ph, &p, self.float);
+        photosplice_algo::camera_raw::develop(&mut px, self.pw, self.ph, &p, self.float);
         let img = Self::image(&px, self.pw, self.ph);
         *self.hist = colour_histogram(&px);
         match &mut self.tex {
@@ -143,7 +143,7 @@ fn preview_side(ctx: &egui::Context, w: usize, h: usize) -> usize {
 
 /// Area-averaged proxy of `area` with long side `side`: every source pixel lands in exactly one
 /// proxy pixel, averaged premultiplied so transparent pixels don't bleed their colour.
-pub(crate) fn build_proxy(surf: &photosuite_raster::Surface, area: Rect, side: usize) -> (Vec<[f32; 4]>, usize, usize) {
+pub(crate) fn build_proxy(surf: &photosplice_raster::Surface, area: Rect, side: usize) -> (Vec<[f32; 4]>, usize, usize) {
     let (w, h) = (area.width().max(1) as usize, area.height().max(1) as usize);
     let k = (w.max(h) as f64 / side.max(1) as f64).max(1.0);
     let (pw, ph) = (((w as f64 / k).ceil() as usize).max(1), ((h as f64 / k).ceil() as usize).max(1));
@@ -180,7 +180,7 @@ pub(crate) fn build_proxy(surf: &photosuite_raster::Surface, area: Rect, side: u
 
 /// Rebuilds the proxy when the preview's size on screen has changed noticeably (window resized,
 /// moved to a display of another density).
-fn refit_proxy(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+fn refit_proxy(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let Some(d) = app.camera_raw.as_ref() else { return };
     let want = preview_side(ctx, d.full_w, d.full_h);
     let have = d.pw.max(d.ph);
@@ -204,8 +204,8 @@ fn refit_proxy(app: &mut PhotosuiteApp, ctx: &egui::Context) {
 }
 
 /// Opens the dialog on the active layer.
-pub fn open(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), String> {
-    photosuite_engine::commands::find("filter.cameraRaw").map(|c| (c.enabled)(&app.session)).unwrap_or(Err("unknown command".into()))?;
+pub fn open(app: &mut PhotospliceApp, ctx: &egui::Context) -> Result<(), String> {
+    photosplice_engine::commands::find("filter.cameraRaw").map(|c| (c.enabled)(&app.session)).unwrap_or(Err("unknown command".into()))?;
     let (layer, surf, _) = crate::distort_ui::active_pixels(app)?;
     let st = app.session.active().ok_or("no document")?;
     let canvas = st.doc.bounds();
@@ -214,7 +214,7 @@ pub fn open(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), String> 
     let area = if area.is_empty() { canvas } else { area };
     let (w, h) = (area.width() as usize, area.height() as usize);
     let (proxy, pw, ph) = build_proxy(&surf, area, preview_side(ctx, w, h));
-    let float = surf.format().sample == photosuite_color::SampleType::F32;
+    let float = surf.format().sample == photosplice_color::SampleType::F32;
     let mut d = CameraRawDialog {
         layer,
         layer_name: name,
@@ -243,7 +243,7 @@ pub fn open(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), String> 
 }
 
 /// Menu / control-channel entry point. `None` when the call isn't for this dialog.
-pub fn menu(app: &mut PhotosuiteApp, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
+pub fn menu(app: &mut PhotospliceApp, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
     if id != "filter.cameraRaw" {
         return None;
     }
@@ -307,7 +307,7 @@ pub fn menu(app: &mut PhotosuiteApp, ctx: &egui::Context, id: &str, params: &Val
     Some(Ok(app.camera_raw.as_ref().map(|d| d.describe()).unwrap_or(Value::Null)))
 }
 
-fn commit(app: &mut PhotosuiteApp) -> Result<Value, String> {
+fn commit(app: &mut PhotospliceApp) -> Result<Value, String> {
     let d = app.camera_raw.take().ok_or(tl!("Camera Raw isn't open"))?;
     if d.params.is_identity() {
         return Ok(json!({"unchanged": true}));
@@ -432,7 +432,7 @@ fn curve_editor(ui: &mut egui::Ui, p: &mut CameraRaw, dirty: &mut bool) {
 /// The dialog's largest size; smaller windows get a smaller one ([`widgets::tool_dialog_rect`]).
 const DIALOG_MAX: egui::Vec2 = vec2(1400.0, 900.0);
 
-pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     open_pending(app, ctx);
     if app.camera_raw.is_none() {
         return;
@@ -554,7 +554,7 @@ pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
                     _ => &mut p.hsl_lum,
                 };
                 for (k, name) in BANDS.iter().enumerate() {
-                    let c = photosuite_algo::camera_raw::HSL_BANDS[k];
+                    let c = photosplice_algo::camera_raw::HSL_BANDS[k];
                     let base = hue_color(c);
                     let grad = [Color32::from_gray(128), base];
                     row(ui, &mut dirty, name, &mut arr[k], -100.0..=100.0, Some(&grad));
@@ -767,7 +767,7 @@ fn histogram(ui: &mut egui::Ui, d: &mut CameraRawDialog) {
 }
 
 /// Opens Camera Raw on a camera file opened last frame, when it is still the active document.
-fn open_pending(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+fn open_pending(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let Some(id) = app.camera_raw_on_open.take() else { return };
     if app.camera_raw.is_some() || app.session.active().map(|d| d.doc.id) != Some(id) {
         return;
@@ -784,7 +784,7 @@ fn open_pending(app: &mut PhotosuiteApp, ctx: &egui::Context) {
 }
 
 /// Cancel: close the dialog; on a camera file being opened, close the file too (as Photoshop).
-fn cancel(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+fn cancel(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let Some(d) = app.camera_raw.take() else { return };
     if let Some(id) = d.opened_file
         && let Some(i) = app.session.documents().iter().position(|s| s.doc.id == id)
@@ -814,7 +814,7 @@ mod tests {
 
     #[test]
     fn dialog_drives_the_engine() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         let ctx = egui::Context::default();
         app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
         app.run("layer.new.layer", json!({})).unwrap();
@@ -841,11 +841,11 @@ mod tests {
     #[test]
     fn camera_raw_is_a_dialog_over_the_document() {
         use egui_kittest::kittest::Queryable;
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
         let mut h =
-            egui_kittest::Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_ui_state(|ui, app: &mut PhotosuiteApp| show(app, ui.ctx()), app);
-        PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+            egui_kittest::Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_ui_state(|ui, app: &mut PhotospliceApp| show(app, ui.ctx()), app);
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
         let ctx = h.ctx.clone();
         menu(h.state_mut(), &ctx, "filter.cameraRaw", &json!({})).unwrap().unwrap();
         h.run_steps(3);
@@ -904,18 +904,18 @@ mod tests {
     #[test]
     fn curve_point_follows_a_long_drag_and_can_be_dragged_again() {
         use egui_kittest::kittest::Queryable;
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
         let mut h =
-            egui_kittest::Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_ui_state(|ui, app: &mut PhotosuiteApp| show(app, ui.ctx()), app);
-        PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+            egui_kittest::Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_ui_state(|ui, app: &mut PhotospliceApp| show(app, ui.ctx()), app);
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
         let ctx = h.ctx.clone();
         menu(h.state_mut(), &ctx, "filter.cameraRaw", &json!({})).unwrap().unwrap();
         h.state_mut().camera_raw.as_mut().unwrap().open_section = Some("Curve".into());
         h.run_steps(3);
-        let curve = |h: &egui_kittest::Harness<'_, PhotosuiteApp>| h.state().camera_raw.as_ref().unwrap().params.point_curve.clone();
+        let curve = |h: &egui_kittest::Harness<'_, PhotospliceApp>| h.state().camera_raw.as_ref().unwrap().params.point_curve.clone();
         // Drags by `by` in 30 steps; returns the curve after the first step (the drag has begun).
-        let drag = |h: &mut egui_kittest::Harness<'_, PhotosuiteApp>, from: Pos2, by: egui::Vec2| {
+        let drag = |h: &mut egui_kittest::Harness<'_, PhotospliceApp>, from: Pos2, by: egui::Vec2| {
             h.hover_at(from);
             h.drag_at(from);
             h.run_steps(2);
@@ -967,22 +967,22 @@ mod tests {
     fn camera_files_open_into_camera_raw_and_cancel_closes_them() {
         let services = crate::Services {
             import: Some(Box::new(|name: &str, _: &[u8]| {
-                let mut d = photosuite_doc::Document::new(
+                let mut d = photosplice_doc::Document::new(
                     name,
-                    photosuite_geom::Size::new(32, 24),
-                    photosuite_color::ColorMode::Rgb,
-                    photosuite_color::SampleType::U16,
+                    photosplice_geom::Size::new(32, 24),
+                    photosplice_color::ColorMode::Rgb,
+                    photosplice_color::SampleType::U16,
                 );
                 d.layers
-                    .push(photosuite_doc::Layer::new("Background", photosuite_doc::LayerContent::Raster(photosuite_raster::Surface::new(d.pixel_format()))));
+                    .push(photosplice_doc::Layer::new("Background", photosplice_doc::LayerContent::Raster(photosplice_raster::Surface::new(d.pixel_format()))));
                 Ok((d, Vec::new()))
             })),
             ..Default::default()
         };
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), services);
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), services);
         let ctx = egui::Context::default();
         crate::theme::install_fonts(&ctx);
-        let frame = |app: &mut PhotosuiteApp| {
+        let frame = |app: &mut PhotospliceApp| {
             ctx.run_ui(egui::RawInput::default(), |ui| show(app, ui.ctx())).textures_delta.clear();
         };
         app.open_file("/shoot/IMG_0001.CR3", b"raw").unwrap();
@@ -1002,7 +1002,7 @@ mod tests {
 
     #[test]
     fn white_balance_auto_and_eyedropper() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         let ctx = egui::Context::default();
         app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
         app.run("layer.new.layer", json!({})).unwrap();

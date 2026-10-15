@@ -1,10 +1,10 @@
 //! Timing: Gaussian Blur radius 10 on a 6016×6016 RGBA8 layer, as a document layer filling the
 //! canvas is filtered (edges repeated at the canvas edge).
-//! `cargo run --release -p photosuite-algo --example bench_gaussian [-- <size> <radius>]`
-use photosuite_algo::{FilterParams, apply_in, output_area};
-use photosuite_color::PixelFormat;
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+//! `cargo run --release -p photosplice-algo --example bench_gaussian [-- <size> <radius>]`
+use photosplice_algo::{FilterParams, apply_in, output_area};
+use photosplice_color::PixelFormat;
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 
 fn main() {
     let n: i32 = std::env::args().nth(1).and_then(|v| v.parse().ok()).unwrap_or(6016);

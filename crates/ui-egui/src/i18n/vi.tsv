@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# Tiếng Việt translations for PhotoSuite UI.
+# Tiếng Việt translations for PhotoSplice UI.
 
 	File	Tệp
 	Edit	Chỉnh sửa
@@ -672,7 +672,7 @@
 	Timeline	Dòng thời gian
 	Tool Presets	Công cụ cài đặt sẵn
 	Tools	Công cụ
-	About PhotoSuite	Giới thiệu về PhotoSuite
+	About PhotoSplice	Giới thiệu về PhotoSplice
 	Website	Trang web
 	Report an Issue…	Báo cáo sự cố…
 	WIA Support…	Hỗ trợ WIA…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Perspective Warp không hoạt động
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Perspective Warp: vẽ các mặt phẳng dọc theo phối cảnh của ảnh, sau đó chuyển sang Warp
 	Photo Filter	Bộ lọc ảnh
-	PhotoSuite	PhotoSuite
-	PhotoSuite Manages Colors	PhotoSuite Quản lý màu sắc
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite — một trình chỉnh sửa hình ảnh gốc, mã nguồn mở được viết bằng Rust
+	PhotoSplice	PhotoSplice
+	PhotoSplice Manages Colors	PhotoSplice Quản lý màu sắc
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice — một trình chỉnh sửa hình ảnh gốc, mã nguồn mở được viết bằng Rust
 	Pin Depth:	Độ sâu ghim:
 	Pixel Length:	Độ dài pixel:
 	Pixels/Centimeter	Pixel/Cm
@@ -1570,7 +1570,7 @@
 	Pen Tilt	Nghiêng bút
 	Pen Tool	Công cụ bút
 	Photo	Ảnh
-	PhotoSuite website	Trang web PhotoSuite
+	PhotoSplice website	Trang web PhotoSplice
 	Picas	Picas
 	Pillow Emboss	Gối chạm khắc
 	Pixel Replacement	Thay thế pixel
@@ -1877,7 +1877,7 @@
 	System Info…	Thông tin hệ thống…
 	System Info	Thông tin hệ thống
 	More panels	Nhiều tấm hơn
-	These settings aren't available in PhotoSuite yet.	Những cài đặt này chưa có trong PhotoSuite
+	These settings aren't available in PhotoSplice yet.	Những cài đặt này chưa có trong PhotoSplice
 	Graphics	đồ họa
 	Reset GPU Backend	Đặt lại phần cuối GPU
 	Applies at next launch.	Áp dụng ở lần ra mắt tiếp theo
@@ -2018,7 +2018,7 @@
 	Opening…	Đang mở…
 	Patch	Vá
 	Patch:	Vá:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite đang dùng bộ tổng hợp ảnh bằng CPU. Cửa sổ vẫn có thể dùng bộ điều hợp đồ họa của bạn.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice đang dùng bộ tổng hợp ảnh bằng CPU. Cửa sổ vẫn có thể dùng bộ điều hợp đồ họa của bạn.
 	Play Action	Phát hành động
 	Reading…	Đang đọc…
 	Record Action	Ghi hành động

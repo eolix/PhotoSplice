@@ -282,7 +282,7 @@ pub fn unicode_names(data: &[u8]) -> Vec<String> {
 /// Builds the data for a 1057 version info resource, with the writer and reader names a current
 /// Photoshop writes (no NUL terminator). The reader names the oldest version the file is meant
 /// for: Photoshop asks to "update" the type layers of a file whose reader is older than its own
-/// text engine (an earlier "Adobe Photoshop CS6" made it prompt on every PhotoSuite PSD with type;
+/// text engine (an earlier "Adobe Photoshop CS6" made it prompt on every PhotoSplice PSD with type;
 /// Photoshop's own re-save of such a file names "Adobe Photoshop 2020").
 pub fn version_info_resource(has_real_merged_data: bool) -> ImageResource {
     ImageResource::new(

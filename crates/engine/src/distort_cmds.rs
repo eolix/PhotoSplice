@@ -3,22 +3,22 @@
 //!
 //! All three take their whole edit as data, so each is one replayable command and one history
 //! step: Liquify the brush strokes (replayed onto a fresh displacement field,
-//! `photosuite_algo::liquify`), Puppet Warp the pins (`photosuite_algo::puppet`, ARAP on a mesh
-//! of the opaque region), Perspective Warp the planes (`photosuite_algo::perspective`). On a
+//! `photosplice_algo::liquify`), Puppet Warp the pins (`photosplice_algo::puppet`, ARAP on a mesh
+//! of the opaque region), Perspective Warp the planes (`photosplice_algo::perspective`). On a
 //! smart object each becomes a smart filter (as in Photoshop): the params are stored with the
 //! smart object and re-applied to a fresh render of the source, so editing never accumulates
 //! resampling. The params are the data in every case (strokes, pins and planes are small
 //! compared with a field or a mesh, and replay is deterministic), so nothing needs a blob.
 
-use photosuite_algo::liquify::{LiquifyField, LiquifyStroke, apply_liquify, auto_cell};
-use photosuite_algo::perspective::{PerspectiveMap, Plane, Straighten, straighten};
-use photosuite_algo::puppet::{PuppetDensity, PuppetMode, PuppetPin, PuppetWarp, puppet_warp};
-use photosuite_algo::transform::Interp;
-use photosuite_algo::warp::{warp_mesh_gray, warp_mesh_surface};
-use photosuite_color::PixelFormat;
-use photosuite_doc::{Document, Layer, LayerContent, LayerId, Locks, SmartFilter};
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_algo::liquify::{LiquifyField, LiquifyStroke, apply_liquify, auto_cell};
+use photosplice_algo::perspective::{PerspectiveMap, Plane, Straighten, straighten};
+use photosplice_algo::puppet::{PuppetDensity, PuppetMode, PuppetPin, PuppetWarp, puppet_warp};
+use photosplice_algo::transform::Interp;
+use photosplice_algo::warp::{warp_mesh_gray, warp_mesh_surface};
+use photosplice_color::PixelFormat;
+use photosplice_doc::{Document, Layer, LayerContent, LayerId, Locks, SmartFilter};
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
@@ -242,7 +242,7 @@ fn run_on_layer(
         let selection = doc.selection.clone();
         let group = crate::transform_cmds::group_locks(doc, id);
         if matches!(doc.layer(id).ok_or(EngineError::NoLayer(id))?.content, LayerContent::Smart(_)) {
-            let sf = SmartFilter { command: cmd.to_string(), params: params.clone(), blend: photosuite_color::BlendMode::Normal, opacity: 1.0, visible: true };
+            let sf = SmartFilter { command: cmd.to_string(), params: params.clone(), blend: photosplice_color::BlendMode::Normal, opacity: 1.0, visible: true };
             return crate::smart_cmds::add_smart_filter(doc, id, sf, selection.as_ref());
         }
         // A Background gains transparency when the distortion moves pixels.

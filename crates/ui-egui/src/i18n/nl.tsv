@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# Nederlands translations for PhotoSuite UI.
+# Nederlands translations for PhotoSplice UI.
 
 	File	Bestand
 	Edit	Bewerken
@@ -672,7 +672,7 @@
 	Timeline	Tijdlijn
 	Tool Presets	Voorinstellingen gereedschap
 	Tools	Gereedschappen
-	About PhotoSuite	Over PhotoSuite
+	About PhotoSplice	Over PhotoSplice
 	Website	Website
 	Report an Issue…	Een probleem melden…
 	WIA Support…	WIA-ondersteuning…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Perspectief verdraaien is niet actief
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Perspectief verdraaien: teken vlakken langs het perspectief van de afbeelding en schakel vervolgens over naar Verdraaien
 	Photo Filter	Fotofilter
-	PhotoSuite	FotoCraft
-	PhotoSuite Manages Colors	PhotoSuite beheert kleuren
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite — een open-source, native afbeeldingseditor geschreven in Rust
+	PhotoSplice	FotoCraft
+	PhotoSplice Manages Colors	PhotoSplice beheert kleuren
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice — een open-source, native afbeeldingseditor geschreven in Rust
 	Pin Depth:	Spelddiepte:
 	Pixel Length:	Pixellengte:
 	Pixels/Centimeter	Pixels/centimeter
@@ -1570,7 +1570,7 @@
 	Pen Tilt	Pen kantelen
 	Pen Tool	Pen-gereedschap
 	Photo	Foto
-	PhotoSuite website	PhotoSuite-website
+	PhotoSplice website	PhotoSplice-website
 	Picas	Pica's
 	Pillow Emboss	Kussenreliëf
 	Pixel Replacement	Pixelvervanging
@@ -1877,7 +1877,7 @@
 	System Info…	Systeeminfo…
 	System Info	Systeeminfo
 	More panels	Meer panelen
-	These settings aren't available in PhotoSuite yet.	Deze instellingen zijn nog niet beschikbaar in PhotoSuite
+	These settings aren't available in PhotoSplice yet.	Deze instellingen zijn nog niet beschikbaar in PhotoSplice
 	Graphics	Grafisch
 	Reset GPU Backend	Reset GPU-backend
 	Applies at next launch.	Geldt bij de volgende lancering
@@ -2018,7 +2018,7 @@
 	Opening…	Openen…
 	Patch	Repareren
 	Patch:	Repareren:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite gebruikt de CPU-beeldcompositor. Het venster kan nog steeds uw grafische adapter gebruiken.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice gebruikt de CPU-beeldcompositor. Het venster kan nog steeds uw grafische adapter gebruiken.
 	Play Action	Actie afspelen
 	Reading…	Lezen…
 	Record Action	Actie opnemen

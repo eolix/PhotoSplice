@@ -1,12 +1,12 @@
 //! Opening files from disk: File › Open, Open Recent, drag-and-drop onto the window (except onto
 //! a document's canvas, which places the file as a layer), command-line paths at launch
 //! and the OS's "open these documents" requests (macOS Finder double-click, Open With, drops on the
-//! Dock icon) all go through [`PhotosuiteApp::open_file`], so each one names the document after the
+//! Dock icon) all go through [`PhotospliceApp::open_file`], so each one names the document after the
 //! file, remembers its path (File › Save writes back to it) and adds it to Open Recent. Failures
 //! are shown as errors (status bar + notice); import warnings as a notice.
 
-use crate::{PhotosuiteApp, notices};
-use photosuite_engine::file_cmds::{is_template, untitled_name};
+use crate::{PhotospliceApp, notices};
+use photosplice_engine::file_cmds::{is_template, untitled_name};
 
 /// A request from the operating system, delivered by the platform shell through
 /// [`Services::os_events`](crate::Services::os_events).
@@ -43,7 +43,7 @@ pub fn display_name(path: &str) -> String {
     std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| path.to_string())
 }
 
-impl PhotosuiteApp {
+impl PhotospliceApp {
     /// Open `bytes` read from the file at `path`: the document is named after the file, keeps
     /// `path` for File › Save, and `path` goes to the top of Open Recent. Returns the import
     /// warnings (also shown to the user).
@@ -55,8 +55,8 @@ impl PhotosuiteApp {
         // A PDF asks how to open first (Import PDF), as Photoshop does, unless it is a Photoshop
         // PDF: that opens as its document and saves back in place.
         #[cfg(not(target_arch = "wasm32"))]
-        if path.to_ascii_lowercase().ends_with(".pdf") && !photosuite_engine::file_cmds::pdf_has_editing_data(bytes) {
-            let pages = photosuite_engine::file_cmds::pdf_pages(bytes);
+        if path.to_ascii_lowercase().ends_with(".pdf") && !photosplice_engine::file_cmds::pdf_has_editing_data(bytes) {
+            let pages = photosplice_engine::file_cmds::pdf_pages(bytes);
             if pages > 0 && std::path::Path::new(path).is_file() {
                 crate::pdf_import_ui::open(self, path, bytes);
                 self.push_recent(path);
@@ -104,10 +104,10 @@ impl PhotosuiteApp {
         // would block the window). Preset files (brushes, gradients) go the usual way.
         let ext = std::path::Path::new(path).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
         if self.background_jobs && !crate::preset_files_ui::PRESET_EXTS.contains(&ext.as_str()) {
-            crate::jobs_ui::start_open(self, &display_name(path), Some(path.to_string()), photosuite_engine::jobs::OpenSource::Path(path.to_string()))?;
+            crate::jobs_ui::start_open(self, &display_name(path), Some(path.to_string()), photosplice_engine::jobs::OpenSource::Path(path.to_string()))?;
             return Ok(Vec::new());
         }
-        let bytes = photosuite_format::read_file(std::path::Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
+        let bytes = photosplice_format::read_file(std::path::Path::new(path)).map_err(|e| format!("{path}: {e}"))?;
         self.open_file(path, &bytes)
     }
 
@@ -222,7 +222,7 @@ impl PhotosuiteApp {
     /// Place a file's bytes as a smart object layer (File › Place; `linked`: Place Linked, to that
     /// path), for files that weren't read from a path the command can read.
     pub(crate) fn place_bytes(&mut self, name: &str, bytes: Vec<u8>, linked: Option<String>) -> Result<serde_json::Value, String> {
-        let r = photosuite_engine::file_cmds::place_bytes(&mut self.session, name, bytes, linked, &serde_json::json!({})).map_err(|e| e.to_string());
+        let r = photosplice_engine::file_cmds::place_bytes(&mut self.session, name, bytes, linked, &serde_json::json!({})).map_err(|e| e.to_string());
         self.sync_views();
         r
     }
@@ -247,12 +247,12 @@ impl PhotosuiteApp {
 /// The settings to save `bytes` (the file at `path`) again with: a JPEG's quality, read from its
 /// quantisation tables, and whether a WebP is lossy. WebP doesn't record its quality, so a lossy
 /// one saves at 75 (libwebp's default). Other formats are lossless or have nothing to keep.
-pub(crate) fn save_options_of(path: &str, bytes: &[u8]) -> photosuite_engine::SaveOptions {
+pub(crate) fn save_options_of(path: &str, bytes: &[u8]) -> photosplice_engine::SaveOptions {
     let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
-    let mut o = photosuite_engine::SaveOptions::default();
+    let mut o = photosplice_engine::SaveOptions::default();
     match ext.as_str() {
-        "jpg" | "jpeg" | "jpe" | "jfif" => o.jpeg_quality = photosuite_codecs::jpeg_quality(bytes),
-        "webp" if photosuite_codecs::webp_is_lossless(bytes) == Some(false) => o.webp_quality = Some(75),
+        "jpg" | "jpeg" | "jpe" | "jfif" => o.jpeg_quality = photosplice_codecs::jpeg_quality(bytes),
+        "webp" if photosplice_codecs::webp_is_lossless(bytes) == Some(false) => o.webp_quality = Some(75),
         _ => {}
     }
     o

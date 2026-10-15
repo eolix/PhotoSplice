@@ -13,14 +13,14 @@
 //! while the pointer is held still. Skips when no GPU adapter exists (like `live_stroke_canvas.rs`).
 
 use egui::{Modifiers, PointerButton, Pos2};
-use photosuite_ui_egui::PhotosuiteApp;
-use photosuite_ui_egui::canvas::ViewXform;
-use photosuite_ui_egui::control::{ControlRequest, handle};
+use photosplice_ui_egui::PhotospliceApp;
+use photosplice_ui_egui::canvas::ViewXform;
+use photosplice_ui_egui::control::{ControlRequest, handle};
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-type Harness = egui_kittest::Harness<'static, PhotosuiteApp>;
+type Harness = egui_kittest::Harness<'static, PhotospliceApp>;
 
 /// A rendered frame: RGBA8, physical pixels.
 struct Image {
@@ -44,8 +44,8 @@ impl Image {
 fn harness(ppp: f32) -> Option<Harness> {
     let built = std::panic::catch_unwind(|| {
         egui_kittest::Harness::builder().with_size(egui::vec2(900.0, 640.0)).with_pixels_per_point(ppp).with_max_steps(64).wgpu().build_eframe(|cc| {
-            PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-            let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+            PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+            let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
             if let Some(rs) = cc.wgpu_render_state.as_ref() {
                 app.set_wgpu(rs.clone());
             }
@@ -86,7 +86,7 @@ fn setup(h: &mut Harness, background: &str, tool: &str) {
 fn xf(h: &Harness) -> ViewXform {
     let app = h.state();
     let v = &app.ui.views[0];
-    ViewXform { rect: photosuite_ui_egui::rulers::content_rect(app, app.last_canvas_rect), zoom: v.zoom, center: v.center, flip: app.ui.view.flip_horizontal }
+    ViewXform { rect: photosplice_ui_egui::rulers::content_rect(app, app.last_canvas_rect), zoom: v.zoom, center: v.center, flip: app.ui.view.flip_horizontal }
 }
 
 /// Screen point (egui points) of document point `(x, y)`.

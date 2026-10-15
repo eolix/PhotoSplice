@@ -5,11 +5,11 @@
 
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 
-pub const APP_PAGE: &str = "https://photosuite.app";
-pub const GITHUB: &str = "https://github.com/eolix/photosuite";
-pub const ISSUES: &str = "https://github.com/eolix/photosuite/issues";
+pub const APP_PAGE: &str = "https://photosplice.com";
+pub const GITHUB: &str = "https://github.com/eolix/photosplice";
+pub const ISSUES: &str = "https://github.com/eolix/photosplice/issues";
 
 /// Help-menu link commands: (id, url). Labels live in `menus::UI_COMMANDS`.
 pub const COMMANDS: &[(&str, &str)] = &[("help.website", APP_PAGE), ("help.github", GITHUB), ("help.reportIssue", ISSUES)];
@@ -20,7 +20,7 @@ pub fn url_for(id: &str) -> Option<&'static str> {
 
 /// Open `url` in the system browser (a new tab on the web) and note it in the status bar. Prefers
 /// the platform `open_url` service (reliable on Windows/macOS/Linux); falls back to `ctx.open_url`.
-pub fn open(app: &mut PhotosuiteApp, ctx: &egui::Context, url: &str) -> Value {
+pub fn open(app: &mut PhotospliceApp, ctx: &egui::Context, url: &str) -> Value {
     let opened = app.services.open_url.as_ref().map(|f| f(url).is_ok()).unwrap_or(false);
     if !opened {
         ctx.open_url(egui::OpenUrl::new_tab(url));
@@ -31,7 +31,7 @@ pub fn open(app: &mut PhotosuiteApp, ctx: &egui::Context, url: &str) -> Value {
 
 /// "Website · GitHub" as links, centred. Clicks route through [`open`] (the platform browser
 /// service) rather than `ui.hyperlink_to`, which uses the unreliable `ctx.open_url`.
-pub fn link_row(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
+pub fn link_row(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
     let t = crate::theme::Tokens::get(ui.ctx());
     let links = [("Website", APP_PAGE), ("GitHub", GITHUB)];
     let font = egui::FontId::proportional(12.5);
@@ -74,7 +74,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), services);
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), services);
         let ctx = egui::Context::default();
         // Every Help-menu link id reaches the service with its URL.
         for (id, url) in COMMANDS {
@@ -88,7 +88,7 @@ mod tests {
 
     #[test]
     fn help_menu_lists_links_then_separator_then_system_info_and_about() {
-        let app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         let help: Vec<String> = crate::menus::menu_items(&app).into_iter().filter(|i| i.path == ["Help"]).map(|i| i.id).collect();
         assert_eq!(help, ["help.website", "help.github", "help.reportIssue", "---", "help.systemInfo", "help.thirdPartyNotices", "help.about"]);
         for (id, _) in COMMANDS {
@@ -98,12 +98,12 @@ mod tests {
 
     #[test]
     fn link_commands_open_their_urls() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         let ctx = egui::Context::default();
         for (id, url) in [
-            ("help.website", "https://photosuite.app"),
-            ("help.github", "https://github.com/eolix/photosuite"),
-            ("help.reportIssue", "https://github.com/eolix/photosuite/issues"),
+            ("help.website", "https://photosplice.com"),
+            ("help.github", "https://github.com/eolix/photosplice"),
+            ("help.reportIssue", "https://github.com/eolix/photosplice/issues"),
         ] {
             let r = crate::menus::invoke(&mut app, &ctx, id, serde_json::json!({})).unwrap();
             assert_eq!(r["url"], url);

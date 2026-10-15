@@ -4,17 +4,17 @@
 use egui::{Modifiers, PointerButton, Pos2, Rect, pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use photosuite_doc::LayerContent;
+use photosplice_doc::LayerContent;
 use serde_json::json;
 
 use super::{Indicator, RowRects, layout, recorded};
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 
 const LONG: &str = "Button / Primary / Hover state — a very long descriptive layer name 背景のテクスチャ that keeps going";
 
 /// Long-named layers with every indicator, nested four groups deep.
-fn busy() -> photosuite_engine::Session {
-    let mut s = photosuite_engine::Session::new();
+fn busy() -> photosplice_engine::Session {
+    let mut s = photosplice_engine::Session::new();
     s.execute("file.new", json!({"width": 64, "height": 48})).unwrap();
     let mut prev = None;
     for depth in 0..4 {
@@ -40,10 +40,10 @@ fn busy() -> photosuite_engine::Session {
     s
 }
 
-fn harness(session: photosuite_engine::Session, ppp: f32, theme: &str, dock_width: f32) -> Harness<'static, PhotosuiteApp> {
+fn harness(session: photosplice_engine::Session, ppp: f32, theme: &str, dock_width: f32) -> Harness<'static, PhotospliceApp> {
     let mut h = Harness::builder().with_size(vec2(1440.0, 1000.0)).with_pixels_per_point(ppp).with_max_steps(64).build_eframe(move |cc| {
-        PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-        PhotosuiteApp::new(session, crate::Services::default())
+        PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+        PhotospliceApp::new(session, crate::Services::default())
     });
     let ctx = h.ctx.clone();
     let (req, _rx) = crate::control::ControlRequest::new(
@@ -106,7 +106,7 @@ fn long_names_never_run_under_the_indicators() {
     }
 }
 
-fn click(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2) {
+fn click(h: &mut Harness<'_, PhotospliceApp>, at: Pos2) {
     h.hover_at(at);
     h.run_steps(1);
     h.event(egui::Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
@@ -119,7 +119,7 @@ fn click(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2) {
 fn the_fx_triangle_hides_and_shows_the_effects_rows() {
     let mut h = harness(busy(), 1.0, "slate", 290.0);
     let top = h.state().session.active().unwrap().doc.layers.last().unwrap().clone();
-    let rows = |h: &Harness<'_, PhotosuiteApp>| recorded(&h.ctx).iter().map(|r| r.row.top()).collect::<Vec<_>>();
+    let rows = |h: &Harness<'_, PhotospliceApp>| recorded(&h.ctx).iter().map(|r| r.row.top()).collect::<Vec<_>>();
     let before = rows(&h);
     let label = format!("Collapse effects {}", top.name);
     let p = h.get_by_label(&label).rect().center();
@@ -135,7 +135,7 @@ fn the_fx_triangle_hides_and_shows_the_effects_rows() {
     assert!(h.state().session.active().unwrap().fx_collapsed.is_empty());
 }
 
-fn groups_open(s: &photosuite_engine::Session) -> Vec<bool> {
+fn groups_open(s: &photosplice_engine::Session) -> Vec<bool> {
     s.active().unwrap().doc.walk().into_iter().filter_map(|(_, _, l)| if let LayerContent::Group(g) = &l.content { Some(g.expanded) } else { None }).collect()
 }
 
@@ -154,9 +154,9 @@ fn collapse_all_groups_from_the_panel_menu_and_it_is_saved() {
     // Collapsed state is document data: it survives a PSD and a .pcraft round trip.
     let doc = (*h.state().session.active().unwrap().doc).clone();
     for name in ["c.psd", "c.pcraft"] {
-        let bytes = photosuite_io::export(&doc, name, &Default::default()).unwrap().bytes;
-        let back = photosuite_io::import(name, &bytes).unwrap().document;
-        let mut s = photosuite_engine::Session::new();
+        let bytes = photosplice_io::export(&doc, name, &Default::default()).unwrap().bytes;
+        let back = photosplice_io::import(name, &bytes).unwrap().document;
+        let mut s = photosplice_engine::Session::new();
         s.add_document(back, None);
         assert!(groups_open(&s).iter().all(|o| !o), "{name}: groups stay closed");
     }
@@ -168,15 +168,15 @@ fn collapse_all_groups_from_the_panel_menu_and_it_is_saved() {
 #[test]
 fn dragging_down_the_eyes_sweeps_visibility_without_reordering() {
     for moves in [10, 1] {
-        let mut s = photosuite_engine::Session::new();
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", json!({"width": 64, "height": 48})).unwrap();
         for i in 0..4 {
             s.execute("layer.new.layer", json!({"name": format!("L{i}")})).unwrap();
         }
         let mut h = harness(s, 1.0, "slate", 290.0);
-        let order = |h: &Harness<'_, PhotosuiteApp>| h.state().session.active().unwrap().doc.layers.iter().map(|l| l.id).collect::<Vec<_>>();
-        let visible = |h: &Harness<'_, PhotosuiteApp>, id: u64| h.state().session.active().unwrap().doc.layer(photosuite_doc::LayerId(id)).unwrap().visible;
-        let steps = |h: &Harness<'_, PhotosuiteApp>| h.state().session.active().unwrap().history.past_len();
+        let order = |h: &Harness<'_, PhotospliceApp>| h.state().session.active().unwrap().doc.layers.iter().map(|l| l.id).collect::<Vec<_>>();
+        let visible = |h: &Harness<'_, PhotospliceApp>, id: u64| h.state().session.active().unwrap().doc.layer(photosplice_doc::LayerId(id)).unwrap().visible;
+        let steps = |h: &Harness<'_, PhotospliceApp>| h.state().session.active().unwrap().history.past_len();
         let (before, steps_before) = (order(&h), steps(&h));
         // Rows top to bottom: L3, L2, L1, L0, Background.
         let rows = recorded(&h.ctx);

@@ -1,4 +1,4 @@
-# photosuite-codecs
+# photosplice-codecs
 
 Codecs for flat raster image formats, written in pure Rust. The crate is standalone: it depends on no other
 workspace crate and defines its own `Image` type. It also builds for `wasm32-unknown-unknown` and
@@ -19,7 +19,7 @@ It follows the "avoid GIMP's hole" rules in `plan/architecture.md` §1.1:
   pages left out, or data that ended early.
 
 ```rust
-use photosuite_codecs::*;
+use photosplice_codecs::*;
 
 let img = decode(&bytes)?;                               // detect + decode (default Limits)
 for w in fidelity_warnings(&img, Format::Jpeg) {         // e.g. "16-bit will be reduced to 8-bit"
@@ -62,8 +62,8 @@ the same.
 ## Documented asymmetries and limitations
 
 * **Camera raw files** (DNG, CR2, NEF, ARW… which are TIFF-structured) are recognised and refused
-  with `CodecError::Unsupported`: they are sensor data, not flat images. `photosuite-raw` decodes
-  and develops them, and `photosuite-io` routes them there.
+  with `CodecError::Unsupported`: they are sensor data, not flat images. `photosplice-raw` decodes
+  and develops them, and `photosplice-io` routes them there.
 
 * **AVIF (the only asymmetric format).** Encoding uses `ravif`, which is pure Rust. Decoding
   needs `dav1d`, which is C. AVIF is therefore read-unsupported, and write support is gated
@@ -77,7 +77,7 @@ the same.
   `DecodeWarning::MoreFrames` / `MorePages` in `Image::warnings`, with the total when the file
   states it (frames and TIFF directories are counted without decoding them; reduced-resolution
   TIFF directories and transparency masks are not pages). Any TIFF page can still be opened
-  with `decode_tiff_page` (and `photosuite_io::import_tiff_page`).
+  with `decode_tiff_page` (and `photosplice_io::import_tiff_page`).
 * **EXIF in TIFF** is stored as a sub-IFD rather than a blob, so it is not preserved yet.
   `caps.exif = false` for TIFF, and a warning is raised.
 * **Orientation** (EXIF tag 274 in JPEG, PNG `eXIf` and WebP; the decoded page's tag in TIFF and
@@ -131,7 +131,7 @@ the same.
   P6, and anything with alpha or CMYK gives P7 (PAM). Writing a `.pbm` file therefore produces
   whichever of these fits the data.
 * **Colour conversions** (CMYK↔RGB, RGB→gray) are naive. Colour-managed conversion belongs in
-  `photosuite-color`.
+  `photosplice-color`.
 
 ## Limits (decompression bombs)
 
@@ -142,7 +142,7 @@ defaults are 262144 px per side, 2^30 pixels and 8 GiB (2 GiB on 32-bit targets 
 
 ## Tests
 
-`cargo test -p photosuite-codecs` covers:
+`cargo test -p photosplice-codecs` covers:
 
 * the full round-trip matrix (every writable format × 4 sample types × 6 layouts), exact for
   lossless formats and above a PSNR threshold for lossy ones;

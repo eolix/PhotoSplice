@@ -438,7 +438,7 @@ impl DngSpec {
             baseline_exposure: None,
             orientation: 1,
             opcode_list2: None,
-            make: "Photosuite".into(),
+            make: "Photosplice".into(),
             model: "Synthetic".into(),
         }
     }

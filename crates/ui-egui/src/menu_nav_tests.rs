@@ -2,7 +2,7 @@
 //! and the scroll arrows, and the keyboard drives submenus and runs commands.
 
 use super::*;
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use egui_kittest::{Harness, kittest::Queryable};
 use serde_json::json;
 
@@ -11,44 +11,44 @@ const DISPLAYS: [(f32, f32, f32); 4] = [(1280.0, 720.0, 1.0), (1024.0, 600.0, 1.
 /// The tallest menus.
 const LONGEST: [&str; 4] = ["Filter", "Layer", "Image", "Edit"];
 
-fn app() -> PhotosuiteApp {
-    let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+fn app() -> PhotospliceApp {
+    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
     app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
     app.sync_views();
     app
 }
 
-fn harness((w, h, scale): (f32, f32, f32)) -> Harness<'static, PhotosuiteApp> {
+fn harness((w, h, scale): (f32, f32, f32)) -> Harness<'static, PhotospliceApp> {
     let mut h = Harness::builder().with_size(egui::vec2(w / scale, h / scale)).with_pixels_per_point(scale).build_ui_state(
         |ui, app| {
             crate::menus::menu_bar(app, ui);
         },
         app(),
     );
-    PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+    PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
     h.ctx.all_styles_mut(|s| s.scroll_animation = egui::style::ScrollAnimation::none());
     h.run_steps(3);
     h
 }
 
-fn open(h: &mut Harness<'static, PhotosuiteApp>, top: &str) {
+fn open(h: &mut Harness<'static, PhotospliceApp>, top: &str) {
     h.get_by_label(top).click();
     h.run_steps(4);
     assert!(Nav::current(&h.ctx).rows.first().is_some_and(|r| !r.is_empty()), "{top} did not open");
 }
 
 /// Is row `i` of `level` entirely inside its level's visible (scrolled) area, on screen?
-fn visible(h: &Harness<'static, PhotosuiteApp>, level: usize, i: usize) -> bool {
+fn visible(h: &Harness<'static, PhotospliceApp>, level: usize, i: usize) -> bool {
     let nav = Nav::current(&h.ctx);
     let (Some(row), Some(view)) = (nav.rows.get(level).and_then(|r| r.get(i)), nav.views.get(level)) else { return false };
     view.expand(0.5).contains_rect(row.rect) && h.ctx.content_rect().expand(0.5).contains_rect(*view)
 }
 
-fn rows(h: &Harness<'static, PhotosuiteApp>, level: usize) -> Vec<Row> {
+fn rows(h: &Harness<'static, PhotospliceApp>, level: usize) -> Vec<Row> {
     Nav::current(&h.ctx).rows.get(level).cloned().unwrap_or_default()
 }
 
-fn key(h: &mut Harness<'static, PhotosuiteApp>, k: egui::Key) {
+fn key(h: &mut Harness<'static, PhotospliceApp>, k: egui::Key) {
     h.key_press(k);
     h.run_steps(3);
 }
@@ -220,13 +220,13 @@ fn left_and_right_switch_menus_and_shortcuts_wait_while_one_is_open() {
 }
 
 /// A level's visible height (its view) and the full height of its rows: equal means no scrolling.
-fn fits(h: &Harness<'static, PhotosuiteApp>, level: usize) -> (f32, f32) {
+fn fits(h: &Harness<'static, PhotospliceApp>, level: usize) -> (f32, f32) {
     let nav = Nav::current(&h.ctx);
     (nav.views.get(level).map_or(0.0, |v| v.height()), nav.contents.get(level).copied().unwrap_or(0.0))
 }
 
 /// The on-screen rect of the popup holding `level` (the smallest area around its view).
-fn popup(h: &Harness<'static, PhotosuiteApp>, level: usize) -> egui::Rect {
+fn popup(h: &Harness<'static, PhotospliceApp>, level: usize) -> egui::Rect {
     let Some(view) = Nav::current(&h.ctx).views.get(level).copied() else { return egui::Rect::NOTHING };
     h.ctx
         .memory(|m| m.areas().visible_layer_ids())
@@ -238,7 +238,7 @@ fn popup(h: &Harness<'static, PhotosuiteApp>, level: usize) -> egui::Rect {
 }
 
 /// The popup is as tall as its rows plus the menu frame: no blank space, no clipped rows.
-fn hugs_rows(h: &Harness<'static, PhotosuiteApp>, level: usize) -> Result<(), String> {
+fn hugs_rows(h: &Harness<'static, PhotospliceApp>, level: usize) -> Result<(), String> {
     let (_, content) = fits(h, level);
     let frame = h.ctx.global_style().spacing.menu_margin.sum().y + 2.0;
     let area = popup(h, level);
@@ -246,7 +246,7 @@ fn hugs_rows(h: &Harness<'static, PhotosuiteApp>, level: usize) -> Result<(), St
 }
 
 /// Open the `n`th enabled submenu of the open top-level menu with the keyboard.
-fn open_submenu(h: &mut Harness<'static, PhotosuiteApp>, n: usize) -> bool {
+fn open_submenu(h: &mut Harness<'static, PhotospliceApp>, n: usize) -> bool {
     let subs: Vec<usize> = rows(h, 0).iter().enumerate().filter(|(_, r)| r.enabled && r.command.is_none()).map(|(i, _)| i).collect();
     let Some(&target) = subs.get(n) else { return false };
     for _ in 0..rows(h, 0).len() {
@@ -344,7 +344,7 @@ fn a_short_window_still_scrolls_the_file_menu_to_its_last_row() {
 }
 
 /// Every popup on screen (menus and submenus).
-fn popups(h: &Harness<'static, PhotosuiteApp>) -> Vec<egui::Rect> {
+fn popups(h: &Harness<'static, PhotospliceApp>) -> Vec<egui::Rect> {
     h.ctx
         .memory(|m| m.areas().visible_layer_ids())
         .into_iter()
@@ -354,14 +354,14 @@ fn popups(h: &Harness<'static, PhotosuiteApp>) -> Vec<egui::Rect> {
 }
 
 /// No popup covers the menu bar or runs off the window, and every menu title stays visible.
-fn check_bar_clear(h: &Harness<'static, PhotosuiteApp>, what: &str) {
+fn check_bar_clear(h: &Harness<'static, PhotospliceApp>, what: &str) {
     let bar = Nav::current(&h.ctx).bar_bottom.expect("the menu bar's bottom");
     let screen = h.ctx.content_rect();
     for r in popups(h) {
         assert!(r.top() >= bar - 0.5, "{what}: popup {r:?} covers the menu bar (bottom {bar})");
         assert!(r.bottom() <= screen.bottom() + 0.5, "{what}: popup {r:?} runs off the window {screen:?}");
     }
-    // The bar PhotoSuite draws: menus whose items are all hidden (Type) have no title.
+    // The bar PhotoSplice draws: menus whose items are all hidden (Type) have no title.
     for title in crate::menus::visible_top_menus(h.state()) {
         // The title is the topmost node of that name (a submenu row can share it).
         let t = h.query_all_by_label(title).map(|n| n.rect()).min_by(|a, b| a.top().total_cmp(&b.top())).expect("menu title");

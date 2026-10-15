@@ -1,6 +1,6 @@
 [package]
-name = "photosuite-io"
-description = "Import/export between photosuite documents and PSD/PSB and flat raster formats"
+name = "photosplice-io"
+description = "Import/export between photosplice documents and PSD/PSB and flat raster formats"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,14 +14,14 @@ workspace = true
 corpus = []
 
 [dependencies]
-photosuite-geom = { workspace = true }
-photosuite-color = { workspace = true }
-photosuite-cms = { workspace = true }
-photosuite-raster = { workspace = true }
-photosuite-doc = { workspace = true }
-photosuite-compose = { workspace = true }
-photosuite-psd = { workspace = true }
-photosuite-codecs = { workspace = true }
+photosplice-geom = { workspace = true }
+photosplice-color = { workspace = true }
+photosplice-cms = { workspace = true }
+photosplice-raster = { workspace = true }
+photosplice-doc = { workspace = true }
+photosplice-compose = { workspace = true }
+photosplice-psd = { workspace = true }
+photosplice-codecs = { workspace = true }
 # PDF pages (pure Rust, Apache-2.0 OR MIT): hayro-interpret walks a page's operations into the
 # importer's device; hayro's renderer is vendored in src/pdf/render and needs the rest.
 hayro = "0.8"
@@ -36,21 +36,21 @@ krilla = { version = "0.8", default-features = false, features = ["raster-images
 # The Photoshop editing data added to a saved PDF (Flate streams).
 flate2 = { workspace = true }
 # EXIF (camera, lens, exposure) read from and written for camera raw files.
-photosuite-algo = { workspace = true }
-photosuite-raw = { workspace = true }
-photosuite-text = { workspace = true }
-photosuite-paint = { workspace = true }
-photosuite-vector = { workspace = true }
-photosuite-format = { path = "../format" }
+photosplice-algo = { workspace = true }
+photosplice-raw = { workspace = true }
+photosplice-text = { workspace = true }
+photosplice-paint = { workspace = true }
+photosplice-vector = { workspace = true }
+photosplice-format = { path = "../format" }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
 blake3 = { version = "1.8", default-features = false, features = ["pure"] }
 
 [dev-dependencies]
-photosuite-psd = { workspace = true, features = ["testgen"] }
-photosuite-raw = { workspace = true, features = ["testgen"] }
+photosplice-psd = { workspace = true, features = ["testgen"] }
+photosplice-raw = { workspace = true, features = ["testgen"] }
 proptest = { workspace = true }
 # examples/gpu_diff.rs: the GPU compositor (what the app draws) against Photoshop's composite.
-photosuite-gpu = { path = "../gpu" }
+photosplice-gpu = { path = "../gpu" }
 wgpu = { version = "30" }
 pollster = "1"

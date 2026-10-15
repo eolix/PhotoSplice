@@ -2,11 +2,11 @@
 //! (eye toggles; double-click a filter to re-open its dialog with the recorded parameters).
 
 use egui::{Align2, Color32, Rect, Sense, Stroke, pos2, vec2};
-use photosuite_doc::{Layer, LayerContent, SmartObject};
+use photosplice_doc::{Layer, LayerContent, SmartObject};
 use serde_json::{Value, json};
 
 use crate::theme::Tokens;
-use crate::{PhotosuiteApp, icons};
+use crate::{PhotospliceApp, icons};
 
 /// Smart-object badge in the bottom-right corner of a layer thumbnail.
 pub fn thumb_badge(ui: &egui::Ui, l: &Layer, thumb: Rect) {
@@ -21,20 +21,20 @@ pub fn thumb_badge(ui: &egui::Ui, l: &Layer, thumb: Rect) {
 }
 
 /// The display name of a smart filter (its command's label without the ellipsis). A Photoshop
-/// filter PhotoSuite doesn't implement shows its own name and is marked as kept as is.
-fn filter_label(f: &photosuite_doc::SmartFilter) -> String {
+/// filter PhotoSplice doesn't implement shows its own name and is marked as kept as is.
+fn filter_label(f: &photosplice_doc::SmartFilter) -> String {
     let command = f.command.as_str();
-    if command == photosuite_engine::smart_cmds::UNSUPPORTED_FILTER {
+    if command == photosplice_engine::smart_cmds::UNSUPPORTED_FILTER {
         let name = f.params.get("name").and_then(Value::as_str).unwrap_or("Photoshop filter");
         return format!("{} (kept, not editable)", name.trim_end_matches("...").trim_end_matches('…'));
     }
-    photosuite_engine::commands::find(command)
+    photosplice_engine::commands::find(command)
         .map_or_else(|| command.rsplit('.').next().unwrap_or(command).to_string(), |c| c.label.trim_end_matches('…').to_string())
 }
 
 /// Smart Filters header + one row per filter (top filter first, as in Photoshop) under a smart
 /// layer. Edits are queued in `actions` as engine commands.
-pub fn filter_rows(app: &mut PhotosuiteApp, ui: &mut egui::Ui, l: &Layer, depth: usize, actions: &mut Vec<(String, Value)>) {
+pub fn filter_rows(app: &mut PhotospliceApp, ui: &mut egui::Ui, l: &Layer, depth: usize, actions: &mut Vec<(String, Value)>) {
     let LayerContent::Smart(sm) = &l.content else { return };
     if sm.smart_filters.is_empty() {
         return;
@@ -86,7 +86,7 @@ pub fn filter_rows(app: &mut PhotosuiteApp, ui: &mut egui::Ui, l: &Layer, depth:
 
 /// Re-opens a smart filter's dialog with its recorded parameters; OK runs
 /// `layer.smartFilter.setParams` instead of adding another filter (see `dialogs::confirm`).
-pub fn open_editor(app: &mut PhotosuiteApp, layer: u64, sm: &SmartObject, index: usize) {
+pub fn open_editor(app: &mut PhotospliceApp, layer: u64, sm: &SmartObject, index: usize) {
     let Some(f) = sm.smart_filters.get(index) else { return };
     if !crate::filter_dialog::has_dialog(&f.command) {
         return;

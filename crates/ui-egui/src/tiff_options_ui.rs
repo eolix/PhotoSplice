@@ -5,7 +5,7 @@
 //! once answered: with the layers (Photoshop layer data in the file), or flattened ("Discard
 //! Layers and Save a Copy"). "Don't show again" clears the preference. Cancel drops the save.
 
-use crate::{ExportSettings, PhotosuiteApp};
+use crate::{ExportSettings, PhotospliceApp};
 
 /// A save waiting on the TIFF Options answer.
 pub struct Prompt {
@@ -25,24 +25,24 @@ pub fn is_tiff_path(path: &str) -> bool {
 
 /// Whether saving the active document to `path` should go through the prompt: a TIFF that
 /// would carry layer data, with the preference on.
-pub fn wants_prompt(app: &PhotosuiteApp, path: &str) -> bool {
+pub fn wants_prompt(app: &PhotospliceApp, path: &str) -> bool {
     if !is_tiff_path(path) || !app.session.prefs().file_handling.ask_before_saving_layered_tiff {
         return false;
     }
     // A document without layers has none to keep: it saves straight back, like any flat file.
-    app.session.active().is_some_and(|st| !st.doc.layers.is_empty() && photosuite_io::tiff_layers::would_write_layers(&st.doc))
+    app.session.active().is_some_and(|st| !st.doc.layers.is_empty() && photosplice_io::tiff_layers::would_write_layers(&st.doc))
 }
 
 /// Parks the save behind the prompt.
-pub fn park(app: &mut PhotosuiteApp, path: String) {
+pub fn park(app: &mut PhotospliceApp, path: String) {
     app.tiff_options = Some(Prompt { path, discard_layers: false, dont_ask_again: false });
 }
 
-pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let Some(p) = &mut app.tiff_options else { return };
     let (mut ok, mut cancel) = (false, false);
     let (mut discard, mut dont_ask) = (p.discard_layers, p.dont_ask_again);
-    // PhotoSuite's dialog frame: the same title bar, drag and placement as every other dialog.
+    // PhotoSplice's dialog frame: the same title bar, drag and placement as every other dialog.
     let id = egui::Id::new("tiff-options");
     let modal = crate::dialogs::frame(ctx, id, tl!("TIFF Options"), crate::dialogs::FrameSize::Width(380.0, 420.0), |ui, _| {
         ui.label(tl!("Including layers will increase file size."));

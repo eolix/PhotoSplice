@@ -6,7 +6,7 @@
 //! radius-independent box cascade, so cost grows with the number of levels,
 //! not the blur size.
 
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 
 use crate::fxutil::{MAXC, add_sample_premul, gauss_blur_n, premul_window, smoothstep, unpremul_px, xy};
 use crate::image::Image;

@@ -2,14 +2,14 @@
 //! properties (board rect, background, preset), View › Clear Selected Artboard Guides, and
 //! File › Export › Artboards to Files / to PDF.
 //!
-//! An artboard is a top-level group with [`photosuite_doc::Artboard`] set; the compositor clips
+//! An artboard is a top-level group with [`photosplice_doc::Artboard`] set; the compositor clips
 //! its children to the board and paints its background. Moving the group (Move tool,
 //! `layer.translate`) moves the board with its contents. The canvas grows to the right and
 //! bottom to fit new boards, like Photoshop's auto-expanding artboard canvas.
 
-use photosuite_color::Color;
-use photosuite_doc::{Artboard, ArtboardBackground, Document, Layer, LayerContent, LayerId, Size};
-use photosuite_geom::Rect;
+use photosplice_color::Color;
+use photosplice_doc::{Artboard, ArtboardBackground, Document, Layer, LayerContent, LayerId, Size};
+use photosplice_geom::Rect;
 use serde_json::{Value, json};
 
 use crate::commands::{CommandSpec, color_param, int, int_i32};
@@ -359,13 +359,13 @@ fn artboards_to_files(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"files": files}))
 }
 
-/// A minimal PDF with one page per JPEG image (see [`photosuite_io::pdf::raster_pdf`]).
+/// A minimal PDF with one page per JPEG image (see [`photosplice_io::pdf::raster_pdf`]).
 pub fn raster_pdf(pages: &[(u32, u32, f32, Vec<u8>)]) -> Vec<u8> {
-    photosuite_io::pdf::raster_pdf(pages)
+    photosplice_io::pdf::raster_pdf(pages)
 }
 
 /// File › Export › Artboards to PDF: one page per board, its shapes and type as PDF vectors and
-/// text (see [`photosuite_io::pdf::export::export_pages`]).
+/// text (see [`photosplice_io::pdf::export::export_pages`]).
 fn artboards_to_pdf(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "file.export.artboardsToPdf";
     let path = str_param(p, "path", cmd)?.to_string();
@@ -375,7 +375,7 @@ fn artboards_to_pdf(s: &mut Session, p: &Value) -> Result<Value> {
     if boards.is_empty() {
         return Err(bad(cmd, "no matching artboards"));
     }
-    let r = photosuite_io::pdf::export::export_pages(&boards, &doc.name).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    let r = photosplice_io::pdf::export::export_pages(&boards, &doc.name).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
     write_file(&path, &r.bytes)?;
     Ok(json!({"path": path, "pages": boards.len(), "warnings": r.warnings}))
 }

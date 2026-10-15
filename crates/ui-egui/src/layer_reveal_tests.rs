@@ -2,19 +2,19 @@
 
 use egui::{Rect, vec2};
 use egui_kittest::{Harness, kittest::Queryable};
-use photosuite_doc::LayerId;
+use photosplice_doc::LayerId;
 use serde_json::json;
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::dock::{Group, last_rects};
 use crate::theme::ThemeKind;
 
 /// 30 layers above a closed group holding `inner` (near the bottom of the panel).
-fn tall_doc() -> (PhotosuiteApp, LayerId, LayerId, LayerId, LayerId) {
-    let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+fn tall_doc() -> (PhotospliceApp, LayerId, LayerId, LayerId, LayerId) {
+    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
     app.run("file.new", json!({"width": 200, "height": 150})).unwrap();
     app.run("layer.new.layer", json!({"name": "Deep inside"})).unwrap();
-    let active = |app: &PhotosuiteApp| app.session.active().unwrap().active_layer.unwrap();
+    let active = |app: &PhotospliceApp| app.session.active().unwrap().active_layer.unwrap();
     let inner = active(&app);
     app.run("layer.groupLayers", json!({})).unwrap();
     let group = app.session.active().unwrap().doc.walk().into_iter().find(|(_, _, l)| l.is_group()).map(|(_, _, l)| l.id).unwrap();
@@ -29,9 +29,9 @@ fn tall_doc() -> (PhotosuiteApp, LayerId, LayerId, LayerId, LayerId) {
     (app, inner, group, stack[29], stack[28])
 }
 
-fn harness(app: PhotosuiteApp, theme: ThemeKind) -> Harness<'static, PhotosuiteApp> {
+fn harness(app: PhotospliceApp, theme: ThemeKind) -> Harness<'static, PhotospliceApp> {
     let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_ui_state(
-        |ui, app: &mut PhotosuiteApp| {
+        |ui, app: &mut PhotospliceApp| {
             if !ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                 return;
             }
@@ -40,26 +40,26 @@ fn harness(app: PhotosuiteApp, theme: ThemeKind) -> Harness<'static, PhotosuiteA
         },
         app,
     );
-    PhotosuiteApp::setup_context(&h.ctx, theme);
+    PhotospliceApp::setup_context(&h.ctx, theme);
     h.state_mut().ui.theme = theme;
     h.run_steps(4);
     h
 }
 
 /// The Layers panel row of `name`, if drawn.
-fn row(h: &Harness<'static, PhotosuiteApp>, name: &str) -> Option<Rect> {
+fn row(h: &Harness<'static, PhotospliceApp>, name: &str) -> Option<Rect> {
     let layers = last_rects(&h.ctx).into_iter().find(|(g, _)| *g == Group::Layers)?.1;
     h.query_all_by_label(name).map(|n| n.rect()).find(|r| layers.contains(r.center()) || (r.left() >= layers.left() && r.right() <= layers.right()))
 }
 
 /// Fully inside the rows viewport (below the strip and the blend/lock rows, above the footer).
-fn in_view(h: &Harness<'static, PhotosuiteApp>, r: Rect) -> bool {
+fn in_view(h: &Harness<'static, PhotospliceApp>, r: Rect) -> bool {
     let layers = last_rects(&h.ctx).into_iter().find(|(g, _)| *g == Group::Layers).unwrap().1;
     r.top() >= layers.top() + 26.0 && r.bottom() <= layers.bottom() - 36.0
 }
 
-fn expanded(app: &PhotosuiteApp, group: LayerId) -> bool {
-    matches!(&app.session.active().unwrap().doc.layer(group).unwrap().content, photosuite_doc::LayerContent::Group(g) if g.expanded)
+fn expanded(app: &PhotospliceApp, group: LayerId) -> bool {
+    matches!(&app.session.active().unwrap().doc.layer(group).unwrap().content, photosplice_doc::LayerContent::Group(g) if g.expanded)
 }
 
 #[test]
@@ -116,7 +116,7 @@ fn a_new_active_layer_opens_its_groups_and_scrolls_into_view() {
 #[test]
 fn reveal_survives_odd_documents() {
     // No document, a document without layers in groups, a layer deleted between frames.
-    let app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+    let app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
     let mut h = harness(app, ThemeKind::Midnight);
     h.run_steps(2);
     h.state_mut().run("file.new", json!({"width": 20, "height": 20})).unwrap();

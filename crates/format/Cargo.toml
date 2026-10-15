@@ -1,5 +1,5 @@
 [package]
-name = "photosuite-format"
+name = "photosplice-format"
 description = "Native .pcraft document bundle: manifest + content-addressed zstd tiles"
 version.workspace = true
 edition.workspace = true
@@ -10,11 +10,11 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-photosuite-geom = { workspace = true }
-photosuite-color = { workspace = true }
-photosuite-raster = { workspace = true }
-photosuite-doc = { workspace = true }
-photosuite-codecs = { workspace = true }
+photosplice-geom = { workspace = true }
+photosplice-color = { workspace = true }
+photosplice-raster = { workspace = true }
+photosplice-doc = { workspace = true }
+photosplice-codecs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["unbounded_depth"] }
 thiserror = { workspace = true }

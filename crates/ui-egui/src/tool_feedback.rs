@@ -8,7 +8,7 @@
 
 use egui::{Color32, Pos2, Shape, Stroke, pos2, vec2};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::state::Tool;
 
 /// The intent a selection tool's next gesture has, shown as a cursor badge (none for New).
@@ -73,7 +73,7 @@ pub fn selection_mode(tool: Tool, bar: u8, m: egui::Modifiers) -> &'static str {
 }
 
 /// The badge the cursor of `tool` shows with modifiers `m` (None for non-selection tools or New).
-pub fn badge(app: &PhotosuiteApp, tool: Tool, m: egui::Modifiers) -> Option<Badge> {
+pub fn badge(app: &PhotospliceApp, tool: Tool, m: egui::Modifiers) -> Option<Badge> {
     if !is_selection_tool(tool) {
         return None;
     }
@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn badge_follows_modifiers_and_the_options_bar() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         let none = egui::Modifiers::NONE;
         let (shift, alt) = (egui::Modifiers::SHIFT, egui::Modifiers::ALT);
         let both = egui::Modifiers { shift: true, alt: true, ..Default::default() };

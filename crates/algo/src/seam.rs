@@ -11,7 +11,7 @@
 //! seams avoid protected pixels. Buffers are interleaved `w × h × ch` normalised floats of any
 //! colour model and depth (alpha is carried like any other channel). Deterministic.
 
-use photosuite_raster::{Cancelled, Interrupt};
+use photosplice_raster::{Cancelled, Interrupt};
 
 /// Energy added per unit of protection: far above any gradient magnitude.
 const PROTECT_ENERGY: f32 = 1.0e4;

@@ -1,8 +1,8 @@
 //! Image › Analysis data and notes survive a `.pcraft` round trip; old manifests default them.
 
-use photosuite_color::{Color, ColorMode, SampleType};
-use photosuite_doc::{CountGroup, Document, MeasurementScale, Note, Ruler, Size};
-use photosuite_format::*;
+use photosplice_color::{Color, ColorMode, SampleType};
+use photosplice_doc::{CountGroup, Document, MeasurementScale, Note, Ruler, Size};
+use photosplice_format::*;
 
 #[test]
 fn measurement_and_notes_roundtrip_and_default_when_absent() {
@@ -34,6 +34,6 @@ fn measurement_and_notes_roundtrip_and_default_when_absent() {
     let mut v = serde_json::to_value(&m.document).unwrap();
     v.as_object_mut().unwrap().remove("measurement");
     v.as_object_mut().unwrap().remove("notes");
-    let old: photosuite_format::manifest::DocM = serde_json::from_value(v).unwrap();
+    let old: photosplice_format::manifest::DocM = serde_json::from_value(v).unwrap();
     assert!(old.measurement.is_empty() && old.notes.is_empty());
 }

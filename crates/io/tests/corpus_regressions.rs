@@ -3,12 +3,12 @@
 //! files themselves are never committed: each test rebuilds the relevant
 //! structure from our own documents.
 
-use photosuite_color::{Color, ColorMode, SampleType};
-use photosuite_doc::{Document, Fill, Layer, LayerContent, LayerMask, Path, ShapeLayer, Size, Subpath, VectorMask};
-use photosuite_geom::Rect;
-use photosuite_io::*;
-use photosuite_psd::layer::CHANNEL_REAL_USER_MASK;
-use photosuite_psd::{ChannelData, Compression, MaskData, PsdFile, RealMask, Version};
+use photosplice_color::{Color, ColorMode, SampleType};
+use photosplice_doc::{Document, Fill, Layer, LayerContent, LayerMask, Path, ShapeLayer, Size, Subpath, VectorMask};
+use photosplice_geom::Rect;
+use photosplice_io::*;
+use photosplice_psd::layer::CHANNEL_REAL_USER_MASK;
+use photosplice_psd::{ChannelData, Compression, MaskData, PsdFile, RealMask, Version};
 
 fn doc(depth: SampleType) -> Document {
     Document::with_background("t", Size::new(32, 32), ColorMode::Rgb, depth, Color::WHITE)
@@ -31,7 +31,7 @@ fn shape_layer_without_stored_pixels_renders_from_its_path() {
         let mut d = doc(depth);
         let sh = ShapeLayer { path: square(8.0, 8.0, 24.0, 24.0), fill: Some(Fill::Solid(Color::BLACK)), ..Default::default() };
         let mut sh2 = sh.clone();
-        sh2.cache = Some(photosuite_vector::render_shape(&sh, d.pixel_format(), d.bounds()));
+        sh2.cache = Some(photosplice_vector::render_shape(&sh, d.pixel_format(), d.bounds()));
         d.layers.push(Layer::new("Shape 1", LayerContent::Shape(sh2)));
         let mut file = PsdFile::from_bytes(&export(&d, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap();
         // Drop the shape record's pixels, as Photoshop does for 32-bit documents.
@@ -43,7 +43,7 @@ fn shape_layer_without_stored_pixels_renders_from_its_path() {
             *ch = ChannelData::encode(ch.id, Compression::Raw, &[], 0, 0, bits, Version::Psd).unwrap();
         }
         let imp = reimport(&file);
-        let f = photosuite_compose::flatten(&imp.document);
+        let f = photosplice_compose::flatten(&imp.document);
         assert!(f.get(16, 16)[0] < 0.01, "{depth:?}: shape interior renders black: {:?}", f.get(16, 16));
         assert!(f.get(2, 2)[0] > 0.99, "{depth:?}: outside stays white");
     }
@@ -100,7 +100,7 @@ fn real_user_mask_with_parameters_is_decoded() {
     let rec = file.layers_mut().last_mut().unwrap();
     let MaskData::Mask(pm) = &mut rec.mask else { panic!("mask record") };
     assert!(pm.parameters.is_some());
-    let real_rect = photosuite_psd::Rect { top: 0, left: 0, bottom: 32, right: 16 };
+    let real_rect = photosplice_psd::Rect { top: 0, left: 0, bottom: 32, right: 16 };
     pm.real = Some(RealMask { flags: 0, background: 255, rect: real_rect });
     pm.trailing.clear();
     rec.channels.push(ChannelData::encode(CHANNEL_REAL_USER_MASK, Compression::Rle, &[0u8; 16 * 32], 16, 32, 8, Version::Psd).unwrap());
@@ -129,7 +129,7 @@ fn shape_with_vector_mask_density_imports_as_fill_with_soft_mask() {
     // Photoshop stores the shape alone: replace the record's pixels with the path's coverage.
     let rec = file.layers_mut().last_mut().unwrap();
     assert!(rec.block(b"SoCo").is_some() && rec.block(b"vmsk").is_some());
-    rec.rect = photosuite_psd::Rect { top: 8, left: 8, bottom: 24, right: 24 };
+    rec.rect = photosplice_psd::Rect { top: 8, left: 8, bottom: 24, right: 24 };
     for ch in &mut rec.channels {
         if ch.id >= -1 {
             let v = if ch.id == -1 { 255 } else { 0 };
@@ -140,7 +140,7 @@ fn shape_with_vector_mask_density_imports_as_fill_with_soft_mask() {
     let l = &imp.document.layers[1];
     assert!(matches!(l.content, LayerContent::Fill(_)), "{}", l.content.kind_name());
     assert_eq!(l.vector_mask.as_ref().map(|v| v.density), Some(204.0 / 255.0));
-    let f = photosuite_compose::flatten(&imp.document);
+    let f = photosplice_compose::flatten(&imp.document);
     assert!(f.get(16, 16)[0] < 0.01, "inside the path: black");
     assert!((f.get(2, 2)[0] - 0.8).abs() < 0.01, "outside: 20% of the fill shows: {:?}", f.get(2, 2));
 }
@@ -154,7 +154,7 @@ fn shape_without_pixels_and_full_initial_fill_covers_the_canvas() {
     path.inverted = true;
     let sh = ShapeLayer { path, fill: Some(Fill::Solid(Color::BLACK)), ..Default::default() };
     let mut sh2 = sh.clone();
-    sh2.cache = Some(photosuite_vector::render_shape(&sh, d.pixel_format(), d.bounds()));
+    sh2.cache = Some(photosplice_vector::render_shape(&sh, d.pixel_format(), d.bounds()));
     d.layers.push(Layer::new("Color Fill 1", LayerContent::Shape(sh2)));
     let mut file = PsdFile::from_bytes(&export(&d, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap();
     let rec = file.layers_mut().last_mut().unwrap();
@@ -162,6 +162,6 @@ fn shape_without_pixels_and_full_initial_fill_covers_the_canvas() {
     for ch in &mut rec.channels {
         *ch = ChannelData::encode(ch.id, Compression::Raw, &[], 0, 0, 8, Version::Psd).unwrap();
     }
-    let f = photosuite_compose::flatten(&reimport(&file).document);
+    let f = photosplice_compose::flatten(&reimport(&file).document);
     assert!(f.get(0, 0)[0] < 0.01 && f.get(31, 31)[0] < 0.01, "covers everything: {:?}", f.get(0, 0));
 }

@@ -2,14 +2,14 @@
 # Structural and delta-update checks on the exact AppImage about to be published. The AppImage
 # is only unpacked, never launched, so this runs on a headless runner.
 #
-#   packaging/linux/verify-appimage.sh [dist/release/photosuite-<version>-linux-<arch>.AppImage]
+#   packaging/linux/verify-appimage.sh [dist/release/photosplice-<version>-linux-<arch>.AppImage]
 #
 # With no argument it checks the one AppImage in $DIST (default dist/release). Needs python3,
 # zsync, desktop-file-utils (desktop-file-validate) and appstream (appstreamcli).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DIST="${DIST:-$ROOT/dist/release}"
-APP_ID=io.github.eolix.PhotoSuite
+APP_ID=io.github.eolix.PhotoSplice
 
 if [ $# -gt 0 ]; then
   image="$1"
@@ -25,8 +25,8 @@ name="$(basename "$image")"
 # The name must match the glob in the embedded update information, or AppImageUpdate would look
 # for a .zsync the release doesn't carry.
 case "$name" in
-  photosuite-*-linux-x86_64.AppImage) arch=x86_64 ;;
-  photosuite-*-linux-aarch64.AppImage) arch=aarch64 ;;
+  photosplice-*-linux-x86_64.AppImage) arch=x86_64 ;;
+  photosplice-*-linux-aarch64.AppImage) arch=aarch64 ;;
   *) echo "unexpected AppImage name: $name" >&2; exit 1 ;;
 esac
 
@@ -65,9 +65,9 @@ PY
     exit 1
   fi
   for f in LICENSE-MIT LICENSE-APACHE NOTICE THIRD-PARTY-NOTICES.md THIRD-PARTY-CRATES.md; do
-    test -s "squashfs-root/usr/share/doc/photosuite/$f" || { echo "missing from the AppImage: $f" >&2; exit 1; }
+    test -s "squashfs-root/usr/share/doc/photosplice/$f" || { echo "missing from the AppImage: $f" >&2; exit 1; }
   done
-  test -d squashfs-root/usr/share/photosuite/resources || { echo "missing from the AppImage: resources" >&2; exit 1; }
+  test -d squashfs-root/usr/share/photosplice/resources || { echo "missing from the AppImage: resources" >&2; exit 1; }
 
   # A delta update only helps if the control file can rebuild the image: rebuild it from
   # itself and compare byte for byte.
@@ -76,8 +76,8 @@ PY
 )
 
 # Without this AppImageUpdate can't find the .zsync, and updates silently never happen.
-repo="${PHOTOSUITE_UPDATE_REPO:-${GITHUB_REPOSITORY:-eolix/photosuite}}"
-expected="gh-releases-zsync|${repo%%/*}|${repo#*/}|latest|photosuite-*-linux-$arch.AppImage.zsync"
+repo="${PHOTOSPLICE_UPDATE_REPO:-${GITHUB_REPOSITORY:-eolix/photosplice}}"
+expected="gh-releases-zsync|${repo%%/*}|${repo#*/}|latest|photosplice-*-linux-$arch.AppImage.zsync"
 actual="$(env -u APPIMAGE_EXTRACT_AND_RUN "$image" --appimage-updateinformation)"
 if [ "$actual" != "$expected" ]; then
   echo "embedded update information mismatch" >&2

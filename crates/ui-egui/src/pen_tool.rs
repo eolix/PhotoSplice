@@ -16,14 +16,14 @@
 //! the control channel drives the same edits.
 
 use egui::{Color32, Modifiers, Pos2};
-use photosuite_doc::vector::{Path, PathOp, Subpath};
-use photosuite_doc::{Knot, LayerContent};
-use photosuite_geom::Point;
-use photosuite_vector::edit::{self, Hit};
+use photosplice_doc::vector::{Path, PathOp, Subpath};
+use photosplice_doc::{Knot, LayerContent};
+use photosplice_geom::Point;
+use photosplice_vector::edit::{self, Hit};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::direct_select::PathRef;
 
 /// The subpath being drawn.
@@ -109,12 +109,12 @@ fn hex(c: [f32; 4]) -> String {
 }
 
 /// The path `r` names in the active document.
-fn path_of(app: &PhotosuiteApp, r: PathRef) -> Option<Path> {
+fn path_of(app: &PhotospliceApp, r: PathRef) -> Option<Path> {
     let st = app.session.active()?;
     match r {
         PathRef::Work => st.doc.work_path.clone(),
         PathRef::Layer(id) => {
-            let l = st.doc.layer(photosuite_doc::LayerId(id))?;
+            let l = st.doc.layer(photosplice_doc::LayerId(id))?;
             match &l.content {
                 LayerContent::Shape(sh) => Some(sh.path.clone()),
                 _ => l.vector_mask.as_ref().map(|m| m.path.clone()),
@@ -123,7 +123,7 @@ fn path_of(app: &PhotosuiteApp, r: PathRef) -> Option<Path> {
     }
 }
 
-fn op(app: &PhotosuiteApp) -> PathOp {
+fn op(app: &PhotospliceApp) -> PathOp {
     match app.ui.tool_options.pen_op.as_str() {
         "subtract" => PathOp::Subtract,
         "intersect" => PathOp::Intersect,
@@ -135,7 +135,7 @@ fn op(app: &PhotosuiteApp) -> PathOp {
 /// Where a new subpath goes: the targeted vector mask, else the work path (Path mode); the
 /// active shape layer when a path operation other than New Layer is chosen, else a new shape
 /// layer (Shape mode). `None` path: nothing there yet.
-fn new_target(app: &PhotosuiteApp) -> (PathRef, Option<Path>, bool) {
+fn new_target(app: &PhotospliceApp) -> (PathRef, Option<Path>, bool) {
     if app.ui.tool_options.vector_mode == "shape" {
         if app.ui.tool_options.pen_op != "new"
             && let Some((id, p)) = crate::vector_ui::active_shape_path(app)
@@ -151,14 +151,14 @@ fn new_target(app: &PhotosuiteApp) -> (PathRef, Option<Path>, bool) {
 }
 
 /// The subpath being drawn, if it still is one (an undo can take it away).
-fn active(app: &PhotosuiteApp) -> Option<(Active, Path)> {
+fn active(app: &PhotospliceApp) -> Option<(Active, Path)> {
     let a = app.ui.pen.active?;
     let p = path_of(app, a.target)?;
     p.subpaths.get(a.subpath).filter(|sp| !sp.closed && !sp.knots.is_empty())?;
     Some((a, p))
 }
 
-fn tolerance(app: &PhotosuiteApp) -> f64 {
+fn tolerance(app: &PhotospliceApp) -> f64 {
     6.0 / f64::from(app.current_zoom().max(0.01))
 }
 
@@ -171,7 +171,7 @@ fn ends(a: &Active, p: &Path) -> Option<([usize; 2], [usize; 2])> {
 }
 
 /// What a press at `p` does, and the parts it acts on.
-fn intent(app: &PhotosuiteApp, p: [f64; 2]) -> (Intent, Option<Hit>) {
+fn intent(app: &PhotospliceApp, p: [f64; 2]) -> (Intent, Option<Hit>) {
     let tol = tolerance(app);
     let at = Point::new(p[0], p[1]);
     let curvature = app.ui.tool == crate::state::Tool::CurvaturePen;
@@ -264,7 +264,7 @@ fn resmooth(path: &mut Path, [s, k]: [usize; 2]) {
 /// Add Anchor Point (`add`) and Delete Anchor Point tools: a press on a segment adds a point
 /// that keeps the curve (a drag then moves it); on a point, deletes it. They act on the path
 /// under the pointer (the targeted vector mask or the active shape's path, then the work path).
-pub fn anchor_down(app: &mut PhotosuiteApp, x: f64, y: f64, add: bool) {
+pub fn anchor_down(app: &mut PhotospliceApp, x: f64, y: f64, add: bool) {
     let tol = tolerance(app);
     let at = Point::new(x, y);
     let active = app.ui.pen.active;
@@ -301,7 +301,7 @@ pub fn anchor_down(app: &mut PhotosuiteApp, x: f64, y: f64, add: bool) {
 }
 
 /// A press with the Pen (no ⌘ / ⌥: those are `direct_select`'s).
-pub fn down(app: &mut PhotosuiteApp, x: f64, y: f64, mods: Modifiers) {
+pub fn down(app: &mut PhotospliceApp, x: f64, y: f64, mods: Modifiers) {
     let curvature = app.ui.tool == crate::state::Tool::CurvaturePen;
     if app.ui.tool == crate::state::Tool::FreeformPen {
         let (target, base, new_shape) = new_target(app);
@@ -432,7 +432,7 @@ pub fn down(app: &mut PhotosuiteApp, x: f64, y: f64, mods: Modifiers) {
 }
 
 /// Pointer moves: shape what the press made.
-pub fn moved(app: &mut PhotosuiteApp, x: f64, y: f64, mods: Modifiers) {
+pub fn moved(app: &mut PhotospliceApp, x: f64, y: f64, mods: Modifiers) {
     let zoom = f64::from(app.current_zoom().max(0.01));
     let Some(d) = app.ui.pen.drag.as_mut() else { return };
     if !d.moved && (x - d.start[0]).hypot(y - d.start[1]) * zoom < 2.0 {
@@ -490,13 +490,13 @@ pub fn moved(app: &mut PhotosuiteApp, x: f64, y: f64, mods: Modifiers) {
 }
 
 /// Release: commit the press as one step.
-pub fn up(app: &mut PhotosuiteApp) {
+pub fn up(app: &mut PhotospliceApp) {
     let Some(d) = app.ui.pen.drag.take() else { return };
     let mut path = d.shaped.clone().unwrap_or_else(|| d.path.clone());
     if d.shaping == Shaping::Freehand {
         // The trail, fitted within Photoshop's default Curve Fit (2 px), as a new subpath.
         let pts: Vec<(f64, f64)> = d.trail.iter().map(|p| (p[0], p[1])).collect();
-        let Some(mut sp) = photosuite_vector::trace::fit_open(&pts, 2.0) else { return };
+        let Some(mut sp) = photosplice_vector::trace::fit_open(&pts, 2.0) else { return };
         if !path.subpaths.is_empty() {
             sp.op = op(app);
         }
@@ -519,7 +519,7 @@ pub fn up(app: &mut PhotosuiteApp) {
             return;
         }
     };
-    let pj = photosuite_engine::vector_cmds::path_json(&path);
+    let pj = photosplice_engine::vector_cmds::path_json(&path);
     let r = if d.new_shape {
         let o = &app.ui.tool_options;
         let fill = if o.shape_fill { json!(hex(app.session.tools.foreground)) } else { Value::Null };
@@ -547,13 +547,13 @@ pub fn up(app: &mut PhotosuiteApp) {
 }
 
 /// ↩ / Esc / ⌘-click: the subpath being drawn ends (it stays as drawn).
-pub fn end(app: &mut PhotosuiteApp) {
+pub fn end(app: &mut PhotospliceApp) {
     app.ui.pen = Pen::default();
 }
 
 /// The path being drawn on and its active end, a rubber band to the pointer, and what a click
 /// would do beside the pointer.
-pub fn draw_overlay(app: &PhotosuiteApp, painter: &egui::Painter, to_scr: &dyn Fn([f64; 2]) -> Pos2, accent: Color32) {
+pub fn draw_overlay(app: &PhotospliceApp, painter: &egui::Painter, to_scr: &dyn Fn([f64; 2]) -> Pos2, accent: Color32) {
     let pen = &app.ui.pen;
     let shown = match &pen.drag {
         Some(d) => Some((d.target, d.shaped.clone().unwrap_or_else(|| d.path.clone()), Some(d.knot))),
@@ -613,29 +613,29 @@ mod tests {
     use super::*;
     use crate::state::Tool;
 
-    fn app() -> PhotosuiteApp {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+    fn app() -> PhotospliceApp {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({"width": 300, "height": 200})).unwrap();
         app.ui.tool = Tool::Pen;
         app
     }
 
-    fn click(app: &mut PhotosuiteApp, x: f64, y: f64) {
+    fn click(app: &mut PhotospliceApp, x: f64, y: f64) {
         down(app, x, y, Modifiers::NONE);
         up(app);
     }
 
-    fn drag(app: &mut PhotosuiteApp, from: [f64; 2], to: [f64; 2], mods: Modifiers) {
+    fn drag(app: &mut PhotospliceApp, from: [f64; 2], to: [f64; 2], mods: Modifiers) {
         down(app, from[0], from[1], mods);
         moved(app, to[0], to[1], mods);
         up(app);
     }
 
-    fn work(app: &PhotosuiteApp) -> Path {
+    fn work(app: &PhotospliceApp) -> Path {
         app.session.active().unwrap().doc.work_path.clone().unwrap()
     }
 
-    fn labels(app: &PhotosuiteApp) -> Vec<String> {
+    fn labels(app: &PhotospliceApp) -> Vec<String> {
         app.session.active().unwrap().history.entries().iter().map(|e| e.to_string()).collect()
     }
 

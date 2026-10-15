@@ -16,8 +16,8 @@
 
 use std::cell::RefCell;
 
-use photosuite_doc::{Document, Knockout, Layer, LayerContent};
-use photosuite_geom::Rect;
+use photosplice_doc::{Document, Knockout, Layer, LayerContent};
+use photosplice_geom::Rect;
 
 use crate::{Buffer, Ctx};
 
@@ -123,9 +123,9 @@ pub(crate) fn mix(a: [f32; 4], b: [f32; 4], k: f32) -> [f32; 4] {
 
 #[cfg(test)]
 mod tests {
-    use photosuite_color::{BlendMode, ColorMode, SampleType};
-    use photosuite_doc::{Document, Knockout, Layer, Size};
-    use photosuite_geom::Rect;
+    use photosplice_color::{BlendMode, ColorMode, SampleType};
+    use photosplice_doc::{Document, Knockout, Layer, Size};
+    use photosplice_geom::Rect;
 
     fn solid(name: &str, d: &Document, rgba: [f32; 4]) -> Layer {
         let mut l = Layer::raster(name, d.pixel_format());
@@ -175,9 +175,9 @@ mod tests {
 
 #[cfg(test)]
 mod clip_tests {
-    use photosuite_color::{BlendMode, ColorMode, SampleType};
-    use photosuite_doc::{Color, Document, Effect, FxCommon, Layer, Size};
-    use photosuite_geom::Rect;
+    use photosplice_color::{BlendMode, ColorMode, SampleType};
+    use photosplice_doc::{Color, Document, Effect, FxCommon, Layer, Size};
+    use photosplice_geom::Rect;
 
     fn solid(name: &str, d: &Document, rgba: [f32; 4], w: i32) -> Layer {
         let mut l = Layer::raster(name, d.pixel_format());
@@ -244,9 +244,9 @@ mod clip_tests {
 
 #[cfg(test)]
 mod mask_hides_effects_tests {
-    use photosuite_color::{ColorMode, SampleType};
-    use photosuite_doc::{Color, Document, Effect, FxCommon, FxPaint, Layer, LayerMask, Size, StrokeFx, StrokePosition};
-    use photosuite_geom::Rect;
+    use photosplice_color::{ColorMode, SampleType};
+    use photosplice_doc::{Color, Document, Effect, FxCommon, FxPaint, Layer, LayerMask, Size, StrokeFx, StrokePosition};
+    use photosplice_geom::Rect;
 
     /// A red square (x 2..6) masked over its right half (x 4..6), with a 1 px black outside
     /// stroke, on white: Photoshop reference `mask-hides-effects.psd` in miniature.
@@ -264,7 +264,7 @@ mod mask_hides_effects_tests {
         m.surface.fill_rect(Rect::new(4, 0, 6, 3), &[0.0]);
         l.mask = Some(m);
         l.effects.items = vec![Effect::Stroke(StrokeFx {
-            common: FxCommon::new(photosuite_color::BlendMode::Normal, 1.0),
+            common: FxCommon::new(photosplice_color::BlendMode::Normal, 1.0),
             size: 1.0,
             position: StrokePosition::Outside,
             paint: FxPaint::Color(Color::BLACK),

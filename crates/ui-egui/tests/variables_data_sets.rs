@@ -1,11 +1,11 @@
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use photosuite_ui_egui::PhotosuiteApp;
-use photosuite_ui_egui::state::DialogKind;
+use photosplice_ui_egui::PhotospliceApp;
+use photosplice_ui_egui::state::DialogKind;
 use serde_json::{Map, json};
 
-fn app_with_variables_dialog(cur: u64) -> PhotosuiteApp {
-    let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), photosuite_ui_egui::Services::default());
+fn app_with_variables_dialog(cur: u64) -> PhotospliceApp {
+    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), photosplice_ui_egui::Services::default());
     app.run("file.new", json!({"width": 64, "height": 64})).unwrap();
     app.run("layer.new.layer", json!({})).unwrap();
     let state = json!({
@@ -27,18 +27,18 @@ fn app_with_variables_dialog(cur: u64) -> PhotosuiteApp {
     app
 }
 
-fn harness(app: PhotosuiteApp) -> Harness<'static, PhotosuiteApp> {
+fn harness(app: PhotospliceApp) -> Harness<'static, PhotospliceApp> {
     let mut h = Harness::builder().with_size(egui::vec2(900.0, 700.0)).build_ui_state(
-        |ui, app: &mut PhotosuiteApp| {
+        |ui, app: &mut PhotospliceApp| {
             let ctx = ui.ctx().clone();
             if !ctx.fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                 return;
             }
-            photosuite_ui_egui::dialogs::show(app, &ctx);
+            photosplice_ui_egui::dialogs::show(app, &ctx);
         },
         app,
     );
-    PhotosuiteApp::setup_context(&h.ctx, photosuite_ui_egui::theme::ThemeKind::ALL[0]);
+    PhotospliceApp::setup_context(&h.ctx, photosplice_ui_egui::theme::ThemeKind::ALL[0]);
     h.run_steps(3);
     h
 }
@@ -57,8 +57,8 @@ fn out_of_range_data_set_index_is_clamped_before_delete() {
 }
 
 /// `ui.dialog.set` can store any JSON in `__variables`; the editors write into its entries.
-fn app_with_malformed_variables(page: &str) -> PhotosuiteApp {
-    let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), photosuite_ui_egui::Services::default());
+fn app_with_malformed_variables(page: &str) -> PhotospliceApp {
+    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), photosplice_ui_egui::Services::default());
     app.run("file.new", json!({"width": 64, "height": 64})).unwrap();
     app.run("layer.new.layer", json!({})).unwrap();
     let mut fields = Map::new();
@@ -71,7 +71,7 @@ fn app_with_malformed_variables(page: &str) -> PhotosuiteApp {
     app
 }
 
-fn type_into_first_text_field(h: &mut Harness<'static, PhotosuiteApp>) {
+fn type_into_first_text_field(h: &mut Harness<'static, PhotospliceApp>) {
     h.query_all_by_role(egui::accesskit::Role::TextInput).next().expect("a text field").click();
     h.run_steps(2);
     h.query_all_by_role(egui::accesskit::Role::TextInput).next().expect("a text field").type_text("z");

@@ -1,5 +1,5 @@
 use super::*;
-use photosuite_color::SampleType;
+use photosplice_color::SampleType;
 
 fn session_depth(depth: u32) -> Session {
     let mut s = Session::new();

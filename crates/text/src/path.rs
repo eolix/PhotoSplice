@@ -1,6 +1,6 @@
 //! Type on a path: arc-length sampling of a [`TextPath`] and glyph placement along it.
 
-use photosuite_doc::text::TextPath;
+use photosplice_doc::text::TextPath;
 
 use crate::layout::{GlyphOrient, TextLayout};
 
@@ -115,8 +115,8 @@ pub(crate) fn place_on_path(out: &mut TextLayout, advances: &[f32], path: &TextP
 mod tests {
     use super::*;
     use crate::TextEngine;
-    use photosuite_doc::TextLayer;
-    use photosuite_doc::text::{CharStyle, TextRun};
+    use photosplice_doc::TextLayer;
+    use photosplice_doc::text::{CharStyle, TextRun};
 
     fn layer(text: &str, path: Option<TextPath>) -> TextLayer {
         let style = CharStyle { size_pt: 20.0, ..CharStyle::default() };
@@ -171,7 +171,7 @@ mod tests {
         p.segments = vec![[[0.0, 0.0], [10.0, 0.0], [20.0, 0.0], [30.0, 0.0]]];
         assert!(e.layout(&layer("Hamburg", Some(p)), 72.0).glyphs.len() < flat.glyphs.len());
         // The glyphs render (rotated outlines included in the ink).
-        let r = crate::render::ink_rect(&l, &photosuite_geom::Affine::IDENTITY);
+        let r = crate::render::ink_rect(&l, &photosplice_geom::Affine::IDENTITY);
         // Turned 90° clockwise, the glyph's top points right.
         assert!(r.width() > 0 && r.y0 >= 140 && r.x0 >= -2, "{r:?}");
     }

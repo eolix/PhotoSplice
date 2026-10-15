@@ -1,9 +1,9 @@
 //! `cargo xtask upstream`: port fixes from upstream PhotoCraft (storytold/photocraft), keeping
 //! each one's author, date and message. The runbook and the ledger are `docs/upstream-sync.md`.
 //!
-//! PhotoSuite began as a file copy of PhotoCraft, so the two share no git history. To port an
+//! PhotoSplice began as a file copy of PhotoCraft, so the two share no git history. To port an
 //! upstream commit, this builds two commits in our repository: the commit's parent and the
-//! commit itself, each holding only the files the commit touches, renamed the way PhotoSuite
+//! commit itself, each holding only the files the commit touches, renamed the way PhotoSplice
 //! names things ([`map_text`]). Cherry-picking the second onto our tree is then a real three-way
 //! merge, file by file, with the upstream parent as the base. Nothing upstream is pushed: the
 //! two commits sit under the local `refs/upstream/` namespace.
@@ -26,14 +26,14 @@ usage: cargo xtask upstream <command>
 
   status [--fetch] [--all]   upstream commits after the pin that are not decided yet (--all:
                              every commit after the pin), with a guess at their kind and how many
-                             of their files PhotoSuite has changed since (\"diverged\")
+                             of their files PhotoSplice has changed since (\"diverged\")
   port <sha>                 apply one upstream commit to the working tree (renamed, three-way),
                              without committing; prints the files held back and the commit command
   skip <sha> <reason>…       record a decision not to port it in the ledger
   pin                        move the ledger's \"Synced through\" to the last commit before the
                              first undecided one
 
-The upstream checkout is ../photocraft, or $PHOTOSUITE_UPSTREAM_DIR.";
+The upstream checkout is ../photocraft, or $PHOTOSPLICE_UPSTREAM_DIR.";
 
 pub fn run(root: &Path, args: &[&str]) -> Result<(), String> {
     let up = upstream_dir(root);
@@ -47,7 +47,7 @@ pub fn run(root: &Path, args: &[&str]) -> Result<(), String> {
 }
 
 fn upstream_dir(root: &Path) -> PathBuf {
-    std::env::var_os("PHOTOSUITE_UPSTREAM_DIR").map(PathBuf::from).unwrap_or_else(|| root.join("../photocraft"))
+    std::env::var_os("PHOTOSPLICE_UPSTREAM_DIR").map(PathBuf::from).unwrap_or_else(|| root.join("../photocraft"))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -57,7 +57,7 @@ fn upstream_dir(root: &Path) -> PathBuf {
 /// must survive [`map_text`] unchanged.
 const KEEP: &[&str] = &["storytold/photocraft", "photocraft-corpus", "PhotoCraft contributors", "PhotoCraft (https://", "PhotoCraft](https://"];
 
-/// PhotoCraft's themes → PhotoSuite's, by role: Pro (darkest) → Midnight, ProMedium (the
+/// PhotoCraft's themes → PhotoSplice's, by role: Pro (darkest) → Midnight, ProMedium (the
 /// default) → Slate (the default), Studio and Classic → Anthracite, StudioLight → Pearl. Longer
 /// names first, so `ProMedium` is not read as `Pro`. Only the unmistakable spellings: a bare
 /// `"pro"` or `"studio"` string is mapped by hand.
@@ -81,7 +81,7 @@ const THEMES: &[(&str, &str)] = &[
     ("window.theme.studioLight", "window.theme.pearl"),
 ];
 
-/// PhotoCraft's names → PhotoSuite's: the app id (the macOS bundle uses `app.photosuite`), every
+/// PhotoCraft's names → PhotoSplice's: the app id (the macOS bundle uses `app.photosplice`), every
 /// casing of the name, and in Rust sources the theme names ([`THEMES`]).
 fn map_text(text: &str, path: &str) -> String {
     let mut s = text.to_string();
@@ -93,9 +93,9 @@ fn map_text(text: &str, path: &str) -> String {
             guards.push((g, *k));
         }
     }
-    let app_id = if path.starts_with("packaging/macos/") { "app.photosuite" } else { "io.github.eolix.PhotoSuite" };
+    let app_id = if path.starts_with("packaging/macos/") { "app.photosplice" } else { "io.github.eolix.PhotoSplice" };
     s = s.replace("ai.storyteller.photocraft", app_id);
-    for (from, to) in [("PHOTOCRAFT", "PHOTOSUITE"), ("PhotoCraft", "PhotoSuite"), ("Photocraft", "Photosuite"), ("photocraft", "photosuite")] {
+    for (from, to) in [("PHOTOCRAFT", "PHOTOSPLICE"), ("PhotoCraft", "PhotoSplice"), ("Photocraft", "Photosplice"), ("photocraft", "photosplice")] {
         s = s.replace(from, to);
     }
     if path.ends_with(".rs") {
@@ -109,9 +109,9 @@ fn map_text(text: &str, path: &str) -> String {
     s
 }
 
-/// Upstream paths never applied automatically: everything under `docs/` (PhotoSuite writes its
+/// Upstream paths never applied automatically: everything under `docs/` (PhotoSplice writes its
 /// own; upstream's also carries brand material under trademark terms), the app icon, licence and
-/// attribution files, all of the translation machinery (PhotoSuite's own), and CI (a different setup). They are
+/// attribution files, all of the translation machinery (PhotoSplice's own), and CI (a different setup). They are
 /// listed after a port for a person to look at.
 fn held_back(path: &str) -> bool {
     const PREFIXES: &[&str] = &["docs/", "assets/app-icon/", "book/", ".github/", "crates/ui-egui/src/i18n/"];
@@ -247,7 +247,7 @@ fn kind(subject: &str) -> &'static str {
     }
 }
 
-/// PhotoSuite's commit subjects start with one of these types, and nothing else.
+/// PhotoSplice's commit subjects start with one of these types, and nothing else.
 const TYPES: &[&str] = &["feat", "fix", "chore", "docs", "nit"];
 
 /// The message with its subject as `<type>: <description>`. The description is upstream's subject
@@ -270,7 +270,7 @@ fn standard_subject(message: &str) -> String {
     if rest.is_empty() { format!("{ty}: {description}") } else { format!("{ty}: {description}\n{rest}") }
 }
 
-/// How many of the commit's files PhotoSuite no longer has as upstream had them before it
+/// How many of the commit's files PhotoSplice no longer has as upstream had them before it
 /// (changed here, or gone), out of the files it touches that existed.
 fn divergence(root: &Path, up: &Path, sha: &str) -> Result<(usize, usize), String> {
     let mut diverged = 0;
@@ -462,12 +462,12 @@ mod tests {
                    © ArtCraft Team and the PhotoCraft contributors. Built on PhotoCraft (https://github.com/storytold/photocraft).\n\
                    The PhotoCraft window. ai.storyteller.photocraft.desktop";
         let out = map_text(src, "crates/x.rs");
-        assert!(out.contains("use photosuite_doc::Layer; PhotosuiteApp; PHOTOSUITE_CONFIG_DIR; photosuite-web"));
+        assert!(out.contains("use photosplice_doc::Layer; PhotospliceApp; PHOTOSPLICE_CONFIG_DIR; photosplice-web"));
         assert!(out.contains("https://github.com/storytold/photocraft/issues/1 and storytold/photocraft-corpus."));
         assert!(out.contains("the PhotoCraft contributors. Built on PhotoCraft (https://github.com/storytold/photocraft)."));
-        assert!(out.contains("The PhotoSuite window. io.github.eolix.PhotoSuite.desktop"));
-        assert_eq!(map_text("<string>ai.storyteller.photocraft</string>", "packaging/macos/Info.plist.in"), "<string>app.photosuite</string>");
-        assert_eq!(map_path("apps/photocraft-web/src/lib.rs"), "apps/photosuite-web/src/lib.rs");
+        assert!(out.contains("The PhotoSplice window. io.github.eolix.PhotoSplice.desktop"));
+        assert_eq!(map_text("<string>ai.storyteller.photocraft</string>", "packaging/macos/Info.plist.in"), "<string>app.photosplice</string>");
+        assert_eq!(map_path("apps/photocraft-web/src/lib.rs"), "apps/photosplice-web/src/lib.rs");
     }
 
     #[test]
@@ -493,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn subjects_take_photosuite_types() {
+    fn subjects_take_photosplice_types() {
         for (from, to) in [
             ("fix(automation): downscale bridge screenshots (#753)", "fix: downscale bridge screenshots (#753)"),
             ("feat(ui): add bounded Liquify redo history (#435)", "feat: add bounded Liquify redo history (#435)"),

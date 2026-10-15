@@ -1,7 +1,7 @@
 //! Writes multi-gigabyte PSB files for large-file tests (#375, #216), straight from the Adobe
 //! PSD spec and independent of this crate's writer, so the fixtures don't inherit its limits.
 //!
-//! `cargo run --release -p photosuite-psd --example big_psb -- <out dir> [case...]`
+//! `cargo run --release -p photosplice-psd --example big_psb -- <out dir> [case...]`
 //!
 //! Every sample follows [`sample`], so a reader can check any pixel without the file. RLE cases
 //! keep each row constant (tiny files, full decoded size); raw cases vary along x too.
@@ -47,7 +47,7 @@ pub fn sample(x: u32, y: u32, c: u32, rle: bool) -> u8 {
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let out = args.first().map_or_else(|| std::env::temp_dir().join("photosuite-big-psb"), std::path::PathBuf::from);
+    let out = args.first().map_or_else(|| std::env::temp_dir().join("photosplice-big-psb"), std::path::PathBuf::from);
     std::fs::create_dir_all(&out)?;
     let wanted = args.get(1..).unwrap_or(&[]);
     for case in CASES.iter().filter(|c| wanted.is_empty() || wanted.iter().any(|w| w == c.name)) {

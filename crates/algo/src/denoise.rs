@@ -5,8 +5,8 @@
 //! Filtering", ECCV 2010): O(1) per pixel whatever the radius, and edge-aware
 //! because the local linear model follows the guide's variance.
 
-use photosuite_color::ColorMode;
-use photosuite_geom::Rect;
+use photosplice_color::ColorMode;
+use photosplice_geom::Rect;
 
 use crate::Ctx;
 use crate::fxutil::{MAXC, box_blur_n, gauss_blur_n, rgba, set_rgba};

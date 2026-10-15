@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
-use photosuite_format::atomic::RenameRetry;
+use photosplice_format::atomic::RenameRetry;
 use serde_json::Value;
 
 use crate::AutomationError;
@@ -47,12 +47,12 @@ impl AuthorizedWorkspace {
             return Err(AutomationError::BadRequest(format!("automation read path is not a regular file: `{path}`")));
         }
         // Bounded reads, and a clear error for a file larger than memory (#375).
-        photosuite_format::read::read_all(&mut file, metadata.len()).map_err(|e| file_error("read", path, e))
+        photosplice_format::read::read_all(&mut file, metadata.len()).map_err(|e| file_error("read", path, e))
     }
 
     /// Create or replace one file below the configured write root, crash-safely: the bytes go to
     /// a temporary file beside the target, which is synced and renamed over it (the same steps
-    /// as [`photosuite_format::atomic_write`], through the directory capability). On failure
+    /// as [`photosplice_format::atomic_write`], through the directory capability). On failure
     /// the previous file is untouched and the temporary file is removed.
     ///
     /// The parent directory must already exist. `cap-std` performs path
@@ -63,14 +63,14 @@ impl AuthorizedWorkspace {
         let root = self.write.as_ref().ok_or_else(|| AutomationError::BadRequest(format!("{DENIED}: write authority is absent")))?;
         let leaf = relative.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let parent = relative.parent().map(Path::to_path_buf).unwrap_or_default();
-        let tmp = parent.join(photosuite_format::atomic::temp_name(&leaf));
+        let tmp = parent.join(photosplice_format::atomic::temp_name(&leaf));
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
         let written = root.dir.open_with(&tmp, &options).and_then(|mut file| {
             file.write_all(bytes)?;
             file.sync_all()
         });
-        let renamed = written.and_then(|()| photosuite_format::atomic::retry_rename(RenameRetry::platform(), || root.dir.rename(&tmp, &root.dir, &relative)));
+        let renamed = written.and_then(|()| photosplice_format::atomic::retry_rename(RenameRetry::platform(), || root.dir.rename(&tmp, &root.dir, &relative)));
         if let Err(e) = renamed {
             let _ = root.dir.remove_file(&tmp);
             return Err(file_error("write", path, e));
@@ -173,7 +173,7 @@ pub fn authorize_engine_command(id: &str, params: &Value) -> Result<(), Automati
             id,
             "pattern.import"
                 | "pattern.export"
-                // PhotoSuite's shape library import reads a .csh file by path only.
+                // PhotoSplice's shape library import reads a .csh file by path only.
                 | "shape.presets.importCsh"
                 | "edit.presets.migratePresets"
                 | "measurementLog.export"
@@ -203,15 +203,15 @@ pub fn authorize_desktop_engine_command(id: &str, params: &Value) -> Result<(), 
     Ok(())
 }
 
-/// [`authorize_engine_command`] as the function pointer [`photosuite_engine::Session::authorize`]
+/// [`authorize_engine_command`] as the function pointer [`photosplice_engine::Session::authorize`]
 /// stores. `actions.play` calls it for every nested step.
-pub fn authorize_engine_step(id: &str, params: &Value) -> photosuite_engine::Result<()> {
-    authorize_engine_command(id, params).map_err(|e| photosuite_engine::EngineError::Other(e.to_string()))
+pub fn authorize_engine_step(id: &str, params: &Value) -> photosplice_engine::Result<()> {
+    authorize_engine_command(id, params).map_err(|e| photosplice_engine::EngineError::Other(e.to_string()))
 }
 
-/// [`authorize_desktop_engine_command`] as a [`photosuite_engine::Session::authorize`] hook.
-pub fn authorize_desktop_engine_step(id: &str, params: &Value) -> photosuite_engine::Result<()> {
-    authorize_desktop_engine_command(id, params).map_err(|e| photosuite_engine::EngineError::Other(e.to_string()))
+/// [`authorize_desktop_engine_command`] as a [`photosplice_engine::Session::authorize`] hook.
+pub fn authorize_desktop_engine_step(id: &str, params: &Value) -> photosplice_engine::Result<()> {
+    authorize_desktop_engine_command(id, params).map_err(|e| photosplice_engine::EngineError::Other(e.to_string()))
 }
 
 fn params_contain_ambient_path(id: &str, params: &Value) -> bool {
@@ -286,7 +286,7 @@ mod tests {
     use super::*;
 
     fn roots(name: &str) -> (PathBuf, PathBuf, AuthorizedWorkspace) {
-        let base = std::env::temp_dir().join(format!("photosuite-workspace-{}-{name}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("photosplice-workspace-{}-{name}", std::process::id()));
         let inside = base.join("inside");
         let outside = base.join("outside");
         let _ = std::fs::remove_dir_all(&base);
@@ -464,25 +464,25 @@ mod tests {
         assert!(authorize_engine_step("file.open", &serde_json::json!({})).is_err());
         assert!(authorize_engine_step("actions.play", &serde_json::json!({})).is_ok());
         // An allowed command can't reach a denied one by running it on its own behalf.
-        let mut session = photosuite_engine::Session::new();
+        let mut session = photosplice_engine::Session::new();
         session.execute("file.new", serde_json::json!({"width": 4, "height": 4})).unwrap();
         session.authorize = Some(authorize_desktop_engine_step);
         let params = serde_json::json!({"to": "grayscale"});
         assert!(authorize_desktop_engine_command("file.automate.conditionalModeChange", &params).is_ok());
         assert!(session.execute("file.automate.conditionalModeChange", params).is_err());
-        assert_eq!(session.active().unwrap().doc.mode, photosuite_engine::doc::ColorMode::Rgb);
+        assert_eq!(session.active().unwrap().doc.mode, photosplice_engine::doc::ColorMode::Rgb);
         assert!(authorize_desktop_engine_step("file.saveACopy", &serde_json::json!({})).is_err());
     }
 
     /// An automation session: nested steps checked like the request itself.
-    fn automation_session() -> photosuite_engine::Session {
-        let mut s = photosuite_engine::Session::new();
+    fn automation_session() -> photosplice_engine::Session {
+        let mut s = photosplice_engine::Session::new();
         s.authorize = Some(authorize_engine_step);
         s
     }
 
     /// A request as the control channel runs it: checked, then executed.
-    fn request(s: &mut photosuite_engine::Session, id: &str, params: serde_json::Value) -> Result<serde_json::Value, AutomationError> {
+    fn request(s: &mut photosplice_engine::Session, id: &str, params: serde_json::Value) -> Result<serde_json::Value, AutomationError> {
         authorize_engine_command(id, &params)?;
         Ok(s.execute(id, params)?)
     }
@@ -505,7 +505,7 @@ mod tests {
             ]},
         ]});
         request(&mut headless, "image.variables.dataSets", sets).unwrap();
-        let visible = |headless: &photosuite_engine::Session| headless.active().unwrap().doc.layers.iter().all(|l| l.visible);
+        let visible = |headless: &photosplice_engine::Session| headless.active().unwrap().doc.layers.iter().all(|l| l.visible);
         let refused = request(&mut headless, "image.applyDataSet", serde_json::json!({"name": "swap"})).unwrap_err();
         assert!(refused.to_string().contains("ambient filesystem paths"), "{refused}");
         assert!(visible(&headless), "a refused data set applies none of its values");
@@ -560,19 +560,19 @@ mod tests {
     #[test]
     fn registry_filesystem_path_params_are_classified() {
         let probe = serde_json::json!({
-            "path": "/outside/photosuite-probe",
-            "file": "/outside/photosuite-probe.icc",
-            "mapPath": "/outside/photosuite-probe.png",
-            "profile": "/outside/photosuite-probe.icc",
-            "workingRgb": "/outside/photosuite-probe.icc",
-            "workingCmyk": "/outside/photosuite-probe.icc",
-            "workingGray": "/outside/photosuite-probe.icc",
-            "input": "/outside/photosuite-input",
-            "output": "/outside/photosuite-output",
-            "paths": ["/outside/photosuite-probe.psd"],
+            "path": "/outside/photosplice-probe",
+            "file": "/outside/photosplice-probe.icc",
+            "mapPath": "/outside/photosplice-probe.png",
+            "profile": "/outside/photosplice-probe.icc",
+            "workingRgb": "/outside/photosplice-probe.icc",
+            "workingCmyk": "/outside/photosplice-probe.icc",
+            "workingGray": "/outside/photosplice-probe.icc",
+            "input": "/outside/photosplice-input",
+            "output": "/outside/photosplice-output",
+            "paths": ["/outside/photosplice-probe.psd"],
         });
         let preference_probe = serde_json::json!({"path": ".scriptEvents", "value": {}});
-        let unclassified: Vec<_> = photosuite_engine::command_specs()
+        let unclassified: Vec<_> = photosplice_engine::command_specs()
             .iter()
             .filter(|spec| documents_filesystem_path_params(spec.id, spec.params))
             .filter(|spec| {

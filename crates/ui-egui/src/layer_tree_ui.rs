@@ -7,7 +7,7 @@
 //! `layer.setExpanded` (a view change: no history step).
 
 use egui::{Rect, Sense, Shape, Stroke, pos2, vec2};
-use photosuite_doc::{Document, Layer, LayerContent};
+use photosplice_doc::{Document, Layer, LayerContent};
 use serde_json::{Value, json};
 
 use crate::theme::Tokens;

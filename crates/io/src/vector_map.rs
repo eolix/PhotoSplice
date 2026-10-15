@@ -6,10 +6,10 @@
 //! a preserved block is written back byte-identical while it still decodes to the layer's
 //! current model; otherwise it is regenerated from the model.
 
-use photosuite_doc::{Fill, FillRule, Knot, LineCap, LineJoin, LiveShape, Path, PathOp, ShapeLayer, ShapeStroke, StrokeAlign, Subpath, VectorMask};
-use photosuite_geom::Point;
-use photosuite_psd::descriptor::{Descriptor, Id, Value, VersionedDescriptor};
-use photosuite_psd::path::{PathData, PsdKnot, PsdSubpath, VectorMaskBlock};
+use photosplice_doc::{Fill, FillRule, Knot, LineCap, LineJoin, LiveShape, Path, PathOp, ShapeLayer, ShapeStroke, StrokeAlign, Subpath, VectorMask};
+use photosplice_geom::Point;
+use photosplice_psd::descriptor::{Descriptor, Id, Value, VersionedDescriptor};
+use photosplice_psd::path::{PathData, PsdKnot, PsdSubpath, VectorMaskBlock};
 
 use crate::blocks::{bool_of, enum_of, fill_from_desc, fill_to_desc, get_desc, num, parse_prefix_versioned};
 
@@ -145,7 +145,7 @@ pub fn vmsk_bytes(path: &Path, flags: u32, w: u32, h: u32) -> Vec<u8> {
 }
 
 /// A layer's vector mask from its `vmsk`/`vsms` block. A vector mask without subpaths reveals
-/// everything unless inverted (see `photosuite_vector::vector_mask_values`), the opposite of a
+/// everything unless inverted (see `photosplice_vector::vector_mask_values`), the opposite of a
 /// shape's coverage, hence the flip.
 pub fn vector_mask_from_block(data: &[u8], w: u32, h: u32) -> Option<VectorMask> {
     let (mut path, flags) = path_from_vmsk(data, w, h)?;
@@ -263,7 +263,7 @@ pub fn parse_vstk(data: &[u8], dpi: f32) -> Option<VstkInfo> {
         Some(Value::List(l)) => l.iter().filter_map(|v| num(Some(v))).map(|v| v as f32).collect(),
         _ => Vec::new(),
     };
-    let paint = get_desc(&d, "strokeStyleContent").and_then(content_fill).unwrap_or(Fill::Solid(photosuite_color::Color::BLACK));
+    let paint = get_desc(&d, "strokeStyleContent").and_then(content_fill).unwrap_or(Fill::Solid(photosplice_color::Color::BLACK));
     let stroke = ShapeStroke {
         width: unit_px(d.get("strokeStyleLineWidth"), dpi).unwrap_or(1.0) as f32,
         paint,
@@ -556,7 +556,7 @@ pub fn shape_blocks(sh: &ShapeLayer, raw: &mut Vec<([u8; 4], Vec<u8>)>, w: u32, 
     // Photoshop shapes always carry fill content, even with the fill turned off.
     let present = raw.iter().any(|(k, _)| matches!(k, b"vscg" | b"SoCo" | b"GdFl" | b"PtFl"));
     if sh.fill.is_none() && !present {
-        raw.push((*b"vscg", vscg_bytes(&Fill::Solid(photosuite_color::Color::BLACK))));
+        raw.push((*b"vscg", vscg_bytes(&Fill::Solid(photosplice_color::Color::BLACK))));
     }
     // Stroke (+ fill enabled flag). A fill we could not decode counts as unchanged.
     let undecodable_fill = sh.fill.is_none() && present && !has_fill_block(raw);
@@ -598,7 +598,7 @@ pub fn shape_blocks(sh: &ShapeLayer, raw: &mut Vec<([u8; 4], Vec<u8>)>, w: u32, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_color::Color;
+    use photosplice_color::Color;
 
     fn sample_path() -> Path {
         let mut p = Path::new(vec![
@@ -663,9 +663,9 @@ mod tests {
         // No subpaths: a vector mask with initial fill reveals all, without hides all; a shape
         // with initial fill covers everything.
         let reveal = vector_mask_from_block(&vmsk_with(true, &[]), 100, 100).unwrap();
-        assert_eq!(photosuite_vector::vector_mask_values(&reveal, photosuite_geom::Rect::new(0, 0, 2, 2)), vec![1.0; 4]);
+        assert_eq!(photosplice_vector::vector_mask_values(&reveal, photosplice_geom::Rect::new(0, 0, 2, 2)), vec![1.0; 4]);
         let hide = vector_mask_from_block(&vmsk_with(false, &[]), 100, 100).unwrap();
-        assert_eq!(photosuite_vector::vector_mask_values(&hide, photosuite_geom::Rect::new(0, 0, 2, 2)), vec![0.0; 4]);
+        assert_eq!(photosplice_vector::vector_mask_values(&hide, photosplice_geom::Rect::new(0, 0, 2, 2)), vec![0.0; 4]);
         assert!(path_from_vmsk(&vmsk_with(true, &[]), 100, 100).unwrap().0.inverted);
         // Our own writer round-trips each case.
         for m in [reveal, hide] {

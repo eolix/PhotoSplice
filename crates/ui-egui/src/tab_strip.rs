@@ -177,7 +177,7 @@ pub fn pro_tabs(ui: &mut Ui, id: egui::Id, strip: Rect, menu_left: f32, tabs: &[
         40.0,
         |i| i == sel && !collapsed,
         |ui, r, i, galley, resp, active| {
-            // PhotoSuite's panel tabs: the active one reads as the front sheet, chrome-coloured with
+            // PhotoSplice's panel tabs: the active one reads as the front sheet, chrome-coloured with
             // a 2 px accent rule along its top; a hovered one lifts; the rest are muted text.
             if active {
                 ui.painter().rect_filled(r, CornerRadius { nw: if i == 0 { 3 } else { 0 }, ne: 0, sw: 0, se: 0 }, t.chrome);

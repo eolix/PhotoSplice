@@ -1,4 +1,4 @@
-//! Value tables of the Filter Gallery (the PhotoSuite authors' own data).
+//! Value tables of the Filter Gallery (the PhotoSplice authors' own data).
 
 /// Indexed by strokePressure 0..15 (Colored Pencil, Sumi-e); value is the Scale factor applied to the detail plane.
 pub(super) const STROKE_AMOUNT: [f64; 16] = [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 35.0, 45.0, 65.0, 85.0, 105.0, 125.0, 145.0, 165.0, 185.0, 205.0];

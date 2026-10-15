@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# Svenska translations for PhotoSuite UI.
+# Svenska translations for PhotoSplice UI.
 
 	File	Fil
 	Edit	Redigera
@@ -672,7 +672,7 @@
 	Timeline	Tidslinje
 	Tool Presets	Verktygsförinställningar
 	Tools	Verktyg
-	About PhotoSuite	Om PhotoSuite
+	About PhotoSplice	Om PhotoSplice
 	Website	Webbplats
 	Report an Issue…	Rapportera ett problem…
 	WIA Support…	WIA-support…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Perspective Warp är inte aktiv
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Perspektiv förvrängning: rita plan längs bildens perspektiv och växla sedan till förvrängning
 	Photo Filter	Fotofilter
-	PhotoSuite	PhotoSuite
-	PhotoSuite Manages Colors	PhotoSuite hanterar färger
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite — en inbyggd bildredigerare med öppen källkod skriven i Rust
+	PhotoSplice	PhotoSplice
+	PhotoSplice Manages Colors	PhotoSplice hanterar färger
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice — en inbyggd bildredigerare med öppen källkod skriven i Rust
 	Pin Depth:	Pinns djup:
 	Pixel Length:	Pixellängd:
 	Pixels/Centimeter	Pixlar/Centimeter
@@ -1570,7 +1570,7 @@
 	Pen Tilt	Pennlutning
 	Pen Tool	Pennverktyg
 	Photo	Foto
-	PhotoSuite website	PhotoSuite hemsida
+	PhotoSplice website	PhotoSplice hemsida
 	Picas	Picas
 	Pillow Emboss	Kuddrelief
 	Pixel Replacement	Pixelbyte
@@ -1877,7 +1877,7 @@
 	System Info…	Systeminformation…
 	System Info	Systeminformation
 	More panels	Fler paneler
-	These settings aren't available in PhotoSuite yet.	Dessa inställningar är inte tillgängliga i PhotoSuite än
+	These settings aren't available in PhotoSplice yet.	Dessa inställningar är inte tillgängliga i PhotoSplice än
 	Graphics	Grafik
 	Reset GPU Backend	Återställ GPU-backend
 	Applies at next launch.	Gäller vid nästa lansering
@@ -2018,7 +2018,7 @@
 	Opening…	Öppnar…
 	Patch	Lappa
 	Patch:	Lappa:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite använder CPU-bildkompositören. Fönstret kan fortfarande använda ditt grafikkort.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice använder CPU-bildkompositören. Fönstret kan fortfarande använda ditt grafikkort.
 	Play Action	Spela upp åtgärd
 	Reading…	Läser…
 	Record Action	Spela in åtgärd

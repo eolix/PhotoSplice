@@ -4,11 +4,11 @@
 //! there is no GPU adapter.
 
 use eframe::egui_wgpu::RenderState;
-use photosuite_color::{Color, ColorMode, SampleType};
-use photosuite_doc::{Document, Size};
-use photosuite_gpu::Fault;
-use photosuite_ui_egui::gpu_canvas::{self, GpuCanvas};
-use photosuite_ui_egui::{PhotosuiteApp, gpu_status};
+use photosplice_color::{Color, ColorMode, SampleType};
+use photosplice_doc::{Document, Size};
+use photosplice_gpu::Fault;
+use photosplice_ui_egui::gpu_canvas::{self, GpuCanvas};
+use photosplice_ui_egui::{PhotospliceApp, gpu_status};
 use serde_json::json;
 
 /// Concurrent wgpu devices in one process crash on some drivers (see `canvas_16f.rs`).
@@ -68,7 +68,7 @@ fn destroyed_device_falls_back_without_panicking() {
     let mut d2 = d.clone();
     d2.layers[0].opacity = 0.5;
     for _ in 0..3 {
-        let r = g.refresh(key, &d2, Some(photosuite_geom::Rect::new(0, 0, 50, 50)), None);
+        let r = g.refresh(key, &d2, Some(photosplice_geom::Rect::new(0, 0, 50, 50)), None);
         if r.kind == "lost" {
             break;
         }
@@ -82,7 +82,7 @@ fn destroyed_device_falls_back_without_panicking() {
 fn app_switches_to_the_cpu_canvas_and_keeps_the_documents() {
     let _gpu = gpu_lock();
     let Some(rs) = render_state() else { return };
-    let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), photosuite_ui_egui::Services::default());
+    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), photosplice_ui_egui::Services::default());
     app.set_wgpu(rs);
     app.run("file.new", json!({"width": 320, "height": 240})).unwrap();
     app.sync_views();
@@ -92,18 +92,18 @@ fn app_switches_to_the_cpu_canvas_and_keeps_the_documents() {
     let flag = started.clone();
     app.on_started(move |_| flag.set(true));
     let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_ui_state(
-        |ui, app: &mut PhotosuiteApp| {
+        |ui, app: &mut PhotospliceApp| {
             let ctx = ui.ctx().clone();
             if !ctx.fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                 return;
             }
             app.check_gpu(&ctx);
-            egui::CentralPanel::default().show(ui, |ui| photosuite_ui_egui::canvas::document_area(app, ui));
+            egui::CentralPanel::default().show(ui, |ui| photosplice_ui_egui::canvas::document_area(app, ui));
             app.check_gpu(&ctx);
         },
         app,
     );
-    PhotosuiteApp::setup_context(&h.ctx, photosuite_ui_egui::theme::ThemeKind::ALL[0]);
+    PhotospliceApp::setup_context(&h.ctx, photosplice_ui_egui::theme::ThemeKind::ALL[0]);
     h.run_steps(4);
     assert!(h.state().gpu_active(), "GPU canvas in use before the loss");
     // The device is lost (e.g. the OS killed a huge submission).
@@ -132,7 +132,7 @@ fn app_switches_to_the_cpu_canvas_and_keeps_the_documents() {
 
 #[test]
 fn started_hook_runs_once_after_the_first_frames() {
-    let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), photosuite_ui_egui::Services::default());
+    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), photosplice_ui_egui::Services::default());
     let runs = std::rc::Rc::new(std::cell::Cell::new(0));
     let r = runs.clone();
     app.on_started(move |_| r.set(r.get() + 1));
@@ -151,7 +151,7 @@ fn started_hook_runs_once_after_the_first_frames() {
 
 #[test]
 fn system_info_lists_the_graphics_state() {
-    let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), photosuite_ui_egui::Services::default());
+    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), photosplice_ui_egui::Services::default());
     app.perf.gpu_info.adapter = "Test GPU".into();
     app.perf.gpu_info.backend = "dx12".into();
     app.perf.gpu_info.preference = "auto".into();

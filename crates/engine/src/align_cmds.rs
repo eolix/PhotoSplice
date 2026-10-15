@@ -1,6 +1,6 @@
 //! Edit › Auto-Align Layers and Auto-Blend Layers, on the selected pixel layers.
 //!
-//! Both share Photomerge's registration and blending ([`photosuite_algo::panorama`] via
+//! Both share Photomerge's registration and blending ([`photosplice_algo::panorama`] via
 //! `photo_cmds`). Auto-Align matches Harris / steered-BRIEF features between every pair of
 //! layers, chains the verified pairs from the reference layer (maximum spanning tree) and
 //! bundle-adjusts all of them, then warps each layer. Projections: Auto, Perspective
@@ -13,12 +13,12 @@
 //! layers agree (Panorama). With Seamless Tones and Colors it also adds a merged layer blended
 //! with Laplacian pyramids so transitions are invisible.
 
-use photosuite_algo::panorama::Layout;
-use photosuite_algo::pyramid;
-use photosuite_algo::transform::Interp;
-use photosuite_doc::{Document, Layer, LayerContent, LayerId, LayerMask};
-use photosuite_geom::Rect;
-use photosuite_raster::{Surface, to_rgba};
+use photosplice_algo::panorama::Layout;
+use photosplice_algo::pyramid;
+use photosplice_algo::transform::Interp;
+use photosplice_doc::{Document, Layer, LayerContent, LayerId, LayerMask};
+use photosplice_geom::Rect;
+use photosplice_raster::{Surface, to_rgba};
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
@@ -60,7 +60,7 @@ fn auto_align(s: &mut Session, p: &Value) -> Result<Value> {
     let area = doc.bounds();
     let surfs: Vec<&Surface> = ids.iter().map(|id| doc.layer(*id).and_then(|l| l.surface()).ok_or(EngineError::NoLayer(*id))).collect::<Result<_>>()?;
     let images: Vec<(&Surface, Rect)> = surfs.iter().map(|s| (*s, area)).collect();
-    let focal35 = doc.metadata.exif.as_ref().and_then(|e| photosuite_algo::exif::read(e).focal_length_35mm);
+    let focal35 = doc.metadata.exif.as_ref().and_then(|e| photosplice_algo::exif::read(e).focal_length_35mm);
     let geometric = p.get("geometricCorrection").and_then(Value::as_bool).unwrap_or(false);
     let al = register(&images, layout, Some(ref_idx), geometric, focal35)
         .ok_or_else(|| EngineError::Other("Auto-Align couldn't find enough matching detail between the layers".into()))?;
@@ -122,7 +122,7 @@ fn auto_align(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// Native-channel pixels of a layer over `area` (transparent outside its content).
-fn pixels(l: &Layer, area: Rect) -> Option<(Vec<f32>, photosuite_color::PixelFormat)> {
+fn pixels(l: &Layer, area: Rect) -> Option<(Vec<f32>, photosplice_color::PixelFormat)> {
     let s = l.surface()?;
     Some((s.read_region(area), s.format()))
 }
@@ -165,7 +165,7 @@ fn auto_blend(s: &mut Session, p: &Value) -> Result<Value> {
             lv[i] = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
             av[i] = c[3];
         }
-        if fmt.is_some_and(|g: photosuite_color::PixelFormat| g != f) {
+        if fmt.is_some_and(|g: photosplice_color::PixelFormat| g != f) {
             return Err(EngineError::Other("the layers have different pixel formats".into()));
         }
         fmt = Some(f);

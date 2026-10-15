@@ -1,12 +1,12 @@
 [package]
-name = "photosuite-plugin-invert"
-description = "Example PhotoSuite WebAssembly filter plug-in: Invert"
+name = "photosplice-plugin-invert"
+description = "Example PhotoSplice WebAssembly filter plug-in: Invert"
 version = "1.0.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
 
-# Not a member of the PhotoSuite workspace: it builds for wasm32-unknown-unknown only.
+# Not a member of the PhotoSplice workspace: it builds for wasm32-unknown-unknown only.
 [workspace]
 
 [lib]

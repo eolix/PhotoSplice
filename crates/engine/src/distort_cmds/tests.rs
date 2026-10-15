@@ -29,7 +29,7 @@ fn worst(a: &Surface, b: &Surface, r: Rect) -> f32 {
     a.read_region(r).iter().zip(b.read_region(r)).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max)
 }
 
-fn smart(s: &Session) -> photosuite_doc::SmartObject {
+fn smart(s: &Session) -> photosplice_doc::SmartObject {
     let st = s.active().unwrap();
     match &st.doc.layer(st.active_layer.unwrap()).unwrap().content {
         LayerContent::Smart(sm) => sm.clone(),
@@ -113,7 +113,7 @@ fn puppet_identity_translation_and_undo() {
         let after = active_surface(&s);
         assert_eq!(after.content_bounds(), Rect::new(16, 14, 66, 44), "{depth}");
         assert!(
-            worst(&after.convert(before.format()), &photosuite_algo::resample::translate_surface(&before, 6, 4), Rect::new(16, 14, 66, 44)) <= 1.0 / 255.0,
+            worst(&after.convert(before.format()), &photosplice_algo::resample::translate_surface(&before, 6, 4), Rect::new(16, 14, 66, 44)) <= 1.0 / 255.0,
             "{depth}"
         );
         s.undo();
@@ -148,7 +148,7 @@ fn perspective_identity_known_homography_and_mask() {
         let after = active_surface(&s);
         assert_eq!(after.content_bounds(), Rect::new(15, 13, 65, 43));
         assert!(
-            worst(&after.convert(before.format()), &photosuite_algo::resample::translate_surface(&before, 5, 3), Rect::new(15, 13, 65, 43)) <= 1.0 / 255.0,
+            worst(&after.convert(before.format()), &photosplice_algo::resample::translate_surface(&before, 5, 3), Rect::new(15, 13, 65, 43)) <= 1.0 / 255.0,
             "{depth}"
         );
         s.undo();

@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 
 /// At most this many notices are kept; older ones drop off.
 pub const MAX_NOTICES: usize = 3;
@@ -24,7 +24,7 @@ pub struct Notice {
 }
 
 /// Show a notice (newest last); returns its id.
-pub fn post(app: &mut PhotosuiteApp, title: impl Into<String>, lines: Vec<String>, error: bool) -> u64 {
+pub fn post(app: &mut PhotospliceApp, title: impl Into<String>, lines: Vec<String>, error: bool) -> u64 {
     let id = app.ui.alloc_id();
     app.ui.notices.push(Notice { id, title: title.into(), lines, error });
     let n = app.ui.notices.len();
@@ -36,7 +36,7 @@ pub fn post(app: &mut PhotosuiteApp, title: impl Into<String>, lines: Vec<String
 
 /// Report import/export `warnings` for the file operation `what` (e.g. "Opened a.psd"): the status
 /// bar says how many there were, and a notice lists them. Nothing happens when there are none.
-pub fn io_warnings(app: &mut PhotosuiteApp, what: &str, warnings: &[String]) {
+pub fn io_warnings(app: &mut PhotospliceApp, what: &str, warnings: &[String]) {
     let Some(first) = warnings.first() else { return };
     let n = warnings.len();
     app.ui.status = if n == 1 { format!("{what}: {first}") } else { format!("{what} with {n} warnings: {first} …") };
@@ -46,21 +46,21 @@ pub fn io_warnings(app: &mut PhotosuiteApp, what: &str, warnings: &[String]) {
 
 /// Report a failed file operation: the status bar shows it as an error and a notice keeps it on
 /// screen until dismissed.
-pub fn error(app: &mut PhotosuiteApp, message: String) {
+pub fn error(app: &mut PhotospliceApp, message: String) {
     app.ui.status = message.clone();
     app.ui.status_error = true;
     post(app, message, Vec::new(), true);
 }
 
 /// Draw the notices; each has a close button.
-pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     if app.ui.notices.is_empty() {
         return;
     }
     let t = crate::theme::Tokens::get(ctx);
     let mut dismiss = None;
     // Clear the status bar (~24 px) and leave the dock's edge some air.
-    egui::Area::new(egui::Id::new("photosuite-notices"))
+    egui::Area::new(egui::Id::new("photosplice-notices"))
         .order(egui::Order::Foreground)
         .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -36.0))
         .interactable(true)

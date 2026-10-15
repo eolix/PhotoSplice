@@ -1,6 +1,6 @@
 //! Photoshop brushes (`.abr`) → brush presets.
 //!
-//! [`photosuite_psd::abr`] reads the file; this module maps its tips and `brushPreset`
+//! [`photosplice_psd::abr`] reads the file; this module maps its tips and `brushPreset`
 //! descriptors onto [`BrushSettings`] (Brush Tip Shape, Shape Dynamics, Scattering, Texture,
 //! Dual Brush, Color Dynamics, Transfer, Brush Pose, Noise, Wet Edges, Build-up, Smoothing and
 //! the captured tool options). Settings without an equivalent are listed in
@@ -9,12 +9,12 @@
 
 use std::collections::BTreeSet;
 
-use photosuite_paint::{
+use photosplice_paint::{
     BrushPreset, BrushSettings, Control, DualBrush, Dynamic, GrayTile, MaskMode, MixerSettings, Pattern, PatternStyle, Pose, ShapeDynamics, TipShape, Transfer,
 };
-use photosuite_psd::abr::{self, AbrFile, AbrSample, LegacyTip};
-use photosuite_psd::descriptor::{Descriptor, Value};
-use photosuite_psd::patterns::PsdPattern;
+use photosplice_psd::abr::{self, AbrFile, AbrSample, LegacyTip};
+use photosplice_psd::descriptor::{Descriptor, Value};
+use photosplice_psd::patterns::PsdPattern;
 
 /// Largest sampled tip edge kept as is; bigger tips are downsampled to it.
 pub const MAX_TIP_EDGE: u32 = 2500;
@@ -32,32 +32,32 @@ pub struct AbrImport {
 
 /// Parse an `.abr` file into presets in group `group` (usually the file name).
 pub fn read_abr(bytes: &[u8], group: &str) -> Result<AbrImport, String> {
-    read_abr_with(bytes, group, &photosuite_raster::Interrupt::NONE)
+    read_abr_with(bytes, group, &photosplice_raster::Interrupt::NONE)
 }
 
 /// [`read_abr`] that checks `ctl` before each brush (and reports progress): a cancelled import
 /// fails with "cancelled".
-pub fn read_abr_with(bytes: &[u8], group: &str, ctl: &photosuite_raster::Interrupt) -> Result<AbrImport, String> {
+pub fn read_abr_with(bytes: &[u8], group: &str, ctl: &photosplice_raster::Interrupt) -> Result<AbrImport, String> {
     let f = abr::parse(bytes).map_err(|e| format!("not a readable Photoshop brush file: {e}"))?;
     // Parsing is the small part; mapping (tip decoding) reports 10–100 %.
     ctl.progress(0.1);
     let cancel = || ctl.cancelled();
     let progress = |p: f32| ctl.progress(0.1 + 0.9 * p);
-    map_file_with(&f, group, &photosuite_raster::Interrupt::new(&cancel, &progress)).map_err(|e| e.to_string())
+    map_file_with(&f, group, &photosplice_raster::Interrupt::new(&cancel, &progress)).map_err(|e| e.to_string())
 }
 
 /// Map a parsed file.
 pub fn map_file(f: &AbrFile, group: &str) -> AbrImport {
     // Never cancelled, so always `Ok`.
-    map_file_with(f, group, &photosuite_raster::Interrupt::NONE).unwrap_or_default()
+    map_file_with(f, group, &photosplice_raster::Interrupt::NONE).unwrap_or_default()
 }
 
 /// [`map_file`] that checks `ctl` before each brush.
-pub fn map_file_with(f: &AbrFile, group: &str, ctl: &photosuite_raster::Interrupt) -> Result<AbrImport, photosuite_raster::Cancelled> {
+pub fn map_file_with(f: &AbrFile, group: &str, ctl: &photosplice_raster::Interrupt) -> Result<AbrImport, photosplice_raster::Cancelled> {
     let mut out = AbrImport { version: f.version, warnings: f.warnings.clone(), ..Default::default() };
     let mut m = Mapper { file: f, warnings: BTreeSet::new(), unknown: BTreeSet::new() };
     let total = f.legacy.len().max(f.samples.len()).max(f.presets.len()).max(1) as f32;
-    let step = |i: usize| -> Result<(), photosuite_raster::Cancelled> {
+    let step = |i: usize| -> Result<(), photosplice_raster::Cancelled> {
         ctl.check()?;
         ctl.progress(i as f32 / total);
         Ok(())
@@ -108,7 +108,7 @@ pub fn map_file_with(f: &AbrFile, group: &str, ctl: &photosuite_raster::Interrup
     }
     out.warnings.extend(m.warnings);
     if !m.unknown.is_empty() {
-        out.warnings.push(format!("settings without a PhotoSuite equivalent were ignored: {}", m.unknown.into_iter().collect::<Vec<_>>().join(", ")));
+        out.warnings.push(format!("settings without a PhotoSplice equivalent were ignored: {}", m.unknown.into_iter().collect::<Vec<_>>().join(", ")));
     }
     ctl.progress(1.0);
     Ok(out)

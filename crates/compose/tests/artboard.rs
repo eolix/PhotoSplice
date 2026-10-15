@@ -1,10 +1,10 @@
 //! Artboards: contents clipped to the board, background painted behind them, backdrop untouched
 //! outside. Checked at 8, 16 and 32-bit.
 
-use photosuite_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
-use photosuite_compose::{render, render_tiled};
-use photosuite_doc::{Artboard, ArtboardBackground, Document, Layer, LayerContent};
-use photosuite_geom::{Rect, Size};
+use photosplice_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
+use photosplice_compose::{render, render_tiled};
+use photosplice_doc::{Artboard, ArtboardBackground, Document, Layer, LayerContent};
+use photosplice_geom::{Rect, Size};
 
 fn artboard_doc(depth: SampleType, background: ArtboardBackground, blend: BlendMode) -> Document {
     let mut d = Document::new("a", Size::new(40, 20), ColorMode::Rgb, depth);
@@ -48,7 +48,7 @@ fn contents_are_clipped_and_background_painted() {
     // Proxy pixel (x,y) samples (4*x,4*y); unaligned half-open artboard edges must agree.
     let original = artboard_doc(SampleType::F32, ArtboardBackground::White, BlendMode::PassThrough);
     let source = render(&original, original.bounds());
-    let proxy = photosuite_compose::proxy::proxy_document(&original, 4);
+    let proxy = photosplice_compose::proxy::proxy_document(&original, 4);
     let reduced = render(&proxy, proxy.bounds());
     for y in 0..proxy.size.height as i32 {
         for x in 0..proxy.size.width as i32 {

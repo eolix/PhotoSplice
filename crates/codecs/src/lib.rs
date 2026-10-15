@@ -1,4 +1,4 @@
-//! `photosuite-codecs`: symmetric, depth- and metadata-preserving codecs for
+//! `photosplice-codecs`: symmetric, depth- and metadata-preserving codecs for
 //! flat raster image formats.
 //!
 //! * Every format we **write** we can also **read** (see

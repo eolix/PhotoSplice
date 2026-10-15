@@ -1,10 +1,10 @@
 //! Edit › Free Transform / Transform: projective transforms of layers (and the selection).
 
-use photosuite_algo::transform::{Homography, Interp, warp_surface};
-use photosuite_color::PixelFormat;
-use photosuite_doc::{Document, Layer, LayerContent, LayerId, Locks};
-use photosuite_geom::{Affine, Rect};
-use photosuite_raster::Surface;
+use photosplice_algo::transform::{Homography, Interp, warp_surface};
+use photosplice_color::PixelFormat;
+use photosplice_doc::{Document, Layer, LayerContent, LayerId, Locks};
+use photosplice_geom::{Affine, Rect};
+use photosplice_raster::Surface;
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
@@ -23,10 +23,10 @@ fn bad(msg: impl Into<String>) -> EngineError {
 pub fn transform_bounds(doc: &Document, layer: &Layer) -> Rect {
     let content = match &layer.content {
         LayerContent::Group(g) => g.children.iter().map(|l| transform_bounds(doc, l)).fold(Rect::EMPTY, |a, b| a.union(&b)),
-        _ => layer.surface().map_or(Rect::EMPTY, photosuite_compose::bounds::content_bounds),
+        _ => layer.surface().map_or(Rect::EMPTY, photosplice_compose::bounds::content_bounds),
     };
     let content =
-        if content.is_empty() { layer.mask.as_ref().map_or(Rect::EMPTY, |m| photosuite_compose::bounds::content_bounds(&m.surface)) } else { content };
+        if content.is_empty() { layer.mask.as_ref().map_or(Rect::EMPTY, |m| photosplice_compose::bounds::content_bounds(&m.surface)) } else { content };
     match &doc.selection {
         Some(sel) if !layer.is_group() => content.intersect(&sel.content_bounds()),
         _ => content,

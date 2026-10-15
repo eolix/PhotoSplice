@@ -4,8 +4,8 @@
 //! The outline is traced at display resolution: `outline_scaled` samples every `step`-th pixel, so
 //! a 36 MP selection at 12% zoom costs a ~0.5 MP scan instead of reading the whole mask.
 
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 
 /// A boundary segment in document pixel coordinates (axis-aligned).
 pub type Segment = ([i32; 2], [i32; 2]);
@@ -91,7 +91,7 @@ pub fn outline_scaled(mask: &Surface, bounds: Rect, step: u32) -> Vec<Segment> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_color::PixelFormat;
+    use photosplice_color::PixelFormat;
 
     #[test]
     fn rectangle_has_four_edges() {

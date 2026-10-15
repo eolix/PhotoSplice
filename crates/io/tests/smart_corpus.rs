@@ -15,8 +15,8 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use photosuite_doc::{Document, LayerContent, SmartObject, SmartSource};
-use photosuite_psd::descriptor::{Descriptor, Value, VersionedDescriptor};
+use photosplice_doc::{Document, LayerContent, SmartObject, SmartSource};
+use photosplice_psd::descriptor::{Descriptor, Value, VersionedDescriptor};
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
@@ -43,12 +43,12 @@ fn smarts(doc: &Document) -> Vec<(String, SmartObject)> {
 fn source_file(doc: &Document, sm: &SmartObject) -> Option<Vec<u8>> {
     match &sm.source {
         SmartSource::Embedded { bytes, .. } => Some(bytes.to_vec()),
-        SmartSource::Linked { path } => photosuite_io::linked::find_linked_file(&doc.metadata, path).map(|f| f.bytes),
+        SmartSource::Linked { path } => photosplice_io::linked::find_linked_file(&doc.metadata, path).map(|f| f.bytes),
     }
 }
 
 /// Mask coverage over `area` (None = no mask: all ones).
-fn mask_values(sm: &SmartObject, area: photosuite_geom::Rect) -> Vec<f32> {
+fn mask_values(sm: &SmartObject, area: photosplice_geom::Rect) -> Vec<f32> {
     let mut v = Vec::new();
     match &sm.filter_mask {
         Some(m) => m.values_into(area, &mut v),
@@ -96,7 +96,7 @@ fn compare(a: &Document, b: &Document, same_files: bool) -> Vec<String> {
 }
 
 fn round_trip(doc: &Document) -> Result<(Document, Vec<u8>), String> {
-    let out = photosuite_io::export(doc, "psd", &Default::default()).map_err(|e| e.to_string())?;
+    let out = photosplice_io::export(doc, "psd", &Default::default()).map_err(|e| e.to_string())?;
     if let Some(w) = out.warnings.iter().find(|w| w.contains("smart object written as pixels")) {
         return Err(w.clone());
     }
@@ -104,7 +104,7 @@ fn round_trip(doc: &Document) -> Result<(Document, Vec<u8>), String> {
     if !errs.is_empty() {
         return Err(format!("strict structure: {errs:?}"));
     }
-    let back = photosuite_io::import("x.psd", &out.bytes).map_err(|e| e.to_string())?.document;
+    let back = photosplice_io::import("x.psd", &out.bytes).map_err(|e| e.to_string())?.document;
     Ok((back, out.bytes))
 }
 
@@ -117,7 +117,7 @@ fn edit_filters(doc: &mut Document) -> bool {
         {
             f.visible = !f.visible;
             f.opacity = 0.4;
-            f.blend = photosuite_color::BlendMode::Multiply;
+            f.blend = photosplice_color::BlendMode::Multiply;
             any = true;
         }
     }
@@ -131,7 +131,7 @@ fn re_embed(doc: &mut Document) -> bool {
         if let Some(l) = doc.layer_mut(id)
             && let LayerContent::Smart(sm) = &mut l.content
             && let SmartSource::Linked { path } = &sm.source
-            && let Some(f) = photosuite_io::linked::find_linked_file(&meta, path)
+            && let Some(f) = photosplice_io::linked::find_linked_file(&meta, path)
         {
             sm.source = SmartSource::Embedded { file_name: f.file_name, bytes: Arc::new(f.bytes) };
             sm.psd_raw = None;
@@ -147,7 +147,7 @@ fn re_embed(doc: &mut Document) -> bool {
 type PlacedRow = (String, Vec<[u8; 4]>, Option<Descriptor>, Option<Descriptor>);
 
 fn placed_rows(bytes: &[u8]) -> Vec<PlacedRow> {
-    let Ok(f) = photosuite_psd::PsdFile::from_bytes(bytes) else { return Vec::new() };
+    let Ok(f) = photosplice_psd::PsdFile::from_bytes(bytes) else { return Vec::new() };
     let warp = |d: Descriptor| match d.get("warp") {
         Some(Value::Descriptor(w)) => Some(w.clone()),
         _ => None,
@@ -203,7 +203,7 @@ fn smart_objects_round_trip_through_psd() {
     for p in &files {
         let name = p.strip_prefix(&root).unwrap_or(p).display().to_string();
         let bytes = std::fs::read(p).unwrap_or_default();
-        let Ok(imp) = photosuite_io::import(&name, &bytes) else { continue };
+        let Ok(imp) = photosplice_io::import(&name, &bytes) else { continue };
         let doc = imp.document;
         let n = smarts(&doc).len();
         if n == 0 {
@@ -252,7 +252,7 @@ fn smart_objects_round_trip_through_psd() {
         if smarts(&doc).iter().any(|(_, s)| s.filter_mask.is_some()) {
             match round_trip(&doc) {
                 Ok((back, _)) => {
-                    let (a, b) = (photosuite_compose::flatten(&doc).px, photosuite_compose::flatten(&back).px);
+                    let (a, b) = (photosplice_compose::flatten(&doc).px, photosplice_compose::flatten(&back).px);
                     let worst = a.iter().zip(&b).flat_map(|(p, q)| (0..4).map(move |c| (p[c] * p[3] - q[c] * q[3]).abs())).fold(0.0f32, f32::max);
                     if worst > 3.0 / 255.0 {
                         fail("filter mask", format!("composite moved by {worst} through PSD"));
@@ -268,12 +268,12 @@ fn smart_objects_round_trip_through_psd() {
                 Ok((back, out)) => {
                     compare(&em, &back, true).into_iter().for_each(|e| fail("re-embedded", e));
                     // The old files are gone: one lnk2 item per distinct source.
-                    let f = photosuite_psd::PsdFile::from_bytes(&out).unwrap();
+                    let f = photosplice_psd::PsdFile::from_bytes(&out).unwrap();
                     let items: Vec<String> = f
                         .global_blocks
                         .iter()
                         .filter(|b| matches!(&b.key, b"lnk2" | b"lnk3" | b"lnkD" | b"lnkE"))
-                        .flat_map(|b| photosuite_io::linked::block_uuids(&b.data))
+                        .flat_map(|b| photosplice_io::linked::block_uuids(&b.data))
                         .collect();
                     let mut used: Vec<String> = smarts(&back)
                         .iter()

@@ -1,7 +1,7 @@
 //! GPU compositor (architecture §7.2, milestone M5).
 //!
 //! Renders a [`Document`] with wgpu, producing the same straight-alpha composite as the CPU
-//! reference (`photosuite-compose`) within ~1/255:
+//! reference (`photosplice-compose`) within ~1/255:
 //!
 //! - **Residency.** Layer and mask surfaces live on the GPU in square *pages* (up to [`PAGE`]²,
 //!   never above the device's texture limit) covering their allocated tiles. A page is uploaded
@@ -40,11 +40,11 @@ use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
-use photosuite_color::{PixelFormat, SampleType};
-use photosuite_compose::effects::FieldKind;
-use photosuite_doc::{DocId, Document, Layer, LayerContent, LayerId, Pattern};
-use photosuite_geom::{Rect, TILE_SIZE, TileCoord};
-use photosuite_raster::{Surface, Tile};
+use photosplice_color::{PixelFormat, SampleType};
+use photosplice_compose::effects::FieldKind;
+use photosplice_doc::{DocId, Document, Layer, LayerContent, LayerId, Pattern};
+use photosplice_geom::{Rect, TILE_SIZE, TileCoord};
+use photosplice_raster::{Surface, Tile};
 
 pub use health::{DeviceHealth, Fault};
 pub use plan::{Kernel, Plan, Role, Unsupported, plan};
@@ -128,7 +128,7 @@ enum TexKind {
 impl TexKind {
     fn for_surface(role: Role, f: PixelFormat) -> Self {
         match role {
-            Role::Content | Role::Stroke if f.mode == photosuite_color::ColorMode::Lab => TexKind::Rgba32F,
+            Role::Content | Role::Stroke if f.mode == photosplice_color::ColorMode::Lab => TexKind::Rgba32F,
             Role::Content | Role::Stroke if f == PixelFormat::RGBA8 => TexKind::Rgba8Direct,
             Role::Content | Role::Stroke if f.sample == SampleType::U8 => TexKind::Rgba8,
             Role::Content | Role::Stroke => TexKind::Rgba16F,
@@ -713,7 +713,7 @@ impl Compositor {
 
     /// How far beyond a page cell the effect maps of `f` must be computed to be exact in it.
     fn fx_apron(doc: &Document, f: &plan::FxLayer<'_>) -> i32 {
-        let vector_shape = matches!(f.layer.content, LayerContent::Shape(_)) && photosuite_compose::effect_outline(f.layer).is_none();
+        let vector_shape = matches!(f.layer.content, LayerContent::Shape(_)) && photosplice_compose::effect_outline(f.layer).is_none();
         let progs: Vec<fx::MapProgram> = f
             .layer
             .effects
@@ -744,8 +744,8 @@ impl Compositor {
                 // Effect noise is speckled in the CPU maps; keep CPU and GPU identical by
                 // rendering noise-carrying effects on the CPU path.
                 let noisy = match e {
-                    photosuite_doc::Effect::DropShadow(s) | photosuite_doc::Effect::InnerShadow(s) => s.noise > 0.0,
-                    photosuite_doc::Effect::OuterGlow(g) | photosuite_doc::Effect::InnerGlow(g) => g.noise > 0.0,
+                    photosplice_doc::Effect::DropShadow(s) | photosplice_doc::Effect::InnerShadow(s) => s.noise > 0.0,
+                    photosplice_doc::Effect::OuterGlow(g) | photosplice_doc::Effect::InnerGlow(g) => g.noise > 0.0,
                     _ => false,
                 };
                 if noisy {
@@ -838,9 +838,9 @@ impl Compositor {
             return Err(Unsupported(f.to_string()));
         }
         // CMYK layers convert through the document's own CMYK profile (uploads and plan colours).
-        let space = photosuite_compose::cmyk_space(doc);
+        let space = photosplice_compose::cmyk_space(doc);
         self.cmyk = space.as_ref().map_or(0, |s| s.id);
-        photosuite_color::convert::with_cmyk_space(space.as_ref(), || self.encode_scoped(device, queue, encoder, doc, region, sink, flush))
+        photosplice_color::convert::with_cmyk_space(space.as_ref(), || self.encode_scoped(device, queue, encoder, doc, region, sink, flush))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1242,7 +1242,7 @@ impl Compositor {
         }
         let format = surface.format();
         let kind = TexKind::for_surface(key.1, format);
-        let cmyk = if format.mode == photosuite_color::ColorMode::Cmyk { self.cmyk } else { 0 };
+        let cmyk = if format.mode == photosplice_color::ColorMode::Cmyk { self.cmyk } else { 0 };
         let stale = self.residents.get(&key).is_none_or(|r| r.region != region || r.kind != kind || r.format != format || r.cmyk != cmyk);
         if stale {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -1496,7 +1496,7 @@ impl Compositor {
 
         // Programs, and the distance fields they read (max reach per field).
         // Filled shapes stroke their outline (the effect shape); others estimate it.
-        let vector_shape = matches!(layer.content, LayerContent::Shape(_)) && photosuite_compose::effect_outline(layer).is_none();
+        let vector_shape = matches!(layer.content, LayerContent::Shape(_)) && photosplice_compose::effect_outline(layer).is_none();
         let anchor = layer.effects.reference.unwrap_or((f64::from(f.bounds.x0), f64::from(f.bounds.y0)));
         let progs: Vec<fx::MapProgram> =
             layer.effects.items.iter().filter(|e| e.enabled()).map(|e| fx::program_with(e, &doc.global_light, vector_shape, &doc.patterns, anchor)).collect();
@@ -1624,13 +1624,13 @@ impl Compositor {
     }
 }
 
-/// A start time when `PHOTOSUITE_FX_TRACE=1` (it prints the CPU time of effect shapes and
+/// A start time when `PHOTOSPLICE_FX_TRACE=1` (it prints the CPU time of effect shapes and
 /// distance fields); never on wasm.
 fn web_time_now() -> Option<std::time::Instant> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        T.get_or_init(|| std::env::var_os("PHOTOSUITE_FX_TRACE").is_some()).then(std::time::Instant::now)
+        T.get_or_init(|| std::env::var_os("PHOTOSPLICE_FX_TRACE").is_some()).then(std::time::Instant::now)
     }
     #[cfg(target_arch = "wasm32")]
     None
@@ -1725,17 +1725,17 @@ fn convert_tile(surface: &Surface, tile: Option<&Arc<Tile>>, kind: TexKind, c: T
     for px in raw.chunks_exact(ch) {
         match kind {
             TexKind::Rgba8Direct | TexKind::Rgba8 => {
-                let v = photosuite_raster::to_rgba(&fmt, px);
+                let v = photosplice_raster::to_rgba(&fmt, px);
                 out.extend(v.map(|x| (x.clamp(0.0, 1.0) * 255.0 + 0.5) as u8));
             }
             TexKind::Rgba16F => {
-                let v = photosuite_raster::to_rgba(&fmt, px);
+                let v = photosplice_raster::to_rgba(&fmt, px);
                 for x in v {
                     out.extend(f32_to_f16(x).to_le_bytes());
                 }
             }
             TexKind::Rgba32F => {
-                for x in photosuite_raster::to_rgba_unclamped(&fmt, px) {
+                for x in photosplice_raster::to_rgba_unclamped(&fmt, px) {
                     out.extend(x.to_le_bytes());
                 }
             }

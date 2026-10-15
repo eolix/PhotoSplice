@@ -8,9 +8,9 @@
 //! One-effect galleries map to `filter.filterGallery`; anything else (a stack of several effects)
 //! stays a [`super::UNSUPPORTED_FILTER`] with its descriptor kept verbatim.
 
-use photosuite_algo::{GalleryFilter as G, GalleryParamKind};
-use photosuite_doc::SmartFilter;
-use photosuite_psd::descriptor::{Descriptor, Id, UnicodeString, Value};
+use photosplice_algo::{GalleryFilter as G, GalleryParamKind};
+use photosplice_doc::SmartFilter;
+use photosplice_psd::descriptor::{Descriptor, Id, UnicodeString, Value};
 use serde_json::{Map, Value as J, json};
 
 use crate::blocks::{enum_of, get_desc, num};
@@ -355,7 +355,7 @@ pub(super) fn export(f: &SmartFilter) -> Option<Result<Descriptor, String>> {
     }
     Some(single_effect(f).and_then(|(g, p)| {
         let effect = by_filter(g).ok_or("no PSD equivalent")?;
-        let defaults = photosuite_algo::GalleryEffect::new(g);
+        let defaults = photosplice_algo::GalleryEffect::new(g);
         let mut d = Descriptor::new(CLASS).with("GEfk", Value::Enumerated { type_id: Id::new("GEft"), value: Id::new(effect.id) });
         let kinds = g.params();
         for (psd, key, kind) in effect.params {
@@ -437,7 +437,7 @@ mod tests {
         assert_eq!(e["filter"], "sponge");
         assert_eq!(e["params"]["definition"], 12.0);
         assert_eq!(e["params"]["seed"], 250_816_192);
-        let sf = SmartFilter { command: cmd.into(), params: p, blend: photosuite_color::BlendMode::Normal, opacity: 1.0, visible: true };
+        let sf = SmartFilter { command: cmd.into(), params: p, blend: photosplice_color::BlendMode::Normal, opacity: 1.0, visible: true };
         let back = export(&sf).unwrap().unwrap();
         let f2 = get_desc(&back, "Fltr").unwrap();
         assert_eq!(f2, fltr);
@@ -448,7 +448,7 @@ mod tests {
         let sf = SmartFilter {
             command: COMMAND.into(),
             params: json!({"effects": [{"filter": "texturizer", "params": {"texture": "sandstone", "light": "bottomLeft", "invert": true, "relief": 12}}], "foreground": [1.0, 0.0, 0.0]}),
-            blend: photosuite_color::BlendMode::Normal,
+            blend: photosplice_color::BlendMode::Normal,
             opacity: 1.0,
             visible: true,
         };
@@ -467,7 +467,7 @@ mod tests {
         let two = SmartFilter {
             command: COMMAND.into(),
             params: json!({"effects": [{"filter": "sponge"}, {"filter": "grain"}]}),
-            blend: photosuite_color::BlendMode::Normal,
+            blend: photosplice_color::BlendMode::Normal,
             opacity: 1.0,
             visible: true,
         };

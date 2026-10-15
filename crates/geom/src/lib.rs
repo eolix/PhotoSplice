@@ -1,4 +1,4 @@
-//! Geometry primitives shared by every PhotoSuite crate.
+//! Geometry primitives shared by every PhotoSplice crate.
 //!
 //! Document space is integer pixels with the origin at the canvas top-left.
 //! Layers may extend beyond the canvas (negative coordinates are valid).

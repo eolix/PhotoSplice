@@ -2,12 +2,12 @@
 //! release:
 //!
 //! ```sh
-//! cargo test --release -p photosuite-codecs --test tiff_bench -- --ignored --nocapture
+//! cargo test --release -p photosplice-codecs --test tiff_bench -- --ignored --nocapture
 //! ```
 
 mod common;
 use common::tiffgen::*;
-use photosuite_codecs::*;
+use photosplice_codecs::*;
 use std::time::Instant;
 
 const W: u32 = 6336;

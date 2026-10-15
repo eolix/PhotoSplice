@@ -5,10 +5,10 @@
 mod common;
 
 use common::*;
-use photosuite_color::{ColorMode, SampleType};
-use photosuite_doc::{Document, LayerContent};
-use photosuite_io::*;
-use photosuite_psd::tiff::{ByteOrder, ImageSourceData};
+use photosplice_color::{ColorMode, SampleType};
+use photosplice_doc::{Document, LayerContent};
+use photosplice_io::*;
+use photosplice_psd::tiff::{ByteOrder, ImageSourceData};
 
 fn tiff(doc: &Document, layers: bool) -> ExportResult {
     export(doc, "x.tif", &ExportOptions { tiff_layers: layers, ..Default::default() }).expect("export")
@@ -16,7 +16,7 @@ fn tiff(doc: &Document, layers: bool) -> ExportResult {
 
 /// The two Photoshop tags of a TIFF: (resources, layers).
 fn tags(bytes: &[u8]) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
-    let (r, l) = photosuite_codecs::tiff_photoshop_tags(bytes);
+    let (r, l) = photosplice_codecs::tiff_photoshop_tags(bytes);
     (r.map(<[u8]>::to_vec), l.map(<[u8]>::to_vec))
 }
 
@@ -26,13 +26,13 @@ fn roundtrip(doc: &Document) -> Document {
     let layers = layers.expect("layer data");
     assert!(resources.is_some_and(|r| !r.is_empty()), "image resources");
     // The layer data matches the container's byte order and is byte-stable through the psd crate.
-    let order = if photosuite_codecs::tiff_writes_little_endian() { ByteOrder::Little } else { ByteOrder::Big };
+    let order = if photosplice_codecs::tiff_writes_little_endian() { ByteOrder::Little } else { ByteOrder::Big };
     let (isd, w) = ImageSourceData::from_bytes(&layers).expect("parse layer data");
     assert!(w.is_empty(), "{w:?}");
     assert_eq!(isd.byte_order, order);
     assert_eq!(isd.to_bytes(order).unwrap().0, layers);
     // The TIFF is a plain image to any other reader: the composite at the document's size.
-    let flat = photosuite_codecs::decode(&r.bytes).expect("flat decode");
+    let flat = photosplice_codecs::decode(&r.bytes).expect("flat decode");
     assert_eq!(flat.dimensions(), (doc.size.width, doc.size.height));
     // A TIFF holds one transparency channel: extra alpha channels (and a Quick Mask) are not
     // kept, and the export says so.
@@ -84,19 +84,19 @@ fn tiff_and_psd_open_as_the_same_document() {
         let tif = tiff(&d, true);
         let flat = import(
             "flat.tif",
-            &photosuite_codecs::encode(&photosuite_codecs::decode(&tif.bytes).unwrap(), photosuite_codecs::Format::Tiff, &Default::default()).unwrap(),
+            &photosplice_codecs::encode(&photosplice_codecs::decode(&tif.bytes).unwrap(), photosplice_codecs::Format::Tiff, &Default::default()).unwrap(),
         )
         .unwrap()
         .document;
-        let a = photosuite_compose::flatten(&d).px;
-        let b = photosuite_compose::flatten(&flat).px;
+        let a = photosplice_compose::flatten(&d).px;
+        let b = photosplice_compose::flatten(&flat).px;
         assert!(max_diff(&a, &b) <= 2.0 / 255.0, "{mode:?} {depth:?}: composite differs by {}", max_diff(&a, &b));
     }
 }
 
 #[test]
 fn every_compression_keeps_the_layers() {
-    use photosuite_codecs::TiffCompression;
+    use photosplice_codecs::TiffCompression;
     let d = gen_doc(ColorMode::Rgb, SampleType::U16, Features::PIXELS);
     for c in [TiffCompression::None, TiffCompression::Lzw, TiffCompression::Deflate, TiffCompression::PackBits] {
         let mut opts = ExportOptions { tiff_layers: true, ..Default::default() };
@@ -143,16 +143,16 @@ fn lab_documents_are_saved_flat_with_a_warning() {
 fn transparency_is_straight_in_the_composite() {
     // A translucent layer over nothing: the TIFF's composite keeps its colour under the alpha
     // instead of being matted against white like a PSD's merged image.
-    let mut d = Document::new("t", photosuite_geom::Size::new(4, 4), ColorMode::Rgb, SampleType::U8);
+    let mut d = Document::new("t", photosplice_geom::Size::new(4, 4), ColorMode::Rgb, SampleType::U8);
     let fmt = d.pixel_format();
-    let mut l = raster("Red", fmt, photosuite_geom::Rect::new(0, 0, 4, 4), 0, false);
+    let mut l = raster("Red", fmt, photosplice_geom::Rect::new(0, 0, 4, 4), 0, false);
     if let LayerContent::Raster(s) = &mut l.content {
         let px: Vec<f32> = (0..16).flat_map(|_| [1.0, 0.0, 0.0, 0.5]).collect();
-        s.write_region(photosuite_geom::Rect::new(0, 0, 4, 4), &px);
+        s.write_region(photosplice_geom::Rect::new(0, 0, 4, 4), &px);
     }
     d.layers.push(l);
     let r = tiff(&d, true);
-    let flat = photosuite_codecs::decode(&r.bytes).unwrap();
+    let flat = photosplice_codecs::decode(&r.bytes).unwrap();
     assert!(flat.layout().has_alpha());
     let px = flat.data();
     assert_eq!(&px[..4], &[255, 0, 0, 128]);
@@ -166,7 +166,7 @@ fn big_documents_use_the_psb_signature() {
     let d = gen_doc(ColorMode::Rgb, SampleType::U8, Features::PIXELS);
     let r = export(&d, "x.tif", &ExportOptions { force_psb: true, tiff_layers: true, ..Default::default() }).unwrap();
     let (_, layers) = tags(&r.bytes);
-    assert!(layers.unwrap().starts_with(photosuite_psd::tiff::SIGNATURE_PSB));
+    assert!(layers.unwrap().starts_with(photosplice_psd::tiff::SIGNATURE_PSB));
     let back = import("x.tif", &r.bytes).unwrap().document;
     assert_docs_eq(&d, &back);
 }
@@ -194,13 +194,13 @@ fn psdtags_fixtures_open_with_their_layers() {
         let Some(bytes) = fixture(name) else { continue };
         let r = import(name, &bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
         let d = &r.document;
-        assert_eq!(d.size, photosuite_geom::Size::new(6, 4), "{name}");
+        assert_eq!(d.size, photosplice_geom::Size::new(6, 4), "{name}");
         assert_eq!(d.mode, ColorMode::Rgb);
         assert_eq!(d.depth, depth, "{name}");
         let names: Vec<&str> = d.layers.iter().map(|l| l.name.as_str()).collect();
         assert_eq!(names, ["Background", "Upper \u{e9}"], "{name}");
         let upper = &d.layers[1];
-        assert_eq!(upper.blend, photosuite_color::BlendMode::Multiply);
+        assert_eq!(upper.blend, photosplice_color::BlendMode::Multiply);
         assert!((upper.opacity - 200.0 / 255.0).abs() < 1e-6);
         let LayerContent::Raster(s) = &upper.content else { panic!("raster") };
         let bounds = s.content_bounds();

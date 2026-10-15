@@ -5,12 +5,12 @@
 //! turns pointer gestures into them.
 
 use egui::{Color32, Rect, Stroke, vec2};
-use photosuite_doc::slices::{self, ResolvedSlice};
-use photosuite_doc::{Document, SliceOrigin};
+use photosplice_doc::slices::{self, ResolvedSlice};
+use photosplice_doc::{Document, SliceOrigin};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::{ToolEvent, ViewXform};
 use crate::state::{DialogKind, Tool};
 
@@ -30,7 +30,7 @@ pub struct SliceUi {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SliceDrag {
     New { start: [f64; 2], cur: [f64; 2] },
-    Move { id: u32, start: [f64; 2], cur: [f64; 2], rect: photosuite_geom::Rect },
+    Move { id: u32, start: [f64; 2], cur: [f64; 2], rect: photosplice_geom::Rect },
 }
 
 fn is_slice_tool(t: Tool) -> bool {
@@ -45,14 +45,14 @@ pub fn slice_at(doc: &Document, x: f64, y: f64) -> Option<ResolvedSlice> {
     all.iter().filter(|r| r.rect.contains(xi, yi)).max_by_key(|r| order(r).map_or(0, |i| i + 1)).cloned()
 }
 
-fn rect_from(a: [f64; 2], b: [f64; 2]) -> photosuite_geom::Rect {
+fn rect_from(a: [f64; 2], b: [f64; 2]) -> photosplice_geom::Rect {
     let (x0, x1) = (a[0].min(b[0]).floor() as i32, a[0].max(b[0]).ceil() as i32);
     let (y0, y1) = (a[1].min(b[1]).floor() as i32, a[1].max(b[1]).ceil() as i32);
-    photosuite_geom::Rect::new(x0, y0, x1, y1)
+    photosplice_geom::Rect::new(x0, y0, x1, y1)
 }
 
 /// Pointer input for the two slice tools. Returns true when the event was theirs.
-pub fn pointer(app: &mut PhotosuiteApp, ev: ToolEvent, _mods: egui::Modifiers) -> bool {
+pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, _mods: egui::Modifiers) -> bool {
     let tool = app.ui.tool;
     if !is_slice_tool(tool) {
         return false;
@@ -116,7 +116,7 @@ fn hex(s: &str, fallback: Color32) -> Color32 {
 }
 
 /// Slice outlines and numbered badges (View › Show › Slices; always while a slice tool is on).
-pub fn draw_overlay(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform) {
+pub fn draw_overlay(app: &PhotospliceApp, painter: &egui::Painter, xf: &ViewXform) {
     let tool_on = is_slice_tool(app.ui.tool);
     let Some(doc) = app.session.active().map(|d| d.doc.clone()) else { return };
     if !(tool_on || (app.ui.view.shows(app.ui.view.show.slices) && !doc.slices.is_empty())) {
@@ -126,7 +126,7 @@ pub fn draw_overlay(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform
     let color = hex(&prefs.slice_color, Color32::from_rgb(0x38, 0xb5, 0xff));
     let numbers = prefs.show_slice_numbers;
     let selected_color = Color32::from_rgb(0xff, 0xb0, 0x00);
-    let to_screen = |r: photosuite_geom::Rect| Rect::from_two_pos(xf.to_screen(r.x0 as f32, r.y0 as f32), xf.to_screen(r.x1 as f32, r.y1 as f32));
+    let to_screen = |r: photosplice_geom::Rect| Rect::from_two_pos(xf.to_screen(r.x0 as f32, r.y0 as f32), xf.to_screen(r.x1 as f32, r.y1 as f32));
     let all = slices::resolve(&doc);
     // Auto slices first (dotted, underneath), then user and layer slices.
     for pass in [true, false] {
@@ -195,7 +195,7 @@ pub fn draw_overlay(app: &PhotosuiteApp, painter: &egui::Painter, xf: &ViewXform
 }
 
 /// The selected slice's id, promoting an auto slice first when `promote`.
-fn selected_id(app: &mut PhotosuiteApp, promote: bool) -> Option<u32> {
+fn selected_id(app: &mut PhotospliceApp, promote: bool) -> Option<u32> {
     let n = app.ui.slices.selected?;
     let doc = app.session.active()?.doc.clone();
     let r = slices::resolve(&doc).into_iter().find(|r| r.number == n)?;
@@ -207,11 +207,11 @@ fn selected_id(app: &mut PhotosuiteApp, promote: bool) -> Option<u32> {
 }
 
 /// Slice Options dialog for the selected slice (auto slices are promoted on OK).
-pub fn open_options(app: &mut PhotosuiteApp) -> Result<Value, String> {
+pub fn open_options(app: &mut PhotospliceApp) -> Result<Value, String> {
     let n = app.ui.slices.selected.ok_or("select a slice with the Slice Select tool")?;
     let st = app.session.active().ok_or("no document")?;
     let r = slices::resolve(&st.doc).into_iter().find(|r| r.number == n).ok_or("no such slice")?;
-    let v = photosuite_engine::slice_cmds::resolved_json(&st.doc, &r);
+    let v = photosplice_engine::slice_cmds::resolved_json(&st.doc, &r);
     let mut f = serde_json::Map::new();
     f.insert("__command".into(), json!("slice.set"));
     f.insert("__label".into(), json!("Slice Options"));
@@ -227,7 +227,7 @@ pub fn open_options(app: &mut PhotosuiteApp) -> Result<Value, String> {
 }
 
 /// Divide Slice dialog.
-fn open_divide(app: &mut PhotosuiteApp) -> Result<Value, String> {
+fn open_divide(app: &mut PhotospliceApp) -> Result<Value, String> {
     let n = app.ui.slices.selected.ok_or("select a slice first")?;
     let mut f = serde_json::Map::new();
     f.insert("__command".into(), json!("slice.divide"));
@@ -241,7 +241,7 @@ fn open_divide(app: &mut PhotosuiteApp) -> Result<Value, String> {
 }
 
 /// Options bars of the Slice and Slice Select tools.
-pub fn options_bar(app: &mut PhotosuiteApp, ui: &mut egui::Ui, tool: Tool) -> bool {
+pub fn options_bar(app: &mut PhotospliceApp, ui: &mut egui::Ui, tool: Tool) -> bool {
     if !is_slice_tool(tool) {
         return false;
     }
@@ -287,8 +287,8 @@ pub fn options_bar(app: &mut PhotosuiteApp, ui: &mut egui::Ui, tool: Tool) -> bo
 mod tests {
     use super::*;
 
-    fn app() -> PhotosuiteApp {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+    fn app() -> PhotospliceApp {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         app.run("file.new", json!({"width": 100, "height": 80})).unwrap();
         app
     }
@@ -303,7 +303,7 @@ mod tests {
         pointer(&mut app, ToolEvent::Up { x: 40.0, y: 30.0 }, m);
         let doc = app.session.active().unwrap().doc.clone();
         assert_eq!(doc.slices.list.len(), 1);
-        assert_eq!(doc.slices.list[0].rect, photosuite_geom::Rect::new(10, 10, 40, 30));
+        assert_eq!(doc.slices.list[0].rect, photosplice_geom::Rect::new(10, 10, 40, 30));
         let n = app.ui.slices.selected.unwrap();
         // Slice Select: drag it by (5, 5).
         app.ui.tool = Tool::SliceSelect;
@@ -311,7 +311,7 @@ mod tests {
         assert_eq!(app.ui.slices.selected, Some(n));
         pointer(&mut app, ToolEvent::Up { x: 25.0, y: 25.0 }, m);
         let doc = app.session.active().unwrap().doc.clone();
-        assert_eq!(doc.slices.list[0].rect, photosuite_geom::Rect::new(15, 15, 45, 35));
+        assert_eq!(doc.slices.list[0].rect, photosplice_geom::Rect::new(15, 15, 45, 35));
         // Clicking an auto slice selects it; Slice Options promotes it.
         pointer(&mut app, ToolEvent::Down { x: 90.0, y: 75.0, pressure: 1.0 }, m);
         pointer(&mut app, ToolEvent::Up { x: 90.0, y: 75.0 }, m);

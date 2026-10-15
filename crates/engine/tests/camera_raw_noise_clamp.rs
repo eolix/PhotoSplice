@@ -7,14 +7,14 @@ use serde_json::json;
 
 #[test]
 fn camera_raw_clamps_noise_amounts() {
-    let p = photosuite_engine::lens_cmds::raw_params("filter.cameraRaw", &json!({"noiseLuminance": 1e9, "noiseColor": 1e9})).expect("params parse");
+    let p = photosplice_engine::lens_cmds::raw_params("filter.cameraRaw", &json!({"noiseLuminance": 1e9, "noiseColor": 1e9})).expect("params parse");
     assert!((p.noise_luminance - 100.0).abs() < f32::EPSILON, "noiseLuminance 1e9 must clamp to 100, got {}", p.noise_luminance);
     assert!((p.noise_color - 100.0).abs() < f32::EPSILON, "noiseColor 1e9 must clamp to 100, got {}", p.noise_color);
 }
 
 #[test]
 fn camera_raw_clamps_negative_noise_and_details() {
-    let p = photosuite_engine::lens_cmds::raw_params(
+    let p = photosplice_engine::lens_cmds::raw_params(
         "filter.cameraRaw",
         &json!({
             "noiseLuminance": -5.0,
@@ -32,7 +32,7 @@ fn camera_raw_clamps_negative_noise_and_details() {
 
 #[test]
 fn camera_raw_keeps_in_range_noise_untouched() {
-    let p = photosuite_engine::lens_cmds::raw_params("filter.cameraRaw", &json!({"noiseLuminance": 25.0, "noiseColor": 40.0})).expect("params parse");
+    let p = photosplice_engine::lens_cmds::raw_params("filter.cameraRaw", &json!({"noiseLuminance": 25.0, "noiseColor": 40.0})).expect("params parse");
     assert_eq!(p.noise_luminance, 25.0);
     assert_eq!(p.noise_color, 40.0);
 }

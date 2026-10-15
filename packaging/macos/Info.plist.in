@@ -7,13 +7,13 @@
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleDisplayName</key>
-  <string>PhotoSuite</string>
+  <string>PhotoSplice</string>
   <key>CFBundleName</key>
-  <string>PhotoSuite</string>
+  <string>PhotoSplice</string>
   <key>CFBundleExecutable</key>
-  <string>PhotoSuite</string>
+  <string>PhotoSplice</string>
   <key>CFBundleIdentifier</key>
-  <string>app.photosuite</string>
+  <string>app.photosplice</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundlePackageType</key>
@@ -24,12 +24,12 @@
   <string>@SHORT_VERSION@</string>
   <key>CFBundleVersion</key>
   <string>@SHORT_VERSION@</string>
-  <key>PhotoSuiteVersion</key>
+  <key>PhotoSpliceVersion</key>
   <string>@VERSION@</string>
-  <key>PhotoSuiteBuildCommit</key>
+  <key>PhotoSpliceBuildCommit</key>
   <string>@BUILD_SHA@</string>
   <key>CFBundleIconFile</key>
-  <string>PhotoSuite</string>
+  <string>PhotoSplice</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.graphics-design</string>
   <!-- Must match MACOSX_DEPLOYMENT_TARGET in package.sh. Big Sur is the first release on
@@ -43,29 +43,29 @@
   <key>NSRequiresAquaSystemAppearance</key>
   <false/>
   <key>NSHumanReadableCopyright</key>
-  <string>Copyright © the PhotoSuite authors; ArtCraft Team and the PhotoCraft contributors. MIT OR Apache-2.0.</string>
+  <string>Copyright © the PhotoSplice authors; ArtCraft Team and the PhotoCraft contributors. MIT OR Apache-2.0.</string>
 
-  <!-- Photosuite's own format. -->
+  <!-- Photosplice's own format. -->
   <key>UTExportedTypeDeclarations</key>
   <array>
     <dict>
       <key>UTTypeIdentifier</key>
-      <string>app.photosuite.document</string>
+      <string>app.photosplice.document</string>
       <key>UTTypeDescription</key>
-      <string>PhotoSuite Document</string>
+      <string>PhotoSplice Document</string>
       <key>UTTypeConformsTo</key>
       <array>
         <string>public.data</string>
         <string>public.image</string>
       </array>
       <key>UTTypeIconFile</key>
-      <string>PhotoSuite</string>
+      <string>PhotoSplice</string>
       <key>UTTypeTagSpecification</key>
       <dict>
         <key>public.filename-extension</key>
         <array><string>pcraft</string></array>
         <key>public.mime-type</key>
-        <array><string>application/x-photosuite</string></array>
+        <array><string>application/x-photosplice</string></array>
       </dict>
     </dict>
   </array>
@@ -90,7 +90,7 @@
     </dict>
     <dict>
       <key>UTTypeIdentifier</key>
-      <string>app.photosuite.qoi</string>
+      <string>app.photosplice.qoi</string>
       <key>UTTypeDescription</key>
       <string>QOI Image</string>
       <key>UTTypeConformsTo</key>
@@ -110,15 +110,15 @@
   <array>
     <dict>
       <key>CFBundleTypeName</key>
-      <string>PhotoSuite Document</string>
+      <string>PhotoSplice Document</string>
       <key>CFBundleTypeRole</key>
       <string>Editor</string>
       <key>LSHandlerRank</key>
       <string>Owner</string>
       <key>CFBundleTypeIconFile</key>
-      <string>PhotoSuite</string>
+      <string>PhotoSplice</string>
       <key>LSItemContentTypes</key>
-      <array><string>app.photosuite.document</string></array>
+      <array><string>app.photosplice.document</string></array>
     </dict>
     <dict>
       <key>CFBundleTypeName</key>
@@ -156,7 +156,7 @@
         <string>public.avif</string>
         <string>public.heic</string>
         <string>public.heif</string>
-        <string>app.photosuite.qoi</string>
+        <string>app.photosplice.qoi</string>
       </array>
     </dict>
   </array>

@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# தமிழ் translations for PhotoSuite UI.
+# தமிழ் translations for PhotoSplice UI.
 
 	File	கோப்பு
 	Edit	தொகு
@@ -672,7 +672,7 @@
 	Timeline	காலவரிசை
 	Tool Presets	கருவி முன்னமைவுகள்
 	Tools	கருவிகள்
-	About PhotoSuite	PhotoSuite பற்றி
+	About PhotoSplice	PhotoSplice பற்றி
 	Website	இணையதளம்
 	Report an Issue…	சிக்கலைப் புகாரளிக்கவும்…
 	WIA Support…	WIA ஆதரவு…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	முன்னோக்கு வார்ப் செயலில் இல்லை
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	முன்னோக்கு வார்ப்: படத்தின் கண்ணோட்டத்தில் விமானங்களை வரையவும், பின்னர் வார்ப்புக்கு மாறவும்
 	Photo Filter	பட வடிகட்டி
-	PhotoSuite	போட்டோகிராஃப்ட்
-	PhotoSuite Manages Colors	PhotoSuite நிறங்களை நிர்வகிக்கிறது
-	PhotoSuite — an open-source, native image editor written in Rust.	ஃபோட்டோகிராஃப்ட் - ஒரு திறந்த மூல, ரஸ்டில் எழுதப்பட்ட நேட்டிவ் இமேஜ் எடிட்டர்
+	PhotoSplice	போட்டோகிராஃப்ட்
+	PhotoSplice Manages Colors	PhotoSplice நிறங்களை நிர்வகிக்கிறது
+	PhotoSplice — an open-source, native image editor written in Rust.	ஃபோட்டோகிராஃப்ட் - ஒரு திறந்த மூல, ரஸ்டில் எழுதப்பட்ட நேட்டிவ் இமேஜ் எடிட்டர்
 	Pin Depth:	பின் ஆழம்:
 	Pixel Length:	பிக்சல் நீளம்:
 	Pixels/Centimeter	பிக்சல்கள்/சென்டிமீட்டர்
@@ -1570,7 +1570,7 @@
 	Pen Tilt	பேனா சாய்வு
 	Pen Tool	பேனா கருவி
 	Photo	நிழற்படம்
-	PhotoSuite website	போட்டோகிராஃப்ட் இணையதளம்
+	PhotoSplice website	போட்டோகிராஃப்ட் இணையதளம்
 	Picas	பிகாஸ்
 	Pillow Emboss	தலையணை புடைப்பு
 	Pixel Replacement	பிக்சல் மாற்று
@@ -1877,7 +1877,7 @@
 	System Info…	சிஸ்டம் தகவல்…
 	System Info	கணினி தகவல்
 	More panels	மேலும் பேனல்கள்
-	These settings aren't available in PhotoSuite yet.	இந்த அமைப்புகள் PhotoSuite இல் இன்னும் கிடைக்கவில்லை
+	These settings aren't available in PhotoSplice yet.	இந்த அமைப்புகள் PhotoSplice இல் இன்னும் கிடைக்கவில்லை
 	Graphics	கிராபிக்ஸ்
 	Reset GPU Backend	GPU பின்தளத்தை மீட்டமைக்கவும்
 	Applies at next launch.	அடுத்த வெளியீட்டில் பொருந்தும்
@@ -2018,7 +2018,7 @@
 	Opening…	திறக்கப்படுகிறது…
 	Patch	ஒட்டுத்துண்டு
 	Patch:	ஒட்டுத்துண்டு:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite CPU பட ஒருங்கிணைப்பியைப் பயன்படுத்துகிறது. சாளரம் இன்னும் உங்கள் கிராஃபிக்ஸ் அடாப்டரைப் பயன்படுத்தக்கூடும்.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice CPU பட ஒருங்கிணைப்பியைப் பயன்படுத்துகிறது. சாளரம் இன்னும் உங்கள் கிராஃபிக்ஸ் அடாப்டரைப் பயன்படுத்தக்கூடும்.
 	Play Action	செயலை இயக்கு
 	Reading…	படிக்கப்படுகிறது…
 	Record Action	செயலைப் பதிவுசெய்

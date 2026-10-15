@@ -1,5 +1,5 @@
 [package]
-name = "photosuite-testkit"
+name = "photosplice-testkit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,9 +8,9 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-photosuite-geom = { workspace = true }
-photosuite-color = { workspace = true }
-photosuite-raster = { workspace = true }
+photosplice-geom = { workspace = true }
+photosplice-color = { workspace = true }
+photosplice-raster = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

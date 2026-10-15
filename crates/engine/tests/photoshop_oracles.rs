@@ -15,8 +15,8 @@
 
 use std::path::{Path, PathBuf};
 
-use photosuite_doc::{Document, LayerContent};
-use photosuite_psd::PsdFile;
+use photosplice_doc::{Document, LayerContent};
+use photosplice_psd::PsdFile;
 
 /// Within two 8-bit steps of Photoshop (same tolerance as the io corpus).
 const PASS_TOL: f32 = 2.0 / 255.0;
@@ -64,14 +64,14 @@ fn rerender(doc: &mut Document) -> Result<usize, String> {
         let Some(l) = doc.layer_mut(id) else { continue };
         match &mut l.content {
             LayerContent::Smart(_) => {
-                if photosuite_engine::smart_cmds::refresh_layer(&snapshot, l).map_err(|e| e.to_string())? {
+                if photosplice_engine::smart_cmds::refresh_layer(&snapshot, l).map_err(|e| e.to_string())? {
                     n += 1;
                 } else {
                     return Err("smart object source unavailable".into());
                 }
             }
             LayerContent::Text(t) => {
-                photosuite_engine::type_cmds::refresh(&snapshot, t);
+                photosplice_engine::type_cmds::refresh(&snapshot, t);
                 n += 1;
             }
             _ => {}
@@ -94,7 +94,7 @@ fn photoshop_oracles_rerendered() {
         let name = p.strip_prefix(&root).unwrap_or(p).display().to_string();
         let bytes = std::fs::read(p).unwrap_or_default();
         let Ok(file) = PsdFile::from_bytes(&bytes) else { continue };
-        let Ok(imp) = photosuite_io::import(&name, &bytes) else {
+        let Ok(imp) = photosplice_io::import(&name, &bytes) else {
             eprintln!("{name:<60} IMPORT-ERROR");
             errors += 1;
             continue;
@@ -109,8 +109,8 @@ fn photoshop_oracles_rerendered() {
                 continue;
             }
         };
-        let Ok(merged) = photosuite_io::merged_composite(&file) else { continue };
-        let ours = photosuite_compose::flatten(&doc).px;
+        let Ok(merged) = photosplice_io::merged_composite(&file) else { continue };
+        let ours = photosplice_compose::flatten(&doc).px;
         let (m, bad) = max_diff(&ours, &merged);
         let group = name.split(['/', '\\']).next().unwrap_or(".").to_string();
         let g = groups.entry(group).or_default();

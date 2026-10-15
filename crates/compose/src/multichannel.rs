@@ -5,8 +5,8 @@
 //! (solidity 0) multiply like overprinted process inks, opaque ones cover what is below, which is
 //! how Photoshop previews spot channels.
 
-use photosuite_doc::Document;
-use photosuite_geom::Rect;
+use photosplice_doc::Document;
+use photosplice_geom::Rect;
 
 use crate::Buffer;
 
@@ -17,7 +17,7 @@ pub fn inks(doc: &Document, rect: Rect) -> Buffer {
     for ch in &doc.channels {
         // Alpha-type channels print as black ink, as Photoshop shows a Multichannel document's
         // "Masked Areas" channels (gray).
-        let (ink, solidity) = ch.spot.unwrap_or((photosuite_doc::Color::BLACK, 0.0));
+        let (ink, solidity) = ch.spot.unwrap_or((photosplice_doc::Color::BLACK, 0.0));
         if ch.surface.content_bounds().intersect(&rect).is_empty() {
             continue;
         }
@@ -41,14 +41,14 @@ pub fn inks(doc: &Document, rect: Rect) -> Buffer {
 
 /// The starting backdrop of a document render: the inks for Multichannel, else transparent.
 pub(crate) fn backdrop(doc: &Document, rect: Rect) -> Buffer {
-    if doc.mode == photosuite_color::ColorMode::Multichannel { inks(doc, rect) } else { Buffer::transparent(rect) }
+    if doc.mode == photosplice_color::ColorMode::Multichannel { inks(doc, rect) } else { Buffer::transparent(rect) }
 }
 
 #[cfg(test)]
 mod tests {
-    use photosuite_color::{Color, ColorMode, PixelFormat, SampleType};
-    use photosuite_doc::{AlphaChannel, Document, Size};
-    use photosuite_raster::Surface;
+    use photosplice_color::{Color, ColorMode, PixelFormat, SampleType};
+    use photosplice_doc::{AlphaChannel, Document, Size};
+    use photosplice_raster::Surface;
 
     use super::*;
 

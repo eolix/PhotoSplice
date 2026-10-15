@@ -5,7 +5,7 @@
 //! thread on every launch: the small seed set at startup, the large one the first time the
 //! Patterns panel is shown.
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 
 /// What kind of preset a library file holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,7 +28,7 @@ pub struct Library {
 }
 
 /// A finished background pattern load: (group, patterns or the error).
-type PatternLoad = (String, Result<Vec<photosuite_doc::Pattern>, String>);
+type PatternLoad = (String, Result<Vec<photosplice_doc::Pattern>, String>);
 
 /// Run-time state of the bundled libraries.
 #[derive(Default)]
@@ -48,7 +48,7 @@ impl State {
     }
 }
 
-fn has_group(app: &PhotosuiteApp, kind: Kind, group: &str) -> bool {
+fn has_group(app: &PhotospliceApp, kind: Kind, group: &str) -> bool {
     match kind {
         Kind::Brushes => app.session.tools.presets.iter().any(|p| p.group == group),
         Kind::Gradients => app.session.presets.gradients.iter().any(|g| g.name == group),
@@ -58,19 +58,19 @@ fn has_group(app: &PhotosuiteApp, kind: Kind, group: &str) -> bool {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_patterns(app: &mut PhotosuiteApp, lib: Library) {
+fn spawn_patterns(app: &mut PhotospliceApp, lib: Library) {
     let (tx, rx) = std::sync::mpsc::channel();
     app.bundled.jobs.push(rx);
     std::thread::spawn(move || {
-        let _ = tx.send((lib.group, photosuite_engine::pattern_cmds::read_pattern_file(&lib.path)));
+        let _ = tx.send((lib.group, photosplice_engine::pattern_cmds::read_pattern_file(&lib.path)));
     });
 }
 
 #[cfg(target_arch = "wasm32")]
-fn spawn_patterns(_app: &mut PhotosuiteApp, _lib: Library) {}
+fn spawn_patterns(_app: &mut PhotospliceApp, _lib: Library) {}
 
 /// Every frame: import what is due, attach finished pattern loads.
-pub fn tick(app: &mut PhotosuiteApp) {
+pub fn tick(app: &mut PhotospliceApp) {
     // Brush presets persist in the store, which loads in the background: wait for it.
     if app.services.preset_store.is_none() && !app.bundled.pending.is_empty() {
         for lib in std::mem::take(&mut app.bundled.pending) {
@@ -104,7 +104,7 @@ pub fn tick(app: &mut PhotosuiteApp) {
         });
         for (group, r) in done {
             match r {
-                Ok(pats) => photosuite_engine::pattern_cmds::attach_group(&mut app.session, &group, pats),
+                Ok(pats) => photosplice_engine::pattern_cmds::attach_group(&mut app.session, &group, pats),
                 Err(e) => log::warn!("bundled patterns {group} not loaded: {e}"),
             }
         }
@@ -112,14 +112,14 @@ pub fn tick(app: &mut PhotosuiteApp) {
 }
 
 /// The Patterns panel is showing: start loading the libraries kept for that moment.
-pub fn patterns_wanted(app: &mut PhotosuiteApp) {
+pub fn patterns_wanted(app: &mut PhotospliceApp) {
     for lib in std::mem::take(&mut app.bundled.on_demand) {
         spawn_patterns(app, lib);
     }
 }
 
 /// Whether pattern libraries are still loading (the panel can say so).
-pub fn patterns_loading(app: &PhotosuiteApp) -> bool {
+pub fn patterns_loading(app: &PhotospliceApp) -> bool {
     #[cfg(not(target_arch = "wasm32"))]
     {
         !app.bundled.jobs.is_empty()
@@ -147,7 +147,7 @@ mod tests {
             Library { kind: Kind::Brushes, group: "Markers".into(), path: res("brushes/Markers.abr") },
             Library { kind: Kind::Patterns, group: "Subtle Patterns".into(), path: res("patterns/patterns.pat") },
         ];
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         app.bundled = State::new(libs.clone());
         tick(&mut app);
         assert!(has_group(&app, Kind::Gradients, "uiGradients"));

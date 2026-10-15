@@ -48,7 +48,7 @@ pub fn spawn(display: Option<&str>, callback: impl Fn(Option<Sample>) + Send + '
     let mut state = State::default();
     state.set_devices(query_devices(&conn));
     std::thread::Builder::new()
-        .name("photosuite-tablet-x11".into())
+        .name("photosplice-tablet-x11".into())
         .spawn(move || run(&conn, &mut state, &callback))
         .map_err(|e| Error::Platform(format!("cannot start the tablet thread: {e}")))
 }

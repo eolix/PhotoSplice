@@ -1,8 +1,8 @@
 //! Brush-engine tests: tips, spacing, dynamics, masks, smoothing, determinism, formats.
 
-use photosuite_color::{BlendMode, ColorMode, PixelFormat, SampleType};
-use photosuite_geom::{Point, Rect};
-use photosuite_raster::Surface;
+use photosplice_color::{BlendMode, ColorMode, PixelFormat, SampleType};
+use photosplice_geom::{Point, Rect};
+use photosplice_raster::Surface;
 
 use crate::brush::*;
 use crate::dynamics::{Smoother, smooth_points};
@@ -616,7 +616,7 @@ fn paints_every_depth_and_model() {
         for sample in [SampleType::U8, SampleType::U16, SampleType::F32] {
             for alpha in [true, false] {
                 let fmt = PixelFormat::new(mode, sample, alpha);
-                let mut s = Surface::with_default(fmt, &photosuite_raster::from_rgba(&fmt, [1.0, 1.0, 1.0, 1.0]));
+                let mut s = Surface::with_default(fmt, &photosplice_raster::from_rgba(&fmt, [1.0, 1.0, 1.0, 1.0]));
                 let fancy = BrushSettings {
                     shape_dynamics: ShapeDynamics { enabled: true, size: Dynamic::jitter(0.3), ..Default::default() },
                     color_dynamics: ColorDynamics { enabled: true, brightness_jitter: 0.1, ..Default::default() },
@@ -627,7 +627,7 @@ fn paints_every_depth_and_model() {
                     render_stroke(&mut s, br, &line(5.0, 40.0, 5.0), None, false, 1.0);
                 }
                 let c = s.rgba(20, 5);
-                let expect = photosuite_raster::to_rgba(&fmt, &photosuite_raster::from_rgba(&fmt, [1.0, 0.0, 0.0, 1.0]));
+                let expect = photosplice_raster::to_rgba(&fmt, &photosplice_raster::from_rgba(&fmt, [1.0, 0.0, 0.0, 1.0]));
                 assert!((c[0] - expect[0]).abs() < 0.15 && (c[1] - expect[1]).abs() < 0.12, "{fmt:?} {c:?} vs {expect:?}");
                 assert_eq!(s.pixel(20, 30), s.pixel(5000, 5000), "{fmt:?} untouched");
             }

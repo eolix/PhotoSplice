@@ -1,6 +1,6 @@
 //! Magnetic Lasso Tool: a click starts the outline; moving the pointer (no button held) draws
 //! a live wire from the last anchor that snaps to the strongest edge within Width
-//! ([`photosuite_algo::livewire`]); a click fixes it with an anchor, and anchors also fall by
+//! ([`photosplice_algo::livewire`]); a click fixes it with an anchor, and anchors also fall by
 //! themselves as the wire grows (Frequency). Backspace removes the last anchor; Enter, a
 //! double-click or a click on the first point closes the outline, and Esc cancels. The closed
 //! outline becomes a selection through `select.lasso`, like the other lassos.
@@ -11,10 +11,10 @@
 
 use std::sync::Arc;
 
-use photosuite_algo::livewire::{self, EdgeImage};
-use photosuite_doc::DocId;
+use photosplice_algo::livewire::{self, EdgeImage};
+use photosplice_doc::DocId;
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::state::Tool;
 
 /// The outline being traced.
@@ -38,30 +38,30 @@ fn centre(p: [i64; 2]) -> [f64; 2] {
     [p[0] as f64 + 0.5, p[1] as f64 + 0.5]
 }
 
-fn contrast(app: &PhotosuiteApp) -> f32 {
+fn contrast(app: &PhotospliceApp) -> f32 {
     (app.ui.tool_options.magnetic_contrast / 100.0).clamp(0.01, 1.0)
 }
 
-fn width(app: &PhotosuiteApp) -> f64 {
+fn width(app: &PhotospliceApp) -> f64 {
     f64::from(app.ui.tool_options.magnetic_width).clamp(1.0, 256.0)
 }
 
 /// Path length between automatic anchors: Frequency 100 places them every 10 px, 0 every 210.
-fn anchor_spacing(app: &PhotosuiteApp) -> f64 {
+fn anchor_spacing(app: &PhotospliceApp) -> f64 {
     10.0 + (100.0 - f64::from(app.ui.tool_options.magnetic_frequency).clamp(0.0, 100.0)) * 2.0
 }
 
 /// The active document's composite as an edge image.
-fn edge_image(app: &PhotosuiteApp) -> Option<(DocId, Arc<EdgeImage>)> {
+fn edge_image(app: &PhotospliceApp) -> Option<(DocId, Arc<EdgeImage>)> {
     let st = app.session.active()?;
-    let buf = photosuite_compose::flatten(&st.doc);
+    let buf = photosplice_compose::flatten(&st.doc);
     let (w, h) = (buf.rect.width() as usize, buf.rect.height() as usize);
     Some((st.doc.id, Arc::new(EdgeImage::from_rgba(&buf.px, w, h))))
 }
 
 /// The tool's state, dropped when its outline is gone (Esc, a commit) or belongs to another
 /// document.
-fn live(app: &mut PhotosuiteApp) -> Option<&mut Magnetic> {
+fn live(app: &mut PhotospliceApp) -> Option<&mut Magnetic> {
     let doc = app.session.active().map(|d| d.doc.id);
     if app.ui.polygon.is_empty() || app.magnetic.as_ref().is_some_and(|m| Some(m.doc) != doc) {
         app.magnetic = None;
@@ -70,7 +70,7 @@ fn live(app: &mut PhotosuiteApp) -> Option<&mut Magnetic> {
 }
 
 /// A click at document point (`x`, `y`).
-pub fn click(app: &mut PhotosuiteApp, x: f64, y: f64, mods: egui::Modifiers) {
+pub fn click(app: &mut PhotospliceApp, x: f64, y: f64, mods: egui::Modifiers) {
     let now = crate::gpu_canvas::now_ms() / 1000.0;
     if live(app).is_none() {
         let Some((doc, edges)) = edge_image(app) else { return };
@@ -97,7 +97,7 @@ pub fn click(app: &mut PhotosuiteApp, x: f64, y: f64, mods: egui::Modifiers) {
 }
 
 /// The pointer is over document point `p`: recompute the wire, placing anchors as it grows.
-pub fn hover(app: &mut PhotosuiteApp, p: [f64; 2]) {
+pub fn hover(app: &mut PhotospliceApp, p: [f64; 2]) {
     if app.ui.tool != Tool::MagneticLasso {
         return;
     }
@@ -137,7 +137,7 @@ pub fn hover(app: &mut PhotosuiteApp, p: [f64; 2]) {
 }
 
 /// Close the outline (a wire back to the first point) and make the selection.
-pub fn close(app: &mut PhotosuiteApp, mods: egui::Modifiers) {
+pub fn close(app: &mut PhotospliceApp, mods: egui::Modifiers) {
     let c = contrast(app);
     let w = width(app);
     if let (Some(m), Some(first), Some(last)) = (app.magnetic.as_ref(), app.ui.polygon.first().copied(), app.ui.polygon.last().copied()) {
@@ -156,7 +156,7 @@ pub fn close(app: &mut PhotosuiteApp, mods: egui::Modifiers) {
 }
 
 /// Backspace / Delete: drop the last anchor (and the wire to it); the first one cancels.
-pub fn remove_anchor(app: &mut PhotosuiteApp) {
+pub fn remove_anchor(app: &mut PhotospliceApp) {
     let Some(m) = live(app) else { return };
     m.anchors.pop();
     m.wire.clear();
@@ -171,7 +171,7 @@ pub fn remove_anchor(app: &mut PhotosuiteApp) {
 }
 
 /// Whether the Magnetic Lasso has an outline in progress.
-pub fn active(app: &PhotosuiteApp) -> bool {
+pub fn active(app: &PhotospliceApp) -> bool {
     app.magnetic.is_some() && !app.ui.polygon.is_empty()
 }
 
@@ -181,8 +181,8 @@ mod tests {
     use serde_json::json;
 
     /// A document with a white disc (radius 30) on black.
-    fn app() -> PhotosuiteApp {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+    fn app() -> PhotospliceApp {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         app.run("file.new", json!({"width": 100, "height": 100, "background": "black"})).unwrap();
         app.run("select.rect", json!({"x": 20, "y": 20, "width": 60, "height": 60, "ellipse": true, "antiAlias": false})).unwrap();
         app.run("edit.fill", json!({"color": "#ffffff"})).unwrap();

@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use eframe::{egui_wgpu, wgpu};
-use photosuite_engine::prefs::{GpuBackend, RenderingMode};
+use photosplice_engine::prefs::{GpuBackend, RenderingMode};
 use serde_json::{Value, json};
 
 /// The marker's file name in the config directory.
@@ -295,13 +295,13 @@ pub fn configure(setup: &mut egui_wgpu::WgpuSetup, plan: &Plan, os: Os, sentinel
             }));
         }
     }
-    photosuite_ui_egui::gpu_canvas::use_adapter_limits_with(setup, move |adapter| {
+    photosplice_ui_egui::gpu_canvas::use_adapter_limits_with(setup, move |adapter| {
         let info = adapter.get_info();
         let mut guard = sentinel.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(s) = guard.as_mut() {
             let mut m = s.marker.clone();
             m.adapter = info.name.clone();
-            m.adapter_backend = photosuite_ui_egui::gpu_canvas::backend_name(info.backend).to_string();
+            m.adapter_backend = photosplice_ui_egui::gpu_canvas::backend_name(info.backend).to_string();
             m.driver = [info.driver.as_str(), info.driver_info.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" ");
             if let Err(e) = s.write(m) {
                 log::warn!("GPU startup marker: {e}");
@@ -571,7 +571,7 @@ mod tests {
     }
 
     fn temp_dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("photosuite-gpu-startup-{name}-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("photosplice-gpu-startup-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
     }

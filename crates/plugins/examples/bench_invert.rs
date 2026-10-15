@@ -1,13 +1,13 @@
 //! Times the example Invert plug-in on a large image:
-//! `cargo run -p photosuite-plugins --release --example bench_invert -- [width] [height]`
+//! `cargo run -p photosplice-plugins --release --example bench_invert -- [width] [height]`
 //! (default 6000 × 4000 = 24 MP, RGBA 8-bit).
 
 use std::time::Instant;
 
-use photosuite_color::PixelFormat;
-use photosuite_geom::Rect;
-use photosuite_plugins::{Limits, Plugin};
-use photosuite_raster::Surface;
+use photosplice_color::PixelFormat;
+use photosplice_geom::Rect;
+use photosplice_plugins::{Limits, Plugin};
+use photosplice_raster::Surface;
 
 fn main() {
     let mut args = std::env::args().skip(1).map(|a| a.parse::<i32>().unwrap_or(0));

@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# Suomi translations for PhotoSuite UI.
+# Suomi translations for PhotoSplice UI.
 
 	File	Tiedosto
 	Edit	Muokkaa
@@ -672,7 +672,7 @@
 	Timeline	Aikajana
 	Tool Presets	Työkalujen esimääritykset
 	Tools	Työkalut
-	About PhotoSuite	Tietoja PhotoSuiteista
+	About PhotoSplice	Tietoja PhotoSpliceista
 	Website	Verkkosivusto
 	Report an Issue…	Ilmoita ongelmasta…
 	WIA Support…	WIA-tuki…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Perspective Warp ei ole aktiivinen
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Perspektiivikäyrä: piirrä tasoja kuvan perspektiiviä pitkin ja vaihda sitten Warp-tilaan
 	Photo Filter	Valokuvasuodatin
-	PhotoSuite	PhotoSuite
-	PhotoSuite Manages Colors	PhotoSuite hallitsee värejä
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite — avoimen lähdekoodin natiivi kuvankäsittelyohjelma, joka on kirjoitettu Rustilla
+	PhotoSplice	PhotoSplice
+	PhotoSplice Manages Colors	PhotoSplice hallitsee värejä
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice — avoimen lähdekoodin natiivi kuvankäsittelyohjelma, joka on kirjoitettu Rustilla
 	Pin Depth:	Pin Syvyys:
 	Pixel Length:	Pikselin pituus:
 	Pixels/Centimeter	pikseliä/senttimetri
@@ -1570,7 +1570,7 @@
 	Pen Tilt	Kynän kallistus
 	Pen Tool	Kynä työkalu
 	Photo	Valokuva
-	PhotoSuite website	PhotoSuite-verkkosivusto
+	PhotoSplice website	PhotoSplice-verkkosivusto
 	Picas	Picas
 	Pillow Emboss	Tyynykorkokuva
 	Pixel Replacement	Pikselin vaihto
@@ -1877,7 +1877,7 @@
 	System Info…	Järjestelmätiedot…
 	System Info	Järjestelmätiedot
 	More panels	Lisää paneeleita
-	These settings aren't available in PhotoSuite yet.	Nämä asetukset eivät ole vielä käytettävissä PhotoSuiteissa
+	These settings aren't available in PhotoSplice yet.	Nämä asetukset eivät ole vielä käytettävissä PhotoSpliceissa
 	Graphics	Grafiikka
 	Reset GPU Backend	Nollaa GPU-tausta
 	Applies at next launch.	Voimassa seuraavan julkaisun yhteydessä
@@ -2018,7 +2018,7 @@
 	Opening…	Avataan…
 	Patch	Paikkaus
 	Patch:	Paikkaus:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite käyttää CPU-kuvakompositoria. Ikkuna saattaa silti käyttää näytönohjaintasi.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice käyttää CPU-kuvakompositoria. Ikkuna saattaa silti käyttää näytönohjaintasi.
 	Play Action	Toista toiminto
 	Reading…	Luetaan…
 	Record Action	Nauhoita toiminto

@@ -2,7 +2,7 @@
 //! column/row count instead of running an unbounded O(n^2) loop. Photoshop's
 //! New Guide Layout caps at 32; we reject counts above a generous 1000
 //! (still O(10^6) worst case) with an actionable BadParams error.
-use photosuite_engine::Session;
+use photosplice_engine::Session;
 use serde_json::json;
 
 fn session() -> Session {

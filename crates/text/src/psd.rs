@@ -9,11 +9,11 @@
 //! Writing starts from the layer's original `TySh` (when present) and patches only the text, runs,
 //! paragraphs, fonts, shape and transform, so Photoshop-only settings survive an edit.
 
-use photosuite_color::{Color, ColorMode};
-use photosuite_doc::TextLayer;
-use photosuite_doc::text::{AntiAlias, Caps, CharStyle, Kerning, Orientation, ParagraphRun, ParagraphStyle, TextAlign, TextPath, TextRun, TextShape, TextWarp};
-use photosuite_geom::{Affine, Point};
-use photosuite_psd::descriptor::{Descriptor, Id, UnicodeString, Value as D, VersionedDescriptor};
+use photosplice_color::{Color, ColorMode};
+use photosplice_doc::TextLayer;
+use photosplice_doc::text::{AntiAlias, Caps, CharStyle, Kerning, Orientation, ParagraphRun, ParagraphStyle, TextAlign, TextPath, TextRun, TextShape, TextWarp};
+use photosplice_geom::{Affine, Point};
+use photosplice_psd::descriptor::{Descriptor, Id, UnicodeString, Value as D, VersionedDescriptor};
 
 use crate::engine_data::{self as ed, Value as E};
 use crate::fonts::guess_from_postscript;
@@ -157,7 +157,7 @@ pub fn set_text_index(tysh: &[u8], index: i64) -> Option<Vec<u8>> {
     let mut t = parse_tysh(tysh)?;
     match t.text.items.iter_mut().find(|(k, _)| k.is("TextIndex")) {
         Some(item) => item.1 = D::Integer(value),
-        None => t.text.items.push((photosuite_psd::descriptor::Id::new("TextIndex"), D::Integer(value))),
+        None => t.text.items.push((photosplice_psd::descriptor::Id::new("TextIndex"), D::Integer(value))),
     }
     Some(write_tysh(&t))
 }
@@ -945,7 +945,7 @@ pub const TXT2_STYLISTIC_SETS: &str = "85";
 fn add_txt2_features(style: &mut CharStyle, txt2_style: &E) {
     let mut set = |tag: String, value: u16| {
         if !style.features.iter().any(|f| f.tag == tag) {
-            style.features.push(photosuite_doc::text::FontFeature { tag, value });
+            style.features.push(photosplice_doc::text::FontFeature { tag, value });
         }
     };
     for (key, tag) in TXT2_FEATURES {
@@ -1259,7 +1259,7 @@ pub(crate) fn char_style(base: Option<&E>, d: &E, fonts: &[String], k: f32) -> C
     s.discretionary_ligatures = flag("DLigatures").unwrap_or(false);
     for (key, tag) in OPENTYPE_KEYS {
         if flag(key) == Some(true) {
-            s.features.push(photosuite_doc::text::FontFeature { tag: tag.to_string(), value: 1 });
+            s.features.push(photosplice_doc::text::FontFeature { tag: tag.to_string(), value: 1 });
         }
     }
     s.kerning = if flag("AutoKerning") == Some(false) { Kerning::Off } else { Kerning::Metrics };
@@ -1271,9 +1271,9 @@ pub(crate) fn char_style(base: Option<&E>, d: &E, fonts: &[String], k: f32) -> C
     };
     // FontBaseline: 1 superscript, 2 subscript.
     s.position = match g("FontBaseline").and_then(E::as_i64) {
-        Some(1) => photosuite_doc::text::BaselinePosition::Superscript,
-        Some(2) => photosuite_doc::text::BaselinePosition::Subscript,
-        _ => photosuite_doc::text::BaselinePosition::Normal,
+        Some(1) => photosplice_doc::text::BaselinePosition::Superscript,
+        Some(2) => photosplice_doc::text::BaselinePosition::Subscript,
+        _ => photosplice_doc::text::BaselinePosition::Normal,
     };
     if let Some(c) = g("FillColor") {
         let v = arr_f(c.get("Values"));
@@ -1511,9 +1511,9 @@ pub(crate) fn style_sheet_data(s: &CharStyle, font: usize, k: f32) -> E {
         (
             "FontBaseline".into(),
             E::Int(match s.position {
-                photosuite_doc::text::BaselinePosition::Normal => 0,
-                photosuite_doc::text::BaselinePosition::Superscript => 1,
-                photosuite_doc::text::BaselinePosition::Subscript => 2,
+                photosplice_doc::text::BaselinePosition::Normal => 0,
+                photosplice_doc::text::BaselinePosition::Superscript => 1,
+                photosplice_doc::text::BaselinePosition::Subscript => 2,
             }),
         ),
         ("Underline".into(), E::Bool(s.underline)),

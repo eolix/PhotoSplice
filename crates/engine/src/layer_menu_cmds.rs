@@ -3,11 +3,11 @@
 //! Options / Global Light / Create Layer / Scale Effects, Layer Content Options, and exporting
 //! just the active layer (Quick Export as PNG, Export As).
 
-use photosuite_algo::selection::Region;
-use photosuite_color::{BlendMode, ColorMode};
-use photosuite_doc::{BlendIf, BlendRange, Document, Effect, Layer, LayerContent, LayerId, LayerMask, SmartSource, StackMode};
-use photosuite_geom::Rect;
-use photosuite_raster::{Surface, from_rgba_into, to_rgba};
+use photosplice_algo::selection::Region;
+use photosplice_color::{BlendMode, ColorMode};
+use photosplice_doc::{BlendIf, BlendRange, Document, Effect, Layer, LayerContent, LayerId, LayerMask, SmartSource, StackMode};
+use photosplice_geom::Rect;
+use photosplice_raster::{Surface, from_rgba_into, to_rgba};
 use serde_json::{Value, json};
 
 use crate::commands::{CommandSpec, layer_param};
@@ -193,16 +193,16 @@ fn mask_all_objects(s: &mut Session, p: &Value) -> Result<Value> {
     let layer = doc.layer(id).ok_or(EngineError::NoLayer(id))?;
     let region: Option<Region> = match layer.surface() {
         Some(surf) if matches!(layer.content, LayerContent::Raster(_)) => {
-            photosuite_algo::segment::subject::select_subject(&photosuite_algo::segment::SurfaceSampler(surf), doc.bounds())
+            photosplice_algo::segment::subject::select_subject(&photosplice_algo::segment::SurfaceSampler(surf), doc.bounds())
         }
         _ => {
             struct Composite<'a>(&'a Document);
-            impl photosuite_algo::segment::Sampler for Composite<'_> {
+            impl photosplice_algo::segment::Sampler for Composite<'_> {
                 fn rgba(&self, r: Rect) -> Vec<[f32; 4]> {
-                    photosuite_compose::render(self.0, r).px
+                    photosplice_compose::render(self.0, r).px
                 }
             }
-            photosuite_algo::segment::subject::select_subject(&Composite(&doc), doc.bounds())
+            photosplice_algo::segment::subject::select_subject(&Composite(&doc), doc.bounds())
         }
     };
     let region = region.ok_or_else(|| other("no objects were found"))?;
@@ -227,7 +227,7 @@ pub fn defringe(px: &mut [[f32; 4]], w: usize, h: usize, width: usize) {
     if !outside.iter().any(|o| *o) {
         return;
     }
-    let dist = photosuite_algo::selection::edt(&outside, w, h);
+    let dist = photosplice_algo::selection::edt(&outside, w, h);
     let mut known: Vec<bool> = (0..px.len()).map(|i| !outside[i] && dist[i] > width as f32).collect();
     let mut todo: Vec<usize> = (0..px.len()).filter(|&i| !outside[i] && !known[i]).collect();
     while !todo.is_empty() {
@@ -298,7 +298,7 @@ fn color_decontaminate(s: &mut Session, p: &Value) -> Result<Value> {
         }
         let alpha: Vec<u8> = read_rgba(surf, r).iter().map(|q| (q[3].clamp(0.0, 1.0) * 255.0).round() as u8).collect();
         let region = Region { bbox: r, mask: alpha };
-        *surf = photosuite_algo::matting::decontaminate(surf, &region, radius, amount);
+        *surf = photosplice_algo::matting::decontaminate(surf, &region, radius, amount);
         Ok(())
     })?;
     Ok(Value::Null)
@@ -534,15 +534,15 @@ fn scale_effects(s: &mut Session, p: &Value) -> Result<Value> {
 fn is_below(e: &Effect) -> bool {
     match e {
         Effect::DropShadow(_) | Effect::OuterGlow(_) => true,
-        Effect::Stroke(st) => st.position == photosuite_doc::StrokePosition::Outside,
+        Effect::Stroke(st) => st.position == photosplice_doc::StrokePosition::Outside,
         Effect::BevelEmboss(b) => {
-            matches!(b.style, photosuite_doc::BevelStyle::OuterBevel | photosuite_doc::BevelStyle::Emboss | photosuite_doc::BevelStyle::PillowEmboss)
+            matches!(b.style, photosplice_doc::BevelStyle::OuterBevel | photosplice_doc::BevelStyle::Emboss | photosplice_doc::BevelStyle::PillowEmboss)
         }
         _ => false,
     }
 }
 
-fn effect_common_mut(e: &mut Effect) -> Option<&mut photosuite_doc::FxCommon> {
+fn effect_common_mut(e: &mut Effect) -> Option<&mut photosplice_doc::FxCommon> {
     match e {
         Effect::DropShadow(s) | Effect::InnerShadow(s) => Some(&mut s.common),
         Effect::OuterGlow(g) | Effect::InnerGlow(g) => Some(&mut g.common),
@@ -596,9 +596,9 @@ fn create_layer(s: &mut Session, p: &Value) -> Result<Value> {
             tmp.global_light = light;
             tmp.patterns = doc.patterns.clone();
             tmp.layers = vec![alone];
-            let buf = photosuite_compose::render(&tmp, area);
+            let buf = photosplice_compose::render(&tmp, area);
             let mut surf = Surface::new(fmt);
-            let data: Vec<f32> = buf.px.iter().flat_map(|q| photosuite_raster::from_rgba(&fmt, *q)).collect();
+            let data: Vec<f32> = buf.px.iter().flat_map(|q| photosplice_raster::from_rgba(&fmt, *q)).collect();
             surf.write_region(area, &data);
             surf.prune();
             let mut nl = Layer::new(format!("{}'s {}", l.name, e.label()), LayerContent::Raster(surf));
@@ -664,7 +664,7 @@ pub fn layer_document(doc: &Document, id: LayerId) -> Result<Document> {
     tmp.layers = vec![alone];
     tmp.selection = None;
     let area = doc.bounds();
-    let buf = photosuite_compose::render(&tmp, area);
+    let buf = photosplice_compose::render(&tmp, area);
     let w = area.width() as usize;
     let mut b = Rect::EMPTY;
     for (i, q) in buf.px.iter().enumerate() {
@@ -677,7 +677,7 @@ pub fn layer_document(doc: &Document, id: LayerId) -> Result<Document> {
         return Err(other("the layer is empty"));
     }
     let fmt = doc.pixel_format();
-    let mut out = Document::new(l.name.clone(), photosuite_doc::Size::new(b.width(), b.height()), doc.mode, doc.depth);
+    let mut out = Document::new(l.name.clone(), photosplice_doc::Size::new(b.width(), b.height()), doc.mode, doc.depth);
     out.resolution_dpi = doc.resolution_dpi;
     out.icc_profile = doc.icc_profile.clone();
     let mut surf = Surface::new(fmt);
@@ -685,7 +685,7 @@ pub fn layer_document(doc: &Document, id: LayerId) -> Result<Document> {
         .flat_map(|y| {
             let row = (y - area.y0) as usize * w;
             let px = &buf.px;
-            (b.x0..b.x1).flat_map(move |x| photosuite_raster::from_rgba(&fmt, px[row + (x - area.x0) as usize]))
+            (b.x0..b.x1).flat_map(move |x| photosplice_raster::from_rgba(&fmt, px[row + (x - area.x0) as usize]))
         })
         .collect();
     surf.write_region(Rect::from_xywh(0, 0, b.width(), b.height()), &rows);
@@ -710,7 +710,7 @@ fn export_layer(s: &mut Session, p: &Value, cmd: &str, png_only: bool) -> Result
         tmp.execute("image.imageSize", json!({"width": w}))?;
         ldoc = (*tmp.active().ok_or(EngineError::NoDocument)?.doc).clone();
     }
-    let out = photosuite_io::export(&ldoc, path, &Default::default()).map_err(|e| other(e.to_string()))?;
+    let out = photosplice_io::export(&ldoc, path, &Default::default()).map_err(|e| other(e.to_string()))?;
     write_file(path, &out.bytes)?;
     Ok(json!({"path": path, "bytes": out.bytes.len(), "width": ldoc.size.width, "height": ldoc.size.height, "warnings": out.warnings}))
 }

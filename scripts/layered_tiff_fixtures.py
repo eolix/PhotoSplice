@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Generates the layered-TIFF fixtures under corpus/layered-tiff (gitignored) with an independent
-implementation (psdtags + tifffile, BSD-3), so PhotoSuite's reader is checked against a second
+implementation (psdtags + tifffile, BSD-3), so PhotoSplice's reader is checked against a second
 writer rather than only against itself:
 
     layered-{le,be}-{8,16}bit.tif   2 layers (one offset, one with transparency), RLE and ZIP

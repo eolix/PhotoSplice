@@ -4,15 +4,15 @@
 use egui::{Rect, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use photosuite_doc::{Layer, LayerContent};
+use photosplice_doc::{Layer, LayerContent};
 use serde_json::json;
 
 use super::*;
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 
 /// A document with one layer of each kind; returns the session and the ids by kind.
-fn kinds() -> (photosuite_engine::Session, Vec<(&'static str, u64)>) {
-    let mut s = photosuite_engine::Session::new();
+fn kinds() -> (photosplice_engine::Session, Vec<(&'static str, u64)>) {
+    let mut s = photosplice_engine::Session::new();
     s.execute("file.new", json!({"width": 400, "height": 300})).unwrap();
     let id = |v: serde_json::Value| v["layer"].as_u64().unwrap();
     let pixel = id(s.execute("layer.new.layer", json!({"name": "Paint"})).unwrap());
@@ -24,33 +24,33 @@ fn kinds() -> (photosuite_engine::Session, Vec<(&'static str, u64)>) {
     (s, vec![("pixel", pixel), ("shape", shape), ("type", ty)])
 }
 
-fn layer_of(app: &PhotosuiteApp, id: u64) -> Layer {
-    app.session.active().unwrap().doc.layer(photosuite_doc::LayerId(id)).unwrap().clone()
+fn layer_of(app: &PhotospliceApp, id: u64) -> Layer {
+    app.session.active().unwrap().doc.layer(photosplice_doc::LayerId(id)).unwrap().clone()
 }
 
 /// Pro theme with only the Properties group expanded (it then fills the column).
-fn harness(session: photosuite_engine::Session, ppp: f32, dock_width: f32) -> Harness<'static, PhotosuiteApp> {
+fn harness(session: photosplice_engine::Session, ppp: f32, dock_width: f32) -> Harness<'static, PhotospliceApp> {
     let mut h = Harness::builder().with_size(vec2(1440.0, 1600.0)).with_pixels_per_point(ppp).with_max_steps(64).build_eframe(move |cc| {
-        PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-        PhotosuiteApp::new(session, crate::Services::default())
+        PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+        PhotospliceApp::new(session, crate::Services::default())
     });
     set(&mut h, json!({"dockWidth": dock_width, "dock": {"collapsed": ["color", "navigator", "history", "layers"]}}));
     h
 }
 
-fn set(h: &mut Harness<'static, PhotosuiteApp>, p: serde_json::Value) {
+fn set(h: &mut Harness<'static, PhotospliceApp>, p: serde_json::Value) {
     let ctx = h.ctx.clone();
     let (req, _rx) = crate::control::ControlRequest::new("ui.set", p);
     crate::control::handle(h.state_mut(), &ctx, &req);
     h.run_steps(8);
 }
 
-fn select(h: &mut Harness<'static, PhotosuiteApp>, id: u64) {
+fn select(h: &mut Harness<'static, PhotospliceApp>, id: u64) {
     h.state_mut().run("layer.select", json!({"layer": id})).unwrap();
     h.run_steps(8);
 }
 
-fn headers(h: &Harness<'_, PhotosuiteApp>) -> Vec<(String, Rect)> {
+fn headers(h: &Harness<'_, PhotospliceApp>) -> Vec<(String, Rect)> {
     sections_drawn(&h.ctx)
 }
 
@@ -58,7 +58,7 @@ fn headers(h: &Harness<'_, PhotosuiteApp>) -> Vec<(String, Rect)> {
 fn quick_actions_fit_the_layer_kind() {
     let ids = |c: &LayerContent| quick_actions(c).iter().map(|(_, id)| *id).collect::<Vec<_>>();
     let (s, layers) = kinds();
-    let app = PhotosuiteApp::new(s, crate::Services::default());
+    let app = PhotospliceApp::new(s, crate::Services::default());
     for (kind, id) in layers {
         let l = layer_of(&app, id);
         let all = ids(&l.content);
@@ -76,7 +76,7 @@ fn quick_actions_fit_the_layer_kind() {
     }
     let ty = app.session.active().unwrap().doc.layers.iter().find(|l| matches!(l.content, LayerContent::Text(_))).unwrap().content.clone();
     assert_eq!(ids(&ty), ["type.convertToShape", "type.convertToParagraphText", "type.convertToPointText", "type.warpText", "type.rasterizeTypeLayer"]);
-    assert!(ids(&LayerContent::Adjustment(photosuite_doc::Adjustment::Invert)).is_empty());
+    assert!(ids(&LayerContent::Adjustment(photosplice_doc::Adjustment::Invert)).is_empty());
 }
 
 #[test]
@@ -190,8 +190,8 @@ fn layers_opacity_and_fill_rows_keep_a_gap() {
     for dw in [250.0, 520.0] {
         let (s, layers) = kinds();
         let mut h = Harness::builder().with_size(vec2(1440.0, 1000.0)).with_max_steps(64).build_eframe(move |cc| {
-            PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-            PhotosuiteApp::new(s, crate::Services::default())
+            PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+            PhotospliceApp::new(s, crate::Services::default())
         });
         set(&mut h, json!({"dockWidth": dw}));
         select(&mut h, layers[0].1);

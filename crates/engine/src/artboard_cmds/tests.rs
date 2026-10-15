@@ -1,5 +1,5 @@
 use super::*;
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 
 fn session(depth: u32) -> Session {
     let mut s = Session::new();
@@ -15,7 +15,7 @@ fn add_square(s: &mut Session, r: Rect, rgba: [f32; 4]) -> LayerId {
     s.edit("sq", |doc, active| {
         let fmt = doc.pixel_format();
         let mut l = Layer::raster(doc.next_layer_name("Layer"), fmt);
-        l.surface_mut().unwrap().fill_rect(r, &photosuite_raster::from_rgba(&fmt, rgba));
+        l.surface_mut().unwrap().fill_rect(r, &photosplice_raster::from_rgba(&fmt, rgba));
         let id = doc.insert_above(None, l);
         *active = Some(id);
         Ok(id)
@@ -56,7 +56,7 @@ fn from_layers_and_group_then_compose_clips() {
         assert_eq!(doc(&s).artboard_of(red), Some(gid));
         // Grow the board; the white background shows around the square, nothing outside it.
         s.execute("layer.artboard.set", json!({"width": 40, "height": 40})).unwrap();
-        let px = |s: &Session, x, y| photosuite_compose::render(doc(s), Rect::new(x, y, x + 1, y + 1)).px[0];
+        let px = |s: &Session, x, y| photosplice_compose::render(doc(s), Rect::new(x, y, x + 1, y + 1)).px[0];
         assert!(px(&s, 40, 40)[0] > 0.99 && px(&s, 40, 40)[1] > 0.99, "{depth}");
         assert!(px(&s, 15, 15)[1] < 0.01);
         // Moving the board moves its contents.
@@ -114,7 +114,7 @@ fn export_to_files_and_pdf() {
     add_square(&mut s, Rect::new(0, 0, 10, 10), [1.0, 0.0, 0.0, 1.0]);
     s.execute("layer.new.artboardFromLayers", json!({"name": "Red Board"})).unwrap();
     s.execute("layer.new.artboard", json!({"rect": [20, 0, 30, 15], "name": "Empty/One", "background": "transparent"})).unwrap();
-    let dir = std::env::temp_dir().join(format!("photosuite-artboards-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("photosplice-artboards-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let d = dir.to_string_lossy().into_owned();
@@ -123,25 +123,25 @@ fn export_to_files_and_pdf() {
     assert_eq!(files.len(), 2);
     assert!(files[0].ends_with("site_Empty_One.png"), "{files:?}");
     assert!(files[1].ends_with("site_Red Board.png"), "{files:?}");
-    let img = photosuite_io::import("x.png", &std::fs::read(&files[1]).unwrap()).unwrap().document;
+    let img = photosplice_io::import("x.png", &std::fs::read(&files[1]).unwrap()).unwrap().document;
     assert_eq!((img.size.width, img.size.height), (10, 10));
-    let img2 = photosuite_io::import("x.png", &std::fs::read(&files[0]).unwrap()).unwrap().document;
+    let img2 = photosplice_io::import("x.png", &std::fs::read(&files[0]).unwrap()).unwrap().document;
     assert_eq!((img2.size.width, img2.size.height), (30, 15));
     // Layered PSD keeps the board, moved to the origin.
     let r = s.execute("file.export.artboardsToFiles", json!({"dir": d, "prefix": "", "format": "psd", "artboards": [doc(&s).artboards()[0].0.0]})).unwrap();
-    let psd = photosuite_io::import("x.psd", &std::fs::read(r["files"][0].as_str().unwrap()).unwrap()).unwrap().document;
+    let psd = photosplice_io::import("x.psd", &std::fs::read(r["files"][0].as_str().unwrap()).unwrap()).unwrap().document;
     assert_eq!(psd.artboards()[0].2.rect, Rect::new(0, 0, 10, 10));
     let pdf = join(&d, "boards.pdf");
     let r = s.execute("file.export.artboardsToPdf", json!({"path": pdf})).unwrap();
     assert_eq!(r["pages"], 2);
     // A page per board, each its board's size, in the Layers panel's order.
     let bytes = std::fs::read(&pdf).unwrap();
-    assert_eq!(photosuite_io::pdf::page_count(&bytes).unwrap(), 2);
-    let page = |i| photosuite_io::pdf::open_page("b.pdf", &bytes, i, 72.0, photosuite_io::pdf::PageAs::Pixels).unwrap().document;
+    assert_eq!(photosplice_io::pdf::page_count(&bytes).unwrap(), 2);
+    let page = |i| photosplice_io::pdf::open_page("b.pdf", &bytes, i, 72.0, photosplice_io::pdf::PageAs::Pixels).unwrap().document;
     let (one, red) = (page(0), page(1));
     assert_eq!((one.size.width, one.size.height), (30, 15));
     assert_eq!((red.size.width, red.size.height), (10, 10));
-    let px = photosuite_compose::flatten(&red).px[5 * 10 + 5];
+    let px = photosplice_compose::flatten(&red).px[5 * 10 + 5];
     assert!(px[0] > 0.9 && px[1] < 0.1, "{px:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

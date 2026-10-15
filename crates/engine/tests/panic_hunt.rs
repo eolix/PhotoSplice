@@ -1,8 +1,8 @@
 //! Fuzz every command with adversarial params; a command must return `Err`, never panic or hang.
 //! (Rule 9 in AGENTS.md.) Each command runs on its own thread with a timeout, so one bad command
 //! can't wedge the run — panics are caught and hangs are reported. Opt-in (slow):
-//! `cargo test -p photosuite-engine --test panic_hunt -- --ignored`.
-use photosuite_engine::{Session, command_specs};
+//! `cargo test -p photosplice-engine --test panic_hunt -- --ignored`.
+use photosplice_engine::{Session, command_specs};
 use serde_json::{Value, json};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc;

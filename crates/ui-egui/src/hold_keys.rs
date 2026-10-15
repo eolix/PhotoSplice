@@ -10,12 +10,12 @@
 //! temporary tool that started a drag lasts until the button is released, as in Photoshop.
 //!
 //! The keys are bindings, not commands: they come from
-//! [`photosuite_engine::prefs::TEMPORARY_TOOLS`] with Edit › Keyboard Shortcuts overrides on top
+//! [`photosplice_engine::prefs::TEMPORARY_TOOLS`] with Edit › Keyboard Shortcuts overrides on top
 //! (Tools › Temporary), and the reposition key is whatever the Hand key is.
 
 use egui::{InputState, KeyboardShortcut};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::shortcuts::parse;
 use crate::state::Tool;
 
@@ -48,12 +48,12 @@ impl Temporary {
 
 /// Is `id` a held temporary tool rather than a command?
 pub fn is_temporary(id: &str) -> bool {
-    photosuite_engine::prefs::TEMPORARY_TOOLS.iter().any(|t| t.0 == id)
+    photosplice_engine::prefs::TEMPORARY_TOOLS.iter().any(|t| t.0 == id)
 }
 
 /// The key binding of a temporary tool in effect (`None` when removed or unparsable).
-pub fn binding(app: &PhotosuiteApp, t: Temporary) -> Option<KeyboardShortcut> {
-    let def = photosuite_engine::prefs::TEMPORARY_TOOLS.iter().find(|x| x.0 == t.id()).map(|x| x.2);
+pub fn binding(app: &PhotospliceApp, t: Temporary) -> Option<KeyboardShortcut> {
+    let def = photosplice_engine::prefs::TEMPORARY_TOOLS.iter().find(|x| x.0 == t.id()).map(|x| x.2);
     parse(app.session.prefs().shortcut(t.id(), def)?)
 }
 
@@ -71,7 +71,7 @@ fn held(i: &InputState, sc: &KeyboardShortcut) -> bool {
 
 /// The temporary tool whose key is held now, the most specific binding first (⌘⌥Space before
 /// ⌘Space before Space). Never while a text field has the keyboard.
-pub fn held_tool(app: &PhotosuiteApp, ctx: &egui::Context) -> Option<Temporary> {
+pub fn held_tool(app: &PhotospliceApp, ctx: &egui::Context) -> Option<Temporary> {
     if ctx.text_edit_focused() {
         return None;
     }
@@ -94,7 +94,7 @@ pub fn held_tool(app: &PhotosuiteApp, ctx: &egui::Context) -> Option<Temporary> 
 }
 
 /// Is the reposition key (the Hand key, any modifiers) down?
-pub fn reposition_held(app: &PhotosuiteApp, ctx: &egui::Context) -> bool {
+pub fn reposition_held(app: &PhotospliceApp, ctx: &egui::Context) -> bool {
     !ctx.text_edit_focused() && binding(app, Temporary::Hand).is_some_and(|sc| ctx.input(|i| i.key_down(sc.logical_key)))
 }
 
@@ -110,7 +110,7 @@ fn latch_id() -> egui::Id {
 /// The temporary tool for this canvas frame: the held one, except while a selection is being
 /// drawn (the key repositions it instead); a temporary tool that was in effect when the button
 /// went down stays until the button comes up.
-pub fn for_frame(app: &PhotosuiteApp, ctx: &egui::Context, drawing: bool) -> Option<Temporary> {
+pub fn for_frame(app: &PhotospliceApp, ctx: &egui::Context, drawing: bool) -> Option<Temporary> {
     let down = ctx.input(|i| i.pointer.primary_down());
     let latched = ctx.data(|d| d.get_temp::<Option<Temporary>>(latch_id())).flatten();
     let t = if down && latched.is_some() {

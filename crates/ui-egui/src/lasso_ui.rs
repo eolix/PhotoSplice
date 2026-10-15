@@ -2,7 +2,7 @@
 //! Selection intent is latched at the first press; Alt pressed later changes drawing mode.
 
 use crate::{
-    PhotosuiteApp,
+    PhotospliceApp,
     canvas::{Drag, ToolEvent, ViewXform},
     state::Tool,
 };
@@ -13,20 +13,20 @@ pub struct Lasso {
     pub cursor: [f64; 2],
     down: bool,
     polygonal: bool,
-    document: Option<photosuite_doc::DocId>,
+    document: Option<photosplice_doc::DocId>,
 }
 
-pub fn active(app: &PhotosuiteApp) -> bool {
+pub fn active(app: &PhotospliceApp) -> bool {
     app.drag.as_ref().is_some_and(|d| d.tool == Tool::Lasso && d.lasso.is_some())
 }
 
 /// A lasso drag that moves the selection (started inside it, `canvas::selection_drag_kind`):
 /// the canvas's own selection-move path handles it, this module only feeds it the events.
-fn moving_selection(app: &PhotosuiteApp) -> bool {
+fn moving_selection(app: &PhotospliceApp) -> bool {
     app.drag.as_ref().is_some_and(|d| d.tool == Tool::Lasso && d.sel_move.is_some())
 }
 
-pub fn cancel_stale(app: &mut PhotosuiteApp) {
+pub fn cancel_stale(app: &mut PhotospliceApp) {
     if app
         .drag
         .as_ref()
@@ -43,7 +43,7 @@ fn append(d: &mut Drag, p: [f64; 2]) {
     }
 }
 
-fn modifiers(app: &mut PhotosuiteApp, mods: Modifiers) {
+fn modifiers(app: &mut PhotospliceApp, mods: Modifiers) {
     let Some(d) = app.drag.as_mut().filter(|d| d.tool == Tool::Lasso) else { return };
     d.track(mods);
     // Alt held before the initial press still means subtract, until released and pressed again.
@@ -59,7 +59,7 @@ fn modifiers(app: &mut PhotosuiteApp, mods: Modifiers) {
     }
 }
 
-pub fn commit(app: &mut PhotosuiteApp) {
+pub fn commit(app: &mut PhotospliceApp) {
     cancel_stale(app);
     if active(app)
         && let Some(d) = app.drag.take()
@@ -68,7 +68,7 @@ pub fn commit(app: &mut PhotosuiteApp) {
     }
 }
 
-pub fn pointer(app: &mut PhotosuiteApp, ev: ToolEvent, mods: Modifiers) -> bool {
+pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: Modifiers) -> bool {
     cancel_stale(app);
     if app.ui.tool != Tool::Lasso || moving_selection(app) {
         return false;
@@ -140,7 +140,7 @@ pub fn pointer(app: &mut PhotosuiteApp, ev: ToolEvent, mods: Modifiers) -> bool 
 
 /// Read actual presses/releases, including clicks below egui's drag threshold. Hover moves
 /// update only the rubber band; they must never become freehand vertices between Alt clicks.
-pub fn canvas_input(app: &mut PhotosuiteApp, ctx: &egui::Context, xf: &ViewXform, response: &egui::Response) {
+pub fn canvas_input(app: &mut PhotospliceApp, ctx: &egui::Context, xf: &ViewXform, response: &egui::Response) {
     let events = ctx.input(|i| i.events.clone());
     let mut mods = app.drag.as_ref().map_or(ctx.input(|i| i.modifiers), |d| d.live);
     for ev in events {

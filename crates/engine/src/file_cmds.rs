@@ -10,11 +10,11 @@
 
 use std::sync::Arc;
 
-use photosuite_algo::resample::{Resample, resize_surface, translate_surface};
-use photosuite_color::{ColorMode, PixelFormat, SampleType};
-use photosuite_doc::{Affine, Document, Layer, LayerContent, LayerId, SmartObject, SmartSource};
-use photosuite_geom::Rect;
-use photosuite_raster::{Surface, from_rgba_into};
+use photosplice_algo::resample::{Resample, resize_surface, translate_surface};
+use photosplice_color::{ColorMode, PixelFormat, SampleType};
+use photosplice_doc::{Affine, Document, Layer, LayerContent, LayerId, SmartObject, SmartSource};
+use photosplice_geom::Rect;
+use photosplice_raster::{Surface, from_rgba_into};
 use serde_json::{Value, json};
 
 use crate::commands::{CommandSpec, layer_param};
@@ -76,9 +76,9 @@ fn is_file(_path: &str) -> bool {
 
 #[cfg(not(target_arch = "wasm32"))]
 /// Every file the engine opens is read here: in bounded reads, with a clear error when it does
-/// not fit in memory (see [`photosuite_format::read`]).
+/// not fit in memory (see [`photosplice_format::read`]).
 pub(crate) fn read_file(path: &str) -> Result<Vec<u8>> {
-    photosuite_format::read_file(std::path::Path::new(path)).map_err(|e| EngineError::Other(format!("{path}: {e}")))
+    photosplice_format::read_file(std::path::Path::new(path)).map_err(|e| EngineError::Other(format!("{path}: {e}")))
 }
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn read_file(path: &str) -> Result<Vec<u8>> {
@@ -87,9 +87,9 @@ pub(crate) fn read_file(path: &str) -> Result<Vec<u8>> {
 
 #[cfg(not(target_arch = "wasm32"))]
 /// Every file the engine writes goes through here: crash-safe (temp file + fsync + rename, see
-/// [`photosuite_format::atomic`]), so a failed save never destroys the previous file.
+/// [`photosplice_format::atomic`]), so a failed save never destroys the previous file.
 pub(crate) fn write_file(path: &str, bytes: &[u8]) -> Result<()> {
-    photosuite_format::atomic_write(std::path::Path::new(path), bytes).map_err(|e| EngineError::Other(e.to_string()))
+    photosplice_format::atomic_write(std::path::Path::new(path), bytes).map_err(|e| EngineError::Other(e.to_string()))
 }
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn write_file(path: &str, _bytes: &[u8]) -> Result<()> {
@@ -178,7 +178,7 @@ pub(crate) fn sanitize(name: &str) -> String {
 }
 
 pub(crate) fn import(name: &str, bytes: &[u8]) -> Result<Document> {
-    photosuite_io::import(name, bytes).map(|r| r.document).map_err(|e| EngineError::Other(format!("{name}: {e}")))
+    photosplice_io::import(name, bytes).map(|r| r.document).map_err(|e| EngineError::Other(format!("{name}: {e}")))
 }
 
 /// What a headless save writes beyond the format: JPEG quality and TIFF layers.
@@ -217,11 +217,11 @@ impl From<Option<f64>> for SaveOpts {
 /// Encodes `doc` for `path`'s extension.
 pub(crate) fn encode(doc: &Document, path: &str, save: impl Into<SaveOpts>) -> Result<(Vec<u8>, Vec<String>)> {
     let save = save.into();
-    let mut opts = photosuite_io::ExportOptions { tiff_layers: save.tiff_layers, pdf_discard_editing: save.pdf_discard_editing, ..Default::default() };
+    let mut opts = photosplice_io::ExportOptions { tiff_layers: save.tiff_layers, pdf_discard_editing: save.pdf_discard_editing, ..Default::default() };
     if let Some(q) = save.quality {
         opts.encode.jpeg_quality = (q.clamp(0.0, 12.0) / 12.0 * 99.0 + 1.0).round() as u8;
     }
-    photosuite_io::export(doc, path, &opts).map(|r| (r.bytes, r.warnings)).map_err(|e| EngineError::Other(format!("{path}: {e}")))
+    photosplice_io::export(doc, path, &opts).map(|r| (r.bytes, r.warnings)).map_err(|e| EngineError::Other(format!("{path}: {e}")))
 }
 
 pub(crate) fn save_doc(doc: &Document, path: &str, save: impl Into<SaveOpts>) -> Result<Vec<String>> {
@@ -246,7 +246,7 @@ fn size_param(p: &Value, key: &str) -> Option<f64> {
 // ---------- pixels ----------
 
 /// A composite buffer as a surface in `fmt` (straight RGBA → the format's model and depth).
-pub(crate) fn buffer_surface(buf: &photosuite_compose::Buffer, fmt: PixelFormat) -> Surface {
+pub(crate) fn buffer_surface(buf: &photosplice_compose::Buffer, fmt: PixelFormat) -> Surface {
     let n = fmt.channels();
     let mut data = vec![0.0f32; buf.px.len() * n];
     for (p, out) in buf.px.iter().zip(data.chunks_exact_mut(n)) {
@@ -262,7 +262,7 @@ pub(crate) fn buffer_surface(buf: &photosuite_compose::Buffer, fmt: PixelFormat)
 
 /// The flattened image of `doc` as a surface in `fmt`, placed at the origin.
 pub(crate) fn flattened(doc: &Document, fmt: PixelFormat) -> Surface {
-    photosuite_compose::flatten_to_surface(doc, fmt, None)
+    photosplice_compose::flatten_to_surface(doc, fmt, None)
 }
 
 // ---------- close / revert / save a copy / open as ----------
@@ -330,7 +330,7 @@ pub fn open_bytes_as(s: &mut Session, name: &str, bytes: &[u8], as_ext: Option<&
         Some(ext) => format!("{}.{}", stem(name), ext.trim_start_matches('.')),
         None => name.to_string(),
     };
-    let r = photosuite_io::import(&decode_name, bytes).map_err(|e| EngineError::Other(format!("{decode_name}: {e}")))?;
+    let r = photosplice_io::import(&decode_name, bytes).map_err(|e| EngineError::Other(format!("{decode_name}: {e}")))?;
     let selected = r.selected;
     let mut doc = r.document;
     let path = match template_name(s, name) {
@@ -362,13 +362,13 @@ fn open_as(s: &mut Session, p: &Value) -> Result<Value> {
 
 /// Pages in a PDF (0 when it isn't one or can't be read).
 pub fn pdf_pages(bytes: &[u8]) -> usize {
-    photosuite_io::pdf::page_count(bytes).unwrap_or(0)
+    photosplice_io::pdf::page_count(bytes).unwrap_or(0)
 }
 
 /// Whether a PDF's first page carries Photoshop editing data (a Photoshop PDF): it opens as its
 /// document, without Import PDF, and saves back in place, as in Photoshop.
 pub fn pdf_has_editing_data(bytes: &[u8]) -> bool {
-    photosuite_io::pdf::has_editing_data(bytes, 0)
+    photosplice_io::pdf::has_editing_data(bytes, 0)
 }
 
 /// File › Open on a PDF (Photoshop's Import PDF): pages at a resolution, each as a new document:
@@ -377,7 +377,7 @@ pub fn pdf_has_editing_data(bytes: &[u8]) -> bool {
 /// Documents open untitled, so saving doesn't silently replace the PDF. A Photoshop PDF opens
 /// as its document whatever the options.
 fn import_pdf(s: &mut Session, p: &Value) -> Result<Value> {
-    use photosuite_io::pdf::{CropTo, OpenOptions, PageAs};
+    use photosplice_io::pdf::{CropTo, OpenOptions, PageAs};
     const CMD: &str = "file.importPdf";
     let bad = |msg: String| EngineError::BadParams { cmd: CMD.into(), msg };
     let path = str_param(p, "path", CMD)?.to_string();
@@ -398,7 +398,7 @@ fn import_pdf(s: &mut Session, p: &Value) -> Result<Value> {
     if wanted.len() > 500 {
         return Err(bad(format!("{} pages at once; open at most 500", wanted.len())));
     }
-    let dpi = f64_param(p, "resolution").unwrap_or(f64::from(photosuite_io::pdf::DEFAULT_DPI)).clamp(1.0, 2400.0) as f32;
+    let dpi = f64_param(p, "resolution").unwrap_or(f64::from(photosplice_io::pdf::DEFAULT_DPI)).clamp(1.0, 2400.0) as f32;
     let how = match p.get("as").and_then(Value::as_str).unwrap_or("pixels") {
         "layers" => PageAs::Layers,
         "pixels" => PageAs::Pixels,
@@ -428,10 +428,10 @@ fn import_pdf(s: &mut Session, p: &Value) -> Result<Value> {
     let mut warnings = Vec::new();
     for &page in &wanted {
         let o = OpenOptions { page: page - 1, dpi, how, crop_to };
-        let r = photosuite_io::pdf::open_page_with(&file_name(&path), &bytes, &o).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+        let r = photosplice_io::pdf::open_page_with(&file_name(&path), &bytes, &o).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
         let mut doc = r.document;
         // A Photoshop PDF opens as it was saved; the options shape an imported page only.
-        if !photosuite_io::pdf::has_editing_data(&bytes, page - 1) {
+        if !photosplice_io::pdf::has_editing_data(&bytes, page - 1) {
             if let Some(m) = mode.filter(|m| *m != doc.mode) {
                 let dst = s.color.working(m);
                 crate::color_cmds::convert_document(&mut doc, &dst, s.color.settings.intent(), s.color.settings.bpc)?;
@@ -894,7 +894,7 @@ fn load_files_into_stack(s: &mut Session, p: &Value) -> Result<Value> {
     let first = &docs[0].1;
     let w = docs.iter().map(|(_, d)| d.size.width).max().unwrap_or(1);
     let h = docs.iter().map(|(_, d)| d.size.height).max().unwrap_or(1);
-    let mut stack = Document::new(stem(&paths[0]), photosuite_doc::Size::new(w, h), first.mode, first.depth);
+    let mut stack = Document::new(stem(&paths[0]), photosplice_doc::Size::new(w, h), first.mode, first.depth);
     stack.resolution_dpi = first.resolution_dpi;
     stack.icc_profile = first.icc_profile.clone();
     let fmt = stack.pixel_format();
@@ -907,7 +907,7 @@ fn load_files_into_stack(s: &mut Session, p: &Value) -> Result<Value> {
         // "Create Smart Object after Loading Layers": the layers go inside one smart object, ready
         // for Layer › Smart Objects › Stack Mode.
         let children = std::mem::take(&mut stack.layers);
-        let group = Layer::new(stem(&paths[0]), LayerContent::Group(photosuite_doc::Group { children, expanded: true, artboard: None, divider_blocks: Vec::new() }));
+        let group = Layer::new(stem(&paths[0]), LayerContent::Group(photosplice_doc::Group { children, expanded: true, artboard: None, divider_blocks: Vec::new() }));
         let smart = crate::smart_cmds::layer_to_smart(&stack, &group)?;
         stack.layers = vec![smart];
     }
@@ -925,7 +925,7 @@ fn has_live_effects(l: &Layer) -> bool {
 fn bake(l: &Layer, canvas: Rect, fmt: PixelFormat, keep_effects: bool) -> Surface {
     let mut tmp = l.clone();
     tmp.opacity = 1.0;
-    tmp.blend = photosuite_color::BlendMode::Normal;
+    tmp.blend = photosplice_color::BlendMode::Normal;
     tmp.visible = true;
     tmp.clipped = false;
     if !keep_effects {
@@ -935,7 +935,7 @@ fn bake(l: &Layer, canvas: Rect, fmt: PixelFormat, keep_effects: bool) -> Surfac
     // Render over the union of the canvas and the content so off-canvas pixels survive.
     let area = l.surface().map_or(canvas, |s| s.content_bounds().union(&canvas));
     let area = if keep_effects { area.inflate(256) } else { area };
-    buffer_surface(&photosuite_compose::render_layer(&tmp, area), fmt)
+    buffer_surface(&photosplice_compose::render_layer(&tmp, area), fmt)
 }
 
 fn walk_ids(doc: &Document) -> Vec<LayerId> {
@@ -1032,7 +1032,7 @@ fn layers_to_files(s: &mut Session, p: &Value) -> Result<Value> {
 pub fn bake_cube(doc: &Document, size: usize, title: &str) -> String {
     let n = size.clamp(2, 256);
     let (w, h) = ((n * n) as u32, n as u32);
-    let mut lattice = Document::new("lut", photosuite_doc::Size::new(w, h), ColorMode::Rgb, photosuite_color::SampleType::F32);
+    let mut lattice = Document::new("lut", photosplice_doc::Size::new(w, h), ColorMode::Rgb, photosplice_color::SampleType::F32);
     let fmt = lattice.pixel_format();
     let step = 1.0 / (n - 1) as f32;
     let mut data = Vec::with_capacity((w * h) as usize * fmt.channels());
@@ -1056,8 +1056,8 @@ pub fn bake_cube(doc: &Document, size: usize, title: &str) -> String {
         a.clipped = false;
         lattice.layers.push(a);
     }
-    let out = photosuite_compose::flatten(&lattice);
-    let mut s = format!("TITLE \"{}\"\n# Created by PhotoSuite\nLUT_3D_SIZE {n}\nDOMAIN_MIN 0.0 0.0 0.0\nDOMAIN_MAX 1.0 1.0 1.0\n", title.replace('"', "'"));
+    let out = photosplice_compose::flatten(&lattice);
+    let mut s = format!("TITLE \"{}\"\n# Created by PhotoSplice\nLUT_3D_SIZE {n}\nDOMAIN_MIN 0.0 0.0 0.0\nDOMAIN_MAX 1.0 1.0 1.0\n", title.replace('"', "'"));
     // .cube order: red changes fastest, then green, then blue.
     for b in 0..n {
         for g in 0..n {

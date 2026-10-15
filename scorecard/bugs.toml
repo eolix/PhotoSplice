@@ -11,7 +11,7 @@ id = "BUG-203-1"
 target = "Every document write goes through one atomic_write (temp, fsync, rename)"
 status = "done"
 issue = 203
-note = "photosuite_format::atomic_write (format/src/atomic.rs, #230/8227071); every write site routes through it: engine file_cmds.rs write_file and preset_store.rs, automation files.rs/headless.rs/workspace.rs, app services.rs write_atomic, format store.rs and autosave.rs"
+note = "photosplice_format::atomic_write (format/src/atomic.rs, #230/8227071); every write site routes through it: engine file_cmds.rs write_file and preset_store.rs, automation files.rs/headless.rs/workspace.rs, app services.rs write_atomic, format store.rs and autosave.rs"
 
 [[item]]
 id = "BUG-203-2"

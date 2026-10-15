@@ -1,6 +1,6 @@
 //! Adjustment layers in Lab documents, on L, a and b as Photoshop applies them.
 //!
-//! Fitted on the Photoshop corpus `adjustments/lab8` (`photosuite-io` example `cmyk_probe`,
+//! Fitted on the Photoshop corpus `adjustments/lab8` (`photosplice-io` example `cmyk_probe`,
 //! `ADJ=1`), against Photoshop's merged L, a, b:
 //! - Invert and Posterize act on L, a and b alike (exact);
 //! - Brightness/Contrast (both kinds) curve L only, a and b kept (a, b exact);
@@ -13,9 +13,9 @@
 //! the adjustment; the others (Hue/Saturation, Photo Filter, …) stay on the clipped screen
 //! colour, which matches Reference more closely than any Lab rule tried.
 
-use photosuite_color::convert::{lab_to_srgb_unclamped, srgb_to_lab};
-use photosuite_doc::Adjustment;
-use photosuite_doc::adjust::ToneSpace;
+use photosplice_color::convert::{lab_to_srgb_unclamped, srgb_to_lab};
+use photosplice_doc::Adjustment;
+use photosplice_doc::adjust::ToneSpace;
 
 use crate::Buffer;
 use crate::adjust::{LUT_SIZE, Transfer, apply_depth, lut, tone_luts_depth};
@@ -35,9 +35,9 @@ pub fn native(adj: &Adjustment) -> bool {
 }
 
 /// `adj`'s curve sampled on a gray ramp (the same function for every channel).
-fn ramp(adj: &Adjustment, transfer: Transfer, depth: photosuite_color::SampleType) -> Vec<f32> {
+fn ramp(adj: &Adjustment, transfer: Transfer, depth: photosplice_color::SampleType) -> Vec<f32> {
     let n = LUT_SIZE;
-    let mut b = Buffer { rect: photosuite_geom::Rect::new(0, 0, n as i32, 1), px: (0..n).map(|k| [k as f32 / (n - 1) as f32; 4]).collect() };
+    let mut b = Buffer { rect: photosplice_geom::Rect::new(0, 0, n as i32, 1), px: (0..n).map(|k| [k as f32 / (n - 1) as f32; 4]).collect() };
     b.px.iter_mut().for_each(|p| p[3] = 1.0);
     apply_depth(adj, &mut b, transfer, Some(depth));
     b.px.iter().map(|p| p[0]).collect()
@@ -53,7 +53,7 @@ pub(crate) fn clip(buf: &mut Buffer) {
 }
 
 /// Applies a [`native`] adjustment to `buf` (screen RGB) on its L, a, b.
-pub(crate) fn apply(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth: photosuite_color::SampleType) {
+pub(crate) fn apply(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth: photosplice_color::SampleType) {
     let ident: Vec<f32> = (0..LUT_SIZE).map(|k| k as f32 / (LUT_SIZE - 1) as f32).collect();
     let luts: [Vec<f32>; 3] = match adj {
         Adjustment::Levels { .. } | Adjustment::Curves { .. } => {
@@ -84,7 +84,7 @@ pub(crate) fn apply(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, dept
     // samples about their true centre (Reference's 16-bit Lab stores 32768 + 256·a*): a* goes
     // to −a* − 1 at 8 bits and to −a* at 16 (Reference corpus lab8 / lab16 invert.psd).
     // Posterize still steps on the 8-bit scale at 16 bits (lab16 posterize-4.psd).
-    let ab_span = if matches!(adj, Adjustment::Invert) && depth != photosuite_color::SampleType::U8 { 256.0 } else { 255.0 };
+    let ab_span = if matches!(adj, Adjustment::Invert) && depth != photosplice_color::SampleType::U8 { 256.0 } else { 255.0 };
     let threshold = match adj {
         Adjustment::Threshold { level } => Some((level * 255.0).round()),
         _ => None,
@@ -108,7 +108,7 @@ pub(crate) fn apply(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, dept
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_color::convert::lab_to_srgb;
+    use photosplice_color::convert::lab_to_srgb;
 
     /// A Lab document keeps colours outside sRGB through its composite, so Invert flips the
     /// file's own L, a, b rather than a clipped screen colour (Reference corpus lab8/invert.psd:
@@ -117,7 +117,7 @@ mod tests {
     fn invert_keeps_colours_outside_srgb() {
         let lab = [46.0, 80.0, -110.0];
         let mut b = one(lab_to_srgb_unclamped(lab));
-        apply(&Adjustment::Invert, &mut b, Transfer::Srgb, photosuite_color::SampleType::U8);
+        apply(&Adjustment::Invert, &mut b, Transfer::Srgb, photosplice_color::SampleType::U8);
         let out = srgb_to_lab([b.px[0][0], b.px[0][1], b.px[0][2]]);
         let want = [100.0 - lab[0], -lab[1] - 1.0, -lab[2] - 1.0];
         for i in 0..3 {
@@ -125,8 +125,8 @@ mod tests {
         }
         // 16-bit flips about the true centre: a* → −a*.
         let mut b = one(lab_to_srgb_unclamped(lab));
-        apply(&Adjustment::Invert, &mut b, Transfer::Srgb, photosuite_color::SampleType::U16);
-        apply(&Adjustment::Invert, &mut b, Transfer::Srgb, photosuite_color::SampleType::U16);
+        apply(&Adjustment::Invert, &mut b, Transfer::Srgb, photosplice_color::SampleType::U16);
+        apply(&Adjustment::Invert, &mut b, Transfer::Srgb, photosplice_color::SampleType::U16);
         let back = srgb_to_lab([b.px[0][0], b.px[0][1], b.px[0][2]]);
         for i in 0..3 {
             assert!((back[i] - lab[i]).abs() < 0.1, "{back:?} vs {lab:?}");
@@ -134,7 +134,7 @@ mod tests {
     }
 
     fn one(rgb: [f32; 3]) -> Buffer {
-        Buffer { rect: photosuite_geom::Rect::new(0, 0, 1, 1), px: vec![[rgb[0], rgb[1], rgb[2], 1.0]] }
+        Buffer { rect: photosplice_geom::Rect::new(0, 0, 1, 1), px: vec![[rgb[0], rgb[1], rgb[2], 1.0]] }
     }
 
     /// Invert flips L, a and b (Photoshop corpus lab8/invert.psd: exact), not the screen colour.
@@ -143,7 +143,7 @@ mod tests {
     fn invert_flips_l_a_and_b() {
         let c = [0.55, 0.45, 0.4];
         let mut b = one(c);
-        apply(&Adjustment::Invert, &mut b, Transfer::Srgb, photosuite_color::SampleType::U16);
+        apply(&Adjustment::Invert, &mut b, Transfer::Srgb, photosplice_color::SampleType::U16);
         let (lab, out) = (srgb_to_lab(c), srgb_to_lab([b.px[0][0], b.px[0][1], b.px[0][2]]));
         assert!((out[0] - (100.0 - lab[0])).abs() < 0.5, "{lab:?} → {out:?}");
         assert!((out[1] + lab[1]).abs() < 1.5 && (out[2] + lab[2]).abs() < 1.5, "{lab:?} → {out:?}");
@@ -154,7 +154,7 @@ mod tests {
     fn threshold_is_neutral() {
         for c in [[0.9, 0.2, 0.1], [0.1, 0.1, 0.6]] {
             let mut b = one(c);
-            apply(&Adjustment::Threshold { level: 0.5 }, &mut b, Transfer::Srgb, photosuite_color::SampleType::U8);
+            apply(&Adjustment::Threshold { level: 0.5 }, &mut b, Transfer::Srgb, photosplice_color::SampleType::U8);
             let p = b.px[0];
             assert!((p[0] - p[1]).abs() < 1e-3 && (p[1] - p[2]).abs() < 1e-3 && (p[0] < 0.01 || p[0] > 0.99), "{p:?}");
         }
@@ -169,8 +169,8 @@ mod tests {
         let gray = lab_to_srgb([60.0, 0.0, 0.0]);
         let red = lab_to_srgb([60.0, 40.0, 30.0]);
         let (mut a, mut b) = (one(gray), one(red));
-        apply(&gm, &mut a, Transfer::Srgb, photosuite_color::SampleType::U16);
-        apply(&gm, &mut b, Transfer::Srgb, photosuite_color::SampleType::U16);
+        apply(&gm, &mut a, Transfer::Srgb, photosplice_color::SampleType::U16);
+        apply(&gm, &mut b, Transfer::Srgb, photosplice_color::SampleType::U16);
         for c in 0..3 {
             assert!((a.px[0][c] - b.px[0][c]).abs() < 1e-3, "{:?} vs {:?}", a.px[0], b.px[0]);
         }
@@ -181,7 +181,7 @@ mod tests {
     fn brightness_contrast_keeps_a_and_b() {
         let c = [0.7, 0.4, 0.3];
         let mut b = one(c);
-        apply(&Adjustment::BrightnessContrast { brightness: 30.0, contrast: 0.0, legacy: true }, &mut b, Transfer::Srgb, photosuite_color::SampleType::U16);
+        apply(&Adjustment::BrightnessContrast { brightness: 30.0, contrast: 0.0, legacy: true }, &mut b, Transfer::Srgb, photosplice_color::SampleType::U16);
         let (lab, out) = (srgb_to_lab(c), srgb_to_lab([b.px[0][0], b.px[0][1], b.px[0][2]]));
         assert!(out[0] > lab[0] + 5.0, "{lab:?} → {out:?}");
         assert!((out[1] - lab[1]).abs() < 0.5 && (out[2] - lab[2]).abs() < 0.5, "{lab:?} → {out:?}");

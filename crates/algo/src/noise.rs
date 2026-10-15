@@ -1,6 +1,6 @@
 //! Add Noise, Median, Dust & Scratches.
 
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 
 use crate::image::Image;
 use crate::{Ctx, Distribution};

@@ -1,4 +1,4 @@
-//! Document slices ↔ PSD resource 1050 (see `photosuite_psd::slices`).
+//! Document slices ↔ PSD resource 1050 (see `photosplice_psd::slices`).
 //!
 //! Import keeps user and layer-based slices (auto slices are regenerated from them) and links
 //! layer-based slices to the layer whose `lyid` they name. Export writes the preserved resource
@@ -7,12 +7,12 @@
 
 use std::collections::HashMap;
 
-use photosuite_doc::slices::{self, Slice, SliceKind, SliceOrigin, Slices};
-use photosuite_doc::{Document, LayerId, Rect};
-use photosuite_psd::slices::{SliceRecord, SlicesResource};
+use photosplice_doc::slices::{self, Slice, SliceKind, SliceOrigin, Slices};
+use photosplice_doc::{Document, LayerId, Rect};
+use photosplice_psd::slices::{SliceRecord, SlicesResource};
 
 /// Image resource id of the slices.
-pub const SLICES: u16 = photosuite_psd::slices::SLICES;
+pub const SLICES: u16 = photosplice_psd::slices::SLICES;
 
 fn raw(doc: &Document) -> Option<&[u8]> {
     doc.metadata.psd_resources.iter().find(|(id, _, _)| *id == SLICES).map(|(_, _, d)| d.as_slice())
@@ -137,7 +137,7 @@ pub fn export_resource(doc: &Document, layer_ids: &HashMap<LayerId, u32>) -> (Op
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_doc::{ColorMode, Layer, SampleType, Size};
+    use photosplice_doc::{ColorMode, Layer, SampleType, Size};
 
     #[test]
     fn slices_survive_a_psd_round_trip() {

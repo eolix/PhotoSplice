@@ -12,8 +12,8 @@
 
 use std::collections::HashMap;
 
-use photosuite_doc::{Knot, Path, PathOp, Subpath};
-use photosuite_geom::{Point, Rect};
+use photosplice_doc::{Knot, Path, PathOp, Subpath};
+use photosplice_geom::{Point, Rect};
 
 type P = (f64, f64);
 

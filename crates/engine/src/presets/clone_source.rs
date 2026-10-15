@@ -8,8 +8,8 @@
 //! sample point: a 200 % width paints the source twice as wide, a 30° rotation paints it turned
 //! 30° counter-clockwise on screen (Photoshop's sense).
 
-use photosuite_geom::Rect;
-use photosuite_paint::retouch::Region;
+use photosplice_geom::Rect;
+use photosplice_paint::retouch::Region;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 

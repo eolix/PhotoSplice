@@ -7,10 +7,10 @@
 
 use std::sync::Arc;
 
-use photosuite_engine::web_cmds::{self, Optimized, WebSettings};
+use photosplice_engine::web_cmds::{self, Optimized, WebSettings};
 use serde_json::{Map, Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::state::DialogKind;
 use crate::theme::Tokens;
 
@@ -18,16 +18,16 @@ fn no_params(p: &Value) -> bool {
     p.as_object().is_none_or(|o| o.is_empty())
 }
 
-fn default_dir(app: &PhotosuiteApp) -> String {
+fn default_dir(app: &PhotospliceApp) -> String {
     app.session.active().and_then(|d| d.path.as_deref()).and_then(|p| p.rfind(['/', '\\']).map(|i| p[..i].to_string())).unwrap_or_else(|| ".".into())
 }
 
-fn doc_stem(app: &PhotosuiteApp) -> String {
+fn doc_stem(app: &PhotospliceApp) -> String {
     app.session.active().map(|d| d.doc.name.rsplit_once('.').map_or(d.doc.name.clone(), |(a, _)| a.to_string())).unwrap_or_else(|| tl!("Untitled").into())
 }
 
 /// A generic form dialog for `command` (rendered by `view_cmds::form_body`).
-fn form(app: &mut PhotosuiteApp, command: &str, label: &str, fields: Value, choices: Value) -> Value {
+fn form(app: &mut PhotospliceApp, command: &str, label: &str, fields: Value, choices: Value) -> Value {
     let mut f = Map::new();
     f.insert("__command".into(), json!(command));
     f.insert("__label".into(), json!(label));
@@ -40,7 +40,7 @@ fn form(app: &mut PhotosuiteApp, command: &str, label: &str, fields: Value, choi
 }
 
 /// Menu items fronted here (dialogs before the engine command). `None` when not ours.
-pub fn invoke(app: &mut PhotosuiteApp, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
+pub fn invoke(app: &mut PhotospliceApp, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
     if !no_params(params) {
         return None;
     }
@@ -64,7 +64,7 @@ pub fn invoke(app: &mut PhotosuiteApp, ctx: &egui::Context, id: &str, params: &V
             app,
             id,
             tl!("Contact Sheet II"),
-            json!({"input": dir, "units": "inches", "width": 8.0, "height": 10.0, "resolution": 300.0, "mode": "rgb", "depth": 8, "columns": 5, "rows": 6, "placeAcrossFirst": true, "autoSpacing": true, "rotateForBestFit": false, "caption": true, "font": photosuite_text::fonts::DEFAULT_FAMILY, "fontSize": 12.0, "flatten": false}),
+            json!({"input": dir, "units": "inches", "width": 8.0, "height": 10.0, "resolution": 300.0, "mode": "rgb", "depth": 8, "columns": 5, "rows": 6, "placeAcrossFirst": true, "autoSpacing": true, "rotateForBestFit": false, "caption": true, "font": photosplice_text::fonts::DEFAULT_FAMILY, "fontSize": 12.0, "flatten": false}),
             json!({"units": ["inches", "cm", "pixels"], "mode": ["rgb", "gray", "cmyk", "lab"]}),
         ),
         "file.automate.createDroplet" => {
@@ -82,7 +82,7 @@ pub fn invoke(app: &mut PhotosuiteApp, ctx: &egui::Context, id: &str, params: &V
             )
         }
         "file.scripts.statistics" => {
-            let modes: Vec<&str> = photosuite_doc::StackMode::ALL.iter().map(|m| m.id()).collect();
+            let modes: Vec<&str> = photosplice_doc::StackMode::ALL.iter().map(|m| m.id()).collect();
             form(app, id, "Image Statistics", json!({"mode": "median", "input": dir, "align": false}), json!({"mode": modes}))
         }
         "file.scripts.browse" => {
@@ -98,7 +98,7 @@ pub fn invoke(app: &mut PhotosuiteApp, ctx: &egui::Context, id: &str, params: &V
         }
         "file.scripts.scriptEventsManager" => {
             let enabled = app.session.prefs().script_events.enabled;
-            let events: Vec<&str> = photosuite_engine::automate_cmds::EVENTS.iter().map(|e| e.0).collect();
+            let events: Vec<&str> = photosplice_engine::automate_cmds::EVENTS.iter().map(|e| e.0).collect();
             form(app, id, "Script Events Manager", json!({"enabled": enabled, "event": "openDocument", "script": "", "name": ""}), json!({"event": events}))
         }
         "file.package" => form(app, id, "Package", json!({"dir": dir}), json!({})),
@@ -117,7 +117,7 @@ pub fn invoke(app: &mut PhotosuiteApp, ctx: &egui::Context, id: &str, params: &V
 }
 
 /// Checked state of toggle items owned here.
-pub fn checked(app: &PhotosuiteApp, id: &str) -> Option<bool> {
+pub fn checked(app: &PhotospliceApp, id: &str) -> Option<bool> {
     match id {
         "view.lockSlices" => Some(app.session.file_menu.slices_locked),
         "file.generate.imageAssets" => Some(app.session.active().is_some_and(|d| app.session.file_menu.image_assets.contains(&d.doc.id))),
@@ -150,7 +150,7 @@ pub fn ok_label(f: &Map<String, Value>) -> Option<&'static str> {
     }
 }
 
-pub fn body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
+pub fn body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     if f.contains_key("__web") {
         web_body(app, ui, f);
     } else {
@@ -158,7 +158,7 @@ pub fn body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
     }
 }
 
-pub fn confirm(app: &mut PhotosuiteApp, f: &Map<String, Value>) -> Result<Value, String> {
+pub fn confirm(app: &mut PhotospliceApp, f: &Map<String, Value>) -> Result<Value, String> {
     if f.contains_key("__web") { web_confirm(app, f) } else { print_confirm(app, f) }
 }
 
@@ -181,7 +181,7 @@ fn b(f: &Map<String, Value>, k: &str, d: bool) -> bool {
 const WEB_FORMATS: [(&str, &str); 7] =
     [("gif", "GIF"), ("png8", "PNG-8"), ("png24", "PNG-24"), ("jpeg", "JPEG"), ("webp", "WebP"), ("webpLossless", "WebP (lossless)"), ("wbmp", "WBMP")];
 
-/// File › Save As adds the whole-document formats, saved through [`PhotosuiteApp::save_as`]: the
+/// File › Save As adds the whole-document formats, saved through [`PhotospliceApp::save_as`]: the
 /// document takes the new path and is marked saved. The web formats below them write one
 /// optimised file through `file.export.saveForWebLegacy`, then retarget the document the same way.
 /// The native .pcraft format isn't offered (PSD is the document format); a .pcraft file that is
@@ -211,19 +211,19 @@ fn ext_of(path: &str) -> String {
     }
 }
 
-/// Can File › Save write this kind of file back in place? Everything PhotoSuite writes. A PDF is
+/// Can File › Save write this kind of file back in place? Everything PhotoSplice writes. A PDF is
 /// saved layered with its document attached, so nothing is lost; one of several pages opens
 /// untitled (Import PDF), so Save can't drop the others.
 pub(crate) fn writes_in_place(path: &str) -> bool {
     let ext = ext_of(path);
-    matches!(ext.as_str(), "psd" | "psb" | "pcraft" | "pdf") || photosuite_codecs::from_extension(&ext).is_some_and(|f| photosuite_codecs::caps(f).write)
+    matches!(ext.as_str(), "psd" | "psb" | "pcraft" | "pdf") || photosplice_codecs::from_extension(&ext).is_some_and(|f| photosplice_codecs::caps(f).write)
 }
 
 /// File › Save without a dialog: the document goes back to its own file, in its format and at
 /// the settings it was opened or last saved with (a JPEG keeps its quality; a file last written
 /// by the Save As screen is written with those settings again). `None` when there is nothing to
 /// save in place (a new document, a PDF page, a camera raw file): Save As then asks.
-pub fn save_in_place(app: &mut PhotosuiteApp) -> Option<Result<Value, String>> {
+pub fn save_in_place(app: &mut PhotospliceApp) -> Option<Result<Value, String>> {
     // Edit Contents documents save back into their smart object (the Save As path does that).
     if app.session.is_enabled("layer.smartObjects.saveContents") {
         return None;
@@ -244,7 +244,7 @@ pub fn save_in_place(app: &mut PhotosuiteApp) -> Option<Result<Value, String>> {
 }
 
 /// The document is now the file at `path`, saved.
-fn saved_as(app: &mut PhotosuiteApp, path: &str) {
+fn saved_as(app: &mut PhotospliceApp, path: &str) {
     if let Some(st) = app.session.active_mut() {
         st.path = Some(path.to_string());
         st.saved_revision = st.revision;
@@ -255,7 +255,7 @@ fn saved_as(app: &mut PhotosuiteApp, path: &str) {
 
 /// File › Save As (and Save on a document that cannot be saved in place): the Save for Web
 /// screen, starting on the document's own format.
-pub fn open_save_as(app: &mut PhotosuiteApp) -> u64 {
+pub fn open_save_as(app: &mut PhotospliceApp) -> u64 {
     let ext = app.session.active().and_then(|d| d.path.clone()).and_then(|p| p.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase())).unwrap_or_default();
     let format = match ext.as_str() {
         "tiff" => "tif".to_string(),
@@ -274,7 +274,7 @@ pub fn open_save_as(app: &mut PhotosuiteApp) -> u64 {
     id
 }
 
-pub fn open_web(app: &mut PhotosuiteApp) -> u64 {
+pub fn open_web(app: &mut PhotospliceApp) -> u64 {
     let mut f = Map::new();
     f.insert("__web".into(), json!(true));
     f.insert("__label".into(), json!("Save for Web (Legacy)"));
@@ -392,7 +392,7 @@ type WebCache = (String, Arc<egui::TextureHandle>, Option<(usize, Option<usize>,
 /// Renders one preview pane: the original (`None`) or an optimised variant.
 /// One preview pane (the original when `p` is `None`): the image at the shared view, and below
 /// it Photoshop's two columns of figures. Returns the pixel under the pointer (RGBA).
-fn web_pane(app: &PhotosuiteApp, ui: &mut egui::Ui, size: egui::Vec2, p: Option<&Value>, view: &mut WebView) -> Option<[u8; 4]> {
+fn web_pane(app: &PhotospliceApp, ui: &mut egui::Ui, size: egui::Vec2, p: Option<&Value>, view: &mut WebView) -> Option<[u8; 4]> {
     let t = Tokens::get(ui.ctx());
     let st = app.session.active()?;
     let doc = st.doc.clone();
@@ -411,7 +411,7 @@ fn web_pane(app: &PhotosuiteApp, ui: &mut egui::Ui, size: egui::Vec2, p: Option<
             let st = WebSettings::default();
             let (wd, _, _) =
                 web_cmds::web_document(&doc, &json!({"width": (fw * k).round().max(1.0), "height": (fh * k).round().max(1.0), "resample": "bilinear"}), &st).ok()?;
-            let buf = photosuite_compose::flatten(&wd);
+            let buf = photosplice_compose::flatten(&wd);
             let v = (Arc::new(buf.px), wd.size.width, wd.size.height, (fw * fh) / (f64::from(wd.size.width) * f64::from(wd.size.height)).max(1.0));
             ui.data_mut(|d| d.insert_temp(wkey, v.clone()));
             v
@@ -426,7 +426,7 @@ fn web_pane(app: &PhotosuiteApp, ui: &mut egui::Ui, size: egui::Vec2, p: Option<
             let (rgba, info) = match p {
                 None => (px.iter().flat_map(|q| q.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)).collect::<Vec<u8>>(), None),
                 Some(p) => match WebSettings::from_params(p, "preview")
-                    .and_then(|st| web_cmds::optimize(&px, w as usize, photosuite_geom::Rect::new(0, 0, w as i32, h as i32), &st, None, None, 72.0, true))
+                    .and_then(|st| web_cmds::optimize(&px, w as usize, photosplice_geom::Rect::new(0, 0, w as i32, h as i32), &st, None, None, 72.0, true))
                 {
                     Ok(Optimized { preview, bytes, colors, ext, .. }) => (preview, Some(((bytes.len() as f64 * ratio) as usize, colors, ext))),
                     Err(_) => (vec![0; (w * h * 4) as usize], None),
@@ -541,13 +541,13 @@ fn title_case(s: &str) -> String {
 /// built once per document revision and size; only the crop in view is rendered and optimised
 /// (so an indexed palette is the crop's own).
 #[allow(clippy::too_many_arguments)]
-fn web_crop(ui: &egui::Ui, doc: &photosuite_doc::Document, rev: u64, size_sig: &str, sig: &str, p: Option<&Value>, (ew, eh): (f32, f32), vis: egui::Rect) -> Option<(Arc<egui::TextureHandle>, egui::Rect)> {
-    let crop = photosuite_geom::Rect::new(vis.min.x.floor() as i32, vis.min.y.floor() as i32, vis.max.x.ceil() as i32, vis.max.y.ceil() as i32);
+fn web_crop(ui: &egui::Ui, doc: &photosplice_doc::Document, rev: u64, size_sig: &str, sig: &str, p: Option<&Value>, (ew, eh): (f32, f32), vis: egui::Rect) -> Option<(Arc<egui::TextureHandle>, egui::Rect)> {
+    let crop = photosplice_geom::Rect::new(vis.min.x.floor() as i32, vis.min.y.floor() as i32, vis.max.x.ceil() as i32, vis.max.y.ceil() as i32);
     if crop.is_empty() {
         return None;
     }
     let fkey = egui::Id::new(("web-full", doc.id.0, rev, size_sig.to_string()));
-    let full: Option<Arc<photosuite_doc::Document>> = ui.data(|d| d.get_temp(fkey));
+    let full: Option<Arc<photosplice_doc::Document>> = ui.data(|d| d.get_temp(fkey));
     let full = match full {
         Some(f) => f,
         None => {
@@ -563,12 +563,12 @@ fn web_crop(ui: &egui::Ui, doc: &photosuite_doc::Document, rev: u64, size_sig: &
     let tex = match cached.filter(|c| c.0 == want) {
         Some((_, tex)) => tex,
         None => {
-            let buf = photosuite_compose::render(&full, crop);
+            let buf = photosplice_compose::render(&full, crop);
             let (w, h) = (crop.width() as usize, crop.height() as usize);
             let rgba = match p {
                 None => buf.px.iter().flat_map(|q| q.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)).collect(),
                 Some(p) => WebSettings::from_params(p, "preview")
-                    .and_then(|st| web_cmds::optimize(&buf.px, w, photosuite_geom::Rect::new(0, 0, w as i32, h as i32), &st, None, None, 72.0, true))
+                    .and_then(|st| web_cmds::optimize(&buf.px, w, photosplice_geom::Rect::new(0, 0, w as i32, h as i32), &st, None, None, 72.0, true))
                     .map(|o| o.preview)
                     .ok()?,
             };
@@ -606,7 +606,7 @@ fn number(ui: &mut egui::Ui, f: &mut Map<String, Value>, key: &str, label: &str,
 }
 
 /// The export size (pixels) the dialog's Image Size settings give `doc`.
-fn export_size(doc: &photosuite_doc::Document, f: &Map<String, Value>) -> (f32, f32) {
+fn export_size(doc: &photosplice_doc::Document, f: &Map<String, Value>) -> (f32, f32) {
     let pct = n(f, "percent", 100.0).max(1.0) / 100.0;
     ((f64::from(doc.size.width) * pct).round().max(1.0) as f32, (f64::from(doc.size.height) * pct).round().max(1.0) as f32)
 }
@@ -657,7 +657,7 @@ fn web_matte(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
 /// File › Export › Save for Web (Legacy) and File › Save As: Photoshop's layout. The previews
 /// under Original / Optimized / 2-Up / 4-Up tabs with a zoom bar and the pixel readout below,
 /// the settings in a column on the right.
-fn web_body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
+fn web_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     let t = Tokens::get(ui.ctx());
     let Some(doc) = app.session.active().map(|d| d.doc.clone()) else { return };
     let save_as = f.contains_key("__saveAs");
@@ -803,7 +803,7 @@ fn web_body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
                 // PDF: Photoshop's editing data, chosen here rather than in a dialog after Save.
                 if s(f, "format", "psd") == "pdf" {
                     check(ui, f, "pdfEditing", tl!("Preserve Photoshop Editing Capabilities"), app.pdf_preserve_editing);
-                    ui.label(egui::RichText::new(tl!("Photoshop and PhotoSuite reopen the PDF with its layers. Other applications show its page.")).color(t.text_dim));
+                    ui.label(egui::RichText::new(tl!("Photoshop and PhotoSplice reopen the PDF with its layers. Other applications show its page.")).color(t.text_dim));
                 }
                 return;
             }
@@ -880,7 +880,7 @@ fn web_body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
                 right_label(ui, tl!("Quality:"), 90.0);
                 dropdown_str(ui, "web-resample", f, "resample", &[("bicubic", tl!("Bicubic")), ("bilinear", tl!("Bilinear")), ("nearest", tl!("Nearest Neighbor"))], 110.0);
             });
-            let nslices = photosuite_doc::slices::resolve(&doc).len();
+            let nslices = photosplice_doc::slices::resolve(&doc).len();
             if !doc.slices.is_empty() {
                 ui.add_space(4.0);
                 crate::widgets::hairline(ui);
@@ -893,7 +893,7 @@ fn web_body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
     web_view.write(f);
 }
 
-fn web_confirm(app: &mut PhotosuiteApp, f: &Map<String, Value>) -> Result<Value, String> {
+fn web_confirm(app: &mut PhotospliceApp, f: &Map<String, Value>) -> Result<Value, String> {
     let save_as = f.contains_key("__saveAs");
     let fmt = s(f, "format", "jpeg");
     if save_as && is_doc_format(&fmt) {
@@ -914,7 +914,7 @@ fn web_confirm(app: &mut PhotosuiteApp, f: &Map<String, Value>) -> Result<Value,
     let has_slices = !doc.slices.is_empty();
     if p.get("path").is_none() && p.get("dir").is_none() {
         let st = WebSettings::from_params(&p, "file.export.saveForWebLegacy").map_err(|e| e.to_string())?;
-        let base = photosuite_doc::slices::base_name(&doc);
+        let base = photosplice_doc::slices::base_name(&doc);
         let suggested = if has_slices && b(f, "html", true) { format!("{base}.html") } else { format!("{base}.{}", st.format.ext()) };
         let path = app.services.pick_save.as_mut().and_then(|pick| pick(&suggested)).ok_or("cancelled")?;
         if has_slices {
@@ -941,7 +941,7 @@ fn web_confirm(app: &mut PhotosuiteApp, f: &Map<String, Value>) -> Result<Value,
     {
         saved_as(app, &path);
         if let Some(st) = app.session.active_mut() {
-            st.save_options = photosuite_engine::SaveOptions { web: Some(again), ..Default::default() };
+            st.save_options = photosplice_engine::SaveOptions { web: Some(again), ..Default::default() };
         }
     }
     Ok(r)
@@ -949,10 +949,10 @@ fn web_confirm(app: &mut PhotosuiteApp, f: &Map<String, Value>) -> Result<Value,
 
 // ---------- Print ----------
 
-pub fn open_print(app: &mut PhotosuiteApp) -> u64 {
+pub fn open_print(app: &mut PhotospliceApp) -> u64 {
     let mut f = Map::new();
     f.insert("__print".into(), json!(true));
-    f.insert("__label".into(), json!("PhotoSuite Print Settings"));
+    f.insert("__label".into(), json!("PhotoSplice Print Settings"));
     if let Some(Value::Object(m)) = app.session.file_menu.last_print.clone() {
         f.extend(m);
     }
@@ -982,7 +982,7 @@ pub fn open_print(app: &mut PhotosuiteApp) -> u64 {
     app.ui.open_dialog(DialogKind::Command, f)
 }
 
-fn print_body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
+fn print_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     let t = Tokens::get(ui.ctx());
     let Some(doc) = app.session.active().map(|d| d.doc.clone()) else { return };
     let p = params(f);
@@ -991,7 +991,7 @@ fn print_body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Va
         ui.vertical(|ui| {
             let (area, _) = ui.allocate_exact_size(egui::vec2(330.0, 400.0), egui::Sense::hover());
             ui.painter().rect_filled(area, 0.0, t.canvas);
-            match photosuite_engine::print_cmds::layout(&doc, &p, "file.print") {
+            match photosplice_engine::print_cmds::layout(&doc, &p, "file.print") {
                 Ok(l) => {
                     let (pw, ph) = l.paper;
                     let k = ((area.width() - 20.0) / pw as f32).min((area.height() - 20.0) / ph as f32);
@@ -1006,7 +1006,7 @@ fn print_body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Va
                     let key = egui::Id::new(("print-thumb", doc.id.0, app.session.active().map_or(0, |d| d.revision)));
                     let tex: Option<Arc<egui::TextureHandle>> = ui.data(|d| d.get_temp(key));
                     let tex = tex.unwrap_or_else(|| {
-                        let th = photosuite_compose::thumbnail(&doc, 400);
+                        let th = photosplice_compose::thumbnail(&doc, 400);
                         let ci = egui::ColorImage::from_rgba_unmultiplied([th.width as usize, th.height as usize], &th.pixels);
                         let tx = Arc::new(ui.ctx().load_texture("print-thumb", ci, egui::TextureOptions::LINEAR));
                         ui.data_mut(|d| d.insert_temp(key, tx.clone()));
@@ -1063,7 +1063,7 @@ fn print_body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Va
             });
             number(ui, f, "copies", tl!("Copies"), 1.0..=999.0, "", 1.0);
             ui.horizontal(|ui| {
-                let papers: Vec<(&str, &str)> = photosuite_engine::print_cmds::PAPERS.iter().map(|p| (p.0, p.0)).collect();
+                let papers: Vec<(&str, &str)> = photosplice_engine::print_cmds::PAPERS.iter().map(|p| (p.0, p.0)).collect();
                 dropdown_str(ui, "print-paper", f, "paper", &papers, 110.0);
                 dropdown_str(ui, "print-orient", f, "orientation", &[("portrait", tl!("Portrait")), ("landscape", tl!("Landscape"))], 110.0);
             });
@@ -1075,12 +1075,12 @@ fn print_body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Va
                 "colorHandling",
                 &[
                     ("printerManages", tl!("Printer Manages Colors")),
-                    ("photosuiteManages", tl!("PhotoSuite Manages Colors")),
+                    ("photospliceManages", tl!("PhotoSplice Manages Colors")),
                     ("noColorManagement", tl!("No Color Management")),
                 ],
                 240.0,
             );
-            if s(f, "colorHandling", "") == "photosuiteManages" {
+            if s(f, "colorHandling", "") == "photospliceManages" {
                 dropdown_str(
                     ui,
                     "print-profile",
@@ -1143,7 +1143,7 @@ fn print_body(app: &mut PhotosuiteApp, ui: &mut egui::Ui, f: &mut Map<String, Va
     });
 }
 
-fn print_confirm(app: &mut PhotosuiteApp, f: &Map<String, Value>) -> Result<Value, String> {
+fn print_confirm(app: &mut PhotospliceApp, f: &Map<String, Value>) -> Result<Value, String> {
     let r = app.run("file.print", params(f))?;
     app.ui.status = if r["sent"] == json!(true) {
         format!("Sent to the printer ({})", r["spooler"].as_str().unwrap_or(""))
@@ -1181,8 +1181,8 @@ mod tests {
         assert!(f.is_empty());
     }
 
-    fn app() -> (PhotosuiteApp, egui::Context) {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+    fn app() -> (PhotospliceApp, egui::Context) {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({"width": 120, "height": 80, "name": "web"})).unwrap();
         (app, egui::Context::default())
     }
@@ -1248,7 +1248,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_in_place_covers_what_photosuite_writes() {
+    fn writes_in_place_covers_what_photosplice_writes() {
         for p in ["a.psd", "a.PSB", "a.pcraft", "a.pdf", "a.png", "a.jpg", "a.jpeg", "a.tif", "a.tiff", "a.webp", "a.gif", "a.exr", "a.bmp"] {
             assert!(writes_in_place(p), "{p}");
         }

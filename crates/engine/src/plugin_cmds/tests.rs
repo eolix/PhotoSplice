@@ -1,9 +1,9 @@
 use super::*;
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 
 /// The example Invert plug-in, built from `examples/plugins/invert-rs`.
 const INVERT: &[u8] = include_bytes!("../../../plugins/tests/fixtures/invert.wasm");
-const INVERT_ID: &str = "org.photosuite.example.invert";
+const INVERT_ID: &str = "org.photosplice.example.invert";
 
 fn b64(b: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -72,7 +72,7 @@ fn pixels(s: &Session) -> Vec<f32> {
 
 fn select_partial(s: &mut Session) {
     s.edit("sel", |doc, _| {
-        let mut sel = Surface::new(photosuite_color::PixelFormat::GRAY8);
+        let mut sel = Surface::new(photosplice_color::PixelFormat::GRAY8);
         sel.fill_rect(Rect::new(4, 4, 30, 20), &[1.0]);
         sel.fill_rect(Rect::new(4, 4, 30, 9), &[0.4]);
         doc.selection = Some(sel);

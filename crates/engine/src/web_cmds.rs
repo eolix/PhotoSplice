@@ -12,10 +12,10 @@
 //! `?x100 thumb.gif` is exported into `<document>-assets/` whenever the document is saved while
 //! the feature is on; a `default` layer (`default 50% low/ + 200% @2x`) adds variants.
 
-use photosuite_algo::quantize::{self, Dither, Forced, PaletteKind};
-use photosuite_doc::slices::{self, ResolvedSlice, SliceKind};
-use photosuite_doc::{DocId, Document, LayerContent, LayerId};
-use photosuite_geom::Rect;
+use photosplice_algo::quantize::{self, Dither, Forced, PaletteKind};
+use photosplice_doc::slices::{self, ResolvedSlice, SliceKind};
+use photosplice_doc::{DocId, Document, LayerContent, LayerId};
+use photosplice_geom::Rect;
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
@@ -296,7 +296,7 @@ pub fn web_document(doc: &Document, p: &Value, st: &WebSettings) -> Result<(Docu
     let mut tmp = Session::new();
     tmp.add_document(doc.clone(), None);
     let mode = doc.mode;
-    if mode != photosuite_color::ColorMode::Rgb {
+    if mode != photosplice_color::ColorMode::Rgb {
         tmp.execute("image.mode.rgb", json!({}))?;
     }
     if st.convert_to_srgb && doc.icc_profile.is_some() {
@@ -381,7 +381,7 @@ pub fn optimize(px: &[[f32; 4]], bw: usize, rect: Rect, st: &WebSettings, icc: O
         [p[0] * p[3] + matte[0] * (1.0 - p[3]), p[1] * p[3] + matte[1] * (1.0 - p[3]), p[2] * p[3] + matte[2] * (1.0 - p[3]), 1.0]
     };
     let (ww, hh) = (w as u32, h as u32);
-    let e = |e: photosuite_codecs::CodecError| other(e);
+    let e = |e: photosplice_codecs::CodecError| other(e);
     let mut look: Vec<u8> = Vec::new();
     let (bytes, colors) = match st.format {
         WebFormat::Png24 => {
@@ -395,16 +395,16 @@ pub fn optimize(px: &[[f32; 4]], bw: usize, rect: Rect, st: &WebSettings, icc: O
             if preview {
                 look = if alpha { data.clone() } else { data.as_chunks::<3>().0.iter().flat_map(|c| [c[0], c[1], c[2], 255]).collect() };
             }
-            let layout = if alpha { photosuite_codecs::ChannelLayout::Rgba } else { photosuite_codecs::ChannelLayout::Rgb };
-            let meta = photosuite_codecs::Metadata { dpi: Some((dpi, dpi)), xmp: xmp.map(str::to_string), ..Default::default() };
-            let img = photosuite_codecs::Image::from_u8(ww, hh, layout, data).map_err(e)?.with_icc(icc.map(<[u8]>::to_vec)).with_meta(meta);
-            let opts = photosuite_codecs::EncodeOptions {
+            let layout = if alpha { photosplice_codecs::ChannelLayout::Rgba } else { photosplice_codecs::ChannelLayout::Rgb };
+            let meta = photosplice_codecs::Metadata { dpi: Some((dpi, dpi)), xmp: xmp.map(str::to_string), ..Default::default() };
+            let img = photosplice_codecs::Image::from_u8(ww, hh, layout, data).map_err(e)?.with_icc(icc.map(<[u8]>::to_vec)).with_meta(meta);
+            let opts = photosplice_codecs::EncodeOptions {
                 png_interlaced: st.interlaced,
                 embed_icc: icc.is_some(),
                 embed_metadata: xmp.is_some(),
                 ..Default::default()
             };
-            (photosuite_codecs::encode(&img, photosuite_codecs::Format::Png, &opts).map_err(e)?, None)
+            (photosplice_codecs::encode(&img, photosplice_codecs::Format::Png, &opts).map_err(e)?, None)
         }
         WebFormat::Webp | WebFormat::WebpLossless => {
             let alpha = st.transparency && region().any(|p| p[3] < 1.0);
@@ -413,21 +413,21 @@ pub fn optimize(px: &[[f32; 4]], bw: usize, rect: Rect, st: &WebSettings, icc: O
                 let q = if alpha { *p } else { over(p) };
                 data.extend_from_slice(&[to8(q[0]), to8(q[1]), to8(q[2]), to8(q[3])]);
             }
-            let layout = if alpha { photosuite_codecs::ChannelLayout::Rgba } else { photosuite_codecs::ChannelLayout::Rgb };
+            let layout = if alpha { photosplice_codecs::ChannelLayout::Rgba } else { photosplice_codecs::ChannelLayout::Rgb };
             let data = if alpha { data } else { data.as_chunks::<4>().0.iter().flat_map(|c| [c[0], c[1], c[2]]).collect() };
-            let meta = photosuite_codecs::Metadata { xmp: xmp.map(str::to_string), ..Default::default() };
-            let img = photosuite_codecs::Image::from_u8(ww, hh, layout, data).map_err(e)?.with_icc(icc.map(<[u8]>::to_vec)).with_meta(meta);
-            let opts = photosuite_codecs::EncodeOptions {
+            let meta = photosplice_codecs::Metadata { xmp: xmp.map(str::to_string), ..Default::default() };
+            let img = photosplice_codecs::Image::from_u8(ww, hh, layout, data).map_err(e)?.with_icc(icc.map(<[u8]>::to_vec)).with_meta(meta);
+            let opts = photosplice_codecs::EncodeOptions {
                 webp_lossless: st.format == WebFormat::WebpLossless,
                 webp_quality: st.quality,
                 embed_icc: icc.is_some() && st.embed_icc,
                 embed_metadata: xmp.is_some(),
                 ..Default::default()
             };
-            let bytes = photosuite_codecs::encode(&img, photosuite_codecs::Format::WebP, &opts).map_err(e)?;
+            let bytes = photosplice_codecs::encode(&img, photosplice_codecs::Format::WebP, &opts).map_err(e)?;
             if preview {
-                look = match photosuite_codecs::decode(&bytes) {
-                    Ok(img) => img.convert(photosuite_codecs::ChannelLayout::Rgba, photosuite_codecs::SampleType::U8).data().to_vec(),
+                look = match photosplice_codecs::decode(&bytes) {
+                    Ok(img) => img.convert(photosplice_codecs::ChannelLayout::Rgba, photosplice_codecs::SampleType::U8).data().to_vec(),
                     Err(_) => vec![0; w * h * 4],
                 };
             }
@@ -441,12 +441,12 @@ pub fn optimize(px: &[[f32; 4]], bw: usize, rect: Rect, st: &WebSettings, icc: O
             }
             // Save for Web's 0–100 quality → encoder 1–100.
             let q = st.quality.max(1);
-            let bytes = photosuite_codecs::web::encode_jpeg_rgb8(ww, hh, &rgb, q, st.progressive, st.optimized, icc.filter(|_| st.embed_icc), Some(dpi), xmp)
+            let bytes = photosplice_codecs::web::encode_jpeg_rgb8(ww, hh, &rgb, q, st.progressive, st.optimized, icc.filter(|_| st.embed_icc), Some(dpi), xmp)
                 .map_err(e)?;
             if preview {
                 // The preview shows the compression artefacts.
-                look = match photosuite_codecs::decode(&bytes) {
-                    Ok(img) => img.convert(photosuite_codecs::ChannelLayout::Rgba, photosuite_codecs::SampleType::U8).data().to_vec(),
+                look = match photosplice_codecs::decode(&bytes) {
+                    Ok(img) => img.convert(photosplice_codecs::ChannelLayout::Rgba, photosplice_codecs::SampleType::U8).data().to_vec(),
                     Err(_) => rgb.as_chunks::<3>().0.iter().flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
                 };
             }
@@ -469,7 +469,7 @@ pub fn optimize(px: &[[f32; 4]], bw: usize, rect: Rect, st: &WebSettings, icc: O
             if preview {
                 look = white.iter().flat_map(|b| if *b { [255, 255, 255, 255] } else { [0, 0, 0, 255] }).collect();
             }
-            (photosuite_codecs::web::encode_wbmp(ww, hh, &white).map_err(e)?, Some(2))
+            (photosplice_codecs::web::encode_wbmp(ww, hh, &white).map_err(e)?, Some(2))
         }
         WebFormat::Gif | WebFormat::Png8 => {
             let transparent = st.transparency && region().any(|p| p[3] < 0.5);
@@ -523,9 +523,9 @@ pub fn optimize(px: &[[f32; 4]], bw: usize, rect: Rect, st: &WebSettings, icc: O
             }
             let tt = t.map(|v| v as u8);
             let bytes = if st.format == WebFormat::Gif {
-                photosuite_codecs::web::encode_gif_indexed(ww, hh, &idx, &pal, tt, st.interlaced).map_err(e)?
+                photosplice_codecs::web::encode_gif_indexed(ww, hh, &idx, &pal, tt, st.interlaced).map_err(e)?
             } else {
-                photosuite_codecs::encode_png_indexed(ww, hh, &idx, &pal, tt).map_err(e)?
+                photosplice_codecs::encode_png_indexed(ww, hh, &idx, &pal, tt).map_err(e)?
             };
             (bytes, Some(pal.len()))
         }
@@ -747,7 +747,7 @@ fn save_for_web(s: &mut Session, p: &Value) -> Result<Value> {
     let d = s.active().ok_or(EngineError::NoDocument)?;
     let doc = d.doc.clone();
     let (wdoc, sx, sy) = web_document(&doc, p, &st)?;
-    let buf = photosuite_compose::flatten(&wdoc);
+    let buf = photosplice_compose::flatten(&wdoc);
     let bw = wdoc.size.width as usize;
     let icc = wdoc.icc_profile.as_deref().map(|v| v.as_slice());
     let xmp = web_xmp(&doc, st.metadata);
@@ -759,7 +759,7 @@ fn save_for_web(s: &mut Session, p: &Value) -> Result<Value> {
         .iter()
         .filter(|r| match (&numbers, pick) {
             (Some(n), _) => n.contains(&(r.number as u64)),
-            (None, "user") => r.origin != photosuite_doc::SliceOrigin::Auto,
+            (None, "user") => r.origin != photosplice_doc::SliceOrigin::Auto,
             _ => true,
         })
         .collect();
@@ -854,7 +854,7 @@ fn save_for_web(s: &mut Session, p: &Value) -> Result<Value> {
         let grid = cells.len() > 1;
         let spacer = grid.then(|| if images.is_empty() { "spacer.gif".to_string() } else { format!("{images}/spacer.gif") });
         if let Some(sp) = &spacer {
-            let gif = photosuite_codecs::web::encode_gif_indexed(1, 1, &[0], &[[0, 0, 0]], Some(0), false).map_err(other)?;
+            let gif = photosplice_codecs::web::encode_gif_indexed(1, 1, &[0], &[[0, 0, 0]], Some(0), false).map_err(other)?;
             write_file(&join(&dir, sp), &gif)?;
         }
         let page = html_table(&base, wdoc.size.width, wdoc.size.height, &cells, spacer.as_deref());
@@ -945,7 +945,7 @@ fn quick_export(s: &mut Session, p: &Value) -> Result<Value> {
     let q = Value::Object(o);
     let st = WebSettings::from_params(&q, cmd)?;
     let (wdoc, _, _) = web_document(&doc, &json!({}), &st)?;
-    let buf = photosuite_compose::flatten(&wdoc);
+    let buf = photosplice_compose::flatten(&wdoc);
     let xmp = web_xmp(&doc, st.metadata);
     let opt = optimize(
         &buf.px,
@@ -1164,7 +1164,7 @@ pub fn generate_assets(doc: &Document, dir: &str) -> (Vec<String>, Vec<Value>) {
                     crate::file_cmds::save_doc(&wdoc, &out, None)?;
                     return Ok(out);
                 }
-                let buf = photosuite_compose::flatten(&wdoc);
+                let buf = photosplice_compose::flatten(&wdoc);
                 let o = optimize(&buf.px, wdoc.size.width as usize, wdoc.bounds(), &st, None, None, wdoc.resolution_dpi, false)?;
                 write_file(&out, &o.bytes)?;
                 Ok(out)

@@ -5,12 +5,12 @@
 //! `colorSpace.ICCProfileData`, documented AppKit APIs read through `osascript` (AppKit via
 //! AppleScriptObjC) so the app needs no `unsafe` FFI. A read takes about 0.4 s on a background
 //! thread; the shell starts one at launch and again when the displays may have changed
-//! (`photosuite_ui_egui::monitor_status`), and each window then uses the profile of the display
+//! (`photosplice_ui_egui::monitor_status`), and each window then uses the profile of the display
 //! it is on. Other platforms report no displays (sRGB, or the profile chosen in Color Settings).
 
 use std::sync::mpsc::Receiver;
 
-use photosuite_engine::display_color::Display;
+use photosplice_engine::display_color::Display;
 
 /// What the platform reader returns: the displays, or why there are none.
 pub type Detection = Result<Vec<Display>, String>;
@@ -252,7 +252,7 @@ mod tests {
         if let Ok(displays) = detect() {
             for d in displays {
                 let Some(icc) = d.icc else { continue };
-                let p = photosuite_engine::color_cmds::profile_from_bytes(&icc).expect("parses");
+                let p = photosplice_engine::color_cmds::profile_from_bytes(&icc).expect("parses");
                 assert_eq!(format!("{:?}", p.color_space), "Rgb", "{}: {}", d.name, p.description);
             }
         }

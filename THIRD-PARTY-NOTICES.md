@@ -109,7 +109,7 @@ source is on record. Notice: `resources/luts/LICENSE`.
 profiles use. It is an adaptation (XML converted to JSON, non-English display names dropped) of
 the [Lensfun](https://github.com/lensfun/lensfun) database at commit `23e8cb8`, by the Lensfun
 contributors, and is distributed under the same licence, CC BY-SA 3.0. Only the data is used, not
-Lensfun's LGPL library, and PhotoSuite's code is a separate work. Licence:
+Lensfun's LGPL library, and PhotoSplice's code is a separate work. Licence:
 `resources/lensfun/LICENSE-CC-BY-SA-3.0.txt`; details in `resources/lensfun/README.md`.
 
 ## Apache-2.0 OR MIT — hayro's renderer, vendored
@@ -133,7 +133,7 @@ crate notices (see "Not yet resolved").
 
 ## CC0 — generated colour data
 
-`crates/cms/profiles/photosuite-coated-cmyk.icc` and the other built-in ICC profiles and generated
+`crates/cms/profiles/photosplice-coated-cmyk.icc` and the other built-in ICC profiles and generated
 looks are produced by code (`crates/cms/src/synth.rs`, `builtin.rs`, `lutfile.rs`) and dedicated to
 the public domain.
 
@@ -151,7 +151,7 @@ the public domain.
 | `assets/icons/eraser-{background,magic}.svg` | Lucide `eraser` with added marks | Lucide Contributors; PhotoCraft contributors | ISC |
 | `assets/dict/en_US-scowl-50.txt.gz` | English word list | Kevin Atkinson and the SCOWL contributors | SCOWL |
 | `assets/ico/**/*.svg`, most | Tabler Icons | Paweł Kuna | MIT |
-| `assets/ico/tools/mbrush.svg` | Mixer Brush glyph: the Brush glyph above with Tabler Icons' `droplet` | The PhotoSuite authors; Paweł Kuna | MIT OR Apache-2.0; MIT |
+| `assets/ico/tools/mbrush.svg` | Mixer Brush glyph: the Brush glyph above with Tabler Icons' `droplet` | The PhotoSplice authors; Paweł Kuna | MIT OR Apache-2.0; MIT |
 | `resources/luts/*.CUBE` (45) | Color Lookup presets | Fresh LUTs uploaders | CC0 |
 | `resources/lensfun/lens-database.json` | Lens profiles (adapted from the Lensfun database) | The Lensfun contributors | CC BY-SA 3.0 |
 | `resources/gradients/uigradients.grd` | Gradient library (the Gradients panel's uiGradients group) | uiGradients contributors | MIT |
@@ -159,7 +159,7 @@ the public domain.
 | `resources/patterns/extra_patterns.pat`, `resources/patterns/patterns.pat` | Pattern libraries | Subtle Patterns designers | CC BY-SA 3.0 |
 | `resources/brushes/{Markers,Paintbrush_Set}.abr` | Brush libraries | brushchick; lovelace | CC BY-ND |
 | `resources/brushes/Pencil_Scribbles.abr` | Brush library | stuffwemake | CC BY-SA |
-| `crates/cms/profiles/photosuite-coated-cmyk.icc` | Synthetic CMYK profile | PhotoCraft contributors | CC0 |
+| `crates/cms/profiles/photosplice-coated-cmyk.icc` | Synthetic CMYK profile | PhotoCraft contributors | CC0 |
 
 
 ## Test data — not shipped

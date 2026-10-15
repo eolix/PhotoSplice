@@ -9,19 +9,19 @@ use std::time::{Duration, Instant};
 use egui::vec2;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use photosuite_engine::jobs::{JobId, Started};
+use photosplice_engine::jobs::{JobId, Started};
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 
-fn app_harness() -> Harness<'static, PhotosuiteApp> {
+fn app_harness() -> Harness<'static, PhotospliceApp> {
     let mut h = Harness::builder().with_size(vec2(1280.0, 800.0)).with_max_steps(8).build_eframe(|cc| {
-        PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-        let mut s = photosuite_engine::Session::new();
+        PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", json!({"width": 320, "height": 240})).unwrap();
         s.execute("layer.new.layer", json!({})).unwrap();
         s.execute("edit.fill", json!({"color": "#3366cc"})).unwrap();
-        let mut app = PhotosuiteApp::new(s, crate::Services::default());
+        let mut app = PhotospliceApp::new(s, crate::Services::default());
         app.background_jobs = true;
         app
     });
@@ -30,7 +30,7 @@ fn app_harness() -> Harness<'static, PhotosuiteApp> {
 }
 
 /// A fake document job that runs until `gate` opens (or it is cancelled), reporting 40 %.
-fn slow_job(app: &mut PhotosuiteApp, gate: &Arc<AtomicBool>) -> JobId {
+fn slow_job(app: &mut PhotospliceApp, gate: &Arc<AtomicBool>) -> JobId {
     let gate = gate.clone();
     let r = app
         .session
@@ -60,7 +60,7 @@ fn slow_job(app: &mut PhotosuiteApp, gate: &Arc<AtomicBool>) -> JobId {
 }
 
 /// Step frames for `ms` of wall time; returns (frames, slowest frame in ms).
-fn frames_for(h: &mut Harness<'_, PhotosuiteApp>, ms: u64) -> (u64, f64) {
+fn frames_for(h: &mut Harness<'_, PhotospliceApp>, ms: u64) -> (u64, f64) {
     let t = Instant::now();
     let (mut n, mut worst) = (0, 0.0f64);
     while t.elapsed() < Duration::from_millis(ms) {
@@ -171,7 +171,7 @@ fn control_requests_wait_for_jobs_unless_asked_not_to() {
 }
 
 /// The control reply for `job`, once the app's frame loop has applied it.
-fn job_reply(h: &mut Harness<'static, PhotosuiteApp>, job: JobId) -> Value {
+fn job_reply(h: &mut Harness<'static, PhotospliceApp>, job: JobId) -> Value {
     let (tx, rx) = std::sync::mpsc::channel();
     h.state_mut().jobs.waiters.push((job, tx));
     let t = Instant::now();
@@ -190,13 +190,13 @@ fn job_reply(h: &mut Harness<'static, PhotosuiteApp>, job: JobId) -> Value {
 fn menu_and_dialog_requests_wait_for_jobs_unless_asked_not_to() {
     let mut h = app_harness();
     let ctx = h.ctx.clone();
-    let control = |h: &mut Harness<'static, PhotosuiteApp>, method: &str, params: Value| {
+    let control = |h: &mut Harness<'static, PhotospliceApp>, method: &str, params: Value| {
         let (req, _rx) = crate::ControlRequest::new(method, params);
         crate::control::handle(h.state_mut(), &ctx, &req)
     };
     // The job a request started: deferred while waiting, `{job, pending}` at once otherwise.
     // Lets it land and checks the filter's result.
-    let land = |h: &mut Harness<'static, PhotosuiteApp>, what: &str, outcome: crate::control::Outcome, wait: bool| {
+    let land = |h: &mut Harness<'static, PhotospliceApp>, what: &str, outcome: crate::control::Outcome, wait: bool| {
         let job = match (outcome, wait) {
             (crate::control::Outcome::AfterJob(job), true) => job,
             (crate::control::Outcome::Done(v), false) => {
@@ -208,7 +208,7 @@ fn menu_and_dialog_requests_wait_for_jobs_unless_asked_not_to() {
         let reply = job_reply(h, job);
         assert!(reply["result"]["filter"].is_object(), "{what}: {reply}");
     };
-    let steps = |h: &Harness<'static, PhotosuiteApp>| h.state().session.active().unwrap().history.past_len();
+    let steps = |h: &Harness<'static, PhotospliceApp>| h.state().session.active().unwrap().history.past_len();
     for wait in [true, false] {
         let before = steps(&h);
         let outcome = control(&mut h, "ui.menu.invoke", json!({"id": "filter.blur.blurMore", "wait": wait}));
@@ -223,18 +223,18 @@ fn menu_and_dialog_requests_wait_for_jobs_unless_asked_not_to() {
 }
 
 fn psd_bytes() -> Vec<u8> {
-    let mut s = photosuite_engine::Session::new();
+    let mut s = photosplice_engine::Session::new();
     s.execute("file.new", json!({"width": 64, "height": 48})).unwrap();
     s.execute("layer.new.layer", json!({})).unwrap();
     let doc = (*s.active().unwrap().doc).clone();
-    photosuite_io::export(&doc, "x.psd", &Default::default()).unwrap().bytes
+    photosplice_io::export(&doc, "x.psd", &Default::default()).unwrap().bytes
 }
 
 #[test]
 fn files_open_in_the_background_with_a_tab_and_cancel_closes_it() {
     let mut h = app_harness();
     let bytes = psd_bytes();
-    h.state_mut().open_file("/tmp/photosuite-test/bg.psd", &bytes).unwrap();
+    h.state_mut().open_file("/tmp/photosplice-test/bg.psd", &bytes).unwrap();
     // The tab is there before the document.
     assert_eq!(h.state().jobs.opens.len(), 1);
     assert_eq!(h.state().session.documents().len(), 1);
@@ -245,11 +245,11 @@ fn files_open_in_the_background_with_a_tab_and_cancel_closes_it() {
     h.run_steps(2);
     let st = h.state().session.active().unwrap();
     assert_eq!(st.doc.size.width, 64);
-    assert_eq!(st.path.as_deref(), Some("/tmp/photosuite-test/bg.psd"));
-    assert_eq!(h.state().ui.recent_files.first().map(String::as_str), Some("/tmp/photosuite-test/bg.psd"));
+    assert_eq!(st.path.as_deref(), Some("/tmp/photosplice-test/bg.psd"));
+    assert_eq!(h.state().ui.recent_files.first().map(String::as_str), Some("/tmp/photosplice-test/bg.psd"));
 
     // Cancel: the half-open tab closes, no document is added.
-    h.state_mut().open_file("/tmp/photosuite-test/bg2.psd", &bytes).unwrap();
+    h.state_mut().open_file("/tmp/photosplice-test/bg2.psd", &bytes).unwrap();
     let job = h.state().jobs.opens[0].job;
     crate::jobs_ui::cancel(h.state_mut(), job);
     h.run_steps(3);
@@ -261,7 +261,7 @@ fn files_open_in_the_background_with_a_tab_and_cancel_closes_it() {
 #[test]
 fn templates_open_untitled_in_the_background() {
     let mut h = app_harness();
-    h.state_mut().open_file("/tmp/photosuite-test/card.psdt", &psd_bytes()).unwrap();
+    h.state_mut().open_file("/tmp/photosplice-test/card.psdt", &psd_bytes()).unwrap();
     assert_eq!(h.state().jobs.opens[0].name, "Untitled-1");
     let t = Instant::now();
     while !h.state().jobs.opens.is_empty() && t.elapsed() < Duration::from_secs(30) {
@@ -270,14 +270,14 @@ fn templates_open_untitled_in_the_background() {
     h.run_steps(2);
     let st = h.state().session.active().unwrap();
     assert_eq!((st.doc.name.as_str(), st.path.as_deref()), ("Untitled-1", None));
-    assert_eq!(h.state().ui.recent_files.first().map(String::as_str), Some("/tmp/photosuite-test/card.psdt"));
+    assert_eq!(h.state().ui.recent_files.first().map(String::as_str), Some("/tmp/photosplice-test/card.psdt"));
 }
 
 /// A camera file opened in the background opens into Camera Raw, as an inline open does: the
 /// background path lands in `finish_open`, which must hand the document to Camera Raw too.
 #[test]
 fn camera_files_opened_in_the_background_open_into_camera_raw() {
-    let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
     app.run("file.new", json!({"width": 32, "height": 24, "name": "IMG_0001.CR3"})).unwrap();
     let id = app.session.active().unwrap().doc.id;
     super::finish_open(&mut app, "IMG_0001.CR3", Some("/shoot/IMG_0001.CR3"), &json!({"document": 0}), None).unwrap();

@@ -2,20 +2,20 @@
 //!
 //! Asserts doc-model equality where the PSD encoding is lossless, and that the re-imported
 //! document flattens to the same composite (within 1/255) in every case, so nothing a user made
-//! in PhotoSuite silently disappears or changes when Photoshop opens the file.
+//! in PhotoSplice silently disappears or changes when Photoshop opens the file.
 
 mod common;
 
 use std::sync::Arc;
 
 use common::*;
-use photosuite_color::{BlendMode, ColorMode, SampleType};
-use photosuite_doc::adjust::{CurvePoint, LevelsChannel};
-use photosuite_doc::adjust::{HueRange, ToneSpace};
-use photosuite_doc::*;
-use photosuite_geom::Rect;
-use photosuite_io::*;
-use photosuite_psd::PsdFile;
+use photosplice_color::{BlendMode, ColorMode, SampleType};
+use photosplice_doc::adjust::{CurvePoint, LevelsChannel};
+use photosplice_doc::adjust::{HueRange, ToneSpace};
+use photosplice_doc::*;
+use photosplice_geom::Rect;
+use photosplice_io::*;
+use photosplice_psd::PsdFile;
 
 const TOL: f32 = 1.0 / 255.0 + 1e-5;
 
@@ -27,7 +27,7 @@ fn export_import(doc: &Document) -> (Document, Vec<String>, PsdFile) {
 }
 
 fn assert_composite_eq(a: &Document, b: &Document, ctx: &str) {
-    let (x, y) = (photosuite_compose::flatten(a), photosuite_compose::flatten(b));
+    let (x, y) = (photosplice_compose::flatten(a), photosplice_compose::flatten(b));
     assert_eq!(x.rect, y.rect, "{ctx}: composite rect");
     let m = max_diff(&x.px, &y.px);
     assert!(m <= TOL, "{ctx}: composite differs by {m} (> 1/255)");
@@ -42,7 +42,7 @@ fn q16(v: u16) -> f32 {
 fn adjustments() -> Vec<(Adjustment, bool)> {
     let pts = |v: &[(u8, u8)]| v.iter().map(|&(i, o)| CurvePoint { input: g(i), output: g(o) }).collect::<Vec<_>>();
     let lc = |a: u8, b: u8, gamma: f32| LevelsChannel { in_black: g(a), in_white: g(b), gamma, out_black: g(5), out_white: g(250) };
-    let lut = photosuite_cms::lutfile::LutFile::from_fn("t", 5, |c| [c[1], c[2] * 0.5, 1.0 - c[0]]);
+    let lut = photosplice_cms::lutfile::LutFile::from_fn("t", 5, |c| [c[1], c[2] * 0.5, 1.0 - c[0]]);
     let all = vec![
         (Adjustment::BrightnessContrast { brightness: 30.0, contrast: -20.0, legacy: false }, true),
         (Adjustment::BrightnessContrast { brightness: -40.0, contrast: 50.0, legacy: true }, true),
@@ -131,7 +131,7 @@ fn adjustments() -> Vec<(Adjustment, bool)> {
 /// A colourful base, a clipping base, and `adj` three times: plain; at half opacity with a mask
 /// and a blend mode; clipped to a pixel layer.
 fn adjustment_doc(adj: &Adjustment, depth: SampleType) -> Document {
-    let mut d = Document::new("adj", photosuite_geom::Size::new(32, 20), ColorMode::Rgb, depth);
+    let mut d = Document::new("adj", photosplice_geom::Size::new(32, 20), ColorMode::Rgb, depth);
     let fmt = d.pixel_format();
     d.layers.push(raster("Background", fmt, d.bounds(), 1, false));
     let mut plain = Layer::new("plain", LayerContent::Adjustment(adj.clone()));
@@ -156,7 +156,7 @@ fn check_adjustment(adj: &Adjustment, lossless: bool, depth: SampleType) {
     let (back, warnings, file) = export_import(&d);
     assert!(!warnings.iter().any(|w| w.contains("adjustment")), "{ctx}: export warned {warnings:?}");
     // The adjustment layers carry an adjustment block, never an empty pixel layer.
-    let with_adj = file.layers().iter().filter(|l| l.blocks.iter().any(|b| photosuite_io::ADJUSTMENT_KEYS.contains(&&b.key))).count();
+    let with_adj = file.layers().iter().filter(|l| l.blocks.iter().any(|b| photosplice_io::ADJUSTMENT_KEYS.contains(&&b.key))).count();
     assert_eq!(with_adj, 3, "{ctx}: adjustment blocks written");
     assert_eq!(back.layers.len(), d.layers.len(), "{ctx}: layer count");
     for (x, y) in d.layers.iter().zip(&back.layers) {
@@ -204,7 +204,7 @@ fn every_adjustment_kind_round_trips_16bit() {
 /// One document per blend mode: the mode on a pixel layer (with fill opacity and a mask), on a
 /// clipped layer, on a group, inside a pass-through group, and on an adjustment layer.
 fn blend_doc(mode: BlendMode) -> Document {
-    let mut d = Document::new("blend", photosuite_geom::Size::new(24, 16), ColorMode::Rgb, SampleType::U8);
+    let mut d = Document::new("blend", photosplice_geom::Size::new(24, 16), ColorMode::Rgb, SampleType::U8);
     let fmt = d.pixel_format();
     d.layers.push(raster("Background", fmt, d.bounds(), 1, false));
     let mut l = raster("layer", fmt, Rect::new(2, 1, 20, 12), 2, true);
@@ -247,7 +247,7 @@ fn every_blend_mode_round_trips() {
             let (back, _, file) = export_import(&d);
             // As Photoshop writes it: `pass` in the section divider, `norm` in the record.
             let group = file.layers().iter().find(|l| l.block(b"lsct").is_some_and(|b| b.data.get(8..12) == Some(b"pass"))).expect("pass key written");
-            assert_eq!(group.blend_mode, photosuite_psd::BlendMode::Normal);
+            assert_eq!(group.blend_mode, photosplice_psd::BlendMode::Normal);
             assert_docs_eq(&d, &back);
             assert_composite_eq(&d, &back, "pass-through");
             continue;

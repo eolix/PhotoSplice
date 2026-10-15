@@ -1,5 +1,5 @@
 use super::*;
-use photosuite_doc::vector::Subpath;
+use photosplice_doc::vector::Subpath;
 
 fn session(depth: u32) -> Session {
     let mut s = Session::new();

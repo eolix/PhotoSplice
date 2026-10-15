@@ -73,7 +73,7 @@ mod tests {
     use super::*;
 
     fn temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("photosuite-read-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("photosplice-read-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("f.bin");
         std::fs::write(&p, bytes).unwrap();
@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn empty_and_missing_files() {
         assert!(read_file(&temp("empty", b"")).unwrap().is_empty());
-        let missing = std::env::temp_dir().join("photosuite-read-does-not-exist.psb");
+        let missing = std::env::temp_dir().join("photosplice-read-does-not-exist.psb");
         assert_eq!(read_file(&missing).unwrap_err().kind(), io::ErrorKind::NotFound);
     }
 

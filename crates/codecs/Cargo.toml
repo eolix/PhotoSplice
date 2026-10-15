@@ -1,5 +1,5 @@
 [package]
-name = "photosuite-codecs"
+name = "photosplice-codecs"
 description = "Symmetric, depth- and metadata-preserving codecs for flat raster image formats"
 version.workspace = true
 edition.workspace = true

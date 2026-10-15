@@ -7,13 +7,13 @@
 //! command, so it is journaled, drivable, and persisted by the preset store.
 
 use egui::{Color32, RichText, Sense, Stroke, pos2, vec2};
-use photosuite_engine::paint::{BrushPreset, MAX_BRUSH_SIZE};
+use photosplice_engine::paint::{BrushPreset, MAX_BRUSH_SIZE};
 use serde_json::json;
 
 use crate::brush_panel::{BrushesView, Renaming, UNGROUPED, WIDTH, commit_gesture, full_uv, grouped_presets, is_current, new_preset_name, run_or_status};
 use crate::brush_preview;
 use crate::theme::{self, Tokens};
-use crate::{PhotosuiteApp, icons, widgets};
+use crate::{PhotospliceApp, icons, widgets};
 
 /// What a drag in the Brushes tab carries.
 #[derive(Clone, Debug, PartialEq)]
@@ -56,7 +56,7 @@ pub fn drop_target(presets: &[BrushPreset], dragged: &str, target: &str, after: 
 }
 
 /// Turn the tab's actions into commands.
-pub fn apply(app: &mut PhotosuiteApp, acts: Vec<Action>) {
+pub fn apply(app: &mut PhotospliceApp, acts: Vec<Action>) {
     for a in acts {
         match a {
             Action::Select(name) => run_or_status(app, "tools.setBrush", json!({ "preset": name })),
@@ -244,7 +244,7 @@ fn group_header(ui: &mut egui::Ui, label: &str, key: &str, open: bool, count: us
 
 /// The rename bar shown while a preset or group is being renamed. Enter or OK renames, Escape or
 /// Cancel stops.
-fn rename_bar(app: &mut PhotosuiteApp, ui: &mut egui::Ui, acts: &mut Vec<Action>) {
+fn rename_bar(app: &mut PhotospliceApp, ui: &mut egui::Ui, acts: &mut Vec<Action>) {
     let Some(r) = app.ui.brushes_panel.renaming.as_mut() else { return };
     let t = Tokens::get(ui.ctx());
     if r.text.is_empty() {
@@ -279,7 +279,7 @@ fn rename_bar(app: &mut PhotosuiteApp, ui: &mut egui::Ui, acts: &mut Vec<Action>
 }
 
 /// The Brushes tab.
-pub fn show(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
+pub fn show(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     // Size of the current brush (Photoshop's Brushes panel slider).
     let before = app.session.tools.brush.clone();

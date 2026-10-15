@@ -2,7 +2,7 @@
 //! Spherize, Wave, Ripple, Polar Coordinates. All are centred on the
 //! reference bounds.
 
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 
 use crate::image::{Edge, Image};
 use crate::noise::hash01;

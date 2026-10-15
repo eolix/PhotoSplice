@@ -13,8 +13,8 @@
 
 use std::io::Write as _;
 
-use photosuite_color::ColorMode;
-use photosuite_doc::{Document, LayerContent, SmartSource};
+use photosplice_color::ColorMode;
+use photosplice_doc::{Document, LayerContent, SmartSource};
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
@@ -214,8 +214,8 @@ fn print_image(doc: &Document, p: &Value, cmd: &str) -> Result<(PrintImage, Valu
         t.execute("image.mode.rgb", json!({}))?;
     }
     match handling {
-        "photosuiteManages" | "photoshopManages" => {
-            let profile = p.get("printerProfile").and_then(Value::as_str).ok_or_else(|| bad(cmd, "\"photosuiteManages\" needs a \"printerProfile\""))?;
+        "photospliceManages" | "photoshopManages" => {
+            let profile = p.get("printerProfile").and_then(Value::as_str).ok_or_else(|| bad(cmd, "\"photospliceManages\" needs a \"printerProfile\""))?;
             let intent = p.get("intent").and_then(Value::as_str).unwrap_or("relative");
             let bpc = p.get("bpc").and_then(Value::as_bool).unwrap_or(true);
             t.execute("edit.convertToProfile", json!({"profile": profile, "intent": intent, "bpc": bpc}))?;
@@ -224,15 +224,15 @@ fn print_image(doc: &Document, p: &Value, cmd: &str) -> Result<(PrintImage, Valu
             info["bpc"] = json!(bpc);
         }
         "printerManages" | "noColorManagement" => {}
-        "separations" => return Err(bad(cmd, "Separations printing is not supported; use photosuiteManages with a CMYK printer profile")),
-        h => return Err(bad(cmd, format!("unknown colorHandling `{h}` (printerManages|photosuiteManages|noColorManagement)"))),
+        "separations" => return Err(bad(cmd, "Separations printing is not supported; use photospliceManages with a CMYK printer profile")),
+        h => return Err(bad(cmd, format!("unknown colorHandling `{h}` (printerManages|photospliceManages|noColorManagement)"))),
     }
     let d = &t.active().ok_or(EngineError::NoDocument)?.doc;
     let icc = if handling == "noColorManagement" { None } else { d.icc_profile.as_ref().map(|v| v.to_vec()) };
     // RGB and Grayscale: the composite over white is the print image (no layer flatten).
     if matches!(d.mode, ColorMode::Rgb | ColorMode::Grayscale) {
         let gray = d.mode == ColorMode::Grayscale;
-        let buf = photosuite_compose::flatten(d).over_background([1.0, 1.0, 1.0]);
+        let buf = photosplice_compose::flatten(d).over_background([1.0, 1.0, 1.0]);
         let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
         let data: Vec<u8> =
             if gray { buf.px.iter().map(|p| to8(p[0])).collect() } else { buf.px.iter().flat_map(|p| [to8(p[0]), to8(p[1]), to8(p[2])]).collect() };
@@ -415,7 +415,7 @@ fn package(s: &mut Session, p: &Value) -> Result<Value> {
     let links_dir = join(&folder, "Links");
     // Copy every linked file once; relink the copy of the document to the copies.
     let mut copied: Vec<(String, String)> = Vec::new();
-    let mut relinks: Vec<(photosuite_doc::LayerId, String)> = Vec::new();
+    let mut relinks: Vec<(photosplice_doc::LayerId, String)> = Vec::new();
     let mut missing = Vec::new();
     for (_, _, l) in doc.walk() {
         let LayerContent::Smart(so) = &l.content else { continue };
@@ -462,7 +462,7 @@ pub fn paths_to_ai(doc: &Document, which: &str) -> Result<(String, usize)> {
     let dpi = f64::from(doc.resolution_dpi.max(1.0));
     let k = 72.0 / dpi;
     let (w, h) = (f64::from(doc.size.width) * k, f64::from(doc.size.height) * k);
-    let mut chosen: Vec<(String, &photosuite_doc::Path)> = Vec::new();
+    let mut chosen: Vec<(String, &photosplice_doc::Path)> = Vec::new();
     match which {
         "all" => {
             chosen.extend(doc.paths.iter().map(|p| (p.name.clone(), &p.path)));
@@ -474,7 +474,7 @@ pub fn paths_to_ai(doc: &Document, which: &str) -> Result<(String, usize)> {
         name => chosen.extend(doc.paths.iter().filter(|p| p.name == name).map(|p| (p.name.clone(), &p.path))),
     }
     let mut s = String::new();
-    s.push_str("%!PS-Adobe-2.0 EPSF-1.2\n%%Creator: PhotoSuite\n");
+    s.push_str("%!PS-Adobe-2.0 EPSF-1.2\n%%Creator: PhotoSplice\n");
     s.push_str(&format!("%%Title: ({})\n", doc.name.replace([')', '('], "_")));
     s.push_str(&format!(
         "%%BoundingBox: 0 0 {} {}\n%%HiResBoundingBox: 0 0 {w:.4} {h:.4}\n%AI3_Cropmarks: 0 0 {w:.4} {h:.4}\n",
@@ -549,7 +549,7 @@ pub fn specs() -> Vec<CommandSpec> {
             CommandSpec { id: $id, label: $label, menu: $menu, shortcut: $sc, params: $params, enabled: $enabled, journal: true, run: $run }
         };
     }
-    const PRINT_PARAMS: &str = r##"{"printer":name? (default printer),"copies":1..999=1,"paper":"letter|legal|tabloid|a3|a4|a5|4x6|5x7"|[w,h] pt="letter","orientation":"portrait|landscape"="portrait","center":bool=true,"top":in?,"left":in?,"scale":%=100,"scaleToFit":bool=false,"colorHandling":"printerManages|photosuiteManages|noColorManagement"="printerManages","printerProfile":profile? (photosuiteManages),"intent":"perceptual|relative|saturation|absolute"="relative","bpc":bool=true,"cornerCropMarks":bool,"centerCropMarks":bool,"registrationMarks":bool,"description":bool,"labels":bool,"output":pdf path? (print to PDF; then "send" defaults to false),"send":bool?,"dryRun":bool=false (render the PDF, report the lp command, don't spool)} → {pdf, imageRect, command, sent}"##;
+    const PRINT_PARAMS: &str = r##"{"printer":name? (default printer),"copies":1..999=1,"paper":"letter|legal|tabloid|a3|a4|a5|4x6|5x7"|[w,h] pt="letter","orientation":"portrait|landscape"="portrait","center":bool=true,"top":in?,"left":in?,"scale":%=100,"scaleToFit":bool=false,"colorHandling":"printerManages|photospliceManages|noColorManagement"="printerManages","printerProfile":profile? (photospliceManages),"intent":"perceptual|relative|saturation|absolute"="relative","bpc":bool=true,"cornerCropMarks":bool,"centerCropMarks":bool,"registrationMarks":bool,"description":bool,"labels":bool,"output":pdf path? (print to PDF; then "send" defaults to false),"send":bool?,"dryRun":bool=false (render the PDF, report the lp command, don't spool)} → {pdf, imageRect, command, sent}"##;
     vec![
         spec!("file.print", "Print…", &["File"], Some("Cmd+P"), PRINT_PARAMS, native_doc, print),
         spec!(

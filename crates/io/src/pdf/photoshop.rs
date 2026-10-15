@@ -7,7 +7,7 @@
 //!
 //! * `StandardImageFileData`: a stream of the tagged blocks a layered TIFF keeps in its 37724
 //!   tag, without that tag's header string (`Layr` / `Lr16` / `Lr32` with the layers, `LMsk`,
-//!   then the global blocks: patterns, linked files, …), see [`photosuite_psd::tiff`];
+//!   then the global blocks: patterns, linked files, …), see [`photosplice_psd::tiff`];
 //!   `StandardImageFileLength` is its decoded length;
 //! * `ImageResources`: a stream of the PSD image resources, as in the TIFF 34377 tag;
 //! * `CompositeImage`: the merged image as an image XObject, its colour space carrying the ICC
@@ -18,7 +18,7 @@
 //! The page's own content is only what other PDF readers show; reopening uses this data, which is
 //! rebuilt into a PSD model and opened by the PSD importer, so a Photoshop PDF opens with
 //! everything a PSD does. Saving runs the PSD exporter and stores its parts the same way, so
-//! Photoshop reopens PhotoSuite's PDFs with their layers too. krilla writes the page; the editing
+//! Photoshop reopens PhotoSplice's PDFs with their layers too. krilla writes the page; the editing
 //! data is added to it as an incremental update (ISO 32000 §7.5.6), as Acrobat saves edits.
 
 use std::io::Write as _;
@@ -27,10 +27,10 @@ use std::sync::Arc;
 use hayro::hayro_syntax::Pdf;
 use hayro::hayro_syntax::object::{Array, Dict, Name, Object, Stream};
 use hayro::hayro_syntax::page::Page;
-use photosuite_doc::Document;
-use photosuite_psd::resources::ids;
-use photosuite_psd::tiff::{ByteOrder, ImageSourceData, SIGNATURE, SIGNATURE_PSB, resources_from_bytes, resources_to_bytes};
-use photosuite_psd::{ColorMode as PsdMode, Compression, Header, ImageData, ImageResource};
+use photosplice_doc::Document;
+use photosplice_psd::resources::ids;
+use photosplice_psd::tiff::{ByteOrder, ImageSourceData, SIGNATURE, SIGNATURE_PSB, resources_from_bytes, resources_to_bytes};
+use photosplice_psd::{ColorMode as PsdMode, Compression, Header, ImageData, ImageResource};
 
 use crate::psd_export::{PsdExportOptions, document_to_psd_with};
 use crate::{ImportResult, IoError};

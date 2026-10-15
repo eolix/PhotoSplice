@@ -2,8 +2,8 @@
 //! transparency channel), whatever its name in the language of the Reference that saved the
 //! file. Ported from storytold/photocraft@b564f2ca.
 
-use photosuite_io::psd_to_document;
-use photosuite_psd::{ColorMode, Compression, PsdFile, TaggedBlock, Version, testgen};
+use photosplice_io::psd_to_document;
+use photosplice_psd::{ColorMode, Compression, PsdFile, TaggedBlock, Version, testgen};
 
 /// `testgen::layered` with its bottom layer turned into a Background named `name`.
 fn file(name: &str, transparency_channel: bool) -> PsdFile {

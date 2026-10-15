@@ -14,20 +14,20 @@
 //! ```
 //!
 //! The list is in application order (first = bottom, applied first), like
-//! [`SmartObject::smart_filters`](photosuite_doc::SmartObject). Filters PhotoSuite implements map
+//! [`SmartObject::smart_filters`](photosplice_doc::SmartObject). Filters PhotoSplice implements map
 //! to their command id and dialog parameters; any other filter becomes a
 //! [`UNSUPPORTED_FILTER`] entry that keeps its descriptor verbatim (hex in `params.psd`), so it is
 //! listed, can be hidden, reordered or deleted, and is written back unchanged.
 
-use photosuite_color::{BlendMode, ColorMode, PixelFormat, SampleType};
-use photosuite_doc::{LayerMask, SmartFilter};
-use photosuite_geom::warp::{Warp, WarpStyle};
-use photosuite_geom::{Affine, Rect as GeomRect};
-use photosuite_psd::Compression;
-use photosuite_psd::Rect as PsdRect;
-use photosuite_psd::descriptor::{Class, Descriptor, Id, ObjectArray, ReferenceItem, UnicodeString, Value, VersionedDescriptor};
-use photosuite_psd::filter_effects::{EffectsPlane, FilterEffectsItem};
-use photosuite_raster::Surface;
+use photosplice_color::{BlendMode, ColorMode, PixelFormat, SampleType};
+use photosplice_doc::{LayerMask, SmartFilter};
+use photosplice_geom::warp::{Warp, WarpStyle};
+use photosplice_geom::{Affine, Rect as GeomRect};
+use photosplice_psd::Compression;
+use photosplice_psd::Rect as PsdRect;
+use photosplice_psd::descriptor::{Class, Descriptor, Id, ObjectArray, ReferenceItem, UnicodeString, Value, VersionedDescriptor};
+use photosplice_psd::filter_effects::{EffectsPlane, FilterEffectsItem};
+use photosplice_raster::Surface;
 use serde_json::{Map, Value as J, json};
 
 use crate::blocks::{enum_of, get_desc, num};
@@ -37,7 +37,7 @@ mod camera_raw;
 #[path = "gallery_map.rs"]
 mod gallery;
 
-/// Command id of a Photoshop smart filter PhotoSuite does not implement. Its params hold the
+/// Command id of a Photoshop smart filter PhotoSplice does not implement. Its params hold the
 /// filter's name, Photoshop filter id and descriptor (`psd`, hex); it renders as a pass-through.
 pub const UNSUPPORTED_FILTER: &str = "psd.unsupportedFilter";
 
@@ -126,7 +126,7 @@ pub fn filter_stack(fx: &Descriptor) -> FilterStack {
 
 // ---------- the filters we model ----------
 
-/// Photoshop filter → PhotoSuite command, keyed by the `Fltr` class (and `filterID`).
+/// Photoshop filter → PhotoSplice command, keyed by the `Fltr` class (and `filterID`).
 struct Known {
     class: &'static str,
     filter_id: i32,
@@ -524,7 +524,7 @@ fn quad_points(s: &PlacedSpec<'_>) -> [f64; 8] {
     let (w, h) = s.size;
     let [a, b, c, d, e, f] = s.transform.m;
     let map = |x: f64, y: f64| match &s.perspective {
-        Some(p) => photosuite_algo::transform::Homography(*p).apply(x, y),
+        Some(p) => photosplice_algo::transform::Homography(*p).apply(x, y),
         None => (a * x + c * y + e, b * x + d * y + f),
     };
     // The frame Reference maps onto the quad: the custom warp's control-point box for an affine
@@ -838,7 +838,7 @@ pub fn feid_item(placed: &str, unfiltered: &Surface, mask: Option<&LayerMask>, b
     // Fully transparent pixels carry white, as in Photoshop's own cache: filters that look at
     // colour regardless of alpha (Shadows/Highlights) read it.
     let mut vals = px.read_region(r);
-    let white = photosuite_raster::from_rgba(&doc_fmt, [1.0, 1.0, 1.0, 1.0]);
+    let white = photosplice_raster::from_rgba(&doc_fmt, [1.0, 1.0, 1.0, 1.0]);
     for p in vals.chunks_exact_mut(cc + 1) {
         if p[cc] <= 0.0 {
             p[..cc].copy_from_slice(&white[..cc]);
@@ -914,7 +914,7 @@ mod tests {
     /// transform and the quad Reference expects (storytold/photocraft@5ed75876).
     #[test]
     fn warp_control_box_quad_round_trips() {
-        use photosuite_geom::warp::{BezierMesh, WarpStyle};
+        use photosplice_geom::warp::{BezierMesh, WarpStyle};
         let mut mesh = BezierMesh::identity([0.0, 0.0, 50.0, 25.0], 1, 1);
         mesh.points[0] = [-10.0, -5.0];
         mesh.points[15] = [60.0, 25.0];
@@ -1031,9 +1031,9 @@ mod tests {
             assert!((a - b).abs() < 1e-9);
         }
         assert_eq!(p.stack, Some(stack));
-        let tb = photosuite_psd::TaggedBlock::new(*b"SoLd", sold.clone());
+        let tb = photosplice_psd::TaggedBlock::new(*b"SoLd", sold.clone());
         tb.check_structure().unwrap();
-        let pl = photosuite_psd::TaggedBlock::new(*b"PlLd", plld_bytes(&spec, &sold, &mut w));
+        let pl = photosplice_psd::TaggedBlock::new(*b"PlLd", plld_bytes(&spec, &sold, &mut w));
         pl.check_structure().unwrap();
         // A template keeps its other keys; an unmoved transform keeps its exact quad.
         let mut tmpl = sold_descriptor(&sold).unwrap();
@@ -1049,7 +1049,7 @@ mod tests {
     /// and comes back as the same projective map; an affine one reads back as no perspective.
     #[test]
     fn perspective_placement_round_trips_through_sold() {
-        let h = photosuite_algo::transform::Homography::rect_to_quad([0.0, 0.0, 64.0, 32.0], [[10.0, 5.0], [80.0, 8.0], [70.0, 50.0], [12.0, 40.0]]).unwrap();
+        let h = photosplice_algo::transform::Homography::rect_to_quad([0.0, 0.0, 64.0, 32.0], [[10.0, 5.0], [80.0, 8.0], [70.0, 50.0], [12.0, 40.0]]).unwrap();
         let mut w = Vec::new();
         let mut spec = PlacedSpec {
             idnt: "id",
@@ -1088,7 +1088,7 @@ mod tests {
         assert!(quad_moved(&template, &spec), "moved half a pixel");
         spec.transform = t;
         spec.perspective =
-            photosuite_algo::transform::Homography::rect_to_quad([0.0, 0.0, 20.0, 10.0], [[3.0, 4.0], [23.0, 4.0], [20.0, 12.0], [3.0, 14.0]]).map(|h| h.0);
+            photosplice_algo::transform::Homography::rect_to_quad([0.0, 0.0, 20.0, 10.0], [[3.0, 4.0], [23.0, 4.0], [20.0, 12.0], [3.0, 14.0]]).map(|h| h.0);
         assert!(quad_moved(&template, &spec), "one corner moved (Distort)");
         assert!(quad_moved(&Descriptor::new("null"), &spec), "no stored quad");
     }
@@ -1144,7 +1144,7 @@ mod tests {
     /// (Photoshop then showed no warp).
     #[test]
     fn plld_warp_follows_the_sold_warp() {
-        use photosuite_geom::warp::BezierMesh;
+        use photosplice_geom::warp::BezierMesh;
         let bounds = [0.0, 0.0, 64.0, 64.0];
         let mut identity = Warp::preset(WarpStyle::Custom, 0.0, bounds);
         identity.mesh = Some(BezierMesh::identity(bounds, 1, 1));
@@ -1176,7 +1176,7 @@ mod tests {
 
     #[test]
     fn warps_are_written_and_read_back() {
-        use photosuite_geom::warp::BezierMesh;
+        use photosplice_geom::warp::BezierMesh;
         let bounds = [0.0, 0.0, 60.0, 30.0];
         let mut custom = BezierMesh::identity(bounds, 1, 1);
         custom.points[15] = [67.0, 30.0];

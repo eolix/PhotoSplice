@@ -9,10 +9,10 @@
 
 #![allow(dead_code)]
 
-use photosuite_color::{BlendMode, Color, ColorMode, SampleType};
-use photosuite_doc::{Document, Effect, FxCommon, FxPaint, Gradient, Layer, LayerContent, LayerId, LayerMask, PixelFormat, StrokeFx, StrokePosition};
-use photosuite_engine::Session;
-use photosuite_geom::{Rect, Size};
+use photosplice_color::{BlendMode, Color, ColorMode, SampleType};
+use photosplice_doc::{Document, Effect, FxCommon, FxPaint, Gradient, Layer, LayerContent, LayerId, LayerMask, PixelFormat, StrokeFx, StrokePosition};
+use photosplice_engine::Session;
+use photosplice_geom::{Rect, Size};
 use serde_json::{Value, json};
 
 /// Size and content knobs.
@@ -285,7 +285,7 @@ pub fn build(spec: Spec) -> (Document, Handles) {
         bg.effects.items = vec![drop_shadow(px(8.0) as f32, px(18.0) as f32)];
         let mut img = t(c[1]);
         // Image masked to the card's top (layer mask).
-        let b = photosuite_compose::layer_bounds(&img, Rect::new(0, 0, w, h));
+        let b = photosplice_compose::layer_bounds(&img, Rect::new(0, 0, w, h));
         let mut m = LayerMask::reveal_all();
         m.surface.fill_rect(Rect::new(b.x0, b.y1 - (b.height() as i32 / 6), b.x1, b.y1), &[0.0]);
         img.mask = Some(m);
@@ -316,7 +316,7 @@ pub fn build(spec: Spec) -> (Document, Handles) {
 
     let mut tile_layers = Vec::new();
     for (i, mut l) in tiles.into_iter().enumerate() {
-        let b = photosuite_compose::layer_bounds(&l, Rect::new(0, 0, w, h));
+        let b = photosplice_compose::layer_bounds(&l, Rect::new(0, 0, w, h));
         let mut m = LayerMask::reveal_all();
         m.surface.fill_rect(Rect::new(b.x0, b.y0, b.x0 + b.width() as i32 / 8, b.y1), &[0.0]);
         l.mask = Some(m);

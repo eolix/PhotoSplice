@@ -1,5 +1,5 @@
 /*
- * PhotoSuite — download manager
+ * PhotoSplice — download manager
  *
  * Reads the latest GitHub release, wires the real asset URLs into the
  * download cards, highlights the visitor's platform and keeps a short-lived
@@ -9,11 +9,11 @@
  * static link to /releases/latest, which this script only upgrades.
  */
 
-const GITHUB_REPO = 'eolix/photosuite';
+const GITHUB_REPO = 'eolix/photosplice';
 const GITHUB_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
 const RELEASES_URL = `https://github.com/${GITHUB_REPO}/releases`;
 
-const CACHE_KEY = 'photosuite:latest-release';
+const CACHE_KEY = 'photosplice:latest-release';
 const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 
 /**
@@ -25,26 +25,26 @@ const PLATFORMS = [
     {
         id: 'macos',
         label: 'macOS',
-        match: /^photosuite-([0-9][0-9.]*)-macos-universal\.dmg$/i,
-        filename: (version) => `photosuite-${version}-macos-universal.dmg`,
+        match: /^photosplice-([0-9][0-9.]*)-macos-universal\.dmg$/i,
+        filename: (version) => `photosplice-${version}-macos-universal.dmg`,
     },
     {
         id: 'windows',
         label: 'Windows',
-        match: /^photosuite-([0-9][0-9.]*)-windows-x64\.msi$/i,
-        filename: (version) => `photosuite-${version}-windows-x64.msi`,
+        match: /^photosplice-([0-9][0-9.]*)-windows-x64\.msi$/i,
+        filename: (version) => `photosplice-${version}-windows-x64.msi`,
     },
     {
         id: 'debian',
         label: 'Linux',
-        match: /^photosuite-([0-9][0-9.]*)-linux-x86_64\.deb$/i,
-        filename: (version) => `photosuite-${version}-linux-x86_64.deb`,
+        match: /^photosplice-([0-9][0-9.]*)-linux-x86_64\.deb$/i,
+        filename: (version) => `photosplice-${version}-linux-x86_64.deb`,
     },
     {
         id: 'fedora',
         label: 'Linux',
-        match: /^photosuite-([0-9][0-9.]*)-linux-x86_64\.rpm$/i,
-        filename: (version) => `photosuite-${version}-linux-x86_64.rpm`,
+        match: /^photosplice-([0-9][0-9.]*)-linux-x86_64\.rpm$/i,
+        filename: (version) => `photosplice-${version}-linux-x86_64.rpm`,
     },
 ];
 
@@ -187,7 +187,7 @@ function renderCards(release, detected) {
         if (link) {
             link.href = asset.url;
             link.setAttribute('download', '');
-            link.setAttribute('aria-label', `Download PhotoSuite ${release.version} for ${card.querySelector('h3').textContent.trim()}`);
+            link.setAttribute('aria-label', `Download PhotoSplice ${release.version} for ${card.querySelector('h3').textContent.trim()}`);
         }
 
         if (meta) {
@@ -220,7 +220,7 @@ function renderPrimaryButtons(release, detected) {
             }
         } else {
             button.href = `${RELEASES_URL}/latest`;
-            if (label) label.textContent = 'Download PhotoSuite';
+            if (label) label.textContent = 'Download PhotoSplice';
             if (meta) meta.textContent = `Version ${release.version}`;
         }
     });
@@ -266,7 +266,7 @@ async function initDownloads() {
         renderVersionBadge(release);
         renderFoot(release);
     } catch (error) {
-        console.error('PhotoSuite: could not load the latest release —', error);
+        console.error('PhotoSplice: could not load the latest release —', error);
         renderError();
     }
 }
@@ -336,7 +336,7 @@ function initLightbox() {
         const title = trigger.dataset.caption || '';
 
         image.src = trigger.dataset.lightbox;
-        image.alt = title ? `${title} — PhotoSuite screenshot` : 'PhotoSuite screenshot';
+        image.alt = title ? `${title} — PhotoSplice screenshot` : 'PhotoSplice screenshot';
         caption.innerHTML = `<b>${title}</b> · ${index + 1} of ${triggers.length}`;
 
         // Warm the neighbouring full-size images so paging feels instant.

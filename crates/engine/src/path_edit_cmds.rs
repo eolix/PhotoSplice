@@ -1,6 +1,6 @@
 //! Point-level path edits, what Photoshop's Direct Selection (A) and Convert Point tools do on
 //! the canvas: move anchors, drag direction handles, bend segments and convert points. The
-//! geometry is `photosuite_vector::edit`; the canvas previews a drag with it and commits the
+//! geometry is `photosplice_vector::edit`; the canvas previews a drag with it and commits the
 //! whole drag as one command (one history step).
 //!
 //! Every command targets a path like `path.transform`: `"name":"work"` (default), a saved path's
@@ -8,9 +8,9 @@
 //! live shape) or a layer's vector mask. Knots are addressed by `subpath` and `knot` index, as
 //! listed by `path.info`, and the result is `{name, path}` in the compact JSON form.
 
-use photosuite_doc::{LayerContent, Path};
-use photosuite_geom::Point;
-use photosuite_vector::edit::{self, Handle};
+use photosplice_doc::{LayerContent, Path};
+use photosplice_geom::Point;
+use photosplice_vector::edit::{self, Handle};
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
@@ -199,7 +199,7 @@ pub fn specs() -> Vec<CommandSpec> {
 
 #[cfg(test)]
 mod tests {
-    use photosuite_doc::{LayerId, ShapeLayer};
+    use photosplice_doc::{LayerId, ShapeLayer};
     use serde_json::json;
 
     use crate::Session;
@@ -218,7 +218,7 @@ mod tests {
         serde_json::from_value(v["path"]["subpaths"][0]["knots"][k]["anchor"].clone()).unwrap()
     }
 
-    fn work(s: &Session) -> photosuite_doc::Path {
+    fn work(s: &Session) -> photosplice_doc::Path {
         s.active().unwrap().doc.work_path.clone().unwrap()
     }
 
@@ -274,7 +274,7 @@ mod tests {
             let r = s.execute("path.moveAnchors", json!({"name": "layer", "layer": id, "anchors": [[0, 1], [0, 2]], "move": [30, 0]})).unwrap();
             assert_eq!(anchor(&r, 1), [80.0, 10.0]);
             let st = s.active().unwrap();
-            let photosuite_doc::LayerContent::Shape(ShapeLayer { live, cache, .. }) = &st.doc.layer(LayerId(id)).unwrap().content else { panic!("shape") };
+            let photosplice_doc::LayerContent::Shape(ShapeLayer { live, cache, .. }) = &st.doc.layer(LayerId(id)).unwrap().content else { panic!("shape") };
             assert!(live.is_none(), "an edited rectangle is a plain path now");
             assert_eq!(cache.as_ref().unwrap().content_bounds().x1, 80, "depth {depth}: re-rendered");
         }
@@ -283,7 +283,7 @@ mod tests {
         s.execute("layer.vectorMask.add", json!({"layer": id, "path": square()})).unwrap();
         s.execute("path.moveAnchors", json!({"name": "layer", "layer": id, "anchors": [[0, 0]], "move": [-5, -5]})).unwrap();
         let vm = s.active().unwrap().doc.layer(LayerId(id)).unwrap().vector_mask.clone().unwrap();
-        assert_eq!(vm.path.subpaths[0].knots[0].anchor, photosuite_geom::Point::new(5.0, 5.0));
+        assert_eq!(vm.path.subpaths[0].knots[0].anchor, photosplice_geom::Point::new(5.0, 5.0));
     }
 
     #[test]

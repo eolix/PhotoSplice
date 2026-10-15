@@ -6,7 +6,7 @@
 //! per-pixel adjustments). Formulas are documented approximations of Photoshop's behaviour,
 //! derived from its manual and observation, not from its implementation.
 
-use photosuite_color::convert::{lab_to_srgb, srgb_to_lab};
+use photosplice_color::convert::{lab_to_srgb, srgb_to_lab};
 use serde::{Deserialize, Serialize};
 
 use crate::fxutil::gauss_blur_n;

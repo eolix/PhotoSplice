@@ -25,7 +25,7 @@ fn paint(s: &mut Session, f: impl Fn(i32, i32) -> [f32; 4]) {
         let mut data = Vec::new();
         for y in b.y0..b.y1 {
             for x in b.x0..b.x1 {
-                data.extend(photosuite_raster::from_rgba(&fmt, f(x, y)));
+                data.extend(photosplice_raster::from_rgba(&fmt, f(x, y)));
             }
         }
         surf.write_region(b, &data);
@@ -45,7 +45,7 @@ fn disc(x: i32, y: i32) -> [f32; 4] {
 
 fn select_left_half(s: &mut Session) {
     s.edit("sel", |doc, _| {
-        let mut sel = Surface::new(photosuite_color::PixelFormat::GRAY8);
+        let mut sel = Surface::new(photosplice_color::PixelFormat::GRAY8);
         sel.write_region(Rect::new(0, 0, 20, 30), &vec![1.0; 600]);
         doc.selection = Some(sel);
         Ok(())
@@ -76,7 +76,7 @@ fn mask_apply_from_transparency_hide_selection() {
         assert_eq!(l.mask.as_ref().unwrap().value(30, 5), 1.0);
         assert_eq!(l.surface().unwrap().rgba(30, 5)[3], 1.0);
         // The composite looks the same.
-        let px = photosuite_compose::render(doc(&s), Rect::from_xywh(5, 5, 1, 1)).px[0];
+        let px = photosplice_compose::render(doc(&s), Rect::from_xywh(5, 5, 1, 1)).px[0];
         assert_eq!(px[3], 0.0);
         s.execute("edit.undo", json!({})).unwrap();
         assert!(active(&s).mask.is_none());
@@ -146,7 +146,7 @@ fn blending_options_blend_if() {
         let mut s = session(depth, "rgb");
         // Black on the left, white on the right.
         paint(&mut s, |x, _| if x < 20 { [0.0, 0.0, 0.0, 1.0] } else { [1.0; 4] });
-        let at = |s: &Session, x: i32| photosuite_compose::flatten(doc(s)).get(x, 5);
+        let at = |s: &Session, x: i32| photosplice_compose::flatten(doc(s)).get(x, 5);
         // Gray › This Layer: black point 50 hides the black half.
         s.execute("layer.layerStyle.blendingOptions", json!({"blendIf": {"channel": "gray", "thisLayer": [50, 255]}})).unwrap();
         assert_eq!(at(&s, 5)[3], 0.0, "depth {depth}");
@@ -223,7 +223,7 @@ fn create_layer_splits_effects_and_keeps_the_look() {
     s.execute("layer.layerStyle.dropShadow", json!({"blend": "normal", "distance": 4, "size": 2, "opacity": 60})).unwrap();
     s.execute("layer.layerStyle.colorOverlay", json!({"color": "#ff8000", "opacity": 50, "add": true})).unwrap();
     let id = active(&s).id;
-    let before = photosuite_compose::flatten(doc(&s));
+    let before = photosplice_compose::flatten(doc(&s));
     let n0 = doc(&s).layers.len();
     let r = s.execute("layer.layerStyle.createLayer", json!({})).unwrap();
     assert_eq!(r["layers"], json!(2));
@@ -233,7 +233,7 @@ fn create_layer_splits_effects_and_keeps_the_look() {
     assert!(d.layers[i - 1].name.ends_with("Drop Shadow") && !d.layers[i - 1].clipped);
     assert!(d.layers[i + 1].name.ends_with("Color Overlay") && d.layers[i + 1].clipped);
     assert!(d.layers[i].effects.items.is_empty());
-    let after = photosuite_compose::flatten(d);
+    let after = photosplice_compose::flatten(d);
     let worst = before.px.iter().zip(&after.px).map(|(a, b)| (0..4).map(|c| (a[c] - b[c]).abs()).fold(0.0, f32::max)).fold(0.0, f32::max);
     assert!(worst < 3.0 / 255.0, "composite changed by {}", worst * 255.0);
     assert!(!s.is_enabled("layer.layerStyle.createLayer"));
@@ -283,11 +283,11 @@ fn stack_modes_render_from_the_nested_layers() {
             let mut l = Layer::raster(format!("f{k}"), fmt);
             let v = if k == 2 { 1.0 } else { 0.4 };
             let surf = l.surface_mut().unwrap();
-            surf.write_region(Rect::new(0, 0, 40, 30), &photosuite_raster::from_rgba(&fmt, [0.4, 0.4, 0.4, 1.0]).repeat(1200));
-            surf.write_region(Rect::new(3, 3, 4, 4), &photosuite_raster::from_rgba(&fmt, [v, v, v, 1.0]));
+            surf.write_region(Rect::new(0, 0, 40, 30), &photosplice_raster::from_rgba(&fmt, [0.4, 0.4, 0.4, 1.0]).repeat(1200));
+            surf.write_region(Rect::new(3, 3, 4, 4), &photosplice_raster::from_rgba(&fmt, [v, v, v, 1.0]));
             kids.push(l);
         }
-        let g = Layer::new("stack", LayerContent::Group(photosuite_doc::Group { children: kids, expanded: true, artboard: None, divider_blocks: Vec::new() }));
+        let g = Layer::new("stack", LayerContent::Group(photosplice_doc::Group { children: kids, expanded: true, artboard: None, divider_blocks: Vec::new() }));
         let smart = crate::smart_cmds::layer_to_smart(doc, &g)?;
         let id = smart.id;
         doc.layers = vec![smart];
@@ -318,8 +318,8 @@ fn stack_modes_render_from_the_nested_layers() {
     assert!(at(&s, 3, 3)[0] > 0.9);
     // The stack mode survives .pcraft.
     s.execute("layer.smartObjects.stackMode.mean", json!({})).unwrap();
-    let bytes = photosuite_format::save_to_bytes(doc(&s), &Default::default()).unwrap();
-    let back = photosuite_format::load_from_bytes(&bytes).unwrap();
+    let bytes = photosplice_format::save_to_bytes(doc(&s), &Default::default()).unwrap();
+    let back = photosplice_format::load_from_bytes(&bytes).unwrap();
     match &back.layers[0].content {
         LayerContent::Smart(sm) => assert_eq!(sm.stack_mode, Some(StackMode::Mean)),
         _ => panic!(),
@@ -357,9 +357,9 @@ fn reveal_in_finder_dry_run_and_enabled() {
     s.edit("linked", |doc, active| {
         let mut l = Layer::new(
             "linked",
-            LayerContent::Smart(photosuite_doc::SmartObject::new(
+            LayerContent::Smart(photosplice_doc::SmartObject::new(
                 SmartSource::Linked { path: "/tmp/pics/a.png".into() },
-                photosuite_geom::Affine::IDENTITY,
+                photosplice_geom::Affine::IDENTITY,
                 None,
             )),
         );
@@ -413,13 +413,13 @@ fn load_files_into_stack_as_smart_object_then_median() {
     for (k, v) in [0.2f32, 0.2, 0.9].iter().enumerate() {
         let d = Document::with_background(
             "f",
-            photosuite_doc::Size::new(6, 4),
-            photosuite_color::ColorMode::Rgb,
-            photosuite_color::SampleType::U8,
-            photosuite_doc::Color::rgba(*v, *v, *v, 1.0),
+            photosplice_doc::Size::new(6, 4),
+            photosplice_color::ColorMode::Rgb,
+            photosplice_color::SampleType::U8,
+            photosplice_doc::Color::rgba(*v, *v, *v, 1.0),
         );
         let p = dir.join(format!("f{k}.png"));
-        std::fs::write(&p, photosuite_io::export(&d, "f.png", &Default::default()).unwrap().bytes).unwrap();
+        std::fs::write(&p, photosplice_io::export(&d, "f.png", &Default::default()).unwrap().bytes).unwrap();
         paths.push(p.to_string_lossy().into_owned());
     }
     let mut s = Session::new();
@@ -427,7 +427,7 @@ fn load_files_into_stack_as_smart_object_then_median() {
     assert_eq!(doc(&s).layers.len(), 1);
     assert!(matches!(doc(&s).layers[0].content, LayerContent::Smart(_)));
     s.execute("layer.smartObjects.stackMode.median", json!({})).unwrap();
-    let px = photosuite_compose::render(doc(&s), Rect::from_xywh(2, 2, 1, 1)).px[0];
+    let px = photosplice_compose::render(doc(&s), Rect::from_xywh(2, 2, 1, 1)).px[0];
     assert!((px[0] - 0.2).abs() < 2.0 / 255.0, "{px:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

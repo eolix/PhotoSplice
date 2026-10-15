@@ -1,6 +1,6 @@
 //! Displace, Shear, ZigZag (inverse mapping over the reference bounds).
 
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 
 use crate::distort::{centre, remap};
 use crate::image::Image;

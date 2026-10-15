@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# Polski translations for PhotoSuite UI.
+# Polski translations for PhotoSplice UI.
 
 	File	Plik
 	Edit	Edycja
@@ -672,7 +672,7 @@
 	Timeline	Oś czasu
 	Tool Presets	Ustawienia domyślne narzędzi
 	Tools	Narzędzia
-	About PhotoSuite	O PhotoCrafcie
+	About PhotoSplice	O PhotoCrafcie
 	Website	Strona internetowa
 	Report an Issue…	Zgłoś problem…
 	WIA Support…	Wsparcie WIA…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Wypaczenie perspektywy nie jest aktywne
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Wypaczenie perspektywy: narysuj płaszczyzny wzdłuż perspektywy obrazu, a następnie przełącz na Wypaczenie
 	Photo Filter	Filtr fotograficzny
-	PhotoSuite	FotoCraft
-	PhotoSuite Manages Colors	PhotoSuite zarządza kolorami
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite — natywny edytor obrazów typu open source napisany w języku Rust
+	PhotoSplice	FotoCraft
+	PhotoSplice Manages Colors	PhotoSplice zarządza kolorami
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice — natywny edytor obrazów typu open source napisany w języku Rust
 	Pin Depth:	Głębokość sworznia:
 	Pixel Length:	Długość piksela:
 	Pixels/Centimeter	Piksele/centymetr
@@ -1570,7 +1570,7 @@
 	Pen Tilt	Pochylenie pióra
 	Pen Tool	Narzędzie Pióro
 	Photo	Zdjęcie
-	PhotoSuite website	stronie PhotoSuitea
+	PhotoSplice website	stronie PhotoSplicea
 	Picas	Picas
 	Pillow Emboss	Żłobienie
 	Pixel Replacement	Wymiana pikseli
@@ -1877,7 +1877,7 @@
 	System Info…	Informacje o systemie…
 	System Info	Informacje o systemie
 	More panels	Więcej paneli
-	These settings aren't available in PhotoSuite yet.	Te ustawienia nie są jeszcze dostępne w PhotoSuite
+	These settings aren't available in PhotoSplice yet.	Te ustawienia nie są jeszcze dostępne w PhotoSplice
 	Graphics	Grafika
 	Reset GPU Backend	Zresetuj zaplecze GPU
 	Applies at next launch.	Obowiązuje przy następnym uruchomieniu
@@ -2018,7 +2018,7 @@
 	Opening…	Otwieranie…
 	Patch	Łatka
 	Patch:	Łatka:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite składa obraz za pomocą CPU. Okno może nadal korzystać z karty graficznej.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice składa obraz za pomocą CPU. Okno może nadal korzystać z karty graficznej.
 	Play Action	Odtwórz operację
 	Reading…	Wczytywanie…
 	Record Action	Nagraj operację

@@ -6,10 +6,10 @@
 use egui::{Pos2, Rect, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use photosuite_doc::{Adjustment, LayerContent, LayerId};
+use photosplice_doc::{Adjustment, LayerContent, LayerId};
 use serde_json::json;
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 
 const ALL_KINDS: [&str; 16] = [
     "brightnessContrast",
@@ -30,18 +30,18 @@ const ALL_KINDS: [&str; 16] = [
     "colorLookup",
 ];
 
-fn app_harness(kind: &str, mode: &str, depth: u32) -> Harness<'static, PhotosuiteApp> {
+fn app_harness(kind: &str, mode: &str, depth: u32) -> Harness<'static, PhotospliceApp> {
     let (kind, mode) = (kind.to_string(), mode.to_string());
     let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_max_steps(64).build_eframe(move |cc| {
-        PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-        let mut s = photosuite_engine::Session::new();
+        PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", json!({"width": 96, "height": 64, "mode": mode, "depth": depth})).unwrap();
         // Two tones so histograms (and Levels' Auto) have something to work with.
         s.execute("select.rect", json!({"x": 0, "y": 0, "width": 48, "height": 64})).unwrap();
         s.execute("edit.fill", json!({"color": "#6a3020"})).unwrap();
         s.execute("select.deselect", json!({})).unwrap();
         s.execute(&format!("layer.newAdjustmentLayer.{kind}"), json!({})).unwrap();
-        let mut app = PhotosuiteApp::new(s, crate::Services::default());
+        let mut app = PhotospliceApp::new(s, crate::Services::default());
         // The default Properties group gives way to Layers (#147) and scrolls taller editors;
         // these tests drive every control without scrolling, so they size it like a user would.
         app.ui.dock.heights.insert(crate::dock::Group::Properties, 560.0);
@@ -51,7 +51,7 @@ fn app_harness(kind: &str, mode: &str, depth: u32) -> Harness<'static, Photosuit
     h
 }
 
-fn layer(h: &Harness<'_, PhotosuiteApp>) -> (LayerId, Adjustment) {
+fn layer(h: &Harness<'_, PhotospliceApp>) -> (LayerId, Adjustment) {
     let st = h.state().session.active().unwrap();
     let id = st.active_layer.unwrap();
     match &st.doc.layer(id).unwrap().content {
@@ -60,7 +60,7 @@ fn layer(h: &Harness<'_, PhotosuiteApp>) -> (LayerId, Adjustment) {
     }
 }
 
-fn drag(h: &mut Harness<'_, PhotosuiteApp>, from: Pos2, to: Pos2) {
+fn drag(h: &mut Harness<'_, PhotospliceApp>, from: Pos2, to: Pos2) {
     h.hover_at(from);
     h.run_steps(1);
     h.drag_at(from);
@@ -73,7 +73,7 @@ fn drag(h: &mut Harness<'_, PhotosuiteApp>, from: Pos2, to: Pos2) {
     h.run_steps(3);
 }
 
-fn click(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2) {
+fn click(h: &mut Harness<'_, PhotospliceApp>, at: Pos2) {
     h.hover_at(at);
     h.run_steps(1);
     h.drag_at(at);
@@ -82,12 +82,12 @@ fn click(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2) {
     h.run_steps(3);
 }
 
-fn label_rect(h: &Harness<'_, PhotosuiteApp>, text: &str) -> Option<Rect> {
+fn label_rect(h: &Harness<'_, PhotospliceApp>, text: &str) -> Option<Rect> {
     // The last match: the Properties header repeats the kind's name above its controls.
     h.query_all_by_label(text).last().map(|n| n.rect())
 }
 
-fn curves_graph(h: &Harness<'_, PhotosuiteApp>, id: LayerId) -> Rect {
+fn curves_graph(h: &Harness<'_, PhotospliceApp>, id: LayerId) -> Rect {
     h.ctx.data(|d| d.get_temp::<Rect>(egui::Id::new(("adjust-layer", id.0)).with("curves-graph"))).expect("curves graph drawn")
 }
 

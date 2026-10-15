@@ -2,17 +2,17 @@
 //! visible layer with pixels under the pointer (or its outermost group in Group mode) and the drag
 //! then moves it; ⌘/Ctrl held at the press inverts the option for that click.
 
-use photosuite_doc::LayerId;
-use photosuite_geom::Rect;
+use photosplice_doc::LayerId;
+use photosplice_geom::Rect;
 use serde_json::json;
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::ToolEvent;
 use crate::state::{Tool, ToolOptions};
 
 /// A 64×64 document with two painted layers: A covers (8..24)², B covers (40..56)². B is active.
-fn app() -> (PhotosuiteApp, LayerId, LayerId) {
-    let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+fn app() -> (PhotospliceApp, LayerId, LayerId) {
+    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
     app.session.execute("file.new", json!({"width": 64, "height": 64})).unwrap();
     app.sync_views();
     let mut ids = Vec::new();
@@ -33,15 +33,15 @@ fn app() -> (PhotosuiteApp, LayerId, LayerId) {
     (app, ids[0], ids[1])
 }
 
-fn bounds(app: &PhotosuiteApp, id: LayerId) -> Rect {
+fn bounds(app: &PhotospliceApp, id: LayerId) -> Rect {
     app.session.active().unwrap().doc.layer(id).unwrap().surface().unwrap().content_bounds()
 }
 
-fn active(app: &PhotosuiteApp) -> Option<LayerId> {
+fn active(app: &PhotospliceApp) -> Option<LayerId> {
     app.session.active().unwrap().active_layer
 }
 
-fn drag(app: &mut PhotosuiteApp, from: [f64; 2], by: [f64; 2], mods: egui::Modifiers) {
+fn drag(app: &mut PhotospliceApp, from: [f64; 2], by: [f64; 2], mods: egui::Modifiers) {
     crate::canvas::tool_event(app, ToolEvent::Down { x: from[0], y: from[1], pressure: 1.0 }, mods);
     let mid = [from[0] + by[0] / 2.0, from[1] + by[1] / 2.0];
     crate::canvas::tool_event(app, ToolEvent::Move { x: mid[0], y: mid[1], pressure: 1.0 }, mods);

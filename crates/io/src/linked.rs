@@ -9,8 +9,8 @@
 //! Pascal uuid, Unicode file name, file type, creator, `u64` data length, open-descriptor flag (+
 //! versioned descriptor), then for `liFD` the raw file bytes.
 
-use photosuite_doc::Metadata;
-use photosuite_psd::descriptor::VersionedDescriptor;
+use photosplice_doc::Metadata;
+use photosplice_psd::descriptor::VersionedDescriptor;
 
 /// An embedded file found in a linked-layer block.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,7 +100,7 @@ pub fn find_in_blocks<'a>(blocks: impl IntoIterator<Item = (&'a [u8; 4], &'a [u8
 pub(crate) fn source_size_in_blocks<'a>(
     blocks: impl IntoIterator<Item = (&'a [u8; 4], &'a [u8])>,
     uuid: &str,
-    ctl: &photosuite_raster::Interrupt,
+    ctl: &photosplice_raster::Interrupt,
 ) -> Option<(f64, f64)> {
     let f = find_in_blocks(blocks, uuid)?;
     if ctl.cancelled() {
@@ -111,7 +111,7 @@ pub(crate) fn source_size_in_blocks<'a>(
 
 /// Pixel size of an embedded source file from its header: PSD/PSB, TIFF (the default page's
 /// directory), PNG (`IHDR`) and JPEG (the frame header); any other image is decoded flat by
-/// `photosuite-codecs`. It never imports a document: a layered TIFF can carry PSD layer data
+/// `photosplice-codecs`. It never imports a document: a layered TIFF can carry PSD layer data
 /// whose `lnkD` holds another file, so a full import here would nest without bound.
 /// Ported from storytold/photocraft@0002d861.
 pub(crate) fn source_size_probe(bytes: &[u8]) -> Option<(f64, f64)> {
@@ -120,13 +120,13 @@ pub(crate) fn source_size_probe(bytes: &[u8]) -> Option<(f64, f64)> {
     match bytes {
         _ if crate::is_psd(bytes) => be32(18).zip(be32(14)).map(|(w, h)| size(w, h)),
         [b'I', b'I', 42, 0, ..] | [b'M', b'M', 0, 42, ..] | [b'I', b'I', 43, 0, ..] | [b'M', b'M', 0, 43, ..] => {
-            let info = photosuite_codecs::tiff_info(bytes).ok()?;
+            let info = photosplice_codecs::tiff_info(bytes).ok()?;
             let page = info.pages.get(info.default_page()?)?;
             Some(size(page.width, page.height))
         }
         [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, ..] => be32(16).zip(be32(20)).map(|(w, h)| size(w, h)),
         [0xFF, 0xD8, ..] => jpeg_size(bytes),
-        _ => photosuite_codecs::decode(bytes).ok().map(|img| {
+        _ => photosplice_codecs::decode(bytes).ok().map(|img| {
             let (w, h) = img.dimensions();
             size(w, h)
         }),
@@ -271,10 +271,10 @@ mod tests {
     /// never by importing it as a document.
     #[test]
     fn source_size_probe_reads_headers() {
-        use photosuite_codecs::{ChannelLayout, EncodeOptions, Format, Image, SampleType};
+        use photosplice_codecs::{ChannelLayout, EncodeOptions, Format, Image, SampleType};
         let img = Image::new(7, 5, ChannelLayout::Rgb, SampleType::U8).unwrap();
         for format in [Format::Png, Format::Jpeg, Format::Tiff, Format::Bmp] {
-            let bytes = photosuite_codecs::encode(&img, format, &EncodeOptions::default()).unwrap();
+            let bytes = photosplice_codecs::encode(&img, format, &EncodeOptions::default()).unwrap();
             assert_eq!(source_size_probe(&bytes), Some((7.0, 5.0)), "{format:?}");
         }
         let mut psd = b"8BPS\0\x01".to_vec();
@@ -331,7 +331,7 @@ mod tests {
         assert_eq!(rebuild_block(&data, &|_| true, &[]), None);
         let out = rebuild_block(&data, &|u| u != "a", std::slice::from_ref(&c)).unwrap();
         assert_eq!(parse_linked_files(&out), vec![b.clone(), c.clone()]);
-        photosuite_psd::TaggedBlock::new(*b"lnk2", out).check_structure().unwrap();
+        photosplice_psd::TaggedBlock::new(*b"lnk2", out).check_structure().unwrap();
         assert_eq!(file_type(&b.bytes), *b"8BPB");
         assert_eq!(file_type(&a.bytes), *b"PNGf");
         // A malformed tail is kept as is.

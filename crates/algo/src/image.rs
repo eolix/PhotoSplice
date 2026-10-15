@@ -1,7 +1,7 @@
 //! Interleaved `f32` image regions and sampling helpers.
 
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 
 /// How samples outside an image are read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

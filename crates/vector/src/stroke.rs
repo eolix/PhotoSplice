@@ -3,7 +3,7 @@
 //! together with the non-zero rule yields their exact union without computing offset curves.
 //! Dashing splits the flattened polylines by arc length first.
 
-use photosuite_doc::{LineCap, LineJoin};
+use photosplice_doc::{LineCap, LineJoin};
 
 use crate::flatten::Polyline;
 

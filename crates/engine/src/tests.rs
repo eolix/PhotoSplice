@@ -60,8 +60,8 @@ fn file_new_variants() {
     assert_eq!(s.active().unwrap().doc.layers[0].name, "Layer 1");
     s.execute("file.new", json!({"width": 10, "height": 5, "mode": "cmyk", "depth": 16})).unwrap();
     let d = &s.active().unwrap().doc;
-    assert_eq!(d.mode, photosuite_color::ColorMode::Cmyk);
-    assert_eq!(d.depth, photosuite_color::SampleType::U16);
+    assert_eq!(d.mode, photosplice_color::ColorMode::Cmyk);
+    assert_eq!(d.depth, photosplice_color::SampleType::U16);
     s.execute("file.new", json!({"background": "#ff0000", "width": 4, "height": 4})).unwrap();
     assert_eq!(px(&mut s, 1, 1), vec![1.0, 0.0, 0.0, 1.0]);
     assert_eq!(s.documents().len(), 3);
@@ -78,7 +78,7 @@ fn layer_lifecycle_with_undo() {
     s.execute("layer.setProps", json!({"name": "Ink", "opacity": 0.5, "blend": "multiply"})).unwrap();
     let doc = &s.active().unwrap().doc;
     let l = doc.layer(LayerId(id)).unwrap();
-    assert_eq!((l.name.as_str(), l.opacity, l.blend), ("Ink", 0.5, photosuite_color::BlendMode::Multiply));
+    assert_eq!((l.name.as_str(), l.opacity, l.blend), ("Ink", 0.5, photosplice_color::BlendMode::Multiply));
     s.execute("layer.duplicate", json!({})).unwrap();
     assert_eq!(s.active().unwrap().doc.layer_count(), 3);
     s.execute("layer.delete", json!({})).unwrap();
@@ -325,7 +325,7 @@ fn image_rotation_rotates_every_layer_not_just_the_active_one() {
     // A second (lower) layer with a red dot at the top-left; keep a third layer active.
     s.execute("layer.new.layer", json!({})).unwrap();
     s.edit("dot", |doc, a| {
-        doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photosuite_geom::Rect::new(2, 2, 4, 4), &[1.0, 0.0, 0.0, 1.0]);
+        doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photosplice_geom::Rect::new(2, 2, 4, 4), &[1.0, 0.0, 0.0, 1.0]);
         Ok(())
     })
     .unwrap();
@@ -427,24 +427,24 @@ fn integer_params_accept_json_floats() {
 fn move_to_refuses_to_nest_past_the_group_depth_cap() {
     let mut s = session_with_doc();
     let deep = s.execute("layer.new.layer", json!({"name": "Deep"})).unwrap()["layer"].as_u64().unwrap();
-    for _ in 0..photosuite_doc::MAX_GROUP_DEPTH - 1 {
+    for _ in 0..photosplice_doc::MAX_GROUP_DEPTH - 1 {
         s.execute("layer.groupLayers", json!({"layer": deep})).unwrap();
     }
     // `Deep` sits inside MAX - 1 groups. Moving a two-level group (G2 > G1 > Leaf) beside it
     // would put `Leaf` at MAX + 1.
-    let path = s.active().unwrap().doc.path_of(photosuite_doc::LayerId(deep)).unwrap();
-    assert_eq!(path.len() - 1, photosuite_doc::MAX_GROUP_DEPTH - 1);
+    let path = s.active().unwrap().doc.path_of(photosplice_doc::LayerId(deep)).unwrap();
+    assert_eq!(path.len() - 1, photosplice_doc::MAX_GROUP_DEPTH - 1);
     let leaf = s.execute("layer.new.layer", json!({"name": "Leaf"})).unwrap()["layer"].as_u64().unwrap();
     let g1 = s.execute("layer.groupLayers", json!({"layer": leaf})).unwrap()["layer"].as_u64().unwrap();
     let g = s.execute("layer.groupLayers", json!({"layer": g1})).unwrap()["layer"].as_u64().unwrap();
     let past = s.active().unwrap().history.past_len();
     let err = s.execute("layer.moveTo", json!({"layer": g, "target": deep, "position": "above"})).unwrap_err();
     assert!(err.to_string().contains("deeper than"), "{err}");
-    assert!(s.active().unwrap().doc.max_group_depth() <= photosuite_doc::MAX_GROUP_DEPTH);
+    assert!(s.active().unwrap().doc.max_group_depth() <= photosplice_doc::MAX_GROUP_DEPTH);
     assert_eq!(s.active().unwrap().history.past_len(), past, "no history step recorded");
     // A plain layer beside the deepest one still fits.
     s.execute("layer.moveTo", json!({"layer": leaf, "target": deep, "position": "above"})).unwrap();
-    assert_eq!(s.active().unwrap().doc.max_group_depth(), photosuite_doc::MAX_GROUP_DEPTH - 1);
+    assert_eq!(s.active().unwrap().doc.max_group_depth(), photosplice_doc::MAX_GROUP_DEPTH - 1);
 }
 
 #[test]
@@ -452,15 +452,15 @@ fn artboard_from_layers_refuses_to_nest_past_the_group_depth_cap() {
     let mut s = session_with_doc();
     let leaf = s.execute("layer.new.layer", json!({"name": "Leaf"})).unwrap()["layer"].as_u64().unwrap();
     let mut top = leaf;
-    for _ in 0..photosuite_doc::MAX_GROUP_DEPTH {
+    for _ in 0..photosplice_doc::MAX_GROUP_DEPTH {
         top = s.execute("layer.groupLayers", json!({"layer": top})).unwrap()["layer"].as_u64().unwrap();
     }
-    assert_eq!(s.active().unwrap().doc.max_group_depth(), photosuite_doc::MAX_GROUP_DEPTH);
+    assert_eq!(s.active().unwrap().doc.max_group_depth(), photosplice_doc::MAX_GROUP_DEPTH);
     s.execute("layer.select", json!({"layer": top})).unwrap();
     let past = s.active().unwrap().history.past_len();
     let err = s.execute("layer.new.artboardFromLayers", json!({})).unwrap_err();
     assert!(err.to_string().contains("deeper than"), "{err}");
-    assert_eq!(s.active().unwrap().doc.max_group_depth(), photosuite_doc::MAX_GROUP_DEPTH);
+    assert_eq!(s.active().unwrap().doc.max_group_depth(), photosplice_doc::MAX_GROUP_DEPTH);
     assert_eq!(s.active().unwrap().history.past_len(), past, "no history step recorded");
 }
 
@@ -529,17 +529,17 @@ fn type_edit_rerenders_cache_to_new_text() {
     let id = r["layer"].as_u64().unwrap();
     let width = |s: &Session| {
         let st = s.active().unwrap();
-        st.doc.layer(photosuite_doc::LayerId(id)).unwrap().surface().unwrap().content_bounds().width()
+        st.doc.layer(photosplice_doc::LayerId(id)).unwrap().surface().unwrap().content_bounds().width()
     };
     let w0 = width(&s);
-    s.execute("type.edit", json!({"layer": id, "replace": {"start": 0, "end": 11, "text": "Photosuite"}, "coalesce": "k"})).unwrap();
+    s.execute("type.edit", json!({"layer": id, "replace": {"start": 0, "end": 11, "text": "Photosplice"}, "coalesce": "k"})).unwrap();
     let w1 = width(&s);
     assert!(w0 > 150 && w1 > 150, "cache widths {w0} → {w1}");
 }
 
 #[test]
 fn levels_and_curves_params_cover_output_and_channels() {
-    use photosuite_doc::Adjustment;
+    use photosplice_doc::Adjustment;
     let a = crate::commands::adjustment_from_params("levels", &json!({"inBlack": 10, "outWhite": 200, "green": {"gamma": 1.5}}));
     let Adjustment::Levels { master, per_channel, .. } = a else { panic!() };
     assert!((master.in_black - 10.0 / 255.0).abs() < 1e-6 && (master.out_white - 200.0 / 255.0).abs() < 1e-6);
@@ -559,7 +559,7 @@ fn painting_can_target_the_layer_mask() {
     s.execute("layer.newAdjustmentLayer.invert", json!({})).unwrap();
     let id = s.active().unwrap().active_layer.unwrap();
     s.edit("mask", |doc, _| {
-        doc.layer_mut(id).unwrap().mask = Some(photosuite_doc::LayerMask::reveal_all());
+        doc.layer_mut(id).unwrap().mask = Some(photosplice_doc::LayerMask::reveal_all());
         Ok(())
     })
     .unwrap();
@@ -651,7 +651,7 @@ fn duplicating_the_background_unlocks_the_copy() {
     let st = s.active().unwrap();
     let copy = st.doc.layer(st.active_layer.unwrap()).unwrap();
     assert_eq!(copy.name, "Background copy");
-    assert_eq!(copy.locks, photosuite_doc::Locks::default());
+    assert_eq!(copy.locks, photosplice_doc::Locks::default());
     assert!(st.doc.layers[0].locks.transparency);
 }
 
@@ -674,7 +674,7 @@ fn advanced_blending_knockout() {
     let r = s.execute("layer.new.layer", json!({})).unwrap();
     let id = r["layer"].as_u64().unwrap();
     s.execute("layer.setProps", json!({"knockout": "deep"})).unwrap();
-    assert_eq!(s.active().unwrap().doc.layer(LayerId(id)).unwrap().knockout, photosuite_doc::Knockout::Deep);
+    assert_eq!(s.active().unwrap().doc.layer(LayerId(id)).unwrap().knockout, photosplice_doc::Knockout::Deep);
     let ins = crate::inspect::layer(s.active().unwrap().doc.layer(LayerId(id)).unwrap());
     assert_eq!(ins["knockout"], json!("deep"));
     assert!(s.execute("layer.setProps", json!({"knockout": "sideways"})).is_err());
@@ -686,7 +686,7 @@ fn advanced_blending_knockout() {
     assert_eq!((ins["blendClipped"].clone(), ins["blendInterior"].clone()), (json!(false), json!(true)));
     s.execute("edit.undo", json!({})).unwrap();
     s.execute("edit.undo", json!({})).unwrap();
-    assert_eq!(s.active().unwrap().doc.layer(LayerId(id)).unwrap().knockout, photosuite_doc::Knockout::None);
+    assert_eq!(s.active().unwrap().doc.layer(LayerId(id)).unwrap().knockout, photosplice_doc::Knockout::None);
 }
 
 #[test]
@@ -695,13 +695,13 @@ fn layer_label_color() {
     let id = s.execute("layer.new.layer", json!({})).unwrap()["layer"].as_u64().unwrap();
     s.execute("layer.setProps", json!({"color": "Violet"})).unwrap();
     let l = s.active().unwrap().doc.layer(LayerId(id)).unwrap().clone();
-    assert_eq!(l.label, photosuite_doc::LabelColor::Violet);
+    assert_eq!(l.label, photosplice_doc::LabelColor::Violet);
     assert_eq!(crate::inspect::layer(&l)["color"], json!("violet"));
     for bad in [json!("pink"), json!(3), json!(null)] {
         assert!(s.execute("layer.setProps", json!({"color": bad})).is_err(), "{bad}");
     }
     s.execute("edit.undo", json!({})).unwrap();
-    assert_eq!(s.active().unwrap().doc.layer(LayerId(id)).unwrap().label, photosuite_doc::LabelColor::None);
+    assert_eq!(s.active().unwrap().doc.layer(LayerId(id)).unwrap().label, photosplice_doc::LabelColor::None);
 }
 
 #[test]

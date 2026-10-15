@@ -1,6 +1,6 @@
 //! Colour conversions between the document colour models.
 //!
-//! CMYK ↔ RGB goes through the ICC colour management module (`photosuite-cms`) with the
+//! CMYK ↔ RGB goes through the ICC colour management module (`photosplice-cms`) with the
 //! built-in coated CMYK profile and sRGB (relative colorimetric with black point
 //! compensation, Photoshop's default), so CMYK pixels display and accept painted colours the
 //! way a colour-managed editor does. A document's embedded CMYK profile replaces the built-in
@@ -11,7 +11,7 @@
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use photosuite_cms::{Builtin, ColorSpace, Intent, Profile, Transform};
+use photosplice_cms::{Builtin, ColorSpace, Intent, Profile, Transform};
 
 /// A document's own CMYK profile, linked to sRGB both ways (relative colorimetric + BPC, like
 /// the built-in defaults). While a space is active on a thread ([`with_cmyk_space`]),
@@ -264,14 +264,14 @@ mod tests {
     #[test]
     fn document_cmyk_space_scope() {
         // A synthetic uncoated-like profile (heavier dot gain than the built-in coated one).
-        let params = photosuite_cms::synth::CmykParams {
+        let params = photosplice_cms::synth::CmykParams {
             description: "Test Uncoated".into(),
             tvi: [0.26, 0.26, 0.26, 0.3],
             grid_a2b: 5,
             grid_b2a: 9,
             ..Default::default()
         };
-        let p = photosuite_cms::synth::cmyk_profile(&params);
+        let p = photosplice_cms::synth::cmyk_profile(&params);
         let bytes = p.to_bytes();
         let space = CmykSpace::for_profile(Some(&bytes)).expect("a CMYK profile other than the default");
         // Cached by allocation.

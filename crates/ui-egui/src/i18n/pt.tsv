@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# Português translations for PhotoSuite UI.
+# Português translations for PhotoSplice UI.
 
 	File	Arquivo
 	Edit	Editar
@@ -672,7 +672,7 @@
 	Timeline	Linha do tempo
 	Tool Presets	Predefinições de Ferramenta
 	Tools	Ferramentas
-	About PhotoSuite	Sobre PhotoSuite
+	About PhotoSplice	Sobre PhotoSplice
 	Website	Site
 	Report an Issue…	Informar um problema…
 	WIA Support…	Suporte WIA…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Perspectiva Warp não está ativa
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Perspectiva Warp: desenhe planos ao longo da perspectiva da imagem e depois mude para Warp
 	Photo Filter	Filtro fotográfico
-	PhotoSuite	FotoCraft
-	PhotoSuite Manages Colors	PhotoSuite gerencia cores
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite — um editor de imagens nativo e de código aberto escrito em Rust
+	PhotoSplice	FotoCraft
+	PhotoSplice Manages Colors	PhotoSplice gerencia cores
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice — um editor de imagens nativo e de código aberto escrito em Rust
 	Pin Depth:	Profundidade do pino:
 	Pixel Length:	Comprimento do pixel:
 	Pixels/Centimeter	Pixels/Centímetro
@@ -1570,7 +1570,7 @@
 	Pen Tilt	Inclinação da caneta
 	Pen Tool	Ferramenta Caneta
 	Photo	Foto
-	PhotoSuite website	Site PhotoSuite
+	PhotoSplice website	Site PhotoSplice
 	Picas	Picas
 	Pillow Emboss	Relevo travesseiro
 	Pixel Replacement	Substituição de pixels
@@ -1877,7 +1877,7 @@
 	System Info…	Informações do sistema…
 	System Info	Informações do sistema
 	More panels	Mais painéis
-	These settings aren't available in PhotoSuite yet.	Essas configurações ainda não estão disponíveis no PhotoSuite
+	These settings aren't available in PhotoSplice yet.	Essas configurações ainda não estão disponíveis no PhotoSplice
 	Graphics	Gráficos
 	Reset GPU Backend	Redefinir back-end da GPU
 	Applies at next launch.	Aplica-se no próximo lançamento
@@ -2018,7 +2018,7 @@
 	Opening…	A abrir…
 	Patch	Remendo
 	Patch:	Remendo:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	O PhotoSuite está a utilizar o compositor de imagens da CPU. A janela pode continuar a utilizar a sua placa gráfica.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	O PhotoSplice está a utilizar o compositor de imagens da CPU. A janela pode continuar a utilizar a sua placa gráfica.
 	Play Action	Reproduzir ação
 	Reading…	A ler…
 	Record Action	Gravar ação

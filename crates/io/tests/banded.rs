@@ -1,11 +1,11 @@
 //! Exports that render the composite in bands (issue #49): results must equal the one-shot
 //! composite, across band boundaries, depths and alpha.
 
-use photosuite_color::{ColorMode, PixelFormat, SampleType};
-use photosuite_doc::{Document, Layer, LayerContent};
-use photosuite_geom::{Rect, Size};
-use photosuite_io::*;
-use photosuite_raster::Surface;
+use photosplice_color::{ColorMode, PixelFormat, SampleType};
+use photosplice_doc::{Document, Layer, LayerContent};
+use photosplice_geom::{Rect, Size};
+use photosplice_io::*;
+use photosplice_raster::Surface;
 
 /// Two layers over more than one export band (a band is ~8 MP), with a gradient, so every row
 /// differs; `alpha` < 1 leaves the top-right translucent.
@@ -31,7 +31,7 @@ fn layered(w: u32, h: u32, depth: SampleType, alpha: f32) -> Document {
 }
 
 fn composite_q(doc: &Document, scale: f32) -> Vec<f32> {
-    photosuite_compose::flatten(doc).px.iter().flat_map(|p| [p[0], p[1], p[2], p[3]]).map(|v| (v.clamp(0.0, 1.0) * scale).round()).collect()
+    photosplice_compose::flatten(doc).px.iter().flat_map(|p| [p[0], p[1], p[2], p[3]]).map(|v| (v.clamp(0.0, 1.0) * scale).round()).collect()
 }
 
 #[test]
@@ -41,7 +41,7 @@ fn layered_png_export_spans_bands() {
         for alpha in [1.0, 0.5] {
             let d = layered(3000, 3000, depth, alpha);
             let r = export(&d, "x.png", &ExportOptions::default()).unwrap();
-            let img = photosuite_codecs::decode(&r.bytes).unwrap();
+            let img = photosplice_codecs::decode(&r.bytes).unwrap();
             assert_eq!(img.layout().has_alpha(), alpha < 1.0, "{depth:?} alpha {alpha}");
             let got: Vec<f32> = img.to_rgba_f32().iter().map(|v| (v * scale).round()).collect();
             assert!(got == composite_q(&d, scale), "{depth:?} alpha {alpha}: pixels differ");
@@ -58,17 +58,17 @@ fn single_layer_native_export_strips_opaque_alpha() {
         let back = import("x.tiff", &r.bytes).unwrap().document;
         let (a, b) = (d.layers[0].surface().unwrap(), back.layers[0].surface().unwrap());
         assert_eq!(a.read_region(d.bounds()), b.read_region(d.bounds()), "alpha {alpha}");
-        let img = photosuite_codecs::decode(&r.bytes).unwrap();
+        let img = photosplice_codecs::decode(&r.bytes).unwrap();
         assert_eq!(img.layout().has_alpha(), alpha < 1.0);
     }
 
     let mut d = layered(8, 4, SampleType::U16, 1.0);
     d.layers.truncate(1);
     // A fractional edge exercises coverage rather than merely cropping raw samples.
-    d.layers[0].vector_mask = Some(photosuite_doc::VectorMask::new(photosuite_vector::shapes::rect(0.0, 0.0, 4.5, 4.0)));
+    d.layers[0].vector_mask = Some(photosplice_doc::VectorMask::new(photosplice_vector::shapes::rect(0.0, 0.0, 4.5, 4.0)));
     let r = export(&d, "x.png", &ExportOptions::default()).unwrap();
-    let img = photosuite_codecs::decode(&r.bytes).unwrap();
-    assert_eq!(img.sample_type(), photosuite_codecs::SampleType::U16);
+    let img = photosplice_codecs::decode(&r.bytes).unwrap();
+    assert_eq!(img.sample_type(), photosplice_codecs::SampleType::U16);
     assert!(img.layout().has_alpha());
     let got: Vec<f32> = img.to_rgba_f32().iter().map(|v| (v * 65535.0).round()).collect();
     assert_eq!(got, composite_q(&d, 65535.0), "active vector mask: pixels differ");
@@ -82,7 +82,7 @@ fn psd_merged_image_matches_composite_and_drops_near_opaque_alpha() {
         let file = document_to_psd(&d);
         assert_eq!(file.merged_has_alpha(), alpha < 0.99, "alpha {alpha}");
         let merged = merged_composite(&file).unwrap();
-        let want = photosuite_compose::flatten(&d).px;
+        let want = photosplice_compose::flatten(&d).px;
         let m = merged.iter().zip(&want).flat_map(|(a, b)| (0..4).map(move |i| (a[i] - b[i]).abs())).fold(0.0f32, f32::max);
         // Un-matting divides the 8-bit rounding error by alpha.
         assert!(m <= 1.0 / (255.0 * alpha) + 1e-4, "alpha {alpha}: max diff {m}");
@@ -94,8 +94,8 @@ fn flat_import_converts_rgb_in_bands() {
     // An opaque RGB file becomes an RGBA document (converted in ~32 MB bands: 36 MB here).
     let (w, h) = (4000u32, 3000u32);
     let px: Vec<u8> = (0..w * h * 3).map(|i| (i % 251) as u8).collect();
-    let img = photosuite_codecs::Image::from_u8(w, h, photosuite_codecs::ChannelLayout::Rgb, px.clone()).unwrap();
-    let bytes = photosuite_codecs::encode(&img, photosuite_codecs::Format::Png, &Default::default()).unwrap();
+    let img = photosplice_codecs::Image::from_u8(w, h, photosplice_codecs::ChannelLayout::Rgb, px.clone()).unwrap();
+    let bytes = photosplice_codecs::encode(&img, photosplice_codecs::Format::Png, &Default::default()).unwrap();
     let doc = import("x.png", &bytes).unwrap().document;
     let s = doc.layers[0].surface().unwrap();
     assert_eq!(s.format(), PixelFormat::RGBA8);

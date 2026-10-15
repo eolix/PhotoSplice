@@ -2,13 +2,13 @@
 //!
 //! - `brush.presets.importAbr` adds the presets of an `.abr` file (v1, v2, v6+) to the brush
 //!   library as one group (Brushes panel › Import Brushes…, Preset Manager). Parsing lives in
-//!   `photosuite-psd` (`abr`), the mapping onto [`BrushSettings`] in `photosuite-io` (`abr_map`).
+//!   `photosplice-psd` (`abr`), the mapping onto [`BrushSettings`] in `photosplice-io` (`abr_map`).
 //! - `gradient.presets.importGrd` adds the gradients of a `.grd` file (version 5) to the
 //!   Gradients panel as one group.
 //! - `style.presets.importAsl` adds the styles of an `.asl` layer-style library to the Styles
 //!   panel as one group, and its patterns (for pattern overlays) to the pattern library.
 //!
-//! [`BrushSettings`]: photosuite_paint::BrushSettings
+//! [`BrushSettings`]: photosplice_paint::BrushSettings
 
 use serde_json::{Value, json};
 
@@ -33,7 +33,7 @@ pub(crate) fn file_bytes(p: &Value, cmd: &str, what: &str) -> Result<(Vec<u8>, S
         if s.len() as u64 > MAX_FILE_BYTES / 3 * 4 + 4 {
             return Err(bad(cmd, "`data` is too large"));
         }
-        let bytes = photosuite_paint::tile::b64_decode(s).ok_or_else(|| bad(cmd, "`data` is not valid base64"))?;
+        let bytes = photosplice_paint::tile::b64_decode(s).ok_or_else(|| bad(cmd, "`data` is not valid base64"))?;
         return Ok((bytes, String::new()));
     }
     let path =
@@ -78,7 +78,7 @@ fn import_abr(s: &mut Session, p: &Value) -> Result<Value> {
             };
             ctx.check()?;
             let imp = ctx
-                .stage(0.05, 1.0, "Importing brushes", |ctl| photosuite_io::abr_map::read_abr_with(&bytes, &group, ctl))
+                .stage(0.05, 1.0, "Importing brushes", |ctl| photosplice_io::abr_map::read_abr_with(&bytes, &group, ctl))
                 .map_err(|e| if ctx.cancelled() { EngineError::Cancelled } else { bad(cmd, e) })?;
             Ok((group, imp))
         },
@@ -86,7 +86,7 @@ fn import_abr(s: &mut Session, p: &Value) -> Result<Value> {
     )
 }
 
-fn add_abr_presets(s: &mut Session, p: &Value, group: String, imp: photosuite_io::abr_map::AbrImport) -> Result<Value> {
+fn add_abr_presets(s: &mut Session, p: &Value, group: String, imp: photosplice_io::abr_map::AbrImport) -> Result<Value> {
     // Re-importing a file replaces its group instead of duplicating it.
     if p.get("replace").and_then(Value::as_bool).unwrap_or(true) {
         s.tools.presets.retain(|x| x.builtin || x.group != group);
@@ -102,7 +102,7 @@ fn add_abr_presets(s: &mut Session, p: &Value, group: String, imp: photosuite_io
     s.brush_presets_changed();
     if p.get("select").and_then(Value::as_bool).unwrap_or(false)
         && let Some(first) = names.first()
-        && let Some(pr) = photosuite_paint::presets::find(&s.tools.presets, first)
+        && let Some(pr) = photosplice_paint::presets::find(&s.tools.presets, first)
     {
         s.tools.brush = pr.brush.clone().picked_over(&s.tools.brush);
     }
@@ -156,14 +156,14 @@ fn import_asl(s: &mut Session, p: &Value) -> Result<Value> {
         None if !stem.is_empty() => stem,
         None => "Imported Styles".to_string(),
     };
-    let (styles, patterns) = photosuite_io::asl_map::read_asl(&bytes).map_err(|e| bad(cmd, e))?;
+    let (styles, patterns) = photosplice_io::asl_map::read_asl(&bytes).map_err(|e| bad(cmd, e))?;
     if styles.is_empty() {
         return Err(bad(cmd, "the file holds no styles"));
     }
     let mut warnings = Vec::new();
     let empty = styles.iter().filter(|st| st.effects.is_empty() && st.blend.is_none() && st.fill_opacity.is_none()).count();
     if empty > 0 {
-        warnings.push(format!("{empty} style(s) have no effects PhotoSuite can draw"));
+        warnings.push(format!("{empty} style(s) have no effects PhotoSplice can draw"));
     }
     let mut items: Vec<StylePreset> = Vec::new();
     for st in styles {
@@ -219,9 +219,9 @@ fn lab_to_rgb([l, a, b]: [f32; 3]) -> [f32; 3] {
     [gamma(r), gamma(g), gamma(bb)]
 }
 
-fn stop_color(c: photosuite_psd::grd::GrdColor) -> crate::presets::gradients::StopColor {
+fn stop_color(c: photosplice_psd::grd::GrdColor) -> crate::presets::gradients::StopColor {
     use crate::presets::gradients::StopColor;
-    use photosuite_psd::grd::GrdColor;
+    use photosplice_psd::grd::GrdColor;
     let clamp = |c: [f32; 3]| StopColor::Rgb(c.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }));
     match c {
         GrdColor::Foreground => StopColor::Foreground,
@@ -244,7 +244,7 @@ fn import_grd(s: &mut Session, p: &Value) -> Result<Value> {
         None if !stem.is_empty() => stem,
         None => "Imported Gradients".to_string(),
     };
-    let grads = photosuite_psd::grd::parse(&bytes).map_err(|e| bad(cmd, format!("not a readable Photoshop gradient file: {e}")))?;
+    let grads = photosplice_psd::grd::parse(&bytes).map_err(|e| bad(cmd, format!("not a readable Photoshop gradient file: {e}")))?;
     let mut warnings = Vec::new();
     let mut items = Vec::new();
     let (mut noise, mut midpoints) = (0, false);
@@ -271,7 +271,7 @@ fn import_grd(s: &mut Session, p: &Value) -> Result<Value> {
         warnings.push("colour and opacity midpoints other than 50 % are drawn at 50 %".to_string());
     }
     if items.is_empty() {
-        return Err(bad(cmd, "the file holds no gradients PhotoSuite can use (noise gradients only)"));
+        return Err(bad(cmd, "the file holds no gradients PhotoSplice can use (noise gradients only)"));
     }
     let names: Vec<String> = items.iter().map(|g| g.name.clone()).collect();
     let st = &mut s.presets;
@@ -286,8 +286,8 @@ fn import_grd(s: &mut Session, p: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_psd::abr::{AbrSample, LegacyBrush, LegacyTip, write_v6, write_v12};
-    use photosuite_psd::descriptor::{Descriptor, UnicodeString, Value as DV};
+    use photosplice_psd::abr::{AbrSample, LegacyBrush, LegacyTip, write_v6, write_v12};
+    use photosplice_psd::descriptor::{Descriptor, UnicodeString, Value as DV};
 
     fn abr_v2() -> Vec<u8> {
         let tip = AbrSample { id: String::new(), width: 6, height: 4, depth: 8, data: vec![255; 24] };
@@ -311,14 +311,14 @@ mod tests {
     fn import_adds_a_group_and_paints() {
         let mut s = Session::new();
         let before = s.tools.presets.len();
-        let data = photosuite_paint::tile::b64_encode(&abr_v2());
+        let data = photosplice_paint::tile::b64_encode(&abr_v2());
         let r = s.execute("brush.presets.importAbr", json!({"data": data, "group": "Legacy", "select": true})).unwrap();
         assert_eq!(r["count"], 2);
         // The name clashing with the built-in Hard Round is made unique.
         assert_eq!(r["imported"], json!(["Hard Round 2", "9 px Round"]));
         assert_eq!(s.tools.presets.len(), before + 2);
         assert!(s.tools.presets.iter().filter(|p| p.group == "Legacy").all(|p| !p.builtin));
-        assert!(matches!(s.tools.brush.tip, photosuite_paint::TipShape::Sampled(_)));
+        assert!(matches!(s.tools.brush.tip, photosplice_paint::TipShape::Sampled(_)));
         // Re-import replaces the group.
         s.execute("brush.presets.importAbr", json!({"data": data, "group": "Legacy"})).unwrap();
         assert_eq!(s.tools.presets.len(), before + 2);
@@ -351,10 +351,10 @@ mod tests {
             json!({"data": "%%%not base64"}),
             json!({"data": ""}),
             json!({"data": "AAAA"}),
-            json!({"data": photosuite_paint::tile::b64_encode(b"8BPS\0\x01junk")}),
-            json!({"data": photosuite_paint::tile::b64_encode(&abr_v2()), "group": 5}),
-            json!({"data": photosuite_paint::tile::b64_encode(&abr_v2()), "group": "  "}),
-            json!({"data": photosuite_paint::tile::b64_encode(&abr_v2()[..20])}),
+            json!({"data": photosplice_paint::tile::b64_encode(b"8BPS\0\x01junk")}),
+            json!({"data": photosplice_paint::tile::b64_encode(&abr_v2()), "group": 5}),
+            json!({"data": photosplice_paint::tile::b64_encode(&abr_v2()), "group": "  "}),
+            json!({"data": photosplice_paint::tile::b64_encode(&abr_v2()[..20])}),
         ] {
             assert!(s.execute("brush.presets.importAbr", p.clone()).is_err(), "{p}");
         }
@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn grd_import_adds_a_gradient_group() {
         use crate::presets::gradients::StopColor;
-        use photosuite_psd::grd::{GrdColor, GrdGradient, GrdStop, write};
+        use photosplice_psd::grd::{GrdColor, GrdGradient, GrdStop, write};
         let grads = vec![
             GrdGradient {
                 name: "Ember".into(),
@@ -378,7 +378,7 @@ mod tests {
             GrdGradient { name: "Static".into(), noise: true, ..Default::default() },
         ];
         let mut s = Session::new();
-        let data = photosuite_paint::tile::b64_encode(&write(&grads));
+        let data = photosplice_paint::tile::b64_encode(&write(&grads));
         let r = s.execute("gradient.presets.importGrd", json!({"data": data, "group": "Fire"})).unwrap();
         assert_eq!(r["imported"], json!(["Ember"]));
         assert_eq!(r["warnings"].as_array().map(Vec::len), Some(1));
@@ -389,10 +389,10 @@ mod tests {
         let n = s.presets.gradients.len();
         s.execute("gradient.presets.importGrd", json!({"data": data, "group": "Fire"})).unwrap();
         assert_eq!(s.presets.gradients.len(), n);
-        for p in [json!({}), json!({"data": "@@"}), json!({"data": photosuite_paint::tile::b64_encode(b"8BGR\0\x03")}), json!({"path": "/nope.grd"})] {
+        for p in [json!({}), json!({"data": "@@"}), json!({"data": photosplice_paint::tile::b64_encode(b"8BGR\0\x03")}), json!({"path": "/nope.grd"})] {
             assert!(s.execute("gradient.presets.importGrd", p.clone()).is_err(), "{p}");
         }
-        let only_noise = photosuite_paint::tile::b64_encode(&write(&grads[1..]));
+        let only_noise = photosplice_paint::tile::b64_encode(&write(&grads[1..]));
         assert!(s.execute("gradient.presets.importGrd", json!({"data": only_noise})).is_err());
     }
 
@@ -414,19 +414,19 @@ mod tests {
 
     #[test]
     fn asl_libraries_import_as_a_styles_group() {
-        use photosuite_psd::asl::{AslFile, AslStyle, write};
-        let fx = photosuite_io::effects_map::write_lfx2(true, &[photosuite_doc::Effect::default_drop_shadow()]);
-        let (lefx, _) = photosuite_psd::descriptor::VersionedDescriptor::parse_prefix(&fx[4..]).unwrap();
+        use photosplice_psd::asl::{AslFile, AslStyle, write};
+        let fx = photosplice_io::effects_map::write_lfx2(true, &[photosplice_doc::Effect::default_drop_shadow()]);
+        let (lefx, _) = photosplice_psd::descriptor::VersionedDescriptor::parse_prefix(&fx[4..]).unwrap();
         let st = Descriptor::new("Styl").with("Lefx", DV::Descriptor(lefx.descriptor));
         let styles = ["Gold", "Gold", ""].map(|n| AslStyle { name: n.into(), id: String::new(), style: st.clone() }).to_vec();
-        let data = photosuite_paint::tile::b64_encode(&write(&AslFile { patterns: Vec::new(), styles }).unwrap());
+        let data = photosplice_paint::tile::b64_encode(&write(&AslFile { patterns: Vec::new(), styles }).unwrap());
         let mut s = Session::new();
         let r = s.execute("style.presets.importAsl", json!({"data": data, "group": "Metals"})).unwrap();
         assert_eq!(r["imported"], json!(["Gold", "Gold 2", "Style"]), "names kept unique");
         let g = s.presets.styles.iter().find(|g| g.name == "Metals").unwrap();
-        assert!(matches!(g.items[0].effects.as_slice(), [photosuite_doc::Effect::DropShadow(_)]));
+        assert!(matches!(g.items[0].effects.as_slice(), [photosplice_doc::Effect::DropShadow(_)]));
         // Bad input is an error, not a crash.
-        for p in [json!({}), json!({"data": "%%%"}), json!({"data": photosuite_paint::tile::b64_encode(b"8BSL")}), json!({"data": data, "group": ""})] {
+        for p in [json!({}), json!({"data": "%%%"}), json!({"data": photosplice_paint::tile::b64_encode(b"8BSL")}), json!({"data": data, "group": ""})] {
             assert!(s.execute("style.presets.importAsl", p.clone()).is_err(), "{p}");
         }
     }

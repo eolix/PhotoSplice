@@ -6,8 +6,8 @@
 //! Knots are addressed as `[subpath, knot]`. Every edit validates its indices and returns an
 //! error message instead of panicking.
 
-use photosuite_doc::{Knot, Path};
-use photosuite_geom::Point;
+use photosplice_doc::{Knot, Path};
+use photosplice_geom::Point;
 
 /// One of a knot's two direction handles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -271,7 +271,7 @@ pub fn hit(path: &Path, p: Point, tol: f64, handles: &[([usize; 2], Handle)]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_doc::Subpath;
+    use photosplice_doc::Subpath;
 
     fn tri() -> Path {
         Path::new(vec![Subpath::polygon(&[(0.0, 0.0), (100.0, 0.0), (50.0, 80.0)])])
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn adding_an_anchor_keeps_the_curve_and_deleting_it_joins_the_segments() {
-        use photosuite_doc::{Subpath, vector::PathOp};
+        use photosplice_doc::{Subpath, vector::PathOp};
         let a = Knot::smooth(Point::new(0.0, 0.0), Point::new(0.0, 0.0), Point::new(0.0, 40.0));
         let b = Knot::smooth(Point::new(100.0, 0.0), Point::new(100.0, 40.0), Point::new(100.0, 0.0));
         let mut p = Path::new(vec![Subpath { closed: false, knots: vec![a, b], op: PathOp::Combine }]);

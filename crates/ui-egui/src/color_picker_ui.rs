@@ -8,7 +8,7 @@
 use egui::{Color32, Mesh, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::{Map, Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::state::DialogKind;
 use crate::theme::Tokens;
 use crate::widgets;
@@ -42,7 +42,7 @@ fn lab_locate(mode: &str, lab: [f32; 3]) -> (f32, f32, f32) {
 }
 
 fn lab_rgb(lab: [f32; 3]) -> [f32; 3] {
-    photosuite_color::convert::lab_to_srgb(lab).map(|c| c.clamp(0.0, 1.0))
+    photosplice_color::convert::lab_to_srgb(lab).map(|c| c.clamp(0.0, 1.0))
 }
 
 pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
@@ -135,7 +135,7 @@ fn c32(c: [f32; 3]) -> Color32 {
 }
 
 /// Open the picker for the foreground or background colour.
-pub fn open(app: &mut PhotosuiteApp, target: &str) -> u64 {
+pub fn open(app: &mut PhotospliceApp, target: &str) -> u64 {
     let c = if target == "background" { app.session.tools.background } else { app.session.tools.foreground };
     let rgb = [c[0], c[1], c[2]];
     let hsv = rgb_to_hsv(rgb);
@@ -152,7 +152,7 @@ pub fn open(app: &mut PhotosuiteApp, target: &str) -> u64 {
 
 /// Open the picker on `rgb` for something other than the tool colours: OK runs `command` with
 /// `params` plus `"color": "#rrggbb"` (e.g. a gradient stop's colour).
-pub fn open_for_command(app: &mut PhotosuiteApp, label: &str, rgb: [f32; 3], command: &str, params: Value) -> u64 {
+pub fn open_for_command(app: &mut PhotospliceApp, label: &str, rgb: [f32; 3], command: &str, params: Value) -> u64 {
     let hsv = rgb_to_hsv(rgb);
     let mut f = Map::new();
     f.insert("__colorPicker".into(), json!("command"));
@@ -172,13 +172,13 @@ pub fn owns(f: &Map<String, Value>) -> bool {
 }
 
 /// The Color Picker, when it is the top dialog (another dialog opened over it takes the input).
-pub fn top(app: &PhotosuiteApp) -> Option<u64> {
+pub fn top(app: &PhotospliceApp) -> Option<u64> {
     app.ui.dialogs.last().filter(|d| owns(&d.fields)).map(|d| d.id)
 }
 
 /// Eyedropper: the top Color Picker's new colour becomes the image's composite colour at document
 /// point (x, y). Off the image or over transparency nothing changes.
-pub fn sample_at(app: &mut PhotosuiteApp, x: f64, y: f64) {
+pub fn sample_at(app: &mut PhotospliceApp, x: f64, y: f64) {
     let Some(id) = top(app) else { return };
     let Some(rgb) = crate::canvas::composite_color(app, x, y) else { return };
     if let Some(d) = app.ui.dialog_mut(id) {
@@ -219,8 +219,8 @@ pub fn current(f: &Map<String, Value>) -> Components {
     Components {
         rgb,
         hsv: kept(f, "__hsv", rgb, |h| hsv_to_rgb(h[0], h[1], h[2])).unwrap_or_else(|| rgb_to_hsv(rgb)),
-        lab: kept(f, "__lab", rgb, photosuite_color::convert::lab_to_srgb).unwrap_or_else(|| photosuite_color::convert::srgb_to_lab(rgb)),
-        cmyk: kept(f, "__cmyk", rgb, photosuite_color::convert::cmyk_to_rgb).unwrap_or_else(|| photosuite_color::convert::rgb_to_cmyk(rgb)),
+        lab: kept(f, "__lab", rgb, photosplice_color::convert::lab_to_srgb).unwrap_or_else(|| photosplice_color::convert::srgb_to_lab(rgb)),
+        cmyk: kept(f, "__cmyk", rgb, photosplice_color::convert::cmyk_to_rgb).unwrap_or_else(|| photosplice_color::convert::rgb_to_cmyk(rgb)),
     }
 }
 
@@ -487,7 +487,7 @@ fn fields(ui: &mut egui::Ui, f: &mut Map<String, Value>, mode: &str, now: &Compo
                 if widgets::value_field(ui, &mut x, 0.0..=100.0, "", 46.0).changed() {
                     let mut k = cmyk;
                     k[i] = x / 100.0;
-                    edit = Some((photosuite_color::convert::cmyk_to_rgb(k).map(|c| c.clamp(0.0, 1.0)), Keep::Cmyk(k)));
+                    edit = Some((photosplice_color::convert::cmyk_to_rgb(k).map(|c| c.clamp(0.0, 1.0)), Keep::Cmyk(k)));
                 }
                 unit(ui, "%");
                 ui.end_row();
@@ -503,7 +503,7 @@ fn fields(ui: &mut egui::Ui, f: &mut Map<String, Value>, mode: &str, now: &Compo
 }
 
 /// OK: set the foreground or background colour.
-pub fn confirm(app: &mut PhotosuiteApp, f: &Map<String, Value>) -> Result<Value, String> {
+pub fn confirm(app: &mut PhotospliceApp, f: &Map<String, Value>) -> Result<Value, String> {
     let target = f.get("__colorPicker").and_then(Value::as_str).unwrap_or("foreground");
     let color = f.get("color").and_then(Value::as_str).unwrap_or("#000000");
     if let Some(cmd) = f.get("__command").and_then(Value::as_str) {
@@ -538,7 +538,7 @@ mod tests {
             },
             f,
         );
-        PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
         h.run_steps(2);
         h
     }
@@ -576,13 +576,13 @@ mod tests {
     #[test]
     fn lab_and_cmyk_fields_take_multi_digit_values() {
         let base = parse_hex("#336699").unwrap();
-        let lab = photosuite_color::convert::srgb_to_lab(base);
-        let cmyk = photosuite_color::convert::rgb_to_cmyk(base);
+        let lab = photosplice_color::convert::srgb_to_lab(base);
+        let cmyk = photosplice_color::convert::rgb_to_cmyk(base);
         // Fields in order: H S B R G B (left column), then L a b C M Y K (right).
         for (field, typed, want) in [
-            (6, "60", photosuite_color::convert::lab_to_srgb([60.0, lab[1], lab[2]])),
-            (7, "30", photosuite_color::convert::lab_to_srgb([lab[0], 30.0, lab[2]])),
-            (9, "40", photosuite_color::convert::cmyk_to_rgb([0.4, cmyk[1], cmyk[2], cmyk[3]])),
+            (6, "60", photosplice_color::convert::lab_to_srgb([60.0, lab[1], lab[2]])),
+            (7, "30", photosplice_color::convert::lab_to_srgb([lab[0], 30.0, lab[2]])),
+            (9, "40", photosplice_color::convert::cmyk_to_rgb([0.4, cmyk[1], cmyk[2], cmyk[3]])),
         ] {
             let mut h = picker("#336699");
             h.query_all_by_role(Role::SpinButton).nth(field).unwrap().click();
@@ -631,7 +631,7 @@ mod tests {
         f.insert("color".into(), json!("#808080"));
         f.insert("__hsv".into(), json!([200.0, 0.0, 128.0 / 255.0]));
         assert_eq!(current(&f).hsv[0], 200.0);
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         let id = open(&mut app, "background");
         let d = app.ui.dialog_mut(id).unwrap();
         d.fields.insert("color".into(), json!("#3366cc"));
@@ -640,13 +640,13 @@ mod tests {
         assert_eq!(hex([app.session.tools.background[0], app.session.tools.background[1], app.session.tools.background[2]]), "#3366cc");
     }
 
-    fn dialog_color(app: &PhotosuiteApp, id: u64) -> &str {
+    fn dialog_color(app: &PhotospliceApp, id: u64) -> &str {
         app.ui.dialogs.iter().find(|d| d.id == id).and_then(|d| d.fields.get("color")).and_then(Value::as_str).unwrap()
     }
 
     #[test]
     fn the_top_picker_samples_the_image() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         app.run("file.new", json!({"width": 40, "height": 20, "background": "transparent"})).unwrap();
         app.run("shape.create", json!({"kind": "rect", "rect": [0, 0, 20, 20], "fill": "#ff0000"})).unwrap();
         app.run("shape.create", json!({"kind": "rect", "rect": [20, 0, 10, 20], "fill": "#00ff00"})).unwrap();

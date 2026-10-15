@@ -8,8 +8,8 @@
 //! The rects drawn each frame are recorded ([`recorded`]) for tests and automation.
 
 use egui::{Align2, FontId, Galley, Painter, Pos2, Rect, Sense, Shape, Stroke, pos2, vec2};
-use photosuite_color::BlendMode;
-use photosuite_doc::Layer;
+use photosplice_color::BlendMode;
+use photosplice_doc::Layer;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -194,7 +194,7 @@ pub fn label(painter: &Painter, x: f32, cy: f32, right: f32, text: &str, font: F
 }
 
 /// The Layers panel's own items at the top of its panel menu (Photoshop's flyout).
-pub fn panel_menu(app: &mut crate::PhotosuiteApp, ui: &mut egui::Ui) {
+pub fn panel_menu(app: &mut crate::PhotospliceApp, ui: &mut egui::Ui) {
     let can = app.session.is_enabled("layer.setExpanded");
     if ui.add_enabled(can, egui::Button::new(tl!("Collapse All Groups"))).clicked() {
         if let Err(e) = app.run("layer.setExpanded", json!({"all": true, "expanded": false})) {

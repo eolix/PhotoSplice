@@ -1,6 +1,6 @@
 //! Menu commands and tools hidden by default.
 //!
-//! The engine carries Photoshop's full menu tree; PhotoSuite shows a smaller set by default.
+//! The engine carries Photoshop's full menu tree; PhotoSplice shows a smaller set by default.
 //! These are the items hidden out of the box, re-showable in Edit › Menus and Edit › Toolbar
 //! ("Show All Menu Items" clears the lot).
 //!
@@ -22,7 +22,7 @@ pub const HIDDEN_MENU_ITEMS: &[&str] = &[
     "edit.toolbar",
     "edit.transform.skew",
     "file.automate.batch",
-    // A droplet only ran through the command-line tool, which PhotoSuite no longer ships.
+    // A droplet only ran through the command-line tool, which PhotoSplice no longer ships.
     "file.automate.createDroplet",
     "file.automate.contactSheetII",
     "file.automate.photomerge",

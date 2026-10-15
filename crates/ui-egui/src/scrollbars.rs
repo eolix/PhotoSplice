@@ -295,15 +295,15 @@ mod tests {
         use serde_json::json;
 
         use super::super::*;
-        use crate::PhotosuiteApp;
+        use crate::PhotospliceApp;
 
-        fn harness(overscroll: bool) -> Harness<'static, PhotosuiteApp> {
-            let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        fn harness(overscroll: bool) -> Harness<'static, PhotospliceApp> {
+            let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
             app.run("file.new", json!({"width": 2000, "height": 1500})).unwrap();
             app.run("prefs.set", json!({"path": "tools.overscroll", "value": overscroll})).unwrap();
             app.sync_views();
             let mut h = Harness::builder().with_size(vec2(1000.0, 700.0)).build_ui_state(
-                |ui, app: &mut PhotosuiteApp| {
+                |ui, app: &mut PhotospliceApp| {
                     let ctx = ui.ctx().clone();
                     if !ctx.fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                         return;
@@ -312,16 +312,16 @@ mod tests {
                 },
                 app,
             );
-            PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::default());
+            PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::default());
             h.run_steps(4);
             h
         }
 
-        fn view(h: &Harness<'static, PhotosuiteApp>) -> View {
+        fn view(h: &Harness<'static, PhotospliceApp>) -> View {
             h.state().ui.views[0].clone()
         }
 
-        fn set_view(h: &mut Harness<'static, PhotosuiteApp>, zoom: f32, center: [f32; 2]) {
+        fn set_view(h: &mut Harness<'static, PhotospliceApp>, zoom: f32, center: [f32; 2]) {
             let v = &mut h.state_mut().ui.views[0];
             v.zoom = zoom;
             v.center = center;
@@ -329,7 +329,7 @@ mod tests {
         }
 
         /// Centre of the horizontal thumb, in screen points.
-        fn h_thumb(h: &Harness<'static, PhotosuiteApp>) -> Option<Pos2> {
+        fn h_thumb(h: &Harness<'static, PhotospliceApp>) -> Option<Pos2> {
             let r = h.state().last_canvas_rect;
             let v = view(h);
             let s = Span::of(v.doc_size[0] as f32, v.center[0], r.width(), v.zoom)?;
@@ -341,7 +341,7 @@ mod tests {
             Some(pos2(bar.left() + at + len / 2.0, bar.center().y))
         }
 
-        fn click(h: &mut Harness<'static, PhotosuiteApp>, p: Pos2) {
+        fn click(h: &mut Harness<'static, PhotospliceApp>, p: Pos2) {
             h.event(egui::Event::PointerMoved(p));
             h.run_steps(1);
             h.event(egui::Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });

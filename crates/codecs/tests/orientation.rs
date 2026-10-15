@@ -3,7 +3,7 @@
 
 mod common;
 use common::*;
-use photosuite_codecs::*;
+use photosplice_codecs::*;
 use proptest::prelude::{any, prop_assert, prop_assert_eq, proptest};
 
 /// A minimal EXIF (TIFF-structured) block: a filler tag, then Orientation.
@@ -371,7 +371,7 @@ fn every_layout_and_depth_orients_and_inverts() {
 }
 
 /// #285 performance budget: turning a 24 MP photo upright on open adds ≤ 50 ms
-/// (release build: `cargo test --release -p photosuite-codecs --test orientation -- --ignored`).
+/// (release build: `cargo test --release -p photosplice-codecs --test orientation -- --ignored`).
 #[test]
 #[ignore = "timing; run in release"]
 fn rotating_24_mp_is_fast() {
@@ -483,7 +483,7 @@ fn upright_exif_keeps_every_other_byte() {
         let ifd_end = 8 + 2 + 4 * 12 + 4;
         let make_at = ifd_end as u32;
         let sub_at = make_at + 12;
-        let mut tail = b"PhotoSuiteCo".to_vec();
+        let mut tail = b"PhotoSpliceCo".to_vec();
         // Sub-IFD: one DateTimeOriginal-ish SHORT entry, then next-IFD 0.
         tail.extend_from_slice(&if big { 1u16.to_be_bytes() } else { 1u16.to_le_bytes() });
         tail.extend_from_slice(&if big { 0x9000u16.to_be_bytes() } else { 0x9000u16.to_le_bytes() });
@@ -504,7 +504,7 @@ fn upright_exif_keeps_every_other_byte() {
         assert_eq!(&fixed[..value], &prefixed[..value]);
         assert_eq!(&fixed[value + 2..], &prefixed[value + 2..]);
         // The offset-based Make string and the inline Software tag are intact.
-        assert_eq!(&fixed[6 + make_at as usize..][..12], b"PhotoSuiteCo");
+        assert_eq!(&fixed[6 + make_at as usize..][..12], b"PhotoSpliceCo");
         assert!(fixed.windows(4).any(|w| w == b"PC1\0"));
     }
 }

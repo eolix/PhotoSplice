@@ -1,7 +1,7 @@
 //! Colour-managed canvas display cost on a 36 MP document (#46).
 //!
 //! ```sh
-//! cargo run --release -p photosuite-engine --example bench_display -- [--size 7360x4912] [--reps 5]
+//! cargo run --release -p photosplice-engine --example bench_display -- [--size 7360x4912] [--reps 5]
 //! ```
 //!
 //! Times, per profile: the composite (shared by every path), the CPU canvas conversion before
@@ -11,10 +11,10 @@
 
 use std::time::Instant;
 
-use photosuite_cms::Builtin;
-use photosuite_color::{Color, ColorMode, SampleType};
-use photosuite_doc::{Document, Size};
-use photosuite_engine::Session;
+use photosplice_cms::Builtin;
+use photosplice_color::{Color, ColorMode, SampleType};
+use photosplice_doc::{Document, Size};
+use photosplice_engine::Session;
 
 fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
@@ -54,7 +54,7 @@ fn main() {
         d.icc_profile = profile.map(|b| b.profile().to_bytes());
         let s = Session::new();
         let mut buf = None;
-        let composite = time(reps, || buf = Some(photosuite_compose::flatten(&d)));
+        let composite = time(reps, || buf = Some(photosplice_compose::flatten(&d)));
         let buf = buf.expect("composited");
         let before = time(reps, || {
             std::hint::black_box(buf.to_rgba8());

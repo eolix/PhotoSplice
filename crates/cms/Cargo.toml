@@ -1,5 +1,5 @@
 [package]
-name = "photosuite-cms"
+name = "photosplice-cms"
 description = "Pure-Rust ICC v2/v4 colour management: profile parsing and writing, transforms, rendering intents, black point compensation"
 version.workspace = true
 edition.workspace = true

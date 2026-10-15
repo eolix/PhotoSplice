@@ -1,11 +1,11 @@
-//! Layer styles (effects): data only. Rendering lives in `photosuite-compose`,
-//! PSD mapping in `photosuite-io`.
+//! Layer styles (effects): data only. Rendering lives in `photosplice-compose`,
+//! PSD mapping in `photosplice-io`.
 //!
 //! Angles are in degrees, counter-clockwise from 3 o'clock, and give the
 //! direction the light comes *from* (Photoshop convention). Sizes and
 //! distances are in pixels, opacities and percentages in `0..=1`.
 
-use photosuite_color::{BlendMode, Color};
+use photosplice_color::{BlendMode, Color};
 use serde::{Deserialize, Serialize};
 
 use crate::adjust::CurvePoint;

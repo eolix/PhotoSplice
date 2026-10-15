@@ -2,16 +2,16 @@
 
 use egui::{Event, Modifiers, PointerButton, Pos2, pos2, vec2};
 use egui_kittest::Harness;
-use photosuite_doc::{LayerContent, LayerId};
+use photosplice_doc::{LayerContent, LayerId};
 use serde_json::json;
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 
-fn harness(session: photosuite_engine::Session, ppp: f32) -> Harness<'static, PhotosuiteApp> {
+fn harness(session: photosplice_engine::Session, ppp: f32) -> Harness<'static, PhotospliceApp> {
     let mut h =
         Harness::builder().with_size(vec2(1440.0, 900.0)).with_pixels_per_point(ppp).with_step_dt(1.0 / 60.0).with_max_steps(64).build_eframe(move |cc| {
-            PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-            PhotosuiteApp::new(session, crate::Services::default())
+            PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+            PhotospliceApp::new(session, crate::Services::default())
         });
     let ctx = h.ctx.clone();
     let (req, _rx) = crate::control::ControlRequest::new("ui.set", json!({"dock": {"collapsed": ["color", "properties", "history", "navigator"]}}));
@@ -20,7 +20,7 @@ fn harness(session: photosuite_engine::Session, ppp: f32) -> Harness<'static, Ph
     h
 }
 
-fn click(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2, button: PointerButton) {
+fn click(h: &mut Harness<'_, PhotospliceApp>, at: Pos2, button: PointerButton) {
     h.hover_at(at);
     h.step();
     for pressed in [true, false] {
@@ -30,7 +30,7 @@ fn click(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2, button: PointerButton) {
     h.run_steps(3);
 }
 
-fn double_click(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2) {
+fn double_click(h: &mut Harness<'_, PhotospliceApp>, at: Pos2) {
     for _ in 0..40 {
         h.step();
     }
@@ -38,23 +38,23 @@ fn double_click(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2) {
     click(h, at, PointerButton::Primary);
 }
 
-fn row(h: &Harness<'_, PhotosuiteApp>, id: u64) -> super::RowRects {
+fn row(h: &Harness<'_, PhotospliceApp>, id: u64) -> super::RowRects {
     super::recorded(&h.ctx).into_iter().find(|r| r.layer == id).expect("layer row drawn")
 }
 
-fn thumbnail(h: &Harness<'_, PhotosuiteApp>, id: u64) -> Pos2 {
+fn thumbnail(h: &Harness<'_, PhotospliceApp>, id: u64) -> Pos2 {
     let r = row(h, id).row;
     // Top-level Pro row: 6 pt padding, 28 pt eye column, 24 pt layer thumbnail.
     pos2(r.left() + 6.0 + 28.0 + 12.0, r.center().y)
 }
 
-fn session() -> photosuite_engine::Session {
-    let mut s = photosuite_engine::Session::new();
+fn session() -> photosplice_engine::Session {
+    let mut s = photosplice_engine::Session::new();
     s.execute("file.new", json!({"width": 640, "height": 480})).unwrap();
     s
 }
 
-fn text(h: &Harness<'_, PhotosuiteApp>, id: u64) -> String {
+fn text(h: &Harness<'_, PhotospliceApp>, id: u64) -> String {
     match &h.state().session.active().unwrap().doc.layer(LayerId(id)).unwrap().content {
         LayerContent::Text(t) => t.text.clone(),
         _ => panic!("expected text layer"),
@@ -111,7 +111,7 @@ fn text_name_still_renames_and_mask_double_click_does_not_edit_text() {
 
 #[test]
 fn edit_type_command_rejects_missing_or_non_type_layers_without_changes() {
-    let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
     let ctx = egui::Context::default();
     for has_document in [false, true] {
         if has_document {
@@ -135,8 +135,8 @@ fn reentering_type_edit_keeps_the_session_and_cancel_restores_cached_pixels() {
         let mut doc = (*st.doc).clone();
         let LayerContent::Text(t) = &mut doc.layer_mut(LayerId(id)).unwrap().content else { panic!("text") };
         let mut moved = t.clone();
-        moved.transform = photosuite_geom::Affine::translate(350.0, 280.0);
-        let cache = photosuite_text::shared().lock().unwrap().render(&moved, 72.0, photosuite_color::PixelFormat::RGBA8).1.surface;
+        moved.transform = photosplice_geom::Affine::translate(350.0, 280.0);
+        let cache = photosplice_text::shared().lock().unwrap().render(&moved, 72.0, photosplice_color::PixelFormat::RGBA8).1.surface;
         t.cache = Some(cache.clone());
         st.doc = std::sync::Arc::new(doc);
         st.revision += 1;

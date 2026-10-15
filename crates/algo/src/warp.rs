@@ -1,5 +1,5 @@
 //! Mesh warps (Edit › Transform › Warp, smart-object warps): resampling a surface through any
-//! forward map, such as a [`photosuite_geom::warp::Warp`] (bicubic Bezier patches or a preset).
+//! forward map, such as a [`photosplice_geom::warp::Warp`] (bicubic Bezier patches or a preset).
 //!
 //! The source rectangle is subdivided into a fine grid whose vertices are mapped forward; each
 //! cell's two triangles are rasterized in destination space with the source position
@@ -9,9 +9,9 @@
 //! maps (the identity included) are reproduced exactly. Where the warp folds over itself the
 //! later (lower-right) cell wins. Work is split per destination tile (parallel on native).
 
-use photosuite_color::PixelFormat;
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_color::PixelFormat;
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 
 use crate::transform::Interp;
 
@@ -30,7 +30,7 @@ const MAX_CELLS: usize = 512;
 /// through `warp` (source space) and then the affine `t` (source → document) in one resampling
 /// pass, an exact shift for whole-pixel translations (so conversions and re-renders are
 /// lossless), bicubic otherwise. Shared by the engine's re-render and PSD export's filter cache.
-pub fn place_source(src: &Surface, src_rect: Rect, t: &photosuite_geom::Affine, warp: Option<&photosuite_geom::warp::Warp>) -> Surface {
+pub fn place_source(src: &Surface, src_rect: Rect, t: &photosplice_geom::Affine, warp: Option<&photosplice_geom::warp::Warp>) -> Surface {
     let [a, b, c, d, e, f] = t.m;
     if let Some(w) = warp.filter(|w| !w.is_identity()) {
         let map = |x: f64, y: f64| {
@@ -48,7 +48,7 @@ pub fn place_source(src: &Surface, src_rect: Rect, t: &photosuite_geom::Affine, 
 
 /// [`place_source`] through a projective map `h` (source → document; Distort, Perspective): the
 /// warp first (in source space), then `h`.
-pub fn place_source_projective(src: &Surface, src_rect: Rect, h: &crate::transform::Homography, warp: Option<&photosuite_geom::warp::Warp>) -> Surface {
+pub fn place_source_projective(src: &Surface, src_rect: Rect, h: &crate::transform::Homography, warp: Option<&photosplice_geom::warp::Warp>) -> Surface {
     if let Some(w) = warp.filter(|w| !w.is_identity()) {
         let map = |x: f64, y: f64| {
             let (u, v) = w.map(x, y);
@@ -125,7 +125,7 @@ pub fn warp_triangles(src: &Surface, src_rect: Rect, verts: &[([f64; 2], [f64; 2
     // Triangles: (vertex indices), binned per destination tile.
     let tiles: Vec<Rect> = dst.tiles().map(|tc| tc.rect().intersect(&dst)).filter(|r| !r.is_empty()).collect();
     let mut bins: Vec<Vec<[usize; 3]>> = vec![Vec::new(); tiles.len()];
-    let ts = photosuite_geom::TILE_SIZE;
+    let ts = photosplice_geom::TILE_SIZE;
     // Bin origin on the tile grid (the first tile is clipped to `dst`, so its x0/y0 may not be).
     let tx0 = tiles.iter().map(|t| t.x0).min().unwrap_or(0).div_euclid(ts) * ts;
     let ty0 = tiles.iter().map(|t| t.y0).min().unwrap_or(0).div_euclid(ts) * ts;
@@ -326,8 +326,8 @@ pub fn warp_mesh_gray(s: &Surface, f: &(dyn Fn(f64, f64) -> (f64, f64) + Sync), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_color::{ColorMode, SampleType};
-    use photosuite_geom::warp::{BezierMesh, Warp, WarpStyle};
+    use photosplice_color::{ColorMode, SampleType};
+    use photosplice_geom::warp::{BezierMesh, Warp, WarpStyle};
 
     fn sample(s: SampleType) -> Surface {
         let mut surf = Surface::new(PixelFormat::new(ColorMode::Rgb, s, true));

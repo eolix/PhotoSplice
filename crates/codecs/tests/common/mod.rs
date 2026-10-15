@@ -4,7 +4,7 @@
 
 pub mod tiffgen;
 
-use photosuite_codecs::*;
+use photosplice_codecs::*;
 
 /// SplitMix64 — tiny deterministic PRNG.
 pub struct Rng(u64);

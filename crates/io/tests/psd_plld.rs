@@ -4,12 +4,12 @@
 
 use std::sync::Arc;
 
-use photosuite_color::{ColorMode, SampleType};
-use photosuite_doc::{Document, Layer, LayerContent, SmartObject, SmartSource};
-use photosuite_geom::{Affine, Size};
-use photosuite_io::{ExportOptions, export, import, smart_map};
-use photosuite_psd::{PsdFile, TaggedBlock};
-use photosuite_raster::Surface;
+use photosplice_color::{ColorMode, SampleType};
+use photosplice_doc::{Document, Layer, LayerContent, SmartObject, SmartSource};
+use photosplice_geom::{Affine, Size};
+use photosplice_io::{ExportOptions, export, import, smart_map};
+use photosplice_psd::{PsdFile, TaggedBlock};
+use photosplice_raster::Surface;
 
 /// A document with one smart object embedding a 2 × 2 red PNG.
 fn fixture() -> Document {
@@ -47,7 +47,7 @@ fn plld_only_layers_without_their_file_or_with_a_broken_record() {
     record.blocks.push(TaggedBlock::new(*b"PlLd", smart_map::plld_bytes(&spec, &[], &mut Vec::new())));
     broken.blocks.push(TaggedBlock::new(*b"PlLd", b"plcL\0\0\0\x03\x05ab\0\0".to_vec()));
     *file.layers_mut() = vec![record, broken];
-    let (doc, warnings) = photosuite_io::psd_to_document(&file);
+    let (doc, warnings) = photosplice_io::psd_to_document(&file);
     let LayerContent::Smart(a) = &doc.layers[0].content else { panic!("PlLd layer is not a smart object") };
     assert_eq!(a.source, SmartSource::Linked { path: "missing".into() });
     for (x, y) in a.transform.m.iter().zip(rotated.m) {
@@ -64,7 +64,7 @@ fn plld_only_layers_without_their_file_or_with_a_broken_record() {
 /// the contents unavailable, so the warped pixels stay the rendering.
 #[test]
 fn plld_only_layers_keep_their_warp() {
-    use photosuite_geom::warp::{Warp, WarpStyle};
+    use photosplice_geom::warp::{Warp, WarpStyle};
     let (mut file, _) = round_trip(&fixture(), "psd");
     let bulge = Warp::preset(WarpStyle::Bulge, 35.0, [0.0, 0.0, 2.0, 2.0]);
     let spec = |warp| smart_map::PlacedSpec {
@@ -87,7 +87,7 @@ fn plld_only_layers_keep_their_warp() {
     cut.truncate(cut.len() - 40);
     broken.blocks.push(TaggedBlock::new(*b"PlLd", cut));
     *file.layers_mut() = vec![warped, flat, broken];
-    let (doc, warnings) = photosuite_io::psd_to_document(&file);
+    let (doc, warnings) = photosplice_io::psd_to_document(&file);
     let sm = |i: usize| match &doc.layers[i].content {
         LayerContent::Smart(s) => s,
         _ => panic!("layer {i} is not a smart object"),
@@ -117,13 +117,13 @@ fn sole_wins_over_plld() {
     };
     let mut record = file.layers()[0].clone();
     let sold = record.block(b"SoLd").expect("the fixture has SoLd").data.clone();
-    let (id, _) = photosuite_io::blocks::parse_smart(b"SoLd", &sold);
+    let (id, _) = photosplice_io::blocks::parse_smart(b"SoLd", &sold);
     assert!(!id.is_empty() && id != "plld-only");
     record.blocks.retain(|b| !matches!(&b.key, b"SoLd" | b"SoLE" | b"PlLd"));
     record.blocks.push(TaggedBlock::new(*b"PlLd", smart_map::plld_bytes(&spec, &[], &mut Vec::new())));
     record.blocks.push(TaggedBlock::new(*b"SoLE", sold.clone()));
     *file.layers_mut() = vec![record];
-    let (doc, _) = photosuite_io::psd_to_document(&file);
+    let (doc, _) = photosplice_io::psd_to_document(&file);
     let LayerContent::Smart(sm) = &doc.layers[0].content else { panic!("not a smart object") };
     assert_eq!(sm.source, SmartSource::Linked { path: id });
     assert_eq!(sm.psd_raw.as_deref(), Some(&sold));
@@ -135,10 +135,10 @@ fn sole_wins_over_plld() {
 /// (no `SoLd` added) and reopens in the same place.
 #[test]
 fn plld_only_spilled_custom_warp_places_like_sold_and_round_trips_verbatim() {
-    use photosuite_geom::warp::{BezierMesh, Warp};
+    use photosplice_geom::warp::{BezierMesh, Warp};
     let (mut file, _) = round_trip(&fixture(), "psd");
     let mut record = file.layers()[0].clone();
-    let (id, _) = photosuite_io::blocks::parse_smart(b"SoLd", &record.block(b"SoLd").expect("the fixture has SoLd").data);
+    let (id, _) = photosplice_io::blocks::parse_smart(b"SoLd", &record.block(b"SoLd").expect("the fixture has SoLd").data);
     assert!(!id.is_empty());
     // The embedded source is 2 × 2; the mesh reaches from (-1, -0.5) to (3, 2.5).
     let bounds = [0.0, 0.0, 2.0, 2.0];
@@ -156,7 +156,7 @@ fn plld_only_spilled_custom_warp_places_like_sold_and_round_trips_verbatim() {
     cs2.blocks.push(TaggedBlock::new(*b"PlLd", plld.clone()));
     *file.layers_mut() = vec![with_sold, cs2];
 
-    let (doc, warnings) = photosuite_io::psd_to_document(&file);
+    let (doc, warnings) = photosplice_io::psd_to_document(&file);
     assert!(!warnings.iter().any(|w| w.contains("PlLd")), "{warnings:?}");
     let sm = |d: &Document, i: usize| match &d.layers[i].content {
         LayerContent::Smart(s) => s.clone(),

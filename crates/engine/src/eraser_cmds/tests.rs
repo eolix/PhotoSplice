@@ -1,5 +1,5 @@
 use super::*;
-use photosuite_raster::Surface;
+use photosplice_raster::Surface;
 
 const MODES: [&str; 3] = ["rgb", "cmyk", "gray"];
 const DEPTHS: [u32; 3] = [8, 16, 32];
@@ -241,7 +241,7 @@ fn background_eraser_fails_gracefully() {
     assert!(s.execute("paint.backgroundEraser", json!({"points": [[4, 4]]})).is_err());
 }
 
-/// `cargo test --release -p photosuite-engine --lib bench_magic_eraser -- --ignored --nocapture`
+/// `cargo test --release -p photosplice-engine --lib bench_magic_eraser -- --ignored --nocapture`
 #[test]
 #[ignore]
 fn bench_magic_eraser_24mp() {
@@ -271,7 +271,7 @@ fn bench_magic_eraser_24mp() {
     let region = sel::wand_region(&img, area, (10, 10), 32.0, true, true).unwrap();
     let t2 = t0.elapsed().as_secs_f64() * 1000.0;
     let mut surf = surface(&s).clone();
-    photosuite_algo::erase::magic_erase(&mut surf, &region, 1.0, None, None);
+    photosplice_algo::erase::magic_erase(&mut surf, &region, 1.0, None, None);
     let t3 = t0.elapsed().as_secs_f64() * 1000.0;
     println!("phases: sample {t1:.1} ms, wand {:.1} ms, erase {:.1} ms", t2 - t1, t3 - t2);
 }

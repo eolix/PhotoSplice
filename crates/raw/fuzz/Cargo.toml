@@ -1,5 +1,5 @@
 [package]
-name = "photosuite-raw-fuzz"
+name = "photosplice-raw-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -14,7 +14,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-photosuite-raw = { path = ".." }
+photosplice-raw = { path = ".." }
 
 [profile.release]
 debug = 1

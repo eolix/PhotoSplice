@@ -8,13 +8,13 @@ use egui::{Align2, Color32, Rect, Sense, Stroke, pos2, vec2};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use photosuite_engine::actions_cmds::{self, Action};
+use photosplice_engine::actions_cmds::{self, Action};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::theme::Tokens;
 
 /// Which row is selected and which rows are expanded. The action list itself is
-/// [`photosuite_engine::Session::actions`].
+/// [`photosplice_engine::Session::actions`].
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ActionsUi {
@@ -23,11 +23,11 @@ pub struct ActionsUi {
 }
 
 fn label_of(id: &str) -> String {
-    photosuite_engine::commands::find(id).map(|c| c.label.trim_end_matches('…').to_string()).unwrap_or_else(|| id.to_string())
+    photosplice_engine::commands::find(id).map(|c| c.label.trim_end_matches('…').to_string()).unwrap_or_else(|| id.to_string())
 }
 
 /// The selected action, or the first one when nothing is selected.
-pub fn selected_action(app: &PhotosuiteApp) -> Option<&Action> {
+pub fn selected_action(app: &PhotospliceApp) -> Option<&Action> {
     let list = &app.session.actions.list;
     let idx = app.ui.actions.selected.filter(|i| *i < list.len());
     idx.and_then(|i| list.get(i)).or_else(|| list.first())
@@ -38,7 +38,7 @@ pub fn action_steps(action: &Action) -> Vec<Value> {
     action.steps.iter().map(|(id, p)| json!([id, p])).collect()
 }
 
-fn begin_recording(app: &mut PhotosuiteApp) {
+fn begin_recording(app: &mut PhotospliceApp) {
     if app.session.actions.recording.is_some() {
         return;
     }
@@ -51,7 +51,7 @@ fn begin_recording(app: &mut PhotosuiteApp) {
     app.ui.actions.expanded[i] = true;
 }
 
-fn report_play(app: &mut PhotosuiteApp, v: &Value) {
+fn report_play(app: &mut PhotospliceApp, v: &Value) {
     let Some(failed) = v.get("failed").filter(|f| f.is_object()) else {
         let ran = v.get("ran").and_then(Value::as_u64).unwrap_or(0);
         app.ui.status = format!("Played {ran} steps");
@@ -64,7 +64,7 @@ fn report_play(app: &mut PhotosuiteApp, v: &Value) {
     app.ui.status_error = true;
 }
 
-pub fn panel(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
+pub fn panel(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let recording = app.session.actions.recording;
     let live = recording.map(|(from, _)| app.session.journal.iter().skip(from).filter(|(id, _)| actions_cmds::replayable(id)).count()).unwrap_or(0);
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn record_and_replay_on_another_document() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({"width": 40, "height": 40})).unwrap();
         app.sync_views();
         app.run("actions.record", json!({})).unwrap();

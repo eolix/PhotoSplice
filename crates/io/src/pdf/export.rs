@@ -1,6 +1,6 @@
 //! A document as a Photoshop PDF: one page drawn layer by layer as PDF content (krilla, MIT OR
 //! Apache-2.0), plus Photoshop's editing data ([`super::photoshop`]), with which Photoshop and
-//! PhotoSuite reopen it with every layer as it was.
+//! PhotoSplice reopen it with every layer as it was.
 //!
 //! Drawn natively, so the PDF stays vector and searchable: shape layers (solid fills and centred
 //! strokes) as paths, type layers as real text in their fonts (embedded and subset, with the text
@@ -18,9 +18,9 @@ use krilla::page::PageSettings;
 use krilla::paint::{Fill as KFill, FillRule as KFillRule, LineCap as KCap, LineJoin as KJoin, Stroke as KStroke, StrokeDash};
 use krilla::surface::Surface as KSurface;
 use krilla::text::{Font, GlyphId, KrillaGlyph};
-use photosuite_color::{BlendMode, ColorMode};
-use photosuite_doc::vector::{FillRule, LineCap, LineJoin, Path, PathOp, ShapeLayer, StrokeAlign};
-use photosuite_doc::{Document, Fill, Layer, LayerContent, TextLayer};
+use photosplice_color::{BlendMode, ColorMode};
+use photosplice_doc::vector::{FillRule, LineCap, LineJoin, Path, PathOp, ShapeLayer, StrokeAlign};
+use photosplice_doc::{Document, Fill, Layer, LayerContent, TextLayer};
 
 use crate::{ExportResult, IoError};
 
@@ -56,7 +56,7 @@ pub fn export_pages(docs: &[Document], title: &str) -> Result<ExportResult, IoEr
 }
 
 fn finish(mut pdf: krilla::Document, title: &str) -> Result<Vec<u8>, IoError> {
-    let mut meta = krilla::metadata::Metadata::new().creator("PhotoSuite".into());
+    let mut meta = krilla::metadata::Metadata::new().creator("PhotoSplice".into());
     if !title.is_empty() {
         meta = meta.title(title.to_string());
     }
@@ -160,7 +160,7 @@ impl Writer<'_> {
             // A fill layer covers the canvas, its gradient laid out in the layer's frame.
             LayerContent::Fill(f) => {
                 let canvas = self.doc.bounds();
-                let frame = photosuite_compose::fill_frame(l, canvas);
+                let frame = photosplice_compose::fill_frame(l, canvas);
                 let Some((paint, a)) = pdf_paint(f, |f| super::gradient::fill_paint(f, frame)) else {
                     self.rastered += 1;
                     self.with_blend(s, l, |w, s| w.image_of(s, &unblended(std::slice::from_ref(l))));
@@ -252,7 +252,7 @@ impl Writer<'_> {
     fn image_of(&mut self, s: &mut KSurface<'_>, layers: &[Layer]) {
         let mut tmp = self.doc.clone();
         tmp.layers = layers.to_vec();
-        let buf = photosuite_compose::flatten(&tmp);
+        let buf = photosplice_compose::flatten(&tmp);
         let img = buf.to_rgba8();
         let (w, h) = (img.width as usize, img.height as usize);
         // Trim to what the layers cover.
@@ -287,10 +287,10 @@ impl Writer<'_> {
     /// The layer's text as PDF text in its fonts, laid out as the text engine lays it out.
     /// `false` when it can't be (warped, vertical or path type, a face krilla can't read).
     fn draw_text(&mut self, s: &mut KSurface<'_>, t: &TextLayer, fill_opacity: f32) -> bool {
-        if t.warp.is_some() || t.path.is_some() || !matches!(t.orientation, photosuite_doc::text::Orientation::Horizontal) {
+        if t.warp.is_some() || t.path.is_some() || !matches!(t.orientation, photosplice_doc::text::Orientation::Horizontal) {
             return false;
         }
-        let mut engine = photosuite_text::shared().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut engine = photosplice_text::shared().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // A font that isn't installed would be set in the fallback face: the layer's own pixels
         // (from the PSD or PDF it came from) still show its font, as the canvas does.
         if t.cache.is_some() && t.char_runs().iter().any(|r| !engine.fonts.renders_as_named(&r.style.font_family, r.style.postscript_name.as_deref())) {
@@ -342,7 +342,7 @@ impl Writer<'_> {
         ok
     }
 
-    fn font(&mut self, face: &photosuite_text::layout::GlyphFace) -> Option<Font> {
+    fn font(&mut self, face: &photosplice_text::layout::GlyphFace) -> Option<Font> {
         let bytes: &[u8] = face.font.data.as_ref();
         let key = (bytes.as_ptr() as usize, face.font.index);
         if let Some((_, f)) = self.fonts.iter().find(|(k, _)| *k == key) {
@@ -355,7 +355,7 @@ impl Writer<'_> {
 }
 
 /// The text a glyph at (`x`, `y`) belongs to (for copying text out of the PDF).
-fn cluster_range(layout: &photosuite_text::layout::TextLayout, x: f32, y: f32) -> std::ops::Range<usize> {
+fn cluster_range(layout: &photosplice_text::layout::TextLayout, x: f32, y: f32) -> std::ops::Range<usize> {
     let line = layout.lines.iter().position(|l| (l.baseline - y).abs() < 0.5).unwrap_or(0);
     layout
         .clusters
@@ -384,7 +384,7 @@ fn needs_backdrop(l: &Layer) -> bool {
 fn native(l: &Layer) -> bool {
     // A vector mask is a clip when it's hard-edged and fully on.
     let vmask = l.vector_mask.as_ref().is_none_or(|m| !m.enabled || (m.density >= 1.0 && m.feather <= 0.0 && plain_path(&m.path)));
-    let plain = !photosuite_compose::effects::has_effects(l) && l.mask.is_none() && vmask && l.blend_if.is_default() && l.excluded_channels == 0;
+    let plain = !photosplice_compose::effects::has_effects(l) && l.mask.is_none() && vmask && l.blend_if.is_default() && l.excluded_channels == 0;
     plain
         && match &l.content {
             LayerContent::Shape(s) => native_shape(s),
@@ -399,7 +399,7 @@ fn native(l: &Layer) -> bool {
 fn pdf_fill(f: &Fill) -> bool {
     match f {
         Fill::Solid(_) => true,
-        Fill::Gradient { style, .. } => *style != photosuite_doc::GradientStyle::Diamond,
+        Fill::Gradient { style, .. } => *style != photosplice_doc::GradientStyle::Diamond,
         Fill::Pattern { .. } => false,
     }
 }

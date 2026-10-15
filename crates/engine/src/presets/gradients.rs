@@ -5,7 +5,7 @@
 //! Photoshop's "Foreground to Background") and transparency stops, both at `0..=1`. Midpoints are
 //! always 50 %. Built-in colours are our own.
 
-use photosuite_doc::{Color, Fill, Layer, LayerContent};
+use photosplice_doc::{Color, Fill, Layer, LayerContent};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -400,7 +400,7 @@ fn list(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(json!({"groups": groups, "current": s.presets.gradient.to_json()}))
 }
 
-fn active_gradient_fill(s: &Session) -> Option<photosuite_doc::LayerId> {
+fn active_gradient_fill(s: &Session) -> Option<photosplice_doc::LayerId> {
     let d = s.active()?;
     let id = d.active_layer?;
     matches!(d.doc.layer(id)?.content, LayerContent::Fill(Fill::Gradient { .. })).then_some(id)

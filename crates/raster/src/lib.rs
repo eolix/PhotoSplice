@@ -13,8 +13,8 @@ pub use interrupt::{Cancelled, Interrupt};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use photosuite_color::{ColorMode, PixelFormat, SampleType, read_sample, write_sample};
-use photosuite_geom::{Rect, TILE_SIZE, TileCoord};
+use photosplice_color::{ColorMode, PixelFormat, SampleType, read_sample, write_sample};
+use photosplice_geom::{Rect, TILE_SIZE, TileCoord};
 
 /// Pixel storage for one tile: `TILE_SIZE² × bytes_per_pixel`, row-major, interleaved channels.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -574,7 +574,7 @@ pub fn to_rgba_unclamped(format: &PixelFormat, px: &[f32]) -> [f32; 4] {
         return to_rgba(format, px);
     }
     let get = |i: usize| px.get(i).copied().unwrap_or(0.0);
-    let rgb = photosuite_color::convert::lab_to_srgb_unclamped([get(0) * 100.0, get(1) * 255.0 - 128.0, get(2) * 255.0 - 128.0]);
+    let rgb = photosplice_color::convert::lab_to_srgb_unclamped([get(0) * 100.0, get(1) * 255.0 - 128.0, get(2) * 255.0 - 128.0]);
     [rgb[0], rgb[1], rgb[2], if format.alpha { get(3) } else { 1.0 }]
 }
 
@@ -583,8 +583,8 @@ pub fn to_rgba(format: &PixelFormat, px: &[f32]) -> [f32; 4] {
     let a = if format.alpha { px[n] } else { 1.0 };
     let rgb = match format.mode {
         ColorMode::Grayscale | ColorMode::Bitmap | ColorMode::Duotone => [px[0]; 3],
-        ColorMode::Cmyk => photosuite_color::convert::cmyk_to_rgb([px[0], px[1], px[2], px[3]]),
-        ColorMode::Lab => photosuite_color::convert::lab_to_srgb([px[0] * 100.0, px[1] * 255.0 - 128.0, px[2] * 255.0 - 128.0]),
+        ColorMode::Cmyk => photosplice_color::convert::cmyk_to_rgb([px[0], px[1], px[2], px[3]]),
+        ColorMode::Lab => photosplice_color::convert::lab_to_srgb([px[0] * 100.0, px[1] * 255.0 - 128.0, px[2] * 255.0 - 128.0]),
         _ => [px[0], px[1], px[2]],
     };
     [rgb[0], rgb[1], rgb[2], a]
@@ -593,10 +593,10 @@ pub fn to_rgba(format: &PixelFormat, px: &[f32]) -> [f32; 4] {
 pub fn from_rgba(format: &PixelFormat, rgba: [f32; 4]) -> Vec<f32> {
     let rgb = [rgba[0], rgba[1], rgba[2]];
     let mut out: Vec<f32> = match format.mode {
-        ColorMode::Grayscale | ColorMode::Bitmap | ColorMode::Duotone => vec![photosuite_color::convert::rgb_to_gray(rgb)],
-        ColorMode::Cmyk => photosuite_color::convert::rgb_to_cmyk(rgb).to_vec(),
+        ColorMode::Grayscale | ColorMode::Bitmap | ColorMode::Duotone => vec![photosplice_color::convert::rgb_to_gray(rgb)],
+        ColorMode::Cmyk => photosplice_color::convert::rgb_to_cmyk(rgb).to_vec(),
         ColorMode::Lab => {
-            let l = photosuite_color::convert::srgb_to_lab(rgb);
+            let l = photosplice_color::convert::srgb_to_lab(rgb);
             vec![l[0] / 100.0, (l[1] + 128.0) / 255.0, (l[2] + 128.0) / 255.0]
         }
         _ => rgb.to_vec(),
@@ -614,15 +614,15 @@ pub fn from_rgba_into(format: &PixelFormat, rgba: [f32; 4], out: &mut [f32]) -> 
     let rgb = [rgba[0], rgba[1], rgba[2]];
     let n = match format.mode {
         ColorMode::Grayscale | ColorMode::Bitmap | ColorMode::Duotone => {
-            out[0] = photosuite_color::convert::rgb_to_gray(rgb);
+            out[0] = photosplice_color::convert::rgb_to_gray(rgb);
             1
         }
         ColorMode::Cmyk => {
-            out[..4].copy_from_slice(&photosuite_color::convert::rgb_to_cmyk(rgb));
+            out[..4].copy_from_slice(&photosplice_color::convert::rgb_to_cmyk(rgb));
             4
         }
         ColorMode::Lab => {
-            let l = photosuite_color::convert::srgb_to_lab(rgb);
+            let l = photosplice_color::convert::srgb_to_lab(rgb);
             out[..3].copy_from_slice(&[l[0] / 100.0, (l[1] + 128.0) / 255.0, (l[2] + 128.0) / 255.0]);
             3
         }
@@ -661,7 +661,7 @@ pub fn is_hdr(sample: SampleType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_color::PixelFormat;
+    use photosplice_color::PixelFormat;
     use proptest::prelude::*;
 
     #[test]

@@ -22,7 +22,7 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 
 use super::grabcut::{self, BG, PR_BG, PR_FG};
 use super::slic::{rgb_to_lab, slic_lab};

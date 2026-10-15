@@ -21,7 +21,7 @@
 //! GPU resources live in the renderer's `callback_resources` type map; the per-frame callback only
 //! carries plain view parameters, so it is `Send + Sync` on every target (including wasm).
 //!
-//! The document pixels still come from the CPU compositor (`photosuite-compose`) for now; the wgpu
+//! The document pixels still come from the CPU compositor (`photosplice-compose`) for now; the wgpu
 //! compositor (M5) will render straight into these tiles.
 
 use std::collections::HashMap;
@@ -30,7 +30,7 @@ use std::num::NonZeroU64;
 use eframe::egui_wgpu::{self, CallbackResources, CallbackTrait, RenderState, ScreenDescriptor};
 use eframe::wgpu;
 
-pub use photosuite_gpu::{DeviceHealth, Fault};
+pub use photosplice_gpu::{DeviceHealth, Fault};
 
 /// Default tile side; documents up to this size (and the device limit) use a single texture.
 pub const DEFAULT_TILE: u32 = 8192;
@@ -40,7 +40,7 @@ const FORMAT_HIGH: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// Largest high-bit document (in pixels) given an `Rgba16Float` canvas texture: 100 MP is
 /// 800 MB at level 0, about 1.07 GB with mips (twice the `Rgba8Unorm` cost). Bigger 16/32-bit
 /// documents (a 14000² one would need 2.1 GB) use `Rgba8Unorm`, so they stay on the GPU like
-/// 8-bit ones. `PHOTOSUITE_CANVAS_F16=0` turns the float canvas off, `=1` ignores this budget.
+/// 8-bit ones. `PHOTOSPLICE_CANVAS_F16=0` turns the float canvas off, `=1` ignores this budget.
 pub const F16_BUDGET_PX: u64 = 100_000_000;
 const VIEW_UNIFORM_SIZE: u64 = 112;
 const VIEW_FLOATS: usize = 28;
@@ -77,11 +77,11 @@ pub struct ViewParams {
 /// When high-bit documents get an `Rgba16Float` canvas texture.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HighPolicy {
-    /// The adapter can't render to or filter `Rgba16Float`, or `PHOTOSUITE_CANVAS_F16=0`.
+    /// The adapter can't render to or filter `Rgba16Float`, or `PHOTOSPLICE_CANVAS_F16=0`.
     Off,
     /// Up to [`F16_BUDGET_PX`].
     Budget,
-    /// Always (`PHOTOSUITE_CANVAS_F16=1`).
+    /// Always (`PHOTOSPLICE_CANVAS_F16=1`).
     Always,
 }
 
@@ -95,7 +95,7 @@ pub struct GpuCanvas {
     rs: RenderState,
     tile: u32,
     high: HighPolicy,
-    health: photosuite_gpu::DeviceHealth,
+    health: photosplice_gpu::DeviceHealth,
 }
 
 /// Can `adapter` use `Rgba16Float` as a sampled, filtered, render-target and copy texture?
@@ -112,19 +112,19 @@ impl GpuCanvas {
         Self::with_tile(rs, None)
     }
 
-    /// Like [`GpuCanvas::new`] with a preferred texture tile side (`PHOTOSUITE_GPU_TILE` wins).
+    /// Like [`GpuCanvas::new`] with a preferred texture tile side (`PHOTOSPLICE_GPU_TILE` wins).
     pub fn with_tile(rs: &RenderState, tile: Option<u32>) -> Self {
         let max = rs.device.limits().max_texture_dimension_2d;
-        let env_tile = std::env::var("PHOTOSUITE_GPU_TILE").ok().and_then(|v| v.parse::<u32>().ok());
+        let env_tile = std::env::var("PHOTOSPLICE_GPU_TILE").ok().and_then(|v| v.parse::<u32>().ok());
         let tile = env_tile.or(tile).unwrap_or(DEFAULT_TILE).clamp(64, max);
-        let high = match std::env::var("PHOTOSUITE_CANVAS_F16").ok().as_deref() {
+        let high = match std::env::var("PHOTOSPLICE_CANVAS_F16").ok().as_deref() {
             _ if !supports_f16_canvas(&rs.adapter) => HighPolicy::Off,
             Some("0") => HighPolicy::Off,
             Some("1") => HighPolicy::Always,
             _ => HighPolicy::Budget,
         };
         // Device loss and uncaptured errors mark this flag instead of panicking (#243).
-        let health = photosuite_gpu::DeviceHealth::watch(&rs.device);
+        let health = photosplice_gpu::DeviceHealth::watch(&rs.device);
         let mut res = Resources::new(&rs.device, &rs.queue, rs.target_format, high != HighPolicy::Off);
         res.health = health.clone();
         rs.renderer.write().callback_resources.insert(res);
@@ -133,12 +133,12 @@ impl GpuCanvas {
     }
 
     /// The device's health flag (shared with the wgpu compositor and the paint callback).
-    pub fn health(&self) -> &photosuite_gpu::DeviceHealth {
+    pub fn health(&self) -> &photosplice_gpu::DeviceHealth {
         &self.health
     }
 
     /// Why the GPU can't be used any more (`None` while it can).
-    pub fn fault(&self) -> Option<photosuite_gpu::Fault> {
+    pub fn fault(&self) -> Option<photosplice_gpu::Fault> {
         self.health.fault()
     }
 
@@ -148,7 +148,7 @@ impl GpuCanvas {
         let mut r = self.rs.renderer.write();
         if let Some(res) = r.callback_resources.get_mut::<Resources>() {
             res.compositor = None;
-            res.compositor_failed = Some(photosuite_gpu::Unsupported(self.fault().map_or_else(|| "GPU canvas released".into(), |f| f.to_string())));
+            res.compositor_failed = Some(photosplice_gpu::Unsupported(self.fault().map_or_else(|| "GPU canvas released".into(), |f| f.to_string())));
             res.docs.clear();
             res.luts.clear();
             res.display_lut_signatures.clear();
@@ -169,14 +169,14 @@ impl GpuCanvas {
         self.rs.device.limits().max_texture_dimension_2d as usize
     }
 
-    pub fn format_for(&self, depth: photosuite_doc::SampleType, size: [u32; 2]) -> wgpu::TextureFormat {
+    pub fn format_for(&self, depth: photosplice_doc::SampleType, size: [u32; 2]) -> wgpu::TextureFormat {
         let px = size[0] as u64 * size[1] as u64;
         let high = match self.high {
             HighPolicy::Off => false,
             HighPolicy::Budget => px <= F16_BUDGET_PX,
             HighPolicy::Always => true,
         };
-        if high && depth != photosuite_doc::SampleType::U8 { FORMAT_HIGH } else { FORMAT }
+        if high && depth != photosplice_doc::SampleType::U8 { FORMAT_HIGH } else { FORMAT }
     }
 
     /// Format and GPU bytes (all tiles, all mip levels) of document `key`'s canvas texture.
@@ -209,7 +209,7 @@ impl GpuCanvas {
 
     /// The document area the view shows: full refreshes composite it last, so its layer pages
     /// are the ones still resident for the edits that follow.
-    pub fn set_focus(&self, focus: Option<photosuite_geom::Rect>) {
+    pub fn set_focus(&self, focus: Option<photosplice_geom::Rect>) {
         let mut r = self.rs.renderer.write();
         if let Some(res) = r.callback_resources.get_mut::<Resources>() {
             res.compositor_focus = focus;
@@ -239,8 +239,8 @@ impl GpuCanvas {
 
     /// Whether [`GpuCanvas::composite`] would draw `doc` with the wgpu compositor (rather than
     /// fall back to the CPU compositor).
-    pub fn supports(&self, doc: &photosuite_doc::Document) -> bool {
-        if std::env::var_os("PHOTOSUITE_CPU_COMPOSE").is_some() || doc.size.width == 0 || doc.size.height == 0 {
+    pub fn supports(&self, doc: &photosplice_doc::Document) -> bool {
+        if std::env::var_os("PHOTOSPLICE_CPU_COMPOSE").is_some() || doc.size.width == 0 || doc.size.height == 0 {
             return false;
         }
         let r = self.rs.renderer.read();
@@ -251,7 +251,7 @@ impl GpuCanvas {
         match &res.compositor {
             Some(c) => c.supports(doc).is_ok(),
             // Layers larger than the texture limit are stored in pages, so any size qualifies.
-            None => photosuite_gpu::plan(doc).is_ok(),
+            None => photosplice_gpu::plan(doc).is_ok(),
         }
     }
 
@@ -311,14 +311,14 @@ impl GpuCanvas {
 
     /// Upload a CPU composite covering the whole document (a preview of a document of `depth`:
     /// see [`GpuCanvas::format_for`]).
-    pub fn upload_buffer_full(&self, doc: u64, buf: &photosuite_compose::Buffer, depth: photosuite_doc::SampleType) {
+    pub fn upload_buffer_full(&self, doc: u64, buf: &photosplice_compose::Buffer, depth: photosplice_doc::SampleType) {
         let size = [buf.rect.width(), buf.rect.height()];
         let format = self.format_for(depth, size);
         self.upload_full_as(doc, size, format, &texels(format, &buf.px));
     }
 
     /// Upload a CPU composite of a sub-rectangle (in document pixels, `buf.rect`).
-    pub fn upload_buffer_rect(&self, doc: u64, buf: &photosuite_compose::Buffer) -> bool {
+    pub fn upload_buffer_rect(&self, doc: u64, buf: &photosplice_compose::Buffer) -> bool {
         let r = buf.rect;
         let Some(format) = self.format_of(doc) else { return false };
         if r.x0 < 0 || r.y0 < 0 {
@@ -329,35 +329,35 @@ impl GpuCanvas {
 
     /// Composite `region` of `doc` with the wgpu compositor straight into its display texture
     /// (no CPU pixels, no upload of the composite). `encode_srgb` stores the sRGB encoding of the
-    /// composite (linear documents, see `photosuite_engine::display_color`). Returns `Err` when the
+    /// composite (linear documents, see `photosplice_engine::display_color`). Returns `Err` when the
     /// document uses features the GPU compositor doesn't cover yet; the caller then falls back to
     /// the CPU compositor.
     pub fn composite(
         &self,
-        doc: &photosuite_doc::Document,
-        region: photosuite_geom::Rect,
+        doc: &photosplice_doc::Document,
+        region: photosplice_geom::Rect,
         encode_srgb: bool,
-    ) -> Result<photosuite_gpu::Stats, photosuite_gpu::Unsupported> {
+    ) -> Result<photosplice_gpu::Stats, photosplice_gpu::Unsupported> {
         let (device, queue) = (&self.rs.device, &self.rs.queue);
         let size = [doc.size.width, doc.size.height];
         if size[0] == 0 || size[1] == 0 {
-            return Err(photosuite_gpu::Unsupported("empty document".into()));
+            return Err(photosplice_gpu::Unsupported("empty document".into()));
         }
-        if std::env::var_os("PHOTOSUITE_CPU_COMPOSE").is_some() {
-            return Err(photosuite_gpu::Unsupported("disabled by PHOTOSUITE_CPU_COMPOSE".into()));
+        if std::env::var_os("PHOTOSPLICE_CPU_COMPOSE").is_some() {
+            return Err(photosplice_gpu::Unsupported("disabled by PHOTOSPLICE_CPU_COMPOSE".into()));
         }
         if let Some(f) = self.fault() {
-            return Err(photosuite_gpu::Unsupported(f.to_string()));
+            return Err(photosplice_gpu::Unsupported(f.to_string()));
         }
         let mut renderer = self.rs.renderer.write();
-        let Some(res) = renderer.callback_resources.get_mut::<Resources>() else { return Err(photosuite_gpu::Unsupported("no GPU canvas".into())) };
+        let Some(res) = renderer.callback_resources.get_mut::<Resources>() else { return Err(photosplice_gpu::Unsupported("no GPU canvas".into())) };
         // A driver that couldn't build the pipelines once won't later: stay on the CPU compositor.
         if let Some(e) = &res.compositor_failed {
             return Err(e.clone());
         }
         let mut comp = match res.compositor.take() {
             Some(c) => c,
-            None => match photosuite_gpu::Compositor::try_new_with_format(device, photosuite_gpu::Compositor::preferred_acc_format(&self.rs.adapter)) {
+            None => match photosplice_gpu::Compositor::try_new_with_format(device, photosplice_gpu::Compositor::preferred_acc_format(&self.rs.adapter)) {
                 Ok(c) => c,
                 Err(e) => {
                     log::warn!("{e}; using the CPU compositor");
@@ -385,7 +385,7 @@ impl GpuCanvas {
         // compositor does it, and edits in the view (damage rects) stay on the GPU.
         if region == doc.bounds() && !comp.fits_budget(doc, region) {
             res.compositor = Some(comp);
-            return Err(photosuite_gpu::Unsupported("layers exceed the GPU memory budget; full refresh on the CPU".into()));
+            return Err(photosplice_gpu::Unsupported("layers exceed the GPU memory budget; full refresh on the CPU".into()));
         }
         if fresh {
             let tex = DocTextures::new(device, res, size, self.tile, format);
@@ -393,7 +393,7 @@ impl GpuCanvas {
         }
         let (Some(pipe), Some(d)) = (res.encode_pipeline(format), res.docs.get(&key)) else {
             res.compositor = Some(comp);
-            return Err(photosuite_gpu::Unsupported(format!("no {format:?} canvas texture or pipeline")));
+            return Err(photosplice_gpu::Unsupported(format!("no {format:?} canvas texture or pipeline")));
         };
         let bgl = &res.encode_bgl;
         // A float canvas keeps values above 1.0 (32-bit documents, for the 32-bit preview).
@@ -404,7 +404,7 @@ impl GpuCanvas {
             comp.render(device, queue, doc, region, |enc, out| {
                 for t in &d.tiles {
                     let [tx, ty, tw, th] = t.rect.map(|v| v as i32);
-                    let r = out.rect.intersect(&photosuite_geom::Rect::from_xywh(tx, ty, tw as u32, th as u32));
+                    let r = out.rect.intersect(&photosplice_geom::Rect::from_xywh(tx, ty, tw as u32, th as u32));
                     if r.is_empty() {
                         continue;
                     }
@@ -439,18 +439,18 @@ impl GpuCanvas {
             })
         }));
         let Ok(result) = result else {
-            self.health.mark(photosuite_gpu::Fault::Lost("the GPU compositor stopped (internal error)".into()));
+            self.health.mark(photosplice_gpu::Fault::Lost("the GPU compositor stopped (internal error)".into()));
             res.docs.remove(&key);
-            return Err(photosuite_gpu::Unsupported("GPU device lost".into()));
+            return Err(photosplice_gpu::Unsupported("GPU device lost".into()));
         };
         // Lost during the refresh: its output can't be trusted.
         let result = match self.fault() {
-            Some(f) => Err(photosuite_gpu::Unsupported(f.to_string())),
+            Some(f) => Err(photosplice_gpu::Unsupported(f.to_string())),
             None => result,
         };
         if result.is_ok() {
             d.regenerate_mips(device, queue, res, [region.x0 as u32, region.y0 as u32, region.x1 as u32, region.y1 as u32]);
-            if std::env::var_os("PHOTOSUITE_GPU_SYNC").is_some() {
+            if std::env::var_os("PHOTOSPLICE_GPU_SYNC").is_some() {
                 // Benchmarking: wait for the GPU so callers can time the whole refresh.
                 #[cfg(not(target_arch = "wasm32"))]
                 self.health.wait(device, None);
@@ -470,9 +470,9 @@ impl GpuCanvas {
     pub fn refresh(
         &self,
         key: u64,
-        doc: &photosuite_doc::Document,
-        damage: Option<photosuite_geom::Rect>,
-        display: Option<&photosuite_engine::display_color::CanvasDisplay>,
+        doc: &photosplice_doc::Document,
+        damage: Option<photosplice_geom::Rect>,
+        display: Option<&photosplice_engine::display_color::CanvasDisplay>,
     ) -> Refresh {
         if let Some(f) = self.fault() {
             // Nothing reaches the GPU any more; the app switches to the CPU canvas.
@@ -491,7 +491,7 @@ impl GpuCanvas {
         }
         let region = damage.unwrap_or(bounds);
         let encode_srgb = display.is_some_and(|d| d.encode_srgb);
-        let gpu = if key == doc.id.0 { self.composite(doc, region, encode_srgb) } else { Err(photosuite_gpu::Unsupported("preview texture".into())) };
+        let gpu = if key == doc.id.0 { self.composite(doc, region, encode_srgb) } else { Err(photosplice_gpu::Unsupported("preview texture".into())) };
         match gpu {
             Ok(stats) => {
                 out.kind = if damage.is_some() { "gpu-rect" } else { "gpu-full" };
@@ -507,7 +507,7 @@ impl GpuCanvas {
                 out.kind = "rect";
                 return out;
             }
-            let buf = photosuite_compose::render(doc, r);
+            let buf = photosplice_compose::render(doc, r);
             let t1 = now_ms();
             if self.upload_buffer_rect(key, &texture_buffer(display, &buf)) {
                 out.kind = "rect";
@@ -527,7 +527,7 @@ impl GpuCanvas {
     /// Composite the whole of `doc` with the CPU compositor into document `key`'s texture, band by
     /// band (each band converted and uploaded before the next is rendered), so a huge document
     /// never needs a full-size float composite or texture-format copy in memory.
-    pub fn upload_composite(&self, key: u64, doc: &photosuite_doc::Document, display: Option<&photosuite_engine::display_color::CanvasDisplay>) {
+    pub fn upload_composite(&self, key: u64, doc: &photosplice_doc::Document, display: Option<&photosplice_engine::display_color::CanvasDisplay>) {
         let size = [doc.size.width, doc.size.height];
         if size[0] == 0 || size[1] == 0 || !self.health.is_ok() {
             return;
@@ -543,7 +543,7 @@ impl GpuCanvas {
             }
         }
         let mut rgba = Vec::new();
-        let _ = photosuite_compose::render_bands(doc, doc.bounds(), 0, |band| -> Result<(), ()> {
+        let _ = photosplice_compose::render_bands(doc, doc.bounds(), 0, |band| -> Result<(), ()> {
             if !self.health.is_ok() {
                 return Err(());
             }
@@ -576,7 +576,7 @@ impl GpuCanvas {
             let gone: Vec<u64> = res.docs.keys().filter(|k| !live.contains(k)).copied().collect();
             if let Some(c) = res.compositor.as_mut() {
                 for k in &gone {
-                    c.forget_doc(photosuite_doc::DocId(*k));
+                    c.forget_doc(photosplice_doc::DocId(*k));
                 }
             }
             res.docs.retain(|k, _| live.contains(k));
@@ -690,9 +690,9 @@ impl GpuCanvas {
 
 /// A CPU composite as the canvas texture stores it (`display`'s encoding; as is without one).
 fn texture_buffer<'a>(
-    display: Option<&photosuite_engine::display_color::CanvasDisplay>,
-    buf: &'a photosuite_compose::Buffer,
-) -> std::borrow::Cow<'a, photosuite_compose::Buffer> {
+    display: Option<&photosplice_engine::display_color::CanvasDisplay>,
+    buf: &'a photosplice_compose::Buffer,
+) -> std::borrow::Cow<'a, photosplice_compose::Buffer> {
     match display {
         Some(d) => d.texture_buffer(buf),
         None => std::borrow::Cow::Borrowed(buf),
@@ -736,7 +736,7 @@ pub fn use_adapter_limits_with(setup: &mut egui_wgpu::WgpuSetup, on_adapter: imp
     if let egui_wgpu::WgpuSetup::CreateNew(create) = setup {
         create.device_descriptor = std::sync::Arc::new(move |adapter| {
             on_adapter(adapter);
-            wgpu::DeviceDescriptor { label: Some("photosuite wgpu device"), required_limits: device_limits(adapter), ..Default::default() }
+            wgpu::DeviceDescriptor { label: Some("photosplice wgpu device"), required_limits: device_limits(adapter), ..Default::default() }
         });
     }
 }
@@ -1050,12 +1050,12 @@ pub fn memory_budget(allowance: u64, pixels: u64, ram: Option<u64>) -> u64 {
     allowance.saturating_sub(pixels).min(ram / 4).max(MIN_GPU_BUDGET)
 }
 
-/// Physical memory of this machine in bytes, if known. `PHOTOSUITE_RAM_MB` overrides it (to
+/// Physical memory of this machine in bytes, if known. `PHOTOSPLICE_RAM_MB` overrides it (to
 /// simulate a smaller machine).
 pub fn physical_memory() -> Option<u64> {
     static RAM: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
     *RAM.get_or_init(|| {
-        if let Some(mb) = std::env::var("PHOTOSUITE_RAM_MB").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
+        if let Some(mb) = std::env::var("PHOTOSPLICE_RAM_MB").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
             return mb.checked_mul(1 << 20);
         }
         detect_physical_memory()
@@ -1102,15 +1102,15 @@ struct Resources {
     views: HashMap<u64, ViewGpu>,
     out_linear: bool,
     /// The wgpu layer compositor (created on first use).
-    compositor: Option<photosuite_gpu::Compositor>,
+    compositor: Option<photosplice_gpu::Compositor>,
     /// Why the wgpu compositor couldn't be created (then the CPU compositor is used).
-    compositor_failed: Option<photosuite_gpu::Unsupported>,
+    compositor_failed: Option<photosplice_gpu::Unsupported>,
     /// The device's health: the paint callback issues no GPU work once it's lost.
-    health: photosuite_gpu::DeviceHealth,
+    health: photosplice_gpu::DeviceHealth,
     /// GPU memory the compositor may hold (`None`: its default), and the document area the
     /// view shows; applied before every composite.
     compositor_budget: Option<u64>,
-    compositor_focus: Option<photosuite_geom::Rect>,
+    compositor_focus: Option<photosplice_geom::Rect>,
     encode_bgl: wgpu::BindGroupLayout,
     encode_pipeline: wgpu::RenderPipeline,
     lut_bgl: wgpu::BindGroupLayout,
@@ -1371,7 +1371,7 @@ impl Resources {
             out_linear: target.is_srgb(),
             compositor: None,
             compositor_failed: None,
-            health: photosuite_gpu::DeviceHealth::new(),
+            health: photosplice_gpu::DeviceHealth::new(),
             compositor_budget: None,
             compositor_focus: None,
             encode_bgl,

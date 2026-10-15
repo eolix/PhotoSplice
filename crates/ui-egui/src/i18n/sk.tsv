@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# Slovenčina translations for PhotoSuite UI.
+# Slovenčina translations for PhotoSplice UI.
 
 	File	Súbor
 	Edit	Upraviť
@@ -672,7 +672,7 @@
 	Timeline	Časová os
 	Tool Presets	Konfigurácia nástrojov
 	Tools	Nástroje
-	About PhotoSuite	O PhotoSuitee
+	About PhotoSplice	O PhotoSplicee
 	Website	webové stránky
 	Report an Issue…	Nahlásiť problém…
 	WIA Support…	Podpora WIA…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Perspective Warp nie je aktívny
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Perspective Warp: nakreslite roviny pozdĺž perspektívy obrazu a potom prepnite na Warp
 	Photo Filter	Fotografický filter
-	PhotoSuite	PhotoSuite
-	PhotoSuite Manages Colors	PhotoSuite spravuje farby
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite — natívny editor obrázkov s otvoreným zdrojom napísaný v jazyku Rust
+	PhotoSplice	PhotoSplice
+	PhotoSplice Manages Colors	PhotoSplice spravuje farby
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice — natívny editor obrázkov s otvoreným zdrojom napísaný v jazyku Rust
 	Pin Depth:	Hĺbka špendlíka:
 	Pixel Length:	Dĺžka pixelov:
 	Pixels/Centimeter	Pixely/Centimeter
@@ -1570,7 +1570,7 @@
 	Pen Tilt	Naklonenie pera
 	Pen Tool	Nástroj pero
 	Photo	Foto
-	PhotoSuite website	Webová stránka PhotoSuite
+	PhotoSplice website	Webová stránka PhotoSplice
 	Picas	Picas
 	Pillow Emboss	Poduškový reliéf
 	Pixel Replacement	Výmena pixelov
@@ -1877,7 +1877,7 @@
 	System Info…	Systémové informácie…
 	System Info	Informácie o systéme
 	More panels	Viac panelov
-	These settings aren't available in PhotoSuite yet.	Tieto nastavenia zatiaľ nie sú v aplikácii PhotoSuite dostupné
+	These settings aren't available in PhotoSplice yet.	Tieto nastavenia zatiaľ nie sú v aplikácii PhotoSplice dostupné
 	Graphics	Grafika
 	Reset GPU Backend	Obnovte backend GPU
 	Applies at next launch.	Platí pri ďalšom spustení
@@ -2018,7 +2018,7 @@
 	Opening…	Otváranie…
 	Patch	Záplata
 	Patch:	Záplata:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite skladá obraz pomocou CPU. Okno môže naďalej využívať grafický adaptér.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice skladá obraz pomocou CPU. Okno môže naďalej využívať grafický adaptér.
 	Play Action	Prehrať akciu
 	Reading…	Načítavanie…
 	Record Action	Zaznamenať akciu

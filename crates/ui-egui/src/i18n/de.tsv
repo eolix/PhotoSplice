@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# Deutsch translations for PhotoSuite UI.
+# Deutsch translations for PhotoSplice UI.
 
 	File	Datei
 	Edit	Bearbeiten
@@ -672,7 +672,7 @@
 	Timeline	Zeitleiste
 	Tool Presets	Werkzeugvorgaben
 	Tools	Werkzeuge
-	About PhotoSuite	Über PhotoSuite
+	About PhotoSplice	Über PhotoSplice
 	Website	Website
 	Report an Issue…	Ein Problem melden…
 	WIA Support…	WIA-Unterstützung…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Perspective Warp ist nicht aktiv
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Perspective Warp: Zeichnen Sie Ebenen entlang der Perspektive des Bildes und wechseln Sie dann zu Warp
 	Photo Filter	Fotofilter
-	PhotoSuite	PhotoSuite
-	PhotoSuite Manages Colors	PhotoSuite verwaltet Farben
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite – ein in Rust geschriebener Open-Source-Bildeditor
+	PhotoSplice	PhotoSplice
+	PhotoSplice Manages Colors	PhotoSplice verwaltet Farben
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice – ein in Rust geschriebener Open-Source-Bildeditor
 	Pin Depth:	Pin-Tiefe:
 	Pixel Length:	Pixellänge:
 	Pixels/Centimeter	Pixel/Zentimeter
@@ -1570,7 +1570,7 @@
 	Pen Tilt	Stiftneigung
 	Pen Tool	Stiftwerkzeug
 	Photo	Foto
-	PhotoSuite website	PhotoSuite-Website
+	PhotoSplice website	PhotoSplice-Website
 	Picas	Picas
 	Pillow Emboss	Relief an allen Kanten
 	Pixel Replacement	Pixelersatz
@@ -1877,7 +1877,7 @@
 	System Info…	Systeminformationen…
 	System Info	Systeminformationen
 	More panels	Weitere Panels
-	These settings aren't available in PhotoSuite yet.	Diese Einstellungen sind in PhotoSuite noch nicht verfügbar
+	These settings aren't available in PhotoSplice yet.	Diese Einstellungen sind in PhotoSplice noch nicht verfügbar
 	Graphics	Grafiken
 	Reset GPU Backend	GPU-Backend zurücksetzen
 	Applies at next launch.	Gilt beim nächsten Start
@@ -2018,7 +2018,7 @@
 	Opening…	Wird geöffnet…
 	Patch	Ausbessern
 	Patch:	Ausbessern:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite verwendet den CPU-Bildcompositor. Das Fenster nutzt möglicherweise weiterhin Ihren Grafikadapter.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice verwendet den CPU-Bildcompositor. Das Fenster nutzt möglicherweise weiterhin Ihren Grafikadapter.
 	Play Action	Aktion ausführen
 	Reading…	Wird gelesen…
 	Record Action	Aktion aufzeichnen

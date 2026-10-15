@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# Bahasa Indonesia translations for PhotoSuite UI.
+# Bahasa Indonesia translations for PhotoSplice UI.
 
 	File	Berkas
 	Edit	Ubah
@@ -672,7 +672,7 @@
 	Timeline	Garis waktu
 	Tool Presets	Prasetel Alat
 	Tools	Alat
-	About PhotoSuite	Tentang FotoCraft
+	About PhotoSplice	Tentang FotoCraft
 	Website	Situs web
 	Report an Issue…	Laporkan Masalah…
 	WIA Support…	Dukungan WIA…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Perspektif Warp tidak aktif
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Perspective Warp: menggambar bidang di sepanjang perspektif gambar, lalu beralih ke Warp
 	Photo Filter	Filter Foto
-	PhotoSuite	Kerajinan Foto
-	PhotoSuite Manages Colors	PhotoSuite Mengelola Warna
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite — editor gambar asli sumber terbuka yang ditulis dalam Rust
+	PhotoSplice	Kerajinan Foto
+	PhotoSplice Manages Colors	PhotoSplice Mengelola Warna
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice — editor gambar asli sumber terbuka yang ditulis dalam Rust
 	Pin Depth:	Kedalaman Pin:
 	Pixel Length:	Panjang Piksel:
 	Pixels/Centimeter	Piksel/Centimeter
@@ -1570,7 +1570,7 @@
 	Pen Tilt	Kemiringan Pena
 	Pen Tool	Alat Pena
 	Photo	Foto
-	PhotoSuite website	Situs web PhotoSuite
+	PhotoSplice website	Situs web PhotoSplice
 	Picas	foto
 	Pillow Emboss	Timbulan halus
 	Pixel Replacement	Penggantian Piksel
@@ -1877,7 +1877,7 @@
 	System Info…	Informasi Sistem…
 	System Info	Informasi Sistem
 	More panels	Lebih banyak panel
-	These settings aren't available in PhotoSuite yet.	Pengaturan ini belum tersedia di PhotoSuite
+	These settings aren't available in PhotoSplice yet.	Pengaturan ini belum tersedia di PhotoSplice
 	Graphics	Grafik
 	Reset GPU Backend	Setel ulang GPU Backend
 	Applies at next launch.	Berlaku pada peluncuran berikutnya
@@ -2018,7 +2018,7 @@
 	Opening…	Membuka…
 	Patch	Tambal
 	Patch:	Tambal:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite menggunakan kompositor gambar CPU. Jendela mungkin tetap menggunakan adaptor grafis Anda.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice menggunakan kompositor gambar CPU. Jendela mungkin tetap menggunakan adaptor grafis Anda.
 	Play Action	Putar Aksi
 	Reading…	Membaca…
 	Record Action	Rekam Aksi

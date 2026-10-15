@@ -7,7 +7,7 @@
 //! history, channels and `filter.lastFilter` all work. The foreground/background colours the
 //! Sketch filters read are recorded as explicit params, so smart filters re-render identically.
 
-use photosuite_algo::{FilterParams, GalleryEffect, GalleryFilter, GalleryParamKind};
+use photosplice_algo::{FilterParams, GalleryEffect, GalleryFilter, GalleryParamKind};
 use serde_json::{Map, Value, json};
 
 use crate::commands::CommandSpec;
@@ -99,7 +99,7 @@ pub fn catalogue() -> Value {
         .iter()
         .map(|f| json!({"key": f.key(), "name": f.name(), "category": f.category(), "command": f.command_id(), "params": f.params_doc()}))
         .collect();
-    json!({"categories": photosuite_algo::GALLERY_CATEGORIES, "filters": filters})
+    json!({"categories": photosplice_algo::GALLERY_CATEGORIES, "filters": filters})
 }
 
 fn run_gallery(s: &mut Session, p: &Value) -> Result<Value> {

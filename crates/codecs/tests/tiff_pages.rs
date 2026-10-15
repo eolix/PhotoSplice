@@ -7,7 +7,7 @@
 mod common;
 use common::Rng;
 use common::tiffgen::*;
-use photosuite_codecs::*;
+use photosplice_codecs::*;
 
 const ORDERS: [(bool, bool); 4] = [(true, false), (false, false), (true, true), (false, true)];
 

@@ -17,7 +17,7 @@
 //! completions and can take seconds on large selections, so the command runs as a background job
 //! (#210): with progress, cancellable, and the document unchanged until it applies.
 
-use photosuite_algo::content_aware::{FillOptions, fill_with};
+use photosplice_algo::content_aware::{FillOptions, fill_with};
 
 use super::patch::{coverage, offset, selection_area, target_layer};
 use super::*;

@@ -8,9 +8,9 @@
 //! document. Pixels are converted to the destination's colour profile (Color Settings' intent and
 //! black point compensation) and bit depth, as Photoshop converts dragged layers.
 
-use photosuite_color::ColorMode;
-use photosuite_doc::{Document, LayerId};
-use photosuite_geom::Rect;
+use photosplice_color::ColorMode;
+use photosplice_doc::{Document, LayerId};
+use photosplice_geom::Rect;
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;

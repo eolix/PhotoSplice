@@ -7,17 +7,17 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 
-fn key(h: &mut Harness<'_, PhotosuiteApp>, key: Key, pressed: bool, modifiers: Modifiers) {
+fn key(h: &mut Harness<'_, PhotospliceApp>, key: Key, pressed: bool, modifiers: Modifiers) {
     h.event(Event::Key { key, physical_key: None, pressed, repeat: false, modifiers });
 }
 
 /// The Keyboard Shortcuts dialog with `command` selected, filtered to it.
-fn dialog(ppp: f32, command: &str, filter: &str) -> (Harness<'static, PhotosuiteApp>, u64) {
+fn dialog(ppp: f32, command: &str, filter: &str) -> (Harness<'static, PhotospliceApp>, u64) {
     let mut h = Harness::builder().with_size(egui::vec2(1100.0, 760.0)).with_pixels_per_point(ppp).with_max_steps(64).build_eframe(|cc| {
-        PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-        PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default())
+        PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+        PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default())
     });
     let ctx = h.ctx.clone();
     let id = crate::menus::invoke(h.state_mut(), &ctx, "edit.keyboardShortcuts", json!({})).unwrap()["dialog"].as_u64().unwrap();
@@ -28,13 +28,13 @@ fn dialog(ppp: f32, command: &str, filter: &str) -> (Harness<'static, Photosuite
     (h, id)
 }
 
-fn field(h: &Harness<'_, PhotosuiteApp>, id: u64, name: &str) -> Value {
+fn field(h: &Harness<'_, PhotospliceApp>, id: u64, name: &str) -> Value {
     h.state().ui.dialogs.iter().find(|d| d.id == id).unwrap().fields.get(name).cloned().unwrap_or(Value::Null)
 }
 
 /// Click the selected command's shortcut button, then press `modifier` and `k` like a keyboard:
 /// the modifier key goes down first (its own key event), then the key with the modifier held.
-fn capture(h: &mut Harness<'_, PhotosuiteApp>, button: &str, modifier: Key, held: Modifiers, k: Key) {
+fn capture(h: &mut Harness<'_, PhotospliceApp>, button: &str, modifier: Key, held: Modifiers, k: Key) {
     h.get_by_label(button).click();
     h.run_steps(2);
     key(h, modifier, true, held);

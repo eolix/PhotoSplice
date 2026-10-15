@@ -7,7 +7,7 @@
 #   CHECK=1 scripts/dev-macos.sh              # typecheck only, no run (fastest feedback)
 #
 # Default profile is `devfast` (see Cargo.toml): debug_assertions stay on, so the
-# PHOTOSUITE_THEME_FILE live design-token overrides work, while the pixel crates and
+# PHOTOSPLICE_THEME_FILE live design-token overrides work, while the pixel crates and
 # dependencies are optimised enough to be interactive.
 #
 # The first build of a cold tree compiles the whole dependency graph and takes a while.
@@ -38,9 +38,9 @@ esac
 # Live design tokens: edit tokens.json while the app runs to retune theme::Tokens with no
 # recompile. Only effective in debug_assertions builds, so not with PROFILE=release.
 if [ -f tokens.json ]; then
-  PHOTOSUITE_THEME_FILE=$ROOT/tokens.json
-  export PHOTOSUITE_THEME_FILE
-  echo "live design tokens: $PHOTOSUITE_THEME_FILE"
+  PHOTOSPLICE_THEME_FILE=$ROOT/tokens.json
+  export PHOTOSPLICE_THEME_FILE
+  echo "live design tokens: $PHOTOSPLICE_THEME_FILE"
   case "$PROFILE" in
     release) echo "  (ignored: compiled out of release builds)" >&2 ;;
   esac
@@ -52,23 +52,23 @@ if [ "${CHECK:-0}" = "1" ]; then
   exec cargo check --workspace $PROFILE_FLAG
 fi
 
-echo "building photosuite ($PROFILE)…"
+echo "building photosplice ($PROFILE)…"
 # shellcheck disable=SC2086
-cargo build $PROFILE_FLAG -p photosuite
+cargo build $PROFILE_FLAG -p photosplice
 
 # Run it from inside a minimal .app bundle: outside one, macOS names the app after the process
-# (`photosuite`) in the menu bar, the Dock and the App menu, instead of CFBundleName.
+# (`photosplice`) in the menu bar, the Dock and the App menu, instead of CFBundleName.
 case "$PROFILE" in
   dev) OUT_DIR=debug ;;
   *)   OUT_DIR=$PROFILE ;;
 esac
 TARGET=${CARGO_TARGET_DIR:-$ROOT/target}
-APP=$TARGET/$OUT_DIR/PhotoSuite.app
+APP=$TARGET/$OUT_DIR/PhotoSplice.app
 VERSION=$(awk '/^\[/{p=($0=="[workspace.package]");next} p&&$1=="version"{gsub(/[" ]/,"",$3);print $3;exit}' Cargo.toml)
 mkdir -p "$APP/Contents/MacOS"
 sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHORT_VERSION@/${VERSION%%-*}/g" -e "s/@BUILD_SHA@/dev/g" \
   packaging/macos/Info.plist.in >"$APP/Contents/Info.plist"
 # A hard link, not a copy or symlink: cheap, and the bundle sees its own executable path.
-ln -f "$TARGET/$OUT_DIR/photosuite" "$APP/Contents/MacOS/PhotoSuite"
+ln -f "$TARGET/$OUT_DIR/photosplice" "$APP/Contents/MacOS/PhotoSplice"
 echo "running $APP"
-exec "$APP/Contents/MacOS/PhotoSuite" "$@"
+exec "$APP/Contents/MacOS/PhotoSplice" "$@"

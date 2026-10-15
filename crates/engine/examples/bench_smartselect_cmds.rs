@@ -1,11 +1,11 @@
 //! End-to-end timing of the smart selection commands (including sampling the layer and storing
 //! the selection / layer) on a 6016×6016 8-bit document: a textured disc on a noisy background.
-//! `cargo run --release -p photosuite-engine --example bench_smartselect_cmds [size]`
+//! `cargo run --release -p photosplice-engine --example bench_smartselect_cmds [size]`
 use std::time::Instant;
 
-use photosuite_algo::segment::Rng;
-use photosuite_engine::Session;
-use photosuite_geom::Rect;
+use photosplice_algo::segment::Rng;
+use photosplice_engine::Session;
+use photosplice_geom::Rect;
 use serde_json::json;
 
 fn main() {

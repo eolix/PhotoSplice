@@ -4,13 +4,13 @@
 #[cfg(feature = "corpus")]
 use std::path::PathBuf;
 
-use photosuite_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
-use photosuite_doc::comps::capture_states;
-use photosuite_doc::{Artboard, ArtboardBackground, Document, Layer, LayerComp, LayerContent};
-use photosuite_geom::{Rect, Size};
-use photosuite_io::comps_map::LAYER_COMPS;
-use photosuite_io::{ExportOptions, export, import};
-use photosuite_psd::PsdFile;
+use photosplice_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
+use photosplice_doc::comps::capture_states;
+use photosplice_doc::{Artboard, ArtboardBackground, Document, Layer, LayerComp, LayerContent};
+use photosplice_geom::{Rect, Size};
+use photosplice_io::comps_map::LAYER_COMPS;
+use photosplice_io::{ExportOptions, export, import};
+use photosplice_psd::PsdFile;
 
 #[cfg(feature = "corpus")]
 fn corpus(rel: &str) -> Vec<u8> {
@@ -43,7 +43,7 @@ fn corpus_layer_comps_import_and_verbatim_export() {
     let moved: Vec<_> = doc.layer_comps[0].states.iter().filter(|s| s.position.is_some()).collect();
     assert_eq!(moved.len(), 1);
     let l = doc.layer(moved[0].layer).unwrap();
-    let here = photosuite_doc::comps::layer_position(l).unwrap();
+    let here = photosplice_doc::comps::layer_position(l).unwrap();
     assert_eq!(moved[0].position, Some((here.0 - 48, here.1 - 35)));
 
     // Unchanged: resource 1065 and every layer's shmd block are written back byte for byte.
@@ -71,7 +71,7 @@ fn corpus_layer_comps_import_and_verbatim_export() {
     assert_eq!(back.last_applied_comp, edited.last_applied_comp);
     // Other metadata items in shmd (`cust`) survive regeneration.
     let r = out2.layers().iter().find(|r| r.block(b"shmd").is_some()).unwrap();
-    let items = photosuite_psd::metadata::parse_shmd(&r.block(b"shmd").unwrap().data).unwrap();
+    let items = photosplice_psd::metadata::parse_shmd(&r.block(b"shmd").unwrap().data).unwrap();
     assert!(items.iter().any(|i| &i.key == b"cust"));
     assert!(items.iter().any(|i| &i.key == b"cmls"));
 
@@ -84,7 +84,7 @@ fn corpus_layer_comps_import_and_verbatim_export() {
     assert!(out3.resource(LAYER_COMPS).is_none());
     for r in out3.layers() {
         if let Some(b) = r.block(b"shmd") {
-            assert!(photosuite_psd::metadata::parse_shmd(&b.data).unwrap().iter().all(|i| &i.key != b"cmls"));
+            assert!(photosplice_psd::metadata::parse_shmd(&b.data).unwrap().iter().all(|i| &i.key != b"cmls"));
         }
     }
 }
@@ -208,22 +208,22 @@ fn synthetic_pcraft_roundtrip_keeps_everything() {
         apply_appearance: true,
         states: capture_states(&d),
     });
-    let bytes = photosuite_format::save_to_bytes(&d, &Default::default()).unwrap();
-    let back = photosuite_format::load_from_bytes(&bytes).unwrap();
+    let bytes = photosplice_format::save_to_bytes(&d, &Default::default()).unwrap();
+    let back = photosplice_format::load_from_bytes(&bytes).unwrap();
     assert_eq!(back.layer_comps, d.layer_comps);
     assert_eq!(back.last_applied_comp, d.last_applied_comp);
     assert_eq!(back.last_document_state, d.last_document_state);
     assert_eq!(back.artboards().len(), 2);
     assert_eq!(back.layers[1].artboard(), d.layers[1].artboard());
     // Remapped ids still point at the same layers.
-    let fresh = photosuite_format::load_from_bytes_with(&bytes, &photosuite_format::LoadOptions { preserve_ids: false, ..Default::default() }).unwrap();
+    let fresh = photosplice_format::load_from_bytes_with(&bytes, &photosplice_format::LoadOptions { preserve_ids: false, ..Default::default() }).unwrap();
     let c = &fresh.layer_comps[0];
     assert_eq!(c.states.len(), fresh.layer_count());
     assert!(c.states.iter().all(|s| fresh.layer(s.layer).is_some()));
 
     // Native identity is independent of ZIP entry order and the filename extension.
-    let zip = photosuite_format::zip::ZipReader::new(&bytes).unwrap();
-    let mut reordered = photosuite_format::zip::ZipWriter::new();
+    let zip = photosplice_format::zip::ZipReader::new(&bytes).unwrap();
+    let mut reordered = photosplice_format::zip::ZipWriter::new();
     reordered.add("extra.txt", b"not the manifest").unwrap();
     for entry in &zip.entries {
         reordered.add(&entry.name, &zip.read(entry, bytes.len()).unwrap()).unwrap();
@@ -237,5 +237,5 @@ fn synthetic_pcraft_roundtrip_keeps_everything() {
 
     let png = export(&d, "x.png", &ExportOptions::default()).unwrap().bytes;
     assert!(import("pcraft", &png).is_ok());
-    assert!(matches!(import("broken.pcraft", b"not a native bundle"), Err(photosuite_io::IoError::Pcraft(_))));
+    assert!(matches!(import("broken.pcraft", b"not a native bundle"), Err(photosplice_io::IoError::Pcraft(_))));
 }

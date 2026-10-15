@@ -1,6 +1,6 @@
 # Third-party Rust crates
 
-The PhotoSuite binaries link the Rust crates below, each used under the licence shown. The
+The PhotoSplice binaries link the Rust crates below, each used under the licence shown. The
 full licence texts follow, grouped by text. This file is generated from `Cargo.lock` by
 `packaging/notices/generate.sh` (cargo-about); don't edit it by hand. Other bundled material
 (fonts, icons, lens data, presets) is listed in `THIRD-PARTY-NOTICES.md`.

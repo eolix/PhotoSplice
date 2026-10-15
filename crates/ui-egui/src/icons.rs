@@ -159,7 +159,7 @@ pub fn tool_icon(t: Tool) -> &'static str {
         Tool::CustomShape => "tools-cshape",
         Tool::Hand => "tools-hand",
         Tool::Zoom => "tools-zoom",
-        // Hidden by default (PhotoSuite has no such tool), so its library has no glyph for
+        // Hidden by default (PhotoSplice has no such tool), so its library has no glyph for
         // them; they keep a Lucide stand-in for anyone who re-shows one in Edit › Toolbar.
         Tool::MagicEraser => "eraser-magic",
         Tool::HistoryBrush => "clock",

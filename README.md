@@ -1,16 +1,16 @@
 <p align="center">
-  <img src="assets/app-icon/photosuite.svg" alt="Logo" width="128" height="128">
+  <img src="assets/app-icon/photosplice.svg" alt="Logo" width="128" height="128">
 </p>
 
-<h1 align="center">PhotoSuite</h1>
+<h1 align="center">PhotoSplice</h1>
 
 <p align="center">
   <strong>A desktop image editor faithfully replicating classic Adobe Photoshop with 1:1 native PSD/PSB compatibility.</strong><br>
-  <strong>Live WebApp at https://photosuite.app/web</strong>
+  <strong>Live WebApp at https://photosplice.com/web</strong>
 </p>
 
 <p align="center">
-  <a href="https://github.com/eolix/photosuite/actions/workflows/build.yml"><img src="https://github.com/eolix/photosuite/actions/workflows/build.yml/badge.svg" alt="Build status"></a>
+  <a href="https://github.com/eolix/photosplice/actions/workflows/build.yml"><img src="https://github.com/eolix/photosplice/actions/workflows/build.yml/badge.svg" alt="Build status"></a>
   <img alt="Rust" src="https://img.shields.io/badge/100%25-Rust-b7410e?style=flat-square&logo=rust">
   <img alt="macOS · Linux · Windows" src="https://img.shields.io/badge/macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-native-2f7bf5?style=flat-square">
   <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-3a3a3a?style=flat-square">
@@ -28,18 +28,18 @@
 
 ---
 
-PhotoSuite is built upon PhotoCraft, as an open-source Rust image-editing engine (MIT OR Apache-2.0). 
+PhotoSplice is built upon PhotoCraft, as an open-source Rust image-editing engine (MIT OR Apache-2.0). 
 Its main focus areas are **compatibility, simplicity and speed**. Featuring full PSD round-trip 
-between Photoshop and PhotoSuite, classic Photoshop 'feel' (circa version CS6), and GPU optimisation for
-all Operating Systems. PhotoSuite's cleaner and leaner interface, full PSD and PDF reader and writer, 
+between Photoshop and PhotoSplice, classic Photoshop 'feel' (circa version CS6), and GPU optimisation for
+all Operating Systems. PhotoSplice's cleaner and leaner interface, full PSD and PDF reader and writer, 
 and comprehensive EXR/HDR tools and features on top.
 
-> PhotoSuite was originally clean-room written in JavsScript with a Rust engine (Tauri), but it has since
+> PhotoSplice was originally clean-room written in JavsScript with a Rust engine (Tauri), but it has since
 > taken a more modern, performant approach. The JS version still lives in many early forks.
 
 ## Downloads
 
-Installers are on the **[Releases](https://github.com/eolix/photosuite/releases)** page.
+Installers are on the **[Releases](https://github.com/eolix/photosplice/releases)** page.
 
 | Platform | Packages | Architecture |
 |:---|:---|:---|
@@ -51,10 +51,10 @@ Installers are on the **[Releases](https://github.com/eolix/photosuite/releases)
 On Linux, pick the package for your distribution (`<version>` and `<arch>` as in the file name):
 
 ```sh
-sudo apt install ./photosuite-<version>-linux-<arch>.deb          # Debian, Ubuntu, Mint, Pop!_OS
-sudo dnf install ./photosuite-<version>-linux-<arch>.rpm          # Fedora, RHEL (openSUSE: zypper install)
-sudo pacman -U photosuite-<version>-linux-<arch>.pkg.tar.zst      # Arch Linux, Manjaro, EndeavourOS
-flatpak install --user photosuite-<version>-linux-x86_64.flatpak  # any distribution with Flatpak
+sudo apt install ./photosplice-<version>-linux-<arch>.deb          # Debian, Ubuntu, Mint, Pop!_OS
+sudo dnf install ./photosplice-<version>-linux-<arch>.rpm          # Fedora, RHEL (openSUSE: zypper install)
+sudo pacman -U photosplice-<version>-linux-<arch>.pkg.tar.zst      # Arch Linux, Manjaro, EndeavourOS
+flatpak install --user photosplice-<version>-linux-x86_64.flatpak  # any distribution with Flatpak
 ```
 
 The AppImage needs no installation (`chmod +x` it and run it) and carries update information, so
@@ -80,15 +80,15 @@ Click any image for the full-resolution version.
 
 ## What this is
 
-PhotoSuite is a full-featured desktop raster and vector graphics editor designed with fidelity 
+PhotoSplice is a full-featured desktop raster and vector graphics editor designed with fidelity 
 in mind rather than reinterpretation. Panels sit where you expect them, shortcuts match your muscle memory, 
 dialogs expose identical fields, and tools behave exactly like the originals, right down to modifier keys. 
-If you know Photoshop ~CS6, you already know PhotoSuite.
+If you know Photoshop ~CS6, you already know PhotoSplice.
 
 * **PSD/PSB Native Format**: PSD is the native format, not a lossy import filter. Documents
   round-trip cleanly through the binary format: layer records, masks, blending modes, channel
   data, descriptors, layer effects, smart-filter stacks, text engine data, vector paths, slices,
-  and colour profiles. A file saved in PhotoSuite opens in Photoshop with its layer tree intact,
+  and colour profiles. A file saved in PhotoSplice opens in Photoshop with its layer tree intact,
   and vice versa. PSB is supported for large documents.
 - **Native.** egui on wgpu (Metal, Vulkan, DirectX 12), with a CPU fallback. No Electron, no
   web view, no JavaScript.
@@ -97,7 +97,7 @@ If you know Photoshop ~CS6, you already know PhotoSuite.
   channel can do anything the interface can.
 
 > Not affiliated with or endorsed by Adobe. Photoshop is a registered trademark of Adobe Inc.,
-> named here only to describe the interface and behaviour PhotoSuite follows. PhotoSuite is
+> named here only to describe the interface and behaviour PhotoSplice follows. PhotoSplice is
 > independent of, and not endorsed by, the PhotoCraft project.
 
 ## What this is not
@@ -145,9 +145,9 @@ each under its own licence (see [Licences](#licences)).
 
 | | Open | Save |
 |:---|:---|:---|
-| **Layered** | PSD, PSB, PhotoSuite (`.pcraft`) | PSD, PSB |
+| **Layered** | PSD, PSB, PhotoSplice (`.pcraft`) | PSD, PSB |
 | **Raster** | PNG, JPEG, WebP, TIFF, GIF, BMP, TGA, ICO, QOI, OpenEXR, Radiance HDR, PBM/PGM/PPM/PAM/PFM, HEIC/HEIF | PNG, JPEG, WebP (lossy and lossless), TIFF, OpenEXR, GIF, PNG-8, WBMP |
-| **Document** | PDF: a Photoshop PDF as its document; any other through Import PDF (pages, Crop To, resolution, mode, bit depth), as pixels or as editable layers (text as type, vectors as shapes, gradients as gradient fills, images) | Photoshop PDF: vectors, text and images, with Photoshop's editing data, so Photoshop and PhotoSuite reopen it with every layer |
+| **Document** | PDF: a Photoshop PDF as its document; any other through Import PDF (pages, Crop To, resolution, mode, bit depth), as pixels or as editable layers (text as type, vectors as shapes, gradients as gradient fills, images) | Photoshop PDF: vectors, text and images, with Photoshop's editing data, so Photoshop and PhotoSplice reopen it with every layer |
 | **Camera raw** | DNG, CR2, CR3, NEF, NRW, ARW, PEF, ORF, RW2, RAF | — |
 | **Presets** | Brushes (`.abr`), gradients (`.grd`), patterns (`.pat`), custom shapes (`.csh`), 3D LUTs (`.cube`, `.3dl`, `.look`) | — |
 
@@ -157,7 +157,7 @@ Rust stable (1.90 or later). Linux also needs
 `libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev libgtk-3-dev`.
 
 ```sh
-cargo run --release -p photosuite      # the desktop app
+cargo run --release -p photosplice      # the desktop app
 cargo test --workspace                 # the tests
 scripts/dev-macos.sh some/file.psd     # macOS: fast development build, opening a file
 ```
@@ -169,7 +169,7 @@ Installers are built by the scripts in [`packaging/`](packaging) (the same ones 
 
 ## Licences
 
-PhotoSuite is licensed under either of the [MIT licence](LICENSE-MIT) or the
+PhotoSplice is licensed under either of the [MIT licence](LICENSE-MIT) or the
 [Apache License 2.0](LICENSE-APACHE), at your option. [`NOTICE`](NOTICE) carries the required
 attributions, including PhotoCraft's.
 
@@ -191,5 +191,5 @@ It bundles third-party material under its own licences, each with its licence fi
 | [Font Awesome Free](https://fontawesome.com) shapes (converted) | Fonticons, Inc. | CC BY 4.0 |
 | PDFium's standard fonts, inside the [hayro](https://github.com/LaurenzV/hayro) PDF renderer | PDFium authors | BSD-3-Clause |
 
-The Rust crates PhotoSuite links (egui, wgpu, hayro and many more) are under their own
+The Rust crates PhotoSplice links (egui, wgpu, hayro and many more) are under their own
 permissive licences, listed with their texts in [`THIRD-PARTY-CRATES.md`](THIRD-PARTY-CRATES.md).

@@ -6,17 +6,17 @@
 use egui::{Modifiers, PointerButton, Pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use photosuite_doc::{LayerContent, LayerId, TextLayer};
-use photosuite_geom::{Affine, Point};
+use photosplice_doc::{LayerContent, LayerId, TextLayer};
+use photosplice_geom::{Affine, Point};
 use serde_json::json;
 
 use super::{layout, text_layer};
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::ViewXform;
 
-fn harness(ppp: f32, app: PhotosuiteApp) -> Harness<'static, PhotosuiteApp> {
+fn harness(ppp: f32, app: PhotospliceApp) -> Harness<'static, PhotospliceApp> {
     let mut h = Harness::builder().with_size(vec2(1200.0, 800.0)).with_pixels_per_point(ppp).build_ui_state(
-        |ui, app: &mut PhotosuiteApp| {
+        |ui, app: &mut PhotospliceApp| {
             let ctx = ui.ctx().clone();
             if !ctx.fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                 return;
@@ -26,13 +26,13 @@ fn harness(ppp: f32, app: PhotosuiteApp) -> Harness<'static, PhotosuiteApp> {
         },
         app,
     );
-    PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+    PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
     h.run_steps(4);
     h
 }
 
-fn new_app() -> PhotosuiteApp {
-    let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+fn new_app() -> PhotospliceApp {
+    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
     app.run("file.new", json!({"width": 1600, "height": 900})).unwrap();
     app.sync_views();
     app.ui.extras.rulers = false;
@@ -40,13 +40,13 @@ fn new_app() -> PhotosuiteApp {
     app
 }
 
-fn xf(app: &PhotosuiteApp) -> ViewXform {
+fn xf(app: &PhotospliceApp) -> ViewXform {
     let v = &app.ui.views[0];
     ViewXform { rect: crate::rulers::content_rect(app, app.last_canvas_rect), zoom: v.zoom, center: v.center, flip: app.ui.view.flip_horizontal }
 }
 
 /// Screen position of a text-space point of layer `id`.
-fn screen(h: &mut Harness<'static, PhotosuiteApp>, id: LayerId, x: f32, y: f32) -> Pos2 {
+fn screen(h: &mut Harness<'static, PhotospliceApp>, id: LayerId, x: f32, y: f32) -> Pos2 {
     let app = h.state_mut();
     let (_, aff, _) = layout(app, id).unwrap();
     let p = aff.apply(Point::new(f64::from(x), f64::from(y)));
@@ -55,7 +55,7 @@ fn screen(h: &mut Harness<'static, PhotosuiteApp>, id: LayerId, x: f32, y: f32) 
 
 /// A point inside glyph `i` (character index): `f` of the way along its advance, in the upper
 /// half of its line.
-fn glyph(h: &mut Harness<'static, PhotosuiteApp>, id: LayerId, i: usize, f: f32) -> Pos2 {
+fn glyph(h: &mut Harness<'static, PhotospliceApp>, id: LayerId, i: usize, f: f32) -> Pos2 {
     let (l, _, text) = layout(h.state_mut(), id).unwrap();
     let b = text.char_indices().nth(i).unwrap().0;
     let c = l.clusters.iter().find(|c| c.range.start == b).unwrap().clone();
@@ -63,12 +63,12 @@ fn glyph(h: &mut Harness<'static, PhotosuiteApp>, id: LayerId, i: usize, f: f32)
     screen(h, id, c.x + c.advance * f, ln.baseline - ln.ascent * 0.35)
 }
 
-fn press(h: &mut Harness<'static, PhotosuiteApp>, p: Pos2, down: bool) {
+fn press(h: &mut Harness<'static, PhotospliceApp>, p: Pos2, down: bool) {
     h.event(egui::Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: down, modifiers: Modifiers::NONE });
     h.run_steps(1);
 }
 
-fn click(h: &mut Harness<'static, PhotosuiteApp>, p: Pos2) {
+fn click(h: &mut Harness<'static, PhotospliceApp>, p: Pos2) {
     h.hover_at(p);
     h.run_steps(1);
     press(h, p, true);
@@ -76,7 +76,7 @@ fn click(h: &mut Harness<'static, PhotosuiteApp>, p: Pos2) {
     h.run_steps(1);
 }
 
-fn drag(h: &mut Harness<'static, PhotosuiteApp>, a: Pos2, b: Pos2) {
+fn drag(h: &mut Harness<'static, PhotospliceApp>, a: Pos2, b: Pos2) {
     h.hover_at(a);
     h.run_steps(1);
     press(h, a, true);
@@ -88,7 +88,7 @@ fn drag(h: &mut Harness<'static, PhotosuiteApp>, a: Pos2, b: Pos2) {
     h.run_steps(1);
 }
 
-fn selection(h: &Harness<'static, PhotosuiteApp>) -> (usize, usize) {
+fn selection(h: &Harness<'static, PhotospliceApp>) -> (usize, usize) {
     let Some(e) = h.state().ui.text_edit.clone() else { return (usize::MAX, usize::MAX) };
     (e.anchor, e.caret)
 }
@@ -150,7 +150,7 @@ fn clicks_and_drags_land_on_the_glyph_under_the_pointer() {
     }
 }
 
-fn text(app: &PhotosuiteApp, id: LayerId) -> TextLayer {
+fn text(app: &PhotospliceApp, id: LayerId) -> TextLayer {
     text_layer(&app.session.active().unwrap().doc, id).unwrap().clone()
 }
 
@@ -165,7 +165,7 @@ fn editing_psd_type_shows_our_layout_and_cancel_restores_it() {
     let moved = {
         let mut t = text(&app, id);
         t.transform = Affine::translate(330.0, 380.0);
-        photosuite_text::shared().lock().unwrap().render(&t, 72.0, photosuite_color::PixelFormat::RGBA8).1.surface
+        photosplice_text::shared().lock().unwrap().render(&t, 72.0, photosplice_color::PixelFormat::RGBA8).1.surface
     };
     let st = app.session.active_mut().unwrap();
     let mut doc = (*st.doc).clone();
@@ -198,7 +198,7 @@ fn editing_psd_type_shows_our_layout_and_cancel_restores_it() {
     assert_eq!(h.state().session.active().unwrap().history.entries().len(), steps);
 }
 
-fn size_at(app: &PhotosuiteApp, id: LayerId, ci: usize) -> f32 {
+fn size_at(app: &PhotospliceApp, id: LayerId, ci: usize) -> f32 {
     let t = text(app, id);
     let b = t.text.char_indices().nth(ci).map_or(t.text.len(), |(b, _)| b);
     let mut at = 0;
@@ -222,8 +222,8 @@ fn size_applies_at_layer_and_selection_scope() {
         app.run("type.edit", json!({"layer": id.0, "transform": [2.0, 0.0, 0.0, 2.0, 300.0, 420.0]})).unwrap();
         let id = if psd {
             let doc = (*app.session.active().unwrap().doc).clone();
-            let out = photosuite_io::export(&doc, "t.psd", &Default::default()).unwrap();
-            let back = photosuite_io::import("t.psd", &out.bytes).unwrap().document;
+            let out = photosplice_io::export(&doc, "t.psd", &Default::default()).unwrap();
+            let back = photosplice_io::import("t.psd", &out.bytes).unwrap().document;
             app.session.add_document(back, None);
             app.sync_views();
             let d = &app.session.active().unwrap().doc;
@@ -265,12 +265,12 @@ fn size_drag_is_live_and_one_history_step_per_drag() {
     let mut app = new_app();
     let id = LayerId(app.run("type.create", json!({"text": "Hello", "size": 20, "x": 300, "y": 420})).unwrap()["layer"].as_u64().unwrap());
     let mut h = Harness::builder().with_size(vec2(900.0, 60.0)).build_ui_state(
-        |ui, app: &mut PhotosuiteApp| {
+        |ui, app: &mut PhotospliceApp| {
             ui.horizontal(|ui| super::options_bar(app, ui));
         },
         app,
     );
-    PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+    PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
     h.run_steps(3);
     let steps = h.state().session.active().unwrap().history.entries().len();
     let mut last = 20.0;
@@ -299,7 +299,7 @@ fn size_drag_is_live_and_one_history_step_per_drag() {
 
 /// A point inside glyph `i` of vertical type: `f` of the way down its advance, right of the
 /// column's centre line.
-fn vglyph(h: &mut Harness<'static, PhotosuiteApp>, id: LayerId, i: usize, f: f32) -> Pos2 {
+fn vglyph(h: &mut Harness<'static, PhotospliceApp>, id: LayerId, i: usize, f: f32) -> Pos2 {
     let (l, _, text) = layout(h.state_mut(), id).unwrap();
     assert!(l.vertical);
     let b = text.char_indices().nth(i).unwrap().0;
@@ -309,7 +309,7 @@ fn vglyph(h: &mut Harness<'static, PhotosuiteApp>, id: LayerId, i: usize, f: f32
     screen(h, id, x, y)
 }
 
-fn key(h: &mut Harness<'static, PhotosuiteApp>, k: egui::Key) {
+fn key(h: &mut Harness<'static, PhotospliceApp>, k: egui::Key) {
     h.event(egui::Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
     h.run_steps(1);
 }
@@ -366,7 +366,7 @@ fn vertical_type_caret_selection_and_arrows_follow_the_columns() {
     assert_eq!(super::flow_key(egui::Key::ArrowUp, false), egui::Key::ArrowUp);
 }
 
-fn rgb_at(app: &PhotosuiteApp, id: LayerId, ci: usize) -> [u8; 4] {
+fn rgb_at(app: &PhotospliceApp, id: LayerId, ci: usize) -> [u8; 4] {
     let t = text(app, id);
     let b = t.text.char_indices().nth(ci).map_or(t.text.len(), |(b, _)| b);
     let mut at = 0;
@@ -415,7 +415,7 @@ fn foreground_colour_recolours_only_selected_type() {
 #[test]
 fn vertical_type_tool_creates_point_and_paragraph_text_with_one_undo() {
     use crate::canvas::{ToolEvent, tool_event};
-    use photosuite_doc::text::{Orientation, TextShape};
+    use photosplice_doc::text::{Orientation, TextShape};
     for end in [[100.0, 100.0], [240.0, 230.0]] {
         let mut app = new_app();
         app.ui.tool = crate::state::Tool::VerticalType;

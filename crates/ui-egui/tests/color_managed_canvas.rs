@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use photosuite_ui_egui::PhotosuiteApp;
+use photosplice_ui_egui::PhotospliceApp;
 use serde_json::json;
 
 /// Renders the UI with one 512² document of `rgb` tagged with `profile`; returns the median
@@ -18,11 +18,11 @@ fn render(profile: &str, rgb: [f32; 3], reopen: bool) -> Option<([u8; 3], [u8; 3
     let observer_out = observer.clone();
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 700.0)).with_pixels_per_point(1.0).with_max_steps(64).wgpu().build_eframe(move |cc| {
-            PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-            let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+            PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+            let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
             if let Some(rs) = cc.wgpu_render_state.as_ref() {
-                ft.store(photosuite_gpu::Compositor::preferred_acc_format(&rs.adapter) == eframe::wgpu::TextureFormat::Rgba32Float, Ordering::SeqCst);
-                *observer_out.lock().expect("GPU observer lock") = Some(photosuite_ui_egui::gpu_canvas::GpuCanvas::new(rs));
+                ft.store(photosplice_gpu::Compositor::preferred_acc_format(&rs.adapter) == eframe::wgpu::TextureFormat::Rgba32Float, Ordering::SeqCst);
+                *observer_out.lock().expect("GPU observer lock") = Some(photosplice_ui_egui::gpu_canvas::GpuCanvas::new(rs));
                 app.set_wgpu(rs.clone());
             }
             app
@@ -47,7 +47,7 @@ fn render(profile: &str, rgb: [f32; 3], reopen: bool) -> Option<([u8; 3], [u8; 3
     if reopen {
         app.session.active_mut().expect("active document").revision = 1;
     }
-    let sample = |harness: &mut egui_kittest::Harness<'_, PhotosuiteApp>| {
+    let sample = |harness: &mut egui_kittest::Harness<'_, PhotospliceApp>| {
         harness.run_steps(6);
         let img = harness.render().expect("render");
         // The document is fitted into the canvas area: its centre lies on the document.
@@ -66,20 +66,20 @@ fn render(profile: &str, rgb: [f32; 3], reopen: bool) -> Option<([u8; 3], [u8; 3
     if reopen {
         let doc = harness.state().session.active().expect("active document").doc.clone();
         let id = doc.id;
-        let bytes = photosuite_format::save_to_bytes(&doc, &photosuite_format::SaveOptions::default()).expect("save native document");
+        let bytes = photosplice_format::save_to_bytes(&doc, &photosplice_format::SaveOptions::default()).expect("save native document");
         drop(doc);
         let observer = observer.lock().expect("GPU observer lock").clone().expect("GPU observer");
-        let (request, _) = photosuite_ui_egui::control::ControlRequest::new("ui.menu.invoke", json!({"id":"filter.blur.gaussianBlur"}));
+        let (request, _) = photosplice_ui_egui::control::ControlRequest::new("ui.menu.invoke", json!({"id":"filter.blur.gaussianBlur"}));
         let ctx = harness.ctx.clone();
-        let response = photosuite_ui_egui::control::handle(harness.state_mut(), &ctx, &request);
-        assert!(matches!(response, photosuite_ui_egui::control::Outcome::Done(_)));
+        let response = photosplice_ui_egui::control::handle(harness.state_mut(), &ctx, &request);
+        assert!(matches!(response, photosplice_ui_egui::control::Outcome::Done(_)));
         harness.run_steps(6);
         let preview = id.0 ^ (1u64 << 61);
         assert!(observer.has(preview, [512, 512]), "filter preview uploaded");
         harness.state_mut().run("file.close", json!({})).expect("close");
         assert!(!observer.has(preview, [512, 512]), "close releases preview resources");
         // No repaint between close and reopen: sync_views must release the old resource/signature.
-        let reopened = photosuite_format::load_from_bytes(&bytes).expect("load native document");
+        let reopened = photosplice_format::load_from_bytes(&bytes).expect("load native document");
         assert_eq!(reopened.id, id, "native loading preserves document ID");
         harness.state_mut().session.add_document(reopened, None);
         harness.state_mut().sync_views();
@@ -88,14 +88,14 @@ fn render(profile: &str, rgb: [f32; 3], reopen: bool) -> Option<([u8; 3], [u8; 3
         harness.state_mut().ui.dialogs.clear();
         let after_reopen = sample(&mut harness);
         assert!((0..3).all(|i| gpu[i].abs_diff(after_reopen[i]) <= 1), "GPU native reopen changed display color: {gpu:?} -> {after_reopen:?}");
-        let (request, _) = photosuite_ui_egui::control::ControlRequest::new("ui.menu.invoke", json!({"id":"image.adjustments.brightnessContrast"}));
-        photosuite_ui_egui::control::handle(harness.state_mut(), &ctx, &request);
-        photosuite_ui_egui::adjust_preview::display_doc(harness.state_mut(), 0).expect("adjustment preview");
+        let (request, _) = photosplice_ui_egui::control::ControlRequest::new("ui.menu.invoke", json!({"id":"image.adjustments.brightnessContrast"}));
+        photosplice_ui_egui::control::handle(harness.state_mut(), &ctx, &request);
+        photosplice_ui_egui::adjust_preview::display_doc(harness.state_mut(), 0).expect("adjustment preview");
         harness.state_mut().run("file.close", json!({})).expect("close adjustment owner");
-        assert!(photosuite_ui_egui::adjust_preview::shown_key(harness.state()).is_none(), "close drops adjustment preview state before same-ID reopen");
-        harness.state_mut().session.add_document(photosuite_format::load_from_bytes(&bytes).expect("reopen adjustment owner"), None);
+        assert!(photosplice_ui_egui::adjust_preview::shown_key(harness.state()).is_none(), "close drops adjustment preview state before same-ID reopen");
+        harness.state_mut().session.add_document(photosplice_format::load_from_bytes(&bytes).expect("reopen adjustment owner"), None);
         harness.state_mut().sync_views();
-        photosuite_ui_egui::adjust_preview::display_doc(harness.state_mut(), 0).expect("rebuilt adjustment preview");
+        photosplice_ui_egui::adjust_preview::display_doc(harness.state_mut(), 0).expect("rebuilt adjustment preview");
         harness.state_mut().ui.dialogs.clear();
     }
     harness.state_mut().ui.view.flip_horizontal = true;

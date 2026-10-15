@@ -6,13 +6,13 @@
 //! solid ink, max = paper. Channel names come from resources 1006 / 1045 and ink colours from
 //! DisplayInfo (1077), exactly as for spot channels in the other modes.
 
-use photosuite_color::{Color, ColorMode, PixelFormat, SampleType};
-use photosuite_doc::{AlphaChannel, Document};
-use photosuite_geom::Rect;
-use photosuite_psd::file::LayerInfoPlacement;
-use photosuite_psd::resources::{ImageResource, ids, version_info_resource};
-use photosuite_psd::{ColorMode as PsdMode, Compression, Header, ImageData, PsdFile};
-use photosuite_raster::Surface;
+use photosplice_color::{Color, ColorMode, PixelFormat, SampleType};
+use photosplice_doc::{AlphaChannel, Document};
+use photosplice_geom::Rect;
+use photosplice_psd::file::LayerInfoPlacement;
+use photosplice_psd::resources::{ImageResource, ids, version_info_resource};
+use photosplice_psd::{ColorMode as PsdMode, Compression, Header, ImageData, PsdFile};
+use photosplice_raster::Surface;
 
 use crate::pixels::{encode_be, psd_depth};
 
@@ -22,13 +22,13 @@ const LAYER_RESOURCES: [u16; 6] = [1024, 1026, 1069, 1072, ids::DOCUMENT_IDS_SEE
 
 /// The document-level tagged blocks kept from the file (`FMsk`, `Patt`, …), padded to 4 as
 /// Photoshop writes them; not layer data.
-fn global_blocks(doc: &Document, version: photosuite_psd::Version) -> Vec<photosuite_psd::TaggedBlock> {
+fn global_blocks(doc: &Document, version: photosplice_psd::Version) -> Vec<photosplice_psd::TaggedBlock> {
     doc.metadata
         .psd_global_blocks
         .iter()
         .filter(|(_, key, _)| !matches!(key, b"Layr" | b"Lr16" | b"Lr32"))
         .map(|(sig, key, data)| {
-            let mut tb = photosuite_psd::TaggedBlock::new(*key, data.to_vec());
+            let mut tb = photosplice_psd::TaggedBlock::new(*key, data.to_vec());
             tb.signature = crate::psd_export::block_signature(*sig, version);
             tb.padding = Some(vec![0; (4 - data.len() % 4) % 4]);
             tb
@@ -140,7 +140,7 @@ pub(crate) fn document_to_psd(doc: &Document, force_psb: bool) -> (PsdFile, Vec<
         resources.push(ImageResource::new(ids::XMP, x.as_bytes().to_vec()));
     }
     if let Some(e) = &doc.metadata.exif {
-        resources.push(ImageResource::new(ids::EXIF, photosuite_codecs::upright_exif(e).into_owned()));
+        resources.push(ImageResource::new(ids::EXIF, photosplice_codecs::upright_exif(e).into_owned()));
     }
     // The file's other resources (print settings, IPTC, guides, …) as imported; not the ones that
     // only describe layers, nor any written above.
@@ -161,7 +161,7 @@ pub(crate) fn document_to_psd(doc: &Document, force_psb: bool) -> (PsdFile, Vec<
         resources.push(r);
     }
     resources.push(version_info_resource(true));
-    let color_mode_data = photosuite_psd::hdr::color_mode_data_for_depth(header.depth);
+    let color_mode_data = photosplice_psd::hdr::color_mode_data_for_depth(header.depth);
     let file = PsdFile {
         header,
         color_mode_data,

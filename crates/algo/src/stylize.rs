@@ -1,14 +1,14 @@
 //! Mosaic, Emboss, Find Edges, Solarize/Invert (per pixel), Desaturate.
 
-use photosuite_color::PixelFormat;
-use photosuite_geom::Rect;
-use photosuite_raster::{from_rgba, to_rgba};
+use photosplice_color::PixelFormat;
+use photosplice_geom::Rect;
+use photosplice_raster::{from_rgba, to_rgba};
 
 use crate::Ctx;
 use crate::image::Image;
 
 fn fmt(ctx: &Ctx) -> PixelFormat {
-    PixelFormat::new(ctx.mode, photosuite_color::SampleType::F32, ctx.alpha)
+    PixelFormat::new(ctx.mode, photosplice_color::SampleType::F32, ctx.alpha)
 }
 
 fn luma(ctx: &Ctx, px: &[f32]) -> f32 {

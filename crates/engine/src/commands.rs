@@ -1,9 +1,9 @@
 //! The command registry. Ids follow Photoshop's menu structure (see the parity checklist).
 
-use photosuite_color::{BlendMode, Color, ColorMode, SampleType};
-use photosuite_doc::{Adjustment, Document, Fill, Layer, LayerContent, LayerId, LayerMask, Size};
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_color::{BlendMode, Color, ColorMode, SampleType};
+use photosplice_doc::{Adjustment, Document, Fill, Layer, LayerContent, LayerId, LayerMask, Size};
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 use serde_json::{Value, json};
 
 use crate::{EngineError, Result, Session, inspect, pixels};
@@ -62,7 +62,7 @@ pub(crate) fn has_paintable(s: &Session) -> std::result::Result<(), String> {
 }
 
 /// Surface a paint command writes to: the layer's pixels, or its mask with `"target":"mask"`.
-pub(crate) fn paint_surface<'a>(doc: &'a mut Document, id: LayerId, p: &Value) -> Result<&'a mut photosuite_raster::Surface> {
+pub(crate) fn paint_surface<'a>(doc: &'a mut Document, id: LayerId, p: &Value) -> Result<&'a mut photosplice_raster::Surface> {
     let locks = doc.effective_locks(id);
     let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
     if !is_mask_target(p) && (locks.pixels || locks.all) {
@@ -324,7 +324,7 @@ fn build() -> Vec<CommandSpec> {
         // Select
         cmd!("select.all", "All", ["Select"], Some("Cmd+A"), "{}", has_doc, |s, _| {
             s.edit("Select All", |doc, _| {
-                let mut m = Surface::new(photosuite_color::PixelFormat::GRAY8);
+                let mut m = Surface::new(photosplice_color::PixelFormat::GRAY8);
                 m.fill_rect(doc.bounds(), &[1.0]);
                 doc.selection = Some(m);
                 Ok(())
@@ -340,10 +340,10 @@ fn build() -> Vec<CommandSpec> {
         }),
         cmd!("select.inverse", "Inverse", ["Select"], Some("Cmd+Shift+I"), "{}", has_selection, |s, _| {
             s.edit("Inverse", |doc, _| {
-                let old = doc.selection.take().unwrap_or_else(|| Surface::new(photosuite_color::PixelFormat::GRAY8));
+                let old = doc.selection.take().unwrap_or_else(|| Surface::new(photosplice_color::PixelFormat::GRAY8));
                 let b = doc.bounds();
                 let data: Vec<f32> = old.read_region(b).into_iter().map(|v| 1.0 - v).collect();
-                let mut m = Surface::new(photosuite_color::PixelFormat::GRAY8);
+                let mut m = Surface::new(photosplice_color::PixelFormat::GRAY8);
                 m.write_region(b, &data);
                 m.prune();
                 doc.selection = Some(m);
@@ -371,7 +371,7 @@ fn build() -> Vec<CommandSpec> {
                     // A marquee dragged past the canvas stops at its edge (Photoshop); the ellipse
                     // keeps the dragged shape and is only cut there.
                     let cut = r.intersect(&area);
-                    let mut shape = Surface::new(photosuite_color::PixelFormat::GRAY8);
+                    let mut shape = Surface::new(photosplice_color::PixelFormat::GRAY8);
                     if ellipse {
                         let (cx, cy) = ((r.x0 + r.x1) as f32 / 2.0, (r.y0 + r.y1) as f32 / 2.0);
                         let (rx, ry) = (r.width() as f32 / 2.0, r.height() as f32 / 2.0);
@@ -400,7 +400,7 @@ fn build() -> Vec<CommandSpec> {
                         shape.fill_rect(cut, &[1.0]);
                     }
                     if feather > 0.0 {
-                        use photosuite_algo::selection as sel;
+                        use photosplice_algo::selection as sel;
                         let m = sel::feather(&sel::mask_from_surface(Some(&shape), area), area.width() as usize, area.height() as usize, feather);
                         doc.selection = sel::combine(doc.selection.as_ref(), &m, area, sel::SelectionMode::parse(&mode));
                         return Ok(());
@@ -547,15 +547,15 @@ fn build() -> Vec<CommandSpec> {
                     if let Some(v) = p.get("color") {
                         // The Layers panel's colour label (right-click › Red, …).
                         let id = v.as_str().ok_or_else(|| bad("layer.setProps", "`color` must be a string"))?;
-                        l.label = photosuite_doc::LabelColor::from_id(id)
+                        l.label = photosplice_doc::LabelColor::from_id(id)
                             .ok_or_else(|| bad("layer.setProps", format!("unknown color `{id}` (none, red, orange, yellow, green, blue, violet, gray)")))?;
                     }
                     if let Some(v) = p.get("knockout").and_then(Value::as_str) {
                         // Blending Options › Advanced Blending › Knockout.
                         l.knockout = match v {
-                            "none" => photosuite_doc::Knockout::None,
-                            "shallow" => photosuite_doc::Knockout::Shallow,
-                            "deep" => photosuite_doc::Knockout::Deep,
+                            "none" => photosplice_doc::Knockout::None,
+                            "shallow" => photosplice_doc::Knockout::Shallow,
+                            "deep" => photosplice_doc::Knockout::Deep,
                             other => return Err(bad("layer.setProps", format!("unknown knockout `{other}` (none, shallow, deep)"))),
                         };
                     }
@@ -657,7 +657,7 @@ fn build() -> Vec<CommandSpec> {
                 let mut bg = Layer::raster("Background", fmt);
                 bg.locks.transparency = true;
                 bg.locks.position = true;
-                *crate::pixels_mut(&mut bg)? = photosuite_compose::flatten_to_surface(doc, fmt, Some([1.0, 1.0, 1.0]));
+                *crate::pixels_mut(&mut bg)? = photosplice_compose::flatten_to_surface(doc, fmt, Some([1.0, 1.0, 1.0]));
                 *active = Some(bg.id);
                 doc.layers = vec![bg];
                 Ok(())
@@ -795,7 +795,7 @@ fn build() -> Vec<CommandSpec> {
                     saturation: -100.0,
                     lightness: 0.0,
                     colorize: false,
-                    ranges: photosuite_doc::adjust::HueRange::defaults(),
+                    ranges: photosplice_doc::adjust::HueRange::defaults(),
                 },
                 &Value::Null,
             )
@@ -917,7 +917,7 @@ fn build() -> Vec<CommandSpec> {
                 let (x, y) = (coord("x")?, coord("y")?);
                 let d = s.active().ok_or(EngineError::NoDocument)?;
                 // At i32::MAX the 1x1 rect saturates to empty: a pixel that far out is transparent.
-                let px = photosuite_compose::render(&d.doc, Rect::from_xywh(x, y, 1, 1)).px.first().copied().unwrap_or_default();
+                let px = photosplice_compose::render(&d.doc, Rect::from_xywh(x, y, 1, 1)).px.first().copied().unwrap_or_default();
                 Ok(json!(px))
             },
             journal: false,
@@ -1172,7 +1172,7 @@ fn combine(a: &Surface, b: &Surface, area: Rect, f: impl Fn(f32, f32) -> f32) ->
     let ra = a.read_region(area);
     let rb = b.read_region(area);
     let data: Vec<f32> = ra.iter().zip(&rb).map(|(x, y)| f(*x, *y)).collect();
-    let mut out = Surface::new(photosuite_color::PixelFormat::GRAY8);
+    let mut out = Surface::new(photosplice_color::PixelFormat::GRAY8);
     out.write_region(area, &data);
     out.prune();
     out
@@ -1194,7 +1194,7 @@ pub(crate) fn translate_layer(doc: &Document, l: &mut Layer, dx: i32, dy: i32) {
     match &mut l.content {
         LayerContent::Raster(s) => *s = translate_surface(s, dx, dy),
         LayerContent::Text(t) => {
-            t.transform = photosuite_geom::Affine::translate(dx as f64, dy as f64).mul(&t.transform);
+            t.transform = photosplice_geom::Affine::translate(dx as f64, dy as f64).mul(&t.transform);
             if !crate::type_cmds::fonts_available(t) {
                 t.cache = t.cache.as_ref().map(|c| translate_surface(c, dx, dy));
             }

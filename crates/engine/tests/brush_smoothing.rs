@@ -1,7 +1,7 @@
 //! Smoothing is a tool option: the Brush starts at Photoshop's 10 %, and picking a brush preset
 //! keeps the current smoothing (amount and mode) instead of taking the preset's.
 
-use photosuite_engine::Session;
+use photosplice_engine::Session;
 use serde_json::json;
 
 #[test]

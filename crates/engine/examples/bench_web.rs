@@ -1,11 +1,11 @@
 //! Timing: File › Export › Save for Web (Legacy) and File › Print on a 6000×4000 (24 MP) image.
-//! `cargo run --release -p photosuite-engine --example bench_web [width] [height]`
+//! `cargo run --release -p photosplice-engine --example bench_web [width] [height]`
 //!
 //! Each line is one full command (flatten, sRGB, quantise/encode), estimate-only (no file).
 use std::time::Instant;
 
-use photosuite_engine::Session;
-use photosuite_geom::Rect;
+use photosplice_engine::Session;
+use photosplice_geom::Rect;
 use serde_json::json;
 
 fn main() {
@@ -20,7 +20,7 @@ fn main() {
         for y in 0..h {
             for x in 0..w {
                 let n = ((x.wrapping_mul(73_856_093) ^ y.wrapping_mul(19_349_663)) as u32 % 1000) as f32 / 1000.0 * 0.06;
-                data.extend(photosuite_raster::from_rgba(
+                data.extend(photosplice_raster::from_rgba(
                     &fmt,
                     [x as f32 / w as f32 + n, 0.5 + ((x + y) as f32 * 0.002).sin() * 0.3, y as f32 / h as f32, 1.0],
                 ));

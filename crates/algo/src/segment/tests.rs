@@ -1,7 +1,7 @@
 use super::gmm::Gmm;
 use super::maxflow::Graph;
 use super::*;
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 
 // ---------- max-flow ----------
 

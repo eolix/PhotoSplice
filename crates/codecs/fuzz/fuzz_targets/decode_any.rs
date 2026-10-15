@@ -3,7 +3,7 @@
 //! path) — neither may panic.
 
 use libfuzzer_sys::fuzz_target;
-use photosuite_codecs::{decode_with, encode, DecodeOptions, EncodeOptions, Limits};
+use photosplice_codecs::{decode_with, encode, DecodeOptions, EncodeOptions, Limits};
 
 fuzz_target!(|data: &[u8]| {
     let opts = DecodeOptions {
@@ -11,7 +11,7 @@ fuzz_target!(|data: &[u8]| {
         ..Default::default()
     };
     if let Ok(img) = decode_with(data, &opts)
-        && let Some(f) = photosuite_codecs::detect(data)
+        && let Some(f) = photosplice_codecs::detect(data)
     {
         let _ = encode(&img, f, &EncodeOptions::default());
     }

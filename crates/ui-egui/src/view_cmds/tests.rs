@@ -1,8 +1,8 @@
 use super::*;
 use crate::menus::{invoke as menu, is_live, menu_items};
 
-fn app_with(n: usize) -> (PhotosuiteApp, egui::Context) {
-    let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+fn app_with(n: usize) -> (PhotospliceApp, egui::Context) {
+    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
     for i in 0..n {
         app.run("file.new", json!({"width": 100 + i as u32 * 10, "height": 80})).unwrap();
     }
@@ -10,7 +10,7 @@ fn app_with(n: usize) -> (PhotosuiteApp, egui::Context) {
     (app, egui::Context::default())
 }
 
-fn checked(app: &PhotosuiteApp, id: &str) -> Option<bool> {
+fn checked(app: &PhotospliceApp, id: &str) -> Option<bool> {
     menu_items(app).into_iter().find(|i| i.id == id).and_then(|i| i.checked)
 }
 

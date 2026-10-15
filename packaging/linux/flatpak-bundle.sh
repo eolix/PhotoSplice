@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# Repackage a PhotoSuite Linux tarball as a single-file Flatpak bundle:
+# Repackage a PhotoSplice Linux tarball as a single-file Flatpak bundle:
 #
-#   $DIST/photosuite-<version>-linux-<arch>.flatpak
+#   $DIST/photosplice-<version>-linux-<arch>.flatpak
 #
 # Usage: packaging/linux/flatpak-bundle.sh [--no-test] [TARBALL]
 #
-# TARBALL defaults to $DIST/photosuite-<version>-linux-<arch>.tar.gz from package.sh. The bundle
+# TARBALL defaults to $DIST/photosplice-<version>-linux-<arch>.tar.gz from package.sh. The bundle
 # is built for the host architecture (x86_64 or aarch64), which must match the tarball's.
 # Needs flatpak, flatpak-builder and the SVG pixbuf loader (librsvg2-common) for the host's
 # `appstreamcli compose`; the freedesktop runtime and SDK named in the manifest are
 # installed per-user from Flathub. Unless --no-test, the bundle is then installed per-user and
-# `photosuite --version` is run inside the sandbox as a smoke test.
-# Manifest: packaging/linux/flatpak/io.github.eolix.PhotoSuite.bundle.yml.
+# `photosplice --version` is run inside the sandbox as a smoke test.
+# Manifest: packaging/linux/flatpak/io.github.eolix.PhotoSplice.bundle.yml.
 set -euo pipefail
 # shellcheck source=../env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
 HERE="$ROOT/packaging/linux"
-APP_ID=io.github.eolix.PhotoSuite
+APP_ID=io.github.eolix.PhotoSplice
 FLATHUB=https://dl.flathub.org/repo/flathub.flatpakrepo
 
 TEST=1
@@ -36,20 +36,20 @@ case "$ARCH" in
   aarch64 | arm64) ARCH=aarch64 ;;
   *) echo "unsupported architecture $ARCH" >&2; exit 2 ;;
 esac
-BASENAME="photosuite-$VERSION-linux-$ARCH"
+BASENAME="photosplice-$VERSION-linux-$ARCH"
 TARBALL="${TARBALL:-$DIST/$BASENAME.tar.gz}"
 [ -f "$TARBALL" ] || { echo "error: $TARBALL not found (run packaging/linux/package.sh --formats tar first)" >&2; exit 1; }
 for tool in flatpak flatpak-builder; do
   command -v "$tool" >/dev/null || { echo "error: $tool not found (apt install flatpak flatpak-builder librsvg2-common)" >&2; exit 1; }
 done
 
-echo "==> PhotoSuite $VERSION Flatpak bundle for $ARCH from $(basename "$TARBALL")"
+echo "==> PhotoSplice $VERSION Flatpak bundle for $ARCH from $(basename "$TARBALL")"
 
 WORK="$CARGO_TARGET_DIR/flatpak-bundle"
 rm -rf "$WORK"
 mkdir -p "$WORK/stage"
 tar -xzf "$TARBALL" -C "$WORK/stage" --strip-components=1
-[ -x "$WORK/stage/bin/photosuite" ] || { echo "error: $TARBALL has no bin/photosuite" >&2; exit 1; }
+[ -x "$WORK/stage/bin/photosplice" ] || { echo "error: $TARBALL has no bin/photosplice" >&2; exit 1; }
 cp "$HERE/flatpak/$APP_ID.bundle.yml" "$WORK/$APP_ID.yml"
 
 flatpak remote-add --user --if-not-exists flathub "$FLATHUB"
@@ -65,7 +65,7 @@ echo "wrote $OUT"
 if [ "$TEST" = 1 ]; then
   flatpak install --user -y --noninteractive --reinstall "$OUT"
   flatpak info --user "$APP_ID"
-  flatpak run --command=photosuite "$APP_ID" --version
+  flatpak run --command=photosplice "$APP_ID" --version
   flatpak run --command=sh "$APP_ID" -c 'ls /app/share/applications /app/share/metainfo /app/share/mime/packages /app/share/icons/hicolor/scalable/apps'
 fi
 echo "==> done"

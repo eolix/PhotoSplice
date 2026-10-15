@@ -36,7 +36,7 @@ fn create_makes_a_canvas_aligned_fill_layer_with_the_drag_as_handles() {
     assert_eq!(d.active_layer, Some(l.id));
     assert!(l.mask.is_none(), "no selection, no mask");
     assert_eq!(l.opacity, 0.5);
-    assert_eq!(l.blend, photosuite_color::BlendMode::Multiply);
+    assert_eq!(l.blend, photosplice_color::BlendMode::Multiply);
     let Fill::Gradient { style, align, dither, .. } = active_fill(&s) else { panic!() };
     assert_eq!(style, GradientStyle::Radial);
     assert!(!align && dither);
@@ -61,9 +61,9 @@ fn create_masks_the_layer_with_the_selection() {
     assert_eq!(m.value(5, 5), 1.0);
     assert_eq!(m.value(30, 20), 0.0);
     // Still laid out on the canvas, not the mask's bounds.
-    assert_eq!(photosuite_compose::fill_frame(l, d.doc.bounds()), d.doc.bounds());
+    assert_eq!(photosplice_compose::fill_frame(l, d.doc.bounds()), d.doc.bounds());
     // The composite outside the selection is the white background.
-    let flat = photosuite_compose::flatten(&d.doc);
+    let flat = photosplice_compose::flatten(&d.doc);
     assert_eq!(flat.px[20 * 48 + 30], [1.0, 1.0, 1.0, 1.0]);
 }
 
@@ -92,7 +92,7 @@ fn parity(depth: u32, background: &str, extra: Value, select: bool, tol: f32) {
                     p["to"] = json!([to[0] + 0.5, to[1] + 0.5]);
                 }
                 s.execute(if live { CREATE } else { "paint.gradient" }, p).unwrap();
-                photosuite_compose::flatten(&s.active().unwrap().doc)
+                photosplice_compose::flatten(&s.active().unwrap().doc)
             };
             let (classic, live) = (run(false), run(true));
             let mut worst = 0.0f32;

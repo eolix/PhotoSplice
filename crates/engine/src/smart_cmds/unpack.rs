@@ -6,10 +6,10 @@
 
 use std::sync::Arc;
 
-use photosuite_algo::transform::Interp;
-use photosuite_cms::Intent;
-use photosuite_color::BlendMode;
-use photosuite_doc::{Document, Group, Layer, LayerContent, LayerId, Metadata, SmartObject, SmartSource};
+use photosplice_algo::transform::Interp;
+use photosplice_cms::Intent;
+use photosplice_color::BlendMode;
+use photosplice_doc::{Document, Group, Layer, LayerContent, LayerId, Metadata, SmartObject, SmartSource};
 use serde_json::{Value, json};
 
 use super::{decode_source, detach_psd, other, placement, shift_layer, smart, source_bytes};
@@ -47,7 +47,7 @@ fn contents(doc: &Document, sm: &SmartObject, intent: Intent, bpc: bool) -> Resu
 /// behind: embed those sources so the nested smart objects keep rendering in the document.
 fn embed_nested(meta: &Metadata, l: &mut Layer) {
     let found = match &l.content {
-        LayerContent::Smart(SmartObject { source: SmartSource::Linked { path }, .. }) => photosuite_io::linked::find_linked_file(meta, path),
+        LayerContent::Smart(SmartObject { source: SmartSource::Linked { path }, .. }) => photosplice_io::linked::find_linked_file(meta, path),
         _ => None,
     };
     if let Some(f) = found {
@@ -78,7 +78,7 @@ fn place(doc: &Document, sm: &SmartObject, layers: &mut [Layer]) -> Result<()> {
     let h = placement(sm);
     let affine = sm.perspective.is_none().then_some(sm.transform);
     for l in layers {
-        released(l, |l| crate::transform_cmds::transform_layer(None, photosuite_doc::Locks::default(), l, &h, affine, Interp::Bicubic))?;
+        released(l, |l| crate::transform_cmds::transform_layer(None, photosplice_doc::Locks::default(), l, &h, affine, Interp::Bicubic))?;
         crate::transform_cmds::refresh_text(doc, l);
     }
     Ok(())

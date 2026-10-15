@@ -1,5 +1,5 @@
 //! Rendering policy migration and command validation, without a graphics device.
-use photosuite_engine::prefs::{GpuBackend, Preferences, RenderingMode};
+use photosplice_engine::prefs::{GpuBackend, Preferences, RenderingMode};
 use serde_json::json;
 
 #[test]

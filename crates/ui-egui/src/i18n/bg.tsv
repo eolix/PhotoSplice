@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# Български език translations for PhotoSuite UI.
+# Български език translations for PhotoSplice UI.
 
 	File	Файл
 	Edit	Редакция
@@ -672,7 +672,7 @@
 	Timeline	Хронология
 	Tool Presets	Предварителни настройки на инструмента
 	Tools	Инструменти
-	About PhotoSuite	Относно PhotoSuite
+	About PhotoSplice	Относно PhotoSplice
 	Website	уебсайт
 	Report an Issue…	Докладване за проблем…
 	WIA Support…	Поддръжка на WIA…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Изкривяването на перспективата не е активно
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Изкривяване на перспектива: начертайте равнини по протежение на перспективата на изображението, след което превключете на Изкривяване
 	Photo Filter	Фото Филтър
-	PhotoSuite	PhotoSuite
-	PhotoSuite Manages Colors	PhotoSuite управлява цветовете
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite — естествен редактор на изображения с отворен код, написан на Rust
+	PhotoSplice	PhotoSplice
+	PhotoSplice Manages Colors	PhotoSplice управлява цветовете
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice — естествен редактор на изображения с отворен код, написан на Rust
 	Pin Depth:	Дълбочина на щифта:
 	Pixel Length:	Дължина на пиксела:
 	Pixels/Centimeter	Пиксели/Сантиметър
@@ -1570,7 +1570,7 @@
 	Pen Tilt	Наклон на писалката
 	Pen Tool	Инструмент за писалка
 	Photo	Снимка
-	PhotoSuite website	Уебсайт на PhotoSuite
+	PhotoSplice website	Уебсайт на PhotoSplice
 	Picas	Пикас
 	Pillow Emboss	Възглавнично Релефиране
 	Pixel Replacement	Смяна на пиксели
@@ -1877,7 +1877,7 @@
 	System Info…	Информация за системата…
 	System Info	Информация за системата
 	More panels	Още панели
-	These settings aren't available in PhotoSuite yet.	Тези настройки все още не са налични във PhotoSuite
+	These settings aren't available in PhotoSplice yet.	Тези настройки все още не са налични във PhotoSplice
 	Graphics	Графика
 	Reset GPU Backend	Нулиране на GPU Backend
 	Applies at next launch.	Прилага се при следващо стартиране
@@ -2018,7 +2018,7 @@
 	Opening…	Отваряне…
 	Patch	Кръпка
 	Patch:	Кръпка:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite композира изображението чрез CPU. Прозорецът все още може да използва графичния адаптер.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice композира изображението чрез CPU. Прозорецът все още може да използва графичния адаптер.
 	Play Action	Изпълни действието
 	Reading…	Четене…
 	Record Action	Запиши действие

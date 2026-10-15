@@ -5,7 +5,7 @@
 //! through [`muda`] and suppresses the egui one.
 //!
 //! One source of truth either way: the menu is built from
-//! [`photosuite_ui_egui::menus::visible_menu_items`], the same list the in-window bar draws, so
+//! [`photosplice_ui_egui::menus::visible_menu_items`], the same list the in-window bar draws, so
 //! Edit › Menus hiding applies here too.
 //!
 //! Three things have to stay in step with the app:
@@ -13,7 +13,7 @@
 //! * **Structure** — rebuilt when the set of visible commands changes (Edit › Menus, a plugin
 //!   appearing, the recent-files list).
 //! * **Enabled and checked state** — polled per frame through
-//!   [`photosuite_ui_egui::menus::is_enabled`] and `checked`, which answer per command id
+//!   [`photosplice_ui_egui::menus::is_enabled`] and `checked`, which answer per command id
 //!   without allocating the whole item list. A handle is only touched when its value actually
 //!   changed, because every setter crosses into Objective-C.
 //! * **Clicks** — `muda` posts to a process-wide channel; [`NativeMenu::poll`] drains it and
@@ -23,8 +23,8 @@ use std::collections::HashMap;
 
 use muda::accelerator::Accelerator;
 use muda::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
-use photosuite_ui_egui::PhotosuiteApp;
-use photosuite_ui_egui::i18n::{self, Lang};
+use photosplice_ui_egui::PhotospliceApp;
+use photosplice_ui_egui::i18n::{self, Lang};
 
 /// Owns the `NSMenu` and the handles needed to keep it in step.
 pub struct NativeMenu {
@@ -45,7 +45,7 @@ pub struct NativeMenu {
 ///
 /// Hashing the item list is far cheaper than rebuilding an `NSMenu`, and it changes exactly
 /// when the structure must: hiding items, a plugin registering, a file joining Open Recent.
-fn shape_of(items: &[photosuite_ui_egui::menus::MenuItem], lang: Lang) -> u64 {
+fn shape_of(items: &[photosplice_ui_egui::menus::MenuItem], lang: Lang) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     // A language change relabels every item, so it rebuilds the bar like any other change.
@@ -64,7 +64,7 @@ fn shape_of(items: &[photosuite_ui_egui::menus::MenuItem], lang: Lang) -> u64 {
 const APP_QUIT: &str = "app.quit";
 
 /// The interface language from Preferences, as the in-window bar resolves it.
-fn lang_of(app: &PhotosuiteApp) -> Lang {
+fn lang_of(app: &PhotospliceApp) -> Lang {
     Lang::from_pref(&app.session.prefs().interface.language)
 }
 
@@ -88,14 +88,14 @@ impl NativeMenu {
     /// while idle, so a click left on muda's own channel waited until something else woke the
     /// app — a choice made with the mouse could sit unhandled, which is how File › Quit
     /// "sometimes" did nothing while ⌘Q (a key event, which wakes it) always worked.
-    pub fn install(app: &PhotosuiteApp, ctx: &egui::Context) -> Option<Self> {
+    pub fn install(app: &PhotospliceApp, ctx: &egui::Context) -> Option<Self> {
         let (tx, events) = std::sync::mpsc::channel();
         let wake = ctx.clone();
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
             let _ = tx.send(event);
             wake.request_repaint();
         }));
-        let items = photosuite_ui_egui::menus::visible_menu_items(app);
+        let items = photosplice_ui_egui::menus::visible_menu_items(app);
         let lang = lang_of(app);
         let menu = Menu::new();
         let mut this = Self { menu, events, normal: HashMap::new(), checkable: HashMap::new(), state: HashMap::new(), shape: shape_of(&items, lang) };
@@ -110,15 +110,15 @@ impl NativeMenu {
     /// (Re)populate the bar from `items`.
     /// Labels go through the same catalogue the in-window bar uses (`tr` for menu and submenu
     /// titles, `tr_id` for items), falling back to English where a language has no entry.
-    fn build(&mut self, items: &[photosuite_ui_egui::menus::MenuItem], lang: Lang) -> muda::Result<()> {
+    fn build(&mut self, items: &[photosplice_ui_egui::menus::MenuItem], lang: Lang) -> muda::Result<()> {
         self.normal.clear();
         self.checkable.clear();
         self.state.clear();
 
         // The application menu macOS expects first: About, Services, Hide/Show, Quit. Quit is
         // routed through our own command so unsaved work still prompts.
-        let app_menu = Submenu::new("PhotoSuite", true);
-        let about = MenuItem::with_id("help.about", i18n::tr(lang, "About PhotoSuite"), true, None);
+        let app_menu = Submenu::new("PhotoSplice", true);
+        let about = MenuItem::with_id("help.about", i18n::tr(lang, "About PhotoSplice"), true, None);
         app_menu.append(&about)?;
         self.normal.insert("help.about".into(), about);
         app_menu.append(&PredefinedMenuItem::separator())?;
@@ -128,13 +128,13 @@ impl NativeMenu {
         app_menu.append(&PredefinedMenuItem::separator())?;
         app_menu.append(&PredefinedMenuItem::services(None))?;
         app_menu.append(&PredefinedMenuItem::separator())?;
-        // Named explicitly: AppKit's default takes the process name, `photosuite` outside a bundle.
-        app_menu.append(&PredefinedMenuItem::hide(Some(i18n::tr(lang, "Hide PhotoSuite"))))?;
+        // Named explicitly: AppKit's default takes the process name, `photosplice` outside a bundle.
+        app_menu.append(&PredefinedMenuItem::hide(Some(i18n::tr(lang, "Hide PhotoSplice"))))?;
         app_menu.append(&PredefinedMenuItem::hide_others(None))?;
         app_menu.append(&PredefinedMenuItem::separator())?;
         // Its own id, dispatched as `file.exit` in `poll`. On macOS quitting lives here only, so
         // File › Exit is left out of the tree below (Windows and Linux keep it).
-        let quit = MenuItem::with_id(APP_QUIT, i18n::tr(lang, "Quit PhotoSuite"), true, accelerator(Some(&"Cmd+Q".to_string())));
+        let quit = MenuItem::with_id(APP_QUIT, i18n::tr(lang, "Quit PhotoSplice"), true, accelerator(Some(&"Cmd+Q".to_string())));
         app_menu.append(&quit)?;
         self.normal.insert(APP_QUIT.into(), quit);
         self.menu.append(&app_menu)?;
@@ -143,7 +143,7 @@ impl NativeMenu {
         // separators re-tidied, or the one above it would be left at the bottom of File.
         let mut items = items.to_vec();
         items.retain(|it| it.id != "file.exit");
-        photosuite_ui_egui::menus::tidy_separators(&mut items);
+        photosplice_ui_egui::menus::tidy_separators(&mut items);
         let items = items.as_slice();
 
         // Then the app's own tree, in catalogue order. `path` is the nesting: ["Filter", "Blur"].
@@ -207,8 +207,8 @@ impl NativeMenu {
 
     /// Per-frame upkeep: rebuild when the structure changed, otherwise push only the
     /// enabled/checked values that actually moved.
-    pub fn sync(&mut self, app: &PhotosuiteApp) {
-        let items = photosuite_ui_egui::menus::visible_menu_items(app);
+    pub fn sync(&mut self, app: &PhotospliceApp) {
+        let items = photosplice_ui_egui::menus::visible_menu_items(app);
         let lang = lang_of(app);
         let shape = shape_of(&items, lang);
         if shape != self.shape {
@@ -225,8 +225,8 @@ impl NativeMenu {
             return;
         }
         for (id, cached) in self.state.iter_mut() {
-            let enabled = photosuite_ui_egui::menus::is_live(id) && photosuite_ui_egui::menus::is_enabled(app, id);
-            let checked = photosuite_ui_egui::menus::checked(app, id);
+            let enabled = photosplice_ui_egui::menus::is_live(id) && photosplice_ui_egui::menus::is_enabled(app, id);
+            let checked = photosplice_ui_egui::menus::checked(app, id);
             if cached.0 != enabled {
                 if let Some(i) = self.normal.get(id) {
                     i.set_enabled(enabled);
@@ -245,10 +245,10 @@ impl NativeMenu {
     }
 
     /// Dispatch any menu clicks that arrived since the last frame.
-    pub fn poll(&self, app: &mut PhotosuiteApp, ctx: &egui::Context) {
+    pub fn poll(&self, app: &mut PhotospliceApp, ctx: &egui::Context) {
         while let Ok(event) = self.events.try_recv() {
             let id = if event.id.0 == APP_QUIT { "file.exit".to_string() } else { event.id.0.clone() };
-            if let Err(e) = photosuite_ui_egui::menus::invoke(app, ctx, &id, serde_json::json!({})) {
+            if let Err(e) = photosplice_ui_egui::menus::invoke(app, ctx, &id, serde_json::json!({})) {
                 log::warn!("native menu: {id} failed: {e}");
             }
             ctx.request_repaint();
@@ -258,10 +258,10 @@ impl NativeMenu {
 
 /// Wraps the app so the native bar is polled and synced around each frame.
 ///
-/// The menu is driven from here rather than from inside `PhotosuiteApp::update` because
-/// `muda` is a native-only dependency and `photosuite-ui-egui` also compiles to WebAssembly.
+/// The menu is driven from here rather than from inside `PhotospliceApp::update` because
+/// `muda` is a native-only dependency and `photosplice-ui-egui` also compiles to WebAssembly.
 pub struct WithNativeMenu {
-    pub app: PhotosuiteApp,
+    pub app: PhotospliceApp,
     pub menu: NativeMenu,
 }
 

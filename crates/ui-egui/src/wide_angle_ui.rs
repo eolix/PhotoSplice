@@ -9,15 +9,15 @@
 //! "add":{"a":[x,y],"b":[x,y],"orientation":"…"}, "remove":i, "commit":true | "cancel":true}}}`.
 
 use egui::{Color32, Pos2, Rect as ERect, Sense, Stroke, TextureHandle, pos2, vec2};
-use photosuite_algo::transform::Interp;
-use photosuite_algo::wideangle::{self, Camera, Constraint, Orientation, WideAngle, WideModel};
-use photosuite_color::PixelFormat;
-use photosuite_doc::LayerId;
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_algo::transform::Interp;
+use photosplice_algo::wideangle::{self, Camera, Constraint, Orientation, WideAngle, WideModel};
+use photosplice_color::PixelFormat;
+use photosplice_doc::LayerId;
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::theme::Tokens;
 use crate::widgets;
 
@@ -72,7 +72,7 @@ impl WideAngleDialog {
         let p = self.proxy_params();
         let mesh = wideangle::solve(&p, pf);
         self.residual = mesh.residual / self.scale;
-        let out = photosuite_algo::warp::warp_triangles(&self.proxy, pf, &mesh.verts, &mesh.triangles(), Interp::Bilinear);
+        let out = photosplice_algo::warp::warp_triangles(&self.proxy, pf, &mesh.verts, &mesh.triangles(), Interp::Bilinear);
         let img = tex_image(&out, self.pw, self.ph);
         match &mut self.out_tex {
             Some(t) => t.set(img, egui::TextureOptions::LINEAR),
@@ -92,8 +92,8 @@ impl WideAngleDialog {
     }
 }
 
-pub fn open(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), String> {
-    photosuite_engine::commands::find("filter.adaptiveWideAngle").map(|c| (c.enabled)(&app.session)).unwrap_or(Err("unknown command".into()))?;
+pub fn open(app: &mut PhotospliceApp, ctx: &egui::Context) -> Result<(), String> {
+    photosplice_engine::commands::find("filter.adaptiveWideAngle").map(|c| (c.enabled)(&app.session)).unwrap_or(Err("unknown command".into()))?;
     let (layer, surf, _) = crate::distort_ui::active_pixels(app)?;
     let st = app.session.active().ok_or("no document")?;
     let frame = st.doc.bounds();
@@ -101,11 +101,11 @@ pub fn open(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), String> 
     let (w, h) = (frame.width() as usize, frame.height() as usize);
     let k = w.max(h).div_ceil(PROXY_SIDE).max(1);
     let (pw, ph) = (w.div_ceil(k), h.div_ceil(k));
-    let proxy = photosuite_algo::resample::resize_surface(
+    let proxy = photosplice_algo::resample::resize_surface(
         &surf.convert(PixelFormat::RGBA8),
         1.0 / k as f64,
         1.0 / k as f64,
-        photosuite_algo::resample::Resample::Bilinear,
+        photosplice_algo::resample::Resample::Bilinear,
     );
     // Normalise the proxy to start at the origin.
     let mut px = Surface::new(PixelFormat::RGBA8);
@@ -117,8 +117,8 @@ pub fn open(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), String> 
     );
     px.write_region(Rect::new(0, 0, pw as i32, ph as i32), &proxy.read_region(src_r));
     // EXIF focal length / crop factor, as the engine would resolve them.
-    let info = st.doc.metadata.exif.as_ref().map(|e| photosuite_algo::exif::read(e));
-    let params = photosuite_engine::lens_cmds::wide_params("filter.adaptiveWideAngle", &json!({}), info.as_ref()).unwrap_or_default();
+    let info = st.doc.metadata.exif.as_ref().map(|e| photosplice_algo::exif::read(e));
+    let params = photosplice_engine::lens_cmds::wide_params("filter.adaptiveWideAngle", &json!({}), info.as_ref()).unwrap_or_default();
     let mut d = WideAngleDialog {
         layer,
         layer_name: name,
@@ -149,7 +149,7 @@ fn parse_orientation(s: &str) -> Orientation {
     }
 }
 
-pub fn menu(app: &mut PhotosuiteApp, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
+pub fn menu(app: &mut PhotospliceApp, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
     if id != "filter.adaptiveWideAngle" {
         return None;
     }
@@ -201,7 +201,7 @@ pub fn menu(app: &mut PhotosuiteApp, ctx: &egui::Context, id: &str, params: &Val
     Some(Ok(app.wide_angle.as_ref().map(|d| d.describe()).unwrap_or(Value::Null)))
 }
 
-fn commit(app: &mut PhotosuiteApp) -> Result<Value, String> {
+fn commit(app: &mut PhotospliceApp) -> Result<Value, String> {
     let d = app.wide_angle.take().ok_or(tl!("Adaptive Wide Angle isn't open"))?;
     app.run("filter.adaptiveWideAngle", d.command_params())
 }
@@ -210,7 +210,7 @@ fn commit(app: &mut PhotosuiteApp) -> Result<Value, String> {
 const DIALOG_MAX: egui::Vec2 = vec2(1280.0, 860.0);
 
 /// Draws the dialog (a large modal over the document) while it is open.
-pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     if app.wide_angle.is_none() {
         return;
     }
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn dialog_adds_constraints_and_commits() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         let ctx = egui::Context::default();
         app.run("file.new", json!({"width": 160, "height": 100})).unwrap();
         app.run("layer.new.layer", json!({})).unwrap();

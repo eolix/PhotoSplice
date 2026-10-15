@@ -6,15 +6,15 @@ use egui::{Event, Key, Modifiers, vec2};
 use egui_kittest::Harness;
 use serde_json::json;
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::state::Tool;
 
-fn harness() -> Harness<'static, PhotosuiteApp> {
-    let mut s = photosuite_engine::Session::new();
+fn harness() -> Harness<'static, PhotospliceApp> {
+    let mut s = photosplice_engine::Session::new();
     s.execute("file.new", json!({"width": 200, "height": 100})).unwrap();
     let mut h = Harness::builder().with_size(vec2(1280.0, 800.0)).with_max_steps(64).build_eframe(move |cc| {
-        PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-        PhotosuiteApp::new(s, crate::Services::default())
+        PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+        PhotospliceApp::new(s, crate::Services::default())
     });
     h.run_steps(6);
     h
@@ -29,7 +29,7 @@ fn command() -> Modifiers {
     }
 }
 
-fn press(h: &mut Harness<'_, PhotosuiteApp>, key: Key, m: Modifiers) {
+fn press(h: &mut Harness<'_, PhotospliceApp>, key: Key, m: Modifiers) {
     h.event(Event::ModifiersChanged(m));
     h.event(Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: m });
     h.event(Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers: m });
@@ -43,7 +43,7 @@ fn rect_path(x: f64, y: f64, w: f64, h: f64) -> serde_json::Value {
 }
 
 /// The selection's bounds (x, y, width, height), if any.
-fn selection(h: &Harness<'_, PhotosuiteApp>) -> Option<[i64; 4]> {
+fn selection(h: &Harness<'_, PhotospliceApp>) -> Option<[i64; 4]> {
     let r = h.state().session.active()?.doc.selection.as_ref()?.content_bounds();
     Some([r.x0, r.y0, r.x1 - r.x0, r.y1 - r.y0].map(i64::from))
 }
@@ -64,7 +64,7 @@ fn cmd_enter_with_the_pen_loads_the_work_path() {
 fn cmd_enter_while_drawing_finishes_the_path_and_loads_it() {
     let mut h = harness();
     h.state_mut().ui.tool = Tool::Pen;
-    let draw = |h: &mut Harness<'_, PhotosuiteApp>| {
+    let draw = |h: &mut Harness<'_, PhotospliceApp>| {
         for (x, y) in [(20.0, 20.0), (120.0, 20.0), (120.0, 80.0)] {
             crate::pen_tool::down(h.state_mut(), x, y, Modifiers::NONE);
             crate::pen_tool::up(h.state_mut());

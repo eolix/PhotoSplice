@@ -1,21 +1,21 @@
-//! Regenerates the shipped synthetic CMYK profile when `PHOTOSUITE_REGEN_PROFILES=1`:
+//! Regenerates the shipped synthetic CMYK profile when `PHOTOSPLICE_REGEN_PROFILES=1`:
 //!
 //! ```sh
-//! PHOTOSUITE_REGEN_PROFILES=1 cargo test -p photosuite-cms --release --test regen
+//! PHOTOSPLICE_REGEN_PROFILES=1 cargo test -p photosplice-cms --release --test regen
 //! ```
 //!
 //! Without the variable the test only checks that the generator's model still matches the
 //! shipped AToB table (cheap), so model edits are not forgotten.
 
-use photosuite_cms::synth::{CmykModel, CmykParams};
-use photosuite_cms::{Builtin, Intent, Profile, Transform};
+use photosplice_cms::synth::{CmykModel, CmykParams};
+use photosplice_cms::{Builtin, Intent, Profile, Transform};
 
 #[test]
 fn regen_or_check_coated_cmyk() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/profiles/photosuite-coated-cmyk.icc");
-    if std::env::var_os("PHOTOSUITE_REGEN_PROFILES").is_some() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/profiles/photosplice-coated-cmyk.icc");
+    if std::env::var_os("PHOTOSPLICE_REGEN_PROFILES").is_some() {
         let t = std::time::Instant::now();
-        let p = photosuite_cms::synth::coated_cmyk();
+        let p = photosplice_cms::synth::coated_cmyk();
         let bytes = p.to_bytes();
         std::fs::write(path, &*bytes).unwrap();
         eprintln!("wrote {} bytes in {:?}", bytes.len(), t.elapsed());
@@ -35,7 +35,7 @@ fn regen_or_check_coated_cmyk() {
                     t.eval(&[c as f32, m as f32, y as f32, k as f32], &mut o);
                     let got = [o[0] as f64 * 100.0, o[1] as f64 * 255.0 - 128.0, o[2] as f64 * 255.0 - 128.0];
                     let want = model.lab([c, m, y, k]);
-                    worst = worst.max(photosuite_cms::math::delta_e76(got, want));
+                    worst = worst.max(photosplice_cms::math::delta_e76(got, want));
                 }
             }
         }

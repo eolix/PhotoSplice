@@ -2,8 +2,8 @@
 //! options bar "Auto-Select: Layer | Group", ⌘-click with the Move tool, and the canvas right-click
 //! layer list).
 
-use photosuite_doc::{Document, LayerContent, LayerId};
-use photosuite_geom::Rect;
+use photosplice_doc::{Document, LayerContent, LayerId};
+use photosplice_geom::Rect;
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;

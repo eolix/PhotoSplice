@@ -1,4 +1,4 @@
-//! Invert: a minimal PhotoSuite filter plug-in (plug-in ABI v1, see `docs/plugins.md`).
+//! Invert: a minimal PhotoSplice filter plug-in (plug-in ABI v1, see `docs/plugins.md`).
 //!
 //! `no_std`, no allocator, no imports: the host hands us an interleaved `f32` buffer and we
 //! invert the colour channels in place, leaving alpha (and fully transparent pixels) alone,
@@ -11,12 +11,12 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 }
 
 const MANIFEST: &str = r#"{
-  "id": "org.photosuite.example.invert",
+  "id": "org.photosplice.example.invert",
   "name": "Invert (WebAssembly)",
   "version": "1.0.0",
   "kind": "filter",
   "author": "PhotoCraft contributors",
-  "description": "Inverts the colour channels; an example of the PhotoSuite plug-in ABI.",
+  "description": "Inverts the colour channels; an example of the PhotoSplice plug-in ABI.",
   "params": {}
 }"#;
 

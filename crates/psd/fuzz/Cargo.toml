@@ -1,11 +1,11 @@
 [package]
-name = "photosuite-psd-fuzz"
+name = "photosplice-psd-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
-# Standalone: excluded from the photosuite workspace.
+# Standalone: excluded from the photosplice workspace.
 [workspace]
 
 [package.metadata]
@@ -13,7 +13,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-photosuite-psd = { path = ".." }
+photosplice-psd = { path = ".." }
 
 [[bin]]
 name = "parse"

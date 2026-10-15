@@ -7,7 +7,7 @@
 
 use egui::{Pos2, Rect, vec2};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::ViewXform;
 use crate::paint_mouse::Buttons;
 use crate::state::View;
@@ -52,7 +52,7 @@ pub fn anchor_view(view: &mut View, xf: &ViewXform, screen: Pos2, doc: [f64; 2],
 
 /// Route the canvas buttons for the Zoom tool. Returns true when it consumed the drag (the
 /// canvas then handles only the click).
-pub fn drag(app: &PhotosuiteApp, ctx: &egui::Context, view: &mut View, xf: &ViewXform, b: &Buttons, pointer: Option<Pos2>) -> bool {
+pub fn drag(app: &PhotospliceApp, ctx: &egui::Context, view: &mut View, xf: &ViewXform, b: &Buttons, pointer: Option<Pos2>) -> bool {
     let scrubby = app.ui.tool_options.zoom_scrubby;
     if b.started {
         let anchor = ctx.input(|i| i.pointer.press_origin()).filter(|p| xf.rect.contains(*p)).or(pointer);
@@ -121,15 +121,15 @@ mod tests {
         assert_eq!(scrub_zoom(2.0, f32::NAN), 2.0);
     }
 
-    fn harness(scrubby: bool) -> Harness<'static, PhotosuiteApp> {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+    fn harness(scrubby: bool) -> Harness<'static, PhotospliceApp> {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({"width": 400, "height": 300})).unwrap();
         app.sync_views();
         app.ui.extras.rulers = false;
         app.ui.tool = crate::state::Tool::Zoom;
         app.ui.tool_options.zoom_scrubby = scrubby;
         let mut h = Harness::builder().with_size(vec2(1000.0, 700.0)).build_ui_state(
-            |ui, app: &mut PhotosuiteApp| {
+            |ui, app: &mut PhotospliceApp| {
                 // Fonts set up after the first frame only apply from the next one.
                 if !ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                     return;
@@ -138,18 +138,18 @@ mod tests {
             },
             app,
         );
-        PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
         h.run_steps(4);
         h
     }
 
-    fn view_xf(h: &Harness<'static, PhotosuiteApp>) -> ViewXform {
+    fn view_xf(h: &Harness<'static, PhotospliceApp>) -> ViewXform {
         let app = h.state();
         let v = &app.ui.views[0];
         ViewXform { rect: app.last_canvas_rect, zoom: v.zoom, center: v.center, flip: false }
     }
 
-    fn press(h: &mut Harness<'static, PhotosuiteApp>, p: Pos2, pressed: bool) {
+    fn press(h: &mut Harness<'static, PhotospliceApp>, p: Pos2, pressed: bool) {
         h.event(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Default::default() });
         h.step();
     }

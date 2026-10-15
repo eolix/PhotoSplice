@@ -1,4 +1,4 @@
-//! Multi-page TIFF and BigTIFF open through `photosuite-io`: the default page is the first
+//! Multi-page TIFF and BigTIFF open through `photosplice-io`: the default page is the first
 //! full-resolution one (like Photoshop), any page can be opened by index, and a BigTIFF's
 //! orientation is applied (#693).
 
@@ -67,16 +67,16 @@ fn the_first_full_resolution_page_opens_and_any_page_on_request() {
     for big in [false, true] {
         // A thumbnail, then two pages.
         let bytes = tiff(big, &[(2, 2, 9, 1, 1), (6, 4, 50, 0, 1), (3, 5, 90, 2, 1)]);
-        let r = photosuite_io::import("pages.tif", &bytes).unwrap();
+        let r = photosplice_io::import("pages.tif", &bytes).unwrap();
         assert_eq!((r.document.size.width, r.document.size.height), (6, 4), "big {big}");
         assert!(r.warnings.iter().any(|w| w == "only the first of 2 pages was imported"), "{:?}", r.warnings);
-        let info = photosuite_codecs::tiff_info(&bytes).unwrap();
+        let info = photosplice_codecs::tiff_info(&bytes).unwrap();
         assert_eq!((info.pages.len(), info.default_page(), info.big_tiff), (3, Some(1), big));
         for (page, size) in [(0, (2, 2)), (1, (6, 4)), (2, (3, 5))] {
-            let r = photosuite_io::import_tiff_page("pages.tif", &bytes, Some(page)).unwrap();
+            let r = photosplice_io::import_tiff_page("pages.tif", &bytes, Some(page)).unwrap();
             assert_eq!((r.document.size.width, r.document.size.height), size, "page {page} big {big}");
         }
-        assert!(photosuite_io::import_tiff_page("pages.tif", &bytes, Some(3)).is_err());
+        assert!(photosplice_io::import_tiff_page("pages.tif", &bytes, Some(3)).is_err());
     }
 }
 
@@ -85,9 +85,9 @@ fn bigtiff_orientation_is_applied_on_open() {
     // #693: Orientation 6 turns the stored 6×4 landscape into a 4×6 portrait, in both containers.
     for big in [false, true] {
         let bytes = tiff(big, &[(6, 4, 50, 0, 6)]);
-        let r = photosuite_io::import("turned.tif", &bytes).unwrap();
+        let r = photosplice_io::import("turned.tif", &bytes).unwrap();
         assert_eq!((r.document.size.width, r.document.size.height), (4, 6), "big {big}");
-        let r = photosuite_io::import_tiff_page("turned.tif", &bytes, Some(0)).unwrap();
+        let r = photosplice_io::import_tiff_page("turned.tif", &bytes, Some(0)).unwrap();
         assert_eq!((r.document.size.width, r.document.size.height), (4, 6), "big {big}");
     }
 }

@@ -3,18 +3,18 @@
 //! pixels are Reference's.
 #![cfg(feature = "corpus")]
 
-use photosuite_doc::LayerContent;
+use photosplice_doc::LayerContent;
 
 #[test]
 fn warped_text_matches_reference_pixels() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/photoshop/text");
     assert!(dir.is_dir(), "{} is missing: run `cargo xtask corpus --all`", dir.display());
     for name in ["warp-arc-50.psd", "warp-bulge-60-persp.psd", "warp-flag-40.psd", "warp-rise-vertical-30.psd", "warp-twist-35.psd"] {
-        let doc = photosuite_io::import(name, &std::fs::read(dir.join(name)).unwrap()).unwrap().document;
+        let doc = photosplice_io::import(name, &std::fs::read(dir.join(name)).unwrap()).unwrap().document;
         let l = doc.walk().into_iter().find(|(_, _, l)| matches!(l.content, LayerContent::Text(_))).map(|(_, _, l)| l.clone()).unwrap();
         let LayerContent::Text(t) = &l.content else { unreachable!() };
         let theirs = t.cache.clone().expect("Reference's pixels");
-        let (_, r) = photosuite_text::shared().lock().unwrap().render(t, doc.resolution_dpi, doc.pixel_format());
+        let (_, r) = photosplice_text::shared().lock().unwrap().render(t, doc.resolution_dpi, doc.pixel_format());
         let ours = r.surface;
         let b = theirs.content_bounds().union(&ours.content_bounds());
         let n = theirs.channels();

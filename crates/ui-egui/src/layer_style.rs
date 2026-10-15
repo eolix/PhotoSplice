@@ -2,14 +2,14 @@
 //! State lives in the dialog's `fields` (JSON), so automation can drive it like any other dialog.
 
 use egui::{Color32, RichText, Sense, Stroke, StrokeKind, vec2};
-use photosuite_color::ColorMode;
-use photosuite_doc::blend_if::BlendRange;
-use photosuite_doc::effects::{FxPaint, StrokePosition};
-use photosuite_doc::{Effect, Layer};
+use photosplice_color::ColorMode;
+use photosplice_doc::blend_if::BlendRange;
+use photosplice_doc::effects::{FxPaint, StrokePosition};
+use photosplice_doc::{Effect, Layer};
 use serde_json::{Map, Value, json};
 
 use crate::theme::Tokens;
-use crate::{PhotosuiteApp, widgets};
+use crate::{PhotospliceApp, widgets};
 
 #[derive(Clone, Copy)]
 enum P {
@@ -235,7 +235,7 @@ fn defaults(kind: &str) -> Value {
     }
 }
 
-fn hex(c: &photosuite_doc::Color) -> String {
+fn hex(c: &photosplice_doc::Color) -> String {
     let [r, g, b, _] = c.to_rgba8();
     format!("#{r:02x}{g:02x}{b:02x}")
 }
@@ -357,12 +357,12 @@ pub struct StyleChoice {
     pub name: String,
     pub tex: egui::TextureHandle,
     pub effects: Vec<Effect>,
-    pub blend: Option<photosuite_color::BlendMode>,
+    pub blend: Option<photosplice_color::BlendMode>,
     pub fill_opacity: Option<f32>,
 }
 
 /// The Styles panel's presets as dialog choices.
-pub fn style_choices(app: &PhotosuiteApp, ctx: &egui::Context) -> Vec<StyleChoice> {
+pub fn style_choices(app: &PhotospliceApp, ctx: &egui::Context) -> Vec<StyleChoice> {
     app.session
         .presets
         .styles
@@ -433,7 +433,7 @@ pub fn initial_fields(layer: &Layer, mode: ColorMode, select: Option<&str>, ligh
     f
 }
 
-pub fn open(app: &mut PhotosuiteApp, select: Option<&str>) -> Option<u64> {
+pub fn open(app: &mut PhotospliceApp, select: Option<&str>) -> Option<u64> {
     let st = app.session.active()?;
     let layer = st.doc.layer(st.active_layer?)?.clone();
     let light = st.doc.global_light.angle;
@@ -443,7 +443,7 @@ pub fn open(app: &mut PhotosuiteApp, select: Option<&str>) -> Option<u64> {
 }
 
 /// `[[id, name], …]` of the patterns a style can use (document's, then the library's).
-pub fn pattern_list(app: &PhotosuiteApp) -> Value {
+pub fn pattern_list(app: &PhotospliceApp) -> Value {
     let mut out: Vec<Value> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let doc_pats = app.session.active().map(|d| d.doc.patterns.clone()).unwrap_or_default();
@@ -456,7 +456,7 @@ pub fn pattern_list(app: &PhotosuiteApp) -> Value {
 }
 
 /// Apply the dialog: replace the layer's effects with the enabled ones.
-pub fn confirm(app: &mut PhotosuiteApp, f: &Map<String, Value>) -> Result<Value, String> {
+pub fn confirm(app: &mut PhotospliceApp, f: &Map<String, Value>) -> Result<Value, String> {
     apply(f, |id, p| app.run(id, p))
 }
 
@@ -535,11 +535,11 @@ pub fn preview_hash(f: &Map<String, Value>) -> u64 {
 
 /// `doc` with the dialog's style applied, run on a scratch session (no history) for the live preview.
 pub fn preview_document(
-    doc: &photosuite_doc::Document,
-    patterns: &photosuite_engine::pattern_cmds::PatternLibrary,
+    doc: &photosplice_doc::Document,
+    patterns: &photosplice_engine::pattern_cmds::PatternLibrary,
     f: &Map<String, Value>,
-) -> Result<photosuite_doc::Document, String> {
-    let mut s = photosuite_engine::Session::new();
+) -> Result<photosplice_doc::Document, String> {
+    let mut s = photosplice_engine::Session::new();
     s.patterns = patterns.clone();
     s.add_document(doc.clone(), None);
     apply(f, |id, p| s.execute(id, p).map_err(|e| e.to_string()))?;
@@ -547,7 +547,7 @@ pub fn preview_document(
 }
 
 /// Dialog body (left list, right parameters).
-pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>, patterns: &photosuite_engine::pattern_cmds::PatternLibrary, styles: &[StyleChoice]) {
+pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>, patterns: &photosplice_engine::pattern_cmds::PatternLibrary, styles: &[StyleChoice]) {
     let t = Tokens::get(ui.ctx());
     let selected = f.get("selected").and_then(Value::as_str).unwrap_or("dropShadow").to_string();
     let invalid = validate_params(f).err();
@@ -694,7 +694,7 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>, patterns: &photosuite
                                 ui.label(RichText::new(tl!(&label)).color(t.text_dim));
                                 let mut cur = p.get(key).and_then(Value::as_str).unwrap_or("Normal").to_string();
                                 let opts: Vec<(String, &str)> =
-                                    photosuite_color::BlendMode::LAYER_MODES.iter().map(|m| (m.label().to_string(), m.label())).collect();
+                                    photosplice_color::BlendMode::LAYER_MODES.iter().map(|m| (m.label().to_string(), m.label())).collect();
                                 if widgets::dropdown(ui, &format!("fx-blend-{selected}"), &mut cur, &opts, 150.0) {
                                     p[key] = json!(cur);
                                 }
@@ -880,7 +880,7 @@ fn group(ui: &mut egui::Ui, title: &str, rule: bool) {
 const SWATCH: f32 = 96.0;
 
 /// The swatch: the dialog's effects, opacity and fill on a grey square, re-rendered when they change.
-fn swatch(ui: &mut egui::Ui, f: &Map<String, Value>, patterns: &photosuite_engine::pattern_cmds::PatternLibrary) {
+fn swatch(ui: &mut egui::Ui, f: &Map<String, Value>, patterns: &photosplice_engine::pattern_cmds::PatternLibrary) {
     let t = Tokens::get(ui.ctx());
     let (rect, _) = ui.allocate_exact_size(vec2(SWATCH, SWATCH), Sense::hover());
     ui.painter().rect_filled(rect, t.radius_sm, t.field);
@@ -903,13 +903,13 @@ fn swatch(ui: &mut egui::Ui, f: &Map<String, Value>, patterns: &photosuite_engin
 
 /// Renders the swatch: a mid-grey square on a transparent RGB document, with the dialog's style.
 /// The layer's blend mode, Channels and Blend If are left out: with nothing beneath they show nothing.
-fn swatch_image(f: &Map<String, Value>, patterns: &photosuite_engine::pattern_cmds::PatternLibrary) -> Option<egui::ColorImage> {
+fn swatch_image(f: &Map<String, Value>, patterns: &photosplice_engine::pattern_cmds::PatternLibrary) -> Option<egui::ColorImage> {
     let side = SWATCH as u32;
-    let mut doc = photosuite_doc::Document::new("Swatch", photosuite_geom::Size::new(side, side), ColorMode::Rgb, photosuite_color::SampleType::U8);
-    let mut surface = photosuite_raster::Surface::new(doc.pixel_format());
+    let mut doc = photosplice_doc::Document::new("Swatch", photosplice_geom::Size::new(side, side), ColorMode::Rgb, photosplice_color::SampleType::U8);
+    let mut surface = photosplice_raster::Surface::new(doc.pixel_format());
     let q = (side / 4) as i32;
-    surface.fill_rect(photosuite_geom::Rect::new(q, q, side as i32 - q, side as i32 - q), &[0.5, 0.5, 0.5, 1.0]);
-    let layer = Layer::new("Swatch", photosuite_doc::LayerContent::Raster(surface));
+    surface.fill_rect(photosplice_geom::Rect::new(q, q, side as i32 - q, side as i32 - q), &[0.5, 0.5, 0.5, 1.0]);
+    let layer = Layer::new("Swatch", photosplice_doc::LayerContent::Raster(surface));
     let lid = layer.id.0;
     doc.layers.push(layer);
     let mut sf = f.clone();
@@ -920,7 +920,7 @@ fn swatch_image(f: &Map<String, Value>, patterns: &photosuite_engine::pattern_cm
         }
     }
     let shown = preview_document(&doc, patterns, &sf).ok()?;
-    Some(crate::canvas::buffer_to_image(&photosuite_compose::flatten(&shown)))
+    Some(crate::canvas::buffer_to_image(&photosplice_compose::flatten(&shown)))
 }
 
 /// Blending Options › Advanced Blending (Channels) and Blend If, for the modes the compositor applies them to.
@@ -1104,8 +1104,8 @@ impl MaxAlpha for Color32 {
 mod tests {
     use super::*;
 
-    fn styled_session(effects: Value) -> (photosuite_engine::Session, Layer) {
-        let mut s = photosuite_engine::Session::new();
+    fn styled_session(effects: Value) -> (photosplice_engine::Session, Layer) {
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", json!({"width": 32, "height": 32})).unwrap();
         s.execute("layer.new.layer", json!({})).unwrap();
         s.execute("layer.layerStyle.replace", json!({ "effects": effects })).unwrap();
@@ -1133,7 +1133,7 @@ mod tests {
         let sizes: Vec<f32> = fx.iter().filter_map(|e| if let Effect::Stroke(st) = e { Some(st.size) } else { None }).collect();
         assert_eq!(sizes, [7.0, 4.0], "both strokes, in order, the edit applied");
         assert!(
-            fx.iter().any(|e| matches!(e, Effect::BevelEmboss(b) if b.technique == photosuite_doc::effects::BevelTechnique::ChiselHard)),
+            fx.iter().any(|e| matches!(e, Effect::BevelEmboss(b) if b.technique == photosplice_doc::effects::BevelTechnique::ChiselHard)),
             "the technique the dialog doesn't show is kept: {fx:?}"
         );
         assert!(fx.iter().any(|e| matches!(e, Effect::DropShadow(_)) && !e.enabled()), "a switched-off effect stays, off");
@@ -1178,7 +1178,7 @@ mod tests {
         let mut f = initial_fields(&layer, ColorMode::Rgb, None, 120.0);
         f.insert("selected".into(), json!("dropShadow#1"));
         let ctx = egui::Context::default();
-        PhotosuiteApp::setup_context(&ctx, crate::theme::ThemeKind::ALL[0]);
+        PhotospliceApp::setup_context(&ctx, crate::theme::ThemeKind::ALL[0]);
         let mut out = ctx.run_ui(Default::default(), |ui| body(ui, &mut f, &s.patterns, &[]));
         out.textures_delta.clear();
         let doc = preview_document(&s.active().unwrap().doc, &s.patterns, &f).unwrap();
@@ -1198,7 +1198,7 @@ mod tests {
 
     #[test]
     fn initial_fields_select_requested_kind() {
-        let l = Layer::raster("x", photosuite_doc::PixelFormat::RGBA8);
+        let l = Layer::raster("x", photosplice_doc::PixelFormat::RGBA8);
         let f = initial_fields(&l, ColorMode::Rgb, Some("stroke"), 120.0);
         assert_eq!(f["globalLight"], json!(120.0));
         assert_eq!(f["selected"], "stroke");
@@ -1208,7 +1208,7 @@ mod tests {
 
     #[test]
     fn preview_applies_the_style_without_touching_the_document() {
-        let mut s = photosuite_engine::Session::new();
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", json!({"width": 16, "height": 16})).unwrap();
         s.execute("layer.new.layer", json!({})).unwrap();
         let st = s.active().unwrap();
@@ -1219,7 +1219,7 @@ mod tests {
         f.insert("on:stroke".into(), json!(true));
         assert_ne!(preview_hash(&f), h);
         let shown = preview_document(&st.doc, &s.patterns, &f).unwrap();
-        let fx = |d: &photosuite_doc::Document| d.layer(st.active_layer.unwrap()).unwrap().effects.items.len();
+        let fx = |d: &photosplice_doc::Document| d.layer(st.active_layer.unwrap()).unwrap().effects.items.len();
         assert_eq!((fx(&shown), fx(&st.doc)), (2, 0));
     }
 
@@ -1227,7 +1227,7 @@ mod tests {
     #[test]
     fn channels_and_blend_if_round_trip_through_the_engine() {
         for (mode, entry) in [("rgb", 2usize), ("grayscale", 1)] {
-            let mut s = photosuite_engine::Session::new();
+            let mut s = photosplice_engine::Session::new();
             s.execute("file.new", json!({"width": 16, "height": 16, "mode": mode})).unwrap();
             s.execute("layer.new.layer", json!({})).unwrap();
             let st = s.active().unwrap();
@@ -1249,7 +1249,7 @@ mod tests {
             assert_eq!(again[&format!("p:{BLENDING}")]["channels"][0], json!(false), "{mode}");
         }
         // CMYK and Lab: the compositor doesn't apply them, so the dialog doesn't offer them.
-        let l = Layer::raster("x", photosuite_doc::PixelFormat::RGBA8);
+        let l = Layer::raster("x", photosplice_doc::PixelFormat::RGBA8);
         let f = initial_fields(&l, ColorMode::Cmyk, None, 120.0);
         assert!(f[&format!("p:{BLENDING}")].get("blendIf").is_none() && !f.contains_key("__mode"));
     }
@@ -1287,7 +1287,7 @@ mod tests {
 
     #[test]
     fn swatch_renders_the_style() {
-        let mut s = photosuite_engine::Session::new();
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", json!({"width": 16, "height": 16})).unwrap();
         s.execute("layer.new.layer", json!({})).unwrap();
         let st = s.active().unwrap();
@@ -1301,7 +1301,7 @@ mod tests {
 
     #[test]
     fn preview_rejects_non_object_effect_params() {
-        let mut s = photosuite_engine::Session::new();
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", json!({"width": 16, "height": 16})).unwrap();
         s.execute("layer.new.layer", json!({})).unwrap();
         let st = s.active().unwrap();
@@ -1330,12 +1330,12 @@ mod tests {
     #[test]
     fn body_keeps_invalid_params_and_renders_without_panicking() {
         let ctx = egui::Context::default();
-        PhotosuiteApp::setup_context(&ctx, crate::theme::ThemeKind::ALL[0]);
+        PhotospliceApp::setup_context(&ctx, crate::theme::ThemeKind::ALL[0]);
         let mut fields = Map::new();
         fields.insert("selected".into(), json!("dropShadow"));
         fields.insert("p:dropShadow".into(), json!(7));
 
-        let patterns = photosuite_engine::pattern_cmds::PatternLibrary::default();
+        let patterns = photosplice_engine::pattern_cmds::PatternLibrary::default();
         let mut out = ctx.run_ui(Default::default(), |ui| body(ui, &mut fields, &patterns, &[]));
         out.textures_delta.clear();
 
@@ -1344,7 +1344,7 @@ mod tests {
 
     #[test]
     fn confirm_rejects_invalid_params_and_applies_valid_effects() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         app.run("file.new", json!({"width": 16, "height": 16})).unwrap();
         app.run("layer.new.layer", json!({})).unwrap();
         let layer = app.session.active().unwrap().doc.layer(app.session.active().unwrap().active_layer.unwrap()).unwrap().clone();
@@ -1360,7 +1360,7 @@ mod tests {
 
     #[test]
     fn percent_fields_round_trip_through_the_engine() {
-        let mut s = photosuite_engine::Session::new();
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", json!({"width": 64, "height": 64})).unwrap();
         s.execute("layer.new.layer", json!({})).unwrap();
         s.execute("layer.layerStyle.outerGlow", json!({"spread": 6, "range": 40})).unwrap();
@@ -1377,11 +1377,11 @@ mod tests {
     fn drop_shadow_angle_reaches_the_effect() {
         // #350: the Angle slider was dead — the dialog never sent `useGlobalLight`, so the engine
         // defaulted it to true and the compositor used the fixed global light angle, ignoring the slider.
-        let mut s = photosuite_engine::Session::new();
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", json!({"width": 64, "height": 64})).unwrap();
         s.execute("layer.new.layer", json!({})).unwrap();
         let id = s.active().unwrap().active_layer.unwrap();
-        let shadow = |s: &photosuite_engine::Session| {
+        let shadow = |s: &photosplice_engine::Session| {
             s.active().unwrap().doc.layer(id).unwrap().effects.items.iter().find_map(|e| match e {
                 Effect::DropShadow(sh) => Some(sh.clone()),
                 _ => None,
@@ -1416,7 +1416,7 @@ mod tests {
 
     #[test]
     fn bevel_angle_change_is_not_overridden_by_unchanged_drop_shadow_angle() {
-        let mut s = photosuite_engine::Session::new();
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", json!({"width": 64, "height": 64})).unwrap();
         s.execute("layer.new.layer", json!({})).unwrap();
         let (id, mut f, initial_light) = {
@@ -1438,7 +1438,7 @@ mod tests {
 
     #[test]
     fn unchanged_global_light_angle_is_not_applied() {
-        let layer = Layer::raster("x", photosuite_doc::PixelFormat::RGBA8);
+        let layer = Layer::raster("x", photosplice_doc::PixelFormat::RGBA8);
         let mut f = initial_fields(&layer, ColorMode::Rgb, None, 47.5);
         f.insert("on:bevelEmboss".into(), json!(true));
         assert_eq!(f["p:bevelEmboss"]["angle"].as_f64(), Some(47.5));

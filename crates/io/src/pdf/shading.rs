@@ -11,14 +11,14 @@ use hayro::hayro_interpret::encode::EncodedShadingType;
 use hayro::hayro_interpret::gradient::SvgGradientKind;
 use hayro::hayro_interpret::pattern::ShadingPattern;
 use hayro::kurbo::{self, Point};
-use photosuite_color::Color;
-use photosuite_doc::{Fill, GradientStyle};
+use photosplice_color::Color;
+use photosplice_doc::{Fill, GradientStyle};
 
 /// How far apart (pixels) two points or radii may be and count as the same.
 const SAME: f64 = 0.5;
 
 /// A gradient fill's geometry in page pixels: `(style, from, to, stops)` for
-/// `photosuite_compose::gradient_fill::from_handles` (Linear: the ends; Radial: the centre and a
+/// `photosplice_compose::gradient_fill::from_handles` (Linear: the ends; Radial: the centre and a
 /// point on the circle where t = 1).
 pub(super) struct Gradient {
     pub style: GradientStyle,
@@ -59,9 +59,9 @@ pub(super) fn gradient(sp: &ShadingPattern, bbox: kurbo::Rect) -> Option<Gradien
     Some(Gradient { style, from, to, stops })
 }
 
-/// The `Fill` of `g` laid out in `frame` (the layer's frame, `photosuite_compose::fill_frame`).
-pub(super) fn fill(g: Gradient, frame: photosuite_geom::Rect) -> Fill {
-    let (angle, scale, offset) = photosuite_compose::gradient_fill::from_handles(g.style, g.from, g.to, frame, 0.0);
+/// The `Fill` of `g` laid out in `frame` (the layer's frame, `photosplice_compose::fill_frame`).
+pub(super) fn fill(g: Gradient, frame: photosplice_geom::Rect) -> Fill {
+    let (angle, scale, offset) = photosplice_compose::gradient_fill::from_handles(g.style, g.from, g.to, frame, 0.0);
     Fill::Gradient {
         stops: g.stops,
         angle,

@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "photosuite-plugin-invert"
+name = "photosplice-plugin-invert"
 version = "1.0.0"

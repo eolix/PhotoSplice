@@ -3,15 +3,15 @@
 use egui::{Modifiers, PointerButton, Pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use photosuite_doc::{Document, LayerContent, LayerId};
+use photosplice_doc::{Document, LayerContent, LayerId};
 use serde_json::json;
 
 use super::display_rows;
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 
 /// Background, then `outer { in-outer, inner { deep } }` with a pixel layer above it all.
-fn layered() -> photosuite_engine::Session {
-    let mut s = photosuite_engine::Session::new();
+fn layered() -> photosplice_engine::Session {
+    let mut s = photosplice_engine::Session::new();
     s.execute("file.new", json!({"width": 64, "height": 48})).unwrap();
     s.execute("layer.new.layer", json!({"name": "deep"})).unwrap();
     let inner = s.execute("layer.groupLayers", json!({"name": "inner"})).unwrap()["layer"].as_u64().unwrap();
@@ -24,16 +24,16 @@ fn layered() -> photosuite_engine::Session {
     s
 }
 
-fn harness_with(session: photosuite_engine::Session, ppp: f32) -> Harness<'static, PhotosuiteApp> {
+fn harness_with(session: photosplice_engine::Session, ppp: f32) -> Harness<'static, PhotospliceApp> {
     let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_pixels_per_point(ppp).with_max_steps(64).build_eframe(move |cc| {
-        PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-        PhotosuiteApp::new(session, crate::Services::default())
+        PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+        PhotospliceApp::new(session, crate::Services::default())
     });
     h.run_steps(8);
     h
 }
 
-fn group(h: &Harness<'_, PhotosuiteApp>, name: &str) -> (LayerId, bool) {
+fn group(h: &Harness<'_, PhotospliceApp>, name: &str) -> (LayerId, bool) {
     let doc = &h.state().session.active().unwrap().doc;
     doc.walk()
         .into_iter()
@@ -47,7 +47,7 @@ fn group(h: &Harness<'_, PhotosuiteApp>, name: &str) -> (LayerId, bool) {
 /// The on-screen centre of a group's triangle, scrolled into view in the Layers panel first (the
 /// dock gives Layers a fixed height, so rows can sit below its fold). `None` when the row isn't
 /// listed (inside a closed group).
-fn triangle(h: &mut Harness<'_, PhotosuiteApp>, name: &str) -> Option<Pos2> {
+fn triangle(h: &mut Harness<'_, PhotospliceApp>, name: &str) -> Option<Pos2> {
     let verb = if group(h, name).1 { "Collapse" } else { "Expand" };
     let label = format!("{verb} group {name}");
     h.query_by_label(&label)?.scroll_to_me();
@@ -56,7 +56,7 @@ fn triangle(h: &mut Harness<'_, PhotosuiteApp>, name: &str) -> Option<Pos2> {
 }
 
 /// A real click (press and release on separate frames), modifiers held throughout.
-fn click(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2, modifiers: Modifiers) {
+fn click(h: &mut Harness<'_, PhotospliceApp>, at: Pos2, modifiers: Modifiers) {
     h.event(egui::Event::ModifiersChanged(modifiers));
     h.hover_at(at);
     h.run_steps(1);
@@ -125,9 +125,9 @@ fn state_survives_psd_export_and_import_and_imported_groups_toggle() {
     let p = triangle(&mut h, "inner").unwrap();
     click(&mut h, p, Modifiers::NONE);
     let doc = (*h.state().session.active().unwrap().doc).clone();
-    let bytes = photosuite_io::export(&doc, "groups.psd", &Default::default()).unwrap().bytes;
-    let back = photosuite_io::import("groups.psd", &bytes).unwrap().document;
-    let mut s = photosuite_engine::Session::new();
+    let bytes = photosplice_io::export(&doc, "groups.psd", &Default::default()).unwrap().bytes;
+    let back = photosplice_io::import("groups.psd", &bytes).unwrap().document;
+    let mut s = photosplice_engine::Session::new();
     s.add_document(back, None);
     let mut h = harness_with(s, 2.0);
     assert!(group(&h, "outer").1 && !group(&h, "inner").1, "open/closed state round-trips through PSD");

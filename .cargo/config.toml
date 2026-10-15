@@ -2,5 +2,5 @@
 xtask = "run -p xtask --"
 
 # Fast interactive loop (see scripts/dev-macos.sh and docs/development.md).
-dev = "run --profile devfast -p photosuite --"
-devr = "run --release -p photosuite --"
+dev = "run --profile devfast -p photosplice --"
+devr = "run --release -p photosplice --"

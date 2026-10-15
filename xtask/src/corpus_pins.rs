@@ -13,7 +13,7 @@ use crate::pinned::{PinnedCorpus, Upstream};
 
 /// https://github.com/storytold/photocraft-corpus: our Photoshop-authored oracle PSDs
 /// (`photoshop/`). Bump through a PR after committing there.
-pub const PHOTOSUITE_CORPUS_COMMIT: &str = "f5b1178cab15309e05b7b504545df3c701f6d8fd";
+pub const PHOTOSPLICE_CORPUS_COMMIT: &str = "f5b1178cab15309e05b7b504545df3c701f6d8fd";
 /// https://github.com/psd-tools/psd-tools (MIT): `tests/psd_files` (main, 2026-10-05).
 pub const PSD_TOOLS_COMMIT: &str = "96eb134c17b2c65edf4c4151c0f00b802ada86c2";
 /// https://github.com/Agamnentzar/ag-psd (MIT): `test/` (master, 2026-07-02).
@@ -28,7 +28,7 @@ pub const PHOTOSHOP: PinnedCorpus = PinnedCorpus {
     upstreams: &[Upstream {
         prefix: "",
         repo: "storytold/photocraft-corpus",
-        commit: PHOTOSUITE_CORPUS_COMMIT,
+        commit: PHOTOSPLICE_CORPUS_COMMIT,
         subdir: "photoshop",
         extras: &[("README.md", "README.md"), ("LICENSE-MIT", "LICENSE-MIT"), ("LICENSE-APACHE", "LICENSE-APACHE")],
     }],
@@ -37,7 +37,7 @@ pub const PHOTOSHOP: PinnedCorpus = PinnedCorpus {
     subset: false,
     sources_md: |c| {
         format!(
-            "# Photoshop oracle corpus\n\n`photoshop/` of https://github.com/storytold/photocraft-corpus at commit {PHOTOSUITE_CORPUS_COMMIT} \
+            "# Photoshop oracle corpus\n\n`photoshop/` of https://github.com/storytold/photocraft-corpus at commit {PHOTOSPLICE_CORPUS_COMMIT} \
              (see `README.md`). MIT OR Apache-2.0, authored by the PhotoCraft contributors. Fetched and sha256-verified by \
              `cargo xtask corpus --photoshop` against `{}`. Gitignored; never commit these files.\n",
             c.manifest

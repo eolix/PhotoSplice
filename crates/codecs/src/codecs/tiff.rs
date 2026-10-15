@@ -50,7 +50,7 @@ const TAG_PHOTOSHOP: u16 = 34377;
 const TAG_IMAGE_SOURCE_DATA: u16 = 37724;
 
 /// `true` when [`encode`] writes little-endian (`II`) files: the `tiff` encoder writes the
-/// running target's byte order, and every target PhotoSuite builds for is little-endian.
+/// running target's byte order, and every target PhotoSplice builds for is little-endian.
 /// Byte-order-sensitive payloads (Photoshop layer data) must be produced to match.
 pub fn writes_little_endian() -> bool {
     cfg!(target_endian = "little")
@@ -234,7 +234,7 @@ pub(crate) fn decode(bytes: &[u8], limits: &Limits) -> Result<Image, CodecError>
 /// full-resolution pages, and a [`DecodeWarning::Truncated`] when image data is cut off.
 pub(crate) fn decode_page(bytes: &[u8], page: Option<usize>, limits: &Limits) -> Result<Image, CodecError> {
     if camera_raw(bytes) {
-        return Err(CodecError::unsupported(F, "camera raw files (such as CR2, NEF, ARW or DNG) are not flat images; decode them with photosuite-raw"));
+        return Err(CodecError::unsupported(F, "camera raw files (such as CR2, NEF, ARW or DNG) are not flat images; decode them with photosplice-raw"));
     }
     let file = File::parse(bytes).ok_or_else(|| err("not a TIFF or BigTIFF header"))?;
     let info = ifd::info_of(&file)?;

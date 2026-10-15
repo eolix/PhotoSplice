@@ -369,7 +369,7 @@ pub struct ToolOptions {
     /// true = "Classic gradient" (paints the pixels).
     pub gradient_classic: bool,
     /// Blend mode used by both live and classic gradient drags.
-    pub gradient_blend_mode: photosuite_color::BlendMode,
+    pub gradient_blend_mode: photosplice_color::BlendMode,
     pub fill_opacity: f32,
     /// Paint Bucket fill source: false = Foreground colour, true = Pattern (Patterns panel selection).
     pub bucket_fill_pattern: bool,
@@ -493,7 +493,7 @@ impl Default for ToolOptions {
             gradient_reverse: false,
             gradient_dither: true,
             gradient_classic: false,
-            gradient_blend_mode: photosuite_color::BlendMode::Normal,
+            gradient_blend_mode: photosplice_color::BlendMode::Normal,
             fill_opacity: 100.0,
             bucket_fill_pattern: false,
             type_font: "Inter".into(),
@@ -585,7 +585,7 @@ pub struct TransformSession {
     pub interpolation: String,
     /// Warp mode (Edit › Transform › Warp): the warp being edited over `rect`, in document px.
     #[serde(default)]
-    pub warp: Option<photosuite_geom::warp::Warp>,
+    pub warp: Option<photosplice_geom::warp::Warp>,
     /// Select › Transform Selection: the box transforms the selection outline, not pixels.
     #[serde(default)]
     pub selection: bool,
@@ -712,7 +712,7 @@ pub struct UiState {
     #[serde(default)]
     pub smoothing_tool: Option<Tool>,
     #[serde(default)]
-    pub tool_smoothing: Vec<(Tool, photosuite_engine::paint::brush::Smoothing)>,
+    pub tool_smoothing: Vec<(Tool, photosplice_engine::paint::brush::Smoothing)>,
     /// The Pen: the subpath being drawn and the press in progress (see `pen_tool`).
     #[serde(default)]
     pub pen: crate::pen_tool::Pen,

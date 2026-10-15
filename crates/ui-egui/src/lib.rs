@@ -1,7 +1,7 @@
-//! PhotoSuite's first UI shell, built on egui/eframe.
+//! PhotoSplice's first UI shell, built on egui/eframe.
 //!
 //! This crate is deliberately thin. Every action goes through
-//! [`photosuite_engine::Session::execute`], and all UI state lives in [`state::UiState`] (plain
+//! [`photosplice_engine::Session::execute`], and all UI state lives in [`state::UiState`] (plain
 //! data). The [`control`] module exposes both to automation, so agents can drive and inspect every
 //! part of the interface.
 #![forbid(unsafe_code)]
@@ -65,7 +65,7 @@ pub mod hold_keys;
 pub mod i18n;
 
 /// The product name, wherever the interface shows it. One place, so a rename is one line.
-pub const APP_NAME: &str = "PhotoSuite";
+pub const APP_NAME: &str = "PhotoSplice";
 mod icon_data;
 pub mod icons;
 pub mod jobs_ui;
@@ -144,8 +144,8 @@ pub mod zoom_tool;
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, Sender};
 
-use photosuite_doc::{DocId, Document};
-use photosuite_engine::Session;
+use photosplice_doc::{DocId, Document};
+use photosplice_engine::Session;
 use serde_json::Value;
 
 pub use control::{ControlRequest, ControlResponse};
@@ -166,8 +166,8 @@ pub struct ExportSettings {
     /// PDF: Photoshop's editing data ("Preserve Photoshop Editing Capabilities").
     pub pdf_editing: bool,
     /// PSD: the selected layers, the active one first, so the file reopens with them selected
-    /// (set by [`PhotosuiteApp::write_document`]).
-    pub selected_layers: Vec<photosuite_doc::LayerId>,
+    /// (set by [`PhotospliceApp::write_document`]).
+    pub selected_layers: Vec<photosplice_doc::LayerId>,
 }
 
 impl Default for ExportSettings {
@@ -252,12 +252,12 @@ pub struct Services {
     /// one on disk: `resources/` in a source checkout, the app bundle's copy when packaged.
     pub resources_dir: Option<std::path::PathBuf>,
     /// The user's own resources (LUTs and other files they loaded), kept across sessions in the
-    /// preferences folder: `…/app.photosuite/libraries`.
+    /// preferences folder: `…/app.photosplice/libraries`.
     pub user_resources_dir: Option<std::path::PathBuf>,
-    /// Home-screen thumbnails of the recent files: `…/app.photosuite/recent-thumbs`.
+    /// Home-screen thumbnails of the recent files: `…/app.photosplice/recent-thumbs`.
     pub recent_thumbs_dir: Option<std::path::PathBuf>,
     /// The Filter Gallery's thumbnails, rendered once per display density:
-    /// `…/app.photosuite/filter-gallery-thumbnails.json`.
+    /// `…/app.photosplice/filter-gallery-thumbnails.json`.
     pub gallery_thumbs_file: Option<std::path::PathBuf>,
     /// Write bytes to a path (native) or trigger a download (web).
     pub write: Option<WriteFn>,
@@ -268,8 +268,8 @@ pub struct Services {
     pub automation_command: Option<AutomationCommandFn>,
     /// Same policy as [`Self::automation_command`], as a function pointer the engine calls for
     /// each step of `actions.play`. Installed on the session only while a control request or
-    /// an automation-driven [`PhotosuiteApp::run`] runs, so a local play of a recorded `file.*` step still works.
-    pub automation_authorize: Option<fn(&str, &serde_json::Value) -> photosuite_engine::Result<()>>,
+    /// an automation-driven [`PhotospliceApp::run`] runs, so a local play of a recorded `file.*` step still works.
+    pub automation_authorize: Option<fn(&str, &serde_json::Value) -> photosplice_engine::Result<()>>,
     /// Encode an RGBA8 image as PNG (used for screenshots and `ui.render`).
     pub encode_png: Option<EncodePngFn>,
     /// Open a URL in the system browser (native). Falls back to `ctx.open_url` (web) when unset.
@@ -296,15 +296,15 @@ pub struct Services {
     /// the window gets no pointer events during an OS drag (see `file_open::DropTarget`).
     pub cursor_pos: Option<CursorPosFn>,
     /// The persistent brush preset store, loading in the background (desktop; see
-    /// `photosuite_engine::preset_store`). Attached to the session once it arrives; without
+    /// `photosplice_engine::preset_store`). Attached to the session once it arrives; without
     /// one, brush presets are session-only (web, tests).
-    pub preset_store: Option<std::sync::mpsc::Receiver<photosuite_engine::preset_store::Opened>>,
+    pub preset_store: Option<std::sync::mpsc::Receiver<photosplice_engine::preset_store::Opened>>,
     /// Reads the displays and their ICC profiles in the background (desktop macOS; see
     /// `monitor_status`). Without one, the canvas uses the profile chosen in Color Settings, or sRGB.
     pub read_displays: Option<monitor_status::ReadDisplaysFn>,
 }
 
-pub struct PhotosuiteApp {
+pub struct PhotospliceApp {
     pub session: Session,
     pub ui: UiState,
     pub services: Services,
@@ -349,7 +349,7 @@ pub struct PhotosuiteApp {
     /// Control replies waiting for queued synthetic input to be processed.
     input_waiters: Vec<Sender<ControlResponse>>,
     /// Live (uncommitted) adjustment edit shown on canvas while a slider is dragged.
-    pub live_adjust: Option<(photosuite_doc::LayerId, Value)>,
+    pub live_adjust: Option<(photosplice_doc::LayerId, Value)>,
     /// Frames rendered (for tests and the status bar).
     pub frame: u64,
     /// Apply theme on first frame.
@@ -357,7 +357,7 @@ pub struct PhotosuiteApp {
     /// Whether the window uses an integrated (transparent) macOS title bar.
     pub integrated_titlebar: bool,
     /// The operating system draws a title bar above the window (Windows, Linux), which already
-    /// shows "PhotoSuite - name", so the in-window bar doesn't repeat it. Set by the shell.
+    /// shows "PhotoSplice - name", so the in-window bar doesn't repeat it. Set by the shell.
     pub os_title_bar: bool,
     /// The platform draws the menus itself (the macOS system menu bar), so the in-window bar
     /// is not drawn. Set by the shell after it installs a native menu.
@@ -376,11 +376,11 @@ pub struct PhotosuiteApp {
     view_docs: Vec<DocId>,
     pub fps: f32,
     last_frame_time: f64,
-    thumbs: HashMap<(photosuite_doc::LayerId, u8), (u64, egui::TextureHandle)>,
+    thumbs: HashMap<(photosplice_doc::LayerId, u8), (u64, egui::TextureHandle)>,
     /// Snapshots whose live layer/mask keys were last used to prune thumbnail handles.
     thumb_documents: Vec<(DocId, std::sync::Weak<Document>)>,
     /// Content bounds cached per (key, revision): scanning a 36 MP layer every frame cost ~77 ms.
-    bounds_cache: HashMap<u64, (u64, photosuite_geom::Rect)>,
+    bounds_cache: HashMap<u64, (u64, photosplice_geom::Rect)>,
     /// Downsampled proxy of the active document for live previews: (doc, revision, k, proxy).
     pub(crate) proxy: Option<(DocId, u64, u32, std::sync::Arc<Document>)>,
     /// Key of the preview currently uploaded to the GPU (doc, params hash).
@@ -399,7 +399,7 @@ pub struct PhotosuiteApp {
     /// direct control calls.
     pub(crate) automation_input: bool,
     /// Levels/Curves histogram cache: (document, adjustment layer, revision it is valid for).
-    pub(crate) tone_hist: Option<(DocId, photosuite_doc::LayerId, u64, std::sync::Arc<tone::Histograms>)>,
+    pub(crate) tone_hist: Option<(DocId, photosplice_doc::LayerId, u64, std::sync::Arc<tone::Histograms>)>,
     /// Histogram panel cache: (document, revision, computed at ms, histograms).
     pub(crate) doc_hist: Option<(DocId, u64, f64, std::sync::Arc<tone::Histograms>)>,
     /// Free Transform preview (document without the moving pixels + their texture).
@@ -423,7 +423,7 @@ pub struct PhotosuiteApp {
     /// Magnetic Lasso outline in progress (magnetic_ui).
     pub(crate) magnetic: Option<magnetic_ui::Magnetic>,
     /// A camera raw file just opened interactively: Camera Raw opens on it next frame.
-    pub(crate) camera_raw_on_open: Option<photosuite_doc::DocId>,
+    pub(crate) camera_raw_on_open: Option<photosplice_doc::DocId>,
     /// Filter › Adaptive Wide Angle dialog (wide_angle_ui).
     pub(crate) wide_angle: Option<wide_angle_ui::WideAngleDialog>,
     /// Signature of the image we last put on the OS clipboard (to tell ours from other apps').
@@ -443,7 +443,7 @@ pub struct PhotosuiteApp {
     /// Crop tool gesture in progress (see `crop_ui`).
     pub(crate) crop: crop_ui::CropState,
     /// Type tool layout cache: ((doc, revision, layer), layout).
-    pub(crate) type_layout: Option<((u64, u64, u64), std::sync::Arc<photosuite_text::TextLayout>)>,
+    pub(crate) type_layout: Option<((u64, u64, u64), std::sync::Arc<photosplice_text::TextLayout>)>,
     /// Channel thumbnails for one document snapshot; view-only revisions reuse their pixels.
     channel_thumbs: Option<(DocId, std::sync::Weak<Document>, Vec<egui::TextureHandle>)>,
     /// Channels panel overlays / channel views drawn over the canvas, per document id.
@@ -482,7 +482,7 @@ pub struct PhotosuiteApp {
     live_tokens: theme::live::LiveTokens,
 }
 
-impl PhotosuiteApp {
+impl PhotospliceApp {
     pub fn new(session: Session, services: Services) -> Self {
         let mut app = Self {
             session,
@@ -575,14 +575,14 @@ impl PhotosuiteApp {
         // Saved preferences (and recovered documents) are in place before the first frame.
         prefs_ui::load(&mut app);
         // File › Scripts › Script Events Manager: "Start Application".
-        photosuite_engine::automate_cmds::fire_event(&mut app.session, "startApplication");
+        photosplice_engine::automate_cmds::fire_event(&mut app.session, "startApplication");
         app
     }
 
     /// Draw the document canvas on the GPU (custom WGSL shader) instead of via egui textures.
     /// Call from the app creator with `cc.wgpu_render_state`; without it the CPU path is used.
     pub fn set_wgpu(&mut self, rs: eframe::egui_wgpu::RenderState) {
-        // Preferences › Performance › cache tile size (PHOTOSUITE_GPU_TILE still overrides).
+        // Preferences › Performance › cache tile size (PHOTOSPLICE_GPU_TILE still overrides).
         let tile = self.session.prefs().performance.cache_tile_size;
         // Escaped driver/setup panics must leave the session and CPU canvas alive.
         self.perf.gpu_info.set_adapter(&rs.adapter.get_info());
@@ -612,13 +612,13 @@ impl PhotosuiteApp {
     }
 
     /// The GPU canvas's device health flag (tests inject faults through it).
-    pub fn gpu_health(&self) -> Option<photosuite_gpu::DeviceHealth> {
+    pub fn gpu_health(&self) -> Option<photosplice_gpu::DeviceHealth> {
         self.gpu.as_ref().map(|g| g.health().clone())
     }
 
     /// Run `hook` once the app has rendered its first frames (and a document opened at launch
     /// has drawn): the desktop app clears its crash-safe GPU startup marker there.
-    pub fn on_started(&mut self, hook: impl FnOnce(&mut PhotosuiteApp) + 'static) {
+    pub fn on_started(&mut self, hook: impl FnOnce(&mut PhotospliceApp) + 'static) {
         self.started = Some(Box::new(hook));
     }
 
@@ -828,7 +828,7 @@ impl PhotosuiteApp {
             self.camera_raw_on_open = self.session.active().map(|d| d.doc.id);
         }
         // Script events bound to "Open Document".
-        photosuite_engine::automate_cmds::document_opened(&mut self.session);
+        photosplice_engine::automate_cmds::document_opened(&mut self.session);
         self.sync_views();
         let ask = color.get("ask").and_then(Value::as_bool) == Some(true);
         if ask && (color.get("mismatch").and_then(Value::as_bool) == Some(true) || color.get("missing").is_some()) {
@@ -942,7 +942,7 @@ impl PhotosuiteApp {
         self.ui.status = format!("Saved {path}");
         // "Save Document" script events and File › Generate › Image Assets.
         if let Some(i) = self.session.active_index()
-            && let Some(r) = photosuite_engine::automate_cmds::document_saved(&mut self.session, i)
+            && let Some(r) = photosplice_engine::automate_cmds::document_saved(&mut self.session, i)
         {
             self.ui.status = format!("Saved {path}; {} image assets in {}", r["files"].as_array().map_or(0, Vec::len), r["dir"].as_str().unwrap_or(""));
         }
@@ -959,7 +959,7 @@ impl PhotosuiteApp {
         let state = self.session.active().ok_or("no document")?;
         // As File › Save: without `path` only a layered file is written back (#416).
         let target = path
-            .or_else(|| state.path.clone().filter(|p| photosuite_engine::file_cmds::saves_in_place(p)))
+            .or_else(|| state.path.clone().filter(|p| photosplice_engine::file_cmds::saves_in_place(p)))
             .ok_or("pass `path`: a save without one writes back only to the document's own PSD, PSB or .pcraft file")?;
         let export = self.services.export.as_ref().ok_or("no exporter configured")?;
         let (bytes, warnings) = export(&state.doc, &target, &ExportSettings::default())?;
@@ -1037,7 +1037,7 @@ impl PhotosuiteApp {
     }
 }
 
-impl eframe::App for PhotosuiteApp {
+impl eframe::App for PhotospliceApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         i18n::set_current(i18n::Lang::from_pref(&self.session.prefs().interface.language));
         if !self.styled {
@@ -1194,17 +1194,17 @@ fn read_dropped(_f: &dyn egui::DroppedFile) -> Result<Vec<u8>, String> {
     Err("drag-and-drop on the web is handled by the page; use File → Open".into())
 }
 
-impl PhotosuiteApp {
+impl PhotospliceApp {
     /// `params` aimed at the active layer's mask (`"target":"mask"`) when the Layers panel targets
     /// it and command `id` edits the target (adjustments, filters, fills) without naming one:
     /// ⌘I then inverts the mask, as in Photoshop (#780). A targeted alpha channel or Quick Mask
     /// mode wins, as the engine routes those itself.
     pub fn with_mask_target(&self, id: &str, params: Value) -> Value {
-        if !self.ui.mask_target || !photosuite_engine::channel_cmds::follows_target(id) || params.get("target").is_some() {
+        if !self.ui.mask_target || !photosplice_engine::channel_cmds::follows_target(id) || params.get("target").is_some() {
             return params;
         }
         let Some(st) = self.session.active() else { return params };
-        let composite = st.channel_view.target == photosuite_engine::channel_cmds::ChannelTarget::Composite && st.doc.quick_mask.is_none();
+        let composite = st.channel_view.target == photosplice_engine::channel_cmds::ChannelTarget::Composite && st.doc.quick_mask.is_none();
         if !composite || st.active_layer.and_then(|id| st.doc.layer(id)).is_none_or(|l| l.mask.is_none()) {
             return params;
         }
@@ -1221,7 +1221,7 @@ impl PhotosuiteApp {
     /// active layer (a shape layer's path is its content, not a mask).
     fn sync_mask_targets(&mut self) {
         let Some(st) = self.session.active() else { return };
-        if photosuite_engine::mask_view_cmds::current(st).is_some() {
+        if photosplice_engine::mask_view_cmds::current(st).is_some() {
             self.ui.mask_target = true;
             self.ui.vector_mask_target = false;
         }
@@ -1268,7 +1268,7 @@ impl PhotosuiteApp {
     }
 
     /// Cached 64px thumbnail of a pixel-ish layer, laid out in document space.
-    pub fn layer_thumb(&mut self, ctx: &egui::Context, doc: &Document, layer: &photosuite_doc::Layer) -> egui::TextureId {
+    pub fn layer_thumb(&mut self, ctx: &egui::Context, doc: &Document, layer: &photosplice_doc::Layer) -> egui::TextureId {
         // Key by content, not document revision: COW tiles change pointer only when their pixels
         // change, so unrelated edits (e.g. painting another layer) don't rebuild this thumbnail.
         let rev = layer.surface().map_or(0, surface_fingerprint) ^ (doc.size.width as u64) << 40;
@@ -1283,12 +1283,12 @@ impl PhotosuiteApp {
             let Some(s) = layer.surface() else { return [0.0; 4] };
             let n = s.channels();
             s.read_pixel(x, y, &mut px[..n]);
-            photosuite_raster::to_rgba(&s.format(), &px[..n])
+            photosplice_raster::to_rgba(&s.format(), &px[..n])
         });
         self.store_thumb(ctx, key, rev, img)
     }
 
-    pub fn mask_thumb(&mut self, ctx: &egui::Context, doc: &Document, id: photosuite_doc::LayerId, mask: &photosuite_doc::LayerMask) -> egui::TextureId {
+    pub fn mask_thumb(&mut self, ctx: &egui::Context, doc: &Document, id: photosplice_doc::LayerId, mask: &photosplice_doc::LayerMask) -> egui::TextureId {
         let rev = surface_fingerprint(&mask.surface) ^ (doc.size.width as u64) << 40;
         let key = (id, mask_thumbs_ui::THUMB_MASK);
         if let Some((r, tex)) = self.thumbs.get(&key)
@@ -1304,7 +1304,7 @@ impl PhotosuiteApp {
         self.store_thumb(ctx, key, rev, img)
     }
 
-    fn store_thumb(&mut self, ctx: &egui::Context, key: (photosuite_doc::LayerId, u8), rev: u64, img: egui::ColorImage) -> egui::TextureId {
+    fn store_thumb(&mut self, ctx: &egui::Context, key: (photosplice_doc::LayerId, u8), rev: u64, img: egui::ColorImage) -> egui::TextureId {
         match self.thumbs.get_mut(&key) {
             Some((r, tex)) => {
                 tex.set(img, egui::TextureOptions::LINEAR);
@@ -1322,7 +1322,7 @@ impl PhotosuiteApp {
 }
 
 /// Cheap identity of a surface's pixels: tile coordinates and `Arc` pointers.
-pub fn surface_fingerprint(s: &photosuite_raster::Surface) -> u64 {
+pub fn surface_fingerprint(s: &photosplice_raster::Surface) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ s.tile_count() as u64;
     for (c, t) in s.tiles() {
         let p = std::sync::Arc::as_ptr(t) as usize as u64;
@@ -1352,7 +1352,7 @@ fn thumb_image(doc: &Document, side: usize, mut f: impl FnMut(i32, i32) -> [f32;
     egui::ColorImage::new([side, side], px)
 }
 
-impl PhotosuiteApp {
+impl PhotospliceApp {
     /// Next step of queued synthetic input (automation): events up to and including the first
     /// release, so egui sees press and release in separate frames. Hosts that don't call
     /// `raw_input_hook` (offscreen harnesses) feed these to their input themselves.
@@ -1375,15 +1375,15 @@ impl PhotosuiteApp {
         theme::install_fonts(ctx);
         egui_extras::install_image_loaders(ctx);
         theme::apply(ctx, kind);
-        // egui's own ⌘+ / ⌘- / ⌘0 scale the whole interface; PhotoSuite zooms the canvas instead
+        // egui's own ⌘+ / ⌘- / ⌘0 scale the whole interface; PhotoSplice zooms the canvas instead
         // (shortcuts.rs), like Photoshop.
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
     }
 }
 
-impl PhotosuiteApp {
+impl PhotospliceApp {
     /// Cached `Surface::content_bounds` keyed by an id and the surface's tile identity.
-    pub fn cached_bounds(&mut self, key: u64, surface: &photosuite_raster::Surface) -> photosuite_geom::Rect {
+    pub fn cached_bounds(&mut self, key: u64, surface: &photosplice_raster::Surface) -> photosplice_geom::Rect {
         let rev = surface_fingerprint(surface);
         if let Some((r, b)) = self.bounds_cache.get(&key)
             && *r == rev
@@ -1399,14 +1399,14 @@ impl PhotosuiteApp {
     }
 }
 
-impl PhotosuiteApp {
+impl PhotospliceApp {
     /// Zoom of the active document's main view (screen points per document pixel).
     pub fn current_zoom(&self) -> f32 {
         self.session.active_index().and_then(|i| self.ui.views.get(i)).map_or(1.0, |v| v.zoom)
     }
 }
 
-impl PhotosuiteApp {
+impl PhotospliceApp {
     /// Channels panel thumbnails of the active document snapshot: the composite,
     /// each colour channel (when there is more than one), each alpha channel, then the Quick Mask.
     pub fn channel_thumbs(&mut self, ctx: &egui::Context) -> Vec<egui::TextureId> {
@@ -1419,7 +1419,7 @@ impl PhotosuiteApp {
         // identity against address reuse without retaining the document's pixel data.
         let snapshot = std::sync::Arc::downgrade(&doc);
         if !matches!(&self.channel_thumbs, Some((d, old, _)) if *d == id && old.ptr_eq(&snapshot)) {
-            let comp = photosuite_compose::thumbnail(&doc, 56);
+            let comp = photosplice_compose::thumbnail(&doc, 56);
             let (w, h) = (comp.width as usize, comp.height as usize);
             let side = w.max(h);
             let make = |f: &dyn Fn(&[u8]) -> egui::Color32, name: &str| {
@@ -1438,11 +1438,11 @@ impl PhotosuiteApp {
             let mut texs = vec![make(&|p| egui::Color32::from_rgb(p[0], p[1], p[2]), "composite")];
             if colors > 1 {
                 for k in 0..colors {
-                    let cmyk = fmt.mode == photosuite_doc::ColorMode::Cmyk;
+                    let cmyk = fmt.mode == photosplice_doc::ColorMode::Cmyk;
                     texs.push(make(
                         &|p| {
                             let rgba = [p[0], p[1], p[2], 255].map(|v| f32::from(v) / 255.0);
-                            let x = photosuite_raster::from_rgba(&fmt, rgba)[k];
+                            let x = photosplice_raster::from_rgba(&fmt, rgba)[k];
                             let g = if cmyk { 1.0 - x } else { x };
                             egui::Color32::from_gray((g.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
                         },
@@ -1479,7 +1479,7 @@ fn clip_signature(w: u32, h: u32, px: &[u8]) -> u64 {
     sig
 }
 
-impl PhotosuiteApp {
+impl PhotospliceApp {
     /// Mirror the session clipboard onto the OS clipboard (RGBA8).
     fn export_os_clipboard(&mut self) {
         let (Some(set), Some(clip)) = (self.services.clipboard_set_image.as_mut(), self.session.clipboard.as_ref()) else { return };
@@ -1508,10 +1508,10 @@ impl PhotosuiteApp {
         if self.os_clip_sig == Some(sig) && self.session.clipboard.is_some() {
             return false;
         }
-        let r = photosuite_geom::Rect::new(0, 0, w as i32, h as i32);
-        let mut surface = photosuite_raster::Surface::from_interleaved(photosuite_color::PixelFormat::RGBA8, r, &bytes);
+        let r = photosplice_geom::Rect::new(0, 0, w as i32, h as i32);
+        let mut surface = photosplice_raster::Surface::from_interleaved(photosplice_color::PixelFormat::RGBA8, r, &bytes);
         surface.prune();
-        self.session.clipboard = Some(photosuite_engine::edit_cmds::Clip { surface, bounds: r });
+        self.session.clipboard = Some(photosplice_engine::edit_cmds::Clip { surface, bounds: r });
         self.os_clip_sig = Some(sig);
         self.clip_external = true;
         true
@@ -1556,7 +1556,7 @@ mod clipboard_tests {
             clipboard_get_image: Some(Box::new(move || b.lock().unwrap().clone())),
             ..Default::default()
         };
-        let mut app = PhotosuiteApp::new(Session::new(), services);
+        let mut app = PhotospliceApp::new(Session::new(), services);
         app.session.execute("file.new", serde_json::json!({"width": 64, "height": 64})).unwrap();
         app.sync_views();
         app.run("select.rect", serde_json::json!({"x": 0, "y": 0, "width": 8, "height": 4})).unwrap();
@@ -1576,13 +1576,13 @@ mod clipboard_tests {
     type OsClip = Arc<Mutex<Option<(u32, u32, Vec<u8>)>>>;
 
     /// An app whose OS clipboard is `os`, counting every read in `reads`.
-    fn app_with_os_clipboard(os: &OsClip, reads: &Arc<std::sync::atomic::AtomicUsize>) -> PhotosuiteApp {
+    fn app_with_os_clipboard(os: &OsClip, reads: &Arc<std::sync::atomic::AtomicUsize>) -> PhotospliceApp {
         let (b, n) = (os.clone(), reads.clone());
         let get = move || {
             n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             b.lock().unwrap().clone()
         };
-        let mut app = PhotosuiteApp::new(Session::new(), Services { clipboard_get_image: Some(Box::new(get)), ..Default::default() });
+        let mut app = PhotospliceApp::new(Session::new(), Services { clipboard_get_image: Some(Box::new(get)), ..Default::default() });
         app.session.execute("file.new", serde_json::json!({"width": 64, "height": 64})).unwrap();
         app.sync_views();
         app
@@ -1603,7 +1603,7 @@ mod clipboard_tests {
         assert_ne!(r["offset"], serde_json::json!([0, 0]), "external image is centred: {r}");
         assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1, "one read per explicit paste");
         // Without a clipboard service Paste greys until something is copied in the app.
-        let mut plain = PhotosuiteApp::new(Session::new(), Services::default());
+        let mut plain = PhotospliceApp::new(Session::new(), Services::default());
         plain.session.execute("file.new", serde_json::json!({"width": 8, "height": 8})).unwrap();
         assert!(!crate::menus::is_enabled(&plain, "edit.paste"));
     }
@@ -1618,7 +1618,7 @@ mod clipboard_tests {
             n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             b.lock().unwrap().clone()
         };
-        let mut app = PhotosuiteApp::new(Session::new(), Services { clipboard_get_image: Some(Box::new(get)), ..Default::default() });
+        let mut app = PhotospliceApp::new(Session::new(), Services { clipboard_get_image: Some(Box::new(get)), ..Default::default() });
         let ctx = egui::Context::default();
         // Listed right after File › New…, enabled without reading the clipboard.
         let items = crate::menus::menu_items(&app);
@@ -1660,12 +1660,12 @@ mod clipboard_tests {
         *os.lock().unwrap() = Some((4, 4, [255u8, 0, 0, 255].repeat(16)));
         let (b, n) = (os.clone(), reads.clone());
         let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).with_max_steps(64).build_eframe(move |cc| {
-            PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
+            PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
             let get = move || {
                 n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 b.lock().unwrap().clone()
             };
-            let mut app = PhotosuiteApp::new(Session::new(), Services { clipboard_get_image: Some(Box::new(get)), ..Default::default() });
+            let mut app = PhotospliceApp::new(Session::new(), Services { clipboard_get_image: Some(Box::new(get)), ..Default::default() });
             app.session.execute("file.new", serde_json::json!({"width": 64, "height": 64})).unwrap();
             app
         });

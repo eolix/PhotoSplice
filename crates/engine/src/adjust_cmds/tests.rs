@@ -18,7 +18,7 @@ fn paint(s: &mut Session, f: impl Fn(i32, i32) -> [f32; 4]) {
         let mut data = Vec::new();
         for y in b.y0..b.y1 {
             for x in b.x0..b.x1 {
-                data.extend(photosuite_raster::from_rgba(&fmt, f(x, y)));
+                data.extend(photosplice_raster::from_rgba(&fmt, f(x, y)));
             }
         }
         surf.write_region(b, &data);
@@ -73,7 +73,7 @@ fn destructive_adjustments_respect_selection() {
     let mut s = session(8, "rgb");
     s.execute("select.all", json!({})).ok();
     s.edit("sel", |doc, _| {
-        let mut sel = Surface::new(photosuite_color::PixelFormat::GRAY8);
+        let mut sel = Surface::new(photosplice_color::PixelFormat::GRAY8);
         sel.write_region(Rect::new(0, 0, 10, 32), &vec![1.0; 320]);
         doc.selection = Some(sel);
         Ok(())
@@ -143,7 +143,7 @@ fn selective_color_layer_and_destructive() {
     }
     let mut s = session(8, "rgb");
     let r = s.execute("layer.newAdjustmentLayer.selectiveColor", json!({"colors": "blues", "yellow": 40})).unwrap();
-    let id = photosuite_doc::LayerId(r["layer"].as_u64().unwrap());
+    let id = photosplice_doc::LayerId(r["layer"].as_u64().unwrap());
     let get = |s: &Session| match &doc(s).layer(id).unwrap().content {
         LayerContent::Adjustment(Adjustment::SelectiveColor { relative, adjustments }) => (*relative, *adjustments),
         other => panic!("{other:?}"),
@@ -164,8 +164,8 @@ fn selective_color_layer_and_destructive() {
 fn color_lookup_builtin_data_and_errors() {
     let mut s = session(8, "rgb");
     let r = s.execute("layer.newAdjustmentLayer.colorLookup", json!({"lut": "dayForNight"})).unwrap();
-    let id = photosuite_doc::LayerId(r["layer"].as_u64().unwrap());
-    let px = photosuite_compose::render(doc(&s), Rect::from_xywh(40, 30, 1, 1)).px[0];
+    let id = photosplice_doc::LayerId(r["layer"].as_u64().unwrap());
+    let px = photosplice_compose::render(doc(&s), Rect::from_xywh(40, 30, 1, 1)).px[0];
     assert!(px[2] > px[0], "night is blue: {px:?}");
     // Switching interpolation keeps the table.
     s.execute("layer.setAdjustment", json!({"layer": id.0, "interpolation": "tetrahedral", "dither": true})).unwrap();
@@ -197,7 +197,7 @@ fn color_lookup_builtin_data_and_errors() {
     assert!(s.execute("image.adjustments.colorLookup", json!({"data": "LUT_3D_SIZE 3\n0 0 0\n"})).is_err());
     assert!(s.execute("layer.newAdjustmentLayer.colorLookup", json!({"file": "/nonexistent/x.cube"})).is_err());
     let looks = s.execute("image.adjustments.colorLookup.list", json!({})).unwrap();
-    assert_eq!(looks.as_array().unwrap().len(), photosuite_cms::lutfile::BUILTIN.len());
+    assert_eq!(looks.as_array().unwrap().len(), photosplice_cms::lutfile::BUILTIN.len());
 }
 
 #[test]
@@ -206,8 +206,8 @@ fn new_kinds_round_trip_through_psd_and_pcraft() {
     s.execute("layer.newAdjustmentLayer.selectiveColor", json!({"reds": [10, -20, 30, -40], "method": "absolute"})).unwrap();
     s.execute("layer.newAdjustmentLayer.colorLookup", json!({"lut": "warm", "dither": true})).unwrap();
     let d = doc(&s).clone();
-    let bytes = photosuite_io::export(&d, "x.psd", &Default::default()).unwrap().bytes;
-    let back = photosuite_io::import("x.psd", &bytes).unwrap().document;
+    let bytes = photosplice_io::export(&d, "x.psd", &Default::default()).unwrap().bytes;
+    let back = photosplice_io::import("x.psd", &bytes).unwrap().document;
     let kinds: Vec<&str> = back
         .layers
         .iter()
@@ -217,8 +217,8 @@ fn new_kinds_round_trip_through_psd_and_pcraft() {
         })
         .collect();
     assert_eq!(kinds, ["selectiveColor", "colorLookup"]);
-    let pc = photosuite_format::save_to_bytes(&d, &Default::default()).unwrap();
-    let again = photosuite_format::load_from_bytes(&pc).unwrap();
+    let pc = photosplice_format::save_to_bytes(&d, &Default::default()).unwrap();
+    let again = photosplice_format::load_from_bytes(&pc).unwrap();
     for (a, b) in d.layers.iter().zip(&again.layers) {
         assert_eq!(a.content, b.content);
     }

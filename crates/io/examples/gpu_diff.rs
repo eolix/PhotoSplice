@@ -2,7 +2,7 @@
 //! canvas) and the CPU compositor, and compares both with the file's own merged composite.
 //!
 //! ```sh
-//! cargo run --release -p photosuite-io --example gpu_diff -- file.psd [out.png]
+//! cargo run --release -p photosplice-io --example gpu_diff -- file.psd [out.png]
 //! SCALE=4 …          # upscale the png: GPU | CPU | Photoshop | GPU-vs-Photoshop heat map
 //! ```
 //!
@@ -10,20 +10,20 @@
 fn main() {
     let path = std::env::args().nth(1).expect("usage: gpu_diff file.psd [out.png]");
     let bytes = std::fs::read(&path).expect("read");
-    let file = photosuite_psd::PsdFile::from_bytes(&bytes).expect("parse");
-    let doc = photosuite_io::import(&path, &bytes).expect("import").document;
-    let merged = photosuite_io::merged_composite(&file).expect("merged composite");
-    let cpu = photosuite_compose::flatten(&doc).px;
+    let file = photosplice_psd::PsdFile::from_bytes(&bytes).expect("parse");
+    let doc = photosplice_io::import(&path, &bytes).expect("import").document;
+    let merged = photosplice_io::merged_composite(&file).expect("merged composite");
+    let cpu = photosplice_compose::flatten(&doc).px;
 
     let instance = wgpu::Instance::default();
     let Ok(adapter) = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())) else {
         eprintln!("no GPU adapter");
         return;
     };
-    let format = photosuite_gpu::Compositor::preferred_acc_format(&adapter);
+    let format = photosplice_gpu::Compositor::preferred_acc_format(&adapter);
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("device");
-    let mut comp = photosuite_gpu::Compositor::try_new_with_format(&device, format).expect("compositor");
-    let gpu = photosuite_gpu::render_to_vec(&mut comp, &device, &queue, &doc, doc.bounds()).expect("GPU render");
+    let mut comp = photosplice_gpu::Compositor::try_new_with_format(&device, format).expect("compositor");
+    let gpu = photosplice_gpu::render_to_vec(&mut comp, &device, &queue, &doc, doc.bounds()).expect("GPU render");
 
     let over = |p: [f32; 4]| [p[0] * p[3] + 1.0 - p[3], p[1] * p[3] + 1.0 - p[3], p[2] * p[3] + 1.0 - p[3]];
     let err = |a: &[[f32; 4]], b: &[[f32; 4]]| -> (f32, f32) {
@@ -65,8 +65,8 @@ fn main() {
             img[o..o + 3].copy_from_slice(&rgb);
         }
     }
-    let image = photosuite_codecs::Image::from_raw((w * 4 * k) as u32, (h * k) as u32, photosuite_codecs::ChannelLayout::Rgba, photosuite_codecs::SampleType::U8, img)
+    let image = photosplice_codecs::Image::from_raw((w * 4 * k) as u32, (h * k) as u32, photosplice_codecs::ChannelLayout::Rgba, photosplice_codecs::SampleType::U8, img)
         .expect("image");
-    std::fs::write(&out, photosuite_codecs::encode(&image, photosuite_codecs::Format::Png, &Default::default()).expect("png")).expect("write");
+    std::fs::write(&out, photosplice_codecs::encode(&image, photosplice_codecs::Format::Png, &Default::default()).expect("png")).expect("write");
     println!("wrote {out}");
 }

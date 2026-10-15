@@ -1,5 +1,5 @@
 [package]
-name = "photosuite-ui-egui"
+name = "photosplice-ui-egui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,22 +8,22 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-# Recent-file thumbnails are encoded and decoded here (already built, via photosuite-io).
-photosuite-codecs = { workspace = true }
-photosuite-geom = { workspace = true }
-photosuite-color = { workspace = true }
-photosuite-raster = { workspace = true }
-photosuite-doc = { workspace = true }
-photosuite-compose = { workspace = true }
-photosuite-gpu = { workspace = true }
-photosuite-engine = { workspace = true }
-photosuite-io = { workspace = true }
-photosuite-plugins = { workspace = true }
-photosuite-algo = { workspace = true }
-photosuite-text = { workspace = true }
-photosuite-vector = { workspace = true }
+# Recent-file thumbnails are encoded and decoded here (already built, via photosplice-io).
+photosplice-codecs = { workspace = true }
+photosplice-geom = { workspace = true }
+photosplice-color = { workspace = true }
+photosplice-raster = { workspace = true }
+photosplice-doc = { workspace = true }
+photosplice-compose = { workspace = true }
+photosplice-gpu = { workspace = true }
+photosplice-engine = { workspace = true }
+photosplice-io = { workspace = true }
+photosplice-plugins = { workspace = true }
+photosplice-algo = { workspace = true }
+photosplice-text = { workspace = true }
+photosplice-vector = { workspace = true }
 # Reading files to open them (bounded reads, a clear error for files larger than memory).
-photosuite-format = { workspace = true }
+photosplice-format = { workspace = true }
 egui = { workspace = true }
 egui_extras = { version = "0.36", default-features = false, features = ["svg"] }
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit"] }
@@ -39,10 +39,10 @@ rayon = { workspace = true }
 egui_kittest = { workspace = true, features = ["wgpu", "snapshot", "eframe"] }
 # Only for examples/snapshot.rs (offscreen UI renders of real files).
 # Only for examples/interactive_bench.rs (JPEG encode, .pcraft saves).
-photosuite-codecs = { workspace = true }
+photosplice-codecs = { workspace = true }
 # Renders every icon in a test, as egui_extras does (same version, already in the lockfile).
 resvg = { version = "0.45", default-features = false }
 # Benchmark helpers for the `--json` benches `cargo xtask perf` runs (in-process RSS, percentiles).
-photosuite-testkit = { workspace = true }
+photosplice-testkit = { workspace = true }
 # Only for examples/perf_scenarios.rs (a 500-brush .abr for the #210 import row).
-photosuite-psd = { workspace = true }
+photosplice-psd = { workspace = true }

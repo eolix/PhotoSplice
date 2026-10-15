@@ -1,8 +1,8 @@
 //! Parametric ("live") shapes → paths: rectangles with corner radii, ellipses, polygons, stars
 //! and lines. Knots run clockwise on screen (y down), starting at the top.
 
-use photosuite_doc::{Knot, LiveShape, Path, Subpath};
-use photosuite_geom::Point;
+use photosplice_doc::{Knot, LiveShape, Path, Subpath};
+use photosplice_geom::Point;
 
 /// Handle length of a quarter-circle cubic, `4/3·(√2 − 1)`.
 pub const KAPPA: f64 = 0.552_284_749_830_793_4;

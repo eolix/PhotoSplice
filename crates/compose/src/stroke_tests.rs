@@ -1,10 +1,10 @@
 //! Stroke effects on shape layers: the outline, the vector stroke's place, gradient frames.
 
 use super::*;
-use photosuite_color::{Color, ColorMode, PixelFormat, SampleType};
-use photosuite_doc::vector::{Path, ShapeLayer, ShapeStroke, StrokeAlign, Subpath};
-use photosuite_doc::{Effect, FxCommon, FxPaint, Gradient, GradientStyle, Layer, LayerContent, LayerMask, StrokeFx, StrokePosition};
-use photosuite_geom::Size;
+use photosplice_color::{Color, ColorMode, PixelFormat, SampleType};
+use photosplice_doc::vector::{Path, ShapeLayer, ShapeStroke, StrokeAlign, Subpath};
+use photosplice_doc::{Effect, FxCommon, FxPaint, Gradient, GradientStyle, Layer, LayerContent, LayerMask, StrokeFx, StrokePosition};
+use photosplice_geom::Size;
 
 const E: f32 = 2.0 / 255.0;
 
@@ -32,7 +32,7 @@ fn blue() -> FxPaint {
 fn shape(x0: f64, x1: f64, fill: Fill, stroke: Option<ShapeStroke>) -> Layer {
     let path = Path::new(vec![Subpath::polygon(&[(x0, x0), (x1, x0), (x1, x1), (x0, x1)])]);
     let mut sh = ShapeLayer { path, fill: Some(fill), stroke, live: None, cache: None, psd_raw: None };
-    sh.cache = Some(photosuite_vector::render_shape(&sh, PixelFormat::RGBA8, Rect::new(0, 0, 40, 40)));
+    sh.cache = Some(photosplice_vector::render_shape(&sh, PixelFormat::RGBA8, Rect::new(0, 0, 40, 40)));
     Layer::new("shape", LayerContent::Shape(sh))
 }
 
@@ -106,7 +106,7 @@ fn a_stroked_shapes_mask_applies_to_fill_and_stroke_together() {
     let vs = ShapeStroke { width: 4.0, align: StrokeAlign::Inside, paint: Fill::Solid(Color::rgb(0.0, 1.0, 0.0)), ..ShapeStroke::default() };
     let mut l = shape(10.0, 30.0, Fill::Solid(Color::rgb(1.0, 0.0, 0.0)), Some(vs));
     let mut m = LayerMask::reveal_all();
-    m.surface = photosuite_raster::Surface::with_default(PixelFormat::GRAY8, &[0.5]);
+    m.surface = photosplice_raster::Surface::with_default(PixelFormat::GRAY8, &[0.5]);
     l.mask = Some(m);
     let mut clip = Layer::raster("clip", PixelFormat::RGBA8);
     clip.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 40, 40), &[0.0, 0.0, 1.0, 1.0]);
@@ -177,7 +177,7 @@ fn hairline_vector_stroke_keeps_the_files_edge_pixel_colour() {
         let edge = 0.86;
         let vs = ShapeStroke { width: 0.25, paint: Fill::Solid(Color::rgb(0.48, 0.48, 0.48)), ..ShapeStroke::default() };
         let path = Path::new(vec![Subpath::polygon(&[(10.3, 10.3), (29.7, 10.3), (29.7, 29.7), (10.3, 29.7)])]);
-        let mut cache = photosuite_raster::Surface::new(fmt);
+        let mut cache = photosplice_raster::Surface::new(fmt);
         cache.fill_rect(Rect::new(10, 10, 30, 30), &[edge, edge, edge, 1.0]);
         cache.fill_rect(Rect::new(11, 11, 29, 29), &[1.0, 1.0, 1.0, 1.0]);
         let sh = ShapeLayer { path, fill: Some(Fill::Solid(Color::WHITE)), stroke: Some(vs), live: None, cache: Some(cache), psd_raw: None };

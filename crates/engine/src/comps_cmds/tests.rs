@@ -1,7 +1,7 @@
 use super::*;
-use photosuite_color::BlendMode;
-use photosuite_doc::Layer;
-use photosuite_geom::Rect;
+use photosplice_color::BlendMode;
+use photosplice_doc::Layer;
+use photosplice_geom::Rect;
 
 fn session(depth: u32) -> (Session, LayerId, LayerId) {
     let mut s = Session::new();
@@ -10,9 +10,9 @@ fn session(depth: u32) -> (Session, LayerId, LayerId) {
         .edit("setup", |doc, _| {
             let fmt = doc.pixel_format();
             let mut a = Layer::raster("A", fmt);
-            a.surface_mut().unwrap().fill_rect(Rect::new(4, 4, 14, 14), &photosuite_raster::from_rgba(&fmt, [1.0, 0.0, 0.0, 1.0]));
+            a.surface_mut().unwrap().fill_rect(Rect::new(4, 4, 14, 14), &photosplice_raster::from_rgba(&fmt, [1.0, 0.0, 0.0, 1.0]));
             let mut b = Layer::raster("B", fmt);
-            b.surface_mut().unwrap().fill_rect(Rect::new(30, 20, 40, 30), &photosuite_raster::from_rgba(&fmt, [0.0, 0.0, 1.0, 1.0]));
+            b.surface_mut().unwrap().fill_rect(Rect::new(30, 20, 40, 30), &photosplice_raster::from_rgba(&fmt, [0.0, 0.0, 1.0, 1.0]));
             let (ia, ib) = (a.id, b.id);
             doc.layers.push(a);
             doc.layers.push(b);
@@ -187,7 +187,7 @@ fn export_comps_to_files_naming() {
     })
     .unwrap();
     s.execute("layerComp.new", json!({"name": "No/B"})).unwrap();
-    let dir = std::env::temp_dir().join(format!("photosuite-comps-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("photosplice-comps-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let d = dir.to_string_lossy().into_owned();
@@ -198,8 +198,8 @@ fn export_comps_to_files_naming() {
     assert!(files[1].ends_with("doc_0001_No_B.png"), "{files:?}");
     // Each file shows its comp: B's blue square only in the first.
     let blue = |path: &str| {
-        let doc = photosuite_io::import("x.png", &std::fs::read(path).unwrap()).unwrap().document;
-        photosuite_compose::render(&doc, Rect::new(35, 25, 36, 26)).px[0]
+        let doc = photosplice_io::import("x.png", &std::fs::read(path).unwrap()).unwrap().document;
+        photosplice_compose::render(&doc, Rect::new(35, 25, 36, 26)).px[0]
     };
     assert!(blue(&files[0])[2] > 0.9 && blue(&files[0])[0] < 0.1);
     assert!(blue(&files[1])[2] > 0.9 && blue(&files[1])[0] > 0.9);
@@ -220,7 +220,7 @@ fn out_of_range_comp_ids_are_rejected_not_wrapped() {
     let doc = &s.active().unwrap().doc;
     assert_eq!(doc.layer_comps.len(), 1);
     assert_eq!(doc.layer_comps[0].name, "Start");
-    let dir = std::env::temp_dir().join(format!("photosuite-comps-wrap-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("photosplice-comps-wrap-{}", std::process::id()));
     let r = s.execute("file.export.layerCompsToFiles", json!({"dir": dir.to_string_lossy(), "comps": [wrapped]}));
     assert!(r.is_err());
     let _ = std::fs::remove_dir_all(dir);

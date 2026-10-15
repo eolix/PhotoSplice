@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# ภาษาไทย translations for PhotoSuite UI.
+# ภาษาไทย translations for PhotoSplice UI.
 
 	File	ไฟล์
 	Edit	แก้ไข
@@ -672,7 +672,7 @@
 	Timeline	ไทม์ไลน์
 	Tool Presets	พรีเซ็ตเครื่องมือ
 	Tools	เครื่องมือ
-	About PhotoSuite	เกี่ยวกับ โฟโต้คราฟ
+	About PhotoSplice	เกี่ยวกับ โฟโต้คราฟ
 	Website	เว็บไซต์
 	Report an Issue…	รายงานปัญหา…
 	WIA Support…	การสนับสนุน WIA…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Perspective Warp ไม่ทำงาน
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	การบิดงอเปอร์สเปคทีฟ: วาดระนาบตามเปอร์สเปคทีฟของรูปภาพ จากนั้นสลับไปที่การบิดงอ
 	Photo Filter	ตัวกรองภาพถ่าย
-	PhotoSuite	โฟโต้คราฟต์
-	PhotoSuite Manages Colors	PhotoSuite จัดการสี
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite — โปรแกรมแก้ไขรูปภาพแบบโอเพ่นซอร์สที่เขียนด้วยภาษา Rust
+	PhotoSplice	โฟโต้คราฟต์
+	PhotoSplice Manages Colors	PhotoSplice จัดการสี
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice — โปรแกรมแก้ไขรูปภาพแบบโอเพ่นซอร์สที่เขียนด้วยภาษา Rust
 	Pin Depth:	ความลึกของพิน:
 	Pixel Length:	ความยาวพิกเซล:
 	Pixels/Centimeter	พิกเซล/เซนติเมตร
@@ -1570,7 +1570,7 @@
 	Pen Tilt	ปากกาเอียง
 	Pen Tool	เครื่องมือปากกา
 	Photo	รูปภาพ
-	PhotoSuite website	เว็บไซต์โฟโต้คราฟต์
+	PhotoSplice website	เว็บไซต์โฟโต้คราฟต์
 	Picas	ปิกัส
 	Pillow Emboss	นูนหมอน
 	Pixel Replacement	การเปลี่ยนพิกเซล
@@ -1877,7 +1877,7 @@
 	System Info…	ข้อมูลระบบ…
 	System Info	ข้อมูลระบบ
 	More panels	แผงเพิ่มเติม
-	These settings aren't available in PhotoSuite yet.	การตั้งค่าเหล่านี้ยังไม่มีใน PhotoSuite
+	These settings aren't available in PhotoSplice yet.	การตั้งค่าเหล่านี้ยังไม่มีใน PhotoSplice
 	Graphics	กราฟิก
 	Reset GPU Backend	รีเซ็ตแบ็กเอนด์ GPU
 	Applies at next launch.	นำไปใช้ในการเปิดตัวครั้งถัดไป
@@ -2018,7 +2018,7 @@
 	Opening…	กำลังเปิด…
 	Patch	แพตช์
 	Patch:	แพตช์:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite กำลังใช้ตัวผสมภาพด้วย CPU หน้าต่างอาจยังคงใช้อะแดปเตอร์กราฟิกของคุณ
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice กำลังใช้ตัวผสมภาพด้วย CPU หน้าต่างอาจยังคงใช้อะแดปเตอร์กราฟิกของคุณ
 	Play Action	เล่นแมโคร
 	Reading…	กำลังอ่าน…
 	Record Action	บันทึกแมโคร

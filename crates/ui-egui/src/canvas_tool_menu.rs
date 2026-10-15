@@ -1,11 +1,11 @@
 //! Canvas context menus for the selection tools, the Pen and an active Free Transform box.
 
 use egui::Context;
-use photosuite_doc::LayerContent;
+use photosplice_doc::LayerContent;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::{PhotosuiteApp, state::Tool};
+use crate::{PhotospliceApp, state::Tool};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CanvasToolMenu {
@@ -35,7 +35,7 @@ pub const TRANSFORM_MENU: &[Row] = &[
 ];
 
 /// Photoshop's selection-tool context menu with an active selection, in its order. Its Generative
-/// Fill and Delete and Fill Selection rows have no PhotoSuite command and are left out. Rows
+/// Fill and Delete and Fill Selection rows have no PhotoSplice command and are left out. Rows
 /// stay visible and grey out exactly like their menu-bar twins.
 pub const SELECTION_MENU: &[Row] = &[
     Some(("Deselect", "select.deselect")),
@@ -129,20 +129,20 @@ pub fn rows(menu: &CanvasToolMenu) -> &'static [Row] {
 }
 
 /// Is `command` one of the open menu's rows, and enabled?
-pub fn available(app: &PhotosuiteApp, menu: &CanvasToolMenu, command: &str) -> bool {
+pub fn available(app: &PhotospliceApp, menu: &CanvasToolMenu, command: &str) -> bool {
     rows(menu).iter().flatten().any(|(_, id)| *id == command) && entry_enabled(app, menu, command)
 }
 
 /// Is `command` the transform box's current mode (checked in the transform menu)?
 /// Scale and Rotate are Free Transform's mode, so only Free Transform shows it checked.
-fn mode_checked(app: &PhotosuiteApp, menu: &CanvasToolMenu, command: &str) -> bool {
+fn mode_checked(app: &PhotospliceApp, menu: &CanvasToolMenu, command: &str) -> bool {
     menu.transform
         && !matches!(command, "edit.transform.scale" | "edit.transform.rotate")
         && app.ui.transform.as_ref().is_some_and(|t| t.mode == crate::state::TransformMode::for_command(command))
 }
 
 /// Right-click over a Free Transform box: its modes.
-pub fn open_transform(app: &mut PhotosuiteApp, pos: [f32; 2]) -> bool {
+pub fn open_transform(app: &mut PhotospliceApp, pos: [f32; 2]) -> bool {
     if !pos.iter().all(|v| v.is_finite()) {
         return false;
     }
@@ -152,7 +152,7 @@ pub fn open_transform(app: &mut PhotosuiteApp, pos: [f32; 2]) -> bool {
     true
 }
 
-pub fn entry_enabled(app: &PhotosuiteApp, menu: &CanvasToolMenu, command: &str) -> bool {
+pub fn entry_enabled(app: &PhotospliceApp, menu: &CanvasToolMenu, command: &str) -> bool {
     if menu.transform || menu.tool != Tool::Pen {
         return crate::menus::is_enabled(app, command);
     }
@@ -189,7 +189,7 @@ pub fn entry_enabled(app: &PhotosuiteApp, menu: &CanvasToolMenu, command: &str) 
     }
 }
 
-pub fn open(app: &mut PhotosuiteApp, tool: Tool, pos: [f32; 2]) -> bool {
+pub fn open(app: &mut PhotospliceApp, tool: Tool, pos: [f32; 2]) -> bool {
     if !applies(tool) || !pos.iter().all(|v| v.is_finite()) {
         return false;
     }
@@ -202,7 +202,7 @@ pub fn open(app: &mut PhotosuiteApp, tool: Tool, pos: [f32; 2]) -> bool {
     true
 }
 
-pub fn choose(app: &mut PhotosuiteApp, ctx: &Context, command: &str) {
+pub fn choose(app: &mut PhotospliceApp, ctx: &Context, command: &str) {
     let Some(menu) = app.ui.canvas_tool_menu.take() else { return };
     if !available(app, &menu, command) {
         return;
@@ -223,7 +223,7 @@ pub fn choose(app: &mut PhotosuiteApp, ctx: &Context, command: &str) {
 }
 
 /// A parameter dialog for `command` following `spec` (registry notation), prefilled with `fields`.
-fn spec_dialog(app: &mut PhotosuiteApp, command: &str, label: &str, spec: &str, mut fields: serde_json::Map<String, serde_json::Value>) {
+fn spec_dialog(app: &mut PhotospliceApp, command: &str, label: &str, spec: &str, mut fields: serde_json::Map<String, serde_json::Value>) {
     fields.insert("__command".into(), json!(command));
     fields.insert("__label".into(), json!(label));
     fields.insert("__filter".into(), json!(true));
@@ -231,7 +231,7 @@ fn spec_dialog(app: &mut PhotosuiteApp, command: &str, label: &str, spec: &str, 
     app.ui.open_dialog(crate::state::DialogKind::Command, fields);
 }
 
-fn pen_dialog(app: &mut PhotosuiteApp, command: &str, label: &str, name: &str) {
+fn pen_dialog(app: &mut PhotospliceApp, command: &str, label: &str, name: &str) {
     let spec = match command {
         "edit.defineCustomShape" => r##"{"name":text}"##,
         "path.toSelection" => r##"{"feather":0..250=0,"antiAlias":bool=true,"mode":"replace|add|subtract|intersect"="replace"}"##,
@@ -261,7 +261,7 @@ fn pen_dialog(app: &mut PhotosuiteApp, command: &str, label: &str, name: &str) {
     spec_dialog(app, command, label, spec, fields);
 }
 
-fn choose_pen(app: &mut PhotosuiteApp, ctx: &Context, menu: &CanvasToolMenu, command: &str) -> Result<(), String> {
+fn choose_pen(app: &mut PhotospliceApp, ctx: &Context, menu: &CanvasToolMenu, command: &str) -> Result<(), String> {
     if command == "select.isolateLayers" {
         crate::menus::invoke(app, ctx, command, json!({}))?;
         return Ok(());
@@ -285,7 +285,7 @@ fn choose_pen(app: &mut PhotosuiteApp, ctx: &Context, menu: &CanvasToolMenu, com
     Ok(())
 }
 
-pub fn show(app: &mut PhotosuiteApp, ctx: &Context) {
+pub fn show(app: &mut PhotospliceApp, ctx: &Context) {
     let Some(menu) = app.ui.canvas_tool_menu.clone() else { return };
     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) || app.ui.tool != menu.tool || (menu.transform && app.ui.transform.is_none()) {
         app.ui.canvas_tool_menu = None;
@@ -334,13 +334,13 @@ mod tests {
     use egui::{Modifiers, PointerButton, Pos2, vec2};
     use egui_kittest::Harness;
 
-    fn app() -> PhotosuiteApp {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+    fn app() -> PhotospliceApp {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
         app
     }
 
-    fn work_path(app: &mut PhotosuiteApp) {
+    fn work_path(app: &mut PhotospliceApp) {
         app.run(
             "path.set",
             json!({"name": "work", "path": {"subpaths": [{"closed": true, "knots": [
@@ -352,15 +352,15 @@ mod tests {
         .unwrap();
     }
 
-    fn choose_open(app: &mut PhotosuiteApp, command: &str) {
+    fn choose_open(app: &mut PhotospliceApp, command: &str) {
         assert!(open(app, Tool::Pen, [10.0, 10.0]));
         choose(app, &Context::default(), command);
     }
 
-    fn harness(mut app: PhotosuiteApp) -> Harness<'static, PhotosuiteApp> {
+    fn harness(mut app: PhotospliceApp) -> Harness<'static, PhotospliceApp> {
         app.sync_views();
         let mut h = Harness::builder().with_size(vec2(1000.0, 700.0)).build_ui_state(
-            |ui, app: &mut PhotosuiteApp| {
+            |ui, app: &mut PhotospliceApp| {
                 let ctx = ui.ctx().clone();
                 if !ctx.fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                     return;
@@ -369,12 +369,12 @@ mod tests {
             },
             app,
         );
-        PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::default());
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::default());
         h.run_steps(4);
         h
     }
 
-    fn right_click(h: &mut Harness<'static, PhotosuiteApp>, p: Pos2, modifiers: Modifiers) {
+    fn right_click(h: &mut Harness<'static, PhotospliceApp>, p: Pos2, modifiers: Modifiers) {
         h.event(egui::Event::ModifiersChanged(modifiers));
         h.event(egui::Event::PointerMoved(p));
         h.run_steps(1);
@@ -443,7 +443,7 @@ mod tests {
         let app = app();
         let items = crate::menus::menu_items(&app);
         for (label, id) in [SELECTION_MENU, NO_SELECTION_MENU, PEN_MENU, TRANSFORM_MENU].into_iter().flatten().flatten() {
-            assert!(items.iter().any(|i| i.id == *id) || photosuite_engine::commands::find(id).is_some(), "{label}: unknown command {id}");
+            assert!(items.iter().any(|i| i.id == *id) || photosplice_engine::commands::find(id).is_some(), "{label}: unknown command {id}");
         }
     }
 

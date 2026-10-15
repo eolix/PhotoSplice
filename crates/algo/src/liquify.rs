@@ -19,8 +19,8 @@
 //! copied untouched. [`ProxyImage::render`] is the cheap preview path: bilinear field and
 //! bilinear source on a downsampled RGBA copy, re-rendered only where a dab changed things.
 
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 use serde::{Deserialize, Serialize};
 
 /// The Liquify tools (Photoshop's left tool strip, minus Hand/Zoom/Face).
@@ -752,7 +752,7 @@ impl ProxyImage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_color::{ColorMode, PixelFormat, SampleType};
+    use photosplice_color::{ColorMode, PixelFormat, SampleType};
 
     #[test]
     fn mouse_speed_does_not_change_the_result() {

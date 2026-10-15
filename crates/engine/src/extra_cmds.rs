@@ -4,10 +4,10 @@
 //! Delete Hidden / Empty Layers, Ungroup, Hide/Show Layers, Show Only This Layer (⌥-click an eye),
 //! Average and Clouds.
 
-use photosuite_algo::selection as sel;
-use photosuite_doc::{Document, Layer, LayerContent, LayerId, LayerMask};
-use photosuite_geom::Rect;
-use photosuite_raster::{from_rgba_into, to_rgba};
+use photosplice_algo::selection as sel;
+use photosplice_doc::{Document, Layer, LayerContent, LayerId, LayerMask};
+use photosplice_geom::Rect;
+use photosplice_raster::{from_rgba_into, to_rgba};
 use serde_json::{Value, json};
 
 use crate::commands::{CommandSpec, color_param, layer_param};
@@ -278,7 +278,7 @@ fn transform_preset(s: &mut Session, kind: &str) -> Result<Value> {
 
 // ---------- selection / clipboard ----------
 
-fn reselect_target(s: &Session) -> Option<photosuite_raster::Surface> {
+fn reselect_target(s: &Session) -> Option<photosplice_raster::Surface> {
     let d = s.active()?;
     if d.doc.selection.is_some() {
         return None;
@@ -311,7 +311,7 @@ fn paste_into(s: &mut Session, p: &Value, outside: bool) -> Result<Value> {
             // Everything but the selection: default reveal, the selection's area inverted.
             let area = b.intersect(&canvas);
             let inv: Vec<f32> = sel::mask_from_surface(Some(&selection), area).iter().map(|v| 1.0 - v).collect();
-            let mut m = photosuite_raster::Surface::with_default(photosuite_color::PixelFormat::GRAY8, &[1.0]);
+            let mut m = photosplice_raster::Surface::with_default(photosplice_color::PixelFormat::GRAY8, &[1.0]);
             m.write_region(area, &inv);
             m
         } else {
@@ -345,14 +345,14 @@ fn unlock_background(l: &mut Layer) {
 
 /// Before `id` gets a layer mask: the Background can't have one, so it becomes a normal layer
 /// first ("Layer 0"), as when adding a mask to it in Photoshop. Other layers are left alone.
-pub(crate) fn background_to_layer_for_mask(doc: &mut photosuite_doc::Document, id: photosuite_doc::LayerId) {
+pub(crate) fn background_to_layer_for_mask(doc: &mut photosplice_doc::Document, id: photosplice_doc::LayerId) {
     background_to_layer(doc, id);
 }
 
-/// If `id` is the Background ([`photosuite_doc::Document::background`], whatever its name), turns
+/// If `id` is the Background ([`photosplice_doc::Document::background`], whatever its name), turns
 /// it into a normal layer ("Layer 0"), as before an edit the Background can't take (moving,
 /// transforming, exposing transparency, a style). Other layers are left alone.
-pub(crate) fn background_to_layer(doc: &mut photosuite_doc::Document, id: photosuite_doc::LayerId) {
+pub(crate) fn background_to_layer(doc: &mut photosplice_doc::Document, id: photosplice_doc::LayerId) {
     if let Some(l) = doc.background_mut().filter(|l| l.id == id) {
         unlock_background(l);
     }
@@ -503,25 +503,25 @@ fn show_only(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// Pixels of a fill or smart-object layer's content alone (no mask, effects or opacity).
-fn content_pixels(doc: &Document, l: &Layer) -> photosuite_raster::Surface {
+fn content_pixels(doc: &Document, l: &Layer) -> photosplice_raster::Surface {
     let mut tmp = l.clone();
     tmp.mask = None;
     tmp.vector_mask = None;
     tmp.effects.items.clear();
     tmp.opacity = 1.0;
     tmp.fill_opacity = 1.0;
-    tmp.blend = photosuite_color::BlendMode::Normal;
+    tmp.blend = photosplice_color::BlendMode::Normal;
     tmp.clipped = false;
     tmp.visible = true;
     let canvas = doc.bounds();
-    let buf = photosuite_compose::render_layer(&tmp, canvas);
+    let buf = photosplice_compose::render_layer(&tmp, canvas);
     let fmt = doc.pixel_format();
     let n = fmt.channels();
     let mut data = vec![0.0f32; buf.px.len() * n];
     for (p, out) in buf.px.iter().zip(data.chunks_exact_mut(n)) {
         from_rgba_into(&fmt, *p, out);
     }
-    let mut s = photosuite_raster::Surface::new(fmt);
+    let mut s = photosplice_raster::Surface::new(fmt);
     s.write_region(canvas, &data);
     s.prune();
     s
@@ -1057,7 +1057,7 @@ mod tests {
         let mut s = session(8);
         s.execute("layer.newFillLayer.solidColor", json!({"color": "#00ff00"})).unwrap();
         let id = s.active().unwrap().active_layer.unwrap();
-        let (psd, _) = photosuite_io::document_to_psd_with(doc(&s), &Default::default());
+        let (psd, _) = photosplice_io::document_to_psd_with(doc(&s), &Default::default());
         let soco = psd.layers().iter().find_map(|r| r.blocks.iter().find(|b| &b.key == b"SoCo")).unwrap().data.clone();
         s.edit("import", |doc, _| {
             doc.layer_mut(id).unwrap().psd_blocks.push((*b"SoCo", std::sync::Arc::new(soco)));
@@ -1065,9 +1065,9 @@ mod tests {
         })
         .unwrap();
         s.execute("layer.rasterize.fillContent", json!({})).unwrap();
-        let (psd, _) = photosuite_io::document_to_psd_with(doc(&s), &Default::default());
+        let (psd, _) = photosplice_io::document_to_psd_with(doc(&s), &Default::default());
         assert!(psd.layers().iter().all(|r| r.blocks.iter().all(|b| &b.key != b"SoCo")));
-        let (back, _) = photosuite_io::psd_to_document(&psd);
+        let (back, _) = photosplice_io::psd_to_document(&psd);
         assert!(back.walk().iter().all(|(_, _, l)| !matches!(l.content, LayerContent::Fill(_))));
     }
 }

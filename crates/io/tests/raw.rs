@@ -1,10 +1,10 @@
 //! Camera raw import: synthetic DNG / CR2 develop into a 16-bit ProPhoto
 //! document; unsupported raw variants fall back to the embedded preview.
 
-use photosuite_codecs::{ChannelLayout, EncodeOptions, Format, Image};
-use photosuite_color::{ColorMode, SampleType};
-use photosuite_io::{IoError, import};
-use photosuite_raw::testgen::{Cr2Spec, DngSpec, TiffBuilder, Val, mosaic, scene};
+use photosplice_codecs::{ChannelLayout, EncodeOptions, Format, Image};
+use photosplice_color::{ColorMode, SampleType};
+use photosplice_io::{IoError, import};
+use photosplice_raw::testgen::{Cr2Spec, DngSpec, TiffBuilder, Val, mosaic, scene};
 
 #[test]
 fn dng_opens_as_16_bit_prophoto() {
@@ -18,7 +18,7 @@ fn dng_opens_as_16_bit_prophoto() {
     assert_eq!(d.depth, SampleType::U16);
     assert_eq!(d.layers.len(), 1);
     let icc = d.icc_profile.as_ref().expect("profile");
-    assert_eq!(icc.as_slice(), &photosuite_cms::Builtin::ProPhotoCompat.profile().to_bytes()[..]);
+    assert_eq!(icc.as_slice(), &photosplice_cms::Builtin::ProPhotoCompat.profile().to_bytes()[..]);
     assert!(r.warnings.iter().any(|w| w.contains("DNG") && w.contains("ProPhoto")), "{:?}", r.warnings);
 }
 
@@ -38,7 +38,7 @@ fn cr2_opens() {
 /// baseline JPEG preview in IFD0.
 fn nef_with_preview() -> Vec<u8> {
     let img = Image::from_u8(32, 20, ChannelLayout::Rgb, vec![180; 32 * 20 * 3]).unwrap();
-    let jpeg = photosuite_codecs::encode(&img, Format::Jpeg, &EncodeOptions::default()).unwrap();
+    let jpeg = photosplice_codecs::encode(&img, Format::Jpeg, &EncodeOptions::default()).unwrap();
     let mut t = TiffBuilder::default();
     let strip = t.blob(vec![0; 64]);
     let preview = t.blob(jpeg.clone());
@@ -100,12 +100,12 @@ fn raw_files_keep_their_camera_as_exif() {
     spec.model = "Canon EOS R5".into();
     let r = import("shot.dng", &spec.build()).unwrap();
     let exif = r.document.metadata.exif.as_ref().expect("EXIF kept");
-    let info = photosuite_algo::exif::read(exif);
+    let info = photosplice_algo::exif::read(exif);
     assert_eq!((info.make.as_deref(), info.model.as_deref()), (Some("Canon"), Some("Canon EOS R5")));
     // Panasonic RW2's TIFF variant (IIU) too.
     let (w, h) = (40, 20);
-    let rw2 = photosuite_raw::testgen::rw2(w, h, &mosaic(&scene(w, h), w, [0, 1, 1, 2], 128, 4095), 12);
+    let rw2 = photosplice_raw::testgen::rw2(w, h, &mosaic(&scene(w, h), w, [0, 1, 1, 2], 128, 4095), 12);
     let r = import("P1000001.RW2", &rw2).unwrap();
-    let info = photosuite_algo::exif::read(r.document.metadata.exif.as_ref().expect("EXIF kept"));
+    let info = photosplice_algo::exif::read(r.document.metadata.exif.as_ref().expect("EXIF kept"));
     assert_eq!(info.make.as_deref(), Some("Panasonic"));
 }

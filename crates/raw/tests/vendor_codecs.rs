@@ -2,8 +2,8 @@
 //! Sony compressed ARW (cRAW), Panasonic RW2 (RawFormat 5) and uncompressed
 //! Olympus ORF (with its maker-note preview).
 
-use photosuite_raw::testgen::{craw_block, mosaic, orf, rw2, scene, sony_craw};
-use photosuite_raw::*;
+use photosplice_raw::testgen::{craw_block, mosaic, orf, rw2, scene, sony_craw};
+use photosplice_raw::*;
 
 const CURVE: [u16; 4] = [8000, 10400, 12900, 14100];
 

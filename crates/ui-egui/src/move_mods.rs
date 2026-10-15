@@ -16,7 +16,7 @@
 
 use serde_json::json;
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::ToolEvent;
 use crate::state::Tool;
 
@@ -72,17 +72,17 @@ pub struct MoveDrag {
     dup_from: Option<usize>,
 }
 
-fn past_len(app: &PhotosuiteApp) -> Option<usize> {
+fn past_len(app: &PhotospliceApp) -> Option<usize> {
     app.session.active().map(|st| st.history.past_len())
 }
 
-fn moving(app: &PhotosuiteApp) -> bool {
+fn moving(app: &PhotospliceApp) -> bool {
     app.drag.as_ref().is_some_and(|d| d.tool == Tool::Move)
 }
 
 /// Duplicates the selected layers (the copies become the selection), remembering the history
 /// length before so [`fold_history`] can merge the copy and the move into one step.
-fn duplicate(app: &mut PhotosuiteApp) -> Option<usize> {
+fn duplicate(app: &mut PhotospliceApp) -> Option<usize> {
     let before = past_len(app)?;
     match app.run("layer.duplicate", json!({})) {
         Ok(_) => Some(before),
@@ -94,7 +94,7 @@ fn duplicate(app: &mut PhotosuiteApp) -> Option<usize> {
 }
 
 /// Merges every history step after `from` into one "Duplicate + Move" step.
-fn fold_history(app: &mut PhotosuiteApp, from: usize) {
+fn fold_history(app: &mut PhotospliceApp, from: usize) {
     let Some(st) = app.session.active_mut() else { return };
     while st.history.past_len() > from + 1 {
         if !st.history.purge_last() {
@@ -108,7 +108,7 @@ fn fold_history(app: &mut PhotosuiteApp, from: usize) {
 
 /// Rewrites a Move-tool pointer event for the held modifiers: ⇧ locks it to an axis, and the
 /// first real movement of an ⌥-drag duplicates the layers being moved. Other tools pass through.
-pub fn filter_event(app: &mut PhotosuiteApp, ev: ToolEvent, mods: egui::Modifiers) -> ToolEvent {
+pub fn filter_event(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers) -> ToolEvent {
     if app.ui.tool != Tool::Move || app.ui.transform.is_some() {
         app.move_mods = MoveDrag::default();
         return ev;
@@ -129,7 +129,7 @@ pub fn filter_event(app: &mut PhotosuiteApp, ev: ToolEvent, mods: egui::Modifier
     }
 }
 
-fn drag_to(app: &mut PhotosuiteApp, p: [f64; 2], mods: egui::Modifiers) -> [f64; 2] {
+fn drag_to(app: &mut PhotospliceApp, p: [f64; 2], mods: egui::Modifiers) -> [f64; 2] {
     let Some(start) = app.move_mods.start.filter(|_| moving(app)) else { return p };
     let mut d = [p[0] - start[0], p[1] - start[1]];
     if mods.shift {
@@ -146,7 +146,7 @@ fn drag_to(app: &mut PhotosuiteApp, p: [f64; 2], mods: egui::Modifiers) -> [f64;
 }
 
 /// Call after the Move tool finished its drag: an ⌥-drag's copy and move become one step.
-pub fn finish(app: &mut PhotosuiteApp) {
+pub fn finish(app: &mut PhotospliceApp) {
     let st = std::mem::take(&mut app.move_mods);
     if let Some(from) = st.dup_from {
         fold_history(app, from);
@@ -155,7 +155,7 @@ pub fn finish(app: &mut PhotosuiteApp) {
 
 /// Call when a Move drag ends without moving (its layers were dragged to another document): an
 /// ⌥-drag's copy is taken back.
-pub fn abandon(app: &mut PhotosuiteApp) {
+pub fn abandon(app: &mut PhotospliceApp) {
     if std::mem::take(&mut app.move_mods).dup_from.is_some() {
         app.session.undo();
     }
@@ -163,7 +163,7 @@ pub fn abandon(app: &mut PhotosuiteApp) {
 
 /// Arrow keys with the Move tool (or while Free Transform is active): nudge 1 px, ⇧ 10 px;
 /// ⌥ duplicates the layers first. Returns true when a key was used.
-pub fn arrow_keys(app: &mut PhotosuiteApp, ctx: &egui::Context) -> bool {
+pub fn arrow_keys(app: &mut PhotospliceApp, ctx: &egui::Context) -> bool {
     if app.ui.tool != Tool::Move && app.ui.transform.is_none() {
         return false;
     }
@@ -182,7 +182,7 @@ pub fn arrow_keys(app: &mut PhotosuiteApp, ctx: &egui::Context) -> bool {
 }
 
 /// Moves the selected layers (or the Free Transform box) by `(dx, dy)` pixels.
-pub fn nudge(app: &mut PhotosuiteApp, dx: f64, dy: f64, duplicate_first: bool) {
+pub fn nudge(app: &mut PhotospliceApp, dx: f64, dy: f64, duplicate_first: bool) {
     if let Some(t) = app.ui.transform.as_mut() {
         if t.warp.is_none() {
             t.quad = t.quad.map(|q| [q[0] + dx, q[1] + dy]);
@@ -238,14 +238,14 @@ mod tests {
         assert!(near(constrain([30.0, 20.0], Some(v), 4), [30.0, 0.0]));
     }
 
-    fn app_with_layer() -> PhotosuiteApp {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+    fn app_with_layer() -> PhotospliceApp {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.session.execute("file.new", json!({"width": 64, "height": 64})).unwrap();
         app.sync_views();
         app.session.execute("layer.new.layer", json!({})).unwrap();
         app.session
             .edit("paint", |doc, a| {
-                doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photosuite_geom::Rect::new(8, 8, 24, 24), &[1.0, 0.0, 0.0, 1.0]);
+                doc.layer_mut(a.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photosplice_geom::Rect::new(8, 8, 24, 24), &[1.0, 0.0, 0.0, 1.0]);
                 Ok(())
             })
             .unwrap();
@@ -257,11 +257,11 @@ mod tests {
         app
     }
 
-    fn bounds(app: &PhotosuiteApp, id: photosuite_doc::LayerId) -> photosuite_geom::Rect {
+    fn bounds(app: &PhotospliceApp, id: photosplice_doc::LayerId) -> photosplice_geom::Rect {
         app.session.active().unwrap().doc.layer(id).unwrap().surface().unwrap().content_bounds()
     }
 
-    fn drag(app: &mut PhotosuiteApp, pts: &[[f64; 2]], mods: egui::Modifiers) {
+    fn drag(app: &mut PhotospliceApp, pts: &[[f64; 2]], mods: egui::Modifiers) {
         crate::canvas::tool_event(app, ToolEvent::Down { x: pts[0][0], y: pts[0][1], pressure: 1.0 }, mods);
         for p in &pts[1..pts.len() - 1] {
             crate::canvas::tool_event(app, ToolEvent::Move { x: p[0], y: p[1], pressure: 1.0 }, mods);
@@ -275,10 +275,10 @@ mod tests {
         let mut app = app_with_layer();
         let id = app.session.active().unwrap().active_layer.unwrap();
         drag(&mut app, &[[16.0, 16.0], [22.0, 18.0], [26.0, 19.0]], egui::Modifiers::SHIFT);
-        assert_eq!(bounds(&app, id), photosuite_geom::Rect::new(18, 8, 34, 24));
+        assert_eq!(bounds(&app, id), photosplice_geom::Rect::new(18, 8, 34, 24));
         // Switching axis mid-drag: the end point decides.
         drag(&mut app, &[[16.0, 16.0], [22.0, 17.0], [18.0, 30.0], [17.0, 36.0]], egui::Modifiers::SHIFT);
-        assert_eq!(bounds(&app, id), photosuite_geom::Rect::new(18, 28, 34, 44));
+        assert_eq!(bounds(&app, id), photosplice_geom::Rect::new(18, 28, 34, 44));
     }
 
     #[test]
@@ -292,14 +292,14 @@ mod tests {
         assert_eq!(st.doc.layers.len(), n0 + 1, "one copy");
         let copy = st.active_layer.unwrap();
         assert_ne!(copy, orig);
-        assert_eq!(bounds(&app, orig), photosuite_geom::Rect::new(8, 8, 24, 24), "original untouched");
-        assert_eq!(bounds(&app, copy), photosuite_geom::Rect::new(18, 13, 34, 29));
+        assert_eq!(bounds(&app, orig), photosplice_geom::Rect::new(8, 8, 24, 24), "original untouched");
+        assert_eq!(bounds(&app, copy), photosplice_geom::Rect::new(18, 13, 34, 29));
         let st = app.session.active().unwrap();
         assert_eq!(st.history.past_len(), h0 + 1, "one undo step");
         assert_eq!(st.history.undo_label(), Some(DUPLICATE_MOVE_LABEL));
         assert!(app.session.undo());
         assert_eq!(app.session.active().unwrap().doc.layers.len(), n0);
-        assert_eq!(bounds(&app, orig), photosuite_geom::Rect::new(8, 8, 24, 24));
+        assert_eq!(bounds(&app, orig), photosplice_geom::Rect::new(8, 8, 24, 24));
         // ⌥-click without a drag makes no copy.
         drag(&mut app, &[[16.0, 16.0], [16.0, 16.0]], egui::Modifiers::ALT);
         assert_eq!(app.session.active().unwrap().doc.layers.len(), n0);
@@ -307,7 +307,7 @@ mod tests {
         drag(&mut app, &[[16.0, 16.0], [30.0, 19.0]], egui::Modifiers::SHIFT | egui::Modifiers::ALT);
         let st = app.session.active().unwrap();
         assert_eq!(st.doc.layers.len(), n0 + 1);
-        assert_eq!(bounds(&app, st.active_layer.unwrap()), photosuite_geom::Rect::new(22, 8, 38, 24));
+        assert_eq!(bounds(&app, st.active_layer.unwrap()), photosplice_geom::Rect::new(22, 8, 38, 24));
     }
 
     #[test]
@@ -323,7 +323,7 @@ mod tests {
         let st = app.session.active().unwrap();
         assert_eq!(st.doc.layers.len(), n0 + 2);
         assert_eq!(st.history.past_len(), h0 + 1);
-        assert_eq!(bounds(&app, a), photosuite_geom::Rect::new(8, 8, 24, 24));
+        assert_eq!(bounds(&app, a), photosplice_geom::Rect::new(8, 8, 24, 24));
         assert!(st.doc.layer(b).is_some());
     }
 
@@ -333,11 +333,11 @@ mod tests {
         let id = app.session.active().unwrap().active_layer.unwrap();
         nudge(&mut app, 10.0, 0.0, false);
         nudge(&mut app, 0.0, -1.0, false);
-        assert_eq!(bounds(&app, id), photosuite_geom::Rect::new(18, 7, 34, 23));
+        assert_eq!(bounds(&app, id), photosplice_geom::Rect::new(18, 7, 34, 23));
         let n0 = app.session.active().unwrap().doc.layers.len();
         nudge(&mut app, 1.0, 0.0, true);
         assert_eq!(app.session.active().unwrap().doc.layers.len(), n0 + 1);
-        assert_eq!(bounds(&app, id), photosuite_geom::Rect::new(18, 7, 34, 23));
+        assert_eq!(bounds(&app, id), photosplice_geom::Rect::new(18, 7, 34, 23));
         let ctx = egui::Context::default();
         crate::transform_tool::begin(&mut app, &ctx).unwrap();
         let q0 = app.ui.transform.as_ref().unwrap().quad;

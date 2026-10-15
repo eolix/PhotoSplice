@@ -13,9 +13,9 @@
 //! Work is tiled: only tiles near the selection boundary are processed (in parallel on native
 //! targets), so cost scales with the boundary length rather than the selection area.
 
-use photosuite_color::PixelFormat;
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_color::PixelFormat;
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 use serde::{Deserialize, Serialize};
 
 use crate::segment::{RgbImage, Sampler};
@@ -578,7 +578,7 @@ pub fn masked_copy(src: &Surface, alpha: &Region) -> Surface {
 mod tests {
     use super::*;
     use crate::segment::ImageSampler;
-    use photosuite_color::SampleType;
+    use photosplice_color::SampleType;
 
     /// Horizontal blend from `a` (left) to `b` (right) across a Gaussian-blurred edge at x = 40.
     fn blurred_edge(w: usize, h: usize, sigma: f32) -> (RgbImage, Vec<f32>) {

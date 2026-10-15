@@ -2,7 +2,7 @@
 
 mod common;
 use common::*;
-use photosuite_codecs::*;
+use photosplice_codecs::*;
 
 fn opts(l: Limits) -> DecodeOptions {
     DecodeOptions { limits: l, ..Default::default() }

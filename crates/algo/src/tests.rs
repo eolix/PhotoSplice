@@ -1,5 +1,5 @@
 use super::*;
-use photosuite_color::{PixelFormat, SampleType};
+use photosplice_color::{PixelFormat, SampleType};
 
 fn fmt(s: SampleType) -> PixelFormat {
     PixelFormat::new(ColorMode::Rgb, s, true)

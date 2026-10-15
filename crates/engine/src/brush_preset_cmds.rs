@@ -6,7 +6,7 @@
 //! and the order of every preset, built-ins included. A built-in that is renamed or moved to
 //! another group becomes the user's preset (built-ins are regenerated with their own group).
 
-use photosuite_paint::BrushPreset;
+use photosplice_paint::BrushPreset;
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
@@ -261,7 +261,7 @@ mod tests {
         // A built-in moved to another group becomes the user's.
         let b = s.tools.presets.iter().find(|x| x.builtin).unwrap().name.clone();
         s.execute("brush.presets.move", json!({"name": b, "group": "Beta", "index": 0})).unwrap();
-        let moved = photosuite_paint::presets::find(&s.tools.presets, &b).unwrap();
+        let moved = photosplice_paint::presets::find(&s.tools.presets, &b).unwrap();
         assert!(!moved.builtin && moved.group == "Beta");
         assert_eq!(names(&s, "Beta")[0], b);
     }
@@ -292,13 +292,13 @@ mod tests {
     fn rename_checks_names() {
         let mut s = with_groups();
         s.execute("brush.presets.rename", json!({"name": "a1", "newName": "Alpha One"})).unwrap();
-        assert!(photosuite_paint::presets::find(&s.tools.presets, "Alpha One").is_some());
+        assert!(photosplice_paint::presets::find(&s.tools.presets, "Alpha One").is_some());
         assert!(s.execute("brush.presets.rename", json!({"name": "A2", "newName": "alpha one"})).is_err());
         // Case-only renames of itself are fine.
         s.execute("brush.presets.rename", json!({"name": "Alpha One", "newName": "ALPHA ONE"})).unwrap();
         let b = s.tools.presets.iter().find(|x| x.builtin).unwrap().name.clone();
         s.execute("brush.presets.rename", json!({"name": b, "newName": "My Round"})).unwrap();
-        assert!(!photosuite_paint::presets::find(&s.tools.presets, "My Round").unwrap().builtin);
+        assert!(!photosplice_paint::presets::find(&s.tools.presets, "My Round").unwrap().builtin);
     }
 
     #[test]

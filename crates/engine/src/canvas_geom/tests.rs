@@ -1,6 +1,6 @@
 use super::*;
 use crate::Session;
-use photosuite_doc::vector::LiveShape;
+use photosplice_doc::vector::LiveShape;
 use serde_json::json;
 
 const W: u32 = 64;
@@ -19,7 +19,7 @@ fn paint(s: &mut Session, f: impl Fn(i32, i32) -> [f32; 4]) {
         let mut data = Vec::new();
         for y in b.y0..b.y1 {
             for x in b.x0..b.x1 {
-                data.extend(photosuite_raster::from_rgba(&fmt, f(x, y)));
+                data.extend(photosplice_raster::from_rgba(&fmt, f(x, y)));
             }
         }
         surf.write_region(b, &data);
@@ -65,7 +65,7 @@ fn command(t: Turn) -> &'static str {
 const TURNS: [Turn; 5] = [Turn::FlipHorizontal, Turn::FlipVertical, Turn::Rotate180, Turn::Cw90, Turn::Ccw90];
 
 /// The flattened original, remapped by the turn's pixel map.
-fn expected(before: &photosuite_compose::Buffer, t: Turn, nw: u32) -> Vec<[f32; 4]> {
+fn expected(before: &photosplice_compose::Buffer, t: Turn, nw: u32) -> Vec<[f32; 4]> {
     let map = t.pixel_map(W as i32, H as i32);
     let mut out = vec![[0.0f32; 4]; before.px.len()];
     for y in 0..H as i32 {
@@ -92,23 +92,23 @@ fn diff(a: &[[f32; 4]], b: &[[f32; 4]]) -> (f32, f32) {
 
 fn check_turn(depth: u64, mode: &str, t: Turn) {
     let mut s = mixed(depth, mode);
-    let before = photosuite_compose::flatten(doc(&s));
+    let before = photosplice_compose::flatten(doc(&s));
     s.execute(command(t), json!({})).unwrap();
     let nw = doc(&s).size.width;
     let want = expected(&before, t, nw);
     // Caches are remapped exactly; vector masks re-rasterize from their mapped path.
-    let got = photosuite_compose::flatten(doc(&s));
+    let got = photosplice_compose::flatten(doc(&s));
     let (mean, big) = diff(&got.px, &want);
     assert!(mean < 1.0 / 255.0 && big < 0.01, "{t:?} {depth} {mode}: mean {mean} big {big}");
     // Re-rendering every type, shape and smart object from its *geometry* gives the same image,
     // so the transforms (not only the cached pixels) moved.
     let mut d = doc(&s).clone();
     refresh(&mut d, Refresh::All);
-    let (mean, big) = diff(&photosuite_compose::flatten(&d).px, &want);
+    let (mean, big) = diff(&photosplice_compose::flatten(&d).px, &want);
     assert!(mean < 2.0 / 255.0 && big < 0.01, "{t:?} {depth} {mode} re-rendered: mean {mean} big {big}");
     // Undo restores the original, bit-exactly.
     s.execute("edit.undo", json!({})).unwrap();
-    let undone = photosuite_compose::flatten(doc(&s));
+    let undone = photosplice_compose::flatten(doc(&s));
     assert_eq!(undone.px.len(), before.px.len(), "{t:?} {depth} {mode}: undo changed the canvas size");
     let (mut n, mut max, mut first) = (0usize, 0.0f32, None);
     for (i, (p, q)) in undone.px.iter().zip(&before.px).enumerate() {
@@ -175,7 +175,7 @@ fn turns_map_guides_paths_slices_and_live_shapes() {
     let after = doc(&s);
     assert_eq!(after.guides, before.guides);
     assert_eq!(after.slices.list[0].rect, before.slices.list[0].rect);
-    assert_eq!(photosuite_compose::flatten(after).px, photosuite_compose::flatten(&before).px);
+    assert_eq!(photosplice_compose::flatten(after).px, photosplice_compose::flatten(&before).px);
 }
 
 #[test]
@@ -204,7 +204,7 @@ fn type_and_shape_origin(d: &Document) -> ([f64; 6], [f64; 2]) {
 #[test]
 fn canvas_size_and_crop_move_vector_geometry() {
     let mut s = mixed(8, "rgb");
-    let before = photosuite_compose::flatten(doc(&s));
+    let before = photosplice_compose::flatten(doc(&s));
     let (t0, k0) = type_and_shape_origin(doc(&s));
     s.execute("image.canvasSize", json!({"width": 20, "height": 10, "relative": true, "anchor": "bottomRight", "extensionColor": "transparent"})).unwrap();
     let d = doc(&s);
@@ -216,7 +216,7 @@ fn canvas_size_and_crop_move_vector_geometry() {
     // The old canvas shows unchanged at its new offset, also after re-rendering from geometry.
     let mut r = d.clone();
     refresh(&mut r, Refresh::All);
-    for img in [photosuite_compose::flatten(d), photosuite_compose::flatten(&r)] {
+    for img in [photosplice_compose::flatten(d), photosplice_compose::flatten(&r)] {
         let nw = img.rect.width() as usize;
         let shifted: Vec<[f32; 4]> = (0..H as usize).flat_map(|y| img.px[(y + 10) * nw + 20..(y + 10) * nw + 20 + W as usize].to_vec()).collect();
         let (mean, big) = diff(&shifted, &before.px);
@@ -226,7 +226,7 @@ fn canvas_size_and_crop_move_vector_geometry() {
     s.execute("image.crop", json!({"x": 20, "y": 10, "width": W, "height": H})).unwrap();
     let (t2, k2) = type_and_shape_origin(doc(&s));
     assert_eq!((t2, k2), (t0, k0));
-    let (mean, _) = diff(&photosuite_compose::flatten(doc(&s)).px, &before.px);
+    let (mean, _) = diff(&photosplice_compose::flatten(doc(&s)).px, &before.px);
     assert!(mean < 1.0 / 255.0, "{mean}");
 }
 
@@ -266,7 +266,7 @@ fn arbitrary_rotation_moves_marks_and_unlinked_vector_masks() {
     // 90° arbitrary == 90° clockwise for the composite.
     let mut s2 = mixed(8, "rgb");
     s2.execute("image.imageRotation.90cw", json!({})).unwrap();
-    let (mean, big) = diff(&photosuite_compose::flatten(d).px, &photosuite_compose::flatten(doc(&s2)).px);
+    let (mean, big) = diff(&photosplice_compose::flatten(d).px, &photosplice_compose::flatten(doc(&s2)).px);
     assert!(mean < 3.0 / 255.0 && big < 0.02, "mean {mean} big {big}");
 }
 

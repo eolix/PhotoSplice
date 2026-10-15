@@ -5,11 +5,11 @@
 //! Reading only the Normal sheets left a centred paragraph style read as Left, so starting an
 //! edit re-laid the text out half a line to the side.
 
-use photosuite_doc::text::TextAlign;
-use photosuite_geom::Affine;
-use photosuite_psd::descriptor::{Descriptor, Id, UnicodeString, Value as D};
-use photosuite_text::engine_data::Value as E;
-use photosuite_text::psd::{TySh, text_layer_from_tysh, write_tysh};
+use photosplice_doc::text::TextAlign;
+use photosplice_geom::Affine;
+use photosplice_psd::descriptor::{Descriptor, Id, UnicodeString, Value as D};
+use photosplice_text::engine_data::Value as E;
+use photosplice_text::psd::{TySh, text_layer_from_tysh, write_tysh};
 
 fn real(v: f64) -> E {
     E::Real(v)
@@ -72,12 +72,12 @@ fn para_sheet(name: &str, justification: i64, default_style: i64) -> E {
     d(vec![("Name", E::String(name.into())), ("DefaultStyleSheet", E::Int(default_style)), ("Properties", d(vec![("Justification", E::Int(justification))]))])
 }
 
-fn layer(text: &str, ed: &E) -> photosuite_doc::TextLayer {
+fn layer(text: &str, ed: &E) -> photosplice_doc::TextLayer {
     let desc = Descriptor::new("TxLr")
         .with("Txt ", D::Text(UnicodeString::new_nul(text)))
         .with("Ornt", D::Enumerated { type_id: Id::new("Ornt"), value: Id::new("Hrzn") })
         .with("TextIndex", D::Integer(0))
-        .with("EngineData", D::RawData(photosuite_text::engine_data::write(ed)));
+        .with("EngineData", D::RawData(photosplice_text::engine_data::write(ed)));
     let data = write_tysh(&TySh { transform: Affine::translate(450.0, 300.0), text: desc, warp: None, bounds: [0.0; 4] });
     let mut t = text_layer_from_tysh(&data, 72.0).expect("parses");
     // Import keeps the block, as for a layer read from a file.
@@ -99,7 +99,7 @@ fn alignment_from_the_paragraph_style_the_run_names() {
         let t = layer("LOREM IPSUM", &ed);
         assert_eq!(t.paragraphs[0].style.align, want, "Justification {j} from the paragraph style");
         // Laid out around the anchor as Reference draws it.
-        let b = photosuite_text::TextEngine::new().layout(&t, 72.0).bounds().unwrap();
+        let b = photosplice_text::TextEngine::new().layout(&t, 72.0).bounds().unwrap();
         match want {
             TextAlign::Center => assert!((b[0] + b[2]).abs() < 1.0, "centred on the anchor: {b:?}"),
             _ => assert!(b[2].abs() < 1.0, "ends at the anchor: {b:?}"),
@@ -176,8 +176,8 @@ fn character_attributes_from_the_style_sheets() {
 /// alignment and size, with one entry per sheet.
 #[test]
 fn styles_from_sheets_survive_a_round_trip() {
-    use photosuite_color::{ColorMode, SampleType};
-    use photosuite_doc::{Document, Layer, LayerContent, Size};
+    use photosplice_color::{ColorMode, SampleType};
+    use photosplice_doc::{Document, Layer, LayerContent, Size};
     let ed = engine(
         "LOREM IPSUM",
         d(vec![("Name", E::String("Title".into())), ("DefaultStyleSheet", E::Int(1)), ("Properties", d(vec![]))]),
@@ -188,10 +188,10 @@ fn styles_from_sheets_survive_a_round_trip() {
     let mut t = layer("LOREM IPSUM", &ed);
     let mut doc = Document::new("t", Size::new(900, 600), ColorMode::Rgb, SampleType::U8);
     doc.resolution_dpi = 72.0;
-    photosuite_text::TextEngine::new().render_layer(&mut t, 72.0, doc.pixel_format());
+    photosplice_text::TextEngine::new().render_layer(&mut t, 72.0, doc.pixel_format());
     doc.layers.push(Layer::new("t", LayerContent::Text(t)));
-    let bytes = photosuite_io::export(&doc, "t.psd", &Default::default()).unwrap().bytes;
-    let back = photosuite_io::import("t.psd", &bytes).unwrap().document;
+    let bytes = photosplice_io::export(&doc, "t.psd", &Default::default()).unwrap().bytes;
+    let back = photosplice_io::import("t.psd", &bytes).unwrap().document;
     let LayerContent::Text(bt) = &back.layers[0].content else { panic!("not a type layer") };
     assert_eq!(bt.paragraphs[0].style.align, TextAlign::Center);
     assert!((bt.runs[0].style.size_pt - 48.0).abs() < 0.01, "{}", bt.runs[0].style.size_pt);
@@ -201,8 +201,8 @@ fn styles_from_sheets_survive_a_round_trip() {
 /// without those styles) keeps them through export: runs are written with what they inherited.
 #[test]
 fn unlinked_runs_keep_their_inherited_style_on_export() {
-    use photosuite_color::{ColorMode, SampleType};
-    use photosuite_doc::{Document, Layer, LayerContent, Size};
+    use photosplice_color::{ColorMode, SampleType};
+    use photosplice_doc::{Document, Layer, LayerContent, Size};
     let ed = engine(
         "LOREM IPSUM",
         d(vec![("Name", E::String("Title".into())), ("DefaultStyleSheet", E::Int(1)), ("Properties", d(vec![]))]),
@@ -214,11 +214,11 @@ fn unlinked_runs_keep_their_inherited_style_on_export() {
     assert!(t.psd_raw.is_some());
     let mut doc = Document::new("t", Size::new(900, 600), ColorMode::Rgb, SampleType::U8);
     doc.resolution_dpi = 72.0;
-    photosuite_text::TextEngine::new().render_layer(&mut t, 72.0, doc.pixel_format());
+    photosplice_text::TextEngine::new().render_layer(&mut t, 72.0, doc.pixel_format());
     doc.layers.push(Layer::new("t", LayerContent::Text(t)));
     // No `text_styles_map::import`: the document has no styles and the runs link to none.
-    let bytes = photosuite_io::export(&doc, "t.psd", &Default::default()).unwrap().bytes;
-    let back = photosuite_io::import("t.psd", &bytes).unwrap().document;
+    let bytes = photosplice_io::export(&doc, "t.psd", &Default::default()).unwrap().bytes;
+    let back = photosplice_io::import("t.psd", &bytes).unwrap().document;
     let LayerContent::Text(bt) = &back.layers[0].content else { panic!("not a type layer") };
     assert_eq!(bt.paragraphs[0].style.align, TextAlign::Center);
     assert!((bt.runs[0].style.size_pt - 48.0).abs() < 0.01, "{}", bt.runs[0].style.size_pt);

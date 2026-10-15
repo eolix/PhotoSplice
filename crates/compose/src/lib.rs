@@ -31,10 +31,10 @@ pub mod proxy;
 pub mod psblend;
 pub mod shape_split;
 
-use photosuite_color::blend::BlendMode;
-use photosuite_doc::{Document, Fill, Layer, LayerContent, Pattern};
-use photosuite_geom::Rect;
-use photosuite_raster::{Rgba8Image, Surface};
+use photosplice_color::blend::BlendMode;
+use photosplice_doc::{Document, Fill, Layer, LayerContent, Pattern};
+use photosplice_geom::Rect;
+use photosplice_raster::{Rgba8Image, Surface};
 use psblend as blend;
 
 /// Straight-alpha RGBA float buffer covering a rectangle.
@@ -97,7 +97,7 @@ pub fn render_tiled(doc: &Document, rect: Rect, tile: i32) -> Buffer {
 fn render_tiled_with(doc: &Document, rect: Rect, tile: i32, cx: &Ctx) -> Buffer {
     let tile = tile.max(1);
     // Lab documents mix Normal blending in CIELAB, as Photoshop does (psblend::LAB_MIX).
-    let lab = doc.mode == photosuite_color::ColorMode::Lab;
+    let lab = doc.mode == photosplice_color::ColorMode::Lab;
     // CMYK layers are read through the document's own CMYK profile (thread-local scope).
     let cmyk = cmyk_space(doc);
     let cmyk = cmyk.as_ref();
@@ -105,7 +105,7 @@ fn render_tiled_with(doc: &Document, rect: Rect, tile: i32, cx: &Ctx) -> Buffer 
         return Buffer::transparent(rect);
     }
     let run = |t: Rect| {
-        photosuite_color::convert::with_cmyk_space(cmyk, || {
+        photosplice_color::convert::with_cmyk_space(cmyk, || {
             psblend::LAB_MIX.with(|l| l.set(lab));
             let b = composite_doc(doc, t, cx);
             psblend::LAB_MIX.with(|l| l.set(false));
@@ -117,7 +117,7 @@ fn render_tiled_with(doc: &Document, rect: Rect, tile: i32, cx: &Ctx) -> Buffer 
     }
     // Effect maps are built once, here, before any tile needs them (#276).
     prepare_effects(&doc.layers, rect, cx, |f| {
-        photosuite_color::convert::with_cmyk_space(cmyk, || {
+        photosplice_color::convert::with_cmyk_space(cmyk, || {
             psblend::LAB_MIX.with(|l| l.set(lab));
             f();
             psblend::LAB_MIX.with(|l| l.set(false));
@@ -199,10 +199,10 @@ pub struct InkBuffer {
 /// flattened layers store, without a trip through screen RGB (which regenerates K). Other
 /// documents' composites are separated through the default CMYK profile.
 pub fn render_ink_bands<E>(doc: &Document, rect: Rect, band_rows: i32, mut sink: impl FnMut(InkBuffer) -> Result<(), E>) -> Result<(), E> {
-    if doc.mode != photosuite_color::ColorMode::Cmyk {
+    if doc.mode != photosplice_color::ColorMode::Cmyk {
         return render_bands(doc, rect, band_rows, |b| {
             let px = b.px.iter().map(|p| {
-                let k = photosuite_color::convert::rgb_to_cmyk([p[0], p[1], p[2]]);
+                let k = photosplice_color::convert::rgb_to_cmyk([p[0], p[1], p[2]]);
                 [k[0], k[1], k[2], k[3], p[3]]
             });
             sink(InkBuffer { rect: b.rect, px: px.collect() })
@@ -220,9 +220,9 @@ pub fn render_ink_bands<E>(doc: &Document, rect: Rect, band_rows: i32, mut sink:
     while y < rect.y1 {
         let y1 = y.saturating_add(rows).min(rect.y1);
         let band = Rect::new(rect.x0, y, rect.x1, y1);
-        prepare_effects(&doc.layers, band, &cx, |f| photosuite_color::convert::with_cmyk_space(space, &mut *f));
+        prepare_effects(&doc.layers, band, &cx, |f| photosplice_color::convert::with_cmyk_space(space, &mut *f));
         let px = tiled(band, RENDER_TILE, [0.0; 5], |t| {
-            photosuite_color::convert::with_cmyk_space(space, || {
+            photosplice_color::convert::with_cmyk_space(space, || {
                 cmyk::composite_document(&doc.layers, t, &cx).px.iter().map(|p| [1.0 - p[0], 1.0 - p[1], 1.0 - p[2], 1.0 - p[3], p[4]]).collect()
             })
         });
@@ -235,7 +235,7 @@ pub fn render_ink_bands<E>(doc: &Document, rect: Rect, band_rows: i32, mut sink:
 /// One tile of `doc`'s composite (inside the caller's colour scopes): CMYK documents are
 /// composited in CMYK ([`cmyk`]), Multichannel ones over their printed inks.
 fn composite_doc(doc: &Document, rect: Rect, cx: &Ctx) -> Buffer {
-    if doc.mode == photosuite_color::ColorMode::Cmyk {
+    if doc.mode == photosplice_color::ColorMode::Cmyk {
         return cmyk::render(&doc.layers, rect, cx);
     }
     let mut b = multichannel::backdrop(doc, rect);
@@ -248,13 +248,13 @@ fn composite_doc(doc: &Document, rect: Rect, cx: &Ctx) -> Buffer {
 }
 
 /// The document's own CMYK profile for reading its CMYK pixels (`None`: not a CMYK document,
-/// untagged, or the built-in coated CMYK). Enter it with `photosuite_color::convert::with_cmyk_space`
+/// untagged, or the built-in coated CMYK). Enter it with `photosplice_color::convert::with_cmyk_space`
 /// around code that converts the document's CMYK pixels or colours to RGB.
-pub fn cmyk_space(doc: &Document) -> Option<std::sync::Arc<photosuite_color::convert::CmykSpace>> {
-    if doc.mode != photosuite_color::ColorMode::Cmyk {
+pub fn cmyk_space(doc: &Document) -> Option<std::sync::Arc<photosplice_color::convert::CmykSpace>> {
+    if doc.mode != photosplice_color::ColorMode::Cmyk {
         return None;
     }
-    photosuite_color::convert::CmykSpace::for_profile(doc.icc_profile.as_ref())
+    photosplice_color::convert::CmykSpace::for_profile(doc.icc_profile.as_ref())
 }
 
 /// Pixels per band of [`render_bands`] (a 14000 px wide band is ~600 rows, ~130 MB of f32).
@@ -291,14 +291,14 @@ pub fn band_rows_for(width: u32, requested: i32) -> i32 {
 /// The document's composite as a pixel surface in `fmt` (straight RGBA converted to its model
 /// and depth), optionally flattened over an opaque `background`; rendered and written in bands,
 /// so no full-size float composite is held. Tiles equal to the default pixel are pruned.
-pub fn flatten_to_surface(doc: &Document, fmt: photosuite_color::PixelFormat, background: Option<[f32; 3]>) -> Surface {
+pub fn flatten_to_surface(doc: &Document, fmt: photosplice_color::PixelFormat, background: Option<[f32; 3]>) -> Surface {
     let mut s = Surface::new(fmt);
     let n = fmt.channels();
     let mut data = Vec::new();
     // A CMYK document flattened into CMYK keeps its composited inks (no trip through screen RGB).
-    if doc.mode == photosuite_color::ColorMode::Cmyk && fmt.mode == photosuite_color::ColorMode::Cmyk {
+    if doc.mode == photosplice_color::ColorMode::Cmyk && fmt.mode == photosplice_color::ColorMode::Cmyk {
         let space = cmyk_space(doc);
-        let bg = background.map(|b| photosuite_color::convert::with_cmyk_space(space.as_ref(), || photosuite_color::convert::rgb_to_cmyk(b)));
+        let bg = background.map(|b| photosplice_color::convert::with_cmyk_space(space.as_ref(), || photosplice_color::convert::rgb_to_cmyk(b)));
         let _ = render_ink_bands(doc, doc.bounds(), 0, |band| -> Result<(), ()> {
             data.clear();
             data.reserve(band.px.len() * n);
@@ -327,7 +327,7 @@ pub fn flatten_to_surface(doc: &Document, fmt: photosuite_color::PixelFormat, ba
         data.clear();
         data.resize(band.px.len() * n, 0.0);
         for (p, out) in band.px.iter().zip(data.chunks_exact_mut(n)) {
-            photosuite_raster::from_rgba_into(&fmt, *p, out);
+            photosplice_raster::from_rgba_into(&fmt, *p, out);
         }
         s.write_region(band.rect, &data);
         Ok(())
@@ -351,10 +351,10 @@ pub fn render_layer(layer: &Layer, rect: Rect) -> Buffer {
         &Ctx {
             canvas: rect,
             transfer: adjust::Transfer::Srgb,
-            light: photosuite_doc::GlobalLight::default(),
+            light: photosplice_doc::GlobalLight::default(),
             patterns: &patterns,
-            mode: photosuite_color::ColorMode::Rgb,
-            depth: photosuite_color::SampleType::F32,
+            mode: photosplice_color::ColorMode::Rgb,
+            depth: photosplice_color::SampleType::F32,
             vector_masks: RenderVectorMasks::default(),
             fx_maps: Default::default(),
         },
@@ -492,11 +492,11 @@ fn render_reduced_in_bands(doc: &Document, w: u32, h: u32, damage: Option<Rect>,
 
 #[derive(Default)]
 struct RenderVectorMasks {
-    masks: std::sync::Mutex<std::collections::HashMap<usize, std::sync::Arc<std::sync::OnceLock<photosuite_vector::CompiledVectorMask>>>>,
+    masks: std::sync::Mutex<std::collections::HashMap<usize, std::sync::Arc<std::sync::OnceLock<photosplice_vector::CompiledVectorMask>>>>,
 }
 
 impl RenderVectorMasks {
-    fn values(&self, mask: &photosuite_doc::VectorMask, rect: Rect) -> Vec<f32> {
+    fn values(&self, mask: &photosplice_doc::VectorMask, rect: Rect) -> Vec<f32> {
         // Addresses identify immutable mask instances only for this render's lifetime.
         let key = std::ptr::from_ref(mask) as usize;
         let slot = {
@@ -505,7 +505,7 @@ impl RenderVectorMasks {
         };
         // Compilation is sequential. Rendering can enter Rayon and must happen after
         // initialization, so waiting tiles cannot re-enter a slot still being built.
-        let compiled = slot.get_or_init(|| photosuite_vector::CompiledVectorMask::new(mask));
+        let compiled = slot.get_or_init(|| photosplice_vector::CompiledVectorMask::new(mask));
         compiled.render(rect)
     }
 }
@@ -517,12 +517,12 @@ struct Ctx<'a> {
     /// Tone transfer used by adjustments that work in linear light.
     transfer: adjust::Transfer,
     /// Global light for layer effects.
-    light: photosuite_doc::GlobalLight,
+    light: photosplice_doc::GlobalLight,
     /// Prepared document patterns, shared across all tiles and bands of this render call.
     patterns: &'a pattern::PreparedPatterns<'a>,
     /// The document's colour mode (channel restrictions name its channels).
-    mode: photosuite_color::ColorMode,
-    depth: photosuite_color::SampleType,
+    mode: photosplice_color::ColorMode,
+    depth: photosplice_color::SampleType,
     vector_masks: RenderVectorMasks,
     /// Effect maps used by this render, by cache key: built before the parallel tiles (see
     /// [`prepare_effects`]) and held for the whole render, so eviction can't force a rebuild.
@@ -661,11 +661,11 @@ fn composite_stack(layers: &[Layer], backdrop: &mut Buffer, cx: &Ctx) {
 
 /// Applies an adjustment layer's change to `buf`: on L, a, b in a Lab document where Photoshop
 /// works there ([`lab`]), else on the screen colour.
-fn apply_adjustment(adj: &photosuite_doc::Adjustment, buf: &mut Buffer, cx: &Ctx) {
-    if cx.mode == photosuite_color::ColorMode::Lab && lab::native(adj) {
+fn apply_adjustment(adj: &photosplice_doc::Adjustment, buf: &mut Buffer, cx: &Ctx) {
+    if cx.mode == photosplice_color::ColorMode::Lab && lab::native(adj) {
         lab::apply(adj, buf, cx.transfer, cx.depth);
     } else {
-        if cx.mode == photosuite_color::ColorMode::Lab {
+        if cx.mode == photosplice_color::ColorMode::Lab {
             // The others work on the screen colour: clip what lies outside sRGB first.
             lab::clip(buf);
         }
@@ -679,11 +679,11 @@ fn apply_adjustment(adj: &photosuite_doc::Adjustment, buf: &mut Buffer, cx: &Ctx
 /// Photoshop (psd-tools adjustment_nested_composition_4: 9.6 → 5.1 % of pixels off;
 /// exposure_grayscale passes). Blends stay in float (quantising them too made other files
 /// worse).
-pub fn adjustment_quantum(depth: photosuite_color::SampleType) -> Option<f32> {
+pub fn adjustment_quantum(depth: photosplice_color::SampleType) -> Option<f32> {
     match depth {
-        photosuite_color::SampleType::U8 => Some(255.0),
-        photosuite_color::SampleType::U16 => Some(32768.0),
-        photosuite_color::SampleType::F32 => None,
+        photosplice_color::SampleType::U8 => Some(255.0),
+        photosplice_color::SampleType::U16 => Some(32768.0),
+        photosplice_color::SampleType::F32 => None,
     }
 }
 
@@ -738,9 +738,9 @@ pub fn layer_bounds(layer: &Layer, canvas: Rect) -> Rect {
 /// whole path even where a gradient fill fades out (psd-tools stroke-effects). `None` for other
 /// layers, shapes without fill, empty and inverted paths, and shapes whose vector stroke reaches
 /// past the path (their pixels give the outline: psd-tools double-stroke-effects).
-pub fn effect_outline(layer: &Layer) -> Option<&photosuite_doc::vector::Path> {
+pub fn effect_outline(layer: &Layer) -> Option<&photosplice_doc::vector::Path> {
     let LayerContent::Shape(sh) = &layer.content else { return None };
-    let stroke_inside = sh.stroke.as_ref().is_none_or(|s| s.width <= 0.0 || s.align == photosuite_doc::vector::StrokeAlign::Inside);
+    let stroke_inside = sh.stroke.as_ref().is_none_or(|s| s.width <= 0.0 || s.align == photosplice_doc::vector::StrokeAlign::Inside);
     (sh.fill.is_some() && stroke_inside && !sh.path.is_empty() && !sh.path.inverted).then_some(&sh.path)
 }
 
@@ -757,7 +757,7 @@ fn effect_shape(layer: &Layer, rect: Rect, cx: &Ctx) -> Vec<f32> {
     };
     // Unmasked: the masks scale the shape, they aren't the fill's transparency.
     let a: Vec<f32> = layer.surface().map(|s| surface_to_buffer(s, rect).px.iter().map(|p| p[3]).collect()).unwrap_or_else(|| vec![0.0; n]);
-    let cov = photosuite_vector::path_coverage(path, rect);
+    let cov = photosplice_vector::path_coverage(path, rect);
     let mv = mask_vals(layer, rect, cx);
     let (w, h) = (rect.width() as usize, rect.height() as usize);
     let mut out = vec![0.0; n];
@@ -869,8 +869,8 @@ pub fn layer_shape(doc: &Document, layer: &Layer, rect: Rect) -> Vec<f32> {
 /// The frame a gradient stroke `st` of `layer` is laid out in (`effects::FxMaps::stroke_frame`),
 /// from the layer's cached effect maps; `None` when `st` isn't a gradient stroke of the layer.
 /// For the GPU compositor.
-pub fn stroke_frame(doc: &Document, layer: &Layer, st: &photosuite_doc::StrokeFx) -> Option<Rect> {
-    if !matches!(st.paint, photosuite_doc::FxPaint::Gradient(_)) || !effects::has_effects(layer) {
+pub fn stroke_frame(doc: &Document, layer: &Layer, st: &photosplice_doc::StrokeFx) -> Option<Rect> {
+    if !matches!(st.paint, photosplice_doc::FxPaint::Gradient(_)) || !effects::has_effects(layer) {
         return None;
     }
     let patterns = pattern::PreparedPatterns::new(&doc.patterns, pattern::PREPARED_PATTERN_BYTES);
@@ -925,7 +925,7 @@ pub fn render_fill_content(layer: &Layer, f: &Fill, canvas: Rect, patterns: &[Pa
 /// A fill layer's pixels over `canvas` in a CMYK document, as ink amounts `[C, M, Y, K, alpha]`
 /// (row-major), the way the CMYK compositor renders them: a solid colour keeps its own inks and
 /// a gradient interpolates its stops' inks, so a CMYK file is written without a lossy round trip
-/// through RGB. Run inside the document's [`photosuite_color::convert::with_cmyk_space`] scope.
+/// through RGB. Run inside the document's [`photosplice_color::convert::with_cmyk_space`] scope.
 pub fn render_fill_inks(layer: &Layer, f: &Fill, canvas: Rect, patterns: &[Pattern]) -> Vec<[f32; 5]> {
     let prepared = pattern::PreparedPatterns::new(patterns, pattern::PREPARED_PATTERN_BYTES);
     cmyk::fill_in(layer, f, canvas, canvas, &prepared).px.iter().map(|p| [1.0 - p[0], 1.0 - p[1], 1.0 - p[2], 1.0 - p[3], p[4]]).collect()
@@ -972,8 +972,8 @@ fn empty_in(layer: &Layer, rect: Rect) -> bool {
 /// directly and a grayscale document's single channel covers all three; other modes composite in
 /// display RGB, where a restriction to their own channels has no exact equivalent, so it is
 /// ignored there.
-pub fn channel_weights(layer: &Layer, mode: photosuite_color::ColorMode) -> Option<[f32; 3]> {
-    use photosuite_color::ColorMode as M;
+pub fn channel_weights(layer: &Layer, mode: photosplice_color::ColorMode) -> Option<[f32; 3]> {
+    use photosplice_color::ColorMode as M;
     let x = layer.excluded_channels;
     if x == 0 {
         return None;
@@ -1064,7 +1064,7 @@ pub fn transparent_outside(layer: &Layer) -> bool {
 /// stops are all opaque). Normal blending at alpha 1 returns the layer's colour exactly, so the
 /// layers below can be skipped (the live Gradient tool's preview recomposites the whole canvas on
 /// every pointer move).
-pub fn occludes_below(layer: &Layer, mode: photosuite_color::ColorMode) -> bool {
+pub fn occludes_below(layer: &Layer, mode: photosplice_color::ColorMode) -> bool {
     let LayerContent::Fill(f) = &layer.content else { return false };
     let opaque = match f {
         Fill::Solid(c) => c.alpha >= 1.0,
@@ -1079,7 +1079,7 @@ pub fn occludes_below(layer: &Layer, mode: photosuite_color::ColorMode) -> bool 
         && !cached
         && layer.visible
         && !layer.clipped
-        && layer.blend == photosuite_color::BlendMode::Normal
+        && layer.blend == photosplice_color::BlendMode::Normal
         && layer.opacity >= 1.0
         && layer.fill_opacity >= 1.0
         && !layer.mask.as_ref().is_some_and(|m| m.enabled)
@@ -1093,16 +1093,16 @@ pub fn occludes_below(layer: &Layer, mode: photosuite_color::ColorMode) -> bool 
 /// RGB documents test Gray and R, G, B; grayscale (and duotone) documents their one channel.
 /// Other modes composite in display RGB, where ranges over their own channels have no exact
 /// equivalent, so (like channel restrictions) the setting round-trips but isn't applied there.
-pub fn blend_if_active(layer: &Layer, mode: photosuite_color::ColorMode) -> bool {
-    use photosuite_color::ColorMode as M;
+pub fn blend_if_active(layer: &Layer, mode: photosplice_color::ColorMode) -> bool {
+    use photosplice_color::ColorMode as M;
     matches!(mode, M::Rgb | M::Grayscale | M::Duotone) && !layer.blend_if.is_default()
 }
 
 /// How much of a pixel shows through `layer`'s Blend If ranges, given the layer's own colour
 /// (`this`, `None` where the layer has no content of its own there) and the colour beneath it
 /// (`under`, `None` where nothing is beneath). Every range multiplies in.
-fn blend_if_weight(layer: &Layer, mode: photosuite_color::ColorMode, this: Option<[f32; 4]>, under: Option<[f32; 4]>) -> f32 {
-    use photosuite_color::ColorMode as M;
+fn blend_if_weight(layer: &Layer, mode: photosplice_color::ColorMode, this: Option<[f32; 4]>, under: Option<[f32; 4]>) -> f32 {
+    use photosplice_color::ColorMode as M;
     let bi = &layer.blend_if;
     let mut k = 1.0;
     for (side, px) in [this, under].into_iter().enumerate() {
@@ -1185,7 +1185,7 @@ fn composite_layer_any(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer, 
 
 /// An artboard: its background and the group, composited only inside the board (contents and
 /// effects outside it are clipped away; the backdrop there is untouched).
-fn composite_artboard(layer: &Layer, ab: &photosuite_doc::Artboard, clipped: &[Layer], backdrop: &mut Buffer, cx: &Ctx) {
+fn composite_artboard(layer: &Layer, ab: &photosplice_doc::Artboard, clipped: &[Layer], backdrop: &mut Buffer, cx: &Ctx) {
     let board = ab.rect.intersect(&backdrop.rect);
     if board.is_empty() {
         return;
@@ -1397,7 +1397,7 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
     }
     // Knockout: the layer's shape (its alpha, at the layer's opacity) first replaces the
     // backdrop with what it knocks out to; the content then lands there at its fill opacity.
-    if layer.knockout != photosuite_doc::Knockout::None
+    if layer.knockout != photosplice_doc::Knockout::None
         && let Some(kb) = knockout::backdrop(layer.knockout, rect)
     {
         for ((b, c), k) in backdrop.px.iter_mut().zip(&content.px).zip(&kb.px) {
@@ -1565,7 +1565,7 @@ fn effect_maps(layer: &Layer, cx: &Ctx) -> std::sync::Arc<effects::FxMaps> {
     use std::hash::{Hash, Hasher};
     let m = effects::margin(layer);
     let region = layer_bounds(layer, cx.canvas).inflate(m).intersect(&cx.canvas.inflate(m));
-    if std::env::var_os("PHOTOSUITE_FX_NOCACHE").is_some() {
+    if std::env::var_os("PHOTOSPLICE_FX_NOCACHE").is_some() {
         let shape = if region.is_empty() { Vec::new() } else { effect_shape(layer, region, cx) };
         return std::sync::Arc::new(effects::build_maps_prepared(layer, shape, region, &cx.light, &texture_ctx(layer, region, cx), cx.patterns));
     }

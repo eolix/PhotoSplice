@@ -1,5 +1,5 @@
 [package]
-name = "photosuite-paint"
+name = "photosplice-paint"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,9 +8,9 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-photosuite-geom = { workspace = true }
-photosuite-color = { workspace = true }
-photosuite-raster = { workspace = true }
+photosplice-geom = { workspace = true }
+photosplice-color = { workspace = true }
+photosplice-raster = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]

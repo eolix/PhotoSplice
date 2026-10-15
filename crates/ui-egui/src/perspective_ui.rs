@@ -10,12 +10,12 @@
 use std::sync::Arc;
 
 use egui::{Color32, Pos2, Stroke, TextureHandle, pos2};
-use photosuite_algo::perspective::{PerspectiveMap, Plane, Straighten, linked_corners, plane_point, straighten};
-use photosuite_doc::{Document, LayerId};
-use photosuite_geom::Rect;
+use photosplice_algo::perspective::{PerspectiveMap, Plane, Straighten, linked_corners, plane_point, straighten};
+use photosplice_doc::{Document, LayerId};
+use photosplice_geom::Rect;
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::{ToolEvent, ViewXform};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -113,7 +113,7 @@ impl PerspSession {
     }
 }
 
-pub fn begin(app: &mut PhotosuiteApp, ctx: &egui::Context, command: &str) -> Result<(), String> {
+pub fn begin(app: &mut PhotospliceApp, ctx: &egui::Context, command: &str) -> Result<(), String> {
     if app.ui.transform.is_some() {
         return Err("finish Free Transform first".into());
     }
@@ -147,7 +147,7 @@ pub fn begin(app: &mut PhotosuiteApp, ctx: &egui::Context, command: &str) -> Res
     Ok(())
 }
 
-pub fn commit(app: &mut PhotosuiteApp) {
+pub fn commit(app: &mut PhotospliceApp) {
     let Some(s) = app.distort.perspective.take() else { return };
     if s.planes.is_empty() || PerspectiveMap::is_identity(&s.planes) {
         return;
@@ -159,13 +159,13 @@ fn set_mode(s: &mut PerspSession, m: PerspMode) {
     s.mode = m;
     if m == PerspMode::Warp {
         // Linked corners share one position from here on.
-        photosuite_algo::perspective::unify(&mut s.planes);
+        photosplice_algo::perspective::unify(&mut s.planes);
     }
     s.update_grid();
 }
 
 /// Control channel: `edit.perspectiveWarp {"ui": {...}}` while the mode is active.
-pub fn control(app: &mut PhotosuiteApp, ui: &Value) -> Result<Value, String> {
+pub fn control(app: &mut PhotospliceApp, ui: &Value) -> Result<Value, String> {
     if ui.get("commit").and_then(Value::as_bool) == Some(true) {
         commit(app);
         return Ok(json!({"committed": true}));
@@ -190,7 +190,7 @@ pub fn control(app: &mut PhotosuiteApp, ui: &Value) -> Result<Value, String> {
     Ok(s.describe())
 }
 
-pub fn pointer(app: &mut PhotosuiteApp, ev: ToolEvent, _mods: egui::Modifiers) {
+pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, _mods: egui::Modifiers) {
     let tol = crate::distort_ui::tolerance(app);
     let Some(s) = app.distort.perspective.as_mut() else { return };
     match ev {
@@ -291,7 +291,7 @@ pub fn draw(s: &PerspSession, painter: &egui::Painter, xf: &ViewXform) {
     }
 }
 
-pub fn options_bar(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
+pub fn options_bar(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
     let Some(s) = app.distort.perspective.as_mut() else { return };
     if crate::widgets::pill_tab(ui, "Layout", s.mode == PerspMode::Layout).clicked() {
         set_mode(s, PerspMode::Layout);
@@ -337,7 +337,7 @@ mod tests {
     #[test]
     fn layout_snaps_planes_then_warp_and_commit() {
         let ctx = egui::Context::default();
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         app.session.execute("file.new", json!({"width": 200, "height": 120, "depth": 8})).unwrap();
         app.session.execute("layer.new.layer", json!({})).unwrap();
         app.session
@@ -348,7 +348,7 @@ mod tests {
             .unwrap();
         app.sync_views();
         crate::distort_ui::menu(&mut app, &ctx, "edit.perspectiveWarp", &json!({})).unwrap().unwrap();
-        let ev = |app: &mut PhotosuiteApp, e| crate::distort_ui::pointer(app, e, egui::Modifiers::NONE);
+        let ev = |app: &mut PhotospliceApp, e| crate::distort_ui::pointer(app, e, egui::Modifiers::NONE);
         // Two planes sharing an edge (the second starts at the first one's corner and snaps).
         ev(&mut app, ToolEvent::Down { x: 20.0, y: 20.0, pressure: 1.0 });
         ev(&mut app, ToolEvent::Move { x: 100.0, y: 100.0, pressure: 1.0 });

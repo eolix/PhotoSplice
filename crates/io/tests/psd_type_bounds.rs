@@ -12,14 +12,14 @@
 
 mod common;
 
-use photosuite_color::{ColorMode, SampleType};
-use photosuite_doc::text::TextShape;
-use photosuite_doc::{Document, Layer, LayerContent, Size, TextLayer};
-use photosuite_geom::{Affine, Rect};
-use photosuite_psd::descriptor::{Descriptor, Id, UnicodeString, Value as D};
-use photosuite_raster::Surface;
-use photosuite_text::engine_data::Value as E;
-use photosuite_text::psd::{TySh, write_tysh};
+use photosplice_color::{ColorMode, SampleType};
+use photosplice_doc::text::TextShape;
+use photosplice_doc::{Document, Layer, LayerContent, Size, TextLayer};
+use photosplice_geom::{Affine, Rect};
+use photosplice_psd::descriptor::{Descriptor, Id, UnicodeString, Value as D};
+use photosplice_raster::Surface;
+use photosplice_text::engine_data::Value as E;
+use photosplice_text::psd::{TySh, write_tysh};
 
 /// One character run: (UTF-16 length, font size in text-space units, explicit leading).
 struct Run {
@@ -106,7 +106,7 @@ fn tysh(text: &str, runs: &[Run], box_bounds: Option<[f64; 4]>, transform: Affin
         .with("bounds", rect("bounds"))
         .with("boundingBox", rect("boundingBox"))
         .with("TextIndex", D::Integer(0))
-        .with("EngineData", D::RawData(photosuite_text::engine_data::write(&engine_data(text, runs, box_bounds))));
+        .with("EngineData", D::RawData(photosplice_text::engine_data::write(&engine_data(text, runs, box_bounds))));
     // Photoshop's trailing bounds: the `bounds` rectangle as four f32s.
     let bounds = ink.map(|v| v as f32);
     write_tysh(&TySh { transform, text: desc, warp: None, bounds })
@@ -232,19 +232,19 @@ fn import_case(c: &Case) -> (Rect, TextLayer, Document, Vec<[f32; 4]>) {
     let mut doc = Document::new("t", Size::new(w, h), ColorMode::Rgb, SampleType::U8);
     doc.resolution_dpi = c.dpi;
     // Photoshop's text `bounds` are the logical bounds in text space; measure them like it does.
-    let probe = photosuite_text::psd::text_layer_from_tysh(&tysh(c.text, &c.runs, c.box_bounds, c.transform, [0.0; 4]), c.dpi).unwrap();
-    let mut engine = photosuite_text::TextEngine::new();
+    let probe = photosplice_text::psd::text_layer_from_tysh(&tysh(c.text, &c.runs, c.box_bounds, c.transform, [0.0; 4]), c.dpi).unwrap();
+    let mut engine = photosplice_text::TextEngine::new();
     let ink = engine.layout(&probe, c.dpi).bounds().unwrap_or([0.0; 4]).map(f64::from);
     let data = tysh(c.text, &c.runs, c.box_bounds, c.transform, ink);
-    let mut t = photosuite_text::psd::text_layer_from_tysh(&data, c.dpi).unwrap();
+    let mut t = photosplice_text::psd::text_layer_from_tysh(&data, c.dpi).unwrap();
     engine.render_layer(&mut t, c.dpi, doc.pixel_format());
     let drawn = t.cache.as_ref().unwrap().content_bounds();
     t.psd_raw = Some(std::sync::Arc::new(data));
     doc.layers.push(Layer::new(c.name, LayerContent::Text(t)));
-    let bytes = photosuite_io::export(&doc, "t.psd", &Default::default()).unwrap().bytes;
-    let file = photosuite_psd::PsdFile::from_bytes(&bytes).unwrap();
-    let merged = photosuite_io::merged_composite(&file).unwrap();
-    let back = photosuite_io::import("t.psd", &bytes).unwrap().document;
+    let bytes = photosplice_io::export(&doc, "t.psd", &Default::default()).unwrap().bytes;
+    let file = photosplice_psd::PsdFile::from_bytes(&bytes).unwrap();
+    let merged = photosplice_io::merged_composite(&file).unwrap();
+    let back = photosplice_io::import("t.psd", &bytes).unwrap().document;
     let LayerContent::Text(bt) = &back.layers[0].content else { panic!("{}: not a type layer", c.name) };
     (drawn, bt.clone(), back, merged)
 }
@@ -268,18 +268,18 @@ fn imported_type_layers_keep_their_full_bounds() {
         // whole of Photoshop's rendering.
         let cache = t.cache.as_ref().unwrap();
         assert_eq!(cache.content_bounds(), drawn, "{}: imported pixels clipped", c.name);
-        let layer_bounds = photosuite_compose::layer_bounds(&doc.layers[0], doc.bounds());
+        let layer_bounds = photosplice_compose::layer_bounds(&doc.layers[0], doc.bounds());
         assert_eq!(layer_bounds, drawn, "{}: layer bounds", c.name);
         // Re-rendering the imported model (what the type tool does on click) draws the same
         // text in the same place: nothing clipped, no scale or dpi drift.
-        let mut engine = photosuite_text::TextEngine::new();
+        let mut engine = photosplice_text::TextEngine::new();
         let (_, ours) = engine.render(&t, doc.resolution_dpi, doc.pixel_format());
         let ours_rect = ours.surface.content_bounds();
         assert!(close(ours_rect, drawn, 1), "{}: re-render {ours_rect:?} vs file {drawn:?}", c.name);
         let o = iou(&ours.surface, cache);
         assert!(o > 0.97, "{}: re-render overlap {o}", c.name);
         // And the document composite is the file's merged composite.
-        let px = photosuite_compose::flatten(&doc).px;
+        let px = photosplice_compose::flatten(&doc).px;
         let worst = common::max_diff(&px, &merged);
         assert!(worst <= 2.0 / 255.0, "{}: composite differs from the merged image by {worst}", c.name);
     }

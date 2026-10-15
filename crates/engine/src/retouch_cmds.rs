@@ -5,19 +5,19 @@
 //! `spacing`, `layer`), respects the active selection as a mask and the layer's transparency lock, and
 //! works at any depth (8/16/32f) and colour model. Like the Brush, each paints the targeted surface:
 //! the layer's pixels, its mask (`"target":"mask"`), an alpha channel or the Quick Mask (`"target"`,
-//! filled in from the Channels panel when absent). The pixel algorithms live in `photosuite-algo`
-//! (`poisson`, `inpaint`, `retouch`) and the dab machinery in `photosuite-paint::retouch`; this module
+//! filled in from the Channels panel when absent). The pixel algorithms live in `photosplice-algo`
+//! (`poisson`, `inpaint`, `retouch`) and the dab machinery in `photosplice-paint::retouch`; this module
 //! only parses parameters and wires them together.
 
-use photosuite_algo::inpaint::{self, CompleteParams};
-use photosuite_algo::poisson;
-use photosuite_algo::retouch::{ToneRange, dodge_burn, local_blur, local_sharpen, sponge};
-use photosuite_color::{BlendMode, PixelFormat, SampleType};
-use photosuite_doc::{Document, LayerContent, LayerId};
-use photosuite_geom::Rect;
-use photosuite_paint::retouch::{Footprint, Region, Smudge, alpha_index, apply_coverage, apply_dab_stroke, stroke_coverage};
-use photosuite_paint::{BrushSettings, Stroke, StrokePoint};
-use photosuite_raster::{Surface, from_rgba_into, to_rgba};
+use photosplice_algo::inpaint::{self, CompleteParams};
+use photosplice_algo::poisson;
+use photosplice_algo::retouch::{ToneRange, dodge_burn, local_blur, local_sharpen, sponge};
+use photosplice_color::{BlendMode, PixelFormat, SampleType};
+use photosplice_doc::{Document, LayerContent, LayerId};
+use photosplice_geom::Rect;
+use photosplice_paint::retouch::{Footprint, Region, Smudge, alpha_index, apply_coverage, apply_dab_stroke, stroke_coverage};
+use photosplice_paint::{BrushSettings, Stroke, StrokePoint};
+use photosplice_raster::{Surface, from_rgba_into, to_rgba};
 use serde_json::{Value, json};
 
 use crate::commands::{CommandSpec, blend_from_str};
@@ -167,7 +167,7 @@ fn composite_region(pre: &Document, id: Option<LayerId>, which: SampleLayers, re
             }
         }
     }
-    let buf = photosuite_compose::render(&doc, rect);
+    let buf = photosplice_compose::render(&doc, rect);
     let n = fmt.channels();
     let mut out = Region::new(rect, n);
     let mut enc = [0.0f32; 8];
@@ -629,7 +629,7 @@ fn smudge_cmd(s: &mut Session, p: &Value) -> Result<Value> {
     let all = sample_all_layers(p);
     let dmg = run_stroke(s, "Smudge Tool", id, p, |pre, surf, sel, lock| {
         let fmt = surf.format();
-        let finger_px = finger.then(|| photosuite_raster::from_rgba(&fmt, fg));
+        let finger_px = finger.then(|| photosplice_raster::from_rgba(&fmt, fg));
         let max_size = stroke.brush.size;
         // Premultiplied mixing: transparent pixels carry no colour, so no dark fringes.
         let mut sm = Smudge::new(strength, finger_px, max_size).with_alpha(alpha_index(&fmt));

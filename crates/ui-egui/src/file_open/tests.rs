@@ -1,8 +1,8 @@
 use super::*;
 use crate::{Services, menus, notices};
-use photosuite_color::{ColorMode, SampleType};
-use photosuite_doc::Document;
-use photosuite_geom::Size;
+use photosplice_color::{ColorMode, SampleType};
+use photosplice_doc::Document;
+use photosplice_geom::Size;
 use serde_json::json;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -10,10 +10,10 @@ use std::rc::Rc;
 /// Writes recorded by the fake writer: (path, bytes).
 type Written = Rc<RefCell<Vec<(String, Vec<u8>)>>>;
 
-/// An app whose importer names the document after the file (like `photosuite-io`) and reports a
+/// An app whose importer names the document after the file (like `photosplice-io`) and reports a
 /// warning for names containing "warn", and fails for bytes "bad"; the exporter warns for ".png"
 /// and the writer records what it wrote.
-fn app_with(pick_open: Option<(String, Vec<u8>)>, pick_save: Option<String>) -> (PhotosuiteApp, Written) {
+fn app_with(pick_open: Option<(String, Vec<u8>)>, pick_save: Option<String>) -> (PhotospliceApp, Written) {
     let written: Written = Rc::default();
     let w = written.clone();
     let mut pick_open = pick_open;
@@ -37,7 +37,7 @@ fn app_with(pick_open: Option<(String, Vec<u8>)>, pick_save: Option<String>) -> 
         })),
         ..Default::default()
     };
-    (PhotosuiteApp::new(photosuite_engine::Session::new(), services), written)
+    (PhotospliceApp::new(photosplice_engine::Session::new(), services), written)
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn file_open_dialog_sets_path_so_save_writes_in_place() {
 
 #[test]
 fn file_open_dialog_opens_every_selected_path() {
-    let dir = std::env::temp_dir().join(format!("photosuite-issue-595-open-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("photosplice-issue-595-open-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let paths = ["one.psd", "two.png"].map(|name| {
         let path = dir.join(name);
@@ -155,18 +155,18 @@ fn save_keeps_the_quality_the_file_was_opened_with() {
         write: Some(Box::new(|_p: &str, _b: &[u8]| Ok(()))),
         ..Default::default()
     };
-    let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), services);
+    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), services);
     let ctx = egui::Context::default();
-    let img = photosuite_codecs::Image::from_u8(8, 8, photosuite_codecs::ChannelLayout::Rgb, vec![128; 8 * 8 * 3]).unwrap();
-    let jpeg = photosuite_codecs::encode(&img, photosuite_codecs::Format::Jpeg, &photosuite_codecs::EncodeOptions { jpeg_quality: 42, ..Default::default() }).unwrap();
+    let img = photosplice_codecs::Image::from_u8(8, 8, photosplice_codecs::ChannelLayout::Rgb, vec![128; 8 * 8 * 3]).unwrap();
+    let jpeg = photosplice_codecs::encode(&img, photosplice_codecs::Format::Jpeg, &photosplice_codecs::EncodeOptions { jpeg_quality: 42, ..Default::default() }).unwrap();
     app.open_file("/pics/a.jpg", &jpeg).unwrap();
     assert_eq!(app.session.active().unwrap().save_options.jpeg_quality, Some(42));
     menus::invoke(&mut app, &ctx, "file.save", json!({})).unwrap();
     assert_eq!(seen.borrow().last().unwrap().jpeg_quality, Some(42));
     // A lossy WebP stays lossy; a lossless one stays lossless.
     let enc = |lossless| {
-        let o = photosuite_codecs::EncodeOptions { webp_lossless: lossless, webp_quality: 60, ..Default::default() };
-        photosuite_codecs::encode(&img, photosuite_codecs::Format::WebP, &o).unwrap()
+        let o = photosplice_codecs::EncodeOptions { webp_lossless: lossless, webp_quality: 60, ..Default::default() };
+        photosplice_codecs::encode(&img, photosplice_codecs::Format::WebP, &o).unwrap()
     };
     app.open_file("/pics/lossy.webp", &enc(false)).unwrap();
     menus::invoke(&mut app, &ctx, "file.save", json!({})).unwrap();
@@ -175,8 +175,8 @@ fn save_keeps_the_quality_the_file_was_opened_with() {
     menus::invoke(&mut app, &ctx, "file.save", json!({})).unwrap();
     assert_eq!(seen.borrow().last().unwrap().webp_quality, None);
     // Unreadable bytes keep the defaults rather than failing the open.
-    assert_eq!(save_options_of("/x.jpg", b"junk"), photosuite_engine::SaveOptions::default());
-    assert_eq!(save_options_of("/x.webp", b""), photosuite_engine::SaveOptions::default());
+    assert_eq!(save_options_of("/x.jpg", b"junk"), photosplice_engine::SaveOptions::default());
+    assert_eq!(save_options_of("/x.webp", b""), photosplice_engine::SaveOptions::default());
 }
 
 #[test]
@@ -198,7 +198,7 @@ fn templates_open_as_new_untitled_documents() {
 
 #[test]
 fn import_warnings_reach_status_notice_and_control_response() {
-    let dir = std::env::temp_dir().join(format!("photosuite-open-warn-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("photosplice-open-warn-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("warn.psd");
     std::fs::write(&path, b"x").unwrap();
@@ -265,7 +265,7 @@ fn a_picked_file_that_cannot_be_read_is_reported_like_any_open_failure() {
 #[test]
 fn open_paths_reports_each_failure_without_panicking() {
     let (mut app, _) = app_with(None, None);
-    let missing = std::env::temp_dir().join("photosuite-definitely-missing-file.psd").to_string_lossy().to_string();
+    let missing = std::env::temp_dir().join("photosplice-definitely-missing-file.psd").to_string_lossy().to_string();
     let dir = std::env::temp_dir().to_string_lossy().to_string();
     let n = app.open_paths(&[missing, String::new(), dir, "\u{0}".into()]);
     assert_eq!(n, 0);
@@ -279,7 +279,7 @@ fn open_paths_reports_each_failure_without_panicking() {
 
 #[test]
 fn os_open_events_open_files_with_paths() {
-    let dir = std::env::temp_dir().join(format!("photosuite-os-open-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("photosplice-os-open-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let a = dir.join("a.psd");
     let b = dir.join("b.png");
@@ -326,14 +326,14 @@ fn dropped(path: impl Into<std::path::PathBuf>, bytes: Result<Vec<u8>, String>) 
     std::sync::Arc::new(FakeDrop(path.into(), bytes))
 }
 
-fn doc_names(app: &PhotosuiteApp) -> Vec<String> {
+fn doc_names(app: &PhotospliceApp) -> Vec<String> {
     app.session.documents().iter().map(|d| d.doc.name.clone()).collect()
 }
 
 #[test]
 fn dropped_files_open_with_path_and_recent() {
     let (mut app, _) = app_with(None, None);
-    let dir = std::env::temp_dir().join(format!("photosuite-drop-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("photosplice-drop-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let abs = dir.join("dropped.psd");
     std::fs::write(&abs, b"x").unwrap();
@@ -364,24 +364,24 @@ fn dropped_files_open_with_path_and_recent() {
 
 /// PNG bytes of a white `w`×`h` image.
 fn png_bytes(w: u32, h: u32) -> Vec<u8> {
-    let mut s = photosuite_engine::Session::new();
+    let mut s = photosplice_engine::Session::new();
     s.execute("file.new", json!({"width": w, "height": h, "background": "white"})).unwrap();
-    photosuite_io::export(&s.active().unwrap().doc, "p.png", &Default::default()).unwrap().bytes
+    photosplice_io::export(&s.active().unwrap().doc, "p.png", &Default::default()).unwrap().bytes
 }
 
 /// An app with one open document whose canvas showed at (100, 50)–(700, 550) last frame.
-fn app_with_canvas() -> PhotosuiteApp {
+fn app_with_canvas() -> PhotospliceApp {
     let (mut app, _) = app_with(None, None);
     app.open_bytes("canvas.psd", b"x").unwrap();
     app.drop_canvas_rect = Some(egui::Rect::from_min_max(egui::pos2(100.0, 50.0), egui::pos2(700.0, 550.0)));
     app
 }
 
-fn layer_count(app: &PhotosuiteApp) -> usize {
+fn layer_count(app: &PhotospliceApp) -> usize {
     app.session.active().unwrap().doc.layers.len()
 }
 
-fn history_steps(app: &PhotosuiteApp) -> usize {
+fn history_steps(app: &PhotospliceApp) -> usize {
     app.session.active().unwrap().history.past_len()
 }
 
@@ -389,7 +389,7 @@ fn history_steps(app: &PhotosuiteApp) -> usize {
 /// Transform; the next is placed once the previous transform is committed or cancelled.
 #[test]
 fn files_dropped_onto_the_canvas_are_placed_in_free_transform_one_by_one() {
-    let dir = std::env::temp_dir().join(format!("photosuite-drop-place-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("photosplice-drop-place-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let abs = dir.join("photo.png");
     std::fs::write(&abs, png_bytes(200, 100)).unwrap();
@@ -426,7 +426,7 @@ fn files_dropped_onto_the_canvas_are_placed_in_free_transform_one_by_one() {
     let st = app.session.active().unwrap();
     let top = st.doc.layer(st.active_layer.unwrap()).unwrap();
     assert_eq!(top.name, "small");
-    assert!(matches!(top.content, photosuite_doc::LayerContent::Smart(_)));
+    assert!(matches!(top.content, photosplice_doc::LayerContent::Smart(_)));
     // Esc takes the place back, leaving nothing to redo.
     crate::transform_tool::cancel(&mut app);
     assert_eq!((layer_count(&app), history_steps(&app)), (layers + 1, steps + 1));
@@ -483,20 +483,20 @@ fn files_dropped_on_the_tabs_open_at_that_slot() {
 /// service picks a slot; files dropped there open (in the background) at it; dropped on the canvas they're placed in Free Transform, and Esc takes the place back.
 #[test]
 fn drag_and_drop_in_the_running_app() {
-    let dir = std::env::temp_dir().join(format!("photosuite-drop-app-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("photosplice-drop-app-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("photo.png");
     std::fs::write(&file, png_bytes(40, 30)).unwrap();
     let pointer = Rc::new(std::cell::Cell::new(egui::Pos2::ZERO));
     let reported = pointer.clone();
     let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1280.0, 800.0)).with_max_steps(8).build_eframe(move |cc| {
-        PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-        let mut s = photosuite_engine::Session::new();
+        PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+        let mut s = photosplice_engine::Session::new();
         for _ in 0..2 {
             s.execute("file.new", json!({"width": 320, "height": 240, "background": "white"})).unwrap();
         }
         let services = Services { cursor_pos: Some(Box::new(move |_: &egui::Context| Some(reported.get()))), ..Default::default() };
-        let mut app = PhotosuiteApp::new(s, services);
+        let mut app = PhotospliceApp::new(s, services);
         app.background_jobs = true;
         app
     });
@@ -547,8 +547,8 @@ fn views_and_windows_stay_with_their_documents() {
         v.zoom = i as f32 + 1.0;
     }
     app.ui.windows = (0..4).map(|document| crate::state::DocWindow { id: document as u64, document, view: Default::default(), open: true }).collect();
-    let zooms = |app: &PhotosuiteApp| app.ui.views.iter().map(|v| v.zoom).collect::<Vec<_>>();
-    let windows = |app: &PhotosuiteApp| app.ui.windows.iter().map(|w| (w.id, w.document)).collect::<Vec<_>>();
+    let zooms = |app: &PhotospliceApp| app.ui.views.iter().map(|v| v.zoom).collect::<Vec<_>>();
+    let windows = |app: &PhotospliceApp| app.ui.windows.iter().map(|w| (w.id, w.document)).collect::<Vec<_>>();
     assert_eq!(app.run("document.move", json!({"document": 0, "to": 3})).unwrap(), json!({"document": 3}));
     assert_eq!(doc_names(&app), ["b.psd", "c.psd", "d.psd", "a.psd"]);
     assert_eq!(zooms(&app), [2.0, 3.0, 4.0, 1.0]);
@@ -620,7 +620,7 @@ fn notices_render_without_panicking() {
 
 #[test]
 fn save_as_is_the_save_for_web_screen_with_document_formats() {
-    let dir = std::env::temp_dir().join(format!("photosuite-saveas-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("photosplice-saveas-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let jpg = dir.join("cat.jpg").to_string_lossy().into_owned();
     let (mut app, written) = app_with(None, Some("/pics/cat.psd".into()));
@@ -652,11 +652,11 @@ fn save_as_is_the_save_for_web_screen_with_document_formats() {
 #[test]
 fn multi_page_pdfs_ask_which_page() {
     let page = || {
-        let img = photosuite_codecs::Image::from_u8(8, 8, photosuite_codecs::ChannelLayout::Rgb, vec![200; 8 * 8 * 3]).unwrap();
-        (8u32, 8u32, 72.0f32, photosuite_codecs::encode(&img, photosuite_codecs::Format::Jpeg, &photosuite_codecs::EncodeOptions::default()).unwrap())
+        let img = photosplice_codecs::Image::from_u8(8, 8, photosplice_codecs::ChannelLayout::Rgb, vec![200; 8 * 8 * 3]).unwrap();
+        (8u32, 8u32, 72.0f32, photosplice_codecs::encode(&img, photosplice_codecs::Format::Jpeg, &photosplice_codecs::EncodeOptions::default()).unwrap())
     };
-    let pdf = photosuite_io::pdf::raster_pdf(&[page(), page(), page()]);
-    let dir = std::env::temp_dir().join(format!("photosuite-pdfui-{}", std::process::id()));
+    let pdf = photosplice_io::pdf::raster_pdf(&[page(), page(), page()]);
+    let dir = std::env::temp_dir().join(format!("photosplice-pdfui-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("deck.pdf").to_string_lossy().into_owned();
     std::fs::write(&path, &pdf).unwrap();
@@ -666,7 +666,7 @@ fn multi_page_pdfs_ask_which_page() {
     let d = app.import_pdf.as_ref().expect("Import PDF");
     assert_eq!((d.count, d.selected.as_slice()), (3, &[0][..]));
     assert_eq!(d.open_as, "pixels", "Photoshop's way by default");
-    assert_eq!(d.crop_to, photosuite_io::pdf::CropTo::BoundingBox, "Photoshop's default");
+    assert_eq!(d.crop_to, photosplice_io::pdf::CropTo::BoundingBox, "Photoshop's default");
     // OK opens the picked pages, each its own document, and remembers the options.
     app.import_pdf.as_mut().unwrap().click(2, true, false);
     app.import_pdf.as_mut().unwrap().resolution = 72.0;
@@ -674,7 +674,7 @@ fn multi_page_pdfs_ask_which_page() {
     assert_eq!(app.session.documents().len(), 2);
     assert!(app.import_pdf.is_none());
     // One page asks too (how to open it), as in Photoshop, starting from the last options.
-    let one = photosuite_io::pdf::raster_pdf(&[page()]);
+    let one = photosplice_io::pdf::raster_pdf(&[page()]);
     let path = dir.join("one.pdf").to_string_lossy().into_owned();
     std::fs::write(&path, &one).unwrap();
     app.open_file(&path, &one).unwrap();
@@ -685,16 +685,16 @@ fn multi_page_pdfs_ask_which_page() {
 
 #[test]
 fn photoshop_pdfs_open_as_their_document_and_save_in_place() {
-    let mut doc = photosuite_doc::Document::with_background("ps", photosuite_geom::Size::new(32, 16), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8, photosuite_doc::Color::WHITE);
-    doc.layers.push(photosuite_doc::Layer::new("Top", photosuite_doc::LayerContent::Raster(photosuite_raster::Surface::new(doc.pixel_format()))));
-    let pdf = photosuite_io::pdf::export::export_layered(&doc, true).unwrap().bytes;
-    let dir = std::env::temp_dir().join(format!("photosuite-pspdf-{}", std::process::id()));
+    let mut doc = photosplice_doc::Document::with_background("ps", photosplice_geom::Size::new(32, 16), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8, photosplice_doc::Color::WHITE);
+    doc.layers.push(photosplice_doc::Layer::new("Top", photosplice_doc::LayerContent::Raster(photosplice_raster::Surface::new(doc.pixel_format()))));
+    let pdf = photosplice_io::pdf::export::export_layered(&doc, true).unwrap().bytes;
+    let dir = std::env::temp_dir().join(format!("photosplice-pspdf-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("ps.pdf").to_string_lossy().into_owned();
     std::fs::write(&path, &pdf).unwrap();
     let (mut app, _) = app_with(None, None);
     app.open_file(&path, &pdf).unwrap();
-    // (The test app's import service stands in for the PSD-backed import: see photosuite-io.)
+    // (The test app's import service stands in for the PSD-backed import: see photosplice-io.)
     assert!(app.import_pdf.is_none(), "no Import PDF");
     let st = app.session.active().expect("opened");
     assert_eq!(st.path.as_deref(), Some(path.as_str()), "File › Save writes back to it");

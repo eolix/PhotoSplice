@@ -17,7 +17,7 @@
 //! geodesic matting (Bai & Sapiro, ICCV 2007). Large windows run at a reduced working resolution
 //! and the boundary is re-cut at full resolution.
 
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 
 use super::gmm::Gmm;
 use super::{FREE, HARD_FG, Region, RgbImage, Sampler, contrast_beta, grid_cut, keep_seeded, subsample};

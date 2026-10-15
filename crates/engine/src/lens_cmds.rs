@@ -3,18 +3,18 @@
 //!
 //! The three filters act on the active pixel layer (inside the selection) or, on a smart
 //! object, record a smart filter whose params are fully resolved (EXIF-derived values are
-//! written into them), so re-rendering is deterministic. Algorithms: [`photosuite_algo::lens`],
-//! [`photosuite_algo::wideangle`], [`photosuite_algo::camera_raw`].
+//! written into them), so re-rendering is deterministic. Algorithms: [`photosplice_algo::lens`],
+//! [`photosplice_algo::wideangle`], [`photosplice_algo::camera_raw`].
 
-use photosuite_algo::camera_raw::{self, CameraRaw};
-use photosuite_algo::exif;
-use photosuite_algo::lens::{self, EdgeMode, LensCorrection};
-use photosuite_algo::transform::Interp;
-use photosuite_algo::wideangle::{self, WideAngle};
-use photosuite_color::{ColorMode, SampleType};
-use photosuite_doc::{Document, LayerContent, LayerId, SmartFilter};
-use photosuite_geom::Rect;
-use photosuite_raster::{Surface, from_rgba_into};
+use photosplice_algo::camera_raw::{self, CameraRaw};
+use photosplice_algo::exif;
+use photosplice_algo::lens::{self, EdgeMode, LensCorrection};
+use photosplice_algo::transform::Interp;
+use photosplice_algo::wideangle::{self, WideAngle};
+use photosplice_color::{ColorMode, SampleType};
+use photosplice_doc::{Document, LayerContent, LayerId, SmartFilter};
+use photosplice_geom::Rect;
+use photosplice_raster::{Surface, from_rgba_into};
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
@@ -41,11 +41,11 @@ fn flag(p: &Value, k: &str, d: bool) -> bool {
 // ---------- lens profiles ----------
 
 /// The measured lens profile database (Lensfun), registered once by the app.
-static LENS_DB: std::sync::RwLock<Option<std::sync::Arc<photosuite_algo::lensdb::LensDatabase>>> = std::sync::RwLock::new(None);
+static LENS_DB: std::sync::RwLock<Option<std::sync::Arc<photosplice_algo::lensdb::LensDatabase>>> = std::sync::RwLock::new(None);
 
 /// Registers the lens profile database from `lens-database.json`; returns how many lenses it has.
 pub fn set_lens_database_json(bytes: &[u8]) -> std::result::Result<usize, String> {
-    let db: photosuite_algo::lensdb::LensDatabase = serde_json::from_slice(bytes).map_err(|e| format!("lens profile database: {e}"))?;
+    let db: photosplice_algo::lensdb::LensDatabase = serde_json::from_slice(bytes).map_err(|e| format!("lens profile database: {e}"))?;
     let n = db.lenses.len();
     *LENS_DB.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::sync::Arc::new(db));
     Ok(n)
@@ -62,7 +62,7 @@ pub fn set_lens_database_loader(loader: LensDatabaseLoader) {
 }
 
 /// The lens profile database: registered, or loaded now through the loader (once).
-pub fn lens_database() -> Option<std::sync::Arc<photosuite_algo::lensdb::LensDatabase>> {
+pub fn lens_database() -> Option<std::sync::Arc<photosplice_algo::lensdb::LensDatabase>> {
     if let Some(db) = LENS_DB.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
         return Some(db);
     }
@@ -73,7 +73,7 @@ pub fn lens_database() -> Option<std::sync::Arc<photosuite_algo::lensdb::LensDat
     LENS_DB.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 }
 
-fn measured(cal: photosuite_algo::lensdb::Calibration) -> lens::LensProfile {
+fn measured(cal: photosplice_algo::lensdb::Calibration) -> lens::LensProfile {
     lens::LensProfile { name: cal.lens.clone(), measured: Some(cal), ..Default::default() }
 }
 
@@ -343,7 +343,7 @@ fn run_filter(s: &mut Session, cmd: &str, label: &str, stored: Value, float_bg: 
         let background = doc.is_background(id);
         let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
         if let LayerContent::Smart(_) = l.content {
-            let sf = SmartFilter { command: cmd.to_string(), params: stored.clone(), blend: photosuite_color::BlendMode::Normal, opacity: 1.0, visible: true };
+            let sf = SmartFilter { command: cmd.to_string(), params: stored.clone(), blend: photosplice_color::BlendMode::Normal, opacity: 1.0, visible: true };
             return crate::smart_cmds::add_smart_filter(doc, id, sf, selection.as_ref());
         }
         if locks.all || locks.pixels {
@@ -396,7 +396,7 @@ fn adaptive_wide_angle(s: &mut Session, p: &Value) -> Result<Value> {
     let id = run_filter(s, WIDE, "Adaptive Wide Angle", stored.clone(), true, &|surf, canvas| {
         let tris = mesh.triangles();
         if canvas == frame {
-            photosuite_algo::warp::warp_triangles(surf, canvas, &mesh.verts, &tris, interp)
+            photosplice_algo::warp::warp_triangles(surf, canvas, &mesh.verts, &tris, interp)
         } else {
             wideangle::apply(surf, canvas, &wa, interp)
         }
@@ -546,7 +546,7 @@ mod tests {
             for y in 0..80 {
                 for x in 0..120 {
                     let v = if x % 12 < 2 || y % 12 < 2 { 0.9 } else { 0.35 };
-                    surf.write_pixel(x, y, &photosuite_raster::from_rgba(&fmt, [v, v * 0.9, v * 0.7, 1.0]));
+                    surf.write_pixel(x, y, &photosplice_raster::from_rgba(&fmt, [v, v * 0.9, v * 0.7, 1.0]));
                 }
             }
             Ok(())

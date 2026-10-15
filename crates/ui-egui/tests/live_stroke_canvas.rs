@@ -8,18 +8,18 @@
 //! at several zooms, with smoothing, pressure, and 8- and 16-bit documents. Skips when no GPU
 //! adapter exists (like `color_managed_canvas.rs`).
 
-use photosuite_ui_egui::PhotosuiteApp;
-use photosuite_ui_egui::control::{ControlRequest, handle};
+use photosplice_ui_egui::PhotospliceApp;
+use photosplice_ui_egui::control::{ControlRequest, handle};
 use serde_json::{Value, json};
 
-type Harness = egui_kittest::Harness<'static, PhotosuiteApp>;
+type Harness = egui_kittest::Harness<'static, PhotospliceApp>;
 type Pixels = Vec<[u8; 4]>;
 
 fn harness() -> Option<Harness> {
     let built = std::panic::catch_unwind(|| {
         egui_kittest::Harness::builder().with_size(egui::vec2(900.0, 640.0)).with_pixels_per_point(1.0).with_max_steps(64).wgpu().build_eframe(|cc| {
-            PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-            let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+            PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+            let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
             if let Some(rs) = cc.wgpu_render_state.as_ref() {
                 app.set_wgpu(rs.clone());
             }

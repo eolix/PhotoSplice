@@ -1,4 +1,4 @@
-//! Adjustment parameters (data only). Evaluation lives in `photosuite-compose`.
+//! Adjustment parameters (data only). Evaluation lives in `photosplice-compose`.
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

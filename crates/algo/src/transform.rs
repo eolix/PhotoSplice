@@ -7,9 +7,9 @@
 //! bounded by the tile working set. Large reductions are pre-filtered with a proper resize first,
 //! so shrinking a layer doesn't alias.
 
-use photosuite_color::PixelFormat;
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_color::PixelFormat;
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 use serde::{Deserialize, Serialize};
 
 use crate::resample::{Resample, resize_surface};
@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn surfaces_without_alpha_gain_it() {
-        let mut s = Surface::new(PixelFormat::new(photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8, false));
+        let mut s = Surface::new(PixelFormat::new(photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8, false));
         s.fill_rect(Rect::new(0, 0, 10, 10), &[1.0, 0.0, 0.0]);
         let h = Homography([1.0, 0.0, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
         let o = warp_surface(&s, Rect::new(0, 0, 10, 10), &h, Interp::Nearest);

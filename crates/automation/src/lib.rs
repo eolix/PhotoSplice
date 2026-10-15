@@ -1,4 +1,4 @@
-//! # photosuite-automation
+//! # photosplice-automation
 //!
 //! The policy behind the desktop app's loopback control channel (`docs/control-protocol.md`):
 //!
@@ -24,9 +24,9 @@ pub enum AutomationError {
     #[error("I/O: {0}")]
     Io(String),
     #[error(transparent)]
-    Engine(#[from] photosuite_engine::EngineError),
+    Engine(#[from] photosplice_engine::EngineError),
     #[error(transparent)]
-    Format(#[from] photosuite_format::FormatError),
+    Format(#[from] photosplice_format::FormatError),
     #[error("{0}")]
     Other(String),
 }

@@ -2,8 +2,8 @@
 
 mod common;
 use common::*;
-use photosuite_color::{ColorMode, SampleType};
-use photosuite_format::*;
+use photosplice_color::{ColorMode, SampleType};
+use photosplice_format::*;
 use proptest::prelude::*;
 use std::io::Read;
 
@@ -294,7 +294,7 @@ fn deflated_zip_entries_are_readable() {
     assert_eq!(load_from_bytes(&out).unwrap(), rich_doc_ids_from(&b));
 }
 
-fn rich_doc_ids_from(b: &[u8]) -> photosuite_doc::Document {
+fn rich_doc_ids_from(b: &[u8]) -> photosplice_doc::Document {
     load_from_bytes(b).unwrap()
 }
 

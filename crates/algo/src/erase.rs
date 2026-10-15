@@ -4,9 +4,9 @@
 //! Works in the surface's own channels at any depth and in any colour model: only the alpha
 //! channel changes (or, under a transparency lock, the colour channels move toward `lock_color`).
 
-use photosuite_color::{read_sample, write_sample};
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_color::{read_sample, write_sample};
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 
 use crate::selection::Region;
 
@@ -99,8 +99,8 @@ pub fn magic_erase(target: &mut Surface, region: &Region, amount: f32, selection
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_color::{ColorMode, PixelFormat, SampleType};
-    use photosuite_raster::from_rgba;
+    use photosplice_color::{ColorMode, PixelFormat, SampleType};
+    use photosplice_raster::from_rgba;
 
     fn region(bbox: Rect, v: u8) -> Region {
         Region { bbox, mask: vec![v; bbox.width() as usize * bbox.height() as usize] }

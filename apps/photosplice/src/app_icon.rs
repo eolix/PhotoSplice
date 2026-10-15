@@ -1,6 +1,6 @@
 //! The app icon, everywhere Windows, macOS and Linux show one (#248).
 //!
-//! - **Executable:** `build.rs` embeds `assets/app-icon/photosuite.ico` (16–256 px) as icon
+//! - **Executable:** `build.rs` embeds `assets/app-icon/photosplice.ico` (16–256 px) as icon
 //!   resource 1, which Explorer, Alt+Tab and an unpinned taskbar button fall back to.
 //! - **Window:** [`window_icon`] sets the title-bar and taskbar icon at runtime (`WM_SETICON` on
 //!   Windows, `_NET_WM_ICON` on X11, the Dock when running unbundled on macOS).
@@ -27,16 +27,16 @@ pub fn window_icon() -> egui::IconData {
 }
 
 #[cfg(target_os = "macos")]
-const PNG: &[u8] = include_bytes!("../../../assets/app-icon/photosuite-1024.png");
+const PNG: &[u8] = include_bytes!("../../../assets/app-icon/photosplice-1024.png");
 #[cfg(not(target_os = "macos"))]
-const PNG: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256/apps/io.github.eolix.PhotoSuite.png");
+const PNG: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256/apps/io.github.eolix.PhotoSplice.png");
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const ICO: &[u8] = include_bytes!("../../../assets/app-icon/photosuite.ico");
-    const WXS: &str = include_str!("../../../packaging/windows/photosuite.wxs");
+    const ICO: &[u8] = include_bytes!("../../../assets/app-icon/photosplice.ico");
+    const WXS: &str = include_str!("../../../packaging/windows/photosplice.wxs");
 
     fn u16_at(b: &[u8], i: usize) -> usize {
         u16::from_le_bytes([b[i], b[i + 1]]) as usize
@@ -77,7 +77,7 @@ mod tests {
             sizes.push(w);
         }
         for want in [16, 24, 32, 48, 64, 256] {
-            assert!(sizes.contains(&want), "photosuite.ico lacks {want}px (has {sizes:?})");
+            assert!(sizes.contains(&want), "photosplice.ico lacks {want}px (has {sizes:?})");
         }
     }
 
@@ -109,7 +109,7 @@ mod tests {
             let icon = attr(s, "Icon").expect("shortcuts name their icon");
             assert!(icons.contains(&icon), "shortcut icon {icon} isn't an <Icon>");
             if attr(s, "Advertise") == Some("yes") {
-                // Every shortcut in the MSI targets photosuite.exe.
+                // Every shortcut in the MSI targets photosplice.exe.
                 assert!(icon.ends_with(".exe"), "advertised shortcut icon {icon} must end in .exe like its target (ICE50)");
             }
         }

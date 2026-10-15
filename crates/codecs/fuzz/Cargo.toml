@@ -1,5 +1,5 @@
 [package]
-name = "photosuite-codecs-fuzz"
+name = "photosplice-codecs-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -14,7 +14,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-photosuite-codecs = { path = ".." }
+photosplice-codecs = { path = ".." }
 
 [profile.release]
 debug = 1

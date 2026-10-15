@@ -1,7 +1,7 @@
 //! Photographic relight: recover shading with a blur (Retinex) and replace it with a
 //! Lambertian lamp whose direction comes from angle / elevation.
 
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 
 use crate::Ctx;
 use crate::fxutil::{MAXC, rgba, set_rgba, xy};
@@ -222,8 +222,8 @@ pub(crate) fn relight(src: &Image, out: Rect, ctx: &Ctx, p: Params) -> Vec<f32> 
 mod tests {
     use super::*;
     use crate::{FilterParams, Halo, apply, apply_tiled, output_area};
-    use photosuite_color::{ColorMode, PixelFormat, SampleType};
-    use photosuite_raster::Surface;
+    use photosplice_color::{ColorMode, PixelFormat, SampleType};
+    use photosplice_raster::Surface;
 
     fn fmt(s: SampleType) -> PixelFormat {
         PixelFormat::new(ColorMode::Rgb, s, true)

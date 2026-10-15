@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# עברית translations for PhotoSuite UI.
+# עברית translations for PhotoSplice UI.
 
 	File	קובץ
 	Edit	ערוך
@@ -672,7 +672,7 @@
 	Timeline	ציר זמן
 	Tool Presets	ערכות כלים
 	Tools	כלים
-	About PhotoSuite	על PhotoSuite
+	About PhotoSplice	על PhotoSplice
 	Website	אתר אינטרנט
 	Report an Issue…	דווח על בעיה…
 	WIA Support…	תמיכת WIA…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Perspective Warp אינו פעיל
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	פרספקטיבה עיוות: צייר מישורים לאורך הפרספקטיבה של התמונה, ולאחר מכן עבור לעיוות
 	Photo Filter	מסנן תמונה
-	PhotoSuite	PhotoSuite
-	PhotoSuite Manages Colors	PhotoSuite מנהל צבעים
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite - עורך תמונות מקורי בקוד פתוח שנכתב ב- Rust
+	PhotoSplice	PhotoSplice
+	PhotoSplice Manages Colors	PhotoSplice מנהל צבעים
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice - עורך תמונות מקורי בקוד פתוח שנכתב ב- Rust
 	Pin Depth:	עומק סיכה:
 	Pixel Length:	אורך פיקסל:
 	Pixels/Centimeter	פיקסלים/סנטימטר
@@ -1570,7 +1570,7 @@
 	Pen Tilt	Pen Tilt
 	Pen Tool	Pen Tool
 	Photo	תמונה
-	PhotoSuite website	PhotoSuite website
+	PhotoSplice website	PhotoSplice website
 	Picas	Picas
 	Pillow Emboss	הבלטת כרית
 	Pixel Replacement	החלפת פיקסל
@@ -1877,7 +1877,7 @@
 	System Info…	מידע מערכת…
 	System Info	מידע מערכת
 	More panels	עוד פאנלים
-	These settings aren't available in PhotoSuite yet.	הגדרות אלה אינן זמינות עדיין ב-PhotoSuite
+	These settings aren't available in PhotoSplice yet.	הגדרות אלה אינן זמינות עדיין ב-PhotoSplice
 	Graphics	גרפיקה
 	Reset GPU Backend	אפס את ה-GPU Backend
 	Applies at next launch.	תקף בהשקה הבאה
@@ -2018,7 +2018,7 @@
 	Opening…	פותח…
 	Patch	טלאי
 	Patch:	טלאי:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite משתמש במרכיב התמונה של ה-CPU. ייתכן שהחלון עדיין ישתמש במתאם הגרפי שלך.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice משתמש במרכיב התמונה של ה-CPU. ייתכן שהחלון עדיין ישתמש במתאם הגרפי שלך.
 	Play Action	הפעל פעולה
 	Reading…	קורא…
 	Record Action	הקלט פעולה

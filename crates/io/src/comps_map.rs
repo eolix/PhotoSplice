@@ -13,11 +13,11 @@
 //! regenerated otherwise. Appearance (when captured) is each setting's `blendOptions` (mode,
 //! opacity, fill) and `Lefx` (layer style).
 
-use photosuite_doc::comps::layer_position;
-use photosuite_doc::{Artboard, ArtboardBackground, CompAppearance, CompLayerState, Document, Guides, Layer, LayerComp};
-use photosuite_geom::Rect;
-use photosuite_psd::descriptor::{Descriptor, UnicodeString, Value, VersionedDescriptor};
-use photosuite_psd::metadata::{MetadataItem, parse_shmd, write_shmd};
+use photosplice_doc::comps::layer_position;
+use photosplice_doc::{Artboard, ArtboardBackground, CompAppearance, CompLayerState, Document, Guides, Layer, LayerComp};
+use photosplice_geom::Rect;
+use photosplice_psd::descriptor::{Descriptor, UnicodeString, Value, VersionedDescriptor};
+use photosplice_psd::metadata::{MetadataItem, parse_shmd, write_shmd};
 
 use crate::blocks::{color_from_desc, color_to_desc, num};
 
@@ -77,7 +77,7 @@ pub fn parse_artboard(data: &[u8]) -> Option<Artboard> {
     let background = match int(d, "artboardBackgroundType").unwrap_or(1) {
         2 => ArtboardBackground::Black,
         3 => ArtboardBackground::Transparent,
-        4 => ArtboardBackground::Custom(desc(d, "Clr ").and_then(color_from_desc).unwrap_or(photosuite_doc::Color::WHITE)),
+        4 => ArtboardBackground::Custom(desc(d, "Clr ").and_then(color_from_desc).unwrap_or(photosplice_doc::Color::WHITE)),
         _ => ArtboardBackground::White,
     };
     let preset = text(d, "artboardPresetName").unwrap_or_default();
@@ -91,8 +91,8 @@ pub fn write_artboard(a: &Artboard, guides: &[i32]) -> Vec<u8> {
     let rect = Descriptor::new("classFloatRect").with("Top ", f(a.rect.y0)).with("Left", f(a.rect.x0)).with("Btom", f(a.rect.y1)).with("Rght", f(a.rect.x1));
     let color = match a.background {
         ArtboardBackground::Custom(c) => c,
-        ArtboardBackground::Black => photosuite_doc::Color::BLACK,
-        _ => photosuite_doc::Color::WHITE,
+        ArtboardBackground::Black => photosplice_doc::Color::BLACK,
+        _ => photosplice_doc::Color::WHITE,
     };
     let d = Descriptor::new("artboard")
         .with("artboardRect", Value::Descriptor(rect))
@@ -151,10 +151,10 @@ fn parse_appearance(s: &Descriptor) -> Option<CompAppearance> {
     let pct = |d: Option<&Descriptor>, key: &str| d.and_then(|d| num(d.get(key))).map_or(1.0, |v| (v / 100.0).clamp(0.0, 1.0) as f32);
     let (enabled, items) = fx.map(crate::effects_map::effects_from_desc).unwrap_or((true, Vec::new()));
     Some(CompAppearance {
-        blend: blend.map_or(photosuite_color::BlendMode::Normal, |b| crate::effects_map::blend_of(b, "Md  ", photosuite_color::BlendMode::Normal)),
+        blend: blend.map_or(photosplice_color::BlendMode::Normal, |b| crate::effects_map::blend_of(b, "Md  ", photosplice_color::BlendMode::Normal)),
         opacity: pct(blend, "Opct"),
         fill_opacity: pct(blend, "fillOpacity"),
-        effects: photosuite_doc::Effects { enabled, items, ..Default::default() },
+        effects: photosplice_doc::Effects { enabled, items, ..Default::default() },
     })
 }
 
@@ -356,7 +356,7 @@ pub(crate) fn set_cmls(raw: &mut Vec<([u8; 4], Vec<u8>)>, cmls: Option<Vec<u8>>)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_doc::{Color, ColorMode, LayerContent, PixelFormat, SampleType, Size};
+    use photosplice_doc::{Color, ColorMode, LayerContent, PixelFormat, SampleType, Size};
 
     #[test]
     fn artboard_roundtrip() {
@@ -422,20 +422,20 @@ mod tests {
 
     #[test]
     fn comp_appearance_roundtrips_through_cmls() {
-        use photosuite_doc::{Effect, FxCommon};
+        use photosplice_doc::{Effect, FxCommon};
         let mut d = Document::with_background("t", Size::new(32, 32), ColorMode::Rgb, SampleType::U8, Color::WHITE);
         let mut l = Layer::raster("A", PixelFormat::RGBA8);
         l.surface_mut().unwrap().fill_rect(Rect::new(4, 4, 8, 8), &[1.0, 0.0, 0.0, 1.0]);
         let lid = l.id;
         d.layers.push(l);
         let Effect::DropShadow(mut sh) = Effect::default_drop_shadow() else { panic!("drop shadow") };
-        sh.common = FxCommon { enabled: true, blend: photosuite_color::BlendMode::Multiply, opacity: 0.6 };
+        sh.common = FxCommon { enabled: true, blend: photosplice_color::BlendMode::Multiply, opacity: 0.6 };
         let shadow = Effect::DropShadow(sh);
         let look = CompAppearance {
-            blend: photosuite_color::BlendMode::Screen,
+            blend: photosplice_color::BlendMode::Screen,
             opacity: 0.5,
             fill_opacity: 0.3,
-            effects: photosuite_doc::Effects { enabled: true, items: vec![shadow], ..Default::default() },
+            effects: photosplice_doc::Effects { enabled: true, items: vec![shadow], ..Default::default() },
         };
         d.layer_comps.push(LayerComp {
             id: 9,

@@ -4,9 +4,9 @@ mod common;
 use std::sync::Arc;
 
 use common::*;
-use photosuite_color::{ColorMode, SampleType};
-use photosuite_doc::{DocId, Document};
-use photosuite_format::*;
+use photosplice_color::{ColorMode, SampleType};
+use photosplice_doc::{DocId, Document};
+use photosplice_format::*;
 
 #[test]
 fn autosave_then_recover() {

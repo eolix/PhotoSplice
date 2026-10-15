@@ -9,11 +9,11 @@
 mod common;
 
 use common::Features;
-use photosuite_color::{ColorMode, SampleType};
-use photosuite_doc::Document;
-use photosuite_geom::Size;
-use photosuite_io::*;
-use photosuite_psd::{Compression, LayerInfoPlacement, PsdFile, hdr};
+use photosplice_color::{ColorMode, SampleType};
+use photosplice_doc::Document;
+use photosplice_geom::Size;
+use photosplice_io::*;
+use photosplice_psd::{Compression, LayerInfoPlacement, PsdFile, hdr};
 
 fn be32(b: &[u8], at: usize) -> u32 {
     u32::from_be_bytes(b[at..at + 4].try_into().unwrap())
@@ -118,7 +118,7 @@ fn layered_32bit_export_reimports_render_equal() {
     for mode in [ColorMode::Rgb, ColorMode::Grayscale] {
         let doc = common::gen_doc(mode, SampleType::F32, Features::ALL);
         let back = import("t.psd", &export_psd(&doc)).unwrap().document;
-        let (a, b) = (photosuite_compose::flatten(&doc).px, photosuite_compose::flatten(&back).px);
+        let (a, b) = (photosplice_compose::flatten(&doc).px, photosplice_compose::flatten(&back).px);
         assert_eq!(a.len(), b.len());
         let d = common::max_diff(&a, &b);
         assert!(d <= 1e-4, "{mode:?}: render differs by {d}");
@@ -154,7 +154,7 @@ fn photoshop_32bit_corpus_round_trip() {
         assert_32bit_layout(&name, &out);
         let back = import(&name, &out).unwrap().document;
         assert_eq!(doc.layer_count(), back.layer_count(), "{name}: layer count");
-        let (a, b) = (photosuite_compose::flatten(&doc).px, photosuite_compose::flatten(&back).px);
+        let (a, b) = (photosplice_compose::flatten(&doc).px, photosplice_compose::flatten(&back).px);
         assert_eq!(a.len(), b.len(), "{name}");
         let d = common::max_diff(&a, &b);
         assert!(d <= 1e-4, "{name}: render differs by {d}");

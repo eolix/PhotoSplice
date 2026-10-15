@@ -1,7 +1,7 @@
-use photosuite_color::{Color, PixelFormat, SampleType};
-use photosuite_doc::TextLayer;
-use photosuite_doc::text::{CharStyle, FontFeature, Orientation, ParagraphRun, ParagraphStyle, TextAlign, TextDirection, TextRun, TextShape};
-use photosuite_geom::Affine;
+use photosplice_color::{Color, PixelFormat, SampleType};
+use photosplice_doc::TextLayer;
+use photosplice_doc::text::{CharStyle, FontFeature, Orientation, ParagraphRun, ParagraphStyle, TextAlign, TextDirection, TextRun, TextShape};
+use photosplice_geom::Affine;
 
 use crate::{TextEngine, fonts};
 
@@ -22,7 +22,7 @@ fn width(l: &crate::TextLayout) -> f32 {
     l.lines.iter().map(|l| l.x1 - l.x0).fold(0.0, f32::max)
 }
 
-fn alpha_sum(s: &photosuite_raster::Surface, r: photosuite_geom::Rect) -> f64 {
+fn alpha_sum(s: &photosplice_raster::Surface, r: photosplice_geom::Rect) -> f64 {
     let n = s.channels();
     s.read_region(r).chunks_exact(n).map(|p| f64::from(p[n - 1])).sum()
 }
@@ -356,11 +356,11 @@ fn forced_line_break_starts_a_line_in_the_same_paragraph() {
         let (l, r) = e.render(&TextLayer { transform: Affine::translate(0.0, 40.0), ..point(text, 20.0) }, 72.0, fmt);
         let row = |i: usize| {
             let ln = &l.lines[i];
-            photosuite_geom::Rect::new(-2, (ln.baseline - ln.ascent + 40.0) as i32, 200, (ln.baseline + 40.0) as i32)
+            photosplice_geom::Rect::new(-2, (ln.baseline - ln.ascent + 40.0) as i32, 200, (ln.baseline + 40.0) as i32)
         };
         assert!(alpha_sum(&r.surface, row(0)) > 1.0 && alpha_sum(&r.surface, row(1)) > 1.0, "{fmt:?}");
         let one_end = l.lines[0].x1.ceil() as i32 + 2;
-        assert!(alpha_sum(&r.surface, photosuite_geom::Rect::new(one_end, row(0).y0, 200, row(0).y1)) < 1e-3, "{fmt:?}: ink after the first line's text");
+        assert!(alpha_sum(&r.surface, photosplice_geom::Rect::new(one_end, row(0).y0, 200, row(0).y1)) < 1e-3, "{fmt:?}: ink after the first line's text");
     }
 }
 
@@ -389,18 +389,18 @@ fn depth_is_respected() {
     assert!(r.surface.format().alpha);
 }
 
-/// Visual check: `PHOTOSUITE_TEXT_DUMP=/tmp/t.ppm cargo test -p photosuite-text dump -- --ignored`.
+/// Visual check: `PHOTOSPLICE_TEXT_DUMP=/tmp/t.ppm cargo test -p photosplice-text dump -- --ignored`.
 #[test]
 #[ignore]
 fn dump_sample() {
-    use photosuite_doc::text::{Caps, TextAlign};
-    let Some(path) = std::env::var_os("PHOTOSUITE_TEXT_DUMP") else {
+    use photosplice_doc::text::{Caps, TextAlign};
+    let Some(path) = std::env::var_os("PHOTOSPLICE_TEXT_DUMP") else {
         return;
     };
-    let mut e = if std::env::var_os("PHOTOSUITE_TEXT_SYSTEM").is_some() { TextEngine::with_system_fonts() } else { TextEngine::new() };
+    let mut e = if std::env::var_os("PHOTOSPLICE_TEXT_SYSTEM").is_some() { TextEngine::with_system_fonts() } else { TextEngine::new() };
     let s = CharStyle { size_pt: 28.0, ..Default::default() };
     let text =
-        "Photosuite Type\nBold faux, italic faux, underline\nשלום عربي mixed ✓\nJustified paragraph text wraps inside the box nicely and evenly across lines.";
+        "Photosplice Type\nBold faux, italic faux, underline\nשלום عربي mixed ✓\nJustified paragraph text wraps inside the box nicely and evenly across lines.";
     let runs = vec![
         TextRun { len: 16, style: CharStyle { size_pt: 40.0, color: Color::rgb(0.1, 0.3, 0.9), caps: Caps::Normal, ..s.clone() } },
         TextRun { len: 5, style: CharStyle { faux_bold: true, ..s.clone() } },
@@ -454,7 +454,7 @@ fn variable_font_axes() {
         let s = CharStyle {
             font_family: fam.clone(),
             size_pt: 40.0,
-            variations: vec![photosuite_doc::text::FontVariation { axis: "wght".into(), value: w }],
+            variations: vec![photosplice_doc::text::FontVariation { axis: "wght".into(), value: w }],
             ..Default::default()
         };
         let (_, r) = e.render(&TextLayer { transform: Affine::translate(0.0, 50.0), ..styled("Weight", s) }, 72.0, PixelFormat::RGBA8);
@@ -467,7 +467,7 @@ fn variable_font_axes() {
 
 #[test]
 fn warp_bends_rendered_text_and_outlines() {
-    use photosuite_doc::text::TextWarp;
+    use photosplice_doc::text::TextWarp;
     let mut e = TextEngine::new();
     let mut t = point("WARPED TEXT", 24.0);
     t.transform = Affine::translate(20.0, 60.0);
@@ -532,7 +532,7 @@ fn txt2_with_styles(text: &str, styles: &[(usize, String)]) -> Vec<u8> {
 fn with_text_index(tysh: &[u8], index: i32) -> Vec<u8> {
     let mut t = crate::psd::parse_tysh(tysh).unwrap();
     t.text.items.retain(|(k, _)| !k.is("TextIndex"));
-    t.text.items.push((photosuite_psd::descriptor::Id::new("TextIndex"), photosuite_psd::descriptor::Value::Integer(index)));
+    t.text.items.push((photosplice_psd::descriptor::Id::new("TextIndex"), photosplice_psd::descriptor::Value::Integer(index)));
     crate::psd::write_tysh(&t)
 }
 
@@ -540,7 +540,7 @@ fn with_text_index(tysh: &[u8], index: i32) -> Vec<u8> {
 /// `TextIndex` object still holds the same text.
 #[test]
 fn txt2_carries_optical_kerning() {
-    use photosuite_doc::text::Kerning;
+    use photosplice_doc::text::Kerning;
     let t = styled("AVA", CharStyle::default());
     let tysh = with_text_index(&crate::psd::build_tysh(&t, 72.0, None), 0);
     let mut back = crate::psd::text_layer_from_tysh(&tysh, 72.0).unwrap();
@@ -574,9 +574,9 @@ fn txt2_carries_optical_kerning() {
 /// Photoshop's form (see `psd::pair_runs`).
 #[test]
 fn psd_round_trips_manual_kerning() {
-    use photosuite_doc::text::Kerning::{Metrics as M, Off as O};
+    use photosplice_doc::text::Kerning::{Metrics as M, Off as O};
     let s = CharStyle::default();
-    let cases: Vec<Vec<(usize, photosuite_doc::text::Kerning, f32)>> = vec![
+    let cases: Vec<Vec<(usize, photosplice_doc::text::Kerning, f32)>> = vec![
         vec![(1, O, 100.0), (1, O, -50.0), (2, M, 0.0)],
         vec![(1, M, 0.0), (1, O, 0.0), (2, M, 0.0)],
         vec![(4, O, 0.0)],
@@ -601,7 +601,7 @@ fn psd_round_trips_manual_kerning() {
 
 #[test]
 fn psd_round_trips_antialias_opentype_and_warp() {
-    use photosuite_doc::text::{AntiAlias, TextWarp};
+    use photosplice_doc::text::{AntiAlias, TextWarp};
     let style = CharStyle {
         font_family: "Inter".into(),
         size_pt: 20.0,
@@ -657,7 +657,7 @@ fn clusters_sit_on_rendered_glyphs() {
         ("plain", styled("HOHOH", big.clone())),
         ("tracking", styled("HOHOH", CharStyle { tracking: 300.0, ..big.clone() })),
         ("hscale", styled("HOHOH", CharStyle { horizontal_scale: 1.6, ..big.clone() })),
-        ("kerned", styled("HOHOH", CharStyle { kern: 250.0, kerning: photosuite_doc::text::Kerning::Optical, ..big.clone() })),
+        ("kerned", styled("HOHOH", CharStyle { kern: 250.0, kerning: photosplice_doc::text::Kerning::Optical, ..big.clone() })),
         ("mixed", mixed),
         ("box", boxed),
     ];
@@ -668,7 +668,7 @@ fn clusters_sit_on_rendered_glyphs() {
         for c in l.clusters.iter().filter(|c| !t.text[c.range.clone()].trim().is_empty()) {
             let ln = &l.lines[c.line];
             // Ink under the cluster's middle, between the line's ascent and descent.
-            let col = photosuite_geom::Rect::new(
+            let col = photosplice_geom::Rect::new(
                 (c.x + c.advance * 0.3 + 7.0).floor() as i32,
                 (ln.baseline - ln.ascent + 60.0).floor() as i32,
                 (c.x + c.advance * 0.55 + 7.0).ceil() as i32,
@@ -691,7 +691,7 @@ fn runs_of(text: &str, styles: &[(usize, CharStyle)]) -> TextLayer {
 /// Manual kerning (1/1000 em) after a character moves everything after it by kern × size.
 #[test]
 fn manual_kerning_moves_the_next_glyph() {
-    use photosuite_doc::text::Kerning;
+    use photosplice_doc::text::Kerning;
     let mut e = TextEngine::new();
     let s = CharStyle { size_pt: 100.0, ..Default::default() };
     let plain = e.layout(&styled("HOH", s.clone()), 72.0);
@@ -727,7 +727,7 @@ fn manual_kerning_moves_the_next_glyph() {
 /// than the unkerned advance, about neutral for straight stems, and never absurd.
 #[test]
 fn optical_kerning_tightens_open_pairs() {
-    use photosuite_doc::text::Kerning;
+    use photosplice_doc::text::Kerning;
     let mut e = TextEngine::new();
     let s = CharStyle { size_pt: 100.0, ..Default::default() };
     let gap = |e: &mut TextEngine, text: &str, k: Kerning| {
@@ -757,7 +757,7 @@ fn optical_kerning_tightens_open_pairs() {
 /// lose their automatic kerning (Photoshop renders it the same way).
 #[test]
 fn kerning_modes_split_pairs() {
-    use photosuite_doc::text::Kerning;
+    use photosplice_doc::text::Kerning;
     let mut e = TextEngine::new();
     let s = CharStyle { size_pt: 100.0, ..Default::default() };
     let off = CharStyle { kerning: Kerning::Off, ..s.clone() };
@@ -875,8 +875,8 @@ fn word_and_line_navigation() {
 #[test]
 fn rewrite_keeps_what_photoshop_wrote() {
     use crate::engine_data::{self as ed, Value as E};
-    use photosuite_doc::text::{AntiAlias, TextWarp};
-    use photosuite_psd::descriptor::{Id, Value as D};
+    use photosplice_doc::text::{AntiAlias, TextWarp};
+    use photosplice_psd::descriptor::{Id, Value as D};
     fn first<'a>(v: &'a mut E, path: &[&str]) -> Option<&'a mut E> {
         let mut v = v;
         for k in path {
@@ -928,7 +928,7 @@ fn rewrite_keeps_what_photoshop_wrote() {
 
 #[test]
 fn superscript_and_subscript_shrink_and_shift() {
-    use photosuite_doc::text::BaselinePosition;
+    use photosplice_doc::text::BaselinePosition;
     let base = CharStyle { font_family: "Inter".into(), size_pt: 20.0, ..Default::default() };
     let mut t = TextLayer {
         text: "x2y".into(),
@@ -1029,7 +1029,7 @@ fn txt2_carries_type_on_a_path() {
 /// Smooth draw the exact outline; Strong is heavier than Smooth.
 #[test]
 fn anti_aliasing_modes_fit_the_pixel_grid_like_photoshop() {
-    use photosuite_doc::text::AntiAlias;
+    use photosplice_doc::text::AntiAlias;
     let mut e = TextEngine::new();
     let px = |l: &crate::TextLayout, x: f64, y: f64, aa: AntiAlias| {
         let r = crate::render::rasterize(l, &Affine::translate(x, y), PixelFormat::RGBA8, aa);
@@ -1119,7 +1119,7 @@ fn txt2_frame_places_point_text_at_its_anchor() {
     let txt2 = crate::psd::parse_txt2(&txt2_with_frame("2", Some([1000.0, 2100.0]), [1.0, 0.0, 0.0, 1.0, 100.0, -50.0])).unwrap();
     let mut l = crate::psd::text_layer_from_tysh(&tysh, 72.0).unwrap();
     crate::psd::apply_txt2_frame(&mut l, &tysh, &txt2);
-    let o = l.transform.apply(photosuite_geom::Point::new(0.0, 0.0));
+    let o = l.transform.apply(photosplice_geom::Point::new(0.0, 0.0));
     assert!((o.x - 100.0).abs() < 1e-3 && (o.y - 50.0).abs() < 1e-3, "anchor at {o:?}");
     // Already folded in (bounds near the origin): unchanged; another text: unchanged.
     let tysh = with_text_index(&crate::psd::build_tysh(&t, 72.0, Some([0.0, -70.0, 60.0, 0.0])), 0);
@@ -1137,7 +1137,7 @@ fn txt2_frame_places_point_text_at_its_anchor() {
 
 /// `tysh` with its text-space `bounds` set to `r` (Reference's, where it drew the text).
 fn with_bounds(tysh: &[u8], r: [f64; 4]) -> Vec<u8> {
-    use photosuite_psd::descriptor::{Descriptor, Id, Value};
+    use photosplice_psd::descriptor::{Descriptor, Id, Value};
     let mut t = crate::psd::parse_tysh(tysh).unwrap();
     let mut d = Descriptor::default();
     for (k, v) in ["Left", "Top ", "Rght", "Btom"].iter().zip(r) {
@@ -1163,7 +1163,7 @@ fn txt2_frame_moves_box_text_onto_its_bounds() {
     assert!(matches!(l.shape, TextShape::Box { .. }));
     crate::psd::apply_txt2_frame(&mut l, &tysh, &txt2);
     let TextShape::Box { x, y, .. } = l.shape else { panic!("not a box") };
-    let o = l.transform.apply(photosuite_geom::Point::new(f64::from(x), f64::from(y)));
+    let o = l.transform.apply(photosplice_geom::Point::new(f64::from(x), f64::from(y)));
     assert!((o.x - 260.0).abs() < 1e-3 && (o.y - 0.0).abs() < 1e-3, "box top left at {o:?}");
     // Our own `TySh` (bounds = the box, frame already folded in): unchanged.
     let mut l = crate::psd::text_layer_from_tysh(&built, 72.0).unwrap();
@@ -1178,7 +1178,7 @@ fn txt2_frame_moves_box_text_onto_its_bounds() {
 /// round trip so every editing and export path uses the same position.
 #[test]
 fn legacy_tysh_point_origin_imports_and_round_trips_on_canvas() {
-    use photosuite_psd::descriptor::{Descriptor, Id, Value as D};
+    use photosplice_psd::descriptor::{Descriptor, Id, Value as D};
 
     let source = styled("Name", CharStyle { font_family: "Inter".into(), size_pt: 120.0, ..Default::default() });
     let mut tysh = crate::psd::parse_tysh(&crate::psd::build_tysh(&source, 72.0, None)).unwrap();

@@ -1,10 +1,10 @@
 //! Alpha / spot channels, channel options and the Quick Mask through PSD.
 
-use photosuite_color::{Color, ColorMode, PixelFormat, SampleType};
-use photosuite_doc::{AlphaChannel, ColorIndicates, Document};
-use photosuite_geom::{Rect, Size};
-use photosuite_io::{document_to_psd, psd_to_document};
-use photosuite_raster::Surface;
+use photosplice_color::{Color, ColorMode, PixelFormat, SampleType};
+use photosplice_doc::{AlphaChannel, ColorIndicates, Document};
+use photosplice_geom::{Rect, Size};
+use photosplice_io::{document_to_psd, psd_to_document};
+use photosplice_raster::Surface;
 
 fn channel(depth: SampleType, x1: i32) -> Surface {
     let mut s = Surface::new(PixelFormat::new(ColorMode::Grayscale, depth, false));
@@ -45,9 +45,9 @@ fn channel_options_spot_and_quick_mask_roundtrip() {
     let mut full = Document::with_background("full", Size::new(1, 1), ColorMode::Rgb, SampleType::U8, Color::WHITE);
     full.channels = (0..53).map(|i| AlphaChannel::new(format!("Alpha {i}"), Surface::new(PixelFormat::GRAY8))).collect();
     full.quick_mask = Some(AlphaChannel::new("Quick Mask", Surface::new(PixelFormat::GRAY8)));
-    let out = photosuite_io::export(&full, "full.psd", &Default::default()).unwrap();
+    let out = photosplice_io::export(&full, "full.psd", &Default::default()).unwrap();
     assert!(out.warnings.iter().any(|warning| warning.contains("Quick Mask")), "{:?}", out.warnings);
-    let file = photosuite_psd::PsdFile::from_bytes(&out.bytes).unwrap();
+    let file = photosplice_psd::PsdFile::from_bytes(&out.bytes).unwrap();
     assert_eq!(file.header.channels, 56);
     assert!(file.resources.iter().all(|resource| resource.id != 1022));
 }

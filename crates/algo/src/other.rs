@@ -1,6 +1,6 @@
 //! Minimum, Maximum, Offset.
 
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 
 use crate::image::{Edge, Image};
 use crate::{Ctx, Preserve, UndefinedAreas};

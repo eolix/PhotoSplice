@@ -18,8 +18,8 @@
 
 use std::sync::Arc;
 
-use photosuite_doc::{Color, Document, MeasurementScale, Note};
-use photosuite_psd::descriptor::{Descriptor, Value, VersionedDescriptor};
+use photosplice_doc::{Color, Document, MeasurementScale, Note};
+use photosplice_psd::descriptor::{Descriptor, Value, VersionedDescriptor};
 
 pub const MEASUREMENT_SCALE: u16 = 1074;
 pub const COUNT_INFO: u16 = 1080;
@@ -241,7 +241,7 @@ pub fn anno_unreadable(doc: &Document) -> bool {
     doc.metadata.psd_global_blocks.iter().find(|(_, k, _)| *k == ANNO).is_some_and(|(_, _, d)| parse_entries(d).is_none())
 }
 
-pub fn export_blocks(doc: &Document, mut blocks: Vec<photosuite_doc::PsdGlobalBlock>) -> Vec<photosuite_doc::PsdGlobalBlock> {
+pub fn export_blocks(doc: &Document, mut blocks: Vec<photosplice_doc::PsdGlobalBlock>) -> Vec<photosplice_doc::PsdGlobalBlock> {
     let at = blocks.iter().position(|(_, k, _)| *k == ANNO);
     let raw = at.map(|i| blocks[i].2.clone());
     let entries = raw.as_deref().and_then(|d| parse_entries(d));
@@ -308,7 +308,7 @@ pub fn write_scale_resource(s: &MeasurementScale) -> Vec<u8> {
     let d = Descriptor::new("null")
         .with("pixelLength", Value::Double(s.pixel_length))
         .with("logicalLength", Value::Double(s.logical_length))
-        .with("logicalUnits", Value::Text(photosuite_psd::descriptor::UnicodeString::new(&s.units)));
+        .with("logicalUnits", Value::Text(photosplice_psd::descriptor::UnicodeString::new(&s.units)));
     let mut v = VersionedDescriptor::new(d).to_bytes();
     if v.len() % 2 == 1 {
         v.push(0);
@@ -375,8 +375,8 @@ mod tests {
     /// (storytold/photocraft@4f33c815).
     #[test]
     fn export_blocks_keeps_an_unreadable_block() {
-        let mut d = Document::new("n", photosuite_geom::Size::new(10, 10), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
-        let bad: Vec<photosuite_doc::PsdGlobalBlock> = vec![(*b"8BIM", ANNO, Arc::new(vec![0, 2, 0, 1, 0, 0, 0, 9]))];
+        let mut d = Document::new("n", photosplice_geom::Size::new(10, 10), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+        let bad: Vec<photosplice_doc::PsdGlobalBlock> = vec![(*b"8BIM", ANNO, Arc::new(vec![0, 2, 0, 1, 0, 0, 0, 9]))];
         d.metadata.psd_global_blocks = bad.clone();
         assert!(anno_unreadable(&d) && notes_from_blocks(&d).is_empty());
         let out = export_blocks(&d, bad.clone());
@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn export_blocks_keeps_replaces_and_drops() {
-        let mut d = Document::new("n", photosuite_doc::Size::new(10, 10), photosuite_doc::ColorMode::Rgb, photosuite_doc::SampleType::U8);
+        let mut d = Document::new("n", photosplice_doc::Size::new(10, 10), photosplice_doc::ColorMode::Rgb, photosplice_doc::SampleType::U8);
         assert!(export_blocks(&d, vec![]).is_empty());
         d.notes.push(Note { text: "héllo ✓".into(), author: "me".into(), position: [3.0, 4.0], ..Default::default() });
         let out = export_blocks(&d, vec![]);
@@ -446,7 +446,7 @@ mod tests {
     fn scale_resource_roundtrip_and_keep_rules() {
         let s = MeasurementScale { pixel_length: 150.0, logical_length: 2.0, units: "mm".into() };
         assert_eq!(scale_from_resource(&write_scale_resource(&s)), Some(s.clone()));
-        let mut d = Document::new("n", photosuite_doc::Size::new(10, 10), photosuite_doc::ColorMode::Rgb, photosuite_doc::SampleType::U8);
+        let mut d = Document::new("n", photosplice_doc::Size::new(10, 10), photosplice_doc::ColorMode::Rgb, photosplice_doc::SampleType::U8);
         assert!(fresh_scale_resource(&d).is_none());
         // An unparseable resource stays while the scale is untouched.
         d.metadata.psd_resources.push((MEASUREMENT_SCALE, String::new(), Arc::new(vec![0, 0, 0, 16, 1])));
@@ -455,7 +455,7 @@ mod tests {
         assert!(!keep_resource(&d, MEASUREMENT_SCALE));
         assert_eq!(scale_from_resource(&fresh_scale_resource(&d).unwrap()), Some(s));
         assert!(keep_resource(&d, COUNT_INFO));
-        d.measurement.count_groups.push(photosuite_doc::CountGroup { points: vec![[1.0, 1.0]], ..Default::default() });
+        d.measurement.count_groups.push(photosplice_doc::CountGroup { points: vec![[1.0, 1.0]], ..Default::default() });
         assert!(!keep_resource(&d, COUNT_INFO));
     }
 }

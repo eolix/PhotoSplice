@@ -10,8 +10,8 @@
 //! Restrict Colors (`VctC`) walks the plain range and caps chroma (max − min) at 181/255; Add
 //! Transparency (`ShTr`) walks an alpha channel too. `Mnm`/`Mxm` clip each channel (percent).
 
-use photosuite_color::{Color, ColorMode};
-use photosuite_psd::descriptor::{Descriptor, Value};
+use photosplice_color::{Color, ColorMode};
+use photosplice_psd::descriptor::{Descriptor, Value};
 
 use crate::blocks::{bool_of, enum_of, num};
 
@@ -164,7 +164,7 @@ impl Mulberry32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_psd::descriptor::Id;
+    use photosplice_psd::descriptor::Id;
 
     fn desc(model: &str, smth: i32, restrict: bool, transparency: bool) -> Descriptor {
         desc_with(model, smth, restrict, transparency, 632_413_682, [0; 4], [100; 4])
@@ -245,11 +245,11 @@ mod tests {
 
     #[test]
     fn unedited_noise_fill_keeps_its_definition() {
-        use photosuite_psd::descriptor::VersionedDescriptor;
+        use photosplice_psd::descriptor::VersionedDescriptor;
         let grad = desc("RGBC", 2048, false, true);
         let gdfl = Descriptor::new("null").with("Grad", Value::Descriptor(grad.clone()));
         let fill = crate::blocks::fill_from_desc(b"GdFl", &gdfl).expect("fill");
-        let photosuite_doc::Fill::Gradient { stops, opacity_stops, .. } = &fill else { panic!("gradient fill") };
+        let photosplice_doc::Fill::Gradient { stops, opacity_stops, .. } = &fill else { panic!("gradient fill") };
         assert_eq!((stops.len(), opacity_stops.len()), (ENTRIES, ENTRIES));
         let old = VersionedDescriptor::new(gdfl).to_bytes();
         let (_, back) = crate::blocks::fill_to_desc_onto(&fill, Some((b"GdFl", &old)));

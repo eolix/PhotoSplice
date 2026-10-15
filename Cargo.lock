@@ -3883,7 +3883,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "photosuite"
+name = "photosplice"
 version = "0.9.21"
 dependencies = [
  "arboard",
@@ -3896,18 +3896,18 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "open",
- "photosuite-automation",
- "photosuite-codecs",
- "photosuite-color",
- "photosuite-compose",
- "photosuite-doc",
- "photosuite-engine",
- "photosuite-format",
- "photosuite-geom",
- "photosuite-io",
- "photosuite-raster",
- "photosuite-tablet",
- "photosuite-ui-egui",
+ "photosplice-automation",
+ "photosplice-codecs",
+ "photosplice-color",
+ "photosplice-compose",
+ "photosplice-doc",
+ "photosplice-engine",
+ "photosplice-format",
+ "photosplice-geom",
+ "photosplice-io",
+ "photosplice-raster",
+ "photosplice-tablet",
+ "photosplice-ui-egui",
  "rfd",
  "serde_json",
  "winit",
@@ -3917,32 +3917,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "photosuite-algo"
+name = "photosplice-algo"
 version = "0.9.21"
 dependencies = [
- "photosuite-color",
- "photosuite-geom",
- "photosuite-raster",
+ "photosplice-color",
+ "photosplice-geom",
+ "photosplice-raster",
  "rayon",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "photosuite-automation"
+name = "photosplice-automation"
 version = "0.9.21"
 dependencies = [
  "cap-std",
  "getrandom 0.3.4",
- "photosuite-engine",
- "photosuite-format",
+ "photosplice-engine",
+ "photosplice-format",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
 ]
 
 [[package]]
-name = "photosuite-cms"
+name = "photosplice-cms"
 version = "0.9.21"
 dependencies = [
  "moxcms",
@@ -3950,7 +3950,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "photosuite-codecs"
+name = "photosplice-codecs"
 version = "0.9.21"
 dependencies = [
  "exr",
@@ -3971,62 +3971,62 @@ dependencies = [
 ]
 
 [[package]]
-name = "photosuite-color"
+name = "photosplice-color"
 version = "0.9.21"
 dependencies = [
- "photosuite-cms",
+ "photosplice-cms",
  "serde",
 ]
 
 [[package]]
-name = "photosuite-compose"
+name = "photosplice-compose"
 version = "0.9.21"
 dependencies = [
  "criterion",
- "photosuite-color",
- "photosuite-doc",
- "photosuite-geom",
- "photosuite-paint",
- "photosuite-raster",
- "photosuite-vector",
+ "photosplice-color",
+ "photosplice-doc",
+ "photosplice-geom",
+ "photosplice-paint",
+ "photosplice-raster",
+ "photosplice-vector",
  "proptest",
  "rayon",
 ]
 
 [[package]]
-name = "photosuite-doc"
+name = "photosplice-doc"
 version = "0.9.21"
 dependencies = [
- "photosuite-color",
- "photosuite-geom",
- "photosuite-raster",
+ "photosplice-color",
+ "photosplice-geom",
+ "photosplice-raster",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "photosuite-engine"
+name = "photosplice-engine"
 version = "0.9.21"
 dependencies = [
  "blake3",
  "flate2",
- "photosuite-algo",
- "photosuite-cms",
- "photosuite-codecs",
- "photosuite-color",
- "photosuite-compose",
- "photosuite-doc",
- "photosuite-format",
- "photosuite-geom",
- "photosuite-io",
- "photosuite-ops",
- "photosuite-paint",
- "photosuite-plugins",
- "photosuite-psd",
- "photosuite-raster",
- "photosuite-raw",
- "photosuite-text",
- "photosuite-vector",
+ "photosplice-algo",
+ "photosplice-cms",
+ "photosplice-codecs",
+ "photosplice-color",
+ "photosplice-compose",
+ "photosplice-doc",
+ "photosplice-format",
+ "photosplice-geom",
+ "photosplice-io",
+ "photosplice-ops",
+ "photosplice-paint",
+ "photosplice-plugins",
+ "photosplice-psd",
+ "photosplice-raster",
+ "photosplice-raw",
+ "photosplice-text",
+ "photosplice-vector",
  "rayon",
  "serde",
  "serde_json",
@@ -4035,16 +4035,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "photosuite-format"
+name = "photosplice-format"
 version = "0.9.21"
 dependencies = [
  "blake3",
  "flate2",
- "photosuite-codecs",
- "photosuite-color",
- "photosuite-doc",
- "photosuite-geom",
- "photosuite-raster",
+ "photosplice-codecs",
+ "photosplice-color",
+ "photosplice-doc",
+ "photosplice-geom",
+ "photosplice-raster",
  "proptest",
  "ruzstd",
  "serde",
@@ -4053,31 +4053,31 @@ dependencies = [
 ]
 
 [[package]]
-name = "photosuite-geom"
+name = "photosplice-geom"
 version = "0.9.21"
 dependencies = [
  "serde",
 ]
 
 [[package]]
-name = "photosuite-gpu"
+name = "photosplice-gpu"
 version = "0.9.21"
 dependencies = [
  "half",
  "log",
- "photosuite-color",
- "photosuite-compose",
- "photosuite-doc",
- "photosuite-geom",
- "photosuite-raster",
- "photosuite-vector",
+ "photosplice-color",
+ "photosplice-compose",
+ "photosplice-doc",
+ "photosplice-geom",
+ "photosplice-raster",
+ "photosplice-vector",
  "pollster 1.0.1",
  "rayon",
  "wgpu",
 ]
 
 [[package]]
-name = "photosuite-io"
+name = "photosplice-io"
 version = "0.9.21"
 dependencies = [
  "blake3",
@@ -4087,21 +4087,21 @@ dependencies = [
  "hayro",
  "image",
  "krilla",
- "photosuite-algo",
- "photosuite-cms",
- "photosuite-codecs",
- "photosuite-color",
- "photosuite-compose",
- "photosuite-doc",
- "photosuite-format",
- "photosuite-geom",
- "photosuite-gpu",
- "photosuite-paint",
- "photosuite-psd",
- "photosuite-raster",
- "photosuite-raw",
- "photosuite-text",
- "photosuite-vector",
+ "photosplice-algo",
+ "photosplice-cms",
+ "photosplice-codecs",
+ "photosplice-color",
+ "photosplice-compose",
+ "photosplice-doc",
+ "photosplice-format",
+ "photosplice-geom",
+ "photosplice-gpu",
+ "photosplice-paint",
+ "photosplice-psd",
+ "photosplice-raster",
+ "photosplice-raw",
+ "photosplice-text",
+ "photosplice-vector",
  "pic-scale",
  "pollster 1.0.1",
  "proptest",
@@ -4112,30 +4112,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "photosuite-ops"
+name = "photosplice-ops"
 version = "0.9.21"
 dependencies = [
- "photosuite-doc",
+ "photosplice-doc",
 ]
 
 [[package]]
-name = "photosuite-paint"
+name = "photosplice-paint"
 version = "0.9.21"
 dependencies = [
- "photosuite-color",
- "photosuite-geom",
- "photosuite-raster",
+ "photosplice-color",
+ "photosplice-geom",
+ "photosplice-raster",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "photosuite-plugins"
+name = "photosplice-plugins"
 version = "0.9.21"
 dependencies = [
- "photosuite-color",
- "photosuite-geom",
- "photosuite-raster",
+ "photosplice-color",
+ "photosplice-geom",
+ "photosplice-raster",
  "rayon",
  "serde",
  "serde_json",
@@ -4145,37 +4145,37 @@ dependencies = [
 ]
 
 [[package]]
-name = "photosuite-psd"
+name = "photosplice-psd"
 version = "0.9.21"
 dependencies = [
  "flate2",
- "photosuite-psd",
+ "photosplice-psd",
  "proptest",
  "serde",
  "thiserror 2.0.21",
 ]
 
 [[package]]
-name = "photosuite-raster"
+name = "photosplice-raster"
 version = "0.9.21"
 dependencies = [
- "photosuite-color",
- "photosuite-geom",
+ "photosplice-color",
+ "photosplice-geom",
  "proptest",
  "serde",
 ]
 
 [[package]]
-name = "photosuite-raw"
+name = "photosplice-raw"
 version = "0.9.21"
 dependencies = [
- "photosuite-raw",
+ "photosplice-raw",
  "png 0.18.1",
  "rayon",
 ]
 
 [[package]]
-name = "photosuite-tablet"
+name = "photosplice-tablet"
 version = "0.9.21"
 dependencies = [
  "block2 0.6.2",
@@ -4187,32 +4187,32 @@ dependencies = [
 ]
 
 [[package]]
-name = "photosuite-testkit"
+name = "photosplice-testkit"
 version = "0.9.21"
 dependencies = [
  "memory-stats",
- "photosuite-color",
- "photosuite-geom",
- "photosuite-raster",
+ "photosplice-color",
+ "photosplice-geom",
+ "photosplice-raster",
  "serde_json",
 ]
 
 [[package]]
-name = "photosuite-text"
+name = "photosplice-text"
 version = "0.9.21"
 dependencies = [
  "flate2",
  "parley",
- "photosuite-color",
- "photosuite-doc",
- "photosuite-geom",
- "photosuite-psd",
- "photosuite-raster",
+ "photosplice-color",
+ "photosplice-doc",
+ "photosplice-geom",
+ "photosplice-psd",
+ "photosplice-raster",
  "skrifa 0.44.0",
 ]
 
 [[package]]
-name = "photosuite-ui-egui"
+name = "photosplice-ui-egui"
 version = "0.9.21"
 dependencies = [
  "base64",
@@ -4221,22 +4221,22 @@ dependencies = [
  "egui_extras",
  "egui_kittest",
  "log",
- "photosuite-algo",
- "photosuite-codecs",
- "photosuite-color",
- "photosuite-compose",
- "photosuite-doc",
- "photosuite-engine",
- "photosuite-format",
- "photosuite-geom",
- "photosuite-gpu",
- "photosuite-io",
- "photosuite-plugins",
- "photosuite-psd",
- "photosuite-raster",
- "photosuite-testkit",
- "photosuite-text",
- "photosuite-vector",
+ "photosplice-algo",
+ "photosplice-codecs",
+ "photosplice-color",
+ "photosplice-compose",
+ "photosplice-doc",
+ "photosplice-engine",
+ "photosplice-format",
+ "photosplice-geom",
+ "photosplice-gpu",
+ "photosplice-io",
+ "photosplice-plugins",
+ "photosplice-psd",
+ "photosplice-raster",
+ "photosplice-testkit",
+ "photosplice-text",
+ "photosplice-vector",
  "rayon",
  "resvg",
  "serde",
@@ -4244,29 +4244,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "photosuite-vector"
+name = "photosplice-vector"
 version = "0.9.21"
 dependencies = [
- "photosuite-color",
- "photosuite-doc",
- "photosuite-geom",
- "photosuite-raster",
+ "photosplice-color",
+ "photosplice-doc",
+ "photosplice-geom",
+ "photosplice-raster",
  "rayon",
 ]
 
 [[package]]
-name = "photosuite-web"
+name = "photosplice-web"
 version = "0.9.21"
 dependencies = [
  "eframe",
  "egui",
  "js-sys",
  "log",
- "photosuite-codecs",
- "photosuite-doc",
- "photosuite-engine",
- "photosuite-io",
- "photosuite-ui-egui",
+ "photosplice-codecs",
+ "photosplice-doc",
+ "photosplice-engine",
+ "photosplice-io",
+ "photosplice-ui-egui",
  "rfd",
  "wasm-bindgen",
  "wasm-bindgen-futures",

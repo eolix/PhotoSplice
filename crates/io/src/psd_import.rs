@@ -2,14 +2,14 @@
 
 use std::sync::Arc;
 
-use photosuite_color::{BlendMode, ColorMode, PixelFormat, SampleType};
-use photosuite_doc::{AlphaChannel, Document, Effects, FillCache, Group, Layer, LayerContent, LayerMask, ShapeLayer, SmartObject, SmartSource, TextLayer};
-use photosuite_geom::{Rect, Size, TILE_SIZE};
-use photosuite_psd::layer::{CHANNEL_REAL_USER_MASK, CHANNEL_TRANSPARENCY, CHANNEL_USER_MASK};
-use photosuite_psd::resources::ids;
-use photosuite_psd::tagged::BlockData;
-use photosuite_psd::{ColorMode as PsdMode, LayerNode, LayerRecord, PsdFile, TaggedBlock};
-use photosuite_raster::Surface;
+use photosplice_color::{BlendMode, ColorMode, PixelFormat, SampleType};
+use photosplice_doc::{AlphaChannel, Document, Effects, FillCache, Group, Layer, LayerContent, LayerMask, ShapeLayer, SmartObject, SmartSource, TextLayer};
+use photosplice_geom::{Rect, Size, TILE_SIZE};
+use photosplice_psd::layer::{CHANNEL_REAL_USER_MASK, CHANNEL_TRANSPARENCY, CHANNEL_USER_MASK};
+use photosplice_psd::resources::ids;
+use photosplice_psd::tagged::BlockData;
+use photosplice_psd::{ColorMode as PsdMode, LayerNode, LayerRecord, PsdFile, TaggedBlock};
+use photosplice_raster::Surface;
 
 use crate::adjust_map::{self, ADJUSTMENT_KEYS};
 use crate::blocks;
@@ -55,13 +55,13 @@ pub(crate) struct Ctx<'a> {
     /// Document resolution (type sizes are converted to points with it).
     pub dpi: f32,
     /// The parsed `Txt2` block (type settings EngineData lacks, e.g. optical kerning).
-    pub txt2: Option<photosuite_text::engine_data::Value>,
+    pub txt2: Option<photosplice_text::engine_data::Value>,
     /// Smart-filter caches from the global `FEid`/`FXid` blocks (filter masks, by placed id).
-    pub filter_effects: Vec<photosuite_psd::filter_effects::FilterEffectsItem>,
+    pub filter_effects: Vec<photosplice_psd::filter_effects::FilterEffectsItem>,
     /// Source sizes of `PlLd`-only placed layers, by source id (read once per embedded file).
     pub plld_sizes: std::collections::HashMap<String, Option<(f64, f64)>>,
     /// Cancellation and progress for background opens (checked per layer record).
-    pub ctl: photosuite_raster::Interrupt<'a>,
+    pub ctl: photosplice_raster::Interrupt<'a>,
     /// Layer records decoded so far, out of `total` (progress).
     pub done: usize,
     pub total: usize,
@@ -82,7 +82,7 @@ fn doc_mode(m: PsdMode) -> Option<ColorMode> {
 }
 
 // Real-mask metadata without a -3 channel still selects the synthetic -2 mask.
-fn selected_real_mask(rec: &LayerRecord) -> Option<photosuite_psd::RealMask> {
+fn selected_real_mask(rec: &LayerRecord) -> Option<photosplice_psd::RealMask> {
     rec.channel(CHANNEL_REAL_USER_MASK)?;
     rec.layer_mask()?.real
 }
@@ -90,7 +90,7 @@ fn selected_real_mask(rec: &LayerRecord) -> Option<photosuite_psd::RealMask> {
 /// The fill of a plain shape layer (fill block + vector path, no stroke) to import as a fill layer
 /// with a vector mask: when its mask parameters give the vector mask a density below 100 % or a
 /// feather, or when it stores no pixels and fills with a pattern.
-fn soft_shape_fill(rec: &LayerRecord, has_vector: bool, fill_key: Option<&[u8; 4]>) -> Option<(photosuite_doc::Fill, bool)> {
+fn soft_shape_fill(rec: &LayerRecord, has_vector: bool, fill_key: Option<&[u8; 4]>) -> Option<(photosplice_doc::Fill, bool)> {
     if !has_vector || rec.block(b"vstk").is_some() || rec.block(b"vscg").is_some() {
         return None;
     }
@@ -102,7 +102,7 @@ fn soft_shape_fill(rec: &LayerRecord, has_vector: bool, fill_key: Option<&[u8; 4
     // document's patterns for fill layers), and its stored pixels may be the unclipped fill
     // (our export writes fill layers so): it is a pattern fill layer seen through its vector
     // mask (storytold/photocraft@9b0c6c4d). Returns the fill and whether the mask is soft.
-    let pattern = matches!(fill, photosuite_doc::Fill::Pattern { .. });
+    let pattern = matches!(fill, photosplice_doc::Fill::Pattern { .. });
     (soft || pattern).then_some((fill, soft))
 }
 
@@ -111,9 +111,9 @@ fn soft_shape_fill(rec: &LayerRecord, has_vector: bool, fill_key: Option<&[u8; 4
 #[derive(Default)]
 struct Placement {
     id: String,
-    transform: photosuite_geom::Affine,
+    transform: photosplice_geom::Affine,
     perspective: Option<[f64; 9]>,
-    warp: Option<photosuite_geom::warp::Warp>,
+    warp: Option<photosplice_geom::warp::Warp>,
 }
 
 impl Ctx<'_> {
@@ -245,7 +245,7 @@ impl Ctx<'_> {
         }
     }
 
-    fn apply_common(&mut self, l: &mut Layer, rec: &LayerRecord, blend_override: Option<photosuite_psd::BlendMode>) {
+    fn apply_common(&mut self, l: &mut Layer, rec: &LayerRecord, blend_override: Option<photosplice_psd::BlendMode>) {
         l.visible = rec.is_visible();
         l.opacity = f32::from(rec.opacity) / 255.0;
         l.fill_opacity = f32::from(rec.fill_opacity()) / 255.0;
@@ -298,7 +298,7 @@ impl Ctx<'_> {
         // Knockout (`knko`: none / shallow / deep); kept in `psd_blocks` too, rewritten from the
         // field on export.
         if let Some(v) = rec.block(b"knko").and_then(|b| b.data.first().copied()) {
-            l.knockout = photosuite_doc::Knockout::from_psd(v);
+            l.knockout = photosplice_doc::Knockout::from_psd(v);
         }
         // Blend Clipped Layers / Interior Effects as Group (`clbl`, `infx`), the same way.
         if let Some(v) = rec.block(b"clbl").and_then(|b| b.data.first().copied()) {
@@ -349,15 +349,15 @@ impl Ctx<'_> {
                 },
             ))
         } else if rec.block(b"TySh").is_some() {
-            // Typed model from TySh/EngineData (photosuite-text); Photoshop's pixels stay the cache.
+            // Typed model from TySh/EngineData (photosplice-text); Photoshop's pixels stay the cache.
             let data = rec.block(b"TySh").map(|b| b.data.clone()).unwrap_or_default();
-            let mut t = photosuite_text::psd::text_layer_from_tysh(&data, self.dpi).unwrap_or_else(|| {
+            let mut t = photosplice_text::psd::text_layer_from_tysh(&data, self.dpi).unwrap_or_else(|| {
                 let (text, transform) = blocks::parse_tysh(&data).unwrap_or_default();
                 TextLayer { text, transform, ..Default::default() }
             });
             if let Some(txt2) = &self.txt2 {
-                photosuite_text::psd::apply_txt2(&mut t, &data, txt2);
-                photosuite_text::psd::apply_txt2_frame(&mut t, &data, txt2);
+                photosplice_text::psd::apply_txt2(&mut t, &data, txt2);
+                photosplice_text::psd::apply_txt2_frame(&mut t, &data, txt2);
             }
             // The file's pixels are the cache only when it has some: ag-psd, GIMP and other
             // writers leave type layers without image data (Reference re-renders them on open),
@@ -365,7 +365,7 @@ impl Ctx<'_> {
             // such a layer from its model. When the engine text itself is blank, Reference draws
             // nothing either: the empty pixels stay (storytold/photocraft@d2ad238e).
             let cache = self.record_surface(rec, &name);
-            let drawn = !cache.content_bounds().is_empty() || photosuite_text::psd::engine_text_is_blank(&data);
+            let drawn = !cache.content_bounds().is_empty() || photosplice_text::psd::engine_text_is_blank(&data);
             t.cache = drawn.then_some(cache);
             t.psd_raw = principal(b"TySh");
             LayerContent::Text(t)
@@ -412,7 +412,7 @@ impl Ctx<'_> {
             // soft vector mask: the fill shows beyond the path, which the stored pixels (the
             // shape alone) lack. Import it as exactly that. A pattern fill keeps its stored
             // pixels as its rendering (a soft mask's pixels lack the fill beyond the path).
-            if !soft && matches!(f, photosuite_doc::Fill::Pattern { .. }) && !rec.rect.is_empty() {
+            if !soft && matches!(f, photosplice_doc::Fill::Pattern { .. }) && !rec.rect.is_empty() {
                 fill_cache = Some(FillCache { fill: f.clone(), surface: self.record_surface(rec, &name) });
             }
             LayerContent::Fill(f)
@@ -425,7 +425,7 @@ impl Ctx<'_> {
             // shape from its path and fill, as Photoshop does when it opens the file.
             if (rec.rect.is_empty() || rec.rect.size().is_err()) && (!sh.path.subpaths.is_empty() || sh.path.inverted) {
                 let canvas = Rect::new(0, 0, self.file.header.width as i32, self.file.header.height as i32);
-                sh.cache = Some(photosuite_vector::render_shape(&sh, self.fmt, canvas));
+                sh.cache = Some(photosplice_vector::render_shape(&sh, self.fmt, canvas));
             }
             LayerContent::Shape(sh)
         } else if let Some(k) = fill_key {
@@ -500,18 +500,18 @@ impl Ctx<'_> {
                     let divider_blocks = divider.and_then(|d| layers.get(d)).map(divider_preserved).unwrap_or_default();
                     // The recursion here (and in every later consumer of the tree) is bounded by
                     // the document model's nesting cap; a deeper subtree is not imported.
-                    let children = if depth >= photosuite_doc::MAX_GROUP_DEPTH {
+                    let children = if depth >= photosplice_doc::MAX_GROUP_DEPTH {
                         self.warn(format!(
                             "group `{}` nests deeper than {} groups; its contents were not imported",
                             rec.name(),
-                            photosuite_doc::MAX_GROUP_DEPTH
+                            photosplice_doc::MAX_GROUP_DEPTH
                         ));
                         Vec::new()
                     } else {
                         self.build(children, depth + 1)
                     };
                     let sd = rec.section_divider();
-                    let expanded = sd.is_none_or(|s| s.kind != photosuite_psd::SectionType::ClosedFolder);
+                    let expanded = sd.is_none_or(|s| s.kind != photosplice_psd::SectionType::ClosedFolder);
                     let artboard = crate::comps_map::ARTBOARD_KEYS.iter().find_map(|k| rec.block(k)).and_then(|b| crate::comps_map::parse_artboard(&b.data));
                     let mut l = Layer::new(rec.name(), LayerContent::Group(Group { children, expanded, artboard, divider_blocks }));
                     l.psd_blocks = preserved_blocks(rec);
@@ -532,7 +532,7 @@ fn apply_link_groups(nodes: &[LayerNode], layers: &mut [Layer], ids: &[u16]) {
                 LayerNode::Layer { index } => *index,
                 LayerNode::Group { index, children, .. } => {
                     // Matches the importer's nesting cap: deeper children were not imported.
-                    if depth < photosuite_doc::MAX_GROUP_DEPTH
+                    if depth < photosplice_doc::MAX_GROUP_DEPTH
                         && let LayerContent::Group(g) = &mut l.content
                     {
                         rec(children, &mut g.children, ids, depth + 1);
@@ -549,7 +549,7 @@ fn apply_link_groups(nodes: &[LayerNode], layers: &mut [Layer], ids: &[u16]) {
 /// Deepest group nesting of the file's layer records (a layer inside this many groups is the
 /// deepest), computed like `layer_tree`'s stack — iteratively, so no file can make it recurse.
 pub(crate) fn group_depth(file: &PsdFile) -> usize {
-    use photosuite_psd::tagged::SectionType;
+    use photosplice_psd::tagged::SectionType;
     let (mut open, mut depth) = (0usize, 0usize);
     for rec in file.layers() {
         match rec.section_type() {
@@ -624,8 +624,8 @@ fn mark_background(file: &PsdFile, layers: &mut [Layer]) {
 /// The layers `file` had selected, its target first: the ids of resource 1069 (a u16 count,
 /// then u32 layer ids) and the record of resource 1024 (a u16 record index), found in `doc` by
 /// their PSD layer ids. Empty when the file names none of `doc`'s layers.
-pub(crate) fn selection(file: &PsdFile, doc: &Document) -> Vec<photosuite_doc::LayerId> {
-    let by_psd: std::collections::HashMap<u32, photosuite_doc::LayerId> = doc.walk().into_iter().filter_map(|(_, _, l)| Some((l.psd_id?, l.id))).collect();
+pub(crate) fn selection(file: &PsdFile, doc: &Document) -> Vec<photosplice_doc::LayerId> {
+    let by_psd: std::collections::HashMap<u32, photosplice_doc::LayerId> = doc.walk().into_iter().filter_map(|(_, _, l)| Some((l.psd_id?, l.id))).collect();
     let target = file
         .resource(ids::LAYER_STATE)
         .and_then(|r| r.data.get(..2))
@@ -633,14 +633,14 @@ pub(crate) fn selection(file: &PsdFile, doc: &Document) -> Vec<photosuite_doc::L
         .and_then(|i| file.layers().get(i))
         .and_then(LayerRecord::layer_id)
         .and_then(|id| by_psd.get(&id).copied());
-    let listed: Vec<photosuite_doc::LayerId> = file
+    let listed: Vec<photosplice_doc::LayerId> = file
         .resource(ids::LAYER_SELECTION_IDS)
         .map(|r| {
             let n = r.data.get(..2).map_or(0, |b| usize::from(u16::from_be_bytes([b[0], b[1]])));
             (0..n).filter_map(|k| r.data.get(2 + k * 4..6 + k * 4)).filter_map(|b| by_psd.get(&u32::from_be_bytes([b[0], b[1], b[2], b[3]])).copied()).collect()
         })
         .unwrap_or_default();
-    let mut out: Vec<photosuite_doc::LayerId> = target.into_iter().collect();
+    let mut out: Vec<photosplice_doc::LayerId> = target.into_iter().collect();
     out.extend(listed.into_iter().filter(|id| Some(*id) != target));
     out
 }
@@ -648,13 +648,13 @@ pub(crate) fn selection(file: &PsdFile, doc: &Document) -> Vec<photosuite_doc::L
 /// Converts a parsed PSD into a document. Never fails: problems become warnings.
 pub fn psd_to_document(file: &PsdFile) -> (Document, Vec<String>) {
     // Never cancelled, so always `Some`; the fallback is unreachable.
-    psd_to_document_with(file, &photosuite_raster::Interrupt::NONE)
+    psd_to_document_with(file, &photosplice_raster::Interrupt::NONE)
         .unwrap_or_else(|| (Document::new("Untitled", Size::new(1, 1), ColorMode::Rgb, SampleType::U8), Vec::new()))
 }
 
 /// [`psd_to_document`] for a background open: checks `ctl` per layer record and reports
 /// progress. `None` when cancelled.
-pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) -> Option<(Document, Vec<String>)> {
+pub fn psd_to_document_with(file: &PsdFile, ctl: &photosplice_raster::Interrupt) -> Option<(Document, Vec<String>)> {
     let h = &file.header;
     let mut warnings = Vec::new();
     let mode = doc_mode(h.color_mode).unwrap_or_else(|| {
@@ -671,12 +671,12 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
     for r in &file.resources {
         match r.id {
             ids::RESOLUTION_INFO => {
-                if let Ok(ri) = photosuite_psd::ResolutionInfo::from_bytes(&r.data) {
+                if let Ok(ri) = photosplice_psd::ResolutionInfo::from_bytes(&r.data) {
                     let f = if ri.h_res_unit == 2 { 2.54 } else { 1.0 };
                     doc.resolution_dpi = (ri.h_res() * f) as f32;
                     // Kept for its display units (pixels/cm, width in cm…) when export wouldn't
                     // write it the same, see `resolution_resource`.
-                    if r.data != photosuite_psd::ResolutionInfo::from_dpi(f64::from(doc.resolution_dpi)).to_bytes() {
+                    if r.data != photosplice_psd::ResolutionInfo::from_dpi(f64::from(doc.resolution_dpi)).to_bytes() {
                         doc.metadata.psd_resources.push((r.id, String::from_utf8_lossy(&r.name).into_owned(), Arc::new(r.data.clone())));
                     }
                 }
@@ -696,7 +696,7 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
                 }
             }
             id if crate::vector_map::SAVED_PATHS.contains(&id) => match crate::vector_map::path_from_resource(&r.data, h.width, h.height) {
-                Some(path) => doc.paths.push(photosuite_doc::NamedPath {
+                Some(path) => doc.paths.push(photosplice_doc::NamedPath {
                     name: String::from_utf8_lossy(&r.name).into_owned(),
                     path,
                     psd_raw: Some(Arc::new(r.data.clone())),
@@ -710,7 +710,7 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
                 // Kept raw (layout beyond the name is not modelled); the name is exposed.
                 let n = usize::from(r.data.first().copied().unwrap_or(0));
                 let name = r.data.get(1..1 + n).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
-                doc.clipping_path = Some(photosuite_doc::ClippingPath { name, flatness: 0.0 });
+                doc.clipping_path = Some(photosplice_doc::ClippingPath { name, flatness: 0.0 });
                 doc.metadata.psd_resources.push((r.id, String::from_utf8_lossy(&r.name).into_owned(), Arc::new(r.data.clone())));
             }
             id if MAPPED_RESOURCES.contains(&id) => {}
@@ -726,7 +726,7 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
                     == crate::psd_export::alpha_ids_resource(
                         None,
                         file.merged_has_alpha(),
-                        file.resource(ids::UNICODE_ALPHA_NAMES).map_or(0, |n| photosuite_psd::resources::unicode_names(&n.data).len()),
+                        file.resource(ids::UNICODE_ALPHA_NAMES).map_or(0, |n| photosplice_psd::resources::unicode_names(&n.data).len()),
                     ) => {}
             id => doc.metadata.psd_resources.push((id, String::from_utf8_lossy(&r.name).into_owned(), Arc::new(r.data.clone()))),
         }
@@ -753,7 +753,7 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
         cmyk: fmt.mode == ColorMode::Cmyk,
         warnings,
         dpi: doc.resolution_dpi,
-        txt2: file.global_blocks.iter().find(|b| &b.key == b"Txt2").and_then(|b| photosuite_text::psd::parse_txt2(&b.data)),
+        txt2: file.global_blocks.iter().find(|b| &b.key == b"Txt2").and_then(|b| photosplice_text::psd::parse_txt2(&b.data)),
         filter_effects: Vec::new(),
         plld_sizes: Default::default(),
         ctl: *ctl,
@@ -768,7 +768,7 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
         if ctl.cancelled() {
             return None;
         }
-        match photosuite_psd::filter_effects::FilterEffects::parse(&b.data) {
+        match photosplice_psd::filter_effects::FilterEffects::parse(&b.data) {
             Ok(fx) => cx.filter_effects.extend(fx.items),
             Err(e) => cx.warn(format!("smart filter masks ({}) could not be read: {e}", b.key_str())),
         }
@@ -803,13 +803,13 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
         // The duotone ink block is undocumented (the spec says to treat the image as gray and
         // keep the block): kept raw and written back; the image shows as its gray plate.
         doc.duotone =
-            Some(photosuite_doc::Duotone { inks: vec![photosuite_doc::DuotoneInk::new("Black", [0.0; 3])], psd_raw: Some(file.color_mode_data.clone()) });
+            Some(photosplice_doc::Duotone { inks: vec![photosplice_doc::DuotoneInk::new("Black", [0.0; 3])], psd_raw: Some(file.color_mode_data.clone()) });
         cx.warn("duotone inks are not interpreted (shown as grayscale)");
     }
     if multichannel {
         // Ink channels only (no layers); see `multichannel_map`.
         if let Some(Ok(all)) = &merged {
-            let names = file.resource(1045).map(|r| photosuite_psd::resources::unicode_names(&r.data)).unwrap_or_default();
+            let names = file.resource(1045).map(|r| photosplice_psd::resources::unicode_names(&r.data)).unwrap_or_default();
             crate::multichannel_map::import(file, all, &mut doc, &names, &mut cx.warnings);
         }
         if !file.layers().is_empty() {
@@ -822,8 +822,8 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
         // locked whatever its (localized) name, lock flags or `lspf` say. Its name is kept.
         mark_background(file, &mut doc.layers);
         // Layer › Link Layers: resource 1026 holds one group id per layer record (0 = unlinked).
-        if let Some(Ok(photosuite_psd::resources::ResourceData::LayerGroupInfo(groups))) =
-            file.resources.iter().find(|r| r.id == ids::LAYER_GROUP_INFO).and_then(photosuite_psd::resources::ImageResource::parsed)
+        if let Some(Ok(photosplice_psd::resources::ResourceData::LayerGroupInfo(groups))) =
+            file.resources.iter().find(|r| r.id == ids::LAYER_GROUP_INFO).and_then(photosplice_psd::resources::ImageResource::parsed)
         {
             apply_link_groups(&tree, &mut doc.layers, &groups);
         }
@@ -847,7 +847,7 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
             if alpha_idx.is_some() {
                 // Undo Photoshop's white matting of the merged image.
                 // A band of tile rows at a time (no full-size float copy of the image).
-                let white = photosuite_raster::from_rgba(&fmt, [1.0, 1.0, 1.0, 1.0]);
+                let white = photosplice_raster::from_rgba(&fmt, [1.0, 1.0, 1.0, 1.0]);
                 let mut vals = Vec::new();
                 let mut y = canvas.y0;
                 while y < canvas.y1 {
@@ -885,7 +885,7 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
             let count = u16_of(crate::flat_modes::COLOR_COUNT).map_or(256, |n| usize::from(n).clamp(1, 256));
             let colors = (0..count).map(|i| [m[i], m[256 + i], m[512 + i]]).collect();
             let transparent = u16_of(crate::flat_modes::TRANSPARENCY_INDEX).filter(|&t| usize::from(t) < count).map(|t| t as u8);
-            doc.color_table = Some(photosuite_doc::ColorTable { colors, transparent });
+            doc.color_table = Some(photosplice_doc::ColorTable { colors, transparent });
         } else if h.color_mode == PsdMode::Duotone {
             // Kept with the document (see below).
         } else if !file.color_mode_data.is_empty() {
@@ -893,21 +893,21 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
         }
         let rgba = file.composite_rgba8().or_else(|_| {
             // Multichannel: show the first channels as RGB.
-            let all = merged.clone().ok_or_else(|| photosuite_psd::PsdError::Invalid("no merged image".into()))??;
-            let plane = h.row_bytes().checked_mul(hh).ok_or(photosuite_psd::PsdError::LimitExceeded("plane size overflow"))?;
-            let mut data = vec![255u8; n.checked_mul(4).ok_or(photosuite_psd::PsdError::LimitExceeded("image size overflow"))?];
+            let all = merged.clone().ok_or_else(|| photosplice_psd::PsdError::Invalid("no merged image".into()))??;
+            let plane = h.row_bytes().checked_mul(hh).ok_or(photosplice_psd::PsdError::LimitExceeded("plane size overflow"))?;
+            let mut data = vec![255u8; n.checked_mul(4).ok_or(photosplice_psd::PsdError::LimitExceeded("image size overflow"))?];
             for c in 0..3.min(usize::from(h.channels)) {
                 // Channel bounds checked: a short merged image is an error, not a panic
                 // (storytold/photocraft@40c9c3c4).
-                let bytes = c.checked_mul(plane).and_then(|a| all.get(a..a.checked_add(plane)?)).ok_or_else(|| photosuite_psd::PsdError::Invalid("channel size mismatch".into()))?;
-                let p = photosuite_psd::pixels::plane_to_u8(bytes, h.depth, w, hh)?;
+                let bytes = c.checked_mul(plane).and_then(|a| all.get(a..a.checked_add(plane)?)).ok_or_else(|| photosplice_psd::PsdError::Invalid("channel size mismatch".into()))?;
+                let p = photosplice_psd::pixels::plane_to_u8(bytes, h.depth, w, hh)?;
                 for (px, v) in data.chunks_exact_mut(4).zip(&p) {
                     if let Some(slot) = px.get_mut(c) {
                         *slot = *v;
                     }
                 }
             }
-            Ok::<_, photosuite_psd::PsdError>(photosuite_psd::RgbaImage { left: 0, top: 0, width: h.width, height: h.height, data })
+            Ok::<_, photosplice_psd::PsdError>(photosplice_psd::RgbaImage { left: 0, top: 0, width: h.width, height: h.height, data })
         });
         if let Ok(mut img) = rgba {
             // Indexed Color › Transparency: pixels of that palette entry are transparent.
@@ -928,7 +928,7 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
                 .0
                 .iter()
                 .flat_map(|p| {
-                    let v = photosuite_raster::from_rgba(&fmt, [p[0], p[1], p[2], p[3]].map(|x| f32::from(x) / 255.0));
+                    let v = photosplice_raster::from_rgba(&fmt, [p[0], p[1], p[2], p[3]].map(|x| f32::from(x) / 255.0));
                     v.into_iter()
                 })
                 .collect();
@@ -942,10 +942,10 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosuite_raster::Interrupt) 
     if layered && let Some(Ok(all)) = &merged {
         let first = cc + usize::from(file.merged_has_alpha());
         let plane = h.row_bytes() * hh;
-        let names = file.resource(1045).map(|r| photosuite_psd::resources::unicode_names(&r.data)).unwrap_or_default();
+        let names = file.resource(1045).map(|r| photosplice_psd::resources::unicode_names(&r.data)).unwrap_or_default();
         // Photoshop lists the merged transparency first ("Transparency") in the channel names and
         // display info; the alpha channels follow it.
-        let skip = usize::from(file.merged_has_alpha() && names.first().is_some_and(|n| n == photosuite_psd::resources::TRANSPARENCY_NAME));
+        let skip = usize::from(file.merged_has_alpha() && names.first().is_some_and(|n| n == photosplice_psd::resources::TRANSPARENCY_NAME));
         let names = names.get(skip..).unwrap_or_default();
         for (k, idx) in (first..usize::from(h.channels)).enumerate() {
             let Some(p) = all.get(idx * plane..(idx + 1) * plane) else { break };

@@ -1,6 +1,6 @@
 [package]
-name = "photosuite-automation"
-description = "Security, budgets and file authority for the PhotoSuite desktop app's control channel"
+name = "photosplice-automation"
+description = "Security, budgets and file authority for the PhotoSplice desktop app's control channel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,8 +10,8 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-photosuite-format = { path = "../format" }
-photosuite-engine = { workspace = true }
+photosplice-format = { path = "../format" }
+photosplice-engine = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

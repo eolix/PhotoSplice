@@ -9,7 +9,7 @@
 #   escapes  \n  \t  \\  inside a column. `{name}` placeholders must appear in both columns.
 #   lines starting with # and blank lines are ignored.
 #
-# Українська translations for PhotoSuite UI.
+# Українська translations for PhotoSplice UI.
 
 	File	Файл
 	Edit	Редагувати
@@ -672,7 +672,7 @@
 	Timeline	Хронологія
 	Tool Presets	Стилі інструментів
 	Tools	Інструменти
-	About PhotoSuite	Про PhotoSuite
+	About PhotoSplice	Про PhotoSplice
 	Website	Веб-сайт
 	Report an Issue…	Повідомити про проблему…
 	WIA Support…	Підтримка WIA…
@@ -1188,9 +1188,9 @@
 	Perspective Warp is not active	Деформація перспективи не активна
 	Perspective Warp: draw planes along the image's perspective, then switch to Warp	Деформація перспективи: намалюйте площини вздовж перспективи зображення, а потім перейдіть до деформації
 	Photo Filter	Фільтр Фото
-	PhotoSuite	PhotoSuite
-	PhotoSuite Manages Colors	PhotoSuite керує кольорами
-	PhotoSuite — an open-source, native image editor written in Rust.	PhotoSuite — рідний редактор зображень із відкритим кодом, написаний на Rust
+	PhotoSplice	PhotoSplice
+	PhotoSplice Manages Colors	PhotoSplice керує кольорами
+	PhotoSplice — an open-source, native image editor written in Rust.	PhotoSplice — рідний редактор зображень із відкритим кодом, написаний на Rust
 	Pin Depth:	Глибина шпильки:
 	Pixel Length:	Довжина пікселя:
 	Pixels/Centimeter	Пікселі/сантиметр
@@ -1570,7 +1570,7 @@
 	Pen Tilt	Нахил пера
 	Pen Tool	Інструмент «Перо»
 	Photo	Фото
-	PhotoSuite website	Веб-сайт PhotoSuite
+	PhotoSplice website	Веб-сайт PhotoSplice
 	Picas	Picas
 	Pillow Emboss	Тиснення подушка
 	Pixel Replacement	Заміна пікселя
@@ -1877,7 +1877,7 @@
 	System Info…	Інформація про систему…
 	System Info	Інформація про систему
 	More panels	Більше панелей
-	These settings aren't available in PhotoSuite yet.	Ці налаштування поки що недоступні у PhotoSuite
+	These settings aren't available in PhotoSplice yet.	Ці налаштування поки що недоступні у PhotoSplice
 	Graphics	Графіка
 	Reset GPU Backend	Скинути бекенд GPU
 	Applies at next launch.	Застосовується під час наступного запуску
@@ -2018,7 +2018,7 @@
 	Opening…	Відкриття…
 	Patch	Латка
 	Patch:	Латка:
-	PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSuite використовує компонувальник зображень на CPU. Вікно все ще може використовувати ваш графічний адаптер.
+	PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter.	PhotoSplice використовує компонувальник зображень на CPU. Вікно все ще може використовувати ваш графічний адаптер.
 	Play Action	Відтворити дію
 	Reading…	Читання…
 	Record Action	Записати дію

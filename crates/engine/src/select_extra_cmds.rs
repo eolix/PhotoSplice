@@ -1,6 +1,6 @@
 //! Select › Sky, Select › Isolate Layers and Select › Transform Selection.
 //!
-//! * `select.sky` runs the classical sky segmentation of `photosuite_algo::segment::sky` on the
+//! * `select.sky` runs the classical sky segmentation of `photosplice_algo::segment::sky` on the
 //!   composite (or the active layer) and combines it with the selection.
 //! * `select.isolateLayers` toggles the Layers panel's isolation filter: only the layers selected
 //!   when it was turned on are listed ([`crate::DocState::isolated_layers`], view state).
@@ -8,13 +8,13 @@
 //!   quad (distort / perspective), an affine matrix, scale / rotate / skew / move about a
 //!   reference point, or a warp (same params as `edit.transform.warp`).
 
-use photosuite_algo::segment::sky::{self, SkyParams};
-use photosuite_algo::segment::{Sampler, SurfaceSampler};
-use photosuite_algo::selection::{SelectionMode, combine_region};
-use photosuite_algo::transform::{Homography, Interp};
-use photosuite_algo::warp::warp_mesh_gray;
-use photosuite_doc::{Document, LayerId};
-use photosuite_geom::Rect;
+use photosplice_algo::segment::sky::{self, SkyParams};
+use photosplice_algo::segment::{Sampler, SurfaceSampler};
+use photosplice_algo::selection::{SelectionMode, combine_region};
+use photosplice_algo::transform::{Homography, Interp};
+use photosplice_algo::warp::warp_mesh_gray;
+use photosplice_doc::{Document, LayerId};
+use photosplice_geom::Rect;
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
@@ -40,7 +40,7 @@ struct CompositeSampler<'a>(&'a Document);
 
 impl Sampler for CompositeSampler<'_> {
     fn rgba(&self, r: Rect) -> Vec<[f32; 4]> {
-        photosuite_compose::render(self.0, r).px
+        photosplice_compose::render(self.0, r).px
     }
 }
 
@@ -89,9 +89,9 @@ pub fn isolation_shows(doc: &Document, isolated: &[LayerId], id: LayerId) -> boo
     if isolated.is_empty() || isolated.contains(&id) {
         return true;
     }
-    fn contains(l: &photosuite_doc::Layer, set: &[LayerId]) -> bool {
+    fn contains(l: &photosplice_doc::Layer, set: &[LayerId]) -> bool {
         match &l.content {
-            photosuite_doc::LayerContent::Group(g) => g.children.iter().any(|c| set.contains(&c.id) || contains(c, set)),
+            photosplice_doc::LayerContent::Group(g) => g.children.iter().any(|c| set.contains(&c.id) || contains(c, set)),
             _ => false,
         }
     }

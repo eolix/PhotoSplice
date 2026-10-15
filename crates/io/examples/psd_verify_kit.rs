@@ -2,17 +2,17 @@
 //! the original it came from, plus a checklist of what to look at in Photoshop.
 //!
 //! ```sh
-//! cargo run --release -p photosuite-io --example psd_verify_kit -- <out dir>
+//! cargo run --release -p photosplice-io --example psd_verify_kit -- <out dir>
 //! ```
 //!
-//! Needs the corpora (`cargo xtask corpus --all`). Each case is one edit of the kind PhotoSuite
+//! Needs the corpora (`cargo xtask corpus --all`). Each case is one edit of the kind PhotoSplice
 //! makes, so the export regenerates the block under test instead of copying it.
 use std::path::Path;
 use std::sync::Arc;
 
-use photosuite_color::{BlendMode, Color, ColorMode, SampleType};
-use photosuite_doc::{Adjustment, Document, Effect, Fill, Layer, LayerContent, ShapeLayer, ShapeStroke};
-use photosuite_geom::{Rect, Size};
+use photosplice_color::{BlendMode, Color, ColorMode, SampleType};
+use photosplice_doc::{Adjustment, Document, Effect, Fill, Layer, LayerContent, ShapeLayer, ShapeStroke};
+use photosplice_geom::{Rect, Size};
 
 struct Case {
     file: &'static str,
@@ -23,11 +23,11 @@ struct Case {
 
 fn load(path: &str) -> Document {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e} (run `cargo xtask corpus --all`)"));
-    photosuite_io::import(path, &bytes).unwrap_or_else(|e| panic!("{path}: {e}")).document
+    photosplice_io::import(path, &bytes).unwrap_or_else(|e| panic!("{path}: {e}")).document
 }
 
 fn save(doc: &Document, out: &Path, name: &str) -> Vec<String> {
-    let (f, warnings) = photosuite_io::document_to_psd_with(doc, &Default::default());
+    let (f, warnings) = photosplice_io::document_to_psd_with(doc, &Default::default());
     std::fs::write(out.join(name), f.to_bytes().expect("encode")).expect("write");
     warnings
 }
@@ -85,7 +85,7 @@ fn kit4(out: &Path, cases: &mut Vec<Case>, log: &mut Vec<Vec<String>>) {
     ] {
         let d = load(src);
         log.push(save(&d, out, file));
-        cases.push(Case { file, source: Some(src), edit: "none (opened and saved by PhotoSuite)", expect });
+        cases.push(Case { file, source: Some(src), edit: "none (opened and saved by PhotoSplice)", expect });
     }
     let src = "corpus/psd-tools/placedLayer.psd";
     let mut d = load(src);
@@ -161,37 +161,37 @@ fn kit1(out: &Path, cases: &mut Vec<Case>, log: &mut Vec<Vec<String>>) {
     cases.push(Case {
         file: "04-background.psd",
         source: Some(src4),
-        edit: "none (opened and saved by PhotoSuite)",
+        edit: "none (opened and saved by PhotoSplice)",
         expect: "Bottom layer is Photoshop's real Background: name in italics, lock icon, can't be moved, no transparency. In File › Open (or Bridge) the file shows a thumbnail preview.",
     });
 
-    // 5. A new document from PhotoSuite: Background, a pass-through group with an adjustment, a
+    // 5. A new document from PhotoSplice: Background, a pass-through group with an adjustment, a
     //    live shape layer and a gradient fill.
     let mut d = Document::with_background("kit", Size::new(400, 300), ColorMode::Rgb, SampleType::U8, Color::WHITE);
     let fmt = d.pixel_format();
     let mut px = Layer::raster("red square", fmt);
     if let Some(s) = px.surface_mut() {
-        s.fill_rect(Rect::new(40, 40, 200, 200), &photosuite_raster::from_rgba(&fmt, [0.9, 0.1, 0.1, 1.0]));
+        s.fill_rect(Rect::new(40, 40, 200, 200), &photosplice_raster::from_rgba(&fmt, [0.9, 0.1, 0.1, 1.0]));
     }
     let mut invert = Layer::new("Invert (inside)", LayerContent::Adjustment(Adjustment::Invert));
     invert.visible = true;
     let mut group = Layer::group("pass-through group", vec![invert]);
     group.blend = BlendMode::PassThrough;
     let mut shape = ShapeLayer {
-        path: photosuite_vector::shapes::rect(220.0, 60.0, 140.0, 100.0),
+        path: photosplice_vector::shapes::rect(220.0, 60.0, 140.0, 100.0),
         fill: Some(Fill::Solid(Color::rgb(0.1, 0.4, 0.9))),
         stroke: Some(ShapeStroke { width: 6.0, paint: Fill::Solid(Color::rgb(1.0, 0.8, 0.0)), ..Default::default() }),
-        live: Some(photosuite_doc::LiveShape::Rect { rect: [220.0, 60.0, 360.0, 160.0], radii: [0.0; 4] }),
+        live: Some(photosplice_doc::LiveShape::Rect { rect: [220.0, 60.0, 360.0, 160.0], radii: [0.0; 4] }),
         ..Default::default()
     };
-    shape.cache = Some(photosuite_vector::render_shape(&shape, fmt, d.bounds()));
+    shape.cache = Some(photosplice_vector::render_shape(&shape, fmt, d.bounds()));
     let shape = Layer::new("Rectangle 1", LayerContent::Shape(shape));
     d.layers.extend([px, shape, group]);
     log.push(save(&d, out, "05-new-document.psd"));
     cases.push(Case {
         file: "05-new-document.psd",
         source: None,
-        edit: "made in PhotoSuite: Background, red square, live rectangle shape, pass-through group holding an Invert adjustment",
+        edit: "made in PhotoSplice: Background, red square, live rectangle shape, pass-through group holding an Invert adjustment",
         expect: "Background is a real Background. The group's blend mode reads Pass Through and the Invert inside it inverts the layers below (cyan square, inverted shape and background). The rectangle is a live shape: Properties panel shows W 140 / H 100, fill blue, stroke 6 px yellow, all editable.",
     });
 
@@ -219,25 +219,25 @@ fn kit1(out: &Path, cases: &mut Vec<Case>, log: &mut Vec<Vec<String>>) {
         if let LayerContent::Text(t) = &mut l.content
             && t.psd_raw.is_some()
         {
-            t.psd_raw = Some(Arc::new(photosuite_text::psd::build_tysh(t, dpi, None)));
+            t.psd_raw = Some(Arc::new(photosplice_text::psd::build_tysh(t, dpi, None)));
         }
     });
     log.push(save(&d, out, "07-type-rewritten.psd"));
     cases.push(Case {
         file: "07-type-rewritten.psd",
         source: Some(src7),
-        edit: "type layer data (TySh + EngineData) regenerated by PhotoSuite",
+        edit: "type layer data (TySh + EngineData) regenerated by PhotoSplice",
         expect: "Still an editable type layer with Warp Text = Arc, Bend +50 (Type › Warp Text). Click into the text and type a character: it re-renders with the same font, size and warp, without a warning about the text data.",
     });
 
-    // 7b. Control: the same file through PhotoSuite with the type layer untouched (verbatim
+    // 7b. Control: the same file through PhotoSplice with the type layer untouched (verbatim
     //     `TySh`): if this one also prompts, the cause is outside the type data.
     let d = load(src7);
     log.push(save(&d, out, "07b-type-untouched.psd"));
     cases.push(Case {
         file: "07b-type-untouched.psd",
         source: Some(src7),
-        edit: "none: opened and saved by PhotoSuite, type data written back verbatim (control for 07)",
+        edit: "none: opened and saved by PhotoSplice, type data written back verbatim (control for 07)",
         expect: "No \"update text layers\" prompt on open. Typing a character keeps the Arc warp.",
     });
 
@@ -254,28 +254,28 @@ fn kit1(out: &Path, cases: &mut Vec<Case>, log: &mut Vec<Vec<String>>) {
             if let Some(p) = t.paragraphs.last_mut() {
                 p.len += 1;
             }
-            t.psd_raw = Some(Arc::new(photosuite_text::psd::build_tysh(t, dpi, None)));
+            t.psd_raw = Some(Arc::new(photosplice_text::psd::build_tysh(t, dpi, None)));
         }
     });
     log.push(save(&d, out, "07c-type-text-edited.psd"));
     cases.push(Case {
         file: "07c-type-text-edited.psd",
         source: Some(src7),
-        edit: "\"!\" appended to the text (type data rebuilt by PhotoSuite; the layer pixels are still the old rendering)",
+        edit: "\"!\" appended to the text (type data rebuilt by PhotoSplice; the layer pixels are still the old rendering)",
         expect: "No prompt. The Type tool shows \"WARPED TEXT!\" with the Arc +50 warp, and typing another character keeps the warp. (Until Photoshop re-renders, the pixels may still show the text without \"!\".)",
     });
 
     // 7d. Experiment: Photoshop's own file with only its version info (1057) changed to what
-    //     PhotoSuite wrote before ("Adobe Photoshop CS6" as the reader): if this prompts, 1057
+    //     PhotoSplice wrote before ("Adobe Photoshop CS6" as the reader): if this prompts, 1057
     //     is the cause.
     {
         let bytes = std::fs::read(src7).expect("read");
-        let mut f = photosuite_psd::PsdFile::from_bytes(&bytes).expect("parse");
-        let old = photosuite_psd::resources::VersionInfo {
+        let mut f = photosplice_psd::PsdFile::from_bytes(&bytes).expect("parse");
+        let old = photosplice_psd::resources::VersionInfo {
             version: 1,
             has_real_merged_data: true,
-            writer: photosuite_psd::descriptor::UnicodeString::new_nul("Adobe Photoshop"),
-            reader: photosuite_psd::descriptor::UnicodeString::new_nul("Adobe Photoshop CS6"),
+            writer: photosplice_psd::descriptor::UnicodeString::new_nul("Adobe Photoshop"),
+            reader: photosplice_psd::descriptor::UnicodeString::new_nul("Adobe Photoshop CS6"),
             file_version: 1,
         };
         for r in f.resources.iter_mut().filter(|r| r.id == 1057) {
@@ -286,7 +286,7 @@ fn kit1(out: &Path, cases: &mut Vec<Case>, log: &mut Vec<Vec<String>>) {
         cases.push(Case {
             file: "07d-photoshop-file-old-version-info.psd",
             source: Some(src7),
-            edit: "experiment: Photoshop's own file, only resource 1057 (version info) changed to the old PhotoSuite value (reader \"Adobe Photoshop CS6\")",
+            edit: "experiment: Photoshop's own file, only resource 1057 (version info) changed to the old PhotoSplice value (reader \"Adobe Photoshop CS6\")",
             expect: "Tell me whether it shows the \"update text layers\" prompt (that would prove the version info is the trigger).",
         });
     }
@@ -333,7 +333,7 @@ fn finish(out: &Path, cases: &[Case], log: &[Vec<String>]) {
         }
     }
     let mut md = String::from(
-        "# PhotoSuite → Photoshop verification kit\n\nFor each file: open it in Photoshop, check the expectation, and note OK / not OK \
+        "# PhotoSplice → Photoshop verification kit\n\nFor each file: open it in Photoshop, check the expectation, and note OK / not OK \
          (with what you saw). `*-original.psd` is the file it came from, for side-by-side comparison.\n\nThen please \
          **File › Save As** each `NN-….psd` into this folder as `NN-…-ps.psd` (Maximize Compatibility on), without other \
          changes: diffing Photoshop's re-save against ours shows exactly what Photoshop normalizes.\n\n",

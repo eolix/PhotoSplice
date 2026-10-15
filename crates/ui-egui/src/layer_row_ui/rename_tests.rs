@@ -7,22 +7,22 @@ use egui_kittest::Harness;
 use serde_json::json;
 
 use super::{recorded, rename, renaming};
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 
 /// A document with layers "Alpha", "Beta" and "Gamma" (Gamma on top and active).
-fn session() -> (photosuite_engine::Session, [u64; 3]) {
-    let mut s = photosuite_engine::Session::new();
+fn session() -> (photosplice_engine::Session, [u64; 3]) {
+    let mut s = photosplice_engine::Session::new();
     s.execute("file.new", json!({"width": 64, "height": 48})).unwrap();
     let ids = ["Alpha", "Beta", "Gamma"].map(|n| s.execute("layer.new.layer", json!({"name": n})).unwrap()["layer"].as_u64().unwrap());
     (s, ids)
 }
 
-fn harness(ppp: f32) -> (Harness<'static, PhotosuiteApp>, [u64; 3]) {
+fn harness(ppp: f32) -> (Harness<'static, PhotospliceApp>, [u64; 3]) {
     let (s, ids) = session();
     let mut h =
         Harness::builder().with_size(vec2(1440.0, 900.0)).with_pixels_per_point(ppp).with_step_dt(1.0 / 60.0).with_max_steps(64).build_eframe(move |cc| {
-            PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-            PhotosuiteApp::new(s, crate::Services::default())
+            PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+            PhotospliceApp::new(s, crate::Services::default())
         });
     let ctx = h.ctx.clone();
     let (req, _rx) = crate::control::ControlRequest::new("ui.set", json!({"dock": {"collapsed": ["color", "properties", "history", "navigator"]}}));
@@ -31,21 +31,21 @@ fn harness(ppp: f32) -> (Harness<'static, PhotosuiteApp>, [u64; 3]) {
     (h, ids)
 }
 
-fn name(h: &Harness<'_, PhotosuiteApp>, layer: u64) -> String {
-    h.state().session.active().unwrap().doc.layer(photosuite_doc::LayerId(layer)).unwrap().name.clone()
+fn name(h: &Harness<'_, PhotospliceApp>, layer: u64) -> String {
+    h.state().session.active().unwrap().doc.layer(photosplice_doc::LayerId(layer)).unwrap().name.clone()
 }
 
 /// Where `layer`'s name is drawn in the Layers panel.
-fn name_at(h: &Harness<'_, PhotosuiteApp>, layer: u64) -> Pos2 {
+fn name_at(h: &Harness<'_, PhotospliceApp>, layer: u64) -> Pos2 {
     let row = recorded(&h.ctx).into_iter().find(|r| r.layer == layer).expect("row drawn");
     row.name.map_or(row.row.center(), |r| r.center())
 }
 
-fn button(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2, pressed: bool) {
+fn button(h: &mut Harness<'_, PhotospliceApp>, at: Pos2, pressed: bool) {
     h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
 }
 
-fn click(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2) {
+fn click(h: &mut Harness<'_, PhotospliceApp>, at: Pos2) {
     h.hover_at(at);
     h.run_steps(1);
     button(h, at, true);
@@ -54,7 +54,7 @@ fn click(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2) {
     h.run_steps(3);
 }
 
-fn double_click(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2) {
+fn double_click(h: &mut Harness<'_, PhotospliceApp>, at: Pos2) {
     h.hover_at(at);
     // Two clicks 2 frames apart (60 fps) are a double click; egui counts a click within 0.6 s of
     // the click before the last as a triple click, so let the clock move past earlier clicks.
@@ -70,30 +70,30 @@ fn double_click(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2) {
     h.run_steps(3);
 }
 
-fn key(h: &mut Harness<'_, PhotosuiteApp>, k: Key) {
+fn key(h: &mut Harness<'_, PhotospliceApp>, k: Key) {
     h.event(Event::Key { key: k, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
     h.event(Event::Key { key: k, physical_key: None, pressed: false, repeat: false, modifiers: Modifiers::NONE });
     h.run_steps(3);
 }
 
-fn type_text(h: &mut Harness<'_, PhotosuiteApp>, text: &str) {
+fn type_text(h: &mut Harness<'_, PhotospliceApp>, text: &str) {
     h.event(Event::Text(text.into()));
     h.run_steps(2);
 }
 
 /// Is `layer`'s rename field on screen (drawn last frame)?
-fn field_shown(h: &Harness<'_, PhotosuiteApp>, layer: u64) -> bool {
+fn field_shown(h: &Harness<'_, PhotospliceApp>, layer: u64) -> bool {
     h.ctx.read_response(egui::Id::new(("layer-rename-field", layer))).is_some()
 }
 
 /// A point on the canvas, away from every panel.
-fn canvas(h: &Harness<'_, PhotosuiteApp>) -> Pos2 {
+fn canvas(h: &Harness<'_, PhotospliceApp>) -> Pos2 {
     let r = h.ctx.content_rect();
     pos2(r.width() * 0.4, r.height() * 0.5)
 }
 
 /// Start renaming `layer` by double-clicking its name; the name is selected, so typing replaces it.
-fn start(h: &mut Harness<'_, PhotosuiteApp>, layer: u64) {
+fn start(h: &mut Harness<'_, PhotospliceApp>, layer: u64) {
     let at = name_at(h, layer);
     double_click(h, at);
     assert_eq!(renaming(&h.ctx), Some(layer), "double-click starts renaming");
@@ -134,7 +134,7 @@ fn enter_and_tab_commit_and_escape_cancels() {
     key(&mut h, Key::Escape);
     assert_eq!((name(&h, c), renaming(&h.ctx)), ("Gamma".into(), None), "Esc cancels");
     // Esc only cancelled the rename: the document and the layer selection are untouched.
-    assert_eq!(h.state().session.active().unwrap().active_layer, Some(photosuite_doc::LayerId(c)));
+    assert_eq!(h.state().session.active().unwrap().active_layer, Some(photosplice_doc::LayerId(c)));
 
     // An empty or unchanged name renames nothing.
     start(&mut h, c);
@@ -183,7 +183,7 @@ fn a_rename_ends_when_its_layer_goes_away() {
     start(&mut h, a);
     h.state_mut().run("layer.select", json!({"layer": a})).unwrap();
     h.state_mut().run("layer.delete", json!({})).unwrap();
-    assert!(h.state().session.active().unwrap().doc.layer(photosuite_doc::LayerId(a)).is_none());
+    assert!(h.state().session.active().unwrap().doc.layer(photosplice_doc::LayerId(a)).is_none());
     h.run_steps(3);
     assert_eq!(renaming(&h.ctx), None);
     // The keyboard is back to the tools: V selects the Move tool.
@@ -214,7 +214,7 @@ fn double_click_above_or_below_the_name_renames() {
 #[test]
 fn double_click_beside_the_name_opens_layer_style() {
     let (mut h, [a, b, c]) = harness(1.0);
-    let styles = |h: &Harness<'_, PhotosuiteApp>| h.state().ui.dialogs.iter().filter(|d| d.kind == crate::state::DialogKind::LayerStyle).count();
+    let styles = |h: &Harness<'_, PhotospliceApp>| h.state().ui.dialogs.iter().filter(|d| d.kind == crate::state::DialogKind::LayerStyle).count();
     // Select Alpha with one click, then double-click the empty part of its row.
     let at = name_at(&h, a);
     click(&mut h, at);
@@ -225,7 +225,7 @@ fn double_click_beside_the_name_opens_layer_style() {
     double_click(&mut h, beside);
     assert_eq!(styles(&h), 1, "Layer Style opened");
     assert_eq!(renaming(&h.ctx), None, "not a rename");
-    assert_eq!(h.state().session.active().unwrap().active_layer, Some(photosuite_doc::LayerId(a)));
+    assert_eq!(h.state().session.active().unwrap().active_layer, Some(photosplice_doc::LayerId(a)));
     h.state_mut().ui.dialogs.clear();
     h.run_steps(2);
     // The name still renames.

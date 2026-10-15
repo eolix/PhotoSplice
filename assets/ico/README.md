@@ -2,7 +2,7 @@
 
 Single-colour SVG icons for the app chrome. Most are derived from
 [Tabler Icons](https://github.com/tabler/tabler-icons) (MIT — see `LICENSE`); the rest were drawn
-for PhotoSuite (see THIRD-PARTY-NOTICES.md).
+for PhotoSplice (see THIRD-PARTY-NOTICES.md).
 
 ## Layout
 

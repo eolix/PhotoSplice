@@ -1,9 +1,9 @@
 //! Timing for the heavier second-batch filters on a ~24 MP (6000×4000) RGBA8 layer.
-//! `cargo run --release -p photosuite-algo --example bench_filters2 [filter-name-substring]`
-use photosuite_algo::*;
-use photosuite_color::PixelFormat;
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+//! `cargo run --release -p photosplice-algo --example bench_filters2 [filter-name-substring]`
+use photosplice_algo::*;
+use photosplice_color::PixelFormat;
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 
 fn main() {
     let only = std::env::args().nth(1);

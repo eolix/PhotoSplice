@@ -127,11 +127,11 @@ fn halve(img: &ColorImage) -> ColorImage {
 /// A layer mask applied to the preview texels: the texel's alpha is scaled by
 /// `1 − density × (1 − value)`, as the compositor applies a pixel mask.
 pub struct PreviewMask {
-    pub surface: photosuite_raster::Surface,
+    pub surface: photosplice_raster::Surface,
     pub density: f32,
 }
 
-pub fn read_surface(surf: &photosuite_raster::Surface, mask: Option<&PreviewMask>, b: photosuite_geom::Rect, max_side: usize) -> (ColorImage, [f32; 2]) {
+pub fn read_surface(surf: &photosplice_raster::Surface, mask: Option<&PreviewMask>, b: photosplice_geom::Rect, max_side: usize) -> (ColorImage, [f32; 2]) {
     let (w, h) = (b.width() as usize, b.height() as usize);
     if w == 0 || h == 0 {
         return (ColorImage::new([1, 1], vec![Color32::TRANSPARENT]), [1.0, 1.0]);
@@ -145,9 +145,9 @@ pub fn read_surface(surf: &photosuite_raster::Surface, mask: Option<&PreviewMask
         let y1 = (y0 + k as i32).min(b.y1);
         let rows = (y1 - y0).max(0) as usize;
         let mut buf = vec![[0u8; 4]; w * rows];
-        surf.read_rgba8_into(photosuite_geom::Rect::new(b.x0, y0, b.x1, y1), &mut buf);
+        surf.read_rgba8_into(photosplice_geom::Rect::new(b.x0, y0, b.x1, y1), &mut buf);
         if let Some(m) = mask {
-            let v = m.surface.read_region(photosuite_geom::Rect::new(b.x0, y0, b.x1, y1));
+            let v = m.surface.read_region(photosplice_geom::Rect::new(b.x0, y0, b.x1, y1));
             let ch = m.surface.channels().max(1);
             for (p, mv) in buf.iter_mut().zip(v.chunks_exact(ch)) {
                 let k = (1.0 - m.density * (1.0 - mv.first().copied().unwrap_or(1.0))).clamp(0.0, 1.0);
@@ -209,16 +209,16 @@ mod tests {
 
     #[test]
     fn full_resolution_unless_over_the_texture_limit() {
-        let mut s = photosuite_raster::Surface::new(photosuite_color::PixelFormat::RGBA8);
+        let mut s = photosplice_raster::Surface::new(photosplice_color::PixelFormat::RGBA8);
         // A one-pixel checkerboard: any downsampling would turn it grey.
         for y in 0..300 {
             for x in 0..500 {
                 if (x + y) % 2 == 0 {
-                    s.fill_rect(photosuite_geom::Rect::new(x, y, x + 1, y + 1), &[1.0, 1.0, 1.0, 1.0]);
+                    s.fill_rect(photosplice_geom::Rect::new(x, y, x + 1, y + 1), &[1.0, 1.0, 1.0, 1.0]);
                 }
             }
         }
-        let r = photosuite_geom::Rect::new(0, 0, 500, 300);
+        let r = photosplice_geom::Rect::new(0, 0, 500, 300);
         let (img, uv) = read_surface(&s, None, r, 8192);
         assert_eq!(img.size, [500, 300]);
         assert_eq!(uv, [1.0, 1.0]);
@@ -229,11 +229,11 @@ mod tests {
         assert_eq!(small.size, [250, 150]);
         assert!((100..=155).contains(&small.pixels[0].a()), "{:?}", small.pixels[0]);
         assert_eq!(uv, [1.0, 1.0]);
-        let (odd, uv) = read_surface(&s, None, photosuite_geom::Rect::new(0, 0, 301, 3), 256);
+        let (odd, uv) = read_surface(&s, None, photosplice_geom::Rect::new(0, 0, 301, 3), 256);
         assert_eq!(odd.size, [151, 2]);
         assert!(uv[0] < 1.0 && uv[1] < 1.0);
         // Empty rect: a placeholder, no panic.
-        assert_eq!(read_surface(&s, None, photosuite_geom::Rect::new(5, 5, 5, 9), 256).0.size, [1, 1]);
+        assert_eq!(read_surface(&s, None, photosplice_geom::Rect::new(5, 5, 5, 9), 256).0.size, [1, 1]);
     }
 
     #[test]

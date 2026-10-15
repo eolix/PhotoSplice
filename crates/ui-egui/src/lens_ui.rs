@@ -3,7 +3,7 @@
 //! camera / lens search over the measured profiles) and Custom (distortion, chromatic
 //! aberration, vignette, transform, grid) tabs on the right.
 //!
-//! The preview runs the same [`photosuite_algo::lens::correct`] the command does, on a proxy of
+//! The preview runs the same [`photosplice_algo::lens::correct`] the command does, on a proxy of
 //! the layer sized to the dialog (a large modal over the document). OK runs `filter.lensCorrection` with the dialog's params (one
 //! history step; a smart filter on a smart object).
 //!
@@ -12,12 +12,12 @@
 //! "cancel":true}}}`; the reply describes the dialog.
 
 use egui::{Color32, FontId, Pos2, Rect as ERect, Sense, Stroke, TextureHandle, pos2, vec2};
-use photosuite_doc::LayerId;
-use photosuite_geom::Rect;
-use photosuite_raster::Surface;
+use photosplice_doc::LayerId;
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 use serde_json::{Map, Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::theme::Tokens;
 use crate::widgets;
 
@@ -54,7 +54,7 @@ pub struct LensDialog {
     ph: usize,
     /// The layer's full width (the zoom readout is relative to it, like the canvas's).
     full_w: usize,
-    info: Option<photosuite_algo::exif::CameraInfo>,
+    info: Option<photosplice_algo::exif::CameraInfo>,
     /// Camera search (maker, model) for the Lens Model list.
     maker: String,
     model: String,
@@ -99,8 +99,8 @@ impl LensDialog {
         let t0 = crate::gpu_canvas::now_ms();
         let frame = Rect::new(0, 0, self.pw as i32, self.ph as i32);
         let p = Value::Object(self.params.clone());
-        let out = match photosuite_engine::lens_cmds::lens_params(CMD, &p, frame, self.info.as_ref()) {
-            Ok(lc) => photosuite_algo::lens::correct(&self.proxy, frame, &lc),
+        let out = match photosplice_engine::lens_cmds::lens_params(CMD, &p, frame, self.info.as_ref()) {
+            Ok(lc) => photosplice_algo::lens::correct(&self.proxy, frame, &lc),
             Err(_) => self.proxy.clone(),
         };
         let img = image(&out, self.pw, self.ph);
@@ -124,18 +124,18 @@ fn image(s: &Surface, w: usize, h: usize) -> egui::ColorImage {
 }
 
 /// Opens the dialog on the active layer.
-pub fn open(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), String> {
-    photosuite_engine::commands::find(CMD).map(|c| (c.enabled)(&app.session)).unwrap_or(Err("unknown command".into()))?;
+pub fn open(app: &mut PhotospliceApp, ctx: &egui::Context) -> Result<(), String> {
+    photosplice_engine::commands::find(CMD).map(|c| (c.enabled)(&app.session)).unwrap_or(Err("unknown command".into()))?;
     let (layer, surf, _) = crate::distort_ui::active_pixels(app)?;
     let st = app.session.active().ok_or("no document")?;
     let canvas = st.doc.bounds();
-    let info = st.doc.metadata.exif.as_ref().map(|e| photosuite_algo::exif::read(e));
+    let info = st.doc.metadata.exif.as_ref().map(|e| photosplice_algo::exif::read(e));
     let (w, h) = (canvas.width() as usize, canvas.height() as usize);
     let screen = crate::widgets::tool_dialog_rect(ctx, DIALOG_MAX);
     let fit = ((screen.width() - PANEL_W - STRIP_W - 32.0) / w.max(1) as f32).min((screen.height() - 120.0) / h.max(1) as f32);
     let side = ((w.max(h) as f32 * fit * ctx.pixels_per_point()).round() as usize).clamp(256, 2400);
     let (px, pw, ph) = crate::camera_raw_ui::build_proxy(&surf, canvas, side);
-    let mut proxy = Surface::new(photosuite_color::PixelFormat::RGBA32F);
+    let mut proxy = Surface::new(photosplice_color::PixelFormat::RGBA32F);
     let flat: Vec<f32> = px.iter().flat_map(|q| *q).collect();
     proxy.write_region(Rect::new(0, 0, pw as i32, ph as i32), &flat);
     let mut d = LensDialog {
@@ -163,13 +163,13 @@ pub fn open(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), String> 
     };
     // The photograph's own camera, whenever the profiles know it (even with no profile for its
     // lens: it used to be shown only when the lens matched too), and its lens (Auto Correction).
-    if let (Some(db), Some(i)) = (photosuite_engine::lens_cmds::lens_database(), d.info.as_ref())
+    if let (Some(db), Some(i)) = (photosplice_engine::lens_cmds::lens_database(), d.info.as_ref())
         && let Some(c) = db.match_camera(i.make.as_deref(), i.model.as_deref())
     {
         d.maker = c.maker.clone();
         d.model = c.model.clone();
     }
-    if let (Some(db), Some(i)) = (photosuite_engine::lens_cmds::lens_database(), d.info.as_ref())
+    if let (Some(db), Some(i)) = (photosplice_engine::lens_cmds::lens_database(), d.info.as_ref())
         && let Some(cal) = db.for_photo(i)
     {
         d.params.insert("profile".into(), json!("measured"));
@@ -182,7 +182,7 @@ pub fn open(app: &mut PhotosuiteApp, ctx: &egui::Context) -> Result<(), String> 
 }
 
 /// Menu / control-channel entry point. `None` when the call isn't for this dialog.
-pub fn menu(app: &mut PhotosuiteApp, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
+pub fn menu(app: &mut PhotospliceApp, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
     if id != CMD {
         return None;
     }
@@ -233,12 +233,12 @@ fn straighten(d: &mut LensDialog, a: [f64; 2], b: [f64; 2]) {
     if (b[0] - a[0]).hypot(b[1] - a[1]) < 3.0 {
         return;
     }
-    let angle = f64::from(d.num("angle")) + photosuite_algo::lens::straighten_angle(a, b);
+    let angle = f64::from(d.num("angle")) + photosplice_algo::lens::straighten_angle(a, b);
     d.params.insert("angle".into(), json!((angle * 100.0).round() / 100.0));
     d.dirty = true;
 }
 
-fn commit(app: &mut PhotosuiteApp) -> Result<Value, String> {
+fn commit(app: &mut PhotospliceApp) -> Result<Value, String> {
     let d = app.lens.take().ok_or("Lens Correction isn't open")?;
     let mut p = d.params.clone();
     p.insert("layer".into(), json!(d.layer.0));
@@ -343,7 +343,7 @@ fn auto_tab(ui: &mut egui::Ui, d: &mut LensDialog) {
         }
     });
     heading(ui, tl!("Search Criteria"));
-    let Some(db) = photosuite_engine::lens_cmds::lens_database() else {
+    let Some(db) = photosplice_engine::lens_cmds::lens_database() else {
         ui.label(egui::RichText::new(tl!("Lens profiles aren't available")).color(t.text_faint));
         return;
     };
@@ -394,7 +394,7 @@ fn auto_tab(ui: &mut egui::Ui, d: &mut LensDialog) {
 const DIALOG_MAX: egui::Vec2 = vec2(1280.0, 860.0);
 
 /// Draws the dialog (a large modal over the document) while it is open.
-pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     if app.lens.is_none() {
         return;
     }
@@ -549,11 +549,11 @@ mod tests {
     #[test]
     fn auto_tab_names_the_camera_without_a_matching_lens() {
         let db = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../resources/lensfun/lens-database.json")).unwrap();
-        photosuite_engine::lens_cmds::set_lens_database_json(&db).unwrap();
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        photosplice_engine::lens_cmds::set_lens_database_json(&db).unwrap();
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         let ctx = egui::Context::default();
         app.run("file.new", json!({"width": 120, "height": 80})).unwrap();
-        let exif = photosuite_algo::exif::build(&photosuite_algo::exif::CameraInfo {
+        let exif = photosplice_algo::exif::build(&photosplice_algo::exif::CameraInfo {
             make: Some("NIKON CORPORATION".into()),
             model: Some("NIKON Z 6".into()),
             lens: Some("A Lens Nobody Measured 37mm".into()),
@@ -569,7 +569,7 @@ mod tests {
 
     #[test]
     fn dialog_previews_and_commits_the_command() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), Default::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         let ctx = egui::Context::default();
         app.run("file.new", json!({"width": 120, "height": 80})).unwrap();
         app.run("layer.new.layer", json!({})).unwrap();

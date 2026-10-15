@@ -10,7 +10,7 @@
 
 use serde_json::{Map, Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::canvas::ToolEvent;
 use crate::state::{DialogKind, Tool};
 
@@ -63,14 +63,14 @@ impl Kind {
 }
 
 /// Does `tool` paint the layer's pixels (so a vector or Smart Object layer must be rasterized)?
-pub fn paints_pixels(app: &PhotosuiteApp, tool: Tool) -> bool {
+pub fn paints_pixels(app: &PhotospliceApp, tool: Tool) -> bool {
     tool.is_brushlike() || matches!(tool, Tool::PaintBucket | Tool::MagicEraser) || (tool == Tool::Gradient && app.ui.tool_options.gradient_classic)
 }
 
 /// The active layer's kind when painting its pixels needs rasterizing first: the tool targets
 /// the layer's pixels (not its mask, an alpha channel or the Quick Mask) and the layer is a
 /// type, shape, Smart Object or fill layer that isn't locked.
-pub fn needed(app: &PhotosuiteApp) -> Option<(Kind, photosuite_doc::LayerId)> {
+pub fn needed(app: &PhotospliceApp) -> Option<(Kind, photosplice_doc::LayerId)> {
     if crate::canvas::paint_target(app) != json!("pixels") {
         return None;
     }
@@ -81,7 +81,7 @@ pub fn needed(app: &PhotosuiteApp) -> Option<(Kind, photosuite_doc::LayerId)> {
     if locks.all || locks.pixels {
         return None;
     }
-    use photosuite_doc::LayerContent as C;
+    use photosplice_doc::LayerContent as C;
     let kind = match &l.content {
         C::Text(_) => Kind::Type,
         C::Shape(_) => Kind::Shape,
@@ -94,7 +94,7 @@ pub fn needed(app: &PhotosuiteApp) -> Option<(Kind, photosuite_doc::LayerId)> {
 
 /// A tool's pointer press: when it would paint a layer that must be rasterized first, park it
 /// behind the prompt and return true (the tool must not see the press).
-pub fn intercept(app: &mut PhotosuiteApp, tool: Tool, x: f64, y: f64, pressure: f32) -> bool {
+pub fn intercept(app: &mut PhotospliceApp, tool: Tool, x: f64, y: f64, pressure: f32) -> bool {
     if !paints_pixels(app, tool) {
         return false;
     }
@@ -106,11 +106,11 @@ pub fn intercept(app: &mut PhotosuiteApp, tool: Tool, x: f64, y: f64, pressure: 
 }
 
 /// Open the prompt for `layer`; OK rasterizes it, then `tool` paints at `at` (x, y, pressure).
-pub fn open(app: &mut PhotosuiteApp, kind: Kind, layer: photosuite_doc::LayerId, tool: Tool, at: [f64; 3]) -> u64 {
+pub fn open(app: &mut PhotospliceApp, kind: Kind, layer: photosplice_doc::LayerId, tool: Tool, at: [f64; 3]) -> u64 {
     let mut f = Map::new();
     f.insert(MARK.into(), json!(kind.key()));
     f.insert("__command".into(), json!(kind.command()));
-    f.insert("__label".into(), json!("PhotoSuite"));
+    f.insert("__label".into(), json!("PhotoSplice"));
     f.insert("message".into(), json!(kind.message()));
     f.insert("layer".into(), json!(layer.0));
     f.insert("tool".into(), json!(format!("{tool:?}")));
@@ -136,7 +136,7 @@ pub fn body(ui: &mut egui::Ui, f: &Map<String, Value>) {
 }
 
 /// OK: rasterize, then paint at the click (two history states).
-pub fn confirm(app: &mut PhotosuiteApp, f: &Map<String, Value>) -> Result<Value, String> {
+pub fn confirm(app: &mut PhotospliceApp, f: &Map<String, Value>) -> Result<Value, String> {
     let kind = f.get(MARK).and_then(Value::as_str).and_then(Kind::from_key).ok_or("not a rasterize prompt")?;
     let layer = f.get("layer").and_then(Value::as_u64).ok_or("the prompt has no layer")?;
     let r = app.run(kind.command(), json!({ "layer": layer }))?;
@@ -149,7 +149,7 @@ pub fn confirm(app: &mut PhotosuiteApp, f: &Map<String, Value>) -> Result<Value,
     // The same tool, layer and point as when the prompt opened.
     app.ui.tool = tool;
     let before = app.session.active().map(|st| st.history.past_len());
-    if app.session.active().and_then(|st| st.active_layer) == Some(photosuite_doc::LayerId(layer)) && x.is_finite() && y.is_finite() {
+    if app.session.active().and_then(|st| st.active_layer) == Some(photosplice_doc::LayerId(layer)) && x.is_finite() && y.is_finite() {
         crate::canvas::tool_event(app, ToolEvent::Down { x, y, pressure: pressure.clamp(0.0, 1.0) }, egui::Modifiers::NONE);
         crate::canvas::tool_event(app, ToolEvent::Up { x, y }, egui::Modifiers::NONE);
     }

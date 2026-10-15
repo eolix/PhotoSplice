@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::state::DialogKind;
 
 /// Top-level menus in Photoshop order.
@@ -59,7 +59,7 @@ pub const UI_COMMANDS: &[(&str, &str, &[&str], Option<&str>)] = &[
     ("help.reportIssue", "Report an Issue…", &["Help"], None),
     ("help.systemInfo", "System Info…", &["Help"], None),
     ("help.thirdPartyNotices", "Third-Party Notices…", &["Help"], None),
-    ("help.about", "About PhotoSuite", &["Help"], None),
+    ("help.about", "About PhotoSplice", &["Help"], None),
 ];
 
 /// Photoshop's Window › <panel> ids for the panels the shell already has, as `window.toggle.*`.
@@ -100,7 +100,7 @@ fn workspace_name(id: &str) -> Option<&'static str> {
 }
 
 /// Run a command id from any source (menu, shortcut, palette, automation).
-pub fn invoke(app: &mut PhotosuiteApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+pub fn invoke(app: &mut PhotospliceApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
     if app.automation_input
         && let Some(authorize) = app.services.automation_command.as_ref()
     {
@@ -113,7 +113,7 @@ pub fn invoke(app: &mut PhotosuiteApp, ctx: &egui::Context, id: &str, params: Va
 }
 
 /// [`invoke`] without the unsaved-changes prompt, for once the user has already answered it.
-pub(crate) fn invoke_unguarded(app: &mut PhotosuiteApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+pub(crate) fn invoke_unguarded(app: &mut PhotospliceApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
     // Help › Website, GitHub, Report an Issue.
     if let Some(url) = crate::links::url_for(id) {
         return Ok(crate::links::open(app, ctx, url));
@@ -211,7 +211,7 @@ pub(crate) fn invoke_unguarded(app: &mut PhotosuiteApp, ctx: &egui::Context, id:
         "layer.renameLayer" if params.get("name").is_none() => {
             let st = app.session.active().ok_or("no document")?;
             let id = params.get("layer").and_then(Value::as_u64).or(st.active_layer.map(|l| l.0)).ok_or("no active layer")?;
-            let name = st.doc.layer(photosuite_doc::LayerId(id)).map(|l| l.name.clone()).ok_or("no such layer")?;
+            let name = st.doc.layer(photosplice_doc::LayerId(id)).map(|l| l.name.clone()).ok_or("no such layer")?;
             // Another rename in progress is committed first (#314).
             if let Some((cmd, p)) = crate::layer_row_ui::start_rename(ctx, id, &name) {
                 app.run(&cmd, p)?;
@@ -336,7 +336,7 @@ pub(crate) fn invoke_unguarded(app: &mut PhotosuiteApp, ctx: &egui::Context, id:
         "select.colorRange" if params.as_object().is_none_or(|o| o.is_empty()) => Ok(json!({"dialog": crate::color_range_ui::open(app)})),
         // Edit › Fill… from the menu or its shortcuts: the Fill dialog (with params: the engine).
         crate::fill_ui::COMMAND if params.as_object().is_none_or(|o| o.is_empty()) => {
-            if let Some(Err(why)) = photosuite_engine::commands::find(id).map(|c| (c.enabled)(&app.session)) {
+            if let Some(Err(why)) = photosplice_engine::commands::find(id).map(|c| (c.enabled)(&app.session)) {
                 return Err(why);
             }
             Ok(json!({"dialog": crate::fill_ui::open(app)}))
@@ -357,7 +357,7 @@ pub(crate) fn invoke_unguarded(app: &mut PhotosuiteApp, ctx: &egui::Context, id:
                     let v = &app.ui.views[i];
                     let (hw, hh) = (app.last_canvas_rect.width() / 2.0 / v.zoom, app.last_canvas_rect.height() / 2.0 / v.zoom);
                     let r =
-                        photosuite_geom::Rect::new((v.center[0] - hw) as i32, (v.center[1] - hh) as i32, (v.center[0] + hw) as i32, (v.center[1] + hh) as i32);
+                        photosplice_geom::Rect::new((v.center[0] - hw) as i32, (v.center[1] - hh) as i32, (v.center[0] + hw) as i32, (v.center[1] + hh) as i32);
                     !clip.bounds.intersect(&r).is_empty()
                 });
             let p = match app.session.active_index() {
@@ -456,7 +456,7 @@ pub(crate) fn invoke_unguarded(app: &mut PhotosuiteApp, ctx: &egui::Context, id:
     }
 }
 
-fn open_path(app: &mut PhotosuiteApp, path: &str) -> Result<Value, String> {
+fn open_path(app: &mut PhotospliceApp, path: &str) -> Result<Value, String> {
     app.open_path(path).map(|w| json!({"warnings": w}))
 }
 
@@ -465,7 +465,7 @@ fn open_path(app: &mut PhotosuiteApp, path: &str) -> Result<Value, String> {
 /// File › Save As without a path: the Save for Web screen with the document formats added
 /// ([`crate::file_ui::open_save_as`]). Edit Contents documents still save straight back into
 /// their smart object.
-fn save_as_screen(app: &mut PhotosuiteApp) -> Result<Value, String> {
+fn save_as_screen(app: &mut PhotospliceApp) -> Result<Value, String> {
     app.session.active().ok_or("no document")?;
     if app.session.is_enabled("layer.smartObjects.saveContents") {
         return app.save_as(None).map(|(p, w)| json!({"path": p, "warnings": w}));
@@ -475,11 +475,11 @@ fn save_as_screen(app: &mut PhotosuiteApp) -> Result<Value, String> {
 
 /// Save now, without the Save As screen: in place when the format allows, else through the
 /// file picker. For callers that need the outcome straight away (closing with unsaved changes).
-pub fn save_or_pick(app: &mut PhotosuiteApp) -> Result<Value, String> {
+pub fn save_or_pick(app: &mut PhotospliceApp) -> Result<Value, String> {
     crate::file_ui::save_in_place(app).unwrap_or_else(|| app.save_as(None).map(|(p, w)| json!({"path": p, "warnings": w})))
 }
 
-pub fn is_enabled(app: &PhotosuiteApp, id: &str) -> bool {
+pub fn is_enabled(app: &PhotospliceApp, id: &str) -> bool {
     // Photoshop greys these for the Background layer, other layer kinds or single-layer documents.
     if crate::enable_rules::disabled(app, id) {
         return false;
@@ -526,7 +526,7 @@ pub fn is_enabled(app: &PhotosuiteApp, id: &str) -> bool {
             .session
             .active()
             .and_then(|s| s.active_layer.and_then(|id| s.doc.layer(id)))
-            .is_some_and(|l| matches!(l.content, photosuite_doc::LayerContent::Text(_))),
+            .is_some_and(|l| matches!(l.content, photosplice_doc::LayerContent::Text(_))),
         "select.transformSelection" => app.ui.transform.is_none() && app.session.is_enabled("select.transformSelection"),
         // ⇧[ / ⇧] only step the hardness of a tool that paints with the brush tip, as in Photoshop.
         "tools.decreaseBrushHardness" | "tools.increaseBrushHardness" => app.ui.tool.is_brushlike(),
@@ -551,8 +551,8 @@ pub fn is_enabled(app: &PhotosuiteApp, id: &str) -> bool {
 /// Is a UI-level panel toggle currently on (for checkmarks)?
 /// Checkmark state for a command, or `None` when it is not a checkable item. Public so the
 /// native menu bar can sync `NSMenuItem` state without rebuilding the whole item list.
-pub fn checked(app: &PhotosuiteApp, id: &str) -> Option<bool> {
-    use photosuite_doc::{ColorMode, SampleType};
+pub fn checked(app: &PhotospliceApp, id: &str) -> Option<bool> {
+    use photosplice_doc::{ColorMode, SampleType};
     if let Some(c) = crate::view_cmds::checked(app, id) {
         return Some(c);
     }
@@ -640,7 +640,7 @@ pub struct MenuItem {
 /// Is `id` implemented by the engine or the shell (a live menu item)? Shared by the menus and
 /// the parity report ([`crate::parity`]).
 pub fn is_live(id: &str) -> bool {
-    photosuite_engine::commands::find(id).is_some()
+    photosplice_engine::commands::find(id).is_some()
         || UI_COMMANDS.iter().any(|c| c.0 == id)
         || panel_alias(id).is_some()
         || workspace_name(id).is_some()
@@ -657,7 +657,7 @@ pub fn is_live(id: &str) -> bool {
 /// Commands outside the catalogue that belong right after a catalogue item: `(id, after)`.
 const PLACE_AFTER: &[(&str, &str)] = &[("file.newFromClipboard", "file.new"), ("filter.render.relight", "filter.render.lightingEffects")];
 
-pub fn menu_items(app: &PhotosuiteApp) -> Vec<MenuItem> {
+pub fn menu_items(app: &PhotospliceApp) -> Vec<MenuItem> {
     // 1) Photoshop's full menu tree, in Photoshop order; live where we implement the command.
     let known = is_live;
     let mut items: Vec<MenuItem> = crate::menu_catalog::CATALOG
@@ -685,7 +685,7 @@ pub fn menu_items(app: &PhotosuiteApp) -> Vec<MenuItem> {
             color: None,
         });
     }
-    for c in photosuite_engine::command_specs().iter().filter(|c| !c.menu.is_empty()) {
+    for c in photosplice_engine::command_specs().iter().filter(|c| !c.menu.is_empty()) {
         extra.push(MenuItem {
             id: c.id.into(),
             label: c.label.into(),
@@ -768,7 +768,7 @@ pub fn menu_items(app: &PhotosuiteApp) -> Vec<MenuItem> {
 /// The unfiltered list stays available because hiding is a *display* choice. Checkmarks,
 /// enabled state, the Keyboard Shortcuts and Menus dialog (which must list hidden items so they
 /// can be shown again), the control channel and the shortcut tables all read [`menu_items`].
-pub fn visible_menu_items(app: &PhotosuiteApp) -> Vec<MenuItem> {
+pub fn visible_menu_items(app: &PhotospliceApp) -> Vec<MenuItem> {
     let mut items = menu_items(app);
     let hidden = &app.session.prefs().menus.hidden;
     if !hidden.is_empty() {
@@ -780,7 +780,7 @@ pub fn visible_menu_items(app: &PhotosuiteApp) -> Vec<MenuItem> {
 
 /// The top-level menus the bar actually draws: [`TOP_MENUS`] minus any whose every item is
 /// hidden. Tests that walk the bar should use this rather than the constant.
-pub fn visible_top_menus(app: &PhotosuiteApp) -> Vec<&'static str> {
+pub fn visible_top_menus(app: &PhotospliceApp) -> Vec<&'static str> {
     TOP_MENUS.into_iter().filter(|top| top_menu_has_items(app, top)).collect()
 }
 
@@ -790,14 +790,14 @@ pub fn visible_top_menus(app: &PhotosuiteApp) -> Vec<&'static str> {
 /// its commands ship hidden. A menu in that state is dropped from the bar entirely rather than
 /// drawn as a title that opens "(coming soon)". Scans the static tables instead of building
 /// [`menu_items`], which allocates, because this runs for every title every frame.
-fn top_menu_has_items(app: &PhotosuiteApp, top: &str) -> bool {
+fn top_menu_has_items(app: &PhotospliceApp, top: &str) -> bool {
     let hidden = &app.session.prefs().menus.hidden;
     let shown = |id: &str| !hidden.iter().any(|h| h == id);
     crate::menu_catalog::CATALOG.iter().any(|(path, _, _, id)| *id != "---" && path.first() == Some(&top) && shown(id))
         || UI_COMMANDS.iter().any(|(id, _, path, _)| path.first() == Some(&top) && shown(id))
         // The engine's own commands too, as `menu_items` lists them: the macOS menu bar is built
         // from that list, so leaving them out here made the two bars disagree about a menu.
-        || photosuite_engine::command_specs().iter().any(|c| c.menu.first() == Some(&top) && shown(c.id))
+        || photosplice_engine::command_specs().iter().any(|c| c.menu.first() == Some(&top) && shown(c.id))
 }
 
 /// Drop separators left stranded by hiding items: runs of adjacent separators collapse to one,
@@ -837,11 +837,11 @@ fn menu_tint(name: &str) -> Option<egui::Color32> {
 }
 
 /// Draws the menu bar; returns the right edge of the last menu title (the bar itself fills the row).
-pub fn menu_bar(app: &mut PhotosuiteApp, ui: &mut egui::Ui) -> f32 {
+pub fn menu_bar(app: &mut PhotospliceApp, ui: &mut egui::Ui) -> f32 {
     // Built only while a menu is open: every item's enabled/checked state scales with the
     // document (layer lookups), which cost milliseconds per frame on large layouts (#125).
     let items: std::cell::OnceCell<Vec<MenuItem>> = std::cell::OnceCell::new();
-    let app_ref: &PhotosuiteApp = app;
+    let app_ref: &PhotospliceApp = app;
     let mut right = ui.cursor().left();
     let lang = crate::i18n::current();
     let mut clicked: Option<String> = None;
@@ -1001,14 +1001,14 @@ fn render_level_rows(ui: &mut egui::Ui, items: &[&MenuItem], depth: usize, click
 /// The command a menu click runs: ⌥ + Merge Down / Merge Layers / Merge Visible keep the
 /// originals, running Stamp Down / Stamp Visible instead (#217).
 pub fn alt_click(id: String, alt: bool) -> String {
-    match photosuite_engine::stamp_cmds::alt_variant(&id) {
+    match photosplice_engine::stamp_cmds::alt_variant(&id) {
         Some(stamp) if alt => stamp.to_string(),
         _ => id,
     }
 }
 
 /// Workspace presets (Window → Workspace): which panels are visible.
-pub fn apply_workspace(app: &mut PhotosuiteApp) {
+pub fn apply_workspace(app: &mut PhotospliceApp) {
     // Saved workspaces (Window › Workspace › New Workspace…) restore their own layout.
     if crate::workspace_ui::apply_custom(app) {
         return;
@@ -1037,7 +1037,7 @@ mod tests {
 
     #[test]
     fn select_menu_contains_every_selection_context_action_and_more() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
         app.run("select.rect", json!({"x": 2, "y": 2, "width": 8, "height": 8})).unwrap();
         let items = menu_items(&app);
@@ -1064,14 +1064,14 @@ mod tests {
 
         for theme in crate::theme::ThemeKind::ALL {
             for width in [640.0, 1440.0] {
-                let app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+                let app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
                 let mut harness = Harness::builder().with_size(egui::vec2(width, 200.0)).build_ui_state(
                     |ui, app| {
                         menu_bar(app, ui);
                     },
                     app,
                 );
-                PhotosuiteApp::setup_context(&harness.ctx, theme);
+                PhotospliceApp::setup_context(&harness.ctx, theme);
                 harness.run_steps(3);
 
                 let font = egui::TextStyle::Button.resolve(&harness.ctx.global_style());
@@ -1123,14 +1123,14 @@ mod tests {
     fn hovering_another_title_switches_the_open_menu() {
         use egui_kittest::{Harness, kittest::Queryable};
 
-        let app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         let mut harness = Harness::builder().with_size(egui::vec2(1200.0, 700.0)).build_ui_state(
             |ui, app| {
                 menu_bar(app, ui);
             },
             app,
         );
-        PhotosuiteApp::setup_context(&harness.ctx, crate::theme::ThemeKind::ALL[0]);
+        PhotospliceApp::setup_context(&harness.ctx, crate::theme::ThemeKind::ALL[0]);
         harness.run_steps(3);
         // Nothing open: hovering a title does not open it.
         harness.get_by_label("Image").hover();
@@ -1150,14 +1150,14 @@ mod tests {
         use egui_kittest::{Harness, kittest::Queryable};
 
         for theme in crate::theme::ThemeKind::ALL {
-            let app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+            let app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
             let mut harness = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_ui_state(
                 |ui, app| {
                     menu_bar(app, ui);
                 },
                 app,
             );
-            PhotosuiteApp::setup_context(&harness.ctx, theme);
+            PhotospliceApp::setup_context(&harness.ctx, theme);
             harness.run_steps(3);
             harness.get_by_label("File").click();
             harness.run_steps(3);
@@ -1173,14 +1173,14 @@ mod tests {
     fn menu_level_height_is_bounded_by_viewport() {
         use egui_kittest::Harness;
 
-        let app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         let mut harness = Harness::builder().with_size(egui::vec2(900.0, 240.0)).build_ui_state(
             |ui, app| {
                 menu_bar(app, ui);
             },
             app,
         );
-        PhotosuiteApp::setup_context(&harness.ctx, crate::theme::ThemeKind::ALL[0]);
+        PhotospliceApp::setup_context(&harness.ctx, crate::theme::ThemeKind::ALL[0]);
         harness.run_steps(3);
         // Opening a top-level menu with many entries must not grow its popup past the viewport.
         use egui_kittest::kittest::Queryable;
@@ -1201,14 +1201,14 @@ mod tests {
     fn tall_menu_scrolls_with_mouse_wheel_on_short_display() {
         use egui_kittest::{Harness, kittest::Queryable};
 
-        let app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         let mut harness = Harness::builder().with_size(egui::vec2(900.0, 220.0)).build_ui_state(
             |ui, app| {
                 menu_bar(app, ui);
             },
             app,
         );
-        PhotosuiteApp::setup_context(&harness.ctx, crate::theme::ThemeKind::ALL[0]);
+        PhotospliceApp::setup_context(&harness.ctx, crate::theme::ThemeKind::ALL[0]);
         harness.run_steps(3);
         harness.get_by_label("Filter").click();
         harness.run_steps(3);
@@ -1230,7 +1230,7 @@ mod tests {
 
     #[test]
     fn window_panel_and_workspace_ids_drive_the_shell() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         let ctx = egui::Context::default();
         assert!(!app.ui.panels.history);
         invoke(&mut app, &ctx, "window.panel.history", Value::Null).unwrap();
@@ -1251,7 +1251,7 @@ mod tests {
 
     #[test]
     fn proof_setup_presets_and_checkmarks() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         let ctx = egui::Context::default();
         app.run("file.new", json!({"width": 8, "height": 8})).unwrap();
         app.sync_views();
@@ -1268,7 +1268,7 @@ mod tests {
         assert_eq!((at(0, 8, 0), at(4, 4, 4)), (255, 0));
         // Custom… opens the generated Proof Setup dialog with a profile choice.
         assert!(invoke(&mut app, &ctx, "view.proofSetup.custom", Value::Null).unwrap()["dialog"].is_u64());
-        let spec = photosuite_engine::commands::find("edit.convertToProfile").unwrap();
+        let spec = photosplice_engine::commands::find("edit.convertToProfile").unwrap();
         let params = crate::filter_dialog::parse_spec(spec.params);
         assert!(matches!(&params[0].kind, crate::filter_dialog::Kind::Choice(c) if c[0] == "srgb" && !c.iter().any(|v| v.contains('/'))));
     }
@@ -1281,7 +1281,7 @@ mod open_recent_tests {
 
     #[test]
     fn tracks_dedupes_caps_and_lists() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.push_recent("/tmp/a.png");
         app.push_recent("/tmp/b.psd");
         app.push_recent("/tmp/a.png"); // de-dupe → moves to front
@@ -1318,14 +1318,14 @@ mod open_recent_tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn opening_a_file_records_it_as_recent() {
-        use photosuite_color::{ColorMode, SampleType};
-        use photosuite_geom::Size;
+        use photosplice_color::{ColorMode, SampleType};
+        use photosplice_geom::Size;
         let services = crate::Services {
-            import: Some(Box::new(|_n: &str, _b: &[u8]| Ok((photosuite_doc::Document::new("t", Size::new(4, 4), ColorMode::Rgb, SampleType::U8), Vec::new())))),
+            import: Some(Box::new(|_n: &str, _b: &[u8]| Ok((photosplice_doc::Document::new("t", Size::new(4, 4), ColorMode::Rgb, SampleType::U8), Vec::new())))),
             ..Default::default()
         };
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), services);
-        let path = std::env::temp_dir().join("photosuite_recent_test.pcraft");
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), services);
+        let path = std::env::temp_dir().join("photosplice_recent_test.pcraft");
         std::fs::write(&path, b"x").unwrap();
         let p = path.to_string_lossy().to_string();
         let ctx = egui::Context::default();
@@ -1342,12 +1342,12 @@ mod open_recent_tests {
 mod hidden_menu_tests {
     use super::*;
 
-    /// PhotoSuite has no Type menu: every item under it ships hidden, the engine's own commands
+    /// PhotoSplice has no Type menu: every item under it ships hidden, the engine's own commands
     /// (Anti-Alias › None) included, so neither the in-window bar nor the macOS one shows it.
     /// And both bars agree: a top menu shows exactly when the item list has something in it.
     #[test]
     fn type_ships_hidden_and_both_menu_bars_agree() {
-        let app = crate::PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let app = crate::PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         let items = visible_menu_items(&app);
         let typed: Vec<&str> = items.iter().filter(|i| i.path.first().map(String::as_str) == Some("Type")).map(|i| i.id.as_str()).collect();
         assert!(typed.is_empty(), "visible under Type: {typed:?}");

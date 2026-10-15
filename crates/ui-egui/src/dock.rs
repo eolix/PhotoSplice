@@ -16,7 +16,7 @@ use egui::{Rect, Sense, Stroke, pos2, vec2};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::state::{DockTabs, Panels};
 use crate::theme::Tokens;
 use crate::widgets;
@@ -296,7 +296,7 @@ impl DockLayout {
 
 /// Show `g` and expand it (Window › <panel>, the icon rail): a panel asked for is always
 /// brought back, whatever state it was left in (#129).
-pub fn reveal(app: &mut PhotosuiteApp, g: Group) {
+pub fn reveal(app: &mut PhotospliceApp, g: Group) {
     *g.shown_mut(&mut app.ui.panels) = true;
     app.ui.dock.set_collapsed(g, false);
 }
@@ -305,7 +305,7 @@ pub fn reveal(app: &mut PhotosuiteApp, g: Group) {
 /// collapsed to its tab strip. A docked group is never hidden from the rail (it used to
 /// toggle visibility, so one stray click made a panel vanish: #129); `docked` is false for
 /// Studio's floating Properties card, which the rail shows and hides.
-pub fn rail_click(app: &mut PhotosuiteApp, g: Group, docked: bool) {
+pub fn rail_click(app: &mut PhotospliceApp, g: Group, docked: bool) {
     if !g.shown(&app.ui.panels) {
         reveal(app, g);
     } else if !docked {
@@ -355,7 +355,7 @@ fn strips_id() -> egui::Id {
 
 /// Draw the `shown` groups (any order; the layout decides) filling `ui`. `body` draws one
 /// group's tab content.
-pub fn show(app: &mut PhotosuiteApp, ui: &mut egui::Ui, shown: &[Group], mut body: impl FnMut(&mut PhotosuiteApp, &mut egui::Ui, Group, usize)) {
+pub fn show(app: &mut PhotospliceApp, ui: &mut egui::Ui, shown: &[Group], mut body: impl FnMut(&mut PhotospliceApp, &mut egui::Ui, Group, usize)) {
     let t = Tokens::get(ui.ctx());
     let strip = if t.pro { 28.0 } else { 40.0 };
     let order: Vec<Group> = app.ui.dock.order().into_iter().filter(|g| shown.contains(g)).collect();
@@ -526,13 +526,13 @@ fn resize(layout: &mut DockLayout, heights: &[(Group, f32)], i: usize, dy: f32) 
 }
 
 /// What `prefs.panelLayout` holds: the live layout and open panels.
-fn snapshot(app: &PhotosuiteApp) -> Value {
+fn snapshot(app: &PhotospliceApp) -> Value {
     json!({"workspace": app.ui.workspace, "panels": app.ui.panels, "dockTabs": app.ui.dock_tabs, "dock": app.ui.dock})
 }
 
 /// Remember the layout in the preferences once the user lets go of the mouse (Workspace ›
 /// Remember Workspace Changes). Cheap: a small JSON compare per frame.
-pub fn persist(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+pub fn persist(app: &mut PhotospliceApp, ctx: &egui::Context) {
     if !app.session.prefs().workspace.remember_workspace_changes || ctx.input(|i| i.pointer.any_down()) {
         return;
     }
@@ -543,7 +543,7 @@ pub fn persist(app: &mut PhotosuiteApp, ctx: &egui::Context) {
 }
 
 /// Restore the remembered layout at launch. Unreadable parts keep their defaults.
-pub fn restore(app: &mut PhotosuiteApp) {
+pub fn restore(app: &mut PhotospliceApp) {
     if !app.session.prefs().workspace.remember_workspace_changes {
         return;
     }
@@ -556,7 +556,7 @@ pub fn restore(app: &mut PhotosuiteApp) {
 
 /// Apply the `panels`, `dockTabs` and `dock` parts of a saved layout (a workspace or
 /// `panelLayout`). Missing or invalid parts are left alone.
-pub fn apply(app: &mut PhotosuiteApp, v: &Value) {
+pub fn apply(app: &mut PhotospliceApp, v: &Value) {
     if let Some(p) = v.get("panels").and_then(|p| serde_json::from_value(p.clone()).ok()) {
         app.ui.panels = p;
     }

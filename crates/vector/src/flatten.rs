@@ -1,7 +1,7 @@
 //! Bézier flattening with a distance tolerance.
 
-use photosuite_doc::{Path, Subpath};
-use photosuite_geom::Point;
+use photosplice_doc::{Path, Subpath};
+use photosplice_geom::Point;
 
 /// A flattened subpath.
 #[derive(Clone, Debug, Default, PartialEq)]

@@ -1,4 +1,4 @@
-use photosuite_geom::Rect;
+use photosplice_geom::Rect;
 use serde_json::json;
 
 use super::*;
@@ -72,8 +72,8 @@ fn results_do_not_depend_on_tiling() {
     let b = Rect::new(0, 0, W, H);
     for f in GalleryFilter::ALL {
         let fp = params_for(f.command_id(), &json!({})).unwrap();
-        let big = photosuite_algo::apply_tiled(&surf, &fp, b, b, None, 256, Some(b));
-        let small = photosuite_algo::apply_tiled(&surf, &fp, b, b, None, 16, Some(b));
+        let big = photosplice_algo::apply_tiled(&surf, &fp, b, b, None, 256, Some(b));
+        let small = photosplice_algo::apply_tiled(&surf, &fp, b, b, None, 16, Some(b));
         let (a, c) = (big.read_region(b), small.read_region(b));
         let worst = a.iter().zip(&c).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max);
         assert!(worst < 1e-3, "{} differs across tilings by {worst}", f.key());
@@ -132,7 +132,7 @@ fn gallery_is_a_smart_filter_on_smart_objects() {
     let r = s.execute("filter.filterGallery", json!({"effects": [{"filter": "texturizer", "params": {"relief": 20}}]}));
     r.unwrap();
     let d = s.active().unwrap();
-    let photosuite_doc::LayerContent::Smart(sm) = &d.doc.layer(d.active_layer.unwrap()).unwrap().content else { panic!("not smart") };
+    let photosplice_doc::LayerContent::Smart(sm) = &d.doc.layer(d.active_layer.unwrap()).unwrap().content else { panic!("not smart") };
     assert_eq!(sm.smart_filters.len(), 1);
     assert_eq!(sm.smart_filters[0].command, "filter.filterGallery");
     assert_eq!(sm.smart_filters[0].params["effects"][0]["filter"], json!("texturizer"));

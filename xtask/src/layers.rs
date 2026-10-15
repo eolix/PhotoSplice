@@ -30,7 +30,7 @@ impl Class {
     }
 }
 
-/// The layering table. Names are package names without the `photosuite-`
+/// The layering table. Names are package names without the `photosplice-`
 /// prefix.
 pub const TABLE: &[(&str, Class)] = &[
     ("geom", Class::Layer(0)),
@@ -63,7 +63,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("platform", Class::Layer(6)),
     ("testkit", Class::Testkit),
     // L7 apps and tooling
-    ("photosuite", Class::Exempt),
+    ("photosplice", Class::Exempt),
     ("cli", Class::Exempt),
     ("web", Class::Exempt),
     ("xtask", Class::Exempt),
@@ -91,7 +91,7 @@ pub const UI_CRATES: &[&str] = &["egui", "eframe", "winit", "egui_kittest", "rfd
 pub const UI_MIN_LAYER: u8 = 6;
 
 pub fn short_name(pkg: &str) -> &str {
-    pkg.strip_prefix("photosuite-").unwrap_or(pkg)
+    pkg.strip_prefix("photosplice-").unwrap_or(pkg)
 }
 
 pub fn classify(pkg: &str) -> Option<Class> {
@@ -149,7 +149,7 @@ impl std::fmt::Display for Violation {
                 write!(f, "{krate}: standalone crate must not depend on workspace crate {dep}")
             }
             Violation::TestkitAsNormalDep { krate } => {
-                write!(f, "{krate}: photosuite-testkit may only be a dev-dependency")
+                write!(f, "{krate}: photosplice-testkit may only be a dev-dependency")
             }
             Violation::UiBelowL6 { krate, dep, layer } => {
                 write!(f, "{krate} (L{layer}) depends on UI crate `{dep}`; UI toolkits are only allowed in L6+")
@@ -257,49 +257,49 @@ mod tests {
     #[test]
     fn clean_downward_graph_passes() {
         let g = [
-            c("photosuite-geom", &[("kurbo", Normal, false)]),
-            c("photosuite-doc", &[("photosuite-geom", Normal, true)]),
-            c("photosuite-engine", &[("photosuite-doc", Normal, true), ("photosuite-testkit", Dev, true)]),
-            c("photosuite-ui-egui", &[("photosuite-engine", Normal, true), ("egui", Normal, false)]),
+            c("photosplice-geom", &[("kurbo", Normal, false)]),
+            c("photosplice-doc", &[("photosplice-geom", Normal, true)]),
+            c("photosplice-engine", &[("photosplice-doc", Normal, true), ("photosplice-testkit", Dev, true)]),
+            c("photosplice-ui-egui", &[("photosplice-engine", Normal, true), ("egui", Normal, false)]),
         ];
         assert!(check(&g).is_empty(), "{:?}", check(&g));
     }
 
     #[test]
     fn upward_dependency_flagged() {
-        let v = check(&[c("photosuite-doc", &[("photosuite-engine", Normal, true)])]);
+        let v = check(&[c("photosplice-doc", &[("photosplice-engine", Normal, true)])]);
         assert!(matches!(v[..], [Violation::Upward { from: 1, to: 5, .. }]));
     }
 
     #[test]
     fn sideways_dependency_flagged() {
-        let v = check(&[c("photosuite-ops", &[("photosuite-algo", Normal, true)])]);
+        let v = check(&[c("photosplice-ops", &[("photosplice-algo", Normal, true)])]);
         assert!(matches!(v[..], [Violation::Upward { from: 2, to: 2, .. }]));
     }
 
     #[test]
     fn l0_foundation_chain_allowed_one_way() {
-        assert!(check(&[c("photosuite-raster", &[("photosuite-color", Normal, true), ("photosuite-geom", Normal, true)])]).is_empty());
-        assert!(check(&[c("photosuite-color", &[("photosuite-geom", Normal, true)])]).is_empty());
-        let v = check(&[c("photosuite-geom", &[("photosuite-raster", Normal, true)])]);
+        assert!(check(&[c("photosplice-raster", &[("photosplice-color", Normal, true), ("photosplice-geom", Normal, true)])]).is_empty());
+        assert!(check(&[c("photosplice-color", &[("photosplice-geom", Normal, true)])]).is_empty());
+        let v = check(&[c("photosplice-geom", &[("photosplice-raster", Normal, true)])]);
         assert!(matches!(v[..], [Violation::Upward { from: 0, to: 0, .. }]));
     }
 
     #[test]
     fn self_dev_dependency_ignored() {
-        assert!(check(&[c("photosuite-psd", &[("photosuite-psd", Dev, true)])]).is_empty());
+        assert!(check(&[c("photosplice-psd", &[("photosplice-psd", Dev, true)])]).is_empty());
     }
 
     #[test]
     fn upward_dev_dependency_flagged() {
-        let v = check(&[c("photosuite-geom", &[("photosuite-doc", Dev, true)])]);
+        let v = check(&[c("photosplice-geom", &[("photosplice-doc", Dev, true)])]);
         assert!(matches!(v[..], [Violation::Upward { kind: Dev, .. }]));
     }
 
     #[test]
     fn standalone_crates_have_no_workspace_deps() {
-        for s in ["photosuite-psd", "photosuite-codecs", "photosuite-adobe-assets"] {
-            let v = check(&[c(s, &[("photosuite-geom", Normal, true)])]);
+        for s in ["photosplice-psd", "photosplice-codecs", "photosplice-adobe-assets"] {
+            let v = check(&[c(s, &[("photosplice-geom", Normal, true)])]);
             assert!(matches!(v[..], [Violation::StandaloneHasWorkspaceDep { .. }]), "{s}");
             assert!(check(&[c(s, &[("image", Normal, false)])]).is_empty());
         }
@@ -307,42 +307,42 @@ mod tests {
 
     #[test]
     fn standalone_is_usable_from_higher_layers() {
-        assert!(check(&[c("photosuite-io", &[("photosuite-psd", Normal, true)])]).is_empty());
-        let v = check(&[c("photosuite-geom", &[("photosuite-codecs", Normal, true)])]);
+        assert!(check(&[c("photosplice-io", &[("photosplice-psd", Normal, true)])]).is_empty());
+        let v = check(&[c("photosplice-geom", &[("photosplice-codecs", Normal, true)])]);
         assert!(matches!(v[..], [Violation::Upward { from: 0, to: 0, .. }]));
     }
 
     #[test]
     fn ui_crates_below_l6_flagged() {
         for dep in ["egui", "eframe", "winit", "egui_kittest", "rfd", "bevy_ecs", "bevy"] {
-            let v = check(&[c("photosuite-engine", &[(dep, Normal, false)])]);
+            let v = check(&[c("photosplice-engine", &[(dep, Normal, false)])]);
             assert!(matches!(v[..], [Violation::UiBelowL6 { layer: 5, .. }]), "{dep}");
         }
-        assert!(check(&[c("photosuite-engine", &[("egui_extras_not", Normal, false)])]).is_empty());
-        assert!(check(&[c("photosuite-platform", &[("winit", Normal, false)])]).is_empty());
+        assert!(check(&[c("photosplice-engine", &[("egui_extras_not", Normal, false)])]).is_empty());
+        assert!(check(&[c("photosplice-platform", &[("winit", Normal, false)])]).is_empty());
     }
 
     #[test]
     fn unregistered_crate_is_error() {
-        let v = check(&[c("photosuite-mystery", &[])]);
-        assert!(matches!(&v[..], [Violation::Unregistered { krate }] if krate == "photosuite-mystery"));
+        let v = check(&[c("photosplice-mystery", &[])]);
+        assert!(matches!(&v[..], [Violation::Unregistered { krate }] if krate == "photosplice-mystery"));
         assert!(v[0].to_string().contains("register"));
     }
 
     #[test]
     fn testkit_only_as_dev_dependency() {
-        let v = check(&[c("photosuite-raster", &[("photosuite-testkit", Normal, true)])]);
+        let v = check(&[c("photosplice-raster", &[("photosplice-testkit", Normal, true)])]);
         assert!(matches!(v[..], [Violation::TestkitAsNormalDep { .. }]));
-        assert!(check(&[c("photosuite-raster", &[("photosuite-testkit", Dev, true)])]).is_empty());
+        assert!(check(&[c("photosplice-raster", &[("photosplice-testkit", Dev, true)])]).is_empty());
         // testkit itself may use anything up to L5 but not L6 crates.
-        assert!(check(&[c("photosuite-testkit", &[("photosuite-engine", Normal, true)])]).is_empty());
-        assert!(!check(&[c("photosuite-testkit", &[("photosuite-ui-egui", Normal, true)])]).is_empty());
+        assert!(check(&[c("photosplice-testkit", &[("photosplice-engine", Normal, true)])]).is_empty());
+        assert!(!check(&[c("photosplice-testkit", &[("photosplice-ui-egui", Normal, true)])]).is_empty());
     }
 
     #[test]
     fn apps_and_xtask_exempt() {
-        for app in ["photosuite", "photosuite-web", "xtask"] {
-            assert!(check(&[c(app, &[("egui", Normal, false), ("photosuite-ui-egui", Normal, true)])]).is_empty());
+        for app in ["photosplice", "photosplice-web", "xtask"] {
+            assert!(check(&[c(app, &[("egui", Normal, false), ("photosplice-ui-egui", Normal, true)])]).is_empty());
         }
     }
 
@@ -350,17 +350,17 @@ mod tests {
     fn metadata_parsing() {
         let meta: Value = serde_json::from_str(
             r#"{"packages":[
-                {"name":"photosuite-doc","dependencies":[
-                    {"name":"photosuite-geom","kind":null,"path":"/x/crates/geom"},
+                {"name":"photosplice-doc","dependencies":[
+                    {"name":"photosplice-geom","kind":null,"path":"/x/crates/geom"},
                     {"name":"serde","kind":null},
                     {"name":"proptest","kind":"dev"}]},
-                {"name":"photosuite-geom","dependencies":[]}
+                {"name":"photosplice-geom","dependencies":[]}
             ]}"#,
         )
         .unwrap();
         let g = from_metadata(&meta).unwrap();
         assert_eq!(g.len(), 2);
-        let doc = g.iter().find(|c| c.name == "photosuite-doc").unwrap();
+        let doc = g.iter().find(|c| c.name == "photosplice-doc").unwrap();
         assert!(doc.deps[0].workspace && !doc.deps[1].workspace);
         assert_eq!(doc.deps[2].kind, Dev);
         assert!(check(&g).is_empty());

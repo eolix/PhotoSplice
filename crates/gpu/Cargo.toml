@@ -1,5 +1,5 @@
 [package]
-name = "photosuite-gpu"
+name = "photosplice-gpu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,11 +9,11 @@ workspace = true
 
 [dependencies]
 half = "2"
-photosuite-geom = { workspace = true }
-photosuite-color = { workspace = true }
-photosuite-raster = { workspace = true }
-photosuite-doc = { workspace = true }
-photosuite-compose = { workspace = true }
+photosplice-geom = { workspace = true }
+photosplice-color = { workspace = true }
+photosplice-raster = { workspace = true }
+photosplice-doc = { workspace = true }
+photosplice-compose = { workspace = true }
 # Same major version as eframe's wgpu so the app's device can be shared.
 wgpu = { version = "30", default-features = false, features = ["std", "wgsl"] }
 log = { workspace = true }
@@ -26,4 +26,4 @@ rayon = { workspace = true }
 wgpu = { version = "30" }
 pollster = "1"
 # Shape layers in the effect parity tests.
-photosuite-vector = { workspace = true }
+photosplice-vector = { workspace = true }

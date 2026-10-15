@@ -9,9 +9,9 @@
 //! Units: Levels and Curves in 0–255 levels; percentages for the rest (as in Photoshop's dialogs);
 //! colours as `"#rrggbb"` or `[r, g, b]` in 0–1.
 
-use photosuite_color::ColorMode;
-use photosuite_doc::Adjustment;
-use photosuite_doc::adjust::{CurvePoint, HueRange, LevelsChannel, ToneSpace};
+use photosplice_color::ColorMode;
+use photosplice_doc::Adjustment;
+use photosplice_doc::adjust::{CurvePoint, HueRange, LevelsChannel, ToneSpace};
 use serde_json::{Map, Value, json};
 
 use crate::{EngineError, Result};
@@ -527,7 +527,7 @@ fn curves(r: &Reader<'_>, base: Option<&Adjustment>, mode: ColorMode) -> Result<
         }
     }
     let [c0, c1, c2, black] = chans;
-    let black = if space == ToneSpace::Cmyk && !photosuite_doc::adjust::is_identity_curve(&black) { black } else { Vec::new() };
+    let black = if space == ToneSpace::Cmyk && !photosplice_doc::adjust::is_identity_curve(&black) { black } else { Vec::new() };
     Ok(Adjustment::Curves { master, per_channel: [c0, c1, c2], space, black })
 }
 
@@ -776,7 +776,7 @@ mod tests {
         s.execute("layer.newAdjustmentLayer.curves", json!({})).unwrap();
         let id = s.active().unwrap().active_layer.unwrap();
         let l = s.active().unwrap().doc.layer(id).unwrap().clone();
-        assert!(matches!(l.content, photosuite_doc::LayerContent::Adjustment(Adjustment::Curves { space: ToneSpace::Cmyk, .. })));
+        assert!(matches!(l.content, photosplice_doc::LayerContent::Adjustment(Adjustment::Curves { space: ToneSpace::Cmyk, .. })));
     }
 
     #[test]
@@ -786,7 +786,7 @@ mod tests {
         s.execute("layer.setAdjustment", json!({"highlights": [0, 0, -20]})).unwrap();
         let id = s.active().unwrap().active_layer.unwrap();
         let adj = |s: &crate::Session| match &s.active().unwrap().doc.layer(id).unwrap().content {
-            photosuite_doc::LayerContent::Adjustment(a) => a.clone(),
+            photosplice_doc::LayerContent::Adjustment(a) => a.clone(),
             _ => panic!(),
         };
         assert!(matches!(adj(&s), Adjustment::ColorBalance { midtones: [30.0, 0.0, 0.0], highlights: [0.0, 0.0, -20.0], .. }));

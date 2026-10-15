@@ -1,6 +1,6 @@
 //! Builder and pixel extraction tests.
 
-use photosuite_psd::*;
+use photosplice_psd::*;
 
 fn rgba_pattern(w: usize, h: usize, seed: u8) -> Vec<u8> {
     let mut v = Vec::with_capacity(w * h * 4);

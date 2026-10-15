@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::Session;
-use photosuite_doc::{Fill, LayerContent, LayerId};
+use photosplice_doc::{Fill, LayerContent, LayerId};
 
 fn session(depth: u32) -> Session {
     let mut s = Session::new();
@@ -38,8 +38,8 @@ fn style_preset_new_from_an_explicit_effect_list() {
     let d = s.active().unwrap();
     let l = d.doc.layer(d.active_layer.unwrap()).unwrap();
     assert_eq!(l.effects.items.len(), 1);
-    assert!(matches!(&l.effects.items[0], photosuite_doc::Effect::Stroke(st) if st.size == 6.0));
-    assert_eq!(l.blend, photosuite_color::BlendMode::Multiply);
+    assert!(matches!(&l.effects.items[0], photosplice_doc::Effect::Stroke(st) if st.size == 6.0));
+    assert_eq!(l.blend, photosplice_color::BlendMode::Multiply);
     assert!((l.fill_opacity - 0.4).abs() < 1e-6);
     // Malformed lists are graceful errors.
     assert!(s.execute("style.presets.new", json!({"effects": [["nope", {}]]})).is_err());
@@ -307,7 +307,7 @@ fn shape_path_language_parses() {
     let p = super::shapes::parse("M 0 0 L 10 0 L 10 10 Z ! O 5 5 2").unwrap();
     assert_eq!(p.subpaths.len(), 2);
     assert_eq!(p.subpaths[0].knots.len(), 3);
-    assert_eq!(p.subpaths[1].op, photosuite_doc::vector::PathOp::Subtract);
+    assert_eq!(p.subpaths[1].op, photosplice_doc::vector::PathOp::Subtract);
     assert!(super::shapes::parse("M 0 0 L x").is_err());
     assert!(super::shapes::parse("").is_err());
     assert!(super::shapes::parse("L 1 1").is_err());
@@ -411,10 +411,10 @@ fn clone_doc(depth: u32) -> Session {
         let mut px = Vec::new();
         for y in 0..48 {
             for x in 0..64 {
-                px.extend(photosuite_raster::from_rgba(&fmt, [x as f32 / 63.0, y as f32 / 47.0, 0.0, 1.0]));
+                px.extend(photosplice_raster::from_rgba(&fmt, [x as f32 / 63.0, y as f32 / 47.0, 0.0, 1.0]));
             }
         }
-        surf.write_region(photosuite_geom::Rect::new(0, 0, 64, 48), &px);
+        surf.write_region(photosplice_geom::Rect::new(0, 0, 64, 48), &px);
         Ok(())
     })
     .unwrap();

@@ -4,7 +4,7 @@
 //! Apache-2.0 OR MIT; its standard fonts are PDFium's Foxit fonts, BSD-3-Clause) into editable
 //! layers: text as type layers, vectors as shape layers, images as pixel layers ([`layers`]), or,
 //! with `PageAs::Pixels`, renders it at a resolution, as Photoshop's Import PDF does. A Photoshop
-//! PDF (one saved with Photoshop's editing data, by Photoshop or PhotoSuite) opens as its
+//! PDF (one saved with Photoshop's editing data, by Photoshop or PhotoSplice) opens as its
 //! document, every layer as it was ([`photoshop`]).
 //!
 //! Saving ([`export::export_layered`]) writes the page layer by layer as PDF content, plus the
@@ -18,7 +18,7 @@ mod photoshop;
 mod render;
 mod shading;
 
-use photosuite_codecs::{self as codecs, ChannelLayout};
+use photosplice_codecs::{self as codecs, ChannelLayout};
 
 use crate::{ImportResult, IoError};
 
@@ -381,17 +381,17 @@ pub fn raster_pdf(pages: &[(u32, u32, f32, Vec<u8>)]) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    fn doc() -> photosuite_doc::Document {
-        let mut d = photosuite_doc::Document::with_background(
+    fn doc() -> photosplice_doc::Document {
+        let mut d = photosplice_doc::Document::with_background(
             "card",
-            photosuite_geom::Size::new(144, 72),
-            photosuite_color::ColorMode::Rgb,
-            photosuite_color::SampleType::U8,
-            photosuite_doc::Color::WHITE,
+            photosplice_geom::Size::new(144, 72),
+            photosplice_color::ColorMode::Rgb,
+            photosplice_color::SampleType::U8,
+            photosplice_doc::Color::WHITE,
         );
         d.resolution_dpi = 72.0;
         if let Some(s) = d.layers.first_mut().and_then(|l| l.surface_mut()) {
-            s.fill_rect(photosuite_geom::Rect::new(0, 0, 72, 72), &[1.0, 0.0, 0.0, 1.0]);
+            s.fill_rect(photosplice_geom::Rect::new(0, 0, 72, 72), &[1.0, 0.0, 0.0, 1.0]);
         }
         d
     }

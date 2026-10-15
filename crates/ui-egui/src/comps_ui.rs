@@ -8,24 +8,24 @@
 use egui::{Align2, Rect, Sense, Stroke, pos2, vec2};
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::theme::Tokens;
 
 /// The comp footer and row actions act on: the panel selection if still valid, else the last
 /// applied comp.
-pub fn target(app: &PhotosuiteApp) -> Option<u32> {
+pub fn target(app: &PhotospliceApp) -> Option<u32> {
     let doc = &app.session.active()?.doc;
     app.ui.layer_comp_selected.filter(|id| doc.comp(*id).is_some()).or(doc.last_applied_comp.filter(|id| doc.comp(*id).is_some()))
 }
 
-fn run(app: &mut PhotosuiteApp, id: &str, p: Value) {
+fn run(app: &mut PhotospliceApp, id: &str, p: Value) {
     if let Err(e) = app.run(id, p) {
         app.ui.status = e;
         app.ui.status_error = true;
     }
 }
 
-pub fn panel(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
+pub fn panel(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let Some(st) = app.session.active() else {
         ui.label(egui::RichText::new(tl!("No document")).color(t.text_faint).size(11.5));

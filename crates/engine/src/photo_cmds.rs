@@ -1,23 +1,23 @@
 //! Computational-photography automation: File › Automate › Photomerge, Merge to HDR Pro and
 //! Crop and Straighten Photos. The registration and blending code
-//! ([`photosuite_algo::panorama`]) is shared with Edit › Auto-Align / Auto-Blend Layers
+//! ([`photosplice_algo::panorama`]) is shared with Edit › Auto-Align / Auto-Blend Layers
 //! (`align_cmds`).
 //!
 //! Inputs are files (`"paths"`: an array or a folder) or, with `"useOpenDocuments": true`, the
 //! open documents (Photoshop's *Add Open Files*). Each command creates new documents; the
 //! sources are untouched.
 
-use photosuite_algo::exif;
-use photosuite_algo::hdr::{self, MergeOptions, ToneMethod};
-use photosuite_algo::panorama::{self, AlignOptions, Alignment, Layout, Placement, RoiImage};
-use photosuite_algo::scancrop;
-use photosuite_algo::tone::HdrToning;
-use photosuite_algo::transform::{Homography, Interp, warp_surface};
-use photosuite_algo::warp::warp_mesh_surface;
-use photosuite_color::{ColorMode, PixelFormat, SampleType};
-use photosuite_doc::{Document, Layer, LayerContent, LayerMask, Size};
-use photosuite_geom::Rect;
-use photosuite_raster::{Surface, to_rgba};
+use photosplice_algo::exif;
+use photosplice_algo::hdr::{self, MergeOptions, ToneMethod};
+use photosplice_algo::panorama::{self, AlignOptions, Alignment, Layout, Placement, RoiImage};
+use photosplice_algo::scancrop;
+use photosplice_algo::tone::HdrToning;
+use photosplice_algo::transform::{Homography, Interp, warp_surface};
+use photosplice_algo::warp::warp_mesh_surface;
+use photosplice_color::{ColorMode, PixelFormat, SampleType};
+use photosplice_doc::{Document, Layer, LayerContent, LayerMask, Size};
+use photosplice_geom::Rect;
+use photosplice_raster::{Surface, to_rgba};
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
@@ -516,7 +516,7 @@ fn photomerge(s: &mut Session, p: &Value) -> Result<Value> {
 /// Fills the transparent areas of a composite (inside its bounding rectangle) with
 /// content-aware fill, at a reduced scale for large panoramas.
 fn content_aware_fill(comp: &Surface, canvas: Rect) -> Surface {
-    use photosuite_algo::content_aware::{FillOptions, fill};
+    use photosplice_algo::content_aware::{FillOptions, fill};
     let fmt = comp.format();
     let n = fmt.channels();
     let (w, h) = (canvas.width() as usize, canvas.height() as usize);
@@ -703,12 +703,12 @@ fn merge_to_hdr(s: &mut Session, p: &Value) -> Result<Value> {
         q[3] = 1.0;
     }
     let mut doc = Document::new(format!("Untitled_HDR{}", s.documents().len() + 1), Size::new(w as u32, h as u32), ColorMode::Rgb, depth);
-    doc.icc_profile = if depth == SampleType::F32 { Some(photosuite_cms::builtin::Builtin::LinearSrgb.profile().to_bytes()) } else { icc };
+    doc.icc_profile = if depth == SampleType::F32 { Some(photosplice_cms::builtin::Builtin::LinearSrgb.profile().to_bytes()) } else { icc };
     let fmt = doc.pixel_format();
     let n = fmt.channels();
     let mut data = vec![0.0f32; w * h * n];
     for (q, o) in px.iter().zip(data.chunks_exact_mut(n)) {
-        photosuite_raster::from_rgba_into(&fmt, *q, o);
+        photosplice_raster::from_rgba_into(&fmt, *q, o);
     }
     let mut surf = Surface::new(fmt);
     surf.write_region(area, &data);
@@ -864,7 +864,7 @@ mod tests {
         let n = fmt.channels();
         let mut data = vec![0.0f32; w * h * n];
         for (q, o) in px.iter().zip(data.chunks_exact_mut(n)) {
-            photosuite_raster::from_rgba_into(&fmt, *q, o);
+            photosplice_raster::from_rgba_into(&fmt, *q, o);
         }
         let mut s = Surface::new(fmt);
         s.write_region(Rect::new(0, 0, w as i32, h as i32), &data);
@@ -904,7 +904,7 @@ mod tests {
                 assert!((shown - 1.0).abs() < 0.01, "({x},{y}) {shown}");
             }
             // The composite matches the scene up to the global gain.
-            let comp = photosuite_compose::flatten(d);
+            let comp = photosplice_compose::flatten(d);
             let at = |x: i32, y: i32| comp.px[(y * comp.rect.width() as i32 + x) as usize];
             let gains = r["photometric"]["gains"].as_array().unwrap();
             assert!(gains[1][0].as_f64().unwrap() > gains[0][0].as_f64().unwrap() * 1.05, "{r}");
@@ -971,7 +971,7 @@ mod tests {
             radiance
                 .iter()
                 .map(|r| {
-                    let f = |v: f32| photosuite_algo_srgb((v * dt).min(1.0));
+                    let f = |v: f32| photosplice_algo_srgb((v * dt).min(1.0));
                     [f(r[0]), f(r[1]), f(r[2]), 1.0]
                 })
                 .collect()
@@ -1015,7 +1015,7 @@ mod tests {
         assert!(s.execute("file.automate.mergeToHdrPro", json!({"useOpenDocuments": true, "exposures": [0, 1]})).is_err());
     }
 
-    fn photosuite_algo_srgb(v: f32) -> f32 {
+    fn photosplice_algo_srgb(v: f32) -> f32 {
         if v <= 0.003_130_8 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
     }
 

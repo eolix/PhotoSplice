@@ -1,12 +1,12 @@
-# PhotoSuite CI: tests on every push; installers for every platform on a `v*` tag (or a manual
+# PhotoSplice CI: tests on every push; installers for every platform on a `v*` tag (or a manual
 # run); a tag also gathers them into a draft GitHub Release.
 #
 # Artifacts per packaging run (packaging/* scripts do the work; this file only prepares runners):
-#   photosuite-macos            universal (arm64 + x86_64) .dmg
-#   photosuite-windows          x64 .msi installer, portable .zip
-#   photosuite-linux-x86_64     .AppImage (+ .zsync), .deb, .rpm, Arch .pkg.tar.zst, .tar.gz
-#   photosuite-linux-aarch64    .AppImage (+ .zsync), .deb, .rpm, Arch .pkg.tar.zst, .tar.gz
-#   photosuite-flatpak-x86_64   single-file .flatpak bundle (built from the x86_64 tarball)
+#   photosplice-macos            universal (arm64 + x86_64) .dmg
+#   photosplice-windows          x64 .msi installer, portable .zip
+#   photosplice-linux-x86_64     .AppImage (+ .zsync), .deb, .rpm, Arch .pkg.tar.zst, .tar.gz
+#   photosplice-linux-aarch64    .AppImage (+ .zsync), .deb, .rpm, Arch .pkg.tar.zst, .tar.gz
+#   photosplice-flatpak-x86_64   single-file .flatpak bundle (built from the x86_64 tarball)
 #
 # Linux builds on Ubuntu 22.04 (glibc 2.35) so the binaries run on newer distributions too.
 #
@@ -18,7 +18,7 @@
 #             Signing: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_SIGNING_ENDPOINT,
 #             AZURE_SIGNING_ACCOUNT, AZURE_CERT_PROFILE (see packaging/windows/sign.ps1)
 
-name: PhotoSuite
+name: PhotoSplice
 
 on:
   push:
@@ -28,7 +28,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: photosuite-${{ github.workflow }}-${{ github.ref }}
+  group: photosplice-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -107,7 +107,7 @@ jobs:
         run: packaging/macos/package.sh --arch universal
       - uses: actions/upload-artifact@v4
         with:
-          name: photosuite-macos
+          name: photosplice-macos
           path: dist/release/*
           if-no-files-found: error
 
@@ -139,7 +139,7 @@ jobs:
         run: ./packaging/windows/package.ps1 -Arch x64
       - uses: actions/upload-artifact@v4
         with:
-          name: photosuite-windows
+          name: photosplice-windows
           path: dist/release/*
           if-no-files-found: error
 
@@ -185,7 +185,7 @@ jobs:
         run: packaging/linux/verify-appimage.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: photosuite-linux-${{ matrix.arch }}
+          name: photosplice-linux-${{ matrix.arch }}
           path: dist/release/*
           if-no-files-found: error
 
@@ -207,7 +207,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends flatpak flatpak-builder librsvg2-common appstream
       - uses: actions/download-artifact@v4
         with:
-          name: photosuite-linux-x86_64
+          name: photosplice-linux-x86_64
           path: dist/release
       - name: Bundle
         run: |
@@ -216,7 +216,7 @@ jobs:
           rm -f dist/release/*.tar.gz
       - uses: actions/upload-artifact@v4
         with:
-          name: photosuite-flatpak-x86_64
+          name: photosplice-flatpak-x86_64
           path: dist/release/*.flatpak
           if-no-files-found: error
 
@@ -231,7 +231,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: photosuite-*
+          pattern: photosplice-*
           merge-multiple: true
       - name: Checksums
         run: cd artifacts && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt

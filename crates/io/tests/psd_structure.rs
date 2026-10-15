@@ -1,9 +1,9 @@
 //! PSD (testgen / builder) → Document → PSD structural equality.
 
-use photosuite_doc::LayerContent;
-use photosuite_io::*;
-use photosuite_psd::testgen;
-use photosuite_psd::{ColorMode, Compression, LayerNode, PsdFile, SectionType, Version};
+use photosplice_doc::LayerContent;
+use photosplice_io::*;
+use photosplice_psd::testgen;
+use photosplice_psd::{ColorMode, Compression, LayerNode, PsdFile, SectionType, Version};
 
 /// Sample of a layer channel in document coordinates (0 outside the rect).
 fn sample(f: &PsdFile, li: usize, id: i16, x: i32, y: i32, cache: &mut std::collections::HashMap<(usize, i16), Vec<u8>>) -> Vec<u8> {
@@ -56,7 +56,7 @@ fn assert_structurally_equal(a: &PsdFile, b: &PsdFile) {
         let (ra, rb) = (&a.layers()[ia], &b.layers()[ib]);
         let n = ra.name();
         assert_eq!(n, rb.name());
-        let blend = if matches!(ra.blend_mode, photosuite_psd::BlendMode::Unknown(_)) { photosuite_psd::BlendMode::Normal } else { ra.blend_mode };
+        let blend = if matches!(ra.blend_mode, photosplice_psd::BlendMode::Unknown(_)) { photosplice_psd::BlendMode::Normal } else { ra.blend_mode };
         if ra.section_type().is_folder() {
             assert_eq!(ra.section_divider().and_then(|s| s.blend_mode), rb.section_divider().and_then(|s| s.blend_mode), "{n}");
         } else {
@@ -71,7 +71,7 @@ fn assert_structurally_equal(a: &PsdFile, b: &PsdFile) {
             continue;
         }
         // Pixels: compare every channel over the union of both rects.
-        let u = |r: photosuite_psd::Rect, s: photosuite_psd::Rect| (r.left.min(s.left), r.top.min(s.top), r.right.max(s.right), r.bottom.max(s.bottom));
+        let u = |r: photosplice_psd::Rect, s: photosplice_psd::Rect| (r.left.min(s.left), r.top.min(s.top), r.right.max(s.right), r.bottom.max(s.bottom));
         let mut ids: Vec<i16> = (-1..cc).collect();
         if ra.layer_mask().is_some() && (ra.channel(-2).is_some() || ra.channel(-3).is_some()) {
             ids.push(-2);
@@ -142,7 +142,7 @@ fn testgen_import_details() {
     let outer = d.layers.iter().find(|l| l.name == "Outer").expect("outer");
     let LayerContent::Group(g) = &outer.content else { panic!() };
     assert!(g.expanded);
-    assert_eq!(outer.blend, photosuite_color::BlendMode::PassThrough);
+    assert_eq!(outer.blend, photosplice_color::BlendMode::PassThrough);
     let inner = g.children.iter().find(|l| l.name == "Inner").unwrap();
     let LayerContent::Group(gi) = &inner.content else { panic!() };
     assert!(!gi.expanded);
@@ -170,7 +170,7 @@ fn fallback_modes_import_flattened() {
         let (d, w) = psd_to_document(&f);
         assert_eq!(d.layers.len(), 1, "{mode:?}");
         assert!(!w.is_empty(), "{mode:?} should warn");
-        assert_eq!(d.depth, photosuite_color::SampleType::U8);
+        assert_eq!(d.depth, photosplice_color::SampleType::U8);
         // Re-export produces a valid PSD.
         let out = export(&d, "x.psd", &ExportOptions::default()).unwrap();
         assert!(PsdFile::from_bytes(&out.bytes).is_ok());
@@ -182,7 +182,7 @@ fn multichannel_imports_ink_channels() {
     for depth in testgen::mode_depths(ColorMode::Multichannel) {
         let f = testgen::merged_only(Version::Psd, ColorMode::Multichannel, *depth, Compression::Rle, 9, 5);
         let (d, _) = psd_to_document(&f);
-        assert_eq!(d.mode, photosuite_color::ColorMode::Multichannel);
+        assert_eq!(d.mode, photosplice_color::ColorMode::Multichannel);
         assert!(d.layers.is_empty());
         assert_eq!(d.channels.len(), usize::from(f.header.channels));
         assert!(d.channels.iter().all(|c| c.spot.is_some()));
@@ -202,7 +202,7 @@ fn multichannel_imports_ink_channels() {
 /// channel names and XMP were written back), but not the layer-only resources.
 #[test]
 fn multichannel_keeps_resources_and_global_blocks() {
-    use photosuite_psd::{ImageResource, TaggedBlock};
+    use photosplice_psd::{ImageResource, TaggedBlock};
     let mut f = testgen::merged_only(Version::Psd, ColorMode::Multichannel, 8, Compression::Rle, 9, 5);
     f.resources.push(ImageResource::new(1028, b"iptc".to_vec()));
     f.resources.push(ImageResource::new(1011, vec![1]));
@@ -218,7 +218,7 @@ fn multichannel_keeps_resources_and_global_blocks() {
     f.resources.push(ImageResource::new(1077, info.clone()));
     let (d, _) = psd_to_document(&f);
     // Shown as before: gray, the channels printed as black ink.
-    let shown = photosuite_compose::flatten(&d).px[0];
+    let shown = photosplice_compose::flatten(&d).px[0];
     assert!(shown[0] < 1.0 && (shown[0] - shown[1]).abs() < 1e-6, "{shown:?}");
     let back = PsdFile::from_bytes(&export(&d, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap();
     let res = |id: u16| back.resources.iter().find(|r| r.id == id).map(|r| r.data.clone());
@@ -254,7 +254,7 @@ fn flattened_psd_becomes_background() {
     let (d, _) = psd_to_document(&f);
     assert_eq!(d.layers.len(), 1);
     assert_eq!(d.layers[0].name, "Background");
-    assert_eq!(d.depth, photosuite_color::SampleType::U16);
+    assert_eq!(d.depth, photosplice_color::SampleType::U16);
     let s = d.layers[0].surface().unwrap();
     let merged = f.decode_merged().unwrap();
     let v = u16::from_be_bytes([merged[0], merged[1]]);
@@ -263,7 +263,7 @@ fn flattened_psd_becomes_background() {
 
 #[test]
 fn builder_psd_imports() {
-    use photosuite_psd::{GroupSpec, LayerSpec, MaskSpec, PixelData, PsdBuilder, Rect};
+    use photosplice_psd::{GroupSpec, LayerSpec, MaskSpec, PixelData, PsdBuilder, Rect};
     let mut b = PsdBuilder::new(4, 4);
     let mut s = LayerSpec::new("a", 0, 0, 2, 2, PixelData::Rgba8(vec![255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 0, 9, 9, 9, 9]));
     s.mask = Some(MaskSpec { rect: Rect::from_xywh(0, 0, 1, 1), data: vec![100], default_color: 255, disabled: true });
@@ -288,7 +288,7 @@ fn builder_psd_imports() {
 
 #[test]
 fn group_nesting_past_the_cap_is_rejected() {
-    use photosuite_psd::{GroupSpec, LayerSpec, PixelData, PsdBuilder};
+    use photosplice_psd::{GroupSpec, LayerSpec, PixelData, PsdBuilder};
     let mut b = PsdBuilder::new(4, 4);
     for _ in 0..101 {
         b.begin_group(GroupSpec::new("g"));
@@ -302,14 +302,14 @@ fn group_nesting_past_the_cap_is_rejected() {
     assert!(err.to_string().contains("nested deeper than 100"), "{err}");
     // The never-fail converter still returns a document — capped, with a warning
     // about the part that was not imported (it used to recurse to the file's depth).
-    let (d, warnings) = psd_to_document(&photosuite_psd::PsdFile::from_bytes(&bytes).unwrap());
+    let (d, warnings) = psd_to_document(&photosplice_psd::PsdFile::from_bytes(&bytes).unwrap());
     assert_eq!(d.max_group_depth(), 100);
     assert!(warnings.iter().any(|w| w.contains("deeper than 100")), "{warnings:?}");
 }
 
 #[test]
 fn group_nesting_at_the_cap_imports() {
-    use photosuite_psd::{GroupSpec, LayerSpec, PixelData, PsdBuilder};
+    use photosplice_psd::{GroupSpec, LayerSpec, PixelData, PsdBuilder};
     let mut b = PsdBuilder::new(4, 4);
     for _ in 0..100 {
         b.begin_group(GroupSpec::new("g"));
@@ -325,7 +325,7 @@ fn group_nesting_at_the_cap_imports() {
 
 #[test]
 fn layered_import_skips_the_unused_merged_composite() {
-    use photosuite_psd::{LayerSpec, PixelData, PsdBuilder};
+    use photosplice_psd::{LayerSpec, PixelData, PsdBuilder};
     // A layered file whose merged composite carries nothing behind the colour channels never
     // decodes it - that composite is roughly half a Photoshop save's bytes. Here its data is
     // garbage: the layered import does not touch it, while a file with an extra channel does
@@ -333,7 +333,7 @@ fn layered_import_skips_the_unused_merged_composite() {
     let mut b = PsdBuilder::new(4, 4);
     b.push_layer(LayerSpec::new("a", 0, 0, 2, 2, PixelData::Rgba8(vec![7u8; 16])));
     b.composite(PixelData::Rgba8(vec![128; 64]));
-    let mut f = photosuite_psd::PsdFile::from_bytes(&b.to_bytes().unwrap()).unwrap();
+    let mut f = photosplice_psd::PsdFile::from_bytes(&b.to_bytes().unwrap()).unwrap();
     f.image_data.data.clear();
     f.layer_info.as_mut().unwrap().merged_alpha = true;
     let (d, warnings) = psd_to_document(&f);
@@ -348,22 +348,22 @@ fn layered_import_skips_the_unused_merged_composite() {
 
 #[test]
 fn locks_and_labels_from_psd() {
-    use photosuite_psd::TaggedBlock;
+    use photosplice_psd::TaggedBlock;
     let mut f = testgen::small(Version::Psd, Compression::Raw);
     f.layers_mut()[0].blocks.push(TaggedBlock::protection(0b101));
     f.layers_mut()[0].blocks.push(TaggedBlock::sheet_color(3));
     let (d, _) = psd_to_document(&f);
     let l = &d.layers[0];
     assert!(l.locks.transparency && l.locks.position && !l.locks.pixels);
-    assert_eq!(l.label, photosuite_doc::LabelColor::Yellow);
+    assert_eq!(l.label, photosplice_doc::LabelColor::Yellow);
 }
 
 #[test]
 fn artboard_lock_round_trips_byte_for_byte() {
     // Reference files write a Background layer's locks as lspf = 0x0D (transparency + position +
-    // the bit-3 lock). PhotoSuite read the artboard lock at bit 4, so 0x0D came back as 0x05
+    // the bit-3 lock). PhotoSplice read the artboard lock at bit 4, so 0x0D came back as 0x05
     // and the lock bytes drifted on every re-save.
-    use photosuite_psd::TaggedBlock;
+    use photosplice_psd::TaggedBlock;
     let mut f = testgen::small(Version::Psd, Compression::Raw);
     f.layers_mut()[0].blocks.push(TaggedBlock::protection(0x0D));
     let g = via_doc(&f);
@@ -373,7 +373,7 @@ fn artboard_lock_round_trips_byte_for_byte() {
 
 #[test]
 fn adjustment_and_fill_layers_from_psd() {
-    use photosuite_psd::{LayerRecord, TaggedBlock};
+    use photosplice_psd::{LayerRecord, TaggedBlock};
     let mut f = testgen::small(Version::Psd, Compression::Raw);
     let mk = |name: &str, key: &[u8; 4], data: Vec<u8>| LayerRecord {
         name: name.as_bytes().to_vec(),
@@ -381,7 +381,7 @@ fn adjustment_and_fill_layers_from_psd() {
         ..Default::default()
     };
     let soco = {
-        use photosuite_psd::descriptor::*;
+        use photosplice_psd::descriptor::*;
         let c = Descriptor::new("RGBC").with("Rd  ", Value::Double(255.0)).with("Grn ", Value::Double(0.0)).with("Bl  ", Value::Double(0.0));
         VersionedDescriptor::new(Descriptor::new("null").with("Clr ", Value::Descriptor(c))).to_bytes()
     };
@@ -391,7 +391,7 @@ fn adjustment_and_fill_layers_from_psd() {
     f.layers_mut().push(mk("red", b"SoCo", soco));
     let (d, _) = psd_to_document(&f);
     let n = d.layers.len();
-    use photosuite_doc::{Adjustment, Fill};
+    use photosplice_doc::{Adjustment, Fill};
     assert!(matches!(d.layers[n - 4].content, LayerContent::Adjustment(Adjustment::Invert)));
     assert!(matches!(d.layers[n - 3].content, LayerContent::Adjustment(Adjustment::Posterize { levels: 4 })));
     assert!(
@@ -402,7 +402,7 @@ fn adjustment_and_fill_layers_from_psd() {
 
 #[test]
 fn unmodelled_blocks_are_preserved() {
-    use photosuite_psd::TaggedBlock;
+    use photosplice_psd::TaggedBlock;
     let mut f = testgen::small(Version::Psd, Compression::Raw);
     f.layers_mut()[0].blocks.push(TaggedBlock::new(*b"vmsk", vec![0; 8]));
     let (d, _) = psd_to_document(&f);
@@ -413,10 +413,10 @@ fn unmodelled_blocks_are_preserved() {
 
 #[test]
 fn fill_layer_keeps_photoshop_pixels() {
-    use photosuite_psd::{ChannelData, LayerRecord, TaggedBlock};
+    use photosplice_psd::{ChannelData, LayerRecord, TaggedBlock};
     let mut f = testgen::small(Version::Psd, Compression::Raw);
     let soco = {
-        use photosuite_psd::descriptor::*;
+        use photosplice_psd::descriptor::*;
         let c = Descriptor::new("RGBC").with("Rd  ", Value::Double(255.0)).with("Grn ", Value::Double(0.0)).with("Bl  ", Value::Double(0.0));
         VersionedDescriptor::new(Descriptor::new("null").with("Clr ", Value::Descriptor(c))).to_bytes()
     };
@@ -427,7 +427,7 @@ fn fill_layer_keeps_photoshop_pixels() {
         c.id = i as i16 - 1;
     }
     f.layers_mut().push(LayerRecord {
-        rect: photosuite_psd::Rect::from_xywh(0, 0, 2, 2),
+        rect: photosplice_psd::Rect::from_xywh(0, 0, 2, 2),
         name: b"fill".to_vec(),
         channels: chans,
         blocks: vec![TaggedBlock::unicode_name("fill"), TaggedBlock::new(*b"SoCo", soco)],
@@ -439,20 +439,20 @@ fn fill_layer_keeps_photoshop_pixels() {
     let fc = l.fill_cache.as_ref().expect("cache");
     assert_eq!(fc.surface.pixel(1, 1), vec![10.0 / 255.0, 20.0 / 255.0, 30.0 / 255.0, 1.0]);
     // The compositor uses the cache while the fill is unchanged.
-    let flat = photosuite_compose::flatten(&d);
+    let flat = photosplice_compose::flatten(&d);
     let p = flat.get(1, 1);
     assert!((p[0] - 10.0 / 255.0).abs() < 1e-3, "{p:?}");
     // Editing the fill invalidates the cache.
     let mut d2 = d.clone();
     let n = d2.layers.len();
-    d2.layers[n - 1].content = LayerContent::Fill(photosuite_doc::Fill::Solid(photosuite_color::Color::rgb(0.0, 0.0, 1.0)));
-    let p = photosuite_compose::flatten(&d2).get(1, 1);
+    d2.layers[n - 1].content = LayerContent::Fill(photosplice_doc::Fill::Solid(photosplice_color::Color::rgb(0.0, 0.0, 1.0)));
+    let p = photosplice_compose::flatten(&d2).get(1, 1);
     assert!(p[2] > 0.99 && p[0] < 0.01, "{p:?}");
 }
 
 #[test]
 fn text_and_smart_detected() {
-    use photosuite_psd::{LayerRecord, TaggedBlock};
+    use photosplice_psd::{LayerRecord, TaggedBlock};
     let mut f = testgen::small(Version::Psd, Compression::Raw);
     for (name, key) in [("t", b"TySh"), ("s", b"PlLd"), ("sh", b"vscg")] {
         f.layers_mut().push(LayerRecord {
@@ -470,15 +470,15 @@ fn text_and_smart_detected() {
 
 #[test]
 fn guides_and_alpha_names_roundtrip() {
-    let mut d = photosuite_doc::Document::new("g", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    let mut d = photosplice_doc::Document::new("g", photosplice_geom::Size::new(8, 8), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
     d.guides.horizontal = vec![1.0, 2.5];
     d.guides.vertical = vec![7.03125];
     for name in ["Spot \u{e9}", "Alpha 2"] {
-        d.channels.push(photosuite_doc::AlphaChannel::new(
+        d.channels.push(photosplice_doc::AlphaChannel::new(
             name,
-            photosuite_raster::Surface::new(photosuite_color::PixelFormat::new(
-                photosuite_color::ColorMode::Grayscale,
-                photosuite_color::SampleType::U8,
+            photosplice_raster::Surface::new(photosplice_color::PixelFormat::new(
+                photosplice_color::ColorMode::Grayscale,
+                photosplice_color::SampleType::U8,
                 false,
             )),
         ));
@@ -495,9 +495,9 @@ fn guides_and_alpha_names_roundtrip() {
 #[test]
 fn resolution_in_cm_converted() {
     let mut f = testgen::small(Version::Psd, Compression::Raw);
-    let mut ri = photosuite_psd::ResolutionInfo::from_dpi(100.0);
+    let mut ri = photosplice_psd::ResolutionInfo::from_dpi(100.0);
     ri.h_res_unit = 2;
-    f.resources[0] = photosuite_psd::ImageResource::new(1005, ri.to_bytes());
+    f.resources[0] = photosplice_psd::ImageResource::new(1005, ri.to_bytes());
     let (d, _) = psd_to_document(&f);
     assert!((d.resolution_dpi - 254.0).abs() < 1e-3);
 }
@@ -506,7 +506,7 @@ fn resolution_in_cm_converted() {
 fn stale_index_resources_dropped() {
     let mut f = testgen::small(Version::Psd, Compression::Raw);
     for id in [1024u16, 1026, 1036, 1057, 1069, 1072] {
-        f.resources.push(photosuite_psd::ImageResource::new(id, vec![0, 0]));
+        f.resources.push(photosplice_psd::ImageResource::new(id, vec![0, 0]));
     }
     let (d, _) = psd_to_document(&f);
     assert!(d.metadata.psd_resources.iter().all(|r| ![1024u16, 1026, 1036, 1057, 1069, 1072].contains(&r.0)));
@@ -518,7 +518,7 @@ fn merged_composite_unmattes_photoshop_white() {
     let mut f = testgen::merged_only(Version::Psd, ColorMode::Rgb, 8, Compression::Raw, 1, 1);
     f.header.channels = 4;
     // straight red at alpha 0.5, matted: r = 1, g = b = 0.5
-    f.image_data = photosuite_psd::ImageData { compression: Compression::Raw, data: vec![255, 128, 128, 128] };
+    f.image_data = photosplice_psd::ImageData { compression: Compression::Raw, data: vec![255, 128, 128, 128] };
     let m = merged_composite(&f).unwrap();
     assert!((m[0][0] - 1.0).abs() < 0.01 && m[0][1] < 0.01 && m[0][2] < 0.01, "{:?}", m[0]);
     let (d, _) = psd_to_document(&f);
@@ -529,22 +529,22 @@ fn merged_composite_unmattes_photoshop_white() {
     let mut hdr = testgen::merged_only(Version::Psd, ColorMode::Rgb, 32, Compression::Raw, 1, 1);
     hdr.header.channels = 4;
     hdr.image_data =
-        photosuite_psd::ImageData { compression: Compression::Raw, data: [1.5_f32, 0.25, 0.5, 0.5].into_iter().flat_map(f32::to_be_bytes).collect() };
+        photosplice_psd::ImageData { compression: Compression::Raw, data: [1.5_f32, 0.25, 0.5, 0.5].into_iter().flat_map(f32::to_be_bytes).collect() };
     let imported = import("hdr.psd", &hdr.to_bytes().unwrap()).unwrap().document;
-    assert_eq!(imported.depth, photosuite_color::SampleType::F32);
+    assert_eq!(imported.depth, photosplice_color::SampleType::F32);
     assert_eq!(imported.layers[0].surface().unwrap().pixel(0, 0), vec![2.0, -0.5, 0.0, 0.5]);
 }
 
 #[test]
 fn vector_rendered_mask_not_doubled_on_shapes() {
-    use photosuite_psd::{LayerRecord, TaggedBlock};
+    use photosplice_psd::{LayerRecord, TaggedBlock};
     let mut f = testgen::small(Version::Psd, Compression::Raw);
-    let mut mask = photosuite_psd::LayerMask::new(photosuite_psd::Rect::default(), 0, 8);
+    let mut mask = photosplice_psd::LayerMask::new(photosplice_psd::Rect::default(), 0, 8);
     mask.flags = 8;
     f.layers_mut().push(LayerRecord {
         name: b"shape".to_vec(),
-        mask: photosuite_psd::MaskData::Mask(mask),
-        channels: vec![photosuite_psd::ChannelData { id: -2, compression: Some(Compression::Raw), data: vec![] }],
+        mask: photosplice_psd::MaskData::Mask(mask),
+        channels: vec![photosplice_psd::ChannelData { id: -2, compression: Some(Compression::Raw), data: vec![] }],
         blocks: vec![TaggedBlock::unicode_name("shape"), TaggedBlock::new(*b"SoCo", vec![]), TaggedBlock::new(*b"vmsk", vec![0; 8])],
         ..Default::default()
     });
@@ -554,9 +554,9 @@ fn vector_rendered_mask_not_doubled_on_shapes() {
     assert!(l.mask.is_none());
 
     let record = f.layers_mut().last_mut().unwrap();
-    let photosuite_psd::MaskData::Mask(mask) = &mut record.mask else { panic!("fixture has a mask") };
-    mask.real = Some(photosuite_psd::RealMask { flags: 0, background: 255, rect: photosuite_psd::Rect { top: 0, left: 0, bottom: 1, right: 1 } });
-    record.channels.push(photosuite_psd::ChannelData { id: -3, compression: Some(Compression::Raw), data: vec![64] });
+    let photosplice_psd::MaskData::Mask(mask) = &mut record.mask else { panic!("fixture has a mask") };
+    mask.real = Some(photosplice_psd::RealMask { flags: 0, background: 255, rect: photosplice_psd::Rect { top: 0, left: 0, bottom: 1, right: 1 } });
+    record.channels.push(photosplice_psd::ChannelData { id: -3, compression: Some(Compression::Raw), data: vec![64] });
     let (imported, _) = psd_to_document(&f);
     assert_eq!(imported.layers.last().unwrap().content.kind_name(), "Shape");
     let mask = imported.layers.last().unwrap().mask.as_ref().expect("selected real mask must survive synthetic cleanup");
@@ -568,29 +568,29 @@ fn vector_rendered_mask_not_doubled_on_shapes() {
 
 #[test]
 fn every_blend_mode_maps_both_ways() {
-    for m in std::iter::once(photosuite_color::BlendMode::PassThrough).chain(photosuite_color::BlendMode::LAYER_MODES) {
-        let k = photosuite_psd::BlendMode::from_key(m.psd_key());
-        assert!(!matches!(k, photosuite_psd::BlendMode::Unknown(_)), "{m:?}");
-        assert_eq!(photosuite_color::BlendMode::from_psd_key(k.key()), Some(m));
+    for m in std::iter::once(photosplice_color::BlendMode::PassThrough).chain(photosplice_color::BlendMode::LAYER_MODES) {
+        let k = photosplice_psd::BlendMode::from_key(m.psd_key());
+        assert!(!matches!(k, photosplice_psd::BlendMode::Unknown(_)), "{m:?}");
+        assert_eq!(photosplice_color::BlendMode::from_psd_key(k.key()), Some(m));
     }
 }
 
 #[test]
 fn export_writes_a_thumbnail() {
-    use photosuite_color::ColorMode as Mode;
-    use photosuite_color::SampleType;
+    use photosplice_color::ColorMode as Mode;
+    use photosplice_color::SampleType;
     for (mode, sample) in [(Mode::Rgb, SampleType::U8), (Mode::Cmyk, SampleType::U16), (Mode::Grayscale, SampleType::F32)] {
-        let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(320, 160), mode, sample);
-        let mut l = photosuite_doc::Layer::raster("red", d.pixel_format());
+        let mut d = photosplice_doc::Document::new("t", photosplice_geom::Size::new(320, 160), mode, sample);
+        let mut l = photosplice_doc::Layer::raster("red", d.pixel_format());
         // Left half dark, right half transparent (white in the thumbnail).
-        l.surface_mut().unwrap().fill_rect(photosuite_geom::Rect::new(0, 0, 160, 160), &photosuite_raster::from_rgba(&d.pixel_format(), [0.1, 0.1, 0.1, 1.0]));
+        l.surface_mut().unwrap().fill_rect(photosplice_geom::Rect::new(0, 0, 160, 160), &photosplice_raster::from_rgba(&d.pixel_format(), [0.1, 0.1, 0.1, 1.0]));
         d.layers.push(l);
         let (f, _) = document_to_psd_with(&d, &PsdExportOptions::default());
         let r = f.resource(1036).expect("thumbnail");
         let be = |at: usize| u32::from_be_bytes(r.data[at..at + 4].try_into().unwrap());
         assert_eq!((be(0), be(4), be(8)), (1, 160, 80), "{mode:?}");
         assert_eq!(be(20) as usize, r.data.len() - 28);
-        let img = photosuite_codecs::decode(&r.data[28..]).unwrap();
+        let img = photosplice_codecs::decode(&r.data[28..]).unwrap();
         assert_eq!((img.width(), img.height()), (160, 80));
         let px = |x: usize, y: usize| img.data()[(y * 160 + x) * 3];
         assert!(px(20, 40) < 60 && px(140, 40) > 200, "{mode:?}: {} {}", px(20, 40), px(140, 40));
@@ -599,10 +599,10 @@ fn export_writes_a_thumbnail() {
 
 #[test]
 fn background_layer_has_no_transparency_channel() {
-    use photosuite_color::{Color, ColorMode as Mode, SampleType};
+    use photosplice_color::{Color, ColorMode as Mode, SampleType};
     for sample in [SampleType::U8, SampleType::U16, SampleType::F32] {
-        let mut d = photosuite_doc::Document::with_background("t", photosuite_geom::Size::new(8, 6), Mode::Rgb, sample, Color::WHITE);
-        d.layers.push(photosuite_doc::Layer::raster("top", d.pixel_format()));
+        let mut d = photosplice_doc::Document::with_background("t", photosplice_geom::Size::new(8, 6), Mode::Rgb, sample, Color::WHITE);
+        d.layers.push(photosplice_doc::Layer::raster("top", d.pixel_format()));
         let (f, _) = document_to_psd_with(&d, &PsdExportOptions::default());
         let bg = &f.layers()[0];
         assert!(bg.channel(-1).is_none(), "{sample:?}");
@@ -611,7 +611,7 @@ fn background_layer_has_no_transparency_channel() {
         let (back, _) = psd_to_document(&f);
         assert_eq!(back.layers[0].surface().unwrap().pixel(3, 3)[3], 1.0);
         // A hole in it: no longer a Background, the transparency channel is back.
-        d.layers[0].surface_mut().unwrap().fill_rect(photosuite_geom::Rect::new(0, 0, 1, 1), &[0.0; 4]);
+        d.layers[0].surface_mut().unwrap().fill_rect(photosplice_geom::Rect::new(0, 0, 1, 1), &[0.0; 4]);
         let (f, _) = document_to_psd_with(&d, &PsdExportOptions::default());
         assert!(f.layers()[0].channel(-1).is_some(), "{sample:?}");
     }
@@ -622,17 +622,17 @@ fn background_layer_has_no_transparency_channel() {
 /// gave it the transparency's overlay (psd-tools stroke-without-vector-mask.psd).
 #[test]
 fn merged_transparency_is_listed_first_and_skipped_on_import() {
-    use photosuite_color::{ColorMode as Mode, SampleType};
-    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 6), Mode::Rgb, SampleType::U8);
+    use photosplice_color::{ColorMode as Mode, SampleType};
+    let mut d = photosplice_doc::Document::new("t", photosplice_geom::Size::new(8, 6), Mode::Rgb, SampleType::U8);
     let fmt = d.pixel_format();
-    let mut l = photosuite_doc::Layer::raster("half", fmt);
-    l.surface_mut().unwrap().fill_rect(photosuite_geom::Rect::new(0, 0, 4, 6), &photosuite_raster::from_rgba(&fmt, [1.0, 0.0, 0.0, 1.0]));
+    let mut l = photosplice_doc::Layer::raster("half", fmt);
+    l.surface_mut().unwrap().fill_rect(photosplice_geom::Rect::new(0, 0, 4, 6), &photosplice_raster::from_rgba(&fmt, [1.0, 0.0, 0.0, 1.0]));
     d.layers.push(l);
-    let mut a = photosuite_doc::AlphaChannel::new("Alpha 1", photosuite_raster::Surface::new(photosuite_color::PixelFormat::new(Mode::Grayscale, SampleType::U8, false)));
+    let mut a = photosplice_doc::AlphaChannel::new("Alpha 1", photosplice_raster::Surface::new(photosplice_color::PixelFormat::new(Mode::Grayscale, SampleType::U8, false)));
     a.opacity = 0.3;
     d.channels.push(a);
     let (f, _) = document_to_psd_with(&d, &PsdExportOptions::default());
-    let names = photosuite_psd::resources::unicode_names(&f.resource(1045).unwrap().data);
+    let names = photosplice_psd::resources::unicode_names(&f.resource(1045).unwrap().data);
     assert_eq!(names, ["Transparency", "Alpha 1"]);
     assert_eq!(f.resource(1053).unwrap().data.len(), 8, "one id per name");
     let (back, _) = psd_to_document(&f);
@@ -646,7 +646,7 @@ fn merged_transparency_is_listed_first_and_skipped_on_import() {
     for r in flat.resources.iter_mut().filter(|r| r.id == 1045) {
         r.data = r.data[4 + 2 * 13..].to_vec();
     }
-    assert_eq!(photosuite_psd::resources::unicode_names(&flat.resources.iter().find(|r| r.id == 1045).unwrap().data), ["Alpha 1"]);
+    assert_eq!(photosplice_psd::resources::unicode_names(&flat.resources.iter().find(|r| r.id == 1045).unwrap().data), ["Alpha 1"]);
     assert!(!flat.merged_has_alpha());
 }
 
@@ -654,14 +654,14 @@ fn merged_transparency_is_listed_first_and_skipped_on_import() {
 /// layers used to be dropped and the file written as Grayscale.
 #[test]
 fn duotone_keeps_layers_mode_and_inks() {
-    use photosuite_color::{ColorMode as Mode, SampleType};
-    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 6), Mode::Duotone, SampleType::U8);
+    use photosplice_color::{ColorMode as Mode, SampleType};
+    let mut d = photosplice_doc::Document::new("t", photosplice_geom::Size::new(8, 6), Mode::Duotone, SampleType::U8);
     let inks = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-    d.duotone = Some(photosuite_doc::Duotone { inks: vec![photosuite_doc::DuotoneInk::new("Black", [0.0; 3])], psd_raw: Some(inks.clone()) });
+    d.duotone = Some(photosplice_doc::Duotone { inks: vec![photosplice_doc::DuotoneInk::new("Black", [0.0; 3])], psd_raw: Some(inks.clone()) });
     let fmt = d.pixel_format();
     for name in ["one", "two"] {
-        let mut l = photosuite_doc::Layer::raster(name, fmt);
-        l.surface_mut().unwrap().fill_rect(photosuite_geom::Rect::new(0, 0, 4, 3), &photosuite_raster::from_rgba(&fmt, [0.5, 0.5, 0.5, 1.0]));
+        let mut l = photosplice_doc::Layer::raster(name, fmt);
+        l.surface_mut().unwrap().fill_rect(photosplice_geom::Rect::new(0, 0, 4, 3), &photosplice_raster::from_rgba(&fmt, [0.5, 0.5, 0.5, 1.0]));
         d.layers.push(l);
     }
     let (f, warnings) = document_to_psd_with(&d, &PsdExportOptions::default());
@@ -673,7 +673,7 @@ fn duotone_keeps_layers_mode_and_inks() {
     assert_eq!(back.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["one", "two"]);
     assert_eq!(back.duotone.and_then(|d| d.psd_raw), Some(inks));
     // Made here without Photoshop's ink data: its gray plate, as Grayscale.
-    d.duotone = Some(photosuite_doc::Duotone { inks: vec![photosuite_doc::DuotoneInk::new("Black", [0.0; 3])], psd_raw: None });
+    d.duotone = Some(photosplice_doc::Duotone { inks: vec![photosplice_doc::DuotoneInk::new("Black", [0.0; 3])], psd_raw: None });
     assert_eq!(document_to_psd(&d).header.color_mode, ColorMode::Grayscale);
 }
 
@@ -688,8 +688,8 @@ fn indexed_and_bitmap_keep_their_mode() {
         let t = f.decode_merged().unwrap()[1];
         if mode == ColorMode::Indexed {
             assert!(t < 200);
-            f.resources.push(photosuite_psd::ImageResource::new(1046, 200u16.to_be_bytes().to_vec()));
-            f.resources.push(photosuite_psd::ImageResource::new(1047, u16::from(t).to_be_bytes().to_vec()));
+            f.resources.push(photosplice_psd::ImageResource::new(1046, 200u16.to_be_bytes().to_vec()));
+            f.resources.push(photosplice_psd::ImageResource::new(1047, u16::from(t).to_be_bytes().to_vec()));
         }
         let (d, _) = psd_to_document(&f);
         let (back, warnings) = document_to_psd_with(&d, &PsdExportOptions::default());
@@ -729,7 +729,7 @@ fn indexed_and_bitmap_keep_their_mode() {
         }
         // With a second layer it can't stay flat: RGB / Grayscale, with the warning.
         let mut layered = d.clone();
-        layered.layers.push(photosuite_doc::Layer::raster("more", d.pixel_format()));
+        layered.layers.push(photosplice_doc::Layer::raster("more", d.pixel_format()));
         let (f2, w2) = document_to_psd_with(&layered, &PsdExportOptions::default());
         assert_ne!(f2.header.color_mode, mode);
         assert!(w2.iter().any(|w| w.contains("written as")));
@@ -739,8 +739,8 @@ fn indexed_and_bitmap_keep_their_mode() {
 /// Knockout (`knko`) reads into the layer and is written back from it (groups too).
 #[test]
 fn knockout_round_trips() {
-    use photosuite_doc::{Document, Knockout, Layer, Size};
-    let mut d = Document::new("k", Size::new(4, 4), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    use photosplice_doc::{Document, Knockout, Layer, Size};
+    let mut d = Document::new("k", Size::new(4, 4), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
     let mut a = Layer::raster("a", d.pixel_format());
     a.knockout = Knockout::Shallow;
     let mut g = Layer::group("g", vec![Layer::raster("in", d.pixel_format())]);
@@ -772,8 +772,8 @@ fn knockout_round_trips() {
 #[test]
 fn group_divider_blocks_round_trip() {
     use std::sync::Arc;
-    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
-    let mut g = photosuite_doc::Layer::group("G", vec![photosuite_doc::Layer::raster("A", photosuite_color::PixelFormat::RGBA8)]);
+    let mut d = photosplice_doc::Document::new("t", photosplice_geom::Size::new(8, 8), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+    let mut g = photosplice_doc::Layer::group("G", vec![photosplice_doc::Layer::raster("A", photosplice_color::PixelFormat::RGBA8)]);
     let fxrp = vec![0u8; 16];
     if let LayerContent::Group(grp) = &mut g.content {
         grp.divider_blocks = vec![(*b"fxrp", Arc::new(fxrp.clone()))];
@@ -787,8 +787,8 @@ fn group_divider_blocks_round_trip() {
     let back = import("t.psd", &bytes).unwrap().document;
     let LayerContent::Group(gb) = &back.layers[0].content else { panic!("group") };
     assert_eq!(gb.divider_blocks.iter().find(|b| &b.0 == b"fxrp").map(|b| b.1.to_vec()), Some(fxrp.clone()));
-    let pc = photosuite_format::save_to_bytes(&back, &Default::default()).unwrap();
-    let again = photosuite_format::load_from_bytes(&pc).unwrap();
+    let pc = photosplice_format::save_to_bytes(&back, &Default::default()).unwrap();
+    let again = photosplice_format::load_from_bytes(&pc).unwrap();
     let LayerContent::Group(ga) = &again.layers[0].content else { panic!("group") };
     assert_eq!(ga.divider_blocks, gb.divider_blocks);
 }
@@ -798,9 +798,9 @@ fn group_divider_blocks_round_trip() {
 #[test]
 fn group_divider_ids_round_trip() {
     use std::sync::Arc;
-    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    let mut d = photosplice_doc::Document::new("t", photosplice_geom::Size::new(8, 8), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
     let group = |psd_id: u32| {
-        let mut g = photosuite_doc::Layer::group("G", vec![photosuite_doc::Layer::raster("A", photosuite_color::PixelFormat::RGBA8)]);
+        let mut g = photosplice_doc::Layer::group("G", vec![photosplice_doc::Layer::raster("A", photosplice_color::PixelFormat::RGBA8)]);
         g.psd_id = Some(psd_id);
         if let LayerContent::Group(grp) = &mut g.content {
             grp.divider_blocks = vec![(*b"lyid", Arc::new(9u32.to_be_bytes().to_vec()))];
@@ -822,7 +822,7 @@ fn group_divider_ids_round_trip() {
     // The second group's own id (9) wins over the dividers' kept 9.
     assert!(first.iter().any(|&(div, id)| !div && id == 9) && !first.iter().any(|&(div, id)| div && id == 9), "{first:?}");
     // Without the clash, the divider keeps its id.
-    let mut one = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    let mut one = photosplice_doc::Document::new("t", photosplice_geom::Size::new(8, 8), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
     one.layers.push(group(4));
     assert!(ids(&export(&one, "t.psd", &Default::default()).unwrap().bytes).contains(&(true, 9)));
     // What was written comes back the same.
@@ -834,8 +834,8 @@ fn group_divider_ids_round_trip() {
 /// while unchanged, else the new resolution in those units.
 #[test]
 fn resolution_keeps_its_units() {
-    use photosuite_psd::ResolutionInfo;
-    let d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    use photosplice_psd::ResolutionInfo;
+    let d = photosplice_doc::Document::new("t", photosplice_geom::Size::new(8, 8), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
     let mut f = PsdFile::from_bytes(&export(&d, "t.psd", &Default::default()).unwrap().bytes).unwrap();
     // 72 dpi as Photoshop writes it for a document set up in centimetres.
     let cm = ResolutionInfo { h_res_fixed: 0x001C_58AF, h_res_unit: 2, width_unit: 2, v_res_fixed: 0x001C_58AF, v_res_unit: 2, height_unit: 2 };
@@ -843,7 +843,7 @@ fn resolution_keeps_its_units() {
     r.data = cm.to_bytes();
     let mut doc = import("t.psd", &f.to_bytes().unwrap()).unwrap().document;
     assert!((doc.resolution_dpi - 72.0).abs() < 0.01, "{}", doc.resolution_dpi);
-    let written = |doc: &photosuite_doc::Document| {
+    let written = |doc: &photosplice_doc::Document| {
         let f = PsdFile::from_bytes(&export(doc, "t.psd", &Default::default()).unwrap().bytes).unwrap();
         assert_eq!(f.resources.iter().filter(|r| r.id == 1005).count(), 1);
         ResolutionInfo::from_bytes(&f.resource(1005).unwrap().data).unwrap()
@@ -859,12 +859,12 @@ fn resolution_keeps_its_units() {
 /// use, never a free lower one a deleted layer may have had.
 #[test]
 fn new_layer_ids_follow_the_seed() {
-    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
-    let mut a = photosuite_doc::Layer::raster("A", photosuite_color::PixelFormat::RGBA8);
+    let mut d = photosplice_doc::Document::new("t", photosplice_geom::Size::new(8, 8), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+    let mut a = photosplice_doc::Layer::raster("A", photosplice_color::PixelFormat::RGBA8);
     a.psd_id = Some(7);
     d.layers.push(a);
-    d.layers.push(photosuite_doc::Layer::raster("new", photosuite_color::PixelFormat::RGBA8));
-    let ids = |d: &photosuite_doc::Document| -> Vec<u32> { PsdFile::from_bytes(&export(d, "t.psd", &Default::default()).unwrap().bytes).unwrap().layers().iter().map(|r| r.layer_id().unwrap()).collect() };
+    d.layers.push(photosplice_doc::Layer::raster("new", photosplice_color::PixelFormat::RGBA8));
+    let ids = |d: &photosplice_doc::Document| -> Vec<u32> { PsdFile::from_bytes(&export(d, "t.psd", &Default::default()).unwrap().bytes).unwrap().layers().iter().map(|r| r.layer_id().unwrap()).collect() };
     assert_eq!(ids(&d), vec![7, 8]);
     d.metadata.psd_resources.push((1044, String::new(), std::sync::Arc::new(20u32.to_be_bytes().to_vec())));
     assert_eq!(ids(&d), vec![7, 21]);
@@ -875,9 +875,9 @@ fn layer_bounds_without_channel_data_allocate_nothing() {
     // A record can declare a 300000x300000 rectangle in a few bytes. With no channel data to
     // back it, import used to interleave a ~360 GB buffer and abort on the allocation
     // (storytold/photocraft@dc256b8b).
-    use photosuite_psd::LayerRecord;
+    use photosplice_psd::LayerRecord;
     let mut f = testgen::small(Version::Psd, Compression::Raw);
-    f.layers_mut().push(LayerRecord { rect: photosuite_psd::Rect::from_xywh(0, 0, 300_000, 300_000), name: b"huge".to_vec(), ..Default::default() });
+    f.layers_mut().push(LayerRecord { rect: photosplice_psd::Rect::from_xywh(0, 0, 300_000, 300_000), name: b"huge".to_vec(), ..Default::default() });
     let (d, warnings) = psd_to_document(&f);
     let l = d.layers.last().unwrap();
     assert!(matches!(&l.content, LayerContent::Raster(s) if s.tile_count() == 0));
@@ -888,8 +888,8 @@ fn layer_bounds_without_channel_data_allocate_nothing() {
 /// smallest free ones instead of overflowing, and none collides (storytold/photocraft@ccb33741).
 #[test]
 fn layer_ids_wrap_without_colliding() {
-    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
-    let mut g = photosuite_doc::Layer::group("G", vec![photosuite_doc::Layer::raster("A", photosuite_color::PixelFormat::RGBA8)]);
+    let mut d = photosplice_doc::Document::new("t", photosplice_geom::Size::new(8, 8), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+    let mut g = photosplice_doc::Layer::group("G", vec![photosplice_doc::Layer::raster("A", photosplice_color::PixelFormat::RGBA8)]);
     g.psd_id = Some(u32::MAX);
     d.layers.push(g);
     let f = PsdFile::from_bytes(&export(&d, "t.psd", &Default::default()).unwrap().bytes).unwrap();
@@ -903,7 +903,7 @@ fn layer_ids_wrap_without_colliding() {
 /// refuses the file otherwise) and stay `8B64` in a PSB (storytold/photocraft@3f72158f).
 #[test]
 fn kept_psb_blocks_are_written_as_8bim_in_a_psd() {
-    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(4, 4), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    let mut d = photosplice_doc::Document::new("t", photosplice_geom::Size::new(4, 4), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
     d.metadata.psd_global_blocks = vec![(*b"8B64", *b"FMsk", std::sync::Arc::new(vec![0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 50])), (*b"8BIM", *b"Patt", std::sync::Arc::new(Vec::new()))];
     let sigs = |force_psb| {
         let bytes = export(&d, "t.psd", &ExportOptions { force_psb, ..Default::default() }).unwrap().bytes;
@@ -917,10 +917,10 @@ fn kept_psb_blocks_are_written_as_8bim_in_a_psd() {
 /// after it (storytold/photocraft@481b939f).
 #[test]
 fn lr16_padding_follows_the_block() {
-    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(5, 3), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U16);
-    d.layers.push(photosuite_doc::Layer::raster("A", photosuite_color::PixelFormat::new(photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U16, true)));
+    let mut d = photosplice_doc::Document::new("t", photosplice_geom::Size::new(5, 3), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U16);
+    d.layers.push(photosplice_doc::Layer::raster("A", photosplice_color::PixelFormat::new(photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U16, true)));
     let f = PsdFile::from_bytes(&export(&d, "t.psd", &Default::default()).unwrap().bytes).unwrap();
-    let photosuite_psd::file::LayerInfoPlacement::GlobalBlock { key, padding, .. } = &f.layer_info_placement else { panic!("Lr16 block") };
+    let photosplice_psd::file::LayerInfoPlacement::GlobalBlock { key, padding, .. } = &f.layer_info_placement else { panic!("Lr16 block") };
     assert_eq!(key, b"Lr16");
     let body = f.layer_info.as_ref().unwrap().unpadded_len(Version::Psd).unwrap();
     assert_eq!(padding.as_ref().map_or(body % 2, |p| p.len() as u64), (4 - body % 4) % 4, "padding after the block, to 4");
@@ -930,11 +930,11 @@ fn lr16_padding_follows_the_block() {
 /// draw) opens rendered from its model, not blank (storytold/photocraft@d2ad238e).
 #[test]
 fn type_layers_without_pixels_open_rendered() {
-    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(120, 40), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
-    let mut t = photosuite_doc::TextLayer { text: "Hello".into(), size_pt: 24.0, transform: photosuite_geom::Affine::translate(4.0, 30.0), ..Default::default() };
-    t.runs = vec![photosuite_doc::text::TextRun { len: 5, style: photosuite_doc::text::CharStyle { font_family: "Inter".into(), size_pt: 24.0, ..Default::default() } }];
+    let mut d = photosplice_doc::Document::new("t", photosplice_geom::Size::new(120, 40), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+    let mut t = photosplice_doc::TextLayer { text: "Hello".into(), size_pt: 24.0, transform: photosplice_geom::Affine::translate(4.0, 30.0), ..Default::default() };
+    t.runs = vec![photosplice_doc::text::TextRun { len: 5, style: photosplice_doc::text::CharStyle { font_family: "Inter".into(), size_pt: 24.0, ..Default::default() } }];
     t.sync_summary();
-    d.layers.push(photosuite_doc::Layer::new("Hello", LayerContent::Text(t)));
+    d.layers.push(photosplice_doc::Layer::new("Hello", LayerContent::Text(t)));
     let bytes = export(&d, "t.psd", &Default::default()).unwrap().bytes;
     let back = import("t.psd", &bytes).unwrap().document;
     let LayerContent::Text(b) = &back.layers[0].content else { panic!("text layer") };
@@ -946,11 +946,11 @@ fn type_layers_without_pixels_open_rendered() {
 #[test]
 fn hostile_type_sizes_without_pixels_open_without_a_huge_render() {
     for (size, scale) in [(6000.0f32, 1.0f64), (1e30, 1.0), (24.0, 1e12)] {
-        let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(64, 64), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
-        let mut t = photosuite_doc::TextLayer { text: "Hostile".into(), size_pt: size, transform: photosuite_geom::Affine { m: [scale, 0.0, 0.0, scale, 0.0, 30.0] }, ..Default::default() };
-        t.runs = vec![photosuite_doc::text::TextRun { len: 7, style: photosuite_doc::text::CharStyle { font_family: "Inter".into(), size_pt: size, ..Default::default() } }];
+        let mut d = photosplice_doc::Document::new("t", photosplice_geom::Size::new(64, 64), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+        let mut t = photosplice_doc::TextLayer { text: "Hostile".into(), size_pt: size, transform: photosplice_geom::Affine { m: [scale, 0.0, 0.0, scale, 0.0, 30.0] }, ..Default::default() };
+        t.runs = vec![photosplice_doc::text::TextRun { len: 7, style: photosplice_doc::text::CharStyle { font_family: "Inter".into(), size_pt: size, ..Default::default() } }];
         t.sync_summary();
-        d.layers.push(photosuite_doc::Layer::new("Hostile", LayerContent::Text(t)));
+        d.layers.push(photosplice_doc::Layer::new("Hostile", LayerContent::Text(t)));
         let Ok(r) = export(&d, "t.psd", &Default::default()) else { continue };
         let started = std::time::Instant::now();
         let _ = import("t.psd", &r.bytes);
@@ -962,8 +962,8 @@ fn hostile_type_sizes_without_pixels_open_without_a_huge_render() {
 /// made readers decompress an invalid extent (storytold/photocraft@c833294e).
 #[test]
 fn empty_channels_are_written_raw() {
-    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::F32);
-    d.layers.push(photosuite_doc::Layer::raster("empty", d.pixel_format()));
+    let mut d = photosplice_doc::Document::new("t", photosplice_geom::Size::new(8, 8), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::F32);
+    d.layers.push(photosplice_doc::Layer::raster("empty", d.pixel_format()));
     let f = PsdFile::from_bytes(&export(&d, "t.psd", &Default::default()).unwrap().bytes).unwrap();
     let rec = f.layers().iter().find(|r| r.name() == "empty").unwrap();
     assert!(rec.channels.iter().all(|c| c.compression.unwrap_or(Compression::Raw) == Compression::Raw), "{:?}", rec.channels.iter().map(|c| c.compression).collect::<Vec<_>>());
@@ -974,9 +974,9 @@ fn empty_channels_are_written_raw() {
 #[test]
 fn regenerated_fill_blocks_are_padded_to_four() {
     for name in ["P", "Pa", "Pat", "Patt"] {
-        let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
-        let fill = photosuite_doc::Fill::Pattern { name: name.into(), scale: 1.0, id: String::new(), angle: 0.0, link: true, phase: (0.0, 0.0) };
-        d.layers.push(photosuite_doc::Layer::new("fill", LayerContent::Fill(fill)));
+        let mut d = photosplice_doc::Document::new("t", photosplice_geom::Size::new(8, 8), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+        let fill = photosplice_doc::Fill::Pattern { name: name.into(), scale: 1.0, id: String::new(), angle: 0.0, link: true, phase: (0.0, 0.0) };
+        d.layers.push(photosplice_doc::Layer::new("fill", LayerContent::Fill(fill)));
         let f = PsdFile::from_bytes(&export(&d, "t.psd", &Default::default()).unwrap().bytes).unwrap();
         let b = f.layers().iter().flat_map(|r| &r.blocks).find(|b| &b.key == b"PtFl").expect("PtFl");
         assert_eq!(b.data.len() % 4, 0, "{name}: {}", b.data.len());
@@ -987,12 +987,12 @@ fn regenerated_fill_blocks_are_padded_to_four() {
 /// its name and even without lock data (other writers' files; storytold/photocraft@57624bd0).
 #[test]
 fn a_bottom_record_without_transparency_opens_as_the_background() {
-    let d = photosuite_doc::Document::with_background("bg", photosuite_geom::Size::new(6, 4), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8, photosuite_color::Color::rgb(0.2, 0.4, 0.6));
+    let d = photosplice_doc::Document::with_background("bg", photosplice_geom::Size::new(6, 4), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8, photosplice_color::Color::rgb(0.2, 0.4, 0.6));
     let mut f = PsdFile::from_bytes(&export(&d, "t.psd", &Default::default()).unwrap().bytes).unwrap();
     let rec = &mut f.layers_mut()[0];
     assert!(rec.channels.iter().all(|c| c.id >= 0), "written as Reference's Background");
     rec.blocks.retain(|b| &b.key != b"lspf");
-    rec.flags = photosuite_psd::LayerFlags(photosuite_psd::LayerFlags::BIT4_USEFUL);
+    rec.flags = photosplice_psd::LayerFlags(photosplice_psd::LayerFlags::BIT4_USEFUL);
     rec.name = b"Layer 1".to_vec();
     let back = import("t.psd", &f.to_bytes().unwrap()).unwrap().document;
     let bg = &back.layers[0];
@@ -1003,15 +1003,15 @@ fn a_bottom_record_without_transparency_opens_as_the_background() {
 /// the reference editor writes it (every such layer of its corpus files).
 #[test]
 fn effects_set_layer_flag_bit_5() {
-    let mut d = photosuite_doc::Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    let mut d = photosplice_doc::Document::new("t", photosplice_geom::Size::new(8, 8), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
     let fmt = d.pixel_format();
-    let mut fx = photosuite_doc::Layer::raster("fx", fmt);
-    fx.effects.items.push(photosuite_doc::Effect::default_drop_shadow());
-    d.layers.push(photosuite_doc::Layer::raster("plain", fmt));
+    let mut fx = photosplice_doc::Layer::raster("fx", fmt);
+    fx.effects.items.push(photosplice_doc::Effect::default_drop_shadow());
+    d.layers.push(photosplice_doc::Layer::raster("plain", fmt));
     d.layers.push(fx);
     let bytes = export(&d, "t.psd", &ExportOptions::default()).unwrap().bytes;
     let f = PsdFile::from_bytes(&bytes).unwrap();
-    let bit5 = |i: usize| f.layers()[i].flags.0 & photosuite_psd::LayerFlags::EFFECTS != 0;
+    let bit5 = |i: usize| f.layers()[i].flags.0 & photosplice_psd::LayerFlags::EFFECTS != 0;
     assert_eq!((bit5(0), bit5(1)), (false, true));
 }
 
@@ -1020,8 +1020,8 @@ fn effects_set_layer_flag_bit_5() {
 /// Without a selection the top record is the target, as before.
 #[test]
 fn selected_layers_round_trip() {
-    use photosuite_doc::{Document, Layer};
-    let mut d = Document::new("t", photosuite_geom::Size::new(8, 8), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    use photosplice_doc::{Document, Layer};
+    let mut d = Document::new("t", photosplice_geom::Size::new(8, 8), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
     let fmt = d.pixel_format();
     let (a, b) = (Layer::raster("A", fmt), Layer::raster("B", fmt));
     let inner = Layer::raster("inner", fmt);

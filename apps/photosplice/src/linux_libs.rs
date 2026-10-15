@@ -10,7 +10,7 @@
 //! No `dlopen` here (that needs `unsafe`): we read the dynamic linker's cache (`ldconfig -p`) and
 //! look in `LD_LIBRARY_PATH` and the usual library directories. Only the cache is conclusive: if
 //! it can't be read (NixOS, some containers) and a library isn't found in the directories, we
-//! warn and start anyway. `PHOTOSUITE_SKIP_LIB_CHECK=1` skips the check.
+//! warn and start anyway. `PHOTOSPLICE_SKIP_LIB_CHECK=1` skips the check.
 //!
 //! The parsing and decision logic is pure and tested on every platform; only [`preflight`]
 //! touches the system, and it is only called on Linux.
@@ -215,9 +215,9 @@ pub fn missing_message(session: DisplaySession, missing: &[AnyOf], distro: Distr
         }
     }
     let mut msg = if conclusive {
-        format!("photosuite: cannot start: the {session_name} session needs libraries that are not installed: {}.\n", names.join(", "))
+        format!("photosplice: cannot start: the {session_name} session needs libraries that are not installed: {}.\n", names.join(", "))
     } else {
-        format!("photosuite: warning: could not find these libraries the {session_name} session needs: {}. Starting anyway.\n", names.join(", "))
+        format!("photosplice: warning: could not find these libraries the {session_name} session needs: {}. Starting anyway.\n", names.join(", "))
     };
     msg.push_str(&format!("Install them with:\n  {}\n", install_command(&packages, distro)));
     if distro == Distro::Unknown {
@@ -225,7 +225,7 @@ pub fn missing_message(session: DisplaySession, missing: &[AnyOf], distro: Distr
         msg.push_str(&format!("  Fedora: sudo dnf install {}\n", fedora.join(" ")));
     }
     if conclusive {
-        msg.push_str("(Set PHOTOSUITE_SKIP_LIB_CHECK=1 to start anyway.)\n");
+        msg.push_str("(Set PHOTOSPLICE_SKIP_LIB_CHECK=1 to start anyway.)\n");
     }
     msg
 }
@@ -260,7 +260,7 @@ fn read_ldconfig() -> Option<String> {
 /// Run the check against this system. `Err` carries the message to print before exiting with a
 /// non-zero status; a warning is printed here and the app starts.
 pub fn preflight() -> Result<(), String> {
-    if std::env::var_os("PHOTOSUITE_SKIP_LIB_CHECK").is_some_and(|v| !v.is_empty() && v != "0") {
+    if std::env::var_os("PHOTOSPLICE_SKIP_LIB_CHECK").is_some_and(|v| !v.is_empty() && v != "0") {
         return Ok(());
     }
     let session = session_from_env(|k| std::env::var(k).ok());
@@ -355,7 +355,7 @@ mod tests {
         let msg = missing_message(DisplaySession::X11, &missing, Distro::Debian, conclusive);
         assert!(msg.contains("libxkbcommon-x11.so.0"), "{msg}");
         assert!(msg.contains("sudo apt install libxkbcommon-x11-0"), "{msg}");
-        assert!(msg.contains("PHOTOSUITE_SKIP_LIB_CHECK"), "{msg}");
+        assert!(msg.contains("PHOTOSPLICE_SKIP_LIB_CHECK"), "{msg}");
     }
 
     #[test]

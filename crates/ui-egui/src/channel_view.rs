@@ -8,13 +8,13 @@
 //! recomposited per frame.
 
 use egui::{Color32, TextureOptions};
-use photosuite_doc::{AlphaChannel, ColorMode, Document};
-use photosuite_engine::channel_cmds::{ChannelView, color_count};
-use photosuite_engine::mask_view_cmds::MaskViewMode;
-use photosuite_geom::Rect;
-use photosuite_raster::{Surface, from_rgba, to_rgba};
+use photosplice_doc::{AlphaChannel, ColorMode, Document};
+use photosplice_engine::channel_cmds::{ChannelView, color_count};
+use photosplice_engine::mask_view_cmds::MaskViewMode;
+use photosplice_geom::Rect;
+use photosplice_raster::{Surface, from_rgba, to_rgba};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 
 /// Largest overlay texture side; bigger documents show a downsampled overlay.
 const MAX_SIDE: u32 = 4096;
@@ -48,7 +48,7 @@ fn sample(s: &Surface, r: Rect, factor: u32) -> Vec<f32> {
 
 /// Composite RGBA (over white, like Photoshop's channel views) at `factor` stride.
 fn composite(doc: &Document, r: Rect, factor: u32) -> Vec<[f32; 4]> {
-    let buf = photosuite_compose::render(doc, r);
+    let buf = photosplice_compose::render(doc, r);
     let (w, h) = (r.width().div_ceil(factor), r.height().div_ceil(factor));
     let bw = r.width();
     let mut out = Vec::with_capacity((w * h) as usize);
@@ -123,7 +123,7 @@ pub fn render(doc: &Document, v: &ChannelView, r: Rect, factor: u32, in_color: b
         vec![[0.0; 4]; n]
     };
     // Rubylith: `color` at `opacity` × coverage over the accumulated pixels.
-    let mut tint = |values: Vec<f32>, color: photosuite_color::Color, opacity: f32, coverage: &dyn Fn(f32) -> f32| {
+    let mut tint = |values: Vec<f32>, color: photosplice_color::Color, opacity: f32, coverage: &dyn Fn(f32) -> f32| {
         let c = color.to_rgb();
         for (o, val) in out.iter_mut().zip(values) {
             let a = (coverage(val.clamp(0.0, 1.0)) * opacity).clamp(0.0, 1.0);
@@ -188,7 +188,7 @@ fn view_key(v: &ChannelView, in_color: bool) -> u64 {
 }
 
 /// Make the channel-view texture of document `idx` current; `None` = nothing to draw.
-pub fn ensure(app: &mut PhotosuiteApp, ctx: &egui::Context, idx: usize) -> Option<egui::TextureId> {
+pub fn ensure(app: &mut PhotospliceApp, ctx: &egui::Context, idx: usize) -> Option<egui::TextureId> {
     let st = app.session.documents().get(idx)?;
     let doc = st.doc.clone();
     let view = st.channel_view.clone();
@@ -254,8 +254,8 @@ pub fn ensure(app: &mut PhotosuiteApp, ctx: &egui::Context, idx: usize) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_engine::Session;
-    use photosuite_engine::channel_cmds::ChannelTarget;
+    use photosplice_engine::Session;
+    use photosplice_engine::channel_cmds::ChannelTarget;
     use serde_json::json;
 
     fn session() -> Session {
@@ -313,7 +313,7 @@ mod tests {
         assert!(px[36].a() <= 4, "next to nothing over the revealed end: {:?}", px[36]);
     }
 
-    /// `cargo test --release -p photosuite-ui-egui --lib mask_view_switch_24mp -- --ignored --nocapture`
+    /// `cargo test --release -p photosplice-ui-egui --lib mask_view_switch_24mp -- --ignored --nocapture`
     #[test]
     #[ignore = "benchmark"]
     fn mask_view_switch_24mp() {

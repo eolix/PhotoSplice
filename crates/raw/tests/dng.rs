@@ -1,8 +1,8 @@
 //! Synthetic DNG files: every storage layout decodes to the exact sensor
 //! samples, and development reproduces known colours.
 
-use photosuite_raw::testgen::{DngSpec, DngStorage, mosaic, scene};
-use photosuite_raw::*;
+use photosplice_raw::testgen::{DngSpec, DngStorage, mosaic, scene};
+use photosplice_raw::*;
 
 fn sensor(bytes: &[u8]) -> Sensor {
     decode(bytes, &Limits::default()).unwrap()
@@ -260,7 +260,7 @@ fn gain_map_opcode_is_applied() {
     spec.as_shot_neutral = Some([1.0; 3]);
     let lin = |v: u16| (f64::from(v) / 65535.0).powf(1.8);
     let base = develop(&spec.build(), &DevelopOptions::default()).unwrap().rgb[(6 * w + 8) * 3 + 1];
-    spec.opcode_list2 = Some(photosuite_raw::testgen::gain_map_opcode_list([0, 0, h as u32, w as u32], 1, [[2.0, 2.0], [2.0, 2.0]]));
+    spec.opcode_list2 = Some(photosplice_raw::testgen::gain_map_opcode_list([0, 0, h as u32, w as u32], 1, [[2.0, 2.0], [2.0, 2.0]]));
     let d = develop(&spec.build(), &DevelopOptions::default()).unwrap();
     assert!(!d.warnings.iter().any(|w| w.contains("Opcode")), "{:?}", d.warnings);
     let gained = d.rgb[(6 * w + 8) * 3 + 1];

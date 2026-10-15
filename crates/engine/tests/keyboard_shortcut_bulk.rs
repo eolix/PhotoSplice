@@ -1,7 +1,7 @@
 //! Regression tests for issue #719: a bulk `edit.keyboardShortcuts` set that
 //! assigns the same key to two commands must not silently unbind both; the
 //! clash inside the call must be reported in `conflicts`.
-use photosuite_engine::Session;
+use photosplice_engine::Session;
 use serde_json::{Value, json};
 
 fn shortcut_of(v: &Value, id: &str) -> Option<String> {

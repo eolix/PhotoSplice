@@ -1,12 +1,12 @@
-//! Layer-style libraries (`.asl`, [`photosuite_psd::asl`]) as PhotoSuite styles: each style's
+//! Layer-style libraries (`.asl`, [`photosplice_psd::asl`]) as PhotoSplice styles: each style's
 //! `Lefx` tree goes through the PSD layer-effects mapping ([`crate::effects_map::parse_lfx2`]),
 //! its `blendOptions` give the blend mode and fill opacity it was saved with, and the library's
 //! patterns become [`Pattern`]s for its pattern overlays.
 
-use photosuite_color::BlendMode;
-use photosuite_doc::{Effect, Pattern};
-use photosuite_psd::asl::AslStyle;
-use photosuite_psd::descriptor::{Value, VersionedDescriptor};
+use photosplice_color::BlendMode;
+use photosplice_doc::{Effect, Pattern};
+use photosplice_psd::asl::AslStyle;
+use photosplice_psd::descriptor::{Value, VersionedDescriptor};
 
 /// One style of a library, mapped.
 #[derive(Debug, Clone, PartialEq)]
@@ -21,7 +21,7 @@ pub struct Style {
 
 /// The styles and patterns of an `.asl` file.
 pub fn read_asl(bytes: &[u8]) -> Result<(Vec<Style>, Vec<Pattern>), String> {
-    let file = photosuite_psd::asl::parse(bytes).map_err(|e| format!("not a readable Photoshop style library: {e}"))?;
+    let file = photosplice_psd::asl::parse(bytes).map_err(|e| format!("not a readable Photoshop style library: {e}"))?;
     let patterns = file.patterns.iter().filter_map(crate::pattern_map::from_psd).collect();
     Ok((file.styles.iter().map(style).collect(), patterns))
 }
@@ -50,8 +50,8 @@ fn style(s: &AslStyle) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_psd::asl::{AslFile, write};
-    use photosuite_psd::descriptor::{Descriptor, Id};
+    use photosplice_psd::asl::{AslFile, write};
+    use photosplice_psd::descriptor::{Descriptor, Id};
 
     #[test]
     fn a_library_maps_its_effects_and_blending_options() {

@@ -1,4 +1,4 @@
-//! `photosuite-raw`: a clean-room, pure-Rust camera raw decoder and developer.
+//! `photosplice-raw`: a clean-room, pure-Rust camera raw decoder and developer.
 //!
 //! Implemented only from public specifications and papers: TIFF 6.0,
 //! TIFF/EP (ISO 12234-2), the Adobe DNG Specification 1.7, ITU-T T.81
@@ -108,7 +108,7 @@ impl RawFormat {
 pub const EXTENSIONS: &[&str] = &["dng", "cr2", "cr3", "nef", "nrw", "arw", "srf", "sr2", "pef", "orf", "rw2", "raf"];
 
 /// Decompression-bomb guards, checked on header values before allocating
-/// (the same shape and defaults as `photosuite-codecs`' limits).
+/// (the same shape and defaults as `photosplice-codecs`' limits).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     pub max_width: u32,

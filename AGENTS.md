@@ -1,6 +1,6 @@
 # AGENTS.md: guide for AI agents and contributors
 
-> PhotoSuite is built on [PhotoCraft](https://github.com/storytold/photocraft) (MIT OR
+> PhotoSplice is built on [PhotoCraft](https://github.com/storytold/photocraft) (MIT OR
 > Apache-2.0); `NOTICE` carries its attribution.
 >
 > **Third-party material** (font, LUT, brush, pattern, icon set, …): its licence file beside it
@@ -11,10 +11,10 @@
 > Font Awesome (`resources/shapes/`) is CC BY 4.0, attribution only.
 >
 > The engine carries Photoshop's whole menu tree; `crates/engine/src/prefs_hidden.rs` hides by
-> default what PhotoSuite doesn't offer yet.
+> default what PhotoSplice doesn't offer yet.
 
 
-PhotoSuite is an open-source, native, Photoshop-comparable image editor written in **Rust only** (no JavaScript or TypeScript). **No Tauri, Electron or webview shells:** the desktop app is native egui/eframe on wgpu, and the web build is the same Rust compiled to WebAssembly (trunk + wasm-bindgen). Never add Tauri (or any webview/JS UI framework) as a dependency, build step or packaging target. The product name is always written **PhotoSuite** in user-facing text: UI, window titles, About, installers, release names, docs prose. Machine names stay lowercase: crates (`photosuite-*`), binaries, file names, ids (`io.github.eolix.PhotoSuite` on Linux: Flatpak, desktop file, AppStream, icons; `app.photosuite` for the macOS bundle and the settings folder). The aim is to work the way Photoshop does (menus, shortcuts, behaviour, PSD fidelity) without claiming to be a full replacement, with every feature drivable by agents. Read this file first, then `docs/`.
+PhotoSplice is an open-source, native, Photoshop-comparable image editor written in **Rust only** (no JavaScript or TypeScript). **No Tauri, Electron or webview shells:** the desktop app is native egui/eframe on wgpu, and the web build is the same Rust compiled to WebAssembly (trunk + wasm-bindgen). Never add Tauri (or any webview/JS UI framework) as a dependency, build step or packaging target. The product name is always written **PhotoSplice** in user-facing text: UI, window titles, About, installers, release names, docs prose. Machine names stay lowercase: crates (`photosplice-*`), binaries, file names, ids (`io.github.eolix.PhotoSplice` on Linux: Flatpak, desktop file, AppStream, icons; `app.photosplice` for the macOS bundle and the settings folder). The aim is to work the way Photoshop does (menus, shortcuts, behaviour, PSD fidelity) without claiming to be a full replacement, with every feature drivable by agents. Read this file first, then `docs/`.
 
 ## 1. Orientation (5 minutes)
 
@@ -45,8 +45,8 @@ crates/
   ui-egui automation         L6 egui shell (thin: all actions go through the engine); control-channel security
   testkit                    test helpers
 apps/
-  photosuite                 desktop app (eframe/wgpu), TCP control server
-  photosuite-web             the same app in the browser (trunk + wasm-bindgen)
+  photosplice                 desktop app (eframe/wgpu), TCP control server
+  photosplice-web             the same app in the browser (trunk + wasm-bindgen)
 xtask/                       cargo xtask layers | wasm | ci | stats | corpus | test-corpus | parity | perf | scorecard
 ```
 
@@ -56,10 +56,10 @@ xtask/                       cargo xtask layers | wasm | ci | stats | corpus | t
 
 ### Never crash (outranks feature work)
 
-People trust PhotoSuite with their work, and a crash loses it. A malformed file, a bad command or control-channel param, a corrupt settings file, an odd keystroke or a full disk must produce an error the user or agent can act on, never a panic. Don't ship a feature by adding a panic path; fix a crash before building on top of it.
+People trust PhotoSplice with their work, and a crash loses it. A malformed file, a bad command or control-channel param, a corrupt settings file, an odd keystroke or a full disk must produce an error the user or agent can act on, never a panic. Don't ship a feature by adding a panic path; fix a crash before building on top of it.
 
 - **Non-test code never panics.** No `unwrap()`, `expect()`, `panic!`, `unreachable!`, `todo!` or `unimplemented!`. Return the crate's error type and propagate with `?`; use `ok_or(..)?`, `let .. else { return Err(..) }`, `if let`, or `unwrap_or*` where a fallback is truly correct (never one that silently corrupts a document). Unfinished features return an "unsupported" error. The only exception is a provably infallible literal: `#[allow(clippy::expect_used)]` plus `.expect("why it can't fail")`.
-- **No `unsafe`.** The workspace sets `unsafe_code = "forbid"`. The one exception is the isolated helper crate `photosuite-tablet` (`crates/tablet`): winit drops pen tablet data, and reading it on macOS needs an AppKit event monitor (Objective-C interop). Only its `src/macos.rs` allows `unsafe` (`unsafe_code = "deny"` crate-wide, every block has a `SAFETY:` comment, tested against real `NSEvent`s); its X11 path and all mapping code are safe. Don't add `unsafe` anywhere else.
+- **No `unsafe`.** The workspace sets `unsafe_code = "forbid"`. The one exception is the isolated helper crate `photosplice-tablet` (`crates/tablet`): winit drops pen tablet data, and reading it on macOS needs an AppKit event monitor (Objective-C interop). Only its `src/macos.rs` allows `unsafe` (`unsafe_code = "deny"` crate-wide, every block has a `SAFETY:` comment, tested against real `NSEvent`s); its X11 path and all mapping code are safe. Don't add `unsafe` anywhere else.
 - **Input-derived numbers are hostile.** Use `get()` rather than `[i]`/`[a..b]` for indices from files, params, selections or arithmetic on them; slice strings only at char boundaries; use `checked_*`/`saturating_*` for lengths, offsets and counts; guard division by zero and NaN/inf casts; cap allocations sized by input.
 - **Bound recursion** with depth limits or seen-sets (documents can be deep or cyclic).
 - **Don't cascade.** Handle lock poisoning (`lock().unwrap_or_else(PoisonError::into_inner)`) and treat thread joins as `Result`s.
@@ -68,11 +68,11 @@ People trust PhotoSuite with their work, and a crash loses it. A malformed file,
 - **Enforced by clippy.** `clippy.toml` allows `unwrap`/`expect`/`panic`/indexing in tests only. Clean crates carry `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]`; new crates start with it.
 
 1. **Everything is a command.** New user-visible behaviour = a command in the engine (`crates/engine/src/*_cmds.rs`, registered in `commands.rs`) with id, label, menu path, shortcut, params doc, `enabled` and `run`, plus tests. The UI and the control channel dispatch commands by id. Use the **exact id from `crates/ui-egui/src/menu_catalog.rs`** and the menu item goes live automatically. Only pure view/window state (zoom, panels, screen mode) belongs to the shell (`menus.rs` `UI_COMMANDS`).
-2. **No format or colour assumptions.** Bit depth (8/16/32f) and colour model (RGB/Gray/CMYK/Lab…) are runtime data. Never introduce a `u8`-only pixel path in public APIs. Never assume sRGB: colour conversions go through `photosuite-cms` (`Transform`, `transform::cached`). Test at several depths.
+2. **No format or colour assumptions.** Bit depth (8/16/32f) and colour model (RGB/Gray/CMYK/Lab…) are runtime data. Never introduce a `u8`-only pixel path in public APIs. Never assume sRGB: colour conversions go through `photosplice-cms` (`Transform`, `transform::cached`). Test at several depths.
 3. **Clean-room.** We studied Photoshop and other proprietary editors for *behaviour and look only*. Never copy their code, shaders, profiles or assets. Implement from public specs (Adobe PSD spec, ICC, ISO 32000 blend modes, papers) and observation. Third-party assets must be permissively licensed, keep their license file next to them, and get a row in `THIRD-PARTY-NOTICES.md` (path, title, author, source, license) in the same change; so do original assets.
 4. **Tests are the gate.** Every change comes with tests. Format crates use round-trip, synthetic-generator, oracle and fuzz tests. Keep the PSD corpus results and the parity floor (`crates/ui-egui/src/parity.rs`) from regressing.
 5. **The UI is thin and data-driven.** UI state lives in `ui-egui/src/state.rs` (serde), so the control channel can read and drive it. Colours and radii come from `theme::Tokens`, never hard-coded.
-6. **Verify UI changes visually.** Render offscreen with `cargo run -p photosuite-ui-egui --example snapshot` (no window, no focus stealing), or launch with `--control` and take `ui.screenshot`. Look at the PNG. Demo images must be public-domain art, never personal photos. When fetching assets, never put a person's name, email or other personal details in requests (User-Agent, headers, URLs); use a generic `PhotoSuite-dev` User-Agent.
+6. **Verify UI changes visually.** Render offscreen with `cargo run -p photosplice-ui-egui --example snapshot` (no window, no focus stealing), or launch with `--control` and take `ui.screenshot`. Look at the PNG. Demo images must be public-domain art, never personal photos. When fetching assets, never put a person's name, email or other personal details in requests (User-Agent, headers, URLs); use a generic `PhotoSplice-dev` User-Agent.
 7. **Never break wasm.** L0–L6 must `cargo check --target wasm32-unknown-unknown` (run `cargo xtask wasm`). File-system code is `cfg(not(target_arch = "wasm32"))` or goes through the platform services.
 8. **Performance is a feature.** Benchmark heavy operations on a 24–36 MP image in release. Work per tile in parallel (rayon), skip empty tiles, never scan a full surface per frame (cache per revision), and record before/after timings in the dev log.
 
@@ -102,13 +102,13 @@ cargo clippy -p <crates> --all-targets -- -D warnings
 cargo xtask layers
 cargo xtask wasm            # if you touched L0–L6
 cargo xtask parity          # if you added commands; commit the regenerated docs/parity.md
-cargo test -p photosuite-engine --test panic_hunt -- --ignored   # if you added/changed commands: no panic on adversarial input (Rule 9)
+cargo test -p photosplice-engine --test panic_hunt -- --ignored   # if you added/changed commands: no panic on adversarial input (Rule 9)
 cargo xtask scorecard       # if you moved a number: flip the checklist row in scorecard/*.toml, raise a
                             # corpus floor, fix a dead preference, or meet a budget (then set enforce = true
                             # in perf/budgets.toml)
 cargo xtask perf --quick    # if you touched a hot path; `cargo xtask perf --update-baseline` publishes a full run
 cargo xtask test-corpus     # if you touched psd, io, codecs, compose, gpu, text or format (or: --changed decides)
-cargo test -p photosuite-ui-egui --lib every_tl_literal -- --ignored   # translation report: tl! labels missing from a catalogue
+cargo test -p photosplice-ui-egui --lib every_tl_literal -- --ignored   # translation report: tl! labels missing from a catalogue
 packaging/notices/generate.sh   # if Cargo.lock changed; commit the regenerated THIRD-PARTY-CRATES.md (CI checks it)
 ```
 
@@ -135,7 +135,7 @@ Keep the tree building at every step: sessions can end abruptly, and a green tre
 
 ## 8. Keeping the native format complete
 
-`photosuite-format` deliberately fails to compile when a `photosuite-doc` struct gains a field, so
+`photosplice-format` deliberately fails to compile when a `photosplice-doc` struct gains a field, so
 nothing is silently dropped from `.pcraft` saves. When you add a doc field, add it to
 `crates/format/src/manifest.rs` and `convert.rs` with `#[serde(default)]` so older files still load.
 If the field has a PSD equivalent, map it in `crates/io` too, and keep unknown PSD blocks verbatim.

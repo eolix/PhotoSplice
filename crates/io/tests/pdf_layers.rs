@@ -1,8 +1,8 @@
-//! PDF pages open as editable layers (`photosuite_io::pdf::open_page`): synthetic one-page PDFs
+//! PDF pages open as editable layers (`photosplice_io::pdf::open_page`): synthetic one-page PDFs
 //! written here, one feature each.
 
-use photosuite_doc::{Document, Fill, LayerContent};
-use photosuite_io::pdf::{PageAs, open_page};
+use photosplice_doc::{Document, Fill, LayerContent};
+use photosplice_io::pdf::{PageAs, open_page};
 
 /// A one-page PDF, 200 × 100 pt, with `content` as its content stream and `resources` (the
 /// inside of the page's resource dictionary). `extra` objects are numbered from 6.
@@ -162,7 +162,7 @@ fn clips_become_vector_masks() {
 fn looks_like_the_page(bytes: &[u8]) -> f32 {
     let layers = open_page("t.pdf", bytes, 0, 72.0, PageAs::Layers).unwrap().document;
     let pixels = open_page("t.pdf", bytes, 0, 72.0, PageAs::Pixels).unwrap().document;
-    let (a, b) = (photosuite_compose::flatten(&layers), photosuite_compose::flatten(&pixels));
+    let (a, b) = (photosplice_compose::flatten(&layers), photosplice_compose::flatten(&pixels));
     let pm = |p: &[f32; 4], c: usize| if c == 3 { p[3] } else { p[c] * p[3] };
     a.px.iter().zip(&b.px).map(|(p, q)| (0..4).map(|c| (pm(p, c) - pm(q, c)).abs()).sum::<f32>() / 4.0).sum::<f32>() / a.px.len() as f32
 }
@@ -174,7 +174,7 @@ fn shadings_become_gradient_fill_layers_in_their_place() {
     let d = open(&bytes);
     assert_eq!(kinds(&d), ["shape", "fill", "shape"], "the shading keeps its place in the stack");
     let LayerContent::Fill(Fill::Gradient { style, stops, .. }) = &d.layers[1].content else { panic!("{:?}", d.layers[1].content) };
-    assert_eq!(*style, photosuite_doc::GradientStyle::Linear);
+    assert_eq!(*style, photosplice_doc::GradientStyle::Linear);
     assert_eq!(stops.len(), 2, "a linear ramp needs two stops: {stops:?}");
     assert!(d.layers[1].vector_mask.is_none(), "it fills the page");
     let diff = looks_like_the_page(&bytes);
@@ -188,7 +188,7 @@ fn a_radial_pattern_fill_is_a_masked_radial_gradient() {
     let d = open(&bytes);
     assert_eq!(kinds(&d), ["fill"]);
     let LayerContent::Fill(Fill::Gradient { style, .. }) = &d.layers[0].content else { panic!() };
-    assert_eq!(*style, photosuite_doc::GradientStyle::Radial);
+    assert_eq!(*style, photosplice_doc::GradientStyle::Radial);
     assert!(d.layers[0].vector_mask.is_some(), "the rectangle masks it");
     let diff = looks_like_the_page(&bytes);
     assert!(diff < 0.01, "{diff}");
@@ -209,7 +209,7 @@ fn a_clipped_shading_is_masked_by_the_clip() {
     let d = open(&bytes);
     assert_eq!(kinds(&d), ["fill"]);
     let m = d.layers[0].vector_mask.as_ref().expect("masked");
-    assert!(m.path.subpaths.iter().any(|s| s.op == photosuite_doc::vector::PathOp::Intersect), "the rectangle, intersected with the clip");
+    assert!(m.path.subpaths.iter().any(|s| s.op == photosplice_doc::vector::PathOp::Intersect), "the rectangle, intersected with the clip");
     let diff = looks_like_the_page(&bytes);
     assert!(diff < 0.01, "{diff}");
 }
@@ -234,24 +234,24 @@ fn a_page_sized_clip_masks_nothing() {
 #[test]
 fn layers_look_like_the_page() {
     let shading = "<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 200 0] /Function << /FunctionType 2 /Domain [0 1] /C0 [1 1 0] /C1 [0 1 1] /N 1 >> >>";
-    let content = "q 0 0 200 40 re W n /Sh0 sh Q  0 0 1 rg 1 0 0 RG 3 w 10 50 60 40 re B  q 120 50 40 40 re W n 0 0.5 0 rg 100 40 80 80 re f Q  BT /F1 18 Tf 0 0 0 rg 20 15 Td (PhotoSuite PDF) Tj ET";
+    let content = "q 0 0 200 40 re W n /Sh0 sh Q  0 0 1 rg 1 0 0 RG 3 w 10 50 60 40 re B  q 120 50 40 40 re W n 0 0.5 0 rg 100 40 80 80 re f Q  BT /F1 18 Tf 0 0 0 rg 20 15 Td (PhotoSplice PDF) Tj ET";
     let bytes = pdf(content, "/Shading << /Sh0 6 0 R >>", &[shading.into()]);
     let layers = open(&bytes);
     let pixels = open_page("t.pdf", &bytes, 0, 144.0, PageAs::Pixels).unwrap().document;
     let layers2 = open_page("t.pdf", &bytes, 0, 144.0, PageAs::Layers).unwrap().document;
     assert!(layers.layers.len() >= 4, "{:?}", kinds(&layers));
-    let (a, b) = (photosuite_compose::flatten(&layers2), photosuite_compose::flatten(&pixels));
+    let (a, b) = (photosplice_compose::flatten(&layers2), photosplice_compose::flatten(&pixels));
     assert_eq!(a.px.len(), b.px.len());
     let diff = a.px.iter().zip(&b.px).map(|(p, q)| (0..4).map(|c| (p[c] - q[c]).abs()).sum::<f32>()).sum::<f32>() / a.px.len() as f32;
     assert!(diff < 0.01, "mean difference {diff}");
 }
 
-/// `PHOTOSUITE_PDF_PROBE=<file.pdf> cargo test -p photosuite-io --test pdf_layers probe -- --ignored --nocapture`:
+/// `PHOTOSPLICE_PDF_PROBE=<file.pdf> cargo test -p photosplice-io --test pdf_layers probe -- --ignored --nocapture`:
 /// how a real file opens (layer kinds, fonts, and how far the layers are from the pixels).
 #[test]
 #[ignore]
 fn probe() {
-    let Some(path) = std::env::var_os("PHOTOSUITE_PDF_PROBE") else { return };
+    let Some(path) = std::env::var_os("PHOTOSPLICE_PDF_PROBE") else { return };
     let bytes = std::fs::read(&path).unwrap();
     let dpi = 150.0;
     let t = std::time::Instant::now();
@@ -260,7 +260,7 @@ fn probe() {
     let pixels = open_page("p.pdf", &bytes, 0, dpi, PageAs::Pixels).unwrap().document;
     let mut count = std::collections::BTreeMap::new();
     let mut fonts = std::collections::BTreeMap::new();
-    fn walk(ls: &[photosuite_doc::Layer], count: &mut std::collections::BTreeMap<&'static str, usize>, fonts: &mut std::collections::BTreeMap<String, usize>) {
+    fn walk(ls: &[photosplice_doc::Layer], count: &mut std::collections::BTreeMap<&'static str, usize>, fonts: &mut std::collections::BTreeMap<String, usize>) {
         for l in ls {
             let k = match &l.content {
                 LayerContent::Text(t) => {
@@ -279,17 +279,17 @@ fn probe() {
         }
     }
     walk(&layers.document.layers, &mut count, &mut fonts);
-    let (a, b) = (photosuite_compose::flatten(&layers.document), photosuite_compose::flatten(&pixels));
+    let (a, b) = (photosplice_compose::flatten(&layers.document), photosplice_compose::flatten(&pixels));
     assert_eq!(a.rect, b.rect, "both ways open at one size");
     // Premultiplied, so colour under no coverage doesn't count.
     let pm = |p: &[f32; 4], c: usize| if c == 3 { p[3] } else { p[c] * p[3] };
     let diff = a.px.iter().zip(&b.px).map(|(p, q)| (0..4).map(|c| (pm(p, c) - pm(q, c)).abs()).sum::<f32>()).sum::<f32>() / a.px.len() as f32;
     let off = a.px.iter().zip(&b.px).filter(|(p, q)| (0..4).any(|c| (pm(p, c) - pm(q, c)).abs() > 0.1)).count() as f32 / a.px.len() as f32;
-    if let Some(dir) = std::env::var_os("PHOTOSUITE_PDF_PROBE_OUT") {
-        let save = |buf: &photosuite_compose::Buffer, name: &str| {
+    if let Some(dir) = std::env::var_os("PHOTOSPLICE_PDF_PROBE_OUT") {
+        let save = |buf: &photosplice_compose::Buffer, name: &str| {
             let img = buf.to_rgba8();
-            let im = photosuite_codecs::Image::from_u8(img.width, img.height, photosuite_codecs::ChannelLayout::Rgba, img.pixels).unwrap();
-            let png = photosuite_codecs::encode(&im, photosuite_codecs::Format::Png, &Default::default()).unwrap();
+            let im = photosplice_codecs::Image::from_u8(img.width, img.height, photosplice_codecs::ChannelLayout::Rgba, img.pixels).unwrap();
+            let png = photosplice_codecs::encode(&im, photosplice_codecs::Format::Png, &Default::default()).unwrap();
             std::fs::write(std::path::Path::new(&dir).join(name), png).unwrap();
         };
         save(&a, "layers.png");
@@ -302,32 +302,32 @@ fn probe() {
 
 /// A 200 × 100 document at 72 ppi: a blue rectangle with a red stroke, a line of type, an image.
 fn sample() -> Document {
-    use photosuite_doc::text::{CharStyle, TextRun, TextShape};
-    use photosuite_doc::vector::{Path, ShapeLayer, ShapeStroke, Subpath};
-    use photosuite_doc::{Layer, TextLayer};
-    let mut doc = Document::new("sample", photosuite_geom::Size::new(200, 100), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+    use photosplice_doc::text::{CharStyle, TextRun, TextShape};
+    use photosplice_doc::vector::{Path, ShapeLayer, ShapeStroke, Subpath};
+    use photosplice_doc::{Layer, TextLayer};
+    let mut doc = Document::new("sample", photosplice_geom::Size::new(200, 100), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
     let fmt = doc.pixel_format();
     let mut sh = ShapeLayer {
         path: Path::new(vec![Subpath::polygon(&[(10.0, 10.0), (90.0, 10.0), (90.0, 60.0), (10.0, 60.0)])]),
-        fill: Some(Fill::Solid(photosuite_color::Color::rgb(0.0, 0.0, 1.0))),
-        stroke: Some(ShapeStroke { width: 4.0, paint: Fill::Solid(photosuite_color::Color::rgb(1.0, 0.0, 0.0)), ..Default::default() }),
+        fill: Some(Fill::Solid(photosplice_color::Color::rgb(0.0, 0.0, 1.0))),
+        stroke: Some(ShapeStroke { width: 4.0, paint: Fill::Solid(photosplice_color::Color::rgb(1.0, 0.0, 0.0)), ..Default::default() }),
         ..Default::default()
     };
-    sh.cache = Some(photosuite_vector::render_shape(&sh, fmt, doc.bounds()));
+    sh.cache = Some(photosplice_vector::render_shape(&sh, fmt, doc.bounds()));
     doc.layers.push(Layer::new("Box", LayerContent::Shape(sh)));
-    let mut img = photosuite_raster::Surface::new(fmt);
-    img.fill_rect(photosuite_geom::Rect::new(120, 10, 180, 50), &[0.0, 0.8, 0.0, 1.0]);
+    let mut img = photosplice_raster::Surface::new(fmt);
+    img.fill_rect(photosplice_geom::Rect::new(120, 10, 180, 50), &[0.0, 0.8, 0.0, 1.0]);
     doc.layers.push(Layer::new("Green", LayerContent::Raster(img)));
-    let style = CharStyle { font_family: "Inter".into(), size_pt: 18.0, color: photosuite_color::Color::rgb(0.0, 0.0, 0.0), ..Default::default() };
-    let mut t = TextLayer { text: "Saved".into(), transform: photosuite_geom::Affine::translate(20.0, 90.0), runs: vec![TextRun { len: 5, style }], shape: TextShape::Point, ..Default::default() };
+    let style = CharStyle { font_family: "Inter".into(), size_pt: 18.0, color: photosplice_color::Color::rgb(0.0, 0.0, 0.0), ..Default::default() };
+    let mut t = TextLayer { text: "Saved".into(), transform: photosplice_geom::Affine::translate(20.0, 90.0), runs: vec![TextRun { len: 5, style }], shape: TextShape::Point, ..Default::default() };
     t.sync_summary();
-    photosuite_text::shared().lock().unwrap().render_layer(&mut t, 72.0, fmt);
+    photosplice_text::shared().lock().unwrap().render_layer(&mut t, 72.0, fmt);
     doc.layers.push(Layer::new("Saved", LayerContent::Text(t)));
     doc
 }
 
 fn mean_diff(a: &Document, b: &Document) -> f32 {
-    let (a, b) = (photosuite_compose::flatten(a), photosuite_compose::flatten(b));
+    let (a, b) = (photosplice_compose::flatten(a), photosplice_compose::flatten(b));
     assert_eq!(a.px.len(), b.px.len());
     a.px.iter().zip(&b.px).map(|(p, q)| (0..4).map(|c| (p[c] - q[c]).abs()).sum::<f32>()).sum::<f32>() / a.px.len() as f32
 }
@@ -335,7 +335,7 @@ fn mean_diff(a: &Document, b: &Document) -> f32 {
 #[test]
 fn a_saved_pdf_reopens_with_its_layers() {
     let doc = sample();
-    let r = photosuite_io::pdf::export::export_layered(&doc, true).unwrap();
+    let r = photosplice_io::pdf::export::export_layered(&doc, true).unwrap();
     assert!(r.warnings.is_empty(), "{:?}", r.warnings);
     let bytes = r.bytes;
     // Photoshop's layout: the page's PieceInfo, its private data in Photoshop's keys.
@@ -343,7 +343,7 @@ fn a_saved_pdf_reopens_with_its_layers() {
     for key in ["/PieceInfo", "/AdobePhotoshop", "/StandardImageFileData", "/ImageResources", "/CompositeImage", "/RoundTrip true"] {
         assert!(text.contains(key), "{key}");
     }
-    assert!(photosuite_io::pdf::has_editing_data(&bytes, 0));
+    assert!(photosplice_io::pdf::has_editing_data(&bytes, 0));
     // As Photoshop does, the editing data wins over how the page was asked to open.
     for how in [PageAs::Layers, PageAs::Pixels] {
         let back = open_page("s.pdf", &bytes, 0, 300.0, how).unwrap();
@@ -356,12 +356,12 @@ fn a_saved_pdf_reopens_with_its_layers() {
         assert!(mean_diff(&doc, &back) < 0.01);
     }
     // Other readers still see the one page (the editing data is an incremental update).
-    assert_eq!(photosuite_io::pdf::page_count(&bytes).unwrap(), 1);
+    assert_eq!(photosplice_io::pdf::page_count(&bytes).unwrap(), 1);
 }
 
 #[test]
 fn broken_editing_data_opens_the_page_instead() {
-    let bytes = photosuite_io::pdf::export::export_layered(&sample(), true).unwrap().bytes;
+    let bytes = photosplice_io::pdf::export::export_layered(&sample(), true).unwrap().bytes;
     // Overwrite the start of the layer data's Flate stream.
     let find = |hay: &[u8], needle: &[u8]| hay.windows(needle.len()).position(|w| w == needle).unwrap();
     let key = b"/StandardImageFileData ";
@@ -371,7 +371,7 @@ fn broken_editing_data_opens_the_page_instead() {
     let data = obj + find(&bytes[obj..], b"stream\n") + b"stream\n".len();
     let mut bad = bytes.clone();
     bad[data..data + 16].fill(0xAB);
-    assert!(!photosuite_io::pdf::has_editing_data(b"%PDF-1.4 nonsense", 0));
+    assert!(!photosplice_io::pdf::has_editing_data(b"%PDF-1.4 nonsense", 0));
     let r = open_page("s.pdf", &bad, 0, 72.0, PageAs::Layers).unwrap();
     assert!(r.warnings.iter().any(|w| w.contains("editing data")), "{:?}", r.warnings);
     assert_eq!(kinds(&r.document), ["shape", "pixels", "text"], "the page's own layers");
@@ -380,7 +380,7 @@ fn broken_editing_data_opens_the_page_instead() {
 #[test]
 fn a_saved_pdf_is_vector_and_text_and_looks_like_the_document() {
     let doc = sample();
-    let r = photosuite_io::pdf::export::export_layered(&doc, false).unwrap();
+    let r = photosplice_io::pdf::export::export_layered(&doc, false).unwrap();
     assert!(r.warnings.is_empty(), "{:?}", r.warnings);
     let text = String::from_utf8_lossy(&r.bytes);
     assert!(text.contains("/ToUnicode"), "the text can be copied");
@@ -396,21 +396,21 @@ fn a_saved_pdf_is_vector_and_text_and_looks_like_the_document() {
 #[test]
 fn adjustment_layers_flatten_what_they_work_on() {
     let mut doc = sample();
-    let mut adj = photosuite_doc::Layer::new("Invert", LayerContent::Adjustment(photosuite_doc::Adjustment::Invert));
+    let mut adj = photosplice_doc::Layer::new("Invert", LayerContent::Adjustment(photosplice_doc::Adjustment::Invert));
     adj.opacity = 1.0;
     doc.layers.insert(2, adj);
-    let r = photosuite_io::pdf::export::export_layered(&doc, false).unwrap();
+    let r = photosplice_io::pdf::export::export_layered(&doc, false).unwrap();
     let back = open_page("s.pdf", &r.bytes, 0, 72.0, PageAs::Layers).unwrap().document;
     assert_eq!(kinds(&back), ["pixels", "text"], "box, image and the inversion as one image; the type above stays type");
     let pixels = open_page("s.pdf", &r.bytes, 0, 72.0, PageAs::Pixels).unwrap().document;
     assert!(mean_diff(&doc, &pixels) < 0.02);
 }
 
-/// `PHOTOSUITE_PDF_STRESS=<out.pdf>`: writes a heavy page (thousands of paths and text runs).
+/// `PHOTOSPLICE_PDF_STRESS=<out.pdf>`: writes a heavy page (thousands of paths and text runs).
 #[test]
 #[ignore]
 fn stress_page() {
-    let Some(out) = std::env::var_os("PHOTOSUITE_PDF_STRESS") else { return };
+    let Some(out) = std::env::var_os("PHOTOSPLICE_PDF_STRESS") else { return };
     let mut c = String::new();
     for i in 0..6000 {
         let (x, y) = ((i % 100) as f32 * 2.0, (i / 100) as f32 * 1.6);
@@ -430,16 +430,16 @@ fn stress_page() {
 
 #[test]
 fn editing_data_keeps_every_mode_and_depth() {
-    use photosuite_color::{ColorMode, SampleType};
+    use photosplice_color::{ColorMode, SampleType};
     for (mode, sample) in [(ColorMode::Cmyk, SampleType::U8), (ColorMode::Grayscale, SampleType::U16), (ColorMode::Lab, SampleType::U8), (ColorMode::Rgb, SampleType::F32)] {
-        let mut doc = Document::with_background("m", photosuite_geom::Size::new(40, 30), mode, sample, photosuite_doc::Color::WHITE);
+        let mut doc = Document::with_background("m", photosplice_geom::Size::new(40, 30), mode, sample, photosplice_doc::Color::WHITE);
         let fmt = doc.pixel_format();
-        let mut s = photosuite_raster::Surface::new(fmt);
+        let mut s = photosplice_raster::Surface::new(fmt);
         let ink = vec![0.25; fmt.channels()];
-        s.fill_rect(photosuite_geom::Rect::new(5, 5, 25, 20), &ink);
-        doc.layers.push(photosuite_doc::Layer::new("Ink", LayerContent::Raster(s)));
-        let r = photosuite_io::pdf::export::export_layered(&doc, true).unwrap();
-        assert!(photosuite_io::pdf::has_editing_data(&r.bytes, 0), "{mode:?} {sample:?}: {:?}", r.warnings);
+        s.fill_rect(photosplice_geom::Rect::new(5, 5, 25, 20), &ink);
+        doc.layers.push(photosplice_doc::Layer::new("Ink", LayerContent::Raster(s)));
+        let r = photosplice_io::pdf::export::export_layered(&doc, true).unwrap();
+        assert!(photosplice_io::pdf::has_editing_data(&r.bytes, 0), "{mode:?} {sample:?}: {:?}", r.warnings);
         let back = open_page("m.pdf", &r.bytes, 0, 72.0, PageAs::Layers).unwrap().document;
         assert_eq!((back.mode, back.pixel_format().sample), (mode, sample), "{mode:?} {sample:?}");
         assert_eq!(back.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["Background", "Ink"]);
@@ -464,16 +464,16 @@ fn both_ways_open_a_page_at_one_size() {
 
 #[test]
 fn without_editing_data_a_pdf_is_only_its_page() {
-    let opts = photosuite_io::ExportOptions { pdf_discard_editing: true, ..Default::default() };
-    let r = photosuite_io::export(&sample(), "s.pdf", &opts).unwrap();
-    assert!(!photosuite_io::pdf::has_editing_data(&r.bytes, 0));
-    let kept = photosuite_io::export(&sample(), "s.pdf", &Default::default()).unwrap();
-    assert!(photosuite_io::pdf::has_editing_data(&kept.bytes, 0), "kept by default, as in Photoshop");
+    let opts = photosplice_io::ExportOptions { pdf_discard_editing: true, ..Default::default() };
+    let r = photosplice_io::export(&sample(), "s.pdf", &opts).unwrap();
+    assert!(!photosplice_io::pdf::has_editing_data(&r.bytes, 0));
+    let kept = photosplice_io::export(&sample(), "s.pdf", &Default::default()).unwrap();
+    assert!(photosplice_io::pdf::has_editing_data(&kept.bytes, 0), "kept by default, as in Photoshop");
 }
 
 #[test]
 fn crop_to_picks_the_page_box() {
-    use photosuite_io::pdf::{CropTo, OpenOptions, open_page_with};
+    use photosplice_io::pdf::{CropTo, OpenOptions, open_page_with};
     // A red 20 × 10 pt mark at (120, 60)–(140, 70) in PDF space (y up).
     let boxes = "/CropBox [10 10 190 90] /TrimBox [20 20 180 80] /ArtBox [100 50 160 80]";
     let bytes = pdf_page(boxes, "1 0 0 rg 120 60 20 10 re f", "", &[]);
@@ -490,18 +490,18 @@ fn crop_to_picks_the_page_box() {
         // The bounding box is the mark, and the mark fills it.
         let (w, h, d) = size(CropTo::BoundingBox);
         assert_eq!((w, h), (20, 10), "{how:?}");
-        let px = photosuite_compose::flatten(&d).px[5 * 20 + 10];
+        let px = photosplice_compose::flatten(&d).px[5 * 20 + 10];
         assert!(px[0] > 0.9 && px[3] > 0.9, "{how:?} {px:?}");
         // In the art box (top left at 100, 80) the mark sits 20 pt right and 10 pt down.
         let (_, _, d) = size(CropTo::ArtBox);
-        let buf = photosuite_compose::flatten(&d);
+        let buf = photosplice_compose::flatten(&d);
         assert!(buf.px[15 * 60 + 30][3] > 0.9 && buf.px[5 * 60 + 30][3] < 0.1, "{how:?}");
     }
 }
 
 #[test]
 fn crop_to_follows_the_page_rotation() {
-    use photosuite_io::pdf::{CropTo, OpenOptions, open_page_with};
+    use photosplice_io::pdf::{CropTo, OpenOptions, open_page_with};
     let bytes = pdf_page("/Rotate 90 /CropBox [0 0 100 100]", "0 0 1 rg 0 0 10 10 re f", "", &[]);
     for crop_to in [CropTo::MediaBox, CropTo::CropBox, CropTo::BoundingBox] {
         let d = open_page_with("r.pdf", &bytes, &OpenOptions { page: 0, dpi: 72.0, how: PageAs::Pixels, crop_to }).unwrap().document;
@@ -517,29 +517,29 @@ fn crop_to_follows_the_page_rotation() {
 
 #[test]
 fn artboards_save_as_vectors_on_their_background() {
-    use photosuite_doc::{Artboard, ArtboardBackground, Layer};
+    use photosplice_doc::{Artboard, ArtboardBackground, Layer};
     let mut doc = sample();
     let shapes: Vec<Layer> = doc.layers.drain(..1).collect();
     let mut board = Layer::group("Board", shapes);
     if let LayerContent::Group(g) = &mut board.content {
-        let mut ab = Artboard::new(photosuite_geom::Rect::new(0, 0, 120, 80));
+        let mut ab = Artboard::new(photosplice_geom::Rect::new(0, 0, 120, 80));
         ab.background = ArtboardBackground::Black;
         g.artboard = Some(ab);
     }
     doc.layers.insert(0, board);
-    let r = photosuite_io::pdf::export::export_layered(&doc, false).unwrap();
+    let r = photosplice_io::pdf::export::export_layered(&doc, false).unwrap();
     assert!(r.warnings.is_empty(), "{:?}", r.warnings);
     let back = open_page("a.pdf", &r.bytes, 0, 72.0, PageAs::Layers).unwrap().document;
     // The board's black background and the box on it as shapes, not one image.
     assert!(kinds(&back).iter().filter(|k| **k == "shape").count() >= 2, "{:?}", kinds(&back));
-    let px = photosuite_compose::flatten(&back).px[70 * 200 + 110];
+    let px = photosplice_compose::flatten(&back).px[70 * 200 + 110];
     assert!(px[3] > 0.9 && px[0] < 0.1 && px[2] < 0.1, "black board: {px:?}");
 }
 
 // ---- gradients ----
 
-fn gradient(style: photosuite_doc::GradientStyle, angle: f32, reverse: bool) -> Fill {
-    use photosuite_color::Color as C;
+fn gradient(style: photosplice_doc::GradientStyle, angle: f32, reverse: bool) -> Fill {
+    use photosplice_color::Color as C;
     Fill::Gradient {
         stops: vec![(0.0, C::rgb(1.0, 0.0, 0.0)), (0.6, C::rgb(0.0, 0.2, 1.0)), (1.0, C::rgb(1.0, 0.9, 0.0))],
         angle,
@@ -559,10 +559,10 @@ fn gradient(style: photosuite_doc::GradientStyle, angle: f32, reverse: bool) -> 
 /// pixel centre, which steep gradients show as a small even difference; macOS's renderer
 /// draws these PDFs centred where the compositor does.)
 fn saves_natively(doc: &Document, what: &str) {
-    let r = photosuite_io::pdf::export::export_layered(doc, false).unwrap();
+    let r = photosplice_io::pdf::export::export_layered(doc, false).unwrap();
     assert!(r.warnings.is_empty(), "{what}: {:?}", r.warnings);
     let back = open_page("g.pdf", &r.bytes, 0, 72.0, PageAs::Pixels).unwrap().document;
-    let (a, b) = (photosuite_compose::flatten(doc), photosuite_compose::flatten(&back));
+    let (a, b) = (photosplice_compose::flatten(doc), photosplice_compose::flatten(&back));
     assert_eq!(a.rect, b.rect);
     let pm = |p: &[f32; 4], c: usize| if c == 3 { p[3] } else { p[c] * p[3] };
     let n = a.px.len() as f32;
@@ -573,10 +573,10 @@ fn saves_natively(doc: &Document, what: &str) {
 
 #[test]
 fn gradient_shapes_save_as_pdf_shadings() {
-    use photosuite_doc::GradientStyle as G;
-    use photosuite_doc::vector::{Path, ShapeLayer, ShapeStroke, Subpath};
+    use photosplice_doc::GradientStyle as G;
+    use photosplice_doc::vector::{Path, ShapeLayer, ShapeStroke, Subpath};
     for (style, angle, reverse) in [(G::Linear, 0.0, false), (G::Linear, 30.0, true), (G::Reflected, 115.0, false), (G::Radial, 0.0, false), (G::Radial, 0.0, true), (G::Angle, 40.0, false)] {
-        let mut doc = Document::new("g", photosuite_geom::Size::new(160, 100), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+        let mut doc = Document::new("g", photosplice_geom::Size::new(160, 100), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
         let fmt = doc.pixel_format();
         let mut sh = ShapeLayer {
             path: Path::new(vec![Subpath::polygon(&[(12.0, 10.0), (148.0, 14.0), (140.0, 90.0), (20.0, 84.0)])]),
@@ -584,25 +584,25 @@ fn gradient_shapes_save_as_pdf_shadings() {
             stroke: Some(ShapeStroke { width: 3.0, paint: gradient(G::Linear, 90.0, false), ..Default::default() }),
             ..Default::default()
         };
-        sh.cache = Some(photosuite_vector::render_shape(&sh, fmt, doc.bounds()));
-        doc.layers.push(photosuite_doc::Layer::new("Shape", LayerContent::Shape(sh)));
+        sh.cache = Some(photosplice_vector::render_shape(&sh, fmt, doc.bounds()));
+        doc.layers.push(photosplice_doc::Layer::new("Shape", LayerContent::Shape(sh)));
         saves_natively(&doc, &format!("shape {style:?} {angle}° reverse {reverse}"));
     }
 }
 
 #[test]
 fn gradient_fill_layers_save_as_pdf_shadings() {
-    use photosuite_doc::GradientStyle as G;
-    use photosuite_doc::vector::{Path, Subpath, VectorMask};
+    use photosplice_doc::GradientStyle as G;
+    use photosplice_doc::vector::{Path, Subpath, VectorMask};
     for (style, angle, reverse, masked) in [(G::Linear, 0.0, false, false), (G::Linear, 37.0, true, true), (G::Reflected, 90.0, false, false), (G::Radial, 0.0, false, true), (G::Angle, 200.0, true, false)] {
-        let mut doc = Document::new("g", photosuite_geom::Size::new(160, 100), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
+        let mut doc = Document::new("g", photosplice_geom::Size::new(160, 100), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
         let mut f = gradient(style, angle, reverse);
         if let Fill::Gradient { opacity_stops, midpoints, offset, .. } = &mut f {
             *opacity_stops = vec![(0.0, 1.0), (0.7, 0.4), (1.0, 0.9)];
             *midpoints = vec![0.3, 0.75];
             *offset = (0.1, -0.15);
         }
-        let mut l = photosuite_doc::Layer::new("Gradient Fill", LayerContent::Fill(f));
+        let mut l = photosplice_doc::Layer::new("Gradient Fill", LayerContent::Fill(f));
         if masked {
             l.vector_mask = Some(VectorMask::new(Path::new(vec![Subpath::polygon(&[(30.0, 20.0), (130.0, 20.0), (120.0, 80.0), (40.0, 85.0)])])));
         }
@@ -610,11 +610,11 @@ fn gradient_fill_layers_save_as_pdf_shadings() {
         saves_natively(&doc, &format!("fill {style:?} {angle}° reverse {reverse} masked {masked}"));
     }
     // A solid colour fill layer, and a Diamond gradient (no PDF shading: an image).
-    let mut doc = Document::new("s", photosuite_geom::Size::new(40, 30), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
-    doc.layers.push(photosuite_doc::Layer::new("Color Fill", LayerContent::Fill(Fill::Solid(photosuite_color::Color::rgb(0.2, 0.6, 0.3)))));
+    let mut doc = Document::new("s", photosplice_geom::Size::new(40, 30), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+    doc.layers.push(photosplice_doc::Layer::new("Color Fill", LayerContent::Fill(Fill::Solid(photosplice_color::Color::rgb(0.2, 0.6, 0.3)))));
     saves_natively(&doc, "solid fill");
     doc.layers[0].content = LayerContent::Fill(gradient(G::Diamond, 0.0, false));
-    let r = photosuite_io::pdf::export::export_layered(&doc, false).unwrap();
+    let r = photosplice_io::pdf::export::export_layered(&doc, false).unwrap();
     assert!(r.warnings.iter().any(|w| w.contains("as images")), "{:?}", r.warnings);
 }
 
@@ -623,11 +623,11 @@ fn gradient_fill_layers_save_as_pdf_shadings() {
 
 #[test]
 fn a_gradient_fill_saved_to_pdf_reopens_as_a_gradient_fill() {
-    use photosuite_doc::GradientStyle as G;
+    use photosplice_doc::GradientStyle as G;
     for style in [G::Linear, G::Radial] {
-        let mut doc = Document::new("g", photosuite_geom::Size::new(160, 100), photosuite_color::ColorMode::Rgb, photosuite_color::SampleType::U8);
-        doc.layers.push(photosuite_doc::Layer::new("Gradient Fill", LayerContent::Fill(gradient(style, 25.0, false))));
-        let bytes = photosuite_io::pdf::export::export_layered(&doc, false).unwrap().bytes;
+        let mut doc = Document::new("g", photosplice_geom::Size::new(160, 100), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+        doc.layers.push(photosplice_doc::Layer::new("Gradient Fill", LayerContent::Fill(gradient(style, 25.0, false))));
+        let bytes = photosplice_io::pdf::export::export_layered(&doc, false).unwrap().bytes;
         let back = open_page("g.pdf", &bytes, 0, 72.0, PageAs::Layers).unwrap().document;
         assert_eq!(kinds(&back), ["fill"], "{style:?}");
         let LayerContent::Fill(Fill::Gradient { style: s, .. }) = &back.layers[0].content else { panic!() };

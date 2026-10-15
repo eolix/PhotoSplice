@@ -3,10 +3,10 @@
 
 use std::time::{Duration, Instant};
 
-use photosuite_color::{PixelFormat, SampleType};
-use photosuite_geom::Rect;
-use photosuite_plugins::{Error, Limits, Plugin};
-use photosuite_raster::Surface;
+use photosplice_color::{PixelFormat, SampleType};
+use photosplice_geom::Rect;
+use photosplice_plugins::{Error, Limits, Plugin};
+use photosplice_raster::Surface;
 use serde_json::json;
 
 const INVERT: &[u8] = include_bytes!("fixtures/invert.wasm");
@@ -68,9 +68,9 @@ fn run_err(bytes: &[u8], limits: Limits) -> (Error, Duration) {
 fn example_invert_loads_and_reports_its_manifest() {
     let p = Plugin::load(INVERT, Limits::default()).unwrap();
     let m = p.manifest();
-    assert_eq!(m.id, "org.photosuite.example.invert");
+    assert_eq!(m.id, "org.photosplice.example.invert");
     assert_eq!(m.name, "Invert (WebAssembly)");
-    assert_eq!(m.kind, photosuite_plugins::Kind::Filter);
+    assert_eq!(m.kind, photosplice_plugins::Kind::Filter);
     assert!(m.params.is_empty());
     assert!(p.size() < 4096, "the example stays tiny: {} bytes", p.size());
 }
@@ -250,29 +250,29 @@ fn memory_cap_limits_bands() {
 fn registry_install_list_remove() {
     // Its own id: the registry is process-wide and tests run in parallel.
     let id = "test.registry";
-    let p = photosuite_plugins::registry::install_bytes(&module(r#"{"id":"test.registry","name":"R","kind":"filter"}"#, 1, "(i32.const 0)", "")).unwrap();
+    let p = photosplice_plugins::registry::install_bytes(&module(r#"{"id":"test.registry","name":"R","kind":"filter"}"#, 1, "(i32.const 0)", "")).unwrap();
     assert_eq!(p.id(), id);
-    let rev = photosuite_plugins::registry::revision();
-    assert!(photosuite_plugins::registry::list().iter().any(|p| p.id() == id));
-    assert!(photosuite_plugins::registry::get(id).is_some());
-    assert!(photosuite_plugins::registry::remove(id));
-    assert!(!photosuite_plugins::registry::remove(id));
-    assert!(photosuite_plugins::registry::get(id).is_none());
-    assert!(photosuite_plugins::registry::revision() > rev);
+    let rev = photosplice_plugins::registry::revision();
+    assert!(photosplice_plugins::registry::list().iter().any(|p| p.id() == id));
+    assert!(photosplice_plugins::registry::get(id).is_some());
+    assert!(photosplice_plugins::registry::remove(id));
+    assert!(!photosplice_plugins::registry::remove(id));
+    assert!(photosplice_plugins::registry::get(id).is_none());
+    assert!(photosplice_plugins::registry::revision() > rev);
 }
 
 #[test]
 fn folder_loading_skips_bad_files() {
-    let dir = std::env::temp_dir().join(format!("photosuite-plugins-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("photosplice-plugins-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("a-invert.wasm"), INVERT).unwrap();
     std::fs::write(dir.join("b-broken.wasm"), b"\0asm junk").unwrap();
     std::fs::write(dir.join("notes.txt"), b"ignored").unwrap();
-    let r = photosuite_plugins::registry::load_folder(&dir).unwrap();
-    assert_eq!(r.loaded, ["org.photosuite.example.invert"]);
+    let r = photosplice_plugins::registry::load_folder(&dir).unwrap();
+    assert_eq!(r.loaded, ["org.photosplice.example.invert"]);
     assert_eq!(r.failed.len(), 1);
     assert!(r.failed[0].0.ends_with("b-broken.wasm"));
-    assert!(photosuite_plugins::registry::load_folder(&dir.join("missing")).is_err());
-    assert!(photosuite_plugins::registry::load_file(&dir, Limits::default()).is_err(), "a directory is not a module");
+    assert!(photosplice_plugins::registry::load_folder(&dir.join("missing")).is_err());
+    assert!(photosplice_plugins::registry::load_file(&dir, Limits::default()).is_err(), "a directory is not a module");
     std::fs::remove_dir_all(&dir).ok();
 }

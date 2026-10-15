@@ -21,8 +21,8 @@ use parley::{
     Alignment, AlignmentOptions, FontData, FontFamily, FontFeatures, FontStyle, FontVariations, FontWeight, IndentOptions, Layout, LayoutContext,
     PositionedLayoutItem, StyleProperty,
 };
-use photosuite_doc::TextLayer;
-use photosuite_doc::text::{Caps, CharStyle, Kerning, Orientation, TextAlign, TextDirection, TextShape};
+use photosplice_doc::TextLayer;
+use photosplice_doc::text::{Caps, CharStyle, Kerning, Orientation, TextAlign, TextDirection, TextShape};
 
 use crate::fonts::FontDb;
 

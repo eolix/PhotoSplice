@@ -1,40 +1,40 @@
-//! Layer bounds exactly as `photosuite-compose` computes them (`layer_bounds`), with the per-tile
+//! Layer bounds exactly as `photosplice-compose` computes them (`layer_bounds`), with the per-tile
 //! content scan cached by copy-on-write tile identity, so an effect layer's region costs a hash
 //! lookup per tile instead of a pixel scan per frame.
 
-use photosuite_doc::Layer;
-use photosuite_geom::Rect;
+use photosplice_doc::Layer;
+use photosplice_geom::Rect;
 #[cfg(test)]
-use photosuite_raster::Surface;
+use photosplice_raster::Surface;
 
-pub use photosuite_compose::bounds::content_bounds;
+pub use photosplice_compose::bounds::content_bounds;
 
-/// Bounds of a layer's own pixels: `photosuite_compose::layer_bounds`.
+/// Bounds of a layer's own pixels: `photosplice_compose::layer_bounds`.
 pub fn layer_bounds(layer: &Layer, canvas: Rect) -> Rect {
-    photosuite_compose::layer_bounds(layer, canvas)
+    photosplice_compose::layer_bounds(layer, canvas)
 }
 
 /// The region a layer's effect maps cover: its bounds grown by the effect reach, within the
-/// canvas grown likewise (`photosuite_compose::effect_maps`).
+/// canvas grown likewise (`photosplice_compose::effect_maps`).
 pub fn effect_region(layer: &Layer, canvas: Rect) -> Rect {
-    let m = photosuite_compose::effects::margin(layer);
+    let m = photosplice_compose::effects::margin(layer);
     layer_bounds(layer, canvas).inflate(m).intersect(&canvas.inflate(m))
 }
 
-/// `photosuite_compose::transparent_outside`.
+/// `photosplice_compose::transparent_outside`.
 pub fn transparent_outside(layer: &Layer) -> bool {
-    photosuite_compose::transparent_outside(layer)
+    photosplice_compose::transparent_outside(layer)
 }
 
-/// `photosuite_compose::composite_bounds`: where compositing the layer can change anything.
+/// `photosplice_compose::composite_bounds`: where compositing the layer can change anything.
 pub fn composite_bounds(layer: &Layer, canvas: Rect) -> Option<Rect> {
-    photosuite_compose::composite_bounds(layer, canvas)
+    photosplice_compose::composite_bounds(layer, canvas)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_color::PixelFormat;
+    use photosplice_color::PixelFormat;
 
     #[test]
     fn matches_surface_content_bounds() {

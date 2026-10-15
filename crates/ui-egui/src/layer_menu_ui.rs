@@ -2,7 +2,7 @@
 //! unavailable ones are greyed using the same enablement as the main menus. Items marked as menu
 //! invocations (`Value::Null` params) go through `menus::invoke`, so dialogs open like in the menu bar.
 
-use photosuite_doc::{LabelColor, Layer, LayerContent};
+use photosplice_doc::{LabelColor, Layer, LayerContent};
 use serde_json::{Value, json};
 
 /// One entry: label, command id. `None` = separator.
@@ -79,7 +79,7 @@ pub fn entries(l: &Layer, multi: bool, has_selection: bool) -> Vec<Entry> {
 
 /// Render the menu. Pushes `(command, params)` actions; `Value::Null` params mean "invoke like the
 /// menu item" (opens the command's dialog when it has one).
-pub fn show(app: &crate::PhotosuiteApp, ui: &mut egui::Ui, l: &Layer, on_set: bool, actions: &mut Vec<(String, Value)>) -> bool {
+pub fn show(app: &crate::PhotospliceApp, ui: &mut egui::Ui, l: &Layer, on_set: bool, actions: &mut Vec<(String, Value)>) -> bool {
     ui.set_min_width(220.0);
     let mut rename = false;
     let mut last_sep = true;
@@ -94,7 +94,7 @@ pub fn show(app: &crate::PhotosuiteApp, ui: &mut egui::Ui, l: &Layer, on_set: bo
             }
             Some((label, id)) => {
                 // Skip commands this build doesn't have rather than showing dead items.
-                if photosuite_engine::commands::find(id).is_none() && !crate::menu_catalog::CATALOG.iter().any(|m| m.3 == id) {
+                if photosplice_engine::commands::find(id).is_none() && !crate::menu_catalog::CATALOG.iter().any(|m| m.3 == id) {
                     continue;
                 }
                 last_sep = false;
@@ -171,11 +171,11 @@ mod tests {
 
     #[test]
     fn smart_object_context_menu_edits_the_clicked_layer() {
-        use crate::PhotosuiteApp;
+        use crate::PhotospliceApp;
         use egui::{Event, Modifiers, PointerButton, Pos2, pos2, vec2};
         use egui_kittest::{Harness, kittest::Queryable};
 
-        fn click(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2, button: PointerButton) {
+        fn click(h: &mut Harness<'_, PhotospliceApp>, at: Pos2, button: PointerButton) {
             h.hover_at(at);
             h.step();
             for pressed in [true, false] {
@@ -186,7 +186,7 @@ mod tests {
         }
 
         for ppp in [1.0, 2.0] {
-            let mut s = photosuite_engine::Session::new();
+            let mut s = photosplice_engine::Session::new();
             s.execute("file.new", json!({"width": 640, "height": 480})).unwrap();
             s.execute("layer.new.layer", json!({"name": "Smart source"})).unwrap();
             s.execute("paint.stroke", json!({"points": [[100, 100]], "size": 20})).unwrap();
@@ -194,8 +194,8 @@ mod tests {
             s.execute("layer.new.layer", json!({"name": "Other active layer"})).unwrap();
             let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_pixels_per_point(ppp).with_step_dt(1.0 / 60.0).with_max_steps(64).build_eframe(
                 move |cc| {
-                    PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-                    PhotosuiteApp::new(s, crate::Services::default())
+                    PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+                    PhotospliceApp::new(s, crate::Services::default())
                 },
             );
             let ctx = h.ctx.clone();
@@ -212,17 +212,17 @@ mod tests {
             assert!(h.state().session.is_enabled("layer.smartObjects.saveContents"));
             assert!(h.state().session.active().unwrap().doc.walk().iter().any(|(_, _, l)| l.name == "Smart source"));
             h.state_mut().session.set_active(0);
-            assert_eq!(h.state().session.active().unwrap().active_layer, Some(photosuite_doc::LayerId(smart)));
+            assert_eq!(h.state().session.active().unwrap().active_layer, Some(photosplice_doc::LayerId(smart)));
         }
     }
 
     #[test]
     fn color_label_from_the_context_menu() {
-        use crate::PhotosuiteApp;
+        use crate::PhotospliceApp;
         use egui::{Event, Modifiers, PointerButton, Pos2, pos2, vec2};
         use egui_kittest::{Harness, kittest::Queryable};
 
-        fn click(h: &mut Harness<'_, PhotosuiteApp>, at: Pos2, button: PointerButton) {
+        fn click(h: &mut Harness<'_, PhotospliceApp>, at: Pos2, button: PointerButton) {
             h.hover_at(at);
             h.step();
             for pressed in [true, false] {
@@ -232,14 +232,14 @@ mod tests {
             h.run_steps(3);
         }
 
-        let mut s = photosuite_engine::Session::new();
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", json!({"width": 64, "height": 48})).unwrap();
         let a = s.execute("layer.new.layer", json!({"name": "A"})).unwrap()["layer"].as_u64().unwrap();
         let b = s.execute("layer.new.layer", json!({"name": "B"})).unwrap()["layer"].as_u64().unwrap();
         s.execute("layer.select", json!({"layer": a, "mode": "add"})).unwrap();
         let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_step_dt(1.0 / 60.0).with_max_steps(64).build_eframe(move |cc| {
-            PhotosuiteApp::setup_context(&cc.egui_ctx, Default::default());
-            PhotosuiteApp::new(s, crate::Services::default())
+            PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+            PhotospliceApp::new(s, crate::Services::default())
         });
         let ctx = h.ctx.clone();
         let (req, _rx) = crate::control::ControlRequest::new("ui.set", json!({"dock": {"collapsed": ["color", "properties", "history", "navigator"]}}));
@@ -251,20 +251,20 @@ mod tests {
         click(&mut h, at, PointerButton::Primary);
         let doc = &h.state().session.active().unwrap().doc;
         for id in [a, b] {
-            assert_eq!(doc.layer(photosuite_doc::LayerId(id)).unwrap().label, LabelColor::Violet, "both selected layers");
+            assert_eq!(doc.layer(photosplice_doc::LayerId(id)).unwrap().label, LabelColor::Violet, "both selected layers");
         }
         // One history step for the whole selection.
         h.state_mut().session.execute("edit.undo", json!({})).unwrap();
         let doc = &h.state().session.active().unwrap().doc;
-        assert!([a, b].iter().all(|id| doc.layer(photosuite_doc::LayerId(*id)).unwrap().label == LabelColor::None));
+        assert!([a, b].iter().all(|id| doc.layer(photosplice_doc::LayerId(*id)).unwrap().label == LabelColor::None));
     }
 
     #[test]
     fn edit_contents_is_available_only_for_smart_objects() {
-        let mut s = photosuite_engine::Session::new();
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", json!({"width": 32, "height": 24})).unwrap();
         s.execute("layer.new.layer", json!({"name": "Source"})).unwrap();
-        let layer = |s: &photosuite_engine::Session| {
+        let layer = |s: &photosplice_engine::Session| {
             let st = s.active().unwrap();
             st.doc.layer(st.active_layer.unwrap()).unwrap().clone()
         };
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn entries_follow_layer_state() {
-        let mut s = photosuite_engine::Session::new();
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", json!({"width": 10, "height": 10})).unwrap();
         s.execute("layer.new.layer", json!({})).unwrap();
         let st = s.active().unwrap();
@@ -299,7 +299,7 @@ mod tests {
         assert_eq!(add_mask_command(false, true), "layer.layerMask.hideAll");
         assert_eq!(add_mask_command(true, true), "layer.layerMask.hideSelection");
         // With a selection the new mask is the selection: inside revealed, outside hidden.
-        let mut s = photosuite_engine::Session::new();
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", json!({"width": 10, "height": 10})).unwrap();
         s.execute("layer.new.layer", json!({})).unwrap();
         s.execute("select.rect", json!({"x": 0, "y": 0, "width": 4, "height": 10})).unwrap();
@@ -311,11 +311,11 @@ mod tests {
 
     #[test]
     fn every_entry_is_a_known_command() {
-        let mut s = photosuite_engine::Session::new();
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", json!({"width": 10, "height": 10})).unwrap();
         let l = s.active().unwrap().doc.layers[0].clone();
         for (_, id) in entries(&l, false, true).into_iter().chain(entries(&l, false, false)).flatten() {
-            assert!(crate::menu_catalog::CATALOG.iter().any(|m| m.3 == id) || photosuite_engine::commands::find(id).is_some(), "{id}");
+            assert!(crate::menu_catalog::CATALOG.iter().any(|m| m.3 == id) || photosplice_engine::commands::find(id).is_some(), "{id}");
         }
     }
 }

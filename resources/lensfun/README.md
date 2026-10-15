@@ -4,15 +4,15 @@
 use: geometric distortion, transverse chromatic aberration and vignetting, indexed by camera and
 lens. It was converted from the [Lensfun](https://github.com/lensfun/lensfun) database at
 commit `23e8cb8050d680c7a293edb3d48b600754665f05` (`lensfun v0.3.95-2003-g23e8cb80`) by
-PhotoSuite's converter. Only the database is used: Lensfun's library (C, LGPL-3) is not part of
-PhotoSuite. The app evaluates the models itself (`crates/algo/src/lens.rs`, `lensdb.rs`).
+PhotoSplice's converter. Only the database is used: Lensfun's library (C, LGPL-3) is not part of
+PhotoSplice. The app evaluates the models itself (`crates/algo/src/lens.rs`, `lensdb.rs`).
 
 ## Licence
 
 The Lensfun database is **CC BY-SA 3.0**, by the Lensfun contributors
 (`LICENSE-CC-BY-SA-3.0.txt`, Lensfun's `data/COPYING.CC_BY-SA_3.0`). `lens-database.json` is an
 adaptation of it (converted from XML to JSON, translations of display names dropped) and is
-distributed under the same licence. PhotoSuite's source is a separate work and is unaffected.
+distributed under the same licence. PhotoSplice's source is a separate work and is unaffected.
 
 ## Contents
 

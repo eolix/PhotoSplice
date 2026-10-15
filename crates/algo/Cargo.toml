@@ -1,5 +1,5 @@
 [package]
-name = "photosuite-algo"
+name = "photosplice-algo"
 description = "Depth-agnostic, tile-aware CPU image filters (blur, sharpen, noise, distort, stylize)"
 version.workspace = true
 edition.workspace = true
@@ -10,9 +10,9 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-photosuite-geom = { workspace = true }
-photosuite-color = { workspace = true }
-photosuite-raster = { workspace = true }
+photosplice-geom = { workspace = true }
+photosplice-color = { workspace = true }
+photosplice-raster = { workspace = true }
 serde = { workspace = true }
 
 # Parallel tiles on native; wasm builds stay single-threaded.

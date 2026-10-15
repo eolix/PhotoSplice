@@ -1,5 +1,5 @@
 [package]
-name = "photosuite-raw"
+name = "photosplice-raw"
 description = "Clean-room, pure-Rust camera raw decoder and developer (DNG, CR2, TIFF/EP raws)"
 version.workspace = true
 edition.workspace = true
@@ -19,7 +19,7 @@ testgen = []
 rayon = { workspace = true }
 
 [dev-dependencies]
-photosuite-raw = { path = ".", features = ["testgen"] }
+photosplice-raw = { path = ".", features = ["testgen"] }
 # Writes sRGB PNG previews in the `rawinfo` example.
 png = "0.18"
 

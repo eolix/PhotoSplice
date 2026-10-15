@@ -7,11 +7,11 @@
 //! - `ink`: the blend applied to ink amounts (1 − stored), converted back.
 //!
 //! ```sh
-//! cargo run --release -p photosuite-io --example cmyk_probe -- corpus/psd-tools/blend-modes/cmyk-blend-modes.psd
+//! cargo run --release -p photosplice-io --example cmyk_probe -- corpus/psd-tools/blend-modes/cmyk-blend-modes.psd
 //! ```
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 
-use photosuite_psd::{LayerRecord, PsdFile};
+use photosplice_psd::{LayerRecord, PsdFile};
 
 /// A named lightness measure of a pixel's inks.
 type Measure<'a> = (&'a str, &'a dyn Fn([f32; 4]) -> f32);
@@ -74,8 +74,8 @@ fn blend(mode: &[u8; 4], b: f32, s: f32) -> Option<f32> {
 }
 
 /// Non-separable modes: the complements of C, M, Y as an RGB colour.
-fn nonsep(mode: &[u8; 4]) -> Option<photosuite_color::blend::BlendMode> {
-    use photosuite_color::blend::BlendMode as M;
+fn nonsep(mode: &[u8; 4]) -> Option<photosplice_color::blend::BlendMode> {
+    use photosplice_color::blend::BlendMode as M;
     Some(match mode {
         b"hue " => M::Hue,
         b"sat " => M::Saturation,
@@ -106,12 +106,12 @@ fn probe_nonsep(f: &PsdFile, recs: &[LayerRecord], i: usize, m: &dyn Fn(usize, i
             let g = |p: &Planes, c: i16| p.get(c, x, y).unwrap_or(0.0);
             let cb = [g(&bot, 0), g(&bot, 1), g(&bot, 2)];
             let cs = [g(&top, 0), g(&top, 1), g(&top, 2)];
-            let out = photosuite_color::blend::blend_rgb(mode, cb, cs);
+            let out = photosplice_color::blend::blend_rgb(mode, cb, cs);
             for (c, v) in out.iter().enumerate() {
                 e_cmy += (v - m(c, x, y)).abs();
             }
             let (kb, ks, want) = (g(&bot, 3), g(&top, 3), m(3, x, y));
-            let kmix = photosuite_color::blend::blend_rgb(mode, [kb; 3], [ks; 3])[0];
+            let kmix = photosplice_color::blend::blend_rgb(mode, [kb; 3], [ks; 3])[0];
             e_kb += (kb - want).abs();
             e_ks += (ks - want).abs();
             e_kmix += (kmix - want).abs();
@@ -136,7 +136,7 @@ fn probe_nonsep(f: &PsdFile, recs: &[LayerRecord], i: usize, m: &dyn Fn(usize, i
 /// channel: the mean merged value for each stored input value (8-bit CMYK or RGB files).
 fn curve(f: &PsdFile, merged: &[u8], w: usize, h: usize) {
     let base = Planes::of(f, &f.layers()[0]);
-    let colors = if f.header.color_mode == photosuite_psd::ColorMode::Cmyk { 4 } else { 3 };
+    let colors = if f.header.color_mode == photosplice_psd::ColorMode::Cmyk { 4 } else { 3 };
     for c in 0..colors {
         let mut sum = vec![(0.0f64, 0usize); 256];
         for y in 0..h as i32 {
@@ -155,9 +155,9 @@ fn curve(f: &PsdFile, merged: &[u8], w: usize, h: usize) {
 /// `THRESH=1`: which lightness measure of the first layer's inks Photoshop's Threshold splits on:
 /// for each candidate, the fewest pixels misclassified by any cut (black = merged K full ink).
 fn thresh(f: &PsdFile, bytes: &[u8], merged: &[u8], w: usize, h: usize) {
-    use photosuite_color::convert::{cmyk_to_rgb, rgb_to_gray, srgb_to_lab, with_cmyk_space};
-    let doc = photosuite_io::import("x.psd", bytes).unwrap().document;
-    let space = photosuite_compose::cmyk_space(&doc);
+    use photosplice_color::convert::{cmyk_to_rgb, rgb_to_gray, srgb_to_lab, with_cmyk_space};
+    let doc = photosplice_io::import("x.psd", bytes).unwrap().document;
+    let space = photosplice_compose::cmyk_space(&doc);
     let base = Planes::of(f, &f.layers()[0]);
     let mut rows: Vec<([f32; 4], bool)> = Vec::new();
     for y in 0..h as i32 {
@@ -196,7 +196,7 @@ fn thresh(f: &PsdFile, bytes: &[u8], merged: &[u8], w: usize, h: usize) {
 /// `GMAP=1`: a CMYK gradient map over one pixel layer: Photoshop's merged inks against the
 /// file's CMYK stops interpolated linearly (on stored values, 1 − ink) at each lightness measure.
 fn gmap(f: &PsdFile, bytes: &[u8], merged: &[u8], w: usize, h: usize) {
-    use photosuite_color::convert::{cmyk_to_rgb, rgb_to_gray, with_cmyk_space};
+    use photosplice_color::convert::{cmyk_to_rgb, rgb_to_gray, with_cmyk_space};
     let rec = &f.layers()[1];
     let d = &rec.blocks.iter().find(|b| &b.key == b"grdm").expect("grdm").data;
     let be16 = |at: usize| u16::from_be_bytes([d[at], d[at + 1]]);
@@ -221,8 +221,8 @@ fn gmap(f: &PsdFile, bytes: &[u8], merged: &[u8], w: usize, h: usize) {
         let k = if b.0 > a.0 { (t - a.0) / (b.0 - a.0) } else { 0.0 };
         std::array::from_fn(|c| a.1[c] + (b.1[c] - a.1[c]) * k)
     };
-    let doc = photosuite_io::import("x.psd", bytes).unwrap().document;
-    let space = photosuite_compose::cmyk_space(&doc);
+    let doc = photosplice_io::import("x.psd", bytes).unwrap().document;
+    let space = photosplice_compose::cmyk_space(&doc);
     let base = Planes::of(f, &f.layers()[0]);
     let metrics: [Measure; 2] = [
         ("ink lightness", &|s| (0.30 * s[0] + 0.59 * s[1] + 0.11 * s[2]) * s[3]),
@@ -250,16 +250,16 @@ fn gmap(f: &PsdFile, bytes: &[u8], merged: &[u8], w: usize, h: usize) {
 /// image for: (a) the RGB adjustment run on the C, M, Y complements as RGB with K kept, (b) the
 /// same with K through it as a gray, (c) the screen colour through the profile, separated back.
 fn adj(f: &PsdFile, bytes: &[u8], merged: &[u8], w: usize, h: usize) {
-    use photosuite_color::convert::{cmyk_to_rgb, rgb_to_cmyk, with_cmyk_space};
-    use photosuite_compose::adjust::{Transfer, apply_depth};
-    let doc = photosuite_io::import("x.psd", bytes).unwrap().document;
-    let Some(photosuite_doc::LayerContent::Adjustment(a)) = doc.layers.get(1).map(|l| &l.content) else { panic!("no adjustment") };
+    use photosplice_color::convert::{cmyk_to_rgb, rgb_to_cmyk, with_cmyk_space};
+    use photosplice_compose::adjust::{Transfer, apply_depth};
+    let doc = photosplice_io::import("x.psd", bytes).unwrap().document;
+    let Some(photosplice_doc::LayerContent::Adjustment(a)) = doc.layers.get(1).map(|l| &l.content) else { panic!("no adjustment") };
     println!("{a:?}");
-    let space = photosuite_compose::cmyk_space(&doc);
-    let transfer = Transfer::for_document(photosuite_color::ColorMode::Rgb, doc.depth);
+    let space = photosplice_compose::cmyk_space(&doc);
+    let transfer = Transfer::for_document(photosplice_color::ColorMode::Rgb, doc.depth);
     let base = Planes::of(f, &f.layers()[0]);
     let run = |rgb: [f32; 3]| {
-        let mut b = photosuite_compose::Buffer { rect: photosuite_geom::Rect::new(0, 0, 1, 1), px: vec![[rgb[0], rgb[1], rgb[2], 1.0]] };
+        let mut b = photosplice_compose::Buffer { rect: photosplice_geom::Rect::new(0, 0, 1, 1), px: vec![[rgb[0], rgb[1], rgb[2], 1.0]] };
         apply_depth(a, &mut b, transfer, Some(doc.depth));
         [b.px[0][0], b.px[0][1], b.px[0][2]]
     };
@@ -293,15 +293,15 @@ fn adj(f: &PsdFile, bytes: &[u8], merged: &[u8], w: usize, h: usize) {
 /// b (stored 0..1, a and b around 0.5) for: (a) run on L, a, b as an RGB colour, (b) on L only
 /// (as a gray), a and b kept, (c) the screen colour through Lab ↔ sRGB (today's route).
 fn adj_lab(f: &PsdFile, bytes: &[u8], merged: &[u8], w: usize, h: usize) {
-    use photosuite_color::convert::{lab_to_srgb, srgb_to_lab};
-    use photosuite_compose::adjust::{Transfer, apply_depth};
-    let doc = photosuite_io::import("x.psd", bytes).unwrap().document;
-    let Some(photosuite_doc::LayerContent::Adjustment(a)) = doc.layers.get(1).map(|l| &l.content) else { panic!("no adjustment") };
+    use photosplice_color::convert::{lab_to_srgb, srgb_to_lab};
+    use photosplice_compose::adjust::{Transfer, apply_depth};
+    let doc = photosplice_io::import("x.psd", bytes).unwrap().document;
+    let Some(photosplice_doc::LayerContent::Adjustment(a)) = doc.layers.get(1).map(|l| &l.content) else { panic!("no adjustment") };
     println!("{a:?}");
-    let transfer = Transfer::for_document(photosuite_color::ColorMode::Rgb, doc.depth);
+    let transfer = Transfer::for_document(photosplice_color::ColorMode::Rgb, doc.depth);
     let base = Planes::of(f, &f.layers()[0]);
     let run = |rgb: [f32; 3]| {
-        let mut b = photosuite_compose::Buffer { rect: photosuite_geom::Rect::new(0, 0, 1, 1), px: vec![[rgb[0], rgb[1], rgb[2], 1.0]] };
+        let mut b = photosplice_compose::Buffer { rect: photosplice_geom::Rect::new(0, 0, 1, 1), px: vec![[rgb[0], rgb[1], rgb[2], 1.0]] };
         apply_depth(a, &mut b, transfer, Some(doc.depth));
         [b.px[0][0], b.px[0][1], b.px[0][2]]
     };
@@ -360,12 +360,12 @@ fn mixr(f: &PsdFile, merged: &[u8], w: usize, h: usize) {
 /// the one Curves point (0,0)-(x,y)-(255,255) (Photoshop's curve interpolation, `curve_lut`)
 /// that reproduces the band best, and its worst error in levels.
 fn bcfit(f: &PsdFile, bytes: &[u8], merged: &[u8], w: usize) {
-    use photosuite_doc::adjust::CurvePoint;
-    let doc = photosuite_io::import("x.psd", bytes).unwrap().document;
+    use photosplice_doc::adjust::CurvePoint;
+    let doc = photosplice_io::import("x.psd", bytes).unwrap().document;
     let ramp_row = 130usize;
     let input: Vec<u8> = (0..w).map(|x| merged[ramp_row * w + x]).collect();
     for l in &doc.layers {
-        let photosuite_doc::LayerContent::Adjustment(photosuite_doc::Adjustment::BrightnessContrast { brightness, contrast, .. }) = &l.content else { continue };
+        let photosplice_doc::LayerContent::Adjustment(photosplice_doc::Adjustment::BrightnessContrast { brightness, contrast, .. }) = &l.content else { continue };
         if *brightness <= 0.0 || *contrast != 0.0 {
             continue;
         }
@@ -375,7 +375,7 @@ fn bcfit(f: &PsdFile, bytes: &[u8], merged: &[u8], w: usize) {
         let mut best = (u32::MAX, 0, 0);
         for px in 1..255u32 {
             for py in px..256u32 {
-                let lut = photosuite_compose::adjust::curve_lut(&[
+                let lut = photosplice_compose::adjust::curve_lut(&[
                     CurvePoint { input: 0.0, output: 0.0 },
                     CurvePoint { input: px as f32 / 255.0, output: py as f32 / 255.0 },
                     CurvePoint { input: 1.0, output: 1.0 },
@@ -416,7 +416,7 @@ fn main() {
     }
     if std::env::var_os("ADJ").is_some() {
         let merged = f.decode_merged().unwrap();
-        if f.header.color_mode == photosuite_psd::ColorMode::Lab {
+        if f.header.color_mode == photosplice_psd::ColorMode::Lab {
             adj_lab(&f, &bytes, &merged, f.header.width as usize, f.header.height as usize);
             return;
         }
@@ -443,7 +443,7 @@ fn main() {
     let (w, h) = (f.header.width as usize, f.header.height as usize);
     let m = |c: usize, x: i32, y: i32| f32::from(merged[c * w * h + y as usize * w + x as usize]) / 255.0;
     // CMYK: four inks; Lab (and RGB): three channels.
-    let colors = if f.header.color_mode == photosuite_psd::ColorMode::Cmyk { 4 } else { 3 };
+    let colors = if f.header.color_mode == photosplice_psd::ColorMode::Cmyk { 4 } else { 3 };
     let recs = f.layers();
     for i in 1..recs.len() {
         probe_nonsep(&f, recs, i, &m, w, h);
@@ -454,7 +454,7 @@ fn main() {
         let (top, bot) = (Planes::of(&f, &recs[i]), Planes::of(&f, &recs[i - 1]));
         let (mut n, mut e_stored, mut e_ink, mut e_max) = (0usize, 0.0f32, 0.0f32, 0.0f32);
         let (mut e_srgb, mut n_srgb) = (0.0f32, 0usize);
-        let lab = f.header.color_mode == photosuite_psd::ColorMode::Lab;
+        let lab = f.header.color_mode == photosplice_psd::ColorMode::Lab;
         let (t, l, b, r) = top.rect;
         for y in t.max(0)..b.min(h as i32) {
             for x in l.max(0)..r.min(w as i32) {
@@ -465,7 +465,7 @@ fn main() {
                 }
                 // Lab: the blend of the two colours' sRGB, back in Lab.
                 if lab {
-                    use photosuite_color::convert::{lab_to_srgb, srgb_to_lab};
+                    use photosplice_color::convert::{lab_to_srgb, srgb_to_lab};
                     let px = |p: &Planes| (0..3).map(|c| p.get(c, x, y)).collect::<Option<Vec<f32>>>();
                     if let (Some(sv), Some(bv)) = (px(&top), px(&bot)) {
                         let rgb = |v: &[f32]| lab_to_srgb([v[0] * 100.0, v[1] * 255.0 - 128.0, v[2] * 255.0 - 128.0]);

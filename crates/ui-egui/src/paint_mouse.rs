@@ -5,15 +5,15 @@
 //! with `"erase": true`, so one undo step, with the pen pressure and tilt of a normal stroke.
 
 use egui::{PointerButton, Response};
-use photosuite_engine::prefs::RightClickPaint;
+use photosplice_engine::prefs::RightClickPaint;
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::state::Tool;
 
 /// Smoothing is a tool option, kept per tool like Photoshop's options bar: switching between the
 /// Brush and the Eraser saves the session brush's smoothing for the old tool and loads the new
 /// tool's (Photoshop's 10 % the first time). Other tools leave it alone.
-pub fn sync_tool_smoothing(app: &mut PhotosuiteApp) {
+pub fn sync_tool_smoothing(app: &mut PhotospliceApp) {
     let tool = app.ui.tool;
     if !matches!(tool, Tool::Brush | Tool::Pencil | Tool::Eraser) || app.ui.smoothing_tool == Some(tool) {
         return;
@@ -32,7 +32,7 @@ pub fn sync_tool_smoothing(app: &mut PhotosuiteApp) {
                 .iter()
                 .find(|(t, _)| *t == tool)
                 .map(|(_, s)| s.clone())
-                .unwrap_or_else(|| photosuite_engine::paint::brush::Smoothing { amount: 0.1, ..Default::default() })
+                .unwrap_or_else(|| photosplice_engine::paint::brush::Smoothing { amount: 0.1, ..Default::default() })
         }
     };
     app.session.tools.brush.smoothing = next;
@@ -54,14 +54,14 @@ pub fn has_brush_picker(tool: Tool) -> bool {
 }
 
 /// Does a right-button drag with `tool` erase (rather than open the picker)?
-pub fn right_erases(app: &PhotosuiteApp, tool: Tool) -> bool {
+pub fn right_erases(app: &PhotospliceApp, tool: Tool) -> bool {
     matches!(tool, Tool::Brush | Tool::Eraser) && app.session.prefs().tools.right_click_with_painting_tools == RightClickPaint::Erase
 }
 
 /// Route the canvas response's buttons: the left one drives the tool; the right one resizes the
 /// brush with Alt held (#297), erases (Erase preference) or opens the Brush Preset picker. Arms
 /// `secondary_erase` or `brush_resize_armed` for this frame's `Down`.
-pub fn canvas_buttons(app: &mut PhotosuiteApp, response: &Response, tool: Tool) -> Buttons {
+pub fn canvas_buttons(app: &mut PhotospliceApp, response: &Response, tool: Tool) -> Buttons {
     let (mods, right_down) = response.ctx.input(|i| (i.modifiers, i.pointer.secondary_down()));
     // Alt+right-drag resizes the brush (brush_resize.rs); its events reach `tool_event` like a
     // left drag's, and nothing paints. A resize whose release was missed ends here.
@@ -101,7 +101,7 @@ pub fn canvas_buttons(app: &mut PhotosuiteApp, response: &Response, tool: Tool) 
 /// Alt+right-drag brush resize, `brush_resize_armed` for its `Down`; or an erasing right stroke,
 /// `secondary_erase` armed for its `Down`). Otherwise a right-click with a painting tool opens
 /// the Brush Preset picker at screen point `at`, and nothing paints.
-pub fn pointer_secondary(app: &mut PhotosuiteApp, down: bool, mods: egui::Modifiers, at: [f32; 2]) -> bool {
+pub fn pointer_secondary(app: &mut PhotospliceApp, down: bool, mods: egui::Modifiers, at: [f32; 2]) -> bool {
     let tool = app.ui.tool;
     if crate::brush_resize::applies(tool) && (crate::brush_resize::is_right_gesture(mods) || app.brush_resize.is_some_and(|r| r.secondary)) {
         app.brush_resize_armed = down && app.drag.is_none();
@@ -119,7 +119,7 @@ pub fn pointer_secondary(app: &mut PhotosuiteApp, down: bool, mods: egui::Modifi
 
 /// The Brush Preset picker a right-click opened, at the pointer. It edits the session brush like
 /// the options-bar chip's; a click outside, Escape or Enter closes it.
-pub fn show_picker(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+pub fn show_picker(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let Some([x, y]) = app.ui.brush_picker else { return };
     if !has_brush_picker(app.ui.tool) || ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Enter)) {
         app.ui.brush_picker = None;
@@ -155,8 +155,8 @@ mod tests {
     use super::*;
     use crate::canvas::{ToolEvent, tool_event};
 
-    fn harness(prefs: Option<&str>) -> Harness<'static, PhotosuiteApp> {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+    fn harness(prefs: Option<&str>) -> Harness<'static, PhotospliceApp> {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({"width": 400, "height": 300})).unwrap();
         app.run("layer.new.layer", json!({})).unwrap();
         app.run("tools.setColors", json!({"foreground": "#0000ff"})).unwrap();
@@ -167,7 +167,7 @@ mod tests {
         app.ui.tool = Tool::Brush;
         app.sync_views();
         let mut h = Harness::builder().with_size(vec2(1200.0, 800.0)).build_ui_state(
-            |ui, app: &mut PhotosuiteApp| {
+            |ui, app: &mut PhotospliceApp| {
                 let ctx = ui.ctx().clone();
                 if !ctx.fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
                     return;
@@ -176,18 +176,18 @@ mod tests {
             },
             app,
         );
-        PhotosuiteApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
         h.run_steps(4);
         h
     }
 
-    fn press(h: &mut Harness<'static, PhotosuiteApp>, pos: Pos2, button: PointerButton, pressed: bool) {
+    fn press(h: &mut Harness<'static, PhotospliceApp>, pos: Pos2, button: PointerButton, pressed: bool) {
         h.event(egui::Event::PointerButton { pos, button, pressed, modifiers: Modifiers::NONE });
         h.run_steps(2);
     }
 
     /// Drag across the canvas centre with `button`; returns the document points it covered.
-    fn drag(h: &mut Harness<'static, PhotosuiteApp>, button: PointerButton) -> (Pos2, Pos2) {
+    fn drag(h: &mut Harness<'static, PhotospliceApp>, button: PointerButton) -> (Pos2, Pos2) {
         let c = h.state().last_canvas_rect.center();
         let (a, b) = (c - vec2(80.0, 0.0), c + vec2(80.0, 0.0));
         h.event(egui::Event::PointerMoved(a));
@@ -201,7 +201,7 @@ mod tests {
         (a, b)
     }
 
-    fn alpha_at(h: &Harness<'static, PhotosuiteApp>, screen: Pos2) -> f32 {
+    fn alpha_at(h: &Harness<'static, PhotospliceApp>, screen: Pos2) -> f32 {
         let app = h.state();
         let v = app.ui.views[0].clone();
         let r = app.last_canvas_rect;
@@ -211,7 +211,7 @@ mod tests {
         st.doc.layer(st.active_layer.unwrap()).unwrap().surface().unwrap().rgba(x, y)[3]
     }
 
-    fn strokes(h: &Harness<'static, PhotosuiteApp>) -> Vec<serde_json::Value> {
+    fn strokes(h: &Harness<'static, PhotospliceApp>) -> Vec<serde_json::Value> {
         h.state().session.journal.iter().filter(|(id, _)| id == "paint.stroke").map(|(_, p)| p.clone()).collect()
     }
 
@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn right_stroke_erases_with_pen_pressure_through_the_control_channel_path() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({"width": 120, "height": 80})).unwrap();
         app.run("prefs.set", json!({"path": "tools.rightClickWithPaintingTools", "value": "erase"})).unwrap();
         app.ui.tool = Tool::Brush;
@@ -351,9 +351,9 @@ mod tests {
 
     #[test]
     fn smoothing_is_a_per_tool_option_that_presets_keep() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({"width": 64, "height": 64})).unwrap();
-        let amount = |app: &PhotosuiteApp| app.session.tools.brush.smoothing.amount;
+        let amount = |app: &PhotospliceApp| app.session.tools.brush.smoothing.amount;
         app.ui.tool = Tool::Brush;
         sync_tool_smoothing(&mut app);
         assert_eq!(amount(&app), 0.1, "Photoshop's default");
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn eraser_tool_on_the_background_paints_the_background_colour() {
         // #76: the Eraser on the Background (locked transparency) paints the background colour.
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         app.run("file.new", json!({"width": 120, "height": 80})).unwrap();
         app.run("tools.setColors", json!({"background": "#ff0000"})).unwrap();
         app.run("tools.setBrush", json!({"brush": {"size": 12, "hardness": 1.0}})).unwrap();
@@ -405,7 +405,7 @@ mod tests {
     }
 
     /// Assert the one committed stroke contains a point at each queued screen position.
-    fn assert_committed_points(h: &Harness<'static, PhotosuiteApp>, queued: &[Pos2]) {
+    fn assert_committed_points(h: &Harness<'static, PhotospliceApp>, queued: &[Pos2]) {
         let s = strokes(h);
         assert_eq!(s.len(), 1);
         let points = s[0]["points"].as_array().unwrap();

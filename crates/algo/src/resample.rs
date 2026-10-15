@@ -1,7 +1,7 @@
 //! High-quality separable resampling of surfaces (Image Size).
 
-use photosuite_geom::{Rect, TILE_SIZE};
-use photosuite_raster::Surface;
+use photosplice_geom::{Rect, TILE_SIZE};
+use photosplice_raster::Surface;
 use serde::{Deserialize, Serialize};
 
 use crate::image::{premultiply, unpremultiply};
@@ -308,7 +308,7 @@ pub fn crop_surface(s: &Surface, keep: Rect) -> Surface {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use photosuite_color::{ColorMode, PixelFormat, SampleType};
+    use photosplice_color::{ColorMode, PixelFormat, SampleType};
 
     fn ramp(sample: SampleType) -> Surface {
         let mut s = Surface::new(PixelFormat::new(ColorMode::Rgb, sample, true));

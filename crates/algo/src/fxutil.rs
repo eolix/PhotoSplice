@@ -1,9 +1,9 @@
 //! Shared helpers for the second filter batch: colour-model access, window
 //! buffers, single-channel box/Gaussian blurs and jittered cell points.
 
-use photosuite_color::{ColorMode, PixelFormat, SampleType};
-use photosuite_geom::Rect;
-use photosuite_raster::{from_rgba_into, to_rgba};
+use photosplice_color::{ColorMode, PixelFormat, SampleType};
+use photosplice_geom::Rect;
+use photosplice_raster::{from_rgba_into, to_rgba};
 
 use crate::Ctx;
 use crate::image::Image;

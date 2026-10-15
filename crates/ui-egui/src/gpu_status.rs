@@ -6,7 +6,7 @@
 
 use serde_json::json;
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 
 /// Notice title when the device was lost.
 pub const LOST_MESSAGE: &str = "GPU device was lost; using the CPU renderer.";
@@ -15,11 +15,11 @@ pub const ERROR_MESSAGE: &str = "GPU error; using the CPU renderer.";
 /// Frames after which startup counts as done even if a document never drew.
 const STARTED_MAX_FRAMES: u64 = 120;
 
-/// Hook run once the app has rendered its first frames (see [`PhotosuiteApp::on_started`]).
-pub type StartedHook = Box<dyn FnOnce(&mut PhotosuiteApp)>;
+/// Hook run once the app has rendered its first frames (see [`PhotospliceApp::on_started`]).
+pub type StartedHook = Box<dyn FnOnce(&mut PhotospliceApp)>;
 
 /// Per-frame check: switch to the CPU canvas when the GPU faulted, and run the started hook.
-pub fn check(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+pub fn check(app: &mut PhotospliceApp, ctx: &egui::Context) {
     if let Some(fault) = app.gpu.as_ref().and_then(|g| g.fault()) {
         fall_back(app, &fault);
         ctx.request_repaint();
@@ -40,7 +40,7 @@ pub fn check(app: &mut PhotosuiteApp, ctx: &egui::Context) {
 
 /// Drop the GPU canvas after `fault`: free its resources, send every view through the CPU
 /// path, record why, and tell the user. Documents are untouched.
-pub fn fall_back(app: &mut PhotosuiteApp, fault: &photosuite_gpu::Fault) {
+pub fn fall_back(app: &mut PhotospliceApp, fault: &photosplice_gpu::Fault) {
     let Some(gpu) = app.gpu.take() else { return };
     log::error!("{fault}; using the CPU renderer for the rest of the session");
     gpu.release();
@@ -59,18 +59,18 @@ pub fn fall_back(app: &mut PhotosuiteApp, fault: &photosuite_gpu::Fault) {
 }
 
 /// Help › System Info: version, platform and the graphics state.
-pub fn system_info(app: &PhotosuiteApp) -> Vec<String> {
+pub fn system_info(app: &PhotospliceApp) -> Vec<String> {
     let mut v =
-        vec![format!("PhotoSuite {}", photosuite_engine::build_info::long_version()), format!("Platform: {} {}", std::env::consts::OS, std::env::consts::ARCH)];
+        vec![format!("PhotoSplice {}", photosplice_engine::build_info::long_version()), format!("Platform: {} {}", std::env::consts::OS, std::env::consts::ARCH)];
     v.extend(app.perf.gpu_info.lines());
     v.extend(crate::monitor_status::summary_lines(app));
     v
 }
 
 /// The `help.systemInfo` result: the same facts as JSON.
-pub fn system_info_json(app: &PhotosuiteApp) -> serde_json::Value {
+pub fn system_info_json(app: &PhotospliceApp) -> serde_json::Value {
     json!({
-        "version": photosuite_engine::build_info::long_version(),
+        "version": photosplice_engine::build_info::long_version(),
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
         "gpu": app.perf.gpu_info,
@@ -81,12 +81,12 @@ pub fn system_info_json(app: &PhotosuiteApp) -> serde_json::Value {
 }
 
 /// Queue the same recovery warning for startup and runtime failures.
-pub fn queue_fallback_notice(app: &mut PhotosuiteApp, reason: impl Into<String>) {
+pub fn queue_fallback_notice(app: &mut PhotospliceApp, reason: impl Into<String>) {
     app.ui.gpu_fallback_notice = Some(reason.into());
 }
 
 /// Store the next-launch choice without restarting or risking unsaved documents.
-fn choose_recovery(app: &mut PhotosuiteApp, retry: bool) -> Result<(), String> {
+fn choose_recovery(app: &mut PhotospliceApp, retry: bool) -> Result<(), String> {
     app.run(
         "prefs.set",
         json!({"values": {
@@ -101,7 +101,7 @@ fn choose_recovery(app: &mut PhotosuiteApp, retry: bool) -> Result<(), String> {
         crate::notices::post(
             app,
             "GPU retry scheduled",
-            vec!["Save your work and restart PhotoSuite to retry GPU acceleration. CPU rendering remains active for this session.".into()],
+            vec!["Save your work and restart PhotoSplice to retry GPU acceleration. CPU rendering remains active for this session.".into()],
             false,
         );
     }
@@ -109,7 +109,7 @@ fn choose_recovery(app: &mut PhotosuiteApp, retry: bool) -> Result<(), String> {
 }
 
 /// Recovery is an explicit choice; the CPU document renderer stays active while the user works.
-pub fn show_fallback(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+pub fn show_fallback(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let Some(reason) = app.ui.gpu_fallback_notice.clone() else { return };
     let t = crate::theme::Tokens::get(ctx);
     let mut choice = None;
@@ -121,7 +121,7 @@ pub fn show_fallback(app: &mut PhotosuiteApp, ctx: &egui::Context) {
         .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
         .show(ctx, |ui| {
             ui.label(egui::RichText::new(tl!("GPU acceleration could not continue. Your documents are unchanged.")).color(t.warning));
-            ui.label(tl!("PhotoSuite is using the CPU image compositor. The window may still use your graphics adapter."));
+            ui.label(tl!("PhotoSplice is using the CPU image compositor. The window may still use your graphics adapter."));
             ui.collapsing(tl!("Details"), |ui| {
                 ui.label(&reason);
             });
@@ -149,7 +149,7 @@ mod tests {
 
     #[test]
     fn fallback_warning_keeps_reason_in_inspectable_state() {
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), crate::Services::default());
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
         queue_fallback_notice(&mut app, "device unavailable");
         let state = serde_json::to_value(&app.ui).unwrap();
         assert_eq!(state["gpu_fallback_notice"], "device unavailable");
@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn failed_preference_save_keeps_recovery_warning_open() {
         let services = crate::Services { save_prefs: Some(Box::new(|_| Err("disk full".into()))), ..Default::default() };
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), services);
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), services);
         queue_fallback_notice(&mut app, "GPU fault");
         assert!(choose_recovery(&mut app, true).is_err());
         assert_eq!(app.ui.gpu_fallback_notice.as_deref(), Some("GPU fault"));
@@ -177,7 +177,7 @@ mod tests {
             })),
             ..Default::default()
         };
-        let mut app = PhotosuiteApp::new(photosuite_engine::Session::new(), services);
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), services);
         queue_fallback_notice(&mut app, "device unavailable");
         choose_recovery(&mut app, false).unwrap();
         assert!(!app.session.prefs().performance.use_gpu);

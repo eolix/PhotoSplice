@@ -2,12 +2,12 @@
 //! File › Export › Layer Comps to Files.
 //!
 //! A comp records every layer's visibility, position and appearance; its three options choose
-//! which of them applying restores (see [`photosuite_doc::comps`]). Comps live in the document,
+//! which of them applying restores (see [`photosplice_doc::comps`]). Comps live in the document,
 //! so every change here is one undoable history step. Commands that act on "the" comp take
 //! `"comp": id | name` and default to the comp applied (or created) last.
 
-use photosuite_doc::comps::{capture_states, layer_position, next_comp_id};
-use photosuite_doc::{CompLayerState, Document, LayerComp, LayerId};
+use photosplice_doc::comps::{capture_states, layer_position, next_comp_id};
+use photosplice_doc::{CompLayerState, Document, LayerComp, LayerId};
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;

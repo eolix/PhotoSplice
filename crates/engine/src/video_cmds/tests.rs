@@ -1,5 +1,5 @@
 use super::*;
-use photosuite_doc::LayerId;
+use photosplice_doc::LayerId;
 use serde_json::json;
 
 fn session() -> Session {
@@ -59,7 +59,7 @@ fn scrub_keeps_content_a_raster() {
 fn write_png(path: &str, w: u32, h: u32, color: &str) {
     let mut s = Session::new();
     s.execute("file.new", json!({"width": w, "height": h, "background": color})).unwrap();
-    let bytes = photosuite_io::export(&s.active().unwrap().doc, "png", &photosuite_io::ExportOptions::default()).unwrap().bytes;
+    let bytes = photosplice_io::export(&s.active().unwrap().doc, "png", &photosplice_io::ExportOptions::default()).unwrap().bytes;
     std::fs::write(path, bytes).unwrap();
 }
 

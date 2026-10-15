@@ -5,16 +5,16 @@
 //!
 //! A live gradient is laid out on the canvas ("Align with layer" off), so its handles stay put
 //! when its mask changes. Its start/end points are stored as the fill's angle, scale and centre
-//! offset (`photosuite_compose::gradient_fill`), which is what a PSD Gradient Fill holds, and it
+//! offset (`photosplice_compose::gradient_fill`), which is what a PSD Gradient Fill holds, and it
 //! renders the same pixels as painting the same drag with `paint.gradient`.
 //!
 //! Every edit is one command, so one history step per gesture: the UI previews a drag with
 //! [`apply_set`] and commits it once on release.
 
-use photosuite_color::Color;
-use photosuite_compose::gradient_fill as gf;
-use photosuite_doc::{Document, Fill, GradientStyle, Layer, LayerContent, LayerId, LayerMask};
-use photosuite_geom::Rect;
+use photosplice_color::Color;
+use photosplice_compose::gradient_fill as gf;
+use photosplice_doc::{Document, Fill, GradientStyle, Layer, LayerContent, LayerId, LayerMask};
+use photosplice_geom::Rect;
 use serde_json::{Value, json};
 
 use crate::commands::{CommandSpec, blend_from_str, layer_param};
@@ -134,7 +134,7 @@ fn gradient_of(s: &Session, id: LayerId, cmd: &str) -> Result<(Fill, Rect)> {
     let d = s.active().ok_or(EngineError::NoDocument)?;
     let l = d.doc.layer(id).ok_or(EngineError::NoLayer(id))?;
     match &l.content {
-        LayerContent::Fill(f @ Fill::Gradient { .. }) => Ok((f.clone(), photosuite_compose::fill_frame(l, d.doc.bounds()))),
+        LayerContent::Fill(f @ Fill::Gradient { .. }) => Ok((f.clone(), photosplice_compose::fill_frame(l, d.doc.bounds()))),
         _ => Err(bad(cmd, format!("layer \"{}\" is not a gradient fill layer", l.name))),
     }
 }
@@ -157,7 +157,7 @@ fn clamp_scale(v: f32) -> f32 {
 fn frame_with_align(layer: &Layer, f: &Fill, canvas: Rect) -> Rect {
     let mut l = layer.clone();
     l.content = LayerContent::Fill(f.clone());
-    photosuite_compose::fill_frame(&l, canvas)
+    photosplice_compose::fill_frame(&l, canvas)
 }
 
 /// Applies `gradient.fill.set` params to a gradient fill (`layer` gives its frame; `fg`/`bg`
@@ -278,7 +278,7 @@ pub fn new_layer(s: &Session, doc: &Document, p: &Value) -> Result<Layer> {
     let dither = p.get("dither").and_then(Value::as_bool).unwrap_or(true);
     let opacity = num(p, "opacity").unwrap_or(100.0).clamp(0.0, 100.0) / 100.0;
     let blend = match p.get("mode").and_then(Value::as_str) {
-        None | Some("") => photosuite_color::BlendMode::Normal,
+        None | Some("") => photosplice_color::BlendMode::Normal,
         Some(m) => blend_from_str(m).ok_or_else(|| bad(CMD, format!("unknown blend mode `{m}`")))?,
     };
     let canvas = doc.bounds();

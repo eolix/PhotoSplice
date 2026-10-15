@@ -7,10 +7,10 @@
 use std::sync::Arc;
 
 use egui::{Color32, Rect, Sense, vec2};
-use photosuite_doc::adjust::ToneSpace;
-use photosuite_doc::{Document, Layer, LayerId};
+use photosplice_doc::adjust::ToneSpace;
+use photosplice_doc::{Document, Layer, LayerId};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 use crate::theme::Tokens;
 
 const CHANNELS: [(&str, &str); 4] = [("rgb", "RGB"), ("red", "Red"), ("green", "Green"), ("blue", "Blue")];
@@ -79,7 +79,7 @@ pub fn compute_histograms(doc: &Document, source: HistSource, space: ToneSpace) 
             isolate(&mut d.layers, id);
         }
     }
-    let img = photosuite_compose::thumbnail(&d, 384);
+    let img = photosplice_compose::thumbnail(&d, 384);
     let n = match space {
         ToneSpace::Rgb => 4,
         ToneSpace::Cmyk => 5,
@@ -100,7 +100,7 @@ pub fn compute_histograms(doc: &Document, source: HistSource, space: ToneSpace) 
             }
             ToneSpace::Cmyk => {
                 let rgb = [p[0], p[1], p[2]].map(|v| f32::from(v) / 255.0);
-                let ink = photosuite_color::convert::rgb_to_cmyk(rgb);
+                let ink = photosplice_color::convert::rgb_to_cmyk(rgb);
                 for (c, v) in ink.iter().enumerate() {
                     h[c + 1][bin(1.0 - v)] += 1;
                 }
@@ -108,7 +108,7 @@ pub fn compute_histograms(doc: &Document, source: HistSource, space: ToneSpace) 
             }
             ToneSpace::Lab => {
                 let rgb = [p[0], p[1], p[2]].map(|v| f32::from(v) / 255.0);
-                let l = photosuite_color::convert::srgb_to_lab(rgb);
+                let l = photosplice_color::convert::srgb_to_lab(rgb);
                 h[0][bin(l[0] / 100.0)] += 1;
                 h[1][bin((l[1] + 128.0) / 255.0)] += 1;
                 h[2][bin((l[2] + 128.0) / 255.0)] += 1;
@@ -120,7 +120,7 @@ pub fn compute_histograms(doc: &Document, source: HistSource, space: ToneSpace) 
 
 /// Cached histograms for a tone editor; recomputed only when something other than the editor's
 /// own commits changed the document (see [`keep_after_commit`]).
-pub fn histograms(app: &mut PhotosuiteApp, source: HistSource, space: ToneSpace) -> Arc<Histograms> {
+pub fn histograms(app: &mut PhotospliceApp, source: HistSource, space: ToneSpace) -> Arc<Histograms> {
     let Some(st) = app.session.active() else { return Arc::new(Histograms::default()) };
     let (doc_id, rev) = (st.doc.id, st.revision);
     let want = tag(source, space);
@@ -146,13 +146,13 @@ pub fn histograms(app: &mut PhotosuiteApp, source: HistSource, space: ToneSpace)
 
 /// Whether the latest revision changed no pixels (selecting a layer, say): cached histograms of
 /// the previous revision still hold (#125).
-fn view_only(st: &photosuite_engine::DocState) -> bool {
+fn view_only(st: &photosplice_engine::DocState) -> bool {
     st.last_damage.is_some_and(|r| r.is_empty())
 }
 
 /// After an editor commits its own adjustment layer, the image below it is unchanged: keep the
 /// cached histogram valid for the new revision. Call with the revision seen before the commit.
-pub fn keep_after_commit(app: &mut PhotosuiteApp, layer: LayerId, before: Option<u64>) {
+pub fn keep_after_commit(app: &mut PhotospliceApp, layer: LayerId, before: Option<u64>) {
     let now = app.session.active().map(|s| s.revision);
     if let (Some((_, l, r, _)), Some(before), Some(now)) = (app.tone_hist.as_mut(), before, now)
         && *l == layer
@@ -220,7 +220,7 @@ fn channel_picker(ui: &mut egui::Ui, id: egui::Id, label: &str) -> usize {
 
 /// Histogram panel (Window › Histogram): whole-image histogram with Photoshop's statistics.
 /// Recomputed at most every 250 ms while the document keeps changing (e.g. during painting).
-pub fn histogram_panel(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
+pub fn histogram_panel(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let Some(st) = app.session.active() else {
         ui.label(egui::RichText::new(tl!("No document")).color(t.text_faint));
@@ -246,7 +246,7 @@ pub fn histogram_panel(app: &mut PhotosuiteApp, ui: &mut egui::Ui) {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(260));
     }
     let Some((_, _, _, h)) = app.doc_hist.clone() else { return };
-    let size = app.session.active().map_or(photosuite_doc::Size::new(0, 0), |s| s.doc.size);
+    let size = app.session.active().map_or(photosplice_doc::Size::new(0, 0), |s| s.doc.size);
     // Statistics come from a downsampled cache (like Photoshop's cache levels).
     let level = (size.width.max(size.height) as f32 / 384.0).max(1.0).log2().ceil() as u32 + 1;
     let ch = channel_picker(ui, egui::Id::new("histogram-panel-ch"), "Channel:");
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn histogram_ignores_the_edited_adjustment() {
-        let mut s = photosuite_engine::Session::new();
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", json!({"width": 64, "height": 64})).unwrap(); // white
         s.execute("layer.newAdjustmentLayer.invert", json!({})).unwrap();
         let st = s.active().unwrap();
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn layer_histogram_sees_only_that_layer_and_spaces_have_their_channels() {
-        let mut s = photosuite_engine::Session::new();
+        let mut s = photosplice_engine::Session::new();
         s.execute("file.new", json!({"width": 32, "height": 32})).unwrap(); // white background
         let bg = s.active().unwrap().doc.layers[0].id;
         s.execute("layer.new.layer", json!({})).unwrap();

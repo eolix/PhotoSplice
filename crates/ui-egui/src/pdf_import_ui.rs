@@ -6,10 +6,10 @@
 //! OK runs `file.importPdf` with those options and remembers them (preferences `dialogs`), so
 //! the next PDF starts from them. A Photoshop PDF never gets here: it opens as its document.
 
-use photosuite_io::pdf::{CropTo, Pages};
+use photosplice_io::pdf::{CropTo, Pages};
 use serde_json::{Value, json};
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 
 const COMMAND: &str = "file.importPdf";
 /// Longest thumbnail side, in points.
@@ -87,7 +87,7 @@ impl ImportPdf {
 }
 
 /// Puts up Import PDF for the PDF `bytes` read from `path`, from the last choices.
-pub fn open(app: &mut PhotosuiteApp, path: &str, bytes: &[u8]) {
+pub fn open(app: &mut PhotospliceApp, path: &str, bytes: &[u8]) {
     let pages = Pages::open(bytes).ok();
     let count = pages.as_ref().map_or(0, Pages::len);
     let mut d = ImportPdf {
@@ -98,7 +98,7 @@ pub fn open(app: &mut PhotosuiteApp, path: &str, bytes: &[u8]) {
         anchor: 0,
         // Photoshop's defaults.
         crop_to: CropTo::BoundingBox,
-        resolution: photosuite_io::pdf::DEFAULT_DPI,
+        resolution: photosplice_io::pdf::DEFAULT_DPI,
         mode: "rgb".into(),
         depth: 8,
         open_as: "pixels".into(),
@@ -129,14 +129,14 @@ pub fn open(app: &mut PhotosuiteApp, path: &str, bytes: &[u8]) {
 const MAX_THUMBS: usize = 2000;
 
 /// Runs the import with the dialog's choices; the dialog closes.
-pub fn confirm(app: &mut PhotosuiteApp) -> Result<Value, String> {
+pub fn confirm(app: &mut PhotospliceApp) -> Result<Value, String> {
     let d = app.import_pdf.take().ok_or("no Import PDF")?;
     let remembered = d.remembered();
     app.session.prefs.edit(|p| p.dialogs.insert(COMMAND.into(), remembered));
     app.run(COMMAND, d.params())
 }
 
-pub fn show(app: &mut PhotosuiteApp, ctx: &egui::Context) {
+pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let Some(d) = &mut app.import_pdf else { return };
     let (mut ok, mut cancel) = (false, false);
     let tk = crate::theme::Tokens::get(ctx);

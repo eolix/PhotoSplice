@@ -36,12 +36,12 @@
 
 use std::sync::Arc;
 
-use photosuite_color::ColorMode;
-use photosuite_doc::{Adjustment, DocId, Document, Layer, LayerContent, LayerId, LayerMask};
-use photosuite_geom::Rect;
+use photosplice_color::ColorMode;
+use photosplice_doc::{Adjustment, DocId, Document, Layer, LayerContent, LayerId, LayerMask};
+use photosplice_geom::Rect;
 use serde_json::Value;
 
-use crate::PhotosuiteApp;
+use crate::PhotospliceApp;
 
 /// Id of the temporary preview layer. Fixed so the GPU compositor keeps its mask (the selection)
 /// resident from one change to the next. Never reaches a committed document.
@@ -63,7 +63,7 @@ pub fn unsupported(doc: &Document, target: LayerId) -> Option<&'static str> {
     if l.clipped {
         return Some("the target is clipped");
     }
-    if photosuite_compose::blend_if_active(l, doc.mode) {
+    if photosplice_compose::blend_if_active(l, doc.mode) {
         return Some(tl!("Blend If"));
     }
     let shows_default = !s.format().alpha || s.default_pixel().last().is_some_and(|a| *a > 0.0);
@@ -114,7 +114,7 @@ pub fn with_settings(base: &Document, kind: &str, params: &Value) -> Result<Docu
 }
 
 fn set_adjustment(base: &Document, layer: LayerId, kind: &str, params: &Value) -> Result<Document, String> {
-    let adj = photosuite_engine::adjust_params::from_params(kind, params, None, base.mode).map_err(|e| e.to_string())?;
+    let adj = photosplice_engine::adjust_params::from_params(kind, params, None, base.mode).map_err(|e| e.to_string())?;
     if base.mode == ColorMode::Grayscale && !keeps_gray(&adj) {
         return Err("colour result in a grayscale document".into());
     }
@@ -183,7 +183,7 @@ struct GpuProxy {
 }
 
 /// The open adjustment dialog: (kind, params, Preview on).
-fn dialog(app: &PhotosuiteApp) -> Option<(String, Value, bool)> {
+fn dialog(app: &PhotospliceApp) -> Option<(String, Value, bool)> {
     let d = app.ui.dialogs.iter().find(|d| crate::adjust_dialog::owns(&d.fields))?;
     let kind = d.fields.get("__adjust")?.as_str()?.to_string();
     let preview = d.fields.get("__preview").and_then(Value::as_bool).unwrap_or(true);
@@ -196,7 +196,7 @@ fn hash(parts: &[&[u8]]) -> u64 {
 }
 
 /// Whether the layer path can draw `doc` cheaply on this app's canvas.
-fn cheap(app: &PhotosuiteApp, doc: &Document) -> bool {
+fn cheap(app: &PhotospliceApp, doc: &Document) -> bool {
     match &app.gpu {
         Some(g) => g.supports(doc),
         None => crate::proxy::factor(doc) <= 1,
@@ -204,7 +204,7 @@ fn cheap(app: &PhotosuiteApp, doc: &Document) -> bool {
 }
 
 /// Bring the cached preview up to date for document `idx` (the active one) and return it.
-fn update(app: &mut PhotosuiteApp, idx: usize) -> Option<&AdjustPreview> {
+fn update(app: &mut PhotospliceApp, idx: usize) -> Option<&AdjustPreview> {
     if app.session.active_index() != Some(idx) {
         return None;
     }
@@ -220,7 +220,7 @@ fn update(app: &mut PhotosuiteApp, idx: usize) -> Option<&AdjustPreview> {
     let (doc_id, revision, target) = (st.doc.id, st.revision, st.active_layer?);
     // Commands that target a channel (Channels panel / Quick Mask) or a layer mask keep the proxy
     // preview.
-    let channel_target = st.channel_view.target != photosuite_engine::channel_cmds::ChannelTarget::Composite
+    let channel_target = st.channel_view.target != photosplice_engine::channel_cmds::ChannelTarget::Composite
         || st.doc.quick_mask.is_some()
         || !app.with_mask_target(&format!("image.adjustments.{kind}"), Value::Null).is_null();
     let session = hash(&[&doc_id.0.to_le_bytes(), &revision.to_le_bytes(), &target.0.to_le_bytes(), &[u8::from(channel_target)]]);
@@ -262,20 +262,20 @@ fn update(app: &mut PhotosuiteApp, idx: usize) -> Option<&AdjustPreview> {
 
 /// The document the canvas shows for document `idx` while an adjustment dialog previews through
 /// the layer path: (document, preview key).
-pub fn display_doc(app: &mut PhotosuiteApp, idx: usize) -> Option<(Arc<Document>, u64)> {
+pub fn display_doc(app: &mut PhotospliceApp, idx: usize) -> Option<(Arc<Document>, u64)> {
     update(app, idx)?.shown.clone()
 }
 
 /// Whether the open adjustment dialog previews through the layer path (so the CPU proxy preview
 /// must stay off).
-pub fn on_layer(app: &mut PhotosuiteApp, idx: usize) -> bool {
+pub fn on_layer(app: &mut PhotospliceApp, idx: usize) -> bool {
     update(app, idx).is_some_and(|p| p.layer_path)
 }
 
 /// The canvas area to recomposite when document `idx` (at `revision`) switches from the preview
 /// key `from` to `to` (raw keys, display transform removed): both must be this dialog's previews
 /// or the committed document (0). None means "everything".
-pub fn switch_region(app: &PhotosuiteApp, doc: DocId, revision: u64, from: u64, to: u64) -> Option<Rect> {
+pub fn switch_region(app: &PhotospliceApp, doc: DocId, revision: u64, from: u64, to: u64) -> Option<Rect> {
     let p = app.adjust_preview.as_ref()?;
     if p.doc != doc || p.revision != revision {
         return None;
@@ -286,14 +286,14 @@ pub fn switch_region(app: &PhotosuiteApp, doc: DocId, revision: u64, from: u64, 
 }
 
 /// The key of the preview currently shown, if any.
-pub fn shown_key(app: &PhotosuiteApp) -> Option<u64> {
+pub fn shown_key(app: &PhotospliceApp) -> Option<u64> {
     app.adjust_preview.as_ref()?.shown.as_ref().map(|s| s.1)
 }
 
 /// The part of a switch's region (from [`switch_region`]) to composite now: to a preview, only
 /// what the view shows (`visible`, document pixels), remembering it so [`uncovered`] catches up
 /// as the view moves; back to the committed document (key 0), the whole region.
-pub fn switch_damage(app: &mut PhotosuiteApp, to: u64, region: Rect, visible: Rect) -> Rect {
+pub fn switch_damage(app: &mut PhotospliceApp, to: u64, region: Rect, visible: Rect) -> Rect {
     let Some(p) = app.adjust_preview.as_mut() else { return region };
     if to == 0 {
         p.covered = None;
@@ -306,7 +306,7 @@ pub fn switch_damage(app: &mut PhotosuiteApp, to: u64, region: Rect, visible: Re
 
 /// Where the main canvas texture (showing preview `key`) is out of date within `visible`: the
 /// region's visible part when the view moved past what was composited. Marks it covered.
-pub fn uncovered(app: &mut PhotosuiteApp, doc: DocId, key: u64, visible: Rect) -> Option<Rect> {
+pub fn uncovered(app: &mut PhotospliceApp, doc: DocId, key: u64, visible: Rect) -> Option<Rect> {
     let p = app.adjust_preview.as_mut().filter(|p| p.doc == doc)?;
     let (k, cov) = p.covered?;
     if k != key {
@@ -322,7 +322,7 @@ pub fn uncovered(app: &mut PhotosuiteApp, doc: DocId, key: u64, visible: Rect) -
 
 /// True while the preview's settings changed within the last `ms` milliseconds (secondary views
 /// such as the Navigator wait for the settings to settle instead of recompositing every change).
-pub fn settling(app: &PhotosuiteApp, ms: f64) -> bool {
+pub fn settling(app: &PhotospliceApp, ms: f64) -> bool {
     app.adjust_preview.as_ref().is_some_and(|p| p.shown.is_some() && crate::gpu_canvas::now_ms() - p.changed_ms < ms)
 }
 
@@ -360,8 +360,8 @@ pub fn proxy_factor(zoom: f32) -> u32 {
 /// A [`base_document`] scaled down by `k` with its own document and layer ids (so the GPU keeps
 /// its textures beside the full-size document's).
 pub fn proxy_base(base: &Document, k: u32) -> Document {
-    let mut d = photosuite_compose::proxy::proxy_document(base, k);
-    d.id = photosuite_doc::DocId(base.id.0 ^ PROXY_DOC_BIT);
+    let mut d = photosplice_compose::proxy::proxy_document(base, k);
+    d.id = photosplice_doc::DocId(base.id.0 ^ PROXY_DOC_BIT);
     flip_ids(&mut d.layers);
     d
 }
@@ -385,14 +385,14 @@ pub struct ProxyFrame {
 /// The zoomed-out preview for document `idx` at `zoom`, when the dialog previews through the layer
 /// and the view is far enough out that a reduced copy shows the same detail as the full-size
 /// composite: each change then composites ~1/k² of the pixels. Built once per session and factor.
-pub fn gpu_proxy(app: &mut PhotosuiteApp, idx: usize, zoom: f32) -> Option<ProxyFrame> {
+pub fn gpu_proxy(app: &mut PhotospliceApp, idx: usize, zoom: f32) -> Option<ProxyFrame> {
     let gpu = app.gpu.clone()?;
     update(app, idx)?;
     let p = app.adjust_preview.as_mut()?;
     p.shown.as_ref()?;
     let base = p.base.clone()?;
     let k = proxy_factor(zoom);
-    if k < 2 || base.size.area() <= PROXY_MIN_PIXELS || !photosuite_compose::proxy::proxy_faithful(&base) {
+    if k < 2 || base.size.area() <= PROXY_MIN_PIXELS || !photosplice_compose::proxy::proxy_faithful(&base) {
         return None;
     }
     if p.proxy.as_ref().is_none_or(|g| g.k != k) {
@@ -418,7 +418,7 @@ pub fn gpu_proxy(app: &mut PhotosuiteApp, idx: usize, zoom: f32) -> Option<Proxy
 }
 
 /// Record that `frame` was composited into the proxy's texture.
-pub fn proxy_drawn(app: &mut PhotosuiteApp, frame: &ProxyFrame) {
+pub fn proxy_drawn(app: &mut PhotospliceApp, frame: &ProxyFrame) {
     if let Some(g) = app.adjust_preview.as_mut().and_then(|p| p.proxy.as_mut())
         && g.k == frame.k
     {
@@ -426,7 +426,7 @@ pub fn proxy_drawn(app: &mut PhotosuiteApp, frame: &ProxyFrame) {
     }
 }
 
-pub(crate) fn retain_documents(app: &mut PhotosuiteApp) {
+pub(crate) fn retain_documents(app: &mut PhotospliceApp) {
     // Native reopen can reuse the ID and revision; neither the old base document nor its
     // coverage and upload markers may survive after that document leaves the session.
     if app.adjust_preview.as_ref().is_some_and(|p| !app.session.documents().iter().any(|st| st.doc.id == p.doc)) {
@@ -435,7 +435,7 @@ pub(crate) fn retain_documents(app: &mut PhotosuiteApp) {
 }
 
 /// GPU texture keys the preview uses besides the documents' own (keep them alive).
-pub fn gpu_keys(app: &PhotosuiteApp) -> Option<u64> {
+pub fn gpu_keys(app: &PhotospliceApp) -> Option<u64> {
     let p = app.adjust_preview.as_ref().filter(|p| p.hash != 0)?;
     p.proxy.as_ref().map(|g| g.base.id.0)
 }

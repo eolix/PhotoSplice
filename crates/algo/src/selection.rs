@@ -3,9 +3,9 @@
 //! modify (expand, contract, border, smooth, feather), anti-aliased lasso,
 //! and combining with an existing selection.
 
-use photosuite_color::PixelFormat;
-use photosuite_geom::{Rect, TILE_SIZE, TileCoord};
-use photosuite_raster::Surface;
+use photosplice_color::PixelFormat;
+use photosplice_geom::{Rect, TILE_SIZE, TileCoord};
+use photosplice_raster::Surface;
 use serde::{Deserialize, Serialize};
 
 use crate::photo_util::par_rows;

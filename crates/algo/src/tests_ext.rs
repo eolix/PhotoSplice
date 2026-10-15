@@ -1,7 +1,7 @@
 //! Tests for the second filter batch (pixelate, stylize, render, blur gallery, video…).
 
 use super::*;
-use photosuite_color::{PixelFormat, SampleType};
+use photosplice_color::{PixelFormat, SampleType};
 use std::sync::Arc;
 
 fn fmt(s: SampleType) -> PixelFormat {
@@ -190,7 +190,7 @@ fn new_filters_work_in_other_colour_modes() {
         let src = pattern(SampleType::F32, R);
         for y in R.y0..R.y1 {
             for x in R.x0..R.x1 {
-                let px = photosuite_raster::from_rgba(&f, photosuite_raster::to_rgba(&src.format(), &src.pixel(x, y)));
+                let px = photosplice_raster::from_rgba(&f, photosplice_raster::to_rgba(&src.format(), &src.pixel(x, y)));
                 s.write_pixel(x, y, &px);
             }
         }
@@ -675,7 +675,7 @@ fn cancelled_filters_return_none_and_progress_never_regresses() {
     let p = FilterParams::GaussianBlur { radius: 3.0 };
     let area = output_area(&p, s.content_bounds(), R, None);
     let yes = || true;
-    assert!(apply_tiled_with(&s, &p, area, R, None, 16, Some(R), &photosuite_raster::Interrupt::cancel_only(&yes)).is_none());
+    assert!(apply_tiled_with(&s, &p, area, R, None, 16, Some(R), &photosplice_raster::Interrupt::cancel_only(&yes)).is_none());
     // Tile workers report progress from their own threads, so values can arrive out of order;
     // consumers keep the high-water mark (as `JobCtx::progress` does with `fetch_max`).
     // Non-negative f32s order like their bits, so `fetch_max` on the bits needs no lock.
@@ -687,7 +687,7 @@ fn cancelled_filters_return_none_and_progress_never_regresses() {
         high.fetch_max(f.to_bits(), Ordering::Relaxed);
         calls.fetch_add(1, Ordering::Relaxed);
     };
-    let out = apply_tiled_with(&s, &p, area, R, None, 16, Some(R), &photosuite_raster::Interrupt::new(&no, &progress)).unwrap();
+    let out = apply_tiled_with(&s, &p, area, R, None, 16, Some(R), &photosplice_raster::Interrupt::new(&no, &progress)).unwrap();
     assert_eq!(f32::from_bits(high.load(Ordering::Relaxed)), 1.0);
     assert!(calls.load(Ordering::Relaxed) >= 1);
     assert_eq!(out.read_region(R), apply_tiled(&s, &p, area, R, None, 16, Some(R)).read_region(R));
