@@ -258,8 +258,10 @@ impl PsdFile {
         // The name is localised ("透明部分" from a Japanese Reference); its alpha id is 0 in any
         // language (user channels get other ids).
         let ids = self.resource(crate::resources::ids::ALPHA_IDS).map(|r| r.data.chunks_exact(4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])).collect::<Vec<_>>());
+        // Only while the two lists agree: names that cover the channels and leave it out win
+        // over a stale id list.
         let named = match ids {
-            Some(ids) if ids.len() >= extra && ids.first() == Some(&0) => Some(true),
+            Some(ids) if ids.len() >= extra && ids.first() == Some(&0) && names.as_ref().is_none_or(|n| n.len() == ids.len()) => Some(true),
             _ => named,
         };
         match &self.layer_info {

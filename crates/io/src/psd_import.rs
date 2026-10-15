@@ -737,8 +737,9 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosplice_raster::Interrupt)
         doc.metadata.psd_global_blocks.push((b.signature, b.key, Arc::new(b.data.clone())));
     }
     // The global layer mask info (default overlay colour and opacity for new masks), kept for
-    // export under a key no tagged block uses.
-    if let Some(m) = file.global_layer_mask.as_ref().filter(|m| !m.data.is_empty()) {
+    // export under a key no tagged block uses, when it isn't what export writes anyway.
+    // (A TIFF's `LMsk` comes back as the writer's 14-byte default when ours was empty.)
+    if let Some(m) = file.global_layer_mask.as_ref().filter(|m| !m.data.is_empty() && m.data != photosplice_psd::tiff::DEFAULT_GLOBAL_MASK) {
         doc.metadata.psd_global_blocks.push((*b"\0\0\0\0", crate::psd_export::GLOBAL_MASK_KEY, Arc::new(m.data.clone())));
     }
     doc.patterns = crate::pattern_map::from_global_blocks(&doc);
