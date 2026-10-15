@@ -57,6 +57,19 @@ impl Renderer<'_> {
     }
 }
 
+/// `mask` drawn over a `width` × `height` page, one byte per pixel (0 hides, 255 shows): what
+/// a layer mask made from it holds.
+pub(crate) fn soft_mask_bytes(mask: &SoftMask<'_>, global: &GlobalState, width: u16, height: u16) -> Vec<u8> {
+    let m = draw_soft_mask(mask, RenderSettings::default(), width, height, global);
+    let mut out = Vec::with_capacity(usize::from(m.width()) * usize::from(m.height()));
+    for y in 0..m.height() {
+        for x in 0..m.width() {
+            out.push(m.sample(x, y));
+        }
+    }
+    out
+}
+
 fn draw_soft_mask(
     mask: &SoftMask<'_>,
     settings: RenderSettings,

@@ -205,6 +205,10 @@ fn shadings_a_photoshop_gradient_cant_hold_stay_pixels() {
     let focal = "<< /PatternType 2 /Shading << /ShadingType 3 /ColorSpace /DeviceRGB /Coords [60 50 0 90 50 45] /Extend [true true] /Function << /FunctionType 2 /Domain [0 1] /C0 [1 1 0] /C1 [0 0.5 1] /N 1 >> >> >>";
     let d = open(&pdf("/Pattern cs /P0 scn 20 10 120 80 re f", "/Pattern << /P0 6 0 R >>", &[focal.into()]));
     assert_eq!(kinds(&d), ["pixels"]);
+    // A focus nudged by less than a pixel, as Illustrator often writes one, is a plain radial.
+    let nudged = focal.replace("[60 50 0 90 50 45]", "[90.6 50 0 90 50 45]");
+    let d = open(&pdf("/Pattern cs /P0 scn 20 10 120 80 re f", "/Pattern << /P0 6 0 R >>", &[nudged]));
+    assert_eq!(kinds(&d), ["fill"]);
 }
 
 #[test]
@@ -702,4 +706,35 @@ fn broken_layer_lists_open_as_one_stack() {
         let bytes = pdf_full(catalog, "", "1 0 0 rg 20 20 50 50 re f", "", &["<< /Type /OCG /Name (Unused) >>".into()]);
         assert_eq!(kinds(&open(&bytes)), ["shape"], "{catalog}");
     }
+}
+
+/// A luminosity soft mask (object 7): white over the left half of the page, so only that half
+/// shows. In `/GS0`.
+fn soft_masked(content: &str) -> Vec<u8> {
+    let gs = "/ExtGState << /GS0 << /SMask << /Type /Mask /S /Luminosity /G 7 0 R >> >> >>";
+    let form = "<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] /Group << /S /Transparency /CS /DeviceRGB >> /Length 24 >>\nstream\n1 g 0 0 100 100 re f\nendstream";
+    pdf(content, gs, &["null".into(), form.into()])
+}
+
+#[test]
+fn a_soft_masked_fill_is_a_shape_with_a_layer_mask() {
+    let bytes = soft_masked("/GS0 gs 1 0 0 rg 0 0 200 100 re f");
+    let d = open(&bytes);
+    assert_eq!(kinds(&d), ["shape"]);
+    let m = d.layers[0].mask.as_ref().expect("the soft mask is its layer mask");
+    assert!(m.value(50, 50) > 0.99 && m.value(150, 50) < 0.01, "shows the left half only");
+    assert!(looks_like_the_page(&bytes) < 0.01);
+}
+
+#[test]
+fn a_soft_masked_group_is_a_masked_layer_group() {
+    let group = "<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] /Group << /S /Transparency >> /Length 46 >>\nstream\n0 0 1 rg 0 0 200 50 re f 1 0 0 rg 0 50 200 50 re f\nendstream";
+    let gs = "/ExtGState << /GS0 << /SMask << /Type /Mask /S /Luminosity /G 7 0 R >> >> >> /XObject << /Fm 8 0 R >>";
+    let form = "<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] /Group << /S /Transparency /CS /DeviceRGB >> /Length 24 >>\nstream\n1 g 0 0 100 100 re f\nendstream";
+    let bytes = pdf("/GS0 gs /Fm Do", gs, &["null".into(), form.into(), group.into()]);
+    let d = open(&bytes);
+    assert_eq!(kinds(&d), ["group"]);
+    assert!(d.layers[0].mask.is_some());
+    assert_eq!(group_children(&d, 0), ["shape", "shape"], "the group's content stays editable");
+    assert!(looks_like_the_page(&bytes) < 0.01);
 }

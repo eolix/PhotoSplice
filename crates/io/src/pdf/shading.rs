@@ -48,8 +48,9 @@ pub(super) fn gradient(sp: &ShadingPattern, bbox: kurbo::Rect) -> Option<Gradien
             }
             let (c0, c1) = (t * start_center, t * end_center);
             let (r0, r1) = (f64::from(start_radius) * sx, f64::from(end_radius) * sx);
-            // Photoshop's radial grows from its centre: same centres, no inner circle.
-            if c0.distance(c1) > SAME || r0 > SAME || r1 <= SAME {
+            // Photoshop's radial grows from its centre: same centres (within a pixel, or 2 % of
+            // the radius: a highlight nudged that little doesn't show), no inner circle.
+            if c0.distance(c1) > 1.0f64.max(0.02 * r1) || r0 > SAME || r1 <= SAME {
                 return None;
             }
             (GradientStyle::Radial, [c1.x as f32, c1.y as f32], [(c1.x + r1) as f32, c1.y as f32])
