@@ -34,8 +34,6 @@ between Photoshop and PhotoSplice, classic Photoshop 'feel' (circa version CS6),
 all Operating Systems. PhotoSplice's cleaner and leaner interface, full PSD and PDF reader and writer, 
 and comprehensive EXR/HDR tools and features on top.
 
-> PhotoSplice was originally clean-room written in JavsScript with a Rust engine (Tauri), but it has since
-> taken a more modern, performant approach. The JS version still lives in many early forks.
 
 ## Downloads
 
