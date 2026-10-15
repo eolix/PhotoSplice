@@ -483,7 +483,7 @@ fn upright_exif_keeps_every_other_byte() {
         let ifd_end = 8 + 2 + 4 * 12 + 4;
         let make_at = ifd_end as u32;
         let sub_at = make_at + 12;
-        let mut tail = b"PhotoSpliceCo".to_vec();
+        let mut tail = b"PhotoSplice\0".to_vec();
         // Sub-IFD: one DateTimeOriginal-ish SHORT entry, then next-IFD 0.
         tail.extend_from_slice(&if big { 1u16.to_be_bytes() } else { 1u16.to_le_bytes() });
         tail.extend_from_slice(&if big { 0x9000u16.to_be_bytes() } else { 0x9000u16.to_le_bytes() });
@@ -504,7 +504,7 @@ fn upright_exif_keeps_every_other_byte() {
         assert_eq!(&fixed[..value], &prefixed[..value]);
         assert_eq!(&fixed[value + 2..], &prefixed[value + 2..]);
         // The offset-based Make string and the inline Software tag are intact.
-        assert_eq!(&fixed[6 + make_at as usize..][..12], b"PhotoSpliceCo");
+        assert_eq!(&fixed[6 + make_at as usize..][..12], b"PhotoSplice\0");
         assert!(fixed.windows(4).any(|w| w == b"PC1\0"));
     }
 }
