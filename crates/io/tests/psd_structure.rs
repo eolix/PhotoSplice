@@ -1049,3 +1049,18 @@ fn selected_layers_round_trip() {
     }
     assert!(import("t.psd", &f.to_bytes().unwrap()).unwrap().selected.is_empty());
 }
+
+/// The global layer mask info (default overlay colour and opacity for new masks) survives an
+/// unedited round trip; it was written back empty (183 corpus files differed).
+#[test]
+fn global_layer_mask_info_is_kept() {
+    let mut d = photosplice_doc::Document::new("g", photosplice_geom::Size::new(4, 4), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+    d.layers.push(photosplice_doc::Layer::raster("l", d.pixel_format()));
+    let mut f = photosplice_io::document_to_psd(&d);
+    let info = vec![0, 0, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0x64, 0x80, 0, 0, 0];
+    f.global_layer_mask = Some(photosplice_psd::GlobalLayerMask { data: info.clone() });
+    let (back, _) = photosplice_io::psd_to_document(&f);
+    let again = photosplice_io::document_to_psd(&back);
+    assert_eq!(again.global_layer_mask.map(|m| m.data), Some(info));
+    assert!(again.global_blocks.iter().all(|b| b.key[0] != 0), "no internal key written as a block");
+}

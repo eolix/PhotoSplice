@@ -16,7 +16,7 @@ use crate::blocks;
 use crate::pixels::{interleave, max_sample, sample_for_depth, zero_sample};
 
 /// Resources that are mapped to document fields or regenerated on export.
-pub(crate) const MAPPED_RESOURCES: [u16; 21] = [
+pub(crate) const MAPPED_RESOURCES: [u16; 20] = [
     ids::GLOBAL_ANGLE,
     // Indexed colour: the palette's colour count and transparent index (into `ColorTable`).
     crate::flat_modes::COLOR_COUNT,
@@ -37,7 +37,6 @@ pub(crate) const MAPPED_RESOURCES: [u16; 21] = [
     1069, // layer selection ids
     1072, // layer group(s) enabled id
     crate::channel_map::DISPLAY_INFO,
-    crate::channel_map::DISPLAY_INFO_OLD,
     crate::channel_map::QUICK_MASK_INFO,
 ];
 
@@ -714,6 +713,9 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosplice_raster::Interrupt)
                 doc.metadata.psd_resources.push((r.id, String::from_utf8_lossy(&r.name).into_owned(), Arc::new(r.data.clone())));
             }
             id if MAPPED_RESOURCES.contains(&id) => {}
+            // The older DisplayInfo is regenerated from the channels on export; kept only as the
+            // note that the file had it.
+            crate::channel_map::DISPLAY_INFO_OLD => doc.metadata.psd_resources.push((r.id, String::new(), Arc::new(Vec::new()))),
             // The layer id seed: export writes the highest layer id, never less than this, so it
             // is kept only when it says more than the ids do.
             ids::DOCUMENT_IDS_SEED
@@ -733,6 +735,11 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photosplice_raster::Interrupt)
     }
     for b in &file.global_blocks {
         doc.metadata.psd_global_blocks.push((b.signature, b.key, Arc::new(b.data.clone())));
+    }
+    // The global layer mask info (default overlay colour and opacity for new masks), kept for
+    // export under a key no tagged block uses.
+    if let Some(m) = file.global_layer_mask.as_ref().filter(|m| !m.data.is_empty()) {
+        doc.metadata.psd_global_blocks.push((*b"\0\0\0\0", crate::psd_export::GLOBAL_MASK_KEY, Arc::new(m.data.clone())));
     }
     doc.patterns = crate::pattern_map::from_global_blocks(&doc);
     // Notes (`Anno`) and the measurement scale (resource 1074); raw data stays for verbatim export.

@@ -45,6 +45,13 @@ pub(crate) fn display_info(transparency: bool, channels: &[&AlphaChannel]) -> Ve
     out
 }
 
+/// Resource 1007, the older DisplayInfo: the records of [`display_info`] without its version,
+/// each padded to 14 bytes.
+pub(crate) fn display_info_old(transparency: bool, channels: &[&AlphaChannel]) -> Vec<u8> {
+    let new = display_info(transparency, channels);
+    new.get(4..).unwrap_or_default().chunks(13).flat_map(|r| r.iter().copied().chain([0])).collect()
+}
+
 /// A colour as a Photoshop colour structure in its own model (inverse of [`decode_color`]): spot
 /// inks defined in CMYK or Lab keep that definition.
 pub(crate) fn encode_color(c: &Color) -> (u16, [u16; 4]) {

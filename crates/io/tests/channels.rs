@@ -51,3 +51,48 @@ fn channel_options_spot_and_quick_mask_roundtrip() {
     assert_eq!(file.header.channels, 56);
     assert!(file.resources.iter().all(|resource| resource.id != 1022));
 }
+
+/// A file that carries the older DisplayInfo (1007) beside 1077 gets it back on export, rebuilt
+/// from the channels in its 14-byte-record form (psd-tools gray0.psd lost it).
+#[test]
+fn older_display_info_is_kept() {
+    let mut d = Document::with_background("c", Size::new(16, 8), ColorMode::Rgb, SampleType::U8, Color::WHITE);
+    d.channels.push(AlphaChannel { opacity: 0.5, ..AlphaChannel::new("Alpha 1", channel(SampleType::U8, 4)) });
+    let mut f = document_to_psd(&d);
+    assert!(f.resources.iter().all(|r| r.id != 1007), "not written unless the file had it");
+    let new = f.resources.iter().find(|r| r.id == 1077).unwrap().data.clone();
+    let old: Vec<u8> = new[4..].chunks(13).flat_map(|r| r.iter().copied().chain([0])).collect();
+    f.resources.push(photosplice_psd::ImageResource::new(1007, old.clone()));
+    let (back, _) = psd_to_document(&f);
+    let again = document_to_psd(&back);
+    let got: Vec<&photosplice_psd::ImageResource> = again.resources.iter().filter(|r| r.id == 1007).collect();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].data, old);
+    assert_eq!(again.resources.iter().find(|r| r.id == 1077).unwrap().data, new);
+}
+
+/// A positive layer count with "Transparency" first in the channel names: the extra channel is
+/// the merged transparency, not an alpha channel (psd-tools transparentbg.psd was written back
+/// with it twice).
+#[test]
+fn transparency_named_channel_is_the_merged_alpha() {
+    let mut d = Document::new("t", Size::new(16, 8), ColorMode::Rgb, SampleType::U8);
+    let mut l = photosplice_doc::Layer::raster("l", d.pixel_format());
+    l.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 8, 8), &[1.0, 0.0, 0.0, 1.0]);
+    d.layers.push(l);
+    let mut f = document_to_psd(&d);
+    assert!(f.merged_has_alpha());
+    let channels = f.header.channels;
+    f.layer_info.as_mut().unwrap().merged_alpha = false;
+    assert!(f.merged_has_alpha(), "the names say so");
+    let (back, _) = psd_to_document(&f);
+    assert!(back.channels.is_empty(), "{:?}", back.channels.iter().map(|c| &c.name).collect::<Vec<_>>());
+    assert_eq!(document_to_psd(&back).header.channels, channels);
+    // A localised name ("透明部分", psd-tools transparentbg.psb): its alpha id 0 still says so.
+    let names = f.resources.iter_mut().find(|r| r.id == 1045).unwrap();
+    let utf16: Vec<u16> = "透明部分".encode_utf16().chain([0]).collect();
+    names.data = (utf16.len() as u32).to_be_bytes().into_iter().chain(utf16.iter().flat_map(|u| u.to_be_bytes())).collect();
+    assert!(f.merged_has_alpha());
+    let (back, _) = psd_to_document(&f);
+    assert!(back.channels.is_empty());
+}
