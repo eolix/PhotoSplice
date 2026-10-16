@@ -539,3 +539,23 @@ fn psd_selection_survives_save_and_open() {
     let st = s.active().unwrap();
     assert_eq!(st.active_layer, st.doc.top_layer());
 }
+
+#[test]
+fn pdf_save_params_parse_and_bad_ones_keep_the_defaults() {
+    use photosplice_io::pdf::export::{Compatibility, PdfOptions};
+    let o = SaveOpts::from_params(&json!({"pdfCompatibility": "1.4", "pdfCompression": "jpeg", "pdfQuality": 12, "pdfDownsample": [300, 450]})).pdf;
+    assert_eq!(o, PdfOptions { compatibility: Compatibility::Pdf14, jpeg_quality: Some(100), downsample: Some((300.0, 450.0)) });
+    assert_eq!(SaveOpts::from_params(&json!({"pdfCompression": "jpeg"})).pdf.jpeg_quality, Some(84), "Maximum (10) by default");
+    for bad in [
+        json!({"pdfCompatibility": 7, "pdfCompression": ["jpeg"], "pdfDownsample": "x"}),
+        json!({"pdfCompatibility": "3.0", "pdfQuality": "high", "pdfDownsample": [0, 450]}),
+        json!({"pdfDownsample": [600, 300]}),
+        json!({"pdfDownsample": [f64::MAX, f64::MAX]}),
+        json!({"pdfCompression": "jpeg", "pdfQuality": -1e300}),
+    ] {
+        let o = SaveOpts::from_params(&bad).pdf;
+        assert_eq!(o.compatibility, Compatibility::Pdf17, "{bad}");
+        assert!(o.downsample.is_none_or(|(to, above)| to >= 1.0 && above >= to && to <= 2400.0), "{bad}: {o:?}");
+        assert!(o.jpeg_quality.is_none_or(|q| (1..=100).contains(&q)), "{bad}");
+    }
+}

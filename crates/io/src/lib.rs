@@ -80,6 +80,9 @@ pub enum IoError {
     /// Camera raw decode failure.
     #[error("{0}")]
     Raw(#[from] photosplice_raw::RawError),
+    /// A PDF is password-protected and no password, or a wrong one (`given`), came with it.
+    #[error("{}", if *given { "PDF: that password doesn't open this file" } else { "PDF: this file is password-protected; enter its password to open it" })]
+    PdfPassword { given: bool },
     /// A background import was cancelled ([`import_with`]).
     #[error("cancelled")]
     Cancelled,
@@ -122,6 +125,8 @@ pub struct ExportOptions {
     /// Capabilities" off), so the PDF is only its page. Off by default: PDFs keep it, as
     /// Photoshop's default does.
     pub pdf_discard_editing: bool,
+    /// PDF: Save Adobe PDF's Compatibility, Image Compression and Downsampling.
+    pub pdf: pdf::export::PdfOptions,
     /// PSD: the selected layers, the target (active) layer first, written so the file reopens
     /// with them selected. Empty: the top layer, as in a file just opened.
     pub selected_layers: Vec<photosplice_doc::LayerId>,
@@ -205,7 +210,7 @@ pub fn export(doc: &Document, name_or_ext: &str, opts: &ExportOptions) -> Result
         return Ok(ExportResult { bytes, warnings });
     }
     if ext == "pdf" {
-        return pdf::export::export_layered(doc, !opts.pdf_discard_editing);
+        return pdf::export::export_layered_with(doc, !opts.pdf_discard_editing, &opts.pdf);
     }
     let format = photosplice_codecs::from_extension(&ext).ok_or_else(|| IoError::UnknownFormat(name_or_ext.to_string()))?;
     if format == photosplice_codecs::Format::Tiff && opts.tiff_layers && tiff_layers::would_write_layers(doc) {

@@ -33,18 +33,44 @@ pub fn is_pdf(bytes: &[u8]) -> bool {
 }
 
 fn load(bytes: &[u8]) -> Result<hayro::hayro_syntax::Pdf, IoError> {
-    hayro::hayro_syntax::Pdf::new(bytes.to_vec()).map_err(|e| IoError::Unsupported(format!("PDF: can't read this file ({e:?})")))
+    load_with(bytes, "")
+}
+
+/// Reads `bytes`, decrypting with `password` (the empty one opens files that only restrict
+/// printing or editing).
+fn load_with(bytes: &[u8], password: &str) -> Result<hayro::hayro_syntax::Pdf, IoError> {
+    use hayro::hayro_syntax::{DecryptionError, LoadPdfError};
+    hayro::hayro_syntax::Pdf::new_with_password(bytes.to_vec(), password).map_err(|e| match e {
+        LoadPdfError::Decryption(DecryptionError::PasswordProtected) => IoError::PdfPassword { given: !password.is_empty() },
+        LoadPdfError::Decryption(e) => IoError::Unsupported(format!("PDF: can't decrypt this file ({e:?})")),
+        e => IoError::Unsupported(format!("PDF: can't read this file ({e:?})")),
+    })
+}
+
+/// Whether `bytes` are a PDF that needs a password to open.
+pub fn needs_password(bytes: &[u8]) -> bool {
+    matches!(load(bytes), Err(IoError::PdfPassword { .. }))
 }
 
 /// Number of pages.
 pub fn page_count(bytes: &[u8]) -> Result<usize, IoError> {
-    Ok(load(bytes)?.pages().len())
+    page_count_with(bytes, "")
+}
+
+/// [`page_count`] of a password-protected file.
+pub fn page_count_with(bytes: &[u8], password: &str) -> Result<usize, IoError> {
+    Ok(load_with(bytes, password)?.pages().len())
 }
 
 /// Whether page `page` (0-based) carries Photoshop editing data, so it opens as its document
 /// whatever [`PageAs`] says, with no Import PDF options (as in Photoshop).
 pub fn has_editing_data(bytes: &[u8], page: usize) -> bool {
-    load(bytes).is_ok_and(|pdf| photoshop::has_editing_data(&pdf, page))
+    has_editing_data_with(bytes, page, "")
+}
+
+/// [`has_editing_data`] of a password-protected file.
+pub fn has_editing_data_with(bytes: &[u8], page: usize, password: &str) -> bool {
+    load_with(bytes, password).is_ok_and(|pdf| photoshop::has_editing_data(&pdf, page))
 }
 
 /// How a page opens.
@@ -97,7 +123,7 @@ impl CropTo {
 }
 
 /// How to open a page: [`open_page_with`].
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct OpenOptions {
     /// 0-based page.
     pub page: usize,
@@ -107,11 +133,13 @@ pub struct OpenOptions {
     pub how: PageAs,
     /// Which box of the page.
     pub crop_to: CropTo,
+    /// The password of a protected file (empty: none).
+    pub password: String,
 }
 
 impl Default for OpenOptions {
     fn default() -> Self {
-        OpenOptions { page: 0, dpi: DEFAULT_DPI, how: PageAs::Pixels, crop_to: CropTo::CropBox }
+        OpenOptions { page: 0, dpi: DEFAULT_DPI, how: PageAs::Pixels, crop_to: CropTo::CropBox, password: String::new() }
     }
 }
 
@@ -209,7 +237,12 @@ pub struct Pages {
 impl Pages {
     /// Reads `bytes` once for the whole dialog.
     pub fn open(bytes: &[u8]) -> Result<Pages, IoError> {
-        Ok(Pages { pdf: load(bytes)? })
+        Self::open_with(bytes, "")
+    }
+
+    /// [`Pages::open`] for a password-protected file.
+    pub fn open_with(bytes: &[u8], password: &str) -> Result<Pages, IoError> {
+        Ok(Pages { pdf: load_with(bytes, password)? })
     }
 
     /// Number of pages.
@@ -258,13 +291,13 @@ pub fn import_page(name: &str, bytes: &[u8], page: usize, dpi: f32) -> Result<Im
 /// Opens page `page` (0-based) of the crop box at `dpi`, as layers or as pixels: see
 /// [`open_page_with`].
 pub fn open_page(name: &str, bytes: &[u8], page: usize, dpi: f32, how: PageAs) -> Result<ImportResult, IoError> {
-    open_page_with(name, bytes, &OpenOptions { page, dpi, how, crop_to: CropTo::CropBox })
+    open_page_with(name, bytes, &OpenOptions { page, dpi, how, crop_to: CropTo::CropBox, ..Default::default() })
 }
 
 /// Opens a page as a document named `name`, as Import PDF does: the chosen box at a resolution,
 /// as layers or as pixels. A page with Photoshop editing data opens as that document instead.
 pub fn open_page_with(name: &str, bytes: &[u8], o: &OpenOptions) -> Result<ImportResult, IoError> {
-    let pdf = load(bytes)?;
+    let pdf = load_with(bytes, &o.password)?;
     let pages = pdf.pages();
     let n = pages.len();
     let p = pages.get(o.page).ok_or_else(|| IoError::Unsupported(format!("PDF has {n} pages; there is no page {}", o.page.saturating_add(1))))?;

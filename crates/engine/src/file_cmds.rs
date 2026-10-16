@@ -190,6 +190,9 @@ pub(crate) struct SaveOpts {
     pub tiff_layers: bool,
     /// PDF: leave out the Photoshop editing data (`"pdfEditing": false`).
     pub pdf_discard_editing: bool,
+    /// PDF: Compatibility, Image Compression and Downsampling (`pdfCompatibility`,
+    /// `pdfCompression`, `pdfQuality`, `pdfDownsample`).
+    pub pdf: photosplice_io::pdf::export::PdfOptions,
 }
 
 impl SaveOpts {
@@ -199,6 +202,7 @@ impl SaveOpts {
             quality: f64_param(p, "quality"),
             tiff_layers: p.get("tiffLayers").and_then(Value::as_bool).unwrap_or(false),
             pdf_discard_editing: p.get("pdfEditing").and_then(Value::as_bool) == Some(false),
+            pdf: pdf_options(p),
         }
     }
 
@@ -214,10 +218,34 @@ impl From<Option<f64>> for SaveOpts {
     }
 }
 
+/// Save Adobe PDF's options from a command's params: `pdfCompatibility` ("1.4" … "2.0"),
+/// `pdfCompression` ("zip", "jpeg") with `pdfQuality` (Reference's 0–12), `pdfDownsample`
+/// ([to ppi, for images above ppi]). Missing or unreadable ones keep their defaults.
+fn pdf_options(p: &Value) -> photosplice_io::pdf::export::PdfOptions {
+    use photosplice_io::pdf::export::{Compatibility, PdfOptions};
+    let mut o = PdfOptions::default();
+    if let Some(c) = p.get("pdfCompatibility").and_then(Value::as_str).and_then(Compatibility::from_id) {
+        o.compatibility = c;
+    }
+    if p.get("pdfCompression").and_then(Value::as_str) == Some("jpeg") {
+        let q = f64_param(p, "pdfQuality").filter(|q| q.is_finite()).unwrap_or(10.0);
+        o.jpeg_quality = Some((q.clamp(0.0, 12.0) / 12.0 * 99.0 + 1.0).round() as u8);
+    }
+    if let Some([to, above]) = p.get("pdfDownsample").and_then(Value::as_array).and_then(|a| Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?]))
+        && to.is_finite()
+        && above.is_finite()
+        && to >= 1.0
+        && above >= to
+    {
+        o.downsample = Some((to.min(2400.0) as f32, above.min(4800.0) as f32));
+    }
+    o
+}
+
 /// Encodes `doc` for `path`'s extension.
 pub(crate) fn encode(doc: &Document, path: &str, save: impl Into<SaveOpts>) -> Result<(Vec<u8>, Vec<String>)> {
     let save = save.into();
-    let mut opts = photosplice_io::ExportOptions { tiff_layers: save.tiff_layers, pdf_discard_editing: save.pdf_discard_editing, ..Default::default() };
+    let mut opts = photosplice_io::ExportOptions { tiff_layers: save.tiff_layers, pdf_discard_editing: save.pdf_discard_editing, pdf: save.pdf, ..Default::default() };
     if let Some(q) = save.quality {
         opts.encode.jpeg_quality = (q.clamp(0.0, 12.0) / 12.0 * 99.0 + 1.0).round() as u8;
     }
@@ -365,6 +393,11 @@ pub fn pdf_pages(bytes: &[u8]) -> usize {
     photosplice_io::pdf::page_count(bytes).unwrap_or(0)
 }
 
+/// Whether `bytes` are a PDF that opens only with a password (Import PDF asks for it).
+pub fn pdf_needs_password(bytes: &[u8]) -> bool {
+    photosplice_io::pdf::needs_password(bytes)
+}
+
 /// Whether a PDF's first page carries Photoshop editing data (a Photoshop PDF): it opens as its
 /// document, without Import PDF, and saves back in place, as in Photoshop.
 pub fn pdf_has_editing_data(bytes: &[u8]) -> bool {
@@ -382,7 +415,17 @@ fn import_pdf(s: &mut Session, p: &Value) -> Result<Value> {
     let bad = |msg: String| EngineError::BadParams { cmd: CMD.into(), msg };
     let path = str_param(p, "path", CMD)?.to_string();
     let bytes = read_file(&path)?;
-    let pages = pdf_pages(&bytes);
+    // A protected file's password (never stored).
+    let password = match p.get("password") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(s)) => s.clone(),
+        Some(_) => return Err(bad("\"password\": expected a string".into())),
+    };
+    let pages = match photosplice_io::pdf::page_count_with(&bytes, &password) {
+        Ok(n) => n,
+        Err(e @ photosplice_io::IoError::PdfPassword { .. }) => return Err(EngineError::Other(format!("{path}: {e}"))),
+        Err(_) => 0,
+    };
     // `pages` (several, 1-based) or `page`.
     let wanted: Vec<usize> = match p.get("pages") {
         Some(Value::Array(a)) => {
@@ -427,11 +470,11 @@ fn import_pdf(s: &mut Session, p: &Value) -> Result<Value> {
     let mut docs = Vec::new();
     let mut warnings = Vec::new();
     for &page in &wanted {
-        let o = OpenOptions { page: page - 1, dpi, how, crop_to };
+        let o = OpenOptions { page: page - 1, dpi, how, crop_to, password: password.clone() };
         let r = photosplice_io::pdf::open_page_with(&file_name(&path), &bytes, &o).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
         let mut doc = r.document;
         // A Photoshop PDF opens as it was saved; the options shape an imported page only.
-        if !photosplice_io::pdf::has_editing_data(&bytes, page - 1) {
+        if !photosplice_io::pdf::has_editing_data_with(&bytes, page - 1, &password) {
             if let Some(m) = mode.filter(|m| *m != doc.mode) {
                 let dst = s.color.working(m);
                 crate::color_cmds::convert_document(&mut doc, &dst, s.color.settings.intent(), s.color.settings.bpc)?;
@@ -1230,7 +1273,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Save a Copy…",
             &["File"],
             Some("Cmd+Alt+S"),
-            r##"{"path":str (format from the extension),"quality":0..12? (JPEG),"layers":bool=true,"tiffLayers":bool=false (TIFF: keep the layers; flat by default),"pdfEditing":bool=true (PDF: Preserve Photoshop Editing Capabilities)}"##,
+            r##"{"path":str (format from the extension),"quality":0..12? (JPEG),"layers":bool=true,"tiffLayers":bool=false (TIFF: keep the layers; flat by default),"pdfEditing":bool=true (PDF: Preserve Photoshop Editing Capabilities),"pdfCompatibility":"1.4|1.5|1.6|1.7|2.0"="1.7","pdfCompression":"zip|jpeg"="zip","pdfQuality":0..12=10 (JPEG),"pdfDownsample":[to ppi, above ppi]?}"##,
             native_doc,
             save_a_copy
         ),
@@ -1248,7 +1291,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Import PDF",
             &[],
             None,
-            r##"{"path":str,"page":1..=100000=1,"pages":[n…]? (several, each its own document),"resolution":ppi=300,"as":"pixels|layers"="pixels","cropTo":"boundingBox|mediaBox|cropBox|bleedBox|trimBox|artBox"="cropBox","mode":"rgb|grayscale|cmyk|lab"?,"depth":8|16?}"##,
+            r##"{"path":str,"page":1..=100000=1,"pages":[n…]? (several, each its own document),"resolution":ppi=300,"as":"pixels|layers"="pixels","cropTo":"boundingBox|mediaBox|cropBox|bleedBox|trimBox|artBox"="cropBox","mode":"rgb|grayscale|cmyk|lab"?,"depth":8|16?,"password":str? (a protected file's; never stored)}"##,
             native,
             import_pdf
         ),

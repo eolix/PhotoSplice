@@ -490,7 +490,7 @@ fn crop_to_picks_the_page_box() {
     let bytes = pdf_page(boxes, "1 0 0 rg 120 60 20 10 re f", "", &[]);
     for how in [PageAs::Pixels, PageAs::Layers] {
         let size = |crop_to| {
-            let d = open_page_with("b.pdf", &bytes, &OpenOptions { page: 0, dpi: 72.0, how, crop_to }).unwrap().document;
+            let d = open_page_with("b.pdf", &bytes, &OpenOptions { page: 0, dpi: 72.0, how, crop_to, ..Default::default() }).unwrap().document;
             (d.size.width, d.size.height, d)
         };
         assert_eq!((size(CropTo::MediaBox).0, size(CropTo::MediaBox).1), (200, 100), "{how:?}");
@@ -515,7 +515,7 @@ fn crop_to_follows_the_page_rotation() {
     use photosplice_io::pdf::{CropTo, OpenOptions, open_page_with};
     let bytes = pdf_page("/Rotate 90 /CropBox [0 0 100 100]", "0 0 1 rg 0 0 10 10 re f", "", &[]);
     for crop_to in [CropTo::MediaBox, CropTo::CropBox, CropTo::BoundingBox] {
-        let d = open_page_with("r.pdf", &bytes, &OpenOptions { page: 0, dpi: 72.0, how: PageAs::Pixels, crop_to }).unwrap().document;
+        let d = open_page_with("r.pdf", &bytes, &OpenOptions { page: 0, dpi: 72.0, how: PageAs::Pixels, crop_to, ..Default::default() }).unwrap().document;
         let want = match crop_to {
             CropTo::MediaBox => (100, 200),
             CropTo::CropBox => (100, 100),
@@ -804,4 +804,221 @@ fn a_grayscale_document_saves_gray_vectors_and_type() {
     assert!(!content.contains(" rg") && !content.contains(" k\n"), "only grey: {content}");
     let back = open_page("s.pdf", &r.bytes, 0, 72.0, PageAs::Layers).unwrap().document;
     assert_eq!(kinds(&back), ["shape", "pixels", "text"]);
+}
+
+/// Writes the PDFs of the Reference verification kit (`temp/pdf-verify`) into
+/// `$PHOTOSPLICE_PDF_KIT`: what PhotoSplice saves, for Reference to reopen.
+#[test]
+#[ignore]
+fn write_verification_pdfs() {
+    use photosplice_color::{BlendMode, Color, ColorMode};
+    use photosplice_doc::{Effect, Layer, LayerMask};
+    let Some(dir) = std::env::var_os("PHOTOSPLICE_PDF_KIT") else { return };
+    let dir = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let save = |doc: &Document, name: &str| {
+        let r = photosplice_io::pdf::export::export_layered(doc, true).unwrap();
+        std::fs::write(dir.join(name), r.bytes).unwrap();
+        eprintln!("{name}: {:?}", r.warnings);
+    };
+    // RGB: the sample, plus a group at 60 % holding a masked Multiply square, a hidden layer and
+    // a drop shadow on the box.
+    let mut doc = sample();
+    let fmt = doc.pixel_format();
+    let mut sq = photosplice_raster::Surface::new(fmt);
+    sq.fill_rect(photosplice_geom::Rect::new(100, 55, 160, 95), &[1.0, 0.5, 0.0, 1.0]);
+    let mut masked = Layer::new("Masked Multiply", LayerContent::Raster(sq));
+    masked.blend = BlendMode::Multiply;
+    let mut m = LayerMask::reveal_all();
+    m.surface.fill_rect(photosplice_geom::Rect::new(100, 55, 130, 95), &[0.0]);
+    masked.mask = Some(m);
+    let mut g = Layer::group("Group 60%", vec![masked]);
+    g.opacity = 0.6;
+    doc.layers.push(g);
+    let mut hidden = photosplice_raster::Surface::new(fmt);
+    hidden.fill_rect(photosplice_geom::Rect::new(0, 0, 200, 100), &[1.0, 0.0, 1.0, 1.0]);
+    let mut hidden = Layer::new("Hidden", LayerContent::Raster(hidden));
+    hidden.visible = false;
+    doc.layers.push(hidden);
+    doc.layers[0].effects.items.push(Effect::default_drop_shadow());
+    doc.layers[0].effects.enabled = true;
+    save(&doc, "photosplice-rgb.pdf");
+    let k = Color { mode: ColorMode::Cmyk, c: [0.0, 0.0, 0.0, 1.0], alpha: 1.0 };
+    let magenta = Color { mode: ColorMode::Cmyk, c: [0.0, 1.0, 0.0, 0.0], alpha: 1.0 };
+    save(&sample_in(ColorMode::Cmyk, magenta, k), "photosplice-cmyk.pdf");
+    let grey = Color { mode: ColorMode::Grayscale, c: [0.4, 0.0, 0.0, 0.0], alpha: 1.0 };
+    let black = Color { mode: ColorMode::Grayscale, c: [0.0, 0.0, 0.0, 0.0], alpha: 1.0 };
+    save(&sample_in(ColorMode::Grayscale, grey, black), "photosplice-gray.pdf");
+}
+
+fn export_with(doc: &Document, o: photosplice_io::pdf::export::PdfOptions) -> Vec<u8> {
+    photosplice_io::pdf::export::export_layered_with(doc, false, &o).unwrap().bytes
+}
+
+#[test]
+fn compatibility_sets_the_pdf_version() {
+    use photosplice_io::pdf::export::{Compatibility, PdfOptions};
+    for (c, id, _) in Compatibility::ALL {
+        let bytes = export_with(&sample(), PdfOptions { compatibility: c, ..Default::default() });
+        assert!(bytes.starts_with(format!("%PDF-{id}").as_bytes()), "{id}: {:?}", String::from_utf8_lossy(&bytes[..8]));
+        assert_eq!(kinds(&open_page("s.pdf", &bytes, 0, 72.0, PageAs::Layers).unwrap().document), ["shape", "pixels", "text"], "{id}");
+    }
+    assert_eq!(Compatibility::from_id("9.9"), None);
+}
+
+#[test]
+fn jpeg_compression_is_for_opaque_images_and_keeps_their_colours() {
+    use photosplice_color::{Color, ColorMode};
+    use photosplice_io::pdf::export::PdfOptions;
+    let jpeg = PdfOptions { jpeg_quality: Some(92), ..Default::default() };
+    // The sample's pixel layer is an opaque square; a layer with soft edges stays lossless.
+    let bytes = export_with(&sample(), jpeg);
+    assert!(String::from_utf8_lossy(&bytes).contains("/DCTDecode"), "JPEG");
+    assert!(!String::from_utf8_lossy(&export_with(&sample(), PdfOptions::default())).contains("/DCTDecode"), "ZIP by default");
+    let mut soft = sample();
+    if let LayerContent::Raster(sf) = &mut soft.layers[1].content {
+        sf.fill_rect(photosplice_geom::Rect::new(120, 10, 150, 50), &[0.0, 0.8, 0.0, 0.5]);
+    }
+    assert!(!String::from_utf8_lossy(&export_with(&soft, jpeg)).contains("/DCTDecode"), "transparency keeps ZIP");
+    // CMYK pixels survive JPEG with their inks (no Adobe inversion mix-up).
+    let k = Color { mode: ColorMode::Cmyk, c: [0.0, 0.0, 0.0, 1.0], alpha: 1.0 };
+    let doc = sample_in(ColorMode::Cmyk, k, k);
+    let zip = open_page("z.pdf", &export_with(&doc, PdfOptions::default()), 0, 72.0, PageAs::Pixels).unwrap().document;
+    let jpg = open_page("j.pdf", &export_with(&doc, jpeg), 0, 72.0, PageAs::Pixels).unwrap().document;
+    let d = mean_diff(&zip, &jpg);
+    assert!(d < 0.01, "CMYK JPEG looks like the ZIP page: {d}");
+}
+
+#[test]
+fn downsampling_resamples_images_above_the_threshold() {
+    use photosplice_io::pdf::export::PdfOptions;
+    let mut doc = sample();
+    doc.resolution_dpi = 600.0;
+    let o = PdfOptions { downsample: Some((300.0, 450.0)), ..Default::default() };
+    let text = String::from_utf8_lossy(&export_with(&doc, o)).into_owned();
+    // The 60 × 40 pixel square, at half the resolution.
+    assert!(text.contains("/Width 30") && text.contains("/Height 20"), "downsampled");
+    let text = String::from_utf8_lossy(&export_with(&sample(), o)).into_owned();
+    assert!(text.contains("/Width 60"), "a 72 ppi document is below the threshold");
+}
+
+// ---- password-protected files ----
+
+/// MD5 (RFC 1321), for writing a test file's encryption.
+fn md5(data: &[u8]) -> [u8; 16] {
+    const S: [u32; 64] = [7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21];
+    let k: Vec<u32> = (0..64).map(|i| ((i as f64 + 1.0).sin().abs() * 4294967296.0) as u32).collect();
+    let mut msg = data.to_vec();
+    let bits = (data.len() as u64).wrapping_mul(8);
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bits.to_le_bytes());
+    let mut h: [u32; 4] = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476];
+    for chunk in msg.chunks(64) {
+        let m: Vec<u32> = chunk.chunks(4).map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]])).collect();
+        let [mut a, mut b, mut c, mut d] = h;
+        for i in 0..64 {
+            let (f, g) = match i / 16 {
+                0 => ((b & c) | (!b & d), i),
+                1 => ((d & b) | (!d & c), (5 * i + 1) % 16),
+                2 => (b ^ c ^ d, (3 * i + 5) % 16),
+                _ => (c ^ (b | !d), (7 * i) % 16),
+            };
+            let t = d;
+            d = c;
+            c = b;
+            b = b.wrapping_add(a.wrapping_add(f).wrapping_add(k[i]).wrapping_add(m[g]).rotate_left(S[i]));
+            a = t;
+        }
+        for (x, y) in h.iter_mut().zip([a, b, c, d]) {
+            *x = x.wrapping_add(y);
+        }
+    }
+    let mut out = [0u8; 16];
+    for (i, w) in h.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+    }
+    out
+}
+
+fn rc4(key: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut st: Vec<u8> = (0..=255).collect();
+    let mut j = 0u8;
+    for i in 0..256 {
+        j = j.wrapping_add(st[i]).wrapping_add(key[i % key.len()]);
+        st.swap(i, j as usize);
+    }
+    let (mut i, mut j) = (0u8, 0u8);
+    data.iter()
+        .map(|b| {
+            i = i.wrapping_add(1);
+            j = j.wrapping_add(st[i as usize]);
+            st.swap(i as usize, j as usize);
+            b ^ st[st[i as usize].wrapping_add(st[j as usize]) as usize]
+        })
+        .collect()
+}
+
+/// A one-page PDF (a red square) encrypted with the Standard security handler, revision 2
+/// (40-bit RC4, ISO 32000 §7.6.3), opened by `user` (empty: anyone; `owner` restricts editing).
+fn encrypted_pdf(user: &str, owner: &str) -> Vec<u8> {
+    const PAD: [u8; 32] = [0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41, 0x64, 0x00, 0x4E, 0x56, 0xFF, 0xFA, 0x01, 0x08, 0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53, 0x69, 0x7A];
+    let pad = |pw: &str| -> Vec<u8> { pw.bytes().chain(PAD.iter().copied()).take(32).collect() };
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02X}")).collect::<String>();
+    let id = md5(b"photosplice-test");
+    let o = rc4(&md5(&pad(if owner.is_empty() { user } else { owner }))[..5], &pad(user));
+    let p: i32 = -4;
+    let key: Vec<u8> = md5(&[pad(user), o.clone(), p.to_le_bytes().to_vec(), id.to_vec()].concat())[..5].to_vec();
+    let u = rc4(&key, &PAD);
+    let obj_key = |n: u32| -> Vec<u8> { md5(&[key.clone(), n.to_le_bytes()[..3].to_vec(), vec![0, 0]].concat())[..10].to_vec() };
+    let content = rc4(&obj_key(4), b"1 0 0 rg 20 20 60 60 re f");
+    let mut objs: Vec<Vec<u8>> = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R /Resources << >> >>".to_vec(),
+        [format!("<< /Length {} >>\nstream\n", content.len()).into_bytes(), content, b"\nendstream".to_vec()].concat(),
+        format!("<< /Filter /Standard /V 1 /R 2 /O <{}> /U <{}> /P {p} >>", hex(&o), hex(&u)).into_bytes(),
+    ];
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter_mut().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        out.append(o);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes());
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size 6 /Root 1 0 R /Encrypt 5 0 R /ID [<{0}><{0}>] >>\nstartxref\n{xref}\n%%EOF\n", hex(&id)).as_bytes());
+    out
+}
+
+#[test]
+fn md5_and_rc4_match_their_published_vectors() {
+    assert_eq!(md5(b"abc").iter().map(|x| format!("{x:02x}")).collect::<String>(), "900150983cd24fb0d6963f7d28e17f72");
+    assert_eq!(rc4(b"Key", b"Plaintext"), [0xBB, 0xF3, 0x16, 0xE8, 0xD9, 0x40, 0xAF, 0x0A, 0xD3]);
+}
+
+#[test]
+fn a_password_protected_pdf_opens_with_its_password() {
+    use photosplice_io::IoError;
+    use photosplice_io::pdf::{OpenOptions, open_page_with};
+    let bytes = encrypted_pdf("secret", "owner");
+    assert!(photosplice_io::pdf::needs_password(&bytes));
+    let with = |pw: &str| open_page_with("p.pdf", &bytes, &OpenOptions { dpi: 72.0, how: PageAs::Layers, password: pw.into(), ..Default::default() });
+    assert!(matches!(with(""), Err(IoError::PdfPassword { given: false })));
+    assert!(matches!(with("wrong"), Err(IoError::PdfPassword { given: true })));
+    assert_eq!(photosplice_io::pdf::page_count_with(&bytes, "secret").unwrap(), 1);
+    let d = with("secret").unwrap().document;
+    assert_eq!(kinds(&d), ["shape"], "the decrypted page");
+    assert!(photosplice_io::pdf::Pages::open(&bytes).is_err() && photosplice_io::pdf::Pages::open_with(&bytes, "secret").is_ok());
+    // Only an owner password (printing or editing restricted): opens for anyone, no prompt.
+    let open = encrypted_pdf("", "owner");
+    assert!(!photosplice_io::pdf::needs_password(&open));
+    assert_eq!(kinds(&open_page("o.pdf", &open, 0, 72.0, PageAs::Layers).unwrap().document), ["shape"]);
 }

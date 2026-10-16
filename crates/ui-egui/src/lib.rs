@@ -165,6 +165,8 @@ pub struct ExportSettings {
     pub tiff_layers: bool,
     /// PDF: Photoshop's editing data ("Preserve Photoshop Editing Capabilities").
     pub pdf_editing: bool,
+    /// PDF: Compatibility, Image Compression and Downsampling.
+    pub pdf: photosplice_io::pdf::export::PdfOptions,
     /// PSD: the selected layers, the active one first, so the file reopens with them selected
     /// (set by [`PhotospliceApp::write_document`]).
     pub selected_layers: Vec<photosplice_doc::LayerId>,
@@ -172,7 +174,7 @@ pub struct ExportSettings {
 
 impl Default for ExportSettings {
     fn default() -> Self {
-        ExportSettings { jpeg_quality: None, webp_quality: None, tiff_layers: true, pdf_editing: true, selected_layers: Vec::new() }
+        ExportSettings { jpeg_quality: None, webp_quality: None, tiff_layers: true, pdf_editing: true, pdf: Default::default(), selected_layers: Vec::new() }
     }
 }
 
@@ -466,6 +468,8 @@ pub struct PhotospliceApp {
     /// The last "Preserve Photoshop Editing Capabilities" choice (File › Save As with PDF): what
     /// PDFs are saved with, File › Save included.
     pub(crate) pdf_preserve_editing: bool,
+    /// Save Adobe PDF's other options, as last chosen (for the next PDF save).
+    pub(crate) pdf_options: photosplice_io::pdf::export::PdfOptions,
     /// Import PDF while it is up (see `pdf_import_ui`).
     pub import_pdf: Option<pdf_import_ui::ImportPdf>,
     /// Set once the user has agreed to quit, so the resulting close request goes through.
@@ -564,6 +568,7 @@ impl PhotospliceApp {
             discard: None,
             tiff_options: None,
             pdf_preserve_editing: true,
+            pdf_options: Default::default(),
             import_pdf: None,
             allow_close: false,
             stylus: Default::default(),
@@ -919,6 +924,7 @@ impl PhotospliceApp {
             jpeg_quality: st.save_options.jpeg_quality,
             webp_quality: st.save_options.webp_quality,
             pdf_editing: self.pdf_preserve_editing,
+            pdf: self.pdf_options,
             ..Default::default()
         };
         self.write_document(path, &settings)

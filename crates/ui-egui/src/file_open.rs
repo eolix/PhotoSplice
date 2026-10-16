@@ -57,7 +57,8 @@ impl PhotospliceApp {
         #[cfg(not(target_arch = "wasm32"))]
         if path.to_ascii_lowercase().ends_with(".pdf") && !photosplice_engine::file_cmds::pdf_has_editing_data(bytes) {
             let pages = photosplice_engine::file_cmds::pdf_pages(bytes);
-            if pages > 0 && std::path::Path::new(path).is_file() {
+            // A protected PDF asks for its password in Import PDF.
+            if (pages > 0 || photosplice_engine::file_cmds::pdf_needs_password(bytes)) && std::path::Path::new(path).is_file() {
                 crate::pdf_import_ui::open(self, path, bytes);
                 self.push_recent(path);
                 return Ok(Vec::new());
