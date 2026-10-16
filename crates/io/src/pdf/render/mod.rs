@@ -4,7 +4,8 @@
 //! private). Changes from upstream: module paths (`crate::` → this module, `hayro::` re-exports
 //! for `hayro_interpret`, `kurbo` and `vello_cpu`), the crate-level attributes and docs, and
 //! [`Renderer`] / [`GlobalState`] made reachable from `pdf`, and [`render_into`] clipping to a
-//! rectangle it is given (Import PDF's Crop To) instead of always the crop box.
+//! rectangle it is given (Import PDF's Crop To) instead of always the crop box, and
+//! `mask::soft_mask_bytes`, a soft mask drawn as bytes for a layer mask.
 #![allow(clippy::all, clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unreachable, clippy::indexing_slicing, missing_docs, dead_code)]
 
 
@@ -39,6 +40,8 @@ mod image;
 mod mask;
 mod paint;
 mod path;
+
+pub(crate) use mask::soft_mask_bytes;
 
 pub(crate) struct GlobalState {
     level: Level,

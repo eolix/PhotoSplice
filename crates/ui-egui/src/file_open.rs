@@ -52,16 +52,13 @@ impl PhotospliceApp {
         if let Some(r) = crate::preset_files_ui::open(self, path, bytes) {
             return r.map(|()| Vec::new());
         }
-        // A PDF asks how to open first (Import PDF), as Photoshop does, unless it is a Photoshop
-        // PDF: that opens as its document and saves back in place.
+        // A PDF opens straight away: every page as editable layers, a board per page. Only a
+        // password-protected one stops first, at Import PDF, for its password.
         #[cfg(not(target_arch = "wasm32"))]
-        if path.to_ascii_lowercase().ends_with(".pdf") && !photosplice_engine::file_cmds::pdf_has_editing_data(bytes) {
-            let pages = photosplice_engine::file_cmds::pdf_pages(bytes);
-            if pages > 0 && std::path::Path::new(path).is_file() {
-                crate::pdf_import_ui::open(self, path, bytes);
-                self.push_recent(path);
-                return Ok(Vec::new());
-            }
+        if path.to_ascii_lowercase().ends_with(".pdf") && photosplice_engine::file_cmds::pdf_needs_password(bytes) && std::path::Path::new(path).is_file() {
+            crate::pdf_import_ui::open(self, path, bytes);
+            self.push_recent(path);
+            return Ok(Vec::new());
         }
         if self.background_jobs {
             // The path and Open Recent are recorded when the background open finishes.
@@ -103,6 +100,13 @@ impl PhotospliceApp {
         // Documents opening in the background are read on the worker too (a 2 GB PSB read
         // would block the window). Preset files (brushes, gradients) go the usual way.
         let ext = std::path::Path::new(path).extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+        // A password-protected PDF asks for its password first (Import PDF), on this thread.
+        if ext == "pdf"
+            && let Ok(bytes) = photosplice_format::read_file(std::path::Path::new(path))
+            && photosplice_engine::file_cmds::pdf_needs_password(&bytes)
+        {
+            return self.open_file(path, &bytes);
+        }
         if self.background_jobs && !crate::preset_files_ui::PRESET_EXTS.contains(&ext.as_str()) {
             crate::jobs_ui::start_open(self, &display_name(path), Some(path.to_string()), photosplice_engine::jobs::OpenSource::Path(path.to_string()))?;
             return Ok(Vec::new());

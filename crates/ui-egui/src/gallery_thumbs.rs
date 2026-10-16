@@ -1,5 +1,5 @@
 //! Filter Gallery thumbnails: every filter on the same picture (the beach, `assets/img/beach.jpg`),
-//! whatever the document, as PS-JS showed them. They are rendered at the cells' size in physical
+//! whatever the document. They are rendered at the cells' size in physical
 //! pixels, with each filter's defaults and black / white colours, so a set depends only on that
 //! size: it is kept in memory, and on desktop in `…/app.photosplice/filter-gallery-thumbnails.json`
 //! (PNGs, base64), and rendered again only when the size changes (another display density) or the

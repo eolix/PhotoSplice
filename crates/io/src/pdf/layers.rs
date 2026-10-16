@@ -33,7 +33,7 @@ use hayro::vello_cpu::{self, Pixmap, RenderContext};
 use photosplice_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
 use photosplice_doc::text::{CharStyle, TextRun, TextShape};
 use photosplice_doc::vector::{FillRule, Knot, LineCap, LineJoin, Path, PathOp, ShapeLayer, ShapeStroke, StrokeAlign, Subpath, VectorMask};
-use photosplice_doc::{Document, Fill, Layer, LayerContent, TextLayer};
+use photosplice_doc::{Document, Fill, Layer, LayerContent, LayerMask, TextLayer};
 use photosplice_geom::{Affine, Point, Rect, Size};
 use photosplice_raster::Surface;
 
@@ -45,15 +45,96 @@ const MAX_LAYERS: usize = 4000;
 
 /// A page as a layered document, placed by `place`, at `dpi`.
 pub(crate) fn import_layers(name: &str, page: &Page<'_>, place: &super::Placement, dpi: f32) -> (Document, Vec<String>) {
-    let (w, h) = (place.w.max(1), place.h.max(1));
-    let mut doc = Document::new(name, Size::new(w, h), ColorMode::Rgb, SampleType::U8);
-    doc.resolution_dpi = dpi;
+    let mut doc = empty_document(name, place, dpi);
+    let (layers, warnings) = stack(page, place, dpi, doc.pixel_format(), Keep::All);
+    doc.layers = layers;
+    if doc.layers.is_empty() {
+        doc.layers.push(Layer::raster("Layer 1", doc.pixel_format()));
+    }
+    (doc, warnings)
+}
+
+/// A page with PDF layers ([`super::ocg`]) as a layered document: what is outside every PDF layer
+/// at the bottom, then a layer group per PDF layer in drawing order, named, shown and locked as
+/// the PDF's default configuration has it. Each is drawn from the file with only that layer on,
+/// so the content of hidden layers comes in too. `page` is the page's index; `None` when a pass
+/// can't be made (the caller then opens the page as one stack).
+pub(crate) fn import_pdf_layers(
+    name: &str,
+    bytes: &[u8],
+    pdf: &hayro::hayro_syntax::Pdf,
+    page: usize,
+    pdf_layers: &[super::ocg::PdfLayer],
+    place: &super::Placement,
+    dpi: f32,
+) -> Option<(Document, Vec<String>)> {
+    let mut doc = empty_document(name, place, dpi);
+    let mut warnings = Vec::new();
     let fmt = doc.pixel_format();
+    let pass = |on: Option<super::ocg::Id>, keep: Keep, warnings: &mut Vec<String>| -> Option<Vec<Layer>> {
+        let only = super::ocg::only(bytes, pdf, pdf_layers, on)?;
+        let pdf = hayro::hayro_syntax::Pdf::new(only).ok()?;
+        let pages = pdf.pages();
+        let (layers, more) = stack(pages.get(page)?, place, dpi, fmt, keep);
+        warnings.extend(more);
+        Some(layers)
+    };
+    let outside = pass(None, Keep::All, &mut warnings)?;
+    doc.layers = outside.clone();
+    for l in pdf_layers {
+        // A layer only marked content uses is drawn alone. A form's `/OC` marks nothing, so a
+        // layer a form is in keeps the whole pass, less what the outside pass drew.
+        let children = if l.via_form { without(pass(Some(l.id), Keep::All, &mut warnings)?, &outside) } else { pass(Some(l.id), Keep::InLayer, &mut warnings)? };
+        // A PDF layer holding one layer is that layer (a PDF from PhotoSplice or the Reference
+        // marks each top-level layer); more become a group.
+        let mut g = match <[Layer; 1]>::try_from(children) {
+            Ok([one]) => one,
+            Err(children) => Layer::group(l.name.clone(), children),
+        };
+        g.name = l.name.clone();
+        g.visible = l.visible;
+        g.locks.all = l.locked;
+        doc.layers.push(g);
+    }
+    // The same warning from every pass once.
+    warnings.sort();
+    warnings.dedup();
+    Some((doc, warnings))
+}
+
+/// `layers` less those of `outside`, matched in order (the outside content each pass draws).
+fn without(mut layers: Vec<Layer>, outside: &[Layer]) -> Vec<Layer> {
+    fn same(a: &Layer, b: &Layer) -> bool {
+        match (a.children(), b.children()) {
+            (Some(x), Some(y)) => a.name == b.name && x.len() == y.len() && x.iter().zip(y).all(|(x, y)| same(x, y)),
+            (None, None) => a.name == b.name && a.content == b.content,
+            _ => false,
+        }
+    }
+    let mut next = 0;
+    layers.retain(|l| {
+        let drop = outside.get(next).is_some_and(|o| same(o, l));
+        next += usize::from(drop);
+        !drop
+    });
+    layers
+}
+
+fn empty_document(name: &str, place: &super::Placement, dpi: f32) -> Document {
+    let mut doc = Document::new(name, Size::new(place.w.max(1), place.h.max(1)), ColorMode::Rgb, SampleType::U8);
+    doc.resolution_dpi = dpi;
+    doc
+}
+
+/// The page's drawing as a layer stack, bottom first.
+fn stack(page: &Page<'_>, place: &super::Placement, dpi: f32, fmt: PixelFormat, keep: Keep) -> (Vec<Layer>, Vec<String>) {
+    let (w, h) = (place.w.max(1), place.h.max(1));
     let cache = RenderCache::new();
     let global = GlobalState::new(&cache, &RenderSettings::default());
     let transform = place.transform;
-    let mut builder = LayerBuilder::new(&global, w, h, fmt, doc.resolution_dpi);
+    let mut builder = LayerBuilder::new(&global, w, h, fmt, dpi);
     builder.font_names = font_names(page);
+    builder.keep = keep;
     // The chosen page box clips everything, as in the renderer.
     let mut crop = place.clip.to_path(0.1);
     crop.apply_affine(transform);
@@ -61,12 +142,16 @@ pub(crate) fn import_layers(name: &str, page: &Page<'_>, place: &super::Placemen
     let mut ctx = Context::new(transform, kurbo::Rect::new(0.0, 0.0, f64::from(w), f64::from(h)), &cache.interpreter_cache, page.xref(), InterpreterSettings::default());
     interpret_page(page, &mut ctx, &mut builder);
     builder.pop_clip();
-    let (layers, warnings) = builder.finish();
-    doc.layers = layers;
-    if doc.layers.is_empty() {
-        doc.layers.push(Layer::raster("Layer 1", fmt));
-    }
-    (doc, warnings)
+    builder.finish()
+}
+
+/// What a pass over the page keeps.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    All,
+    /// Only what is drawn inside a PDF layer's marked content (`/OC … BDC`): with one layer on,
+    /// that layer's content, without what is outside every layer.
+    InLayer,
 }
 
 /// One level of the layer stack being built: the page itself, or a transparency group.
@@ -75,6 +160,8 @@ struct Frame {
     /// `Some` for a transparency group that becomes a layer group; `None` for the page, and for
     /// a group with nothing to keep (opacity 1, Normal), whose layers go to the parent.
     group: Option<(f32, BlendMode)>,
+    /// The group's soft mask, as its layer mask.
+    mask: Option<LayerMask>,
 }
 
 /// Pixels being drawn by the renderer for a run of operations with no editable form.
@@ -145,7 +232,14 @@ pub(crate) struct LayerBuilder<'g> {
     /// Font (by hayro's cache key) → its `BaseFont`, for fonts hayro has no data for (Type 1).
     font_names: HashMap<u128, String>,
     warnings: Vec<String>,
-    pixel_items: usize,
+    /// Items that came in as pixels, by why (counted once each; a soft-masked group once).
+    pixel_items: std::collections::BTreeMap<&'static str, usize>,
+    /// Which of the page's drawing becomes layers (a PDF layer's pass keeps only its content).
+    keep: Keep,
+    /// Open marked-content sequences: whether each is a PDF layer's (`/OC`).
+    marked: Vec<bool>,
+    /// Soft masks made into layer masks, by hayro's cache key.
+    masks: HashMap<u128, LayerMask>,
 }
 
 impl<'g> LayerBuilder<'g> {
@@ -158,7 +252,7 @@ impl<'g> LayerBuilder<'g> {
             dpi,
             clips: Vec::new(),
             next_clip_id: 1,
-            frames: vec![Frame { layers: Vec::new(), group: None }],
+            frames: vec![Frame { layers: Vec::new(), group: None, mask: None }],
             segment: None,
             raster_groups: 0,
             text: None,
@@ -167,7 +261,10 @@ impl<'g> LayerBuilder<'g> {
             fonts: HashMap::new(),
             font_names: HashMap::new(),
             warnings: Vec::new(),
-            pixel_items: 0,
+            pixel_items: Default::default(),
+            keep: Keep::All,
+            marked: Vec::new(),
+            masks: HashMap::new(),
         }
     }
 
@@ -179,11 +276,91 @@ impl<'g> LayerBuilder<'g> {
         if self.layer_count >= MAX_LAYERS {
             self.warnings.push(format!("PDF: more than {MAX_LAYERS} layers; the rest of the page came in as pixels"));
         }
-        if self.pixel_items > 0 {
-            self.warnings.push(format!("PDF: {} item(s) with no editable equivalent (patterns, soft masks, …) came in as pixels", self.pixel_items));
+        if !self.pixel_items.is_empty() {
+            let why: Vec<String> = self.pixel_items.iter().map(|(why, n)| format!("{n} {why}")).collect();
+            self.warnings.push(format!("PDF: came in as pixels (no editable equivalent): {}", why.join(", ")));
         }
         let layers = self.frames.pop().map(|f| f.layers).unwrap_or_default();
         (layers, self.warnings)
+    }
+
+    /// The soft mask `m` as a layer mask over the page: what it holds where it differs from its
+    /// edges, the edges' value everywhere else (cached per mask).
+    fn layer_mask(&mut self, m: &SoftMask<'_>) -> LayerMask {
+        use hayro::hayro_interpret::CacheKey;
+        let key = m.cache_key();
+        if let Some(lm) = self.masks.get(&key) {
+            return lm.clone();
+        }
+        let (w, h) = (self.w.min(u32::from(u16::MAX)) as u16, self.h.min(u32::from(u16::MAX)) as u16);
+        let bytes = super::render::soft_mask_bytes(m, self.global, w, h);
+        let edge = bytes.first().copied().unwrap_or(0);
+        let mut lm = LayerMask::reveal_all();
+        lm.surface = Surface::with_default(PixelFormat::GRAY8, &[f32::from(edge) / 255.0]);
+        let (w, h) = (usize::from(w), usize::from(h));
+        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+        for (i, v) in bytes.iter().enumerate() {
+            if *v != edge {
+                let (x, y) = (i % w.max(1), i / w.max(1));
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+            }
+        }
+        if x0 < x1 && y0 < y1 {
+            let mut vals = Vec::with_capacity((x1 - x0) * (y1 - y0));
+            for y in y0..y1 {
+                vals.extend(bytes.get(y * w + x0..y * w + x1).unwrap_or_default().iter().map(|v| f32::from(*v) / 255.0));
+            }
+            lm.surface.write_region(Rect::new(x0 as i32, y0 as i32, x1 as i32, y1 as i32), &vals);
+        }
+        self.masks.insert(key, lm.clone());
+        lm
+    }
+
+    /// Draws one soft-masked item (`draw`, with the mask taken off) as layers of its own, each
+    /// with the mask as its layer mask. `false`, having done nothing, when it can't be.
+    fn masked_item(&mut self, mask: &Option<SoftMask<'_>>, draw: impl FnOnce(&mut Self)) -> bool {
+        let Some(m) = mask else { return false };
+        if self.raster_groups > 0 || self.full() {
+            return false;
+        }
+        let lm = self.layer_mask(m);
+        self.flush_all();
+        let start = self.frames.last().map_or(0, |f| f.layers.len());
+        draw(self);
+        self.flush_all();
+        if let Some(f) = self.frames.last_mut() {
+            for l in f.layers.iter_mut().skip(start) {
+                l.mask = Some(lm.clone());
+            }
+        }
+        true
+    }
+
+    /// Why an item drawn with `paint` can't be editable, for the warning: `None` inside a group
+    /// already counted, else the first reason that applies, else `what`.
+    fn fallback_why(&self, paint: &Paint<'_>, soft_mask: bool, what: &'static str) -> Option<&'static str> {
+        use hayro::hayro_interpret::pattern::Pattern;
+        if self.raster_groups > 0 {
+            return None;
+        }
+        Some(if self.full() {
+            "items past the layer limit"
+        } else if soft_mask {
+            "soft-masked items"
+        } else {
+            match paint {
+                Paint::Pattern(p) => match &**p {
+                    Pattern::Shading(_) => "gradients with no gradient fill equivalent",
+                    _ => "pattern fills",
+                },
+                Paint::Color(_) => what,
+            }
+        })
+    }
+
+    /// Whether what is being drawn now is kept (see [`Keep`]).
+    fn wanted(&self) -> bool {
+        self.keep == Keep::All || self.marked.contains(&true)
     }
 
     fn bounds(&self) -> Rect {
@@ -368,8 +545,12 @@ impl<'g> LayerBuilder<'g> {
         self.segment.as_mut().unwrap()
     }
 
-    fn with_segment(&mut self, f: impl FnOnce(&mut Renderer<'_>)) {
-        self.pixel_items += 1;
+    /// Draws `f` into the pixel segment; `why` it can't be editable, counted for the warning
+    /// (`None` inside a group already counted, or for the end of one).
+    fn with_segment(&mut self, why: Option<&'static str>, f: impl FnOnce(&mut Renderer<'_>)) {
+        if let Some(why) = why {
+            *self.pixel_items.entry(why).or_default() += 1;
+        }
         let global = self.global;
         let seg = self.segment();
         let mut r = Renderer::new(&mut seg.ctx, global);
@@ -627,9 +808,10 @@ impl<'g> LayerBuilder<'g> {
         let Some(frame) = self.frames.pop() else { return };
         match frame.group {
             Some((opacity, blend)) if !frame.layers.is_empty() => {
-                let mut g = Layer::group("Group", frame.layers);
+                let mut g = Layer::group(if frame.mask.is_some() { "Masked Group" } else { "Group" }, frame.layers);
                 g.opacity = opacity.clamp(0.0, 1.0);
                 g.blend = if blend == BlendMode::Normal { BlendMode::Normal } else { blend };
+                g.mask = frame.mask;
                 self.push_layer(g);
             }
             _ => {
@@ -643,6 +825,13 @@ impl<'g> LayerBuilder<'g> {
 
 impl<'a> Device<'a> for LayerBuilder<'_> {
     fn draw_path(&mut self, path: &BezPath, props: DrawProps<'a>, draw_mode: &DrawMode) {
+        if !self.wanted() {
+            return;
+        }
+        let mask = props.soft_mask.clone();
+        if self.masked_item(&mask, |b| b.draw_path(path, DrawProps { soft_mask: None, ..props.clone() }, draw_mode)) {
+            return;
+        }
         match (&props.paint, &props.soft_mask) {
             (Paint::Color(c), None) if self.raster_groups == 0 && !self.full() => {
                 let color = c.to_rgba().to_rgba8();
@@ -654,7 +843,10 @@ impl<'a> Device<'a> for LayerBuilder<'_> {
                     && !self.full()
                     && let (hayro::hayro_interpret::pattern::Pattern::Shading(sp), DrawMode::Fill(rule)) = (&**p, draw_mode)
                     && self.gradient_layer(path, &props, rule, sp) => {}
-            _ => self.with_segment(|r| Device::draw_path(r, path, props, draw_mode)),
+            _ => {
+                let why = self.fallback_why(&props.paint, props.soft_mask.is_some(), "shapes");
+                self.with_segment(why, |r| Device::draw_path(r, path, props, draw_mode));
+            }
         }
     }
 
@@ -674,18 +866,36 @@ impl<'a> Device<'a> for LayerBuilder<'_> {
     }
 
     fn push_transparency_group(&mut self, opacity: f32, mask: Option<SoftMask<'a>>, blend_mode: PdfBlend) {
+        // A soft-masked group: a layer group with the mask as its layer mask.
+        if self.raster_groups == 0
+            && !self.full()
+            && let Some(m) = &mask
+        {
+            self.flush_all();
+            let mask = self.layer_mask(m);
+            self.frames.push(Frame { layers: Vec::new(), group: Some((opacity, to_blend(blend_mode))), mask: Some(mask) });
+            return;
+        }
         if self.raster_groups > 0 || mask.is_some() {
+            let why = (self.raster_groups == 0).then_some("soft-masked groups");
             self.raster_groups += 1;
-            self.with_segment(|r| Device::push_transparency_group(r, opacity, mask, blend_mode));
+            self.with_segment(why, |r| Device::push_transparency_group(r, opacity, mask, blend_mode));
             return;
         }
         self.flush_all();
         let blend = to_blend(blend_mode);
         let group = (opacity < 0.999 || blend != BlendMode::Normal).then_some((opacity, blend));
-        self.frames.push(Frame { layers: Vec::new(), group });
+        self.frames.push(Frame { layers: Vec::new(), group, mask: None });
     }
 
     fn draw_glyph_run(&mut self, glyph_run: &GlyphRun<'_, 'a>, props: DrawProps<'a>, draw_mode: &DrawMode) {
+        if !self.wanted() {
+            return;
+        }
+        let mask = props.soft_mask.clone();
+        if self.masked_item(&mask, |b| b.draw_glyph_run(glyph_run, DrawProps { soft_mask: None, ..props.clone() }, draw_mode)) {
+            return;
+        }
         let editable = self.raster_groups == 0
             && !self.full()
             && props.soft_mask.is_none()
@@ -697,13 +907,32 @@ impl<'a> Device<'a> for LayerBuilder<'_> {
                 self.add_text(glyph_run, &props, draw_mode, color);
             }
             _ if matches!(draw_mode, DrawMode::Invisible) => {}
-            _ => self.with_segment(|r| Device::draw_glyph_run(r, glyph_run, props, draw_mode)),
+            _ => {
+                let why = match self.fallback_why(&props.paint, props.soft_mask.is_some(), "text") {
+                    Some("text") if !matches!(draw_mode, DrawMode::Fill(_)) => Some("outlined or clipping text runs"),
+                    Some("text") => Some("Type 3 text runs"),
+                    why => why,
+                };
+                self.with_segment(why, |r| Device::draw_glyph_run(r, glyph_run, props, draw_mode));
+            }
         }
     }
 
     fn draw_image(&mut self, image: Image<'a, '_>, props: ImageDrawProps<'a>) {
+        if !self.wanted() {
+            return;
+        }
+        if let Some(m) = props.soft_mask.clone()
+            && self.raster_groups == 0
+            && !self.full()
+        {
+            let unmasked = ImageDrawProps { soft_mask: None, ..props };
+            self.masked_item(&Some(m), |b| b.draw_image(image, unmasked));
+            return;
+        }
         if self.raster_groups > 0 || self.full() {
-            self.with_segment(|r| Device::draw_image(r, image, props));
+            let why = (self.raster_groups == 0).then_some("images past the layer limit");
+            self.with_segment(why, |r| Device::draw_image(r, image, props));
             return;
         }
         self.flush_all();
@@ -746,10 +975,18 @@ impl<'a> Device<'a> for LayerBuilder<'_> {
         self.clips.pop();
     }
 
+    fn begin_marked_content(&mut self, tag: &[u8], _mcid: Option<i32>) {
+        self.marked.push(tag == b"OC");
+    }
+
+    fn end_marked_content(&mut self) {
+        self.marked.pop();
+    }
+
     fn pop_transparency_group(&mut self) {
         if self.raster_groups > 0 {
             self.raster_groups -= 1;
-            self.with_segment(|r| Device::pop_transparency_group(r));
+            self.with_segment(None, |r| Device::pop_transparency_group(r));
             return;
         }
         self.close_frame();

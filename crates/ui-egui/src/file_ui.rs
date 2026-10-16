@@ -804,6 +804,8 @@ fn web_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, Val
                 if s(f, "format", "psd") == "pdf" {
                     check(ui, f, "pdfEditing", tl!("Preserve Photoshop Editing Capabilities"), app.pdf_preserve_editing);
                     ui.label(egui::RichText::new(tl!("Photoshop and PhotoSplice reopen the PDF with its layers. Other applications show its page.")).color(t.text_dim));
+                    ui.add_space(6.0);
+                    pdf_options_ui(ui, f, app.pdf_options);
                 }
                 return;
             }
@@ -893,6 +895,82 @@ fn web_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, Val
     web_view.write(f);
 }
 
+/// Save Adobe PDF's Compatibility, Compression and Downsampling, as Photoshop lays them out.
+fn pdf_options_ui(ui: &mut egui::Ui, f: &mut Map<String, Value>, cur: photosplice_io::pdf::export::PdfOptions) {
+    use photosplice_io::pdf::export::Compatibility;
+    let t = crate::theme::Tokens::get(ui.ctx());
+    // Fields the dialog doesn't have yet start from the last PDF save.
+    let (to, above) = cur.downsample.unwrap_or((300.0, 450.0));
+    for (k, v) in [
+        ("pdfCompatibility", json!(cur.compatibility.id())),
+        ("pdfCompression", json!(if cur.jpeg_quality.is_some() { "jpeg" } else { "zip" })),
+        ("pdfQuality", json!(cur.jpeg_quality.map_or("10".to_string(), |q| ((f32::from(q) - 1.0) / 99.0 * 12.0).round().to_string()))),
+        ("pdfDownsampleMode", json!(if cur.downsample.is_some() { "bicubic" } else { "none" })),
+        ("pdfDownsampleTo", json!(to.round())),
+        ("pdfDownsampleAbove", json!(above.round())),
+        ("pdfLayers", json!(cur.pdf_layers)),
+    ] {
+        f.entry(k).or_insert(v);
+    }
+    let label = |ui: &mut egui::Ui, s: &str| {
+        ui.add_sized(egui::vec2(104.0, 22.0), egui::Label::new(egui::RichText::new(s).color(t.text_dim)));
+    };
+    let compat: Vec<(&str, &str)> = Compatibility::ALL.iter().map(|(_, id, l)| (*id, tl!(l))).collect();
+    ui.horizontal(|ui| {
+        label(ui, tl!("Compatibility:"));
+        dropdown_str(ui, "pdf-compat", f, "pdfCompatibility", &compat, 190.0);
+    });
+    ui.horizontal(|ui| {
+        label(ui, tl!("Compression:"));
+        dropdown_str(ui, "pdf-compression", f, "pdfCompression", &[("zip", "ZIP"), ("jpeg", "JPEG")], 90.0);
+        if s(f, "pdfCompression", "zip") == "jpeg" {
+            ui.label(egui::RichText::new(tl!("Image Quality:")).color(t.text_dim));
+            let q = [("2", tl!("Minimum")), ("4", tl!("Low")), ("6", tl!("Medium")), ("8", tl!("High")), ("10", tl!("Maximum"))];
+            dropdown_str(ui, "pdf-quality", f, "pdfQuality", &q, 110.0);
+        }
+    });
+    ui.horizontal(|ui| {
+        label(ui, tl!("Downsampling:"));
+        dropdown_str(ui, "pdf-downsample", f, "pdfDownsampleMode", &[("none", tl!("Do Not Downsample")), ("bicubic", tl!("Bicubic Downsampling To"))], 190.0);
+    });
+    if s(f, "pdfDownsampleMode", "none") == "bicubic" {
+        ui.horizontal(|ui| {
+            ui.add_space(108.0);
+            web_number(ui, f, "pdfDownsampleTo", 1.0..=2400.0, "ppi", 300.0);
+            ui.label(egui::RichText::new(tl!("for images above")).color(t.text_dim));
+            web_number(ui, f, "pdfDownsampleAbove", 1.0..=4800.0, "ppi", 450.0);
+        });
+    }
+    check(ui, f, "pdfLayers", tl!("Create PDF Layers from Top-Level Layers"), cur.pdf_layers);
+}
+
+/// The PDF options the dialog's fields set (missing ones keep `cur`).
+pub(crate) fn pdf_options(f: &Map<String, Value>, cur: photosplice_io::pdf::export::PdfOptions) -> photosplice_io::pdf::export::PdfOptions {
+    use photosplice_io::pdf::export::Compatibility;
+    let mut o = cur;
+    if let Some(c) = f.get("pdfCompatibility").and_then(Value::as_str).and_then(Compatibility::from_id) {
+        o.compatibility = c;
+    }
+    if let Some(on) = f.get("pdfLayers").and_then(Value::as_bool) {
+        o.pdf_layers = on;
+    }
+    let num = |k: &str| f.get(k).and_then(|v| v.as_f64().or_else(|| v.as_str()?.parse().ok())).filter(|v: &f64| v.is_finite());
+    match f.get("pdfCompression").and_then(Value::as_str) {
+        Some("jpeg") => o.jpeg_quality = Some((num("pdfQuality").unwrap_or(10.0).clamp(0.0, 12.0) / 12.0 * 99.0 + 1.0).round() as u8),
+        Some(_) => o.jpeg_quality = None,
+        None => {}
+    }
+    match f.get("pdfDownsampleMode").and_then(Value::as_str) {
+        Some("bicubic") => {
+            let to = num("pdfDownsampleTo").unwrap_or(300.0).clamp(1.0, 2400.0);
+            o.downsample = Some((to as f32, num("pdfDownsampleAbove").unwrap_or(450.0).clamp(to, 4800.0) as f32));
+        }
+        Some(_) => o.downsample = None,
+        None => {}
+    }
+    o
+}
+
 fn web_confirm(app: &mut PhotospliceApp, f: &Map<String, Value>) -> Result<Value, String> {
     let save_as = f.contains_key("__saveAs");
     let fmt = s(f, "format", "jpeg");
@@ -906,6 +984,7 @@ fn web_confirm(app: &mut PhotospliceApp, f: &Map<String, Value>) -> Result<Value
         };
         if fmt == "pdf" {
             app.pdf_preserve_editing = b(f, "pdfEditing", app.pdf_preserve_editing);
+            app.pdf_options = pdf_options(f, app.pdf_options);
         }
         return app.save_as(Some(path)).map(|(p, w)| json!({"path": p, "warnings": w}));
     }
@@ -1156,6 +1235,28 @@ fn print_confirm(app: &mut PhotospliceApp, f: &Map<String, Value>) -> Result<Val
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pdf_option_fields_set_the_options_and_keep_the_rest() {
+        use photosplice_io::pdf::export::{Compatibility, PdfOptions};
+        let cur = PdfOptions { compatibility: Compatibility::Pdf16, jpeg_quality: Some(50), downsample: None, pdf_layers: true };
+        assert_eq!(pdf_options(&Map::new(), cur), cur, "no fields: as last time");
+        let mut f = Map::new();
+        f.insert("pdfCompatibility".into(), json!("2.0"));
+        f.insert("pdfCompression".into(), json!("zip"));
+        f.insert("pdfDownsampleMode".into(), json!("bicubic"));
+        f.insert("pdfDownsampleTo".into(), json!(150));
+        f.insert("pdfDownsampleAbove".into(), json!(100));
+        let o = pdf_options(&f, cur);
+        assert_eq!(o, PdfOptions { compatibility: Compatibility::Pdf20, jpeg_quality: None, downsample: Some((150.0, 150.0)), pdf_layers: true }, "the threshold is never below the target");
+        f.insert("pdfLayers".into(), json!(false));
+        assert!(!pdf_options(&f, cur).pdf_layers);
+        f.insert("pdfCompression".into(), json!("jpeg"));
+        f.insert("pdfQuality".into(), json!("6"));
+        assert_eq!(pdf_options(&f, cur).jpeg_quality, Some(51));
+        f.insert("pdfQuality".into(), json!("nonsense"));
+        assert_eq!(pdf_options(&f, cur).jpeg_quality, Some(84), "unreadable quality: Maximum");
+    }
 
     #[test]
     fn web_previews_fit_then_zoom_and_pan_inside_the_image() {

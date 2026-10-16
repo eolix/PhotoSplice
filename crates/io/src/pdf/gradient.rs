@@ -12,7 +12,6 @@
 //! Radial a radial one, Angle a sweep. Diamond has no PDF shading: `None`, and the caller draws
 //! the layer as an image.
 
-use krilla::color::rgb;
 use krilla::geom::Transform;
 use krilla::num::NormalizedF32;
 use krilla::paint::{LinearGradient, Paint, RadialGradient, SpreadMethod, Stop, SweepGradient};
@@ -32,7 +31,7 @@ enum Layout {
 
 /// The krilla paint of a shape layer's fill or stroke `f` (a gradient), as
 /// `photosplice_vector::Paint::from_fill(f, bounds)` renders it.
-pub(super) fn shape_paint(f: &Fill, bounds: (f64, f64, f64, f64)) -> Option<Paint> {
+pub(super) fn shape_paint(f: &Fill, bounds: (f64, f64, f64, f64), ink: &super::ink::Ink) -> Option<Paint> {
     let Fill::Gradient { stops, angle, style, reverse, opacity_stops, midpoints, .. } = f else { return None };
     let real = VPaint::from_fill(f, bounds);
     // The renderer's parameter: its own paint with a black → white ramp, read in the red channel.
@@ -75,12 +74,12 @@ pub(super) fn shape_paint(f: &Fill, bounds: (f64, f64, f64, f64)) -> Option<Pain
     at.extend(opacity_stops.iter().map(|s| s.0));
     at.extend([0.0, 1.0]);
     let samples = sample(&at, |t| real.sample(t));
-    paint(*style, *reverse, layout, samples)
+    paint(*style, *reverse, layout, samples, ink)
 }
 
 /// The krilla paint of a Gradient Fill layer's fill `f`, laid out in `frame` (see
 /// `photosplice_compose::fill_frame`), as `photosplice_compose::gradient_fill::render` draws it.
-pub(super) fn fill_paint(f: &Fill, frame: Rect) -> Option<Paint> {
+pub(super) fn fill_paint(f: &Fill, frame: Rect, ink: &super::ink::Ink) -> Option<Paint> {
     use photosplice_compose::{effects, fill_layout, gradient_fill};
     let Fill::Gradient { stops, angle, scale, style, reverse, opacity_stops, midpoints, offset, .. } = f else { return None };
     let layout = match style {
@@ -111,7 +110,7 @@ pub(super) fn fill_paint(f: &Fill, frame: Rect) -> Option<Paint> {
     at.extend(opacity_stops.iter().map(|s| s.0));
     at.extend([0.0, 1.0]);
     let samples = sample(&at, |t| ramp.sample(t));
-    paint(*style, *reverse, layout, samples)
+    paint(*style, *reverse, layout, samples, ink)
 }
 
 /// The axial layout of an affine parameter `t` (clamped to 0…1 by the renderer), read at points
@@ -138,11 +137,11 @@ fn sample(at: &[f32], f: impl Fn(f32) -> [f32; 4]) -> Vec<(f32, [f32; 4])> {
     at.into_iter().map(|t| (t, f(t))).collect()
 }
 
-fn paint(style: GradientStyle, reverse: bool, layout: Layout, mut samples: Vec<(f32, [f32; 4])>) -> Option<Paint> {
+fn paint(style: GradientStyle, reverse: bool, layout: Layout, mut samples: Vec<(f32, [f32; 4])>, ink: &super::ink::Ink) -> Option<Paint> {
     if reverse {
         samples = samples.into_iter().rev().map(|(t, c)| (1.0 - t, c)).collect();
     }
-    let stops = |s: &[(f32, [f32; 4])]| -> Vec<Stop> { s.iter().map(|(t, c)| stop(*t, *c)).collect() };
+    let stops = |s: &[(f32, [f32; 4])]| -> Vec<Stop> { s.iter().map(|(t, c)| stop(*t, *c, ink)).collect() };
     let f = |v: f64| v as f32;
     Some(match (style, layout) {
         (GradientStyle::Linear, Layout::Axial { p0, p1 }) => {
@@ -188,11 +187,10 @@ fn paint(style: GradientStyle, reverse: bool, layout: Layout, mut samples: Vec<(
     })
 }
 
-fn stop(t: f32, c: [f32; 4]) -> Stop {
-    let u = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+fn stop(t: f32, c: [f32; 4], ink: &super::ink::Ink) -> Stop {
     Stop {
         offset: NormalizedF32::new(t.clamp(0.0, 1.0)).unwrap_or(NormalizedF32::ZERO),
-        color: rgb::Color::new(u(c[0]), u(c[1]), u(c[2])).into(),
+        color: ink.rgb([c[0], c[1], c[2]]),
         opacity: NormalizedF32::new(c[3].clamp(0.0, 1.0)).unwrap_or(NormalizedF32::ONE),
     }
 }

@@ -12,6 +12,8 @@ use serde_json::{Value, json};
 use crate::PhotospliceApp;
 
 const COMMAND: &str = "file.importPdf";
+/// Where the dialog's choices are remembered (a new key: earlier choices defaulted to pixels).
+const REMEMBERED: &str = "file.importPdf#2";
 /// Longest thumbnail side, in points.
 const THUMB: f32 = 112.0;
 
@@ -35,12 +37,16 @@ pub struct ImportPdf {
     /// `pixels` or `layers`.
     pub open_as: String,
     thumbs: Vec<Option<egui::TextureHandle>>,
+    /// The password of a protected file, once it opened it (sent with the import, never stored).
+    pub password: String,
+    /// A protected file's bytes until the right password is typed, and why the last try failed.
+    locked: Option<(Vec<u8>, Option<String>)>,
 }
 
 impl ImportPdf {
     /// `file.importPdf`'s params for the current choices.
     pub fn params(&self) -> Value {
-        json!({
+        let mut p = json!({
             "path": self.path,
             "pages": self.selected.iter().map(|p| p + 1).collect::<Vec<_>>(),
             "resolution": self.resolution,
@@ -48,7 +54,32 @@ impl ImportPdf {
             "mode": self.mode,
             "depth": self.depth,
             "as": self.open_as,
-        })
+        });
+        if !self.password.is_empty() {
+            p["password"] = json!(self.password);
+        }
+        p
+    }
+
+    /// Tries `password` on the protected file: its pages show when it opens it.
+    pub fn unlock(&mut self, password: &str) {
+        let Some((bytes, why)) = &mut self.locked else { return };
+        match Pages::open_with(bytes, password) {
+            Ok(pages) => {
+                self.count = pages.len();
+                self.selected = (0..self.count).collect();
+                self.pages = Some(pages);
+                self.thumbs = (0..self.count.min(MAX_THUMBS)).map(|_| None).collect();
+                self.password = password.to_string();
+                self.locked = None;
+            }
+            Err(e) => *why = Some(e.to_string()),
+        }
+    }
+
+    /// Whether the file waits for its password.
+    pub fn is_locked(&self) -> bool {
+        self.locked.is_some()
     }
 
     /// The options to remember for the next PDF (not the file or its pages).
@@ -88,23 +119,27 @@ impl ImportPdf {
 
 /// Puts up Import PDF for the PDF `bytes` read from `path`, from the last choices.
 pub fn open(app: &mut PhotospliceApp, path: &str, bytes: &[u8]) {
-    let pages = Pages::open(bytes).ok();
+    let opened = Pages::open(bytes);
+    let locked = matches!(opened, Err(photosplice_io::IoError::PdfPassword { .. })).then(|| (bytes.to_vec(), None));
+    let pages = opened.ok();
     let count = pages.as_ref().map_or(0, Pages::len);
     let mut d = ImportPdf {
         path: path.to_string(),
         pages,
         count,
-        selected: vec![0],
+        // Every page, as editable layers, a board per page, a point per pixel.
+        selected: (0..count).collect(),
         anchor: 0,
-        // Photoshop's defaults.
-        crop_to: CropTo::BoundingBox,
-        resolution: photosplice_io::pdf::DEFAULT_DPI,
+        crop_to: CropTo::CropBox,
+        resolution: photosplice_io::pdf::OPEN_DPI,
         mode: "rgb".into(),
         depth: 8,
-        open_as: "pixels".into(),
+        open_as: "layers".into(),
         thumbs: Vec::new(),
+        password: String::new(),
+        locked,
     };
-    if let Some(Value::Object(saved)) = app.session.prefs().dialogs.get(COMMAND) {
+    if let Some(Value::Object(saved)) = app.session.prefs().dialogs.get(REMEMBERED) {
         if let Some(c) = saved.get("cropTo").and_then(Value::as_str).and_then(CropTo::from_id) {
             d.crop_to = c;
         }
@@ -132,7 +167,7 @@ const MAX_THUMBS: usize = 2000;
 pub fn confirm(app: &mut PhotospliceApp) -> Result<Value, String> {
     let d = app.import_pdf.take().ok_or("no Import PDF")?;
     let remembered = d.remembered();
-    app.session.prefs.edit(|p| p.dialogs.insert(COMMAND.into(), remembered));
+    app.session.prefs.edit(|p| p.dialogs.insert(REMEMBERED.into(), remembered));
     app.run(COMMAND, d.params())
 }
 
@@ -149,6 +184,34 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
             ui.vertical(|ui| {
                 ui.set_width(body.x - side - 16.0);
                 crate::widgets::section_label(ui, tl!("Pages"));
+                if let Some((_, why)) = &d.locked {
+                    let why = why.clone();
+                    ui.add_space(8.0);
+                    ui.label(tl!("This PDF is password-protected. Enter its password to see its pages."));
+                    ui.add_space(6.0);
+                    let id = ui.id().with("import-pdf-password");
+                    let mut typed = ui.data(|m| m.get_temp::<String>(id)).unwrap_or_default();
+                    let mut unlock = false;
+                    ui.horizontal(|ui| {
+                        let r = ui.add(egui::TextEdit::singleline(&mut typed).password(true).desired_width(220.0).hint_text(tl!("Password")));
+                        if !r.has_focus() && why.is_none() && typed.is_empty() {
+                            r.request_focus();
+                        }
+                        unlock = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        unlock |= crate::widgets::secondary_button(ui, tl!("Unlock"), 84.0).clicked();
+                    });
+                    if let Some(why) = why {
+                        ui.colored_label(tk.danger, why);
+                    }
+                    ui.data_mut(|m| m.insert_temp(id, typed.clone()));
+                    if unlock {
+                        d.unlock(&typed);
+                        if !d.is_locked() {
+                            ui.data_mut(|m| m.remove::<String>(id));
+                        }
+                    }
+                    return;
+                }
                 let grid_h = body.y - 70.0;
                 egui::ScrollArea::vertical().id_salt("import-pdf-pages").max_height(grid_h).auto_shrink([false, false]).show(ui, |ui| {
                     let cell = egui::vec2(THUMB + 16.0, THUMB + 30.0);
@@ -281,7 +344,9 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     if d.count == 0 {
         ok = false;
     }
-    if ok || ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+    // Enter in the password field unlocks; it doesn't import.
+    let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter)) && !app.import_pdf.as_ref().is_some_and(ImportPdf::is_locked);
+    if ok || enter {
         if let Err(e) = confirm(app) {
             app.ui.status = e;
             app.ui.status_error = true;
@@ -308,6 +373,8 @@ mod tests {
             depth: 8,
             open_as: "pixels".into(),
             thumbs: Vec::new(),
+            password: String::new(),
+            locked: None,
         }
     }
 
