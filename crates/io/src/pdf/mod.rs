@@ -13,6 +13,7 @@
 
 pub mod export;
 mod gradient;
+mod ink;
 mod layers;
 mod ocg;
 mod photoshop;

@@ -738,3 +738,70 @@ fn a_soft_masked_group_is_a_masked_layer_group() {
     assert_eq!(group_children(&d, 0), ["shape", "shape"], "the group's content stays editable");
     assert!(looks_like_the_page(&bytes) < 0.01);
 }
+
+/// A 200 × 100 document in `mode`: a rectangle in `fill` (that mode's colour), a line of type
+/// in `ink`, and a square of pixels.
+fn sample_in(mode: photosplice_color::ColorMode, fill: photosplice_color::Color, ink: photosplice_color::Color) -> Document {
+    use photosplice_doc::text::{CharStyle, TextRun, TextShape};
+    use photosplice_doc::vector::{Path, ShapeLayer, Subpath};
+    use photosplice_doc::{Layer, TextLayer};
+    let mut doc = Document::new("sample", photosplice_geom::Size::new(200, 100), mode, photosplice_color::SampleType::U8);
+    let fmt = doc.pixel_format();
+    let mut sh = ShapeLayer { path: Path::new(vec![Subpath::polygon(&[(10.0, 10.0), (90.0, 10.0), (90.0, 60.0), (10.0, 60.0)])]), fill: Some(Fill::Solid(fill)), ..Default::default() };
+    sh.cache = Some(photosplice_vector::render_shape(&sh, fmt, doc.bounds()));
+    doc.layers.push(Layer::new("Box", LayerContent::Shape(sh)));
+    let mut img = photosplice_raster::Surface::new(fmt);
+    let mut px = vec![0.5; fmt.channels()];
+    if let Some(a) = px.last_mut() {
+        *a = 1.0;
+    }
+    img.fill_rect(photosplice_geom::Rect::new(120, 10, 180, 50), &px);
+    doc.layers.push(Layer::new("Pixels", LayerContent::Raster(img)));
+    let style = CharStyle { font_family: "Inter".into(), size_pt: 18.0, color: ink, ..Default::default() };
+    let mut t = TextLayer { text: "Inks".into(), transform: photosplice_geom::Affine::translate(20.0, 90.0), runs: vec![TextRun { len: 4, style }], shape: TextShape::Point, ..Default::default() };
+    t.sync_summary();
+    photosplice_text::shared().lock().unwrap().render_layer(&mut t, 72.0, fmt);
+    doc.layers.push(Layer::new("Inks", LayerContent::Text(t)));
+    doc
+}
+
+/// The decoded content of the first page.
+fn page_content(bytes: &[u8]) -> String {
+    let pdf = hayro::hayro_syntax::Pdf::new(bytes.to_vec()).unwrap();
+    let pages = pdf.pages();
+    String::from_utf8_lossy(pages[0].page_stream().unwrap()).into_owned()
+}
+
+#[test]
+fn a_cmyk_document_saves_cmyk_vectors_and_type() {
+    use photosplice_color::{Color, ColorMode};
+    let k = Color { mode: ColorMode::Cmyk, c: [0.0, 0.0, 0.0, 1.0], alpha: 1.0 };
+    let magenta = Color { mode: ColorMode::Cmyk, c: [0.0, 1.0, 0.0, 0.0], alpha: 1.0 };
+    let doc = sample_in(ColorMode::Cmyk, magenta, k);
+    let r = photosplice_io::pdf::export::export_layered(&doc, false).unwrap();
+    assert!(!r.warnings.iter().any(|w| w.contains("one image")), "{:?}", r.warnings);
+    let content = page_content(&r.bytes);
+    // The fill's and the type's inks as they are: 100 % magenta, 100 % black (not rich black).
+    assert!(content.contains("0 1 0 0 k") || content.contains("0 1 0 0 sc"), "{content}");
+    assert!(content.contains("0 0 0 1 k") || content.contains("0 0 0 1 sc"), "{content}");
+    assert!(!content.contains(" rg"), "nothing in RGB: {content}");
+    // The rectangle and the type are still a shape and type for any reader.
+    let back = open_page("s.pdf", &r.bytes, 0, 72.0, PageAs::Layers).unwrap().document;
+    assert_eq!(kinds(&back), ["shape", "pixels", "text"]);
+    assert!(String::from_utf8_lossy(&r.bytes).contains("/DeviceCMYK"), "the pixels are CMYK too");
+}
+
+#[test]
+fn a_grayscale_document_saves_gray_vectors_and_type() {
+    use photosplice_color::{Color, ColorMode};
+    let grey = Color { mode: ColorMode::Grayscale, c: [0.4, 0.0, 0.0, 0.0], alpha: 1.0 };
+    let black = Color { mode: ColorMode::Grayscale, c: [0.0, 0.0, 0.0, 0.0], alpha: 1.0 };
+    let doc = sample_in(ColorMode::Grayscale, grey, black);
+    let r = photosplice_io::pdf::export::export_layered(&doc, false).unwrap();
+    assert!(!r.warnings.iter().any(|w| w.contains("one image")), "{:?}", r.warnings);
+    let content = page_content(&r.bytes);
+    assert!(content.contains("0.4 g") && content.contains("0 g\nBT"), "the fill's and the type's greys: {content}");
+    assert!(!content.contains(" rg") && !content.contains(" k\n"), "only grey: {content}");
+    let back = open_page("s.pdf", &r.bytes, 0, 72.0, PageAs::Layers).unwrap().document;
+    assert_eq!(kinds(&back), ["shape", "pixels", "text"]);
+}

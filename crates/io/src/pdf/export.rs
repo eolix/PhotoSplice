@@ -11,14 +11,13 @@
 //! (Linear Burn, Vivid Light, …), work on what is beneath them, so everything up to the topmost
 //! one is flattened into one image first.
 
-use krilla::color::rgb;
 use krilla::geom::{Path as KPath, PathBuilder, Point as KPoint, Size as KSize, Transform};
 use krilla::num::NormalizedF32;
 use krilla::page::PageSettings;
 use krilla::paint::{Fill as KFill, FillRule as KFillRule, LineCap as KCap, LineJoin as KJoin, Stroke as KStroke, StrokeDash};
 use krilla::surface::Surface as KSurface;
 use krilla::text::{Font, GlyphId, KrillaGlyph};
-use photosplice_color::{BlendMode, ColorMode};
+use photosplice_color::BlendMode;
 use photosplice_doc::vector::{FillRule, LineCap, LineJoin, Path, PathOp, ShapeLayer, StrokeAlign};
 use photosplice_doc::{Document, Fill, Layer, LayerContent, TextLayer};
 
@@ -73,8 +72,9 @@ fn draw_page(pdf: &mut krilla::Document, doc: &Document, warnings: &mut Vec<Stri
     let mut page = pdf.start_page_with(settings);
     let mut surface = page.surface();
     surface.push_transform(&Transform::from_scale(k, k));
-    let mut w = Writer { doc, rastered: 0, fonts: Vec::new() };
-    if doc.mode == ColorMode::Rgb {
+    let ink = super::ink::Ink::of(doc);
+    let mut w = Writer { doc, rastered: 0, fonts: Vec::new(), ink: ink.clone().unwrap_or(super::ink::Ink::Rgb) };
+    if ink.is_some() {
         // Everything up to the topmost layer that works on what is beneath it, as one image.
         let cut = doc.layers.iter().rposition(|l| l.visible && needs_backdrop(l));
         let rest = match cut {
@@ -86,7 +86,7 @@ fn draw_page(pdf: &mut krilla::Document, doc: &Document, warnings: &mut Vec<Stri
         };
         w.layers(&mut surface, rest);
     } else {
-        // Grayscale, CMYK, Lab…: the composite, converted for display.
+        // Lab, Indexed, Duotone…: the composite, converted for display.
         w.image_of(&mut surface, &doc.layers);
         warnings.push(format!("PDF: a {:?} document is saved as one image (its layers are in the editing data)", doc.mode));
     }
@@ -102,6 +102,8 @@ fn draw_page(pdf: &mut krilla::Document, doc: &Document, warnings: &mut Vec<Stri
 struct Writer<'d> {
     doc: &'d Document,
     rastered: usize,
+    /// The colour space the page paints in (the document's own: RGB, Grayscale or CMYK).
+    ink: super::ink::Ink,
     /// Fonts already handed to krilla, by the face's data pointer and index.
     fonts: Vec<((usize, u32), Font)>,
 }
@@ -161,7 +163,8 @@ impl Writer<'_> {
             LayerContent::Fill(f) => {
                 let canvas = self.doc.bounds();
                 let frame = photosplice_compose::fill_frame(l, canvas);
-                let Some((paint, a)) = pdf_paint(f, |f| super::gradient::fill_paint(f, frame)) else {
+                let ink = self.ink.clone();
+                let Some((paint, a)) = pdf_paint(f, &ink, |f| super::gradient::fill_paint(f, frame, &ink)) else {
                     self.rastered += 1;
                     self.with_blend(s, l, |w, s| w.image_of(s, &unblended(std::slice::from_ref(l))));
                     return;
@@ -195,8 +198,7 @@ impl Writer<'_> {
                 self.with_blend(s, l, |w, s| {
                     s.push_clip_path(&rect, &KFillRule::NonZero);
                     if let Some([r, g, b, a]) = ab.background.rgba() {
-                        let c = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-                        s.set_fill(Some(KFill { paint: rgb::Color::new(c(r), c(g), c(b)).into(), opacity: NormalizedF32::new(a.clamp(0.0, 1.0)).unwrap_or(NormalizedF32::ONE), rule: KFillRule::NonZero }));
+                        s.set_fill(Some(KFill { paint: w.ink.rgb([r, g, b]).into(), opacity: NormalizedF32::new(a.clamp(0.0, 1.0)).unwrap_or(NormalizedF32::ONE), rule: KFillRule::NonZero }));
                         s.set_stroke(None);
                         s.draw_path(&rect);
                         s.set_fill(None);
@@ -216,7 +218,7 @@ impl Writer<'_> {
                     });
                 }
             }
-            LayerContent::Shape(sh) => self.with_blend(s, l, |_, s| draw_shape(s, sh, l.fill_opacity)),
+            LayerContent::Shape(sh) => self.with_blend(s, l, |w, s| draw_shape(s, sh, l.fill_opacity, &w.ink)),
             LayerContent::Text(t) => self.with_blend(s, l, |w, s| {
                 if !w.draw_text(s, t, l.fill_opacity) {
                     w.rastered += 1;
@@ -248,16 +250,32 @@ impl Writer<'_> {
         }
     }
 
-    /// `layers` composited on their own (over transparency) and placed as an image.
+    /// `layers` composited on their own (over transparency) and placed as an image, in the
+    /// page's ink (a CMYK document's composite stays CMYK, with the document's profile).
     fn image_of(&mut self, s: &mut KSurface<'_>, layers: &[Layer]) {
+        use super::ink::{Ink, InkImage};
         let mut tmp = self.doc.clone();
         tmp.layers = layers.to_vec();
-        let buf = photosplice_compose::flatten(&tmp);
-        let img = buf.to_rgba8();
-        let (w, h) = (img.width as usize, img.height as usize);
+        // Straight 8-bit pixels with alpha last, `n` channels, over `rect`.
+        let (pixels, n, rect) = match &self.ink {
+            Ink::Rgb => {
+                let buf = photosplice_compose::flatten(&tmp);
+                let img = buf.to_rgba8();
+                (img.pixels, 4, buf.rect)
+            }
+            ink => {
+                let fmt = ink.format();
+                let surface = photosplice_compose::flatten_to_surface(&tmp, fmt, None);
+                let rect = tmp.bounds();
+                let mut f = Vec::new();
+                surface.read_region_into(rect, &mut f);
+                (f.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect(), fmt.channels(), rect)
+            }
+        };
+        let (w, h) = (rect.width() as usize, rect.height() as usize);
         // Trim to what the layers cover.
         let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
-        for (i, a) in img.pixels.iter().skip(3).step_by(4).enumerate() {
+        for (i, a) in pixels.iter().skip(n - 1).step_by(n).enumerate() {
             if *a != 0 {
                 let (x, y) = (i % w.max(1), i / w.max(1));
                 x0 = x0.min(x);
@@ -269,15 +287,27 @@ impl Writer<'_> {
         if x1 <= x0 || y1 <= y0 {
             return;
         }
-        let mut px = Vec::with_capacity((x1 - x0) * (y1 - y0) * 4);
+        let mut px = Vec::with_capacity((x1 - x0) * (y1 - y0) * n);
         for y in y0..y1 {
-            if let Some(row) = img.pixels.get((y * w + x0) * 4..(y * w + x1) * 4) {
+            if let Some(row) = pixels.get((y * w + x0) * n..(y * w + x1) * n) {
                 px.extend_from_slice(row);
             }
         }
         let (iw, ih) = ((x1 - x0) as u32, (y1 - y0) as u32);
-        let origin = (buf.rect.x0 as f32 + x0 as f32, buf.rect.y0 as f32 + y0 as f32);
-        let image = krilla::image::Image::from_rgba8(px, iw, ih);
+        let origin = (rect.x0 as f32 + x0 as f32, rect.y0 as f32 + y0 as f32);
+        let image = match &self.ink {
+            Ink::Rgb => krilla::image::Image::from_rgba8(px, iw, ih),
+            ink => {
+                let (color, alpha): (Vec<u8>, Vec<u8>) = (px.chunks_exact(n).flat_map(|p| p.iter().take(n - 1).copied()).collect(), px.chunks_exact(n).map(|p| p[n - 1]).collect());
+                let opaque = alpha.iter().all(|a| *a == 255);
+                let space = if matches!(ink, Ink::Cmyk(_)) { krilla::image::ImageColorspace::Cmyk } else { krilla::image::ImageColorspace::Luma };
+                let img = InkImage::new(color, (!opaque).then_some(alpha), (iw, ih), space, self.doc.icc_profile.clone());
+                match krilla::image::Image::from_custom(img, false) {
+                    Ok(i) => i,
+                    Err(_) => return,
+                }
+            }
+        };
         let Some(size) = KSize::from_wh(iw as f32, ih as f32) else { return };
         s.push_transform(&Transform::from_translate(origin.0, origin.1));
         s.draw_image(image, size);
@@ -328,10 +358,9 @@ impl Writer<'_> {
                     KrillaGlyph::new(GlyphId::new(g.id), (next - g.x) / size, 0.0, 0.0, 0.0, range, None)
                 })
                 .collect();
-            let [r, gg, b, a] = style.color.to_rgba8();
             s.set_fill(Some(KFill {
-                paint: rgb::Color::new(r, gg, b).into(),
-                opacity: NormalizedF32::new((f32::from(a) / 255.0 * fill_opacity).clamp(0.0, 1.0)).unwrap_or(NormalizedF32::ONE),
+                paint: self.ink.color(&style.color).into(),
+                opacity: NormalizedF32::new((style.color.alpha * fill_opacity).clamp(0.0, 1.0)).unwrap_or(NormalizedF32::ONE),
                 rule: KFillRule::NonZero,
             }));
             s.set_stroke(None);
@@ -414,18 +443,15 @@ fn native_shape(s: &ShapeLayer) -> bool {
 }
 
 /// The krilla paint and opacity of `f` (solid, or a gradient laid out by `gradient`).
-fn pdf_paint(f: &Fill, gradient: impl FnOnce(&Fill) -> Option<krilla::paint::Paint>) -> Option<(krilla::paint::Paint, f32)> {
+fn pdf_paint(f: &Fill, ink: &super::ink::Ink, gradient: impl FnOnce(&Fill) -> Option<krilla::paint::Paint>) -> Option<(krilla::paint::Paint, f32)> {
     match f {
-        Fill::Solid(c) => {
-            let [r, g, b, a] = c.to_rgba8();
-            Some((rgb::Color::new(r, g, b).into(), f32::from(a) / 255.0))
-        }
+        Fill::Solid(c) => Some((ink.color(c).into(), c.alpha.clamp(0.0, 1.0))),
         Fill::Gradient { .. } => gradient(f).map(|p| (p, 1.0)),
         Fill::Pattern { .. } => None,
     }
 }
 
-fn draw_shape(s: &mut KSurface<'_>, sh: &ShapeLayer, fill_opacity: f32) {
+fn draw_shape(s: &mut KSurface<'_>, sh: &ShapeLayer, fill_opacity: f32, ink: &super::ink::Ink) {
     let Some(path) = to_path(&sh.path) else { return };
     let rule = match sh.path.fill_rule {
         FillRule::NonZero => KFillRule::NonZero,
@@ -433,7 +459,7 @@ fn draw_shape(s: &mut KSurface<'_>, sh: &ShapeLayer, fill_opacity: f32) {
     };
     // Gradients laid out over the path's control bounds, as the shape renderer does.
     let bounds = sh.path.control_bounds().unwrap_or((0.0, 0.0, 0.0, 0.0));
-    let color = |f: &Fill| pdf_paint(f, |f| super::gradient::shape_paint(f, bounds));
+    let color = |f: &Fill| pdf_paint(f, ink, |f| super::gradient::shape_paint(f, bounds, ink));
     s.set_fill(sh.fill.as_ref().and_then(|f| {
         let (c, a) = color(f)?;
         Some(KFill { paint: c, opacity: NormalizedF32::new((a * fill_opacity).clamp(0.0, 1.0)).unwrap_or(NormalizedF32::ONE), rule })
