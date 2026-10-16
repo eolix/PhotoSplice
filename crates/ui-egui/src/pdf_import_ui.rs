@@ -12,6 +12,8 @@ use serde_json::{Value, json};
 use crate::PhotospliceApp;
 
 const COMMAND: &str = "file.importPdf";
+/// Where the dialog's choices are remembered (a new key: earlier choices defaulted to pixels).
+const REMEMBERED: &str = "file.importPdf#2";
 /// Longest thumbnail side, in points.
 const THUMB: f32 = 112.0;
 
@@ -65,6 +67,7 @@ impl ImportPdf {
         match Pages::open_with(bytes, password) {
             Ok(pages) => {
                 self.count = pages.len();
+                self.selected = (0..self.count).collect();
                 self.pages = Some(pages);
                 self.thumbs = (0..self.count.min(MAX_THUMBS)).map(|_| None).collect();
                 self.password = password.to_string();
@@ -124,19 +127,19 @@ pub fn open(app: &mut PhotospliceApp, path: &str, bytes: &[u8]) {
         path: path.to_string(),
         pages,
         count,
-        selected: vec![0],
+        // Every page, as editable layers, a board per page, a point per pixel.
+        selected: (0..count).collect(),
         anchor: 0,
-        // Photoshop's defaults.
-        crop_to: CropTo::BoundingBox,
-        resolution: photosplice_io::pdf::DEFAULT_DPI,
+        crop_to: CropTo::CropBox,
+        resolution: photosplice_io::pdf::OPEN_DPI,
         mode: "rgb".into(),
         depth: 8,
-        open_as: "pixels".into(),
+        open_as: "layers".into(),
         thumbs: Vec::new(),
         password: String::new(),
         locked,
     };
-    if let Some(Value::Object(saved)) = app.session.prefs().dialogs.get(COMMAND) {
+    if let Some(Value::Object(saved)) = app.session.prefs().dialogs.get(REMEMBERED) {
         if let Some(c) = saved.get("cropTo").and_then(Value::as_str).and_then(CropTo::from_id) {
             d.crop_to = c;
         }
@@ -164,7 +167,7 @@ const MAX_THUMBS: usize = 2000;
 pub fn confirm(app: &mut PhotospliceApp) -> Result<Value, String> {
     let d = app.import_pdf.take().ok_or("no Import PDF")?;
     let remembered = d.remembered();
-    app.session.prefs.edit(|p| p.dialogs.insert(COMMAND.into(), remembered));
+    app.session.prefs.edit(|p| p.dialogs.insert(REMEMBERED.into(), remembered));
     app.run(COMMAND, d.params())
 }
 

@@ -472,9 +472,17 @@ fn import_pdf(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let mut docs = Vec::new();
     let mut warnings = Vec::new();
-    for &page in &wanted {
+    // Several pages: one document, a board per page (`"together": false`: a document each).
+    let together = match p.get("together") {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(b)) => *b,
+        Some(v) => return Err(bad(format!("\"together\": expected true or false, got {v}"))),
+    };
+    let groups: Vec<Vec<usize>> = if together && wanted.len() > 1 { vec![wanted.iter().map(|n| n - 1).collect()] } else { wanted.iter().map(|n| vec![n - 1]).collect() };
+    for group in groups {
+        let page = group.first().copied().unwrap_or(0) + 1;
         let o = OpenOptions { page: page - 1, dpi, how, crop_to, password: password.clone() };
-        let r = photosplice_io::pdf::open_page_with(&file_name(&path), &bytes, &o).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+        let r = photosplice_io::pdf::open_pages(&file_name(&path), &bytes, &group, &o).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
         let mut doc = r.document;
         // A Photoshop PDF opens as it was saved; the options shape an imported page only.
         if !photosplice_io::pdf::has_editing_data_with(&bytes, page - 1, &password) {
@@ -487,7 +495,7 @@ fn import_pdf(s: &mut Session, p: &Value) -> Result<Value> {
                 doc.depth = d;
             }
         }
-        doc.name = if pages > 1 { format!("{} (page {page})", file_name(&path)) } else { file_name(&path) };
+        doc.name = if pages > 1 && group.len() == 1 { format!("{} (page {page})", file_name(&path)) } else { file_name(&path) };
         docs.push(doc);
         warnings.extend(r.warnings);
     }
@@ -513,7 +521,12 @@ pub fn place_bytes(s: &mut Session, name: &str, bytes: Vec<u8>, linked: Option<S
     let d = s.active().ok_or(EngineError::NoDocument)?;
     let (cw, ch) = (d.doc.size.width as f64, d.doc.size.height as f64);
     let fmt = d.doc.pixel_format();
-    let src = import(name, &bytes)?;
+    // A placed PDF is its first page, at the resolution its smart object renders from.
+    let src = if photosplice_io::pdf::is_pdf(&bytes) {
+        photosplice_io::pdf::import_page(name, &bytes, 0, crate::smart_cmds::PDF_SOURCE_DPI).map(|r| r.document).map_err(|e| EngineError::Other(format!("{name}: {e}")))?
+    } else {
+        import(name, &bytes)?
+    };
     // A PDF lands at its printed size at the document's resolution, as in Photoshop (`scale` is
     // a percentage of that); other files at their pixel size.
     let vector = crate::smart_cmds::is_vector_source(&bytes);
@@ -1294,7 +1307,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Import PDF",
             &[],
             None,
-            r##"{"path":str,"page":1..=100000=1,"pages":[n…]? (several, each its own document),"resolution":ppi=300,"as":"pixels|layers"="pixels","cropTo":"boundingBox|mediaBox|cropBox|bleedBox|trimBox|artBox"="cropBox","mode":"rgb|grayscale|cmyk|lab"?,"depth":8|16?,"password":str? (a protected file's; never stored)}"##,
+            r##"{"path":str,"page":1..=100000=1,"pages":[n…]? (several, each its own document),"resolution":ppi=300,"as":"pixels|layers"="pixels","cropTo":"boundingBox|mediaBox|cropBox|bleedBox|trimBox|artBox"="cropBox","mode":"rgb|grayscale|cmyk|lab"?,"depth":8|16?,"password":str? (a protected file's; never stored),"together":bool=true (several pages: one document, a board per page)}"##,
             native,
             import_pdf
         ),

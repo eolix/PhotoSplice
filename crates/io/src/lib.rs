@@ -177,7 +177,10 @@ fn import_stages(name: &str, bytes: &[u8], ctl: &photosplice_raster::Interrupt) 
         return raw::import_raw(name, bytes);
     }
     if has_extension(name, "pdf") || pdf::is_pdf(bytes) {
-        return pdf::import_page(name, bytes, 0, pdf::DEFAULT_DPI);
+        // Every page as editable layers, a board per page, in one document.
+        let n = pdf::page_count(bytes)?;
+        let o = pdf::OpenOptions { dpi: pdf::OPEN_DPI, how: pdf::PageAs::Layers, ..Default::default() };
+        return pdf::open_pages(name, bytes, &(0..n).collect::<Vec<_>>(), &o);
     }
     flat::import_flat(name, bytes)
 }

@@ -650,7 +650,7 @@ fn save_as_is_the_save_for_web_screen_with_document_formats() {
 }
 
 #[test]
-fn multi_page_pdfs_ask_which_page() {
+fn pdfs_open_every_page_as_boards_without_asking() {
     let page = || {
         let img = photosplice_codecs::Image::from_u8(8, 8, photosplice_codecs::ChannelLayout::Rgb, vec![200; 8 * 8 * 3]).unwrap();
         (8u32, 8u32, 72.0f32, photosplice_codecs::encode(&img, photosplice_codecs::Format::Jpeg, &photosplice_codecs::EncodeOptions::default()).unwrap())
@@ -662,24 +662,18 @@ fn multi_page_pdfs_ask_which_page() {
     std::fs::write(&path, &pdf).unwrap();
     let (mut app, _) = app_with(None, None);
     app.open_file(&path, &pdf).unwrap();
-    assert!(app.session.documents().is_empty(), "nothing opened yet");
-    let d = app.import_pdf.as_ref().expect("Import PDF");
-    assert_eq!((d.count, d.selected.as_slice()), (3, &[0][..]));
-    assert_eq!(d.open_as, "pixels", "Photoshop's way by default");
-    assert_eq!(d.crop_to, photosplice_io::pdf::CropTo::BoundingBox, "Photoshop's default");
-    // OK opens the picked pages, each its own document, and remembers the options.
-    app.import_pdf.as_mut().unwrap().click(2, true, false);
-    app.import_pdf.as_mut().unwrap().resolution = 72.0;
-    crate::pdf_import_ui::confirm(&mut app).unwrap();
-    assert_eq!(app.session.documents().len(), 2);
-    assert!(app.import_pdf.is_none());
-    // One page asks too (how to open it), as in Photoshop, starting from the last options.
-    let one = photosplice_io::pdf::raster_pdf(&[page()]);
-    let path = dir.join("one.pdf").to_string_lossy().into_owned();
-    std::fs::write(&path, &one).unwrap();
-    app.open_file(&path, &one).unwrap();
-    let d = app.import_pdf.as_ref().expect("Import PDF");
-    assert_eq!((d.count, d.resolution), (1, 72.0));
+    assert!(app.import_pdf.is_none(), "no dialog");
+    assert_eq!(app.session.documents().len(), 1, "one document (this test's importer is a stub)");
+    // Import PDF (the command, the real importer) opens picked pages together, or each alone.
+    let (mut app, _) = app_with(None, None);
+    app.run("file.importPdf", json!({"path": path, "pages": [1, 2, 3], "resolution": 72})).unwrap();
+    let docs = app.session.documents();
+    assert_eq!(docs.len(), 1);
+    let names: Vec<&str> = docs[0].doc.layers.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, ["Page 1", "Page 2", "Page 3"], "a board per page");
+    app.run("file.importPdf", json!({"path": path, "pages": [1, 3], "together": false})).unwrap();
+    assert_eq!(app.session.documents().len(), 3, "two more, a page each");
+    assert!(app.run("file.importPdf", json!({"path": path, "together": "yes"})).is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

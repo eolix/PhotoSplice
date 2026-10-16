@@ -16,7 +16,10 @@ mod gradient;
 mod ink;
 mod layers;
 mod ocg;
+mod pages;
 mod photoshop;
+
+pub use pages::open_pages;
 mod render;
 mod shading;
 mod update;
@@ -27,6 +30,10 @@ use crate::{ImportResult, IoError};
 
 /// Photoshop's Import PDF default resolution.
 pub const DEFAULT_DPI: f32 = 300.0;
+
+/// The resolution a PDF opens at without Import PDF: a point per pixel (type and shapes stay
+/// editable at any size).
+pub const OPEN_DPI: f32 = 72.0;
 
 /// Whether `bytes` start like a PDF.
 pub fn is_pdf(bytes: &[u8]) -> bool {
@@ -295,19 +302,9 @@ pub fn open_page(name: &str, bytes: &[u8], page: usize, dpi: f32, how: PageAs) -
     open_page_with(name, bytes, &OpenOptions { page, dpi, how, crop_to: CropTo::CropBox, ..Default::default() })
 }
 
-/// Opens a page as a document named `name`, as Import PDF does: the chosen box at a resolution,
-/// as layers or as pixels. A page with Photoshop editing data opens as that document instead.
-pub fn open_page_with(name: &str, bytes: &[u8], o: &OpenOptions) -> Result<ImportResult, IoError> {
-    let pdf = load_with(bytes, &o.password)?;
-    let pages = pdf.pages();
-    let n = pages.len();
-    let p = pages.get(o.page).ok_or_else(|| IoError::Unsupported(format!("PDF has {n} pages; there is no page {}", o.page.saturating_add(1))))?;
-    let mut warnings = Vec::new();
-    match photoshop::read(name, &pdf, p) {
-        Some(Ok(r)) => return Ok(r),
-        Some(Err(why)) => warnings.push(format!("PDF: the Photoshop editing data can't be used ({why}); opened the page instead")),
-        None => {}
-    }
+/// Where page `p` lands at `o`'s resolution and box: its placement, the scale (pixels per
+/// point) and, when Crop To Bounding Box had to render the page whole, those pixels.
+fn placement(p: &hayro::hayro_syntax::page::Page<'_>, o: &OpenOptions, warnings: &mut Vec<String>) -> Result<(Placement, f32, Option<Vec<u8>>), IoError> {
     let (clip, to_points) = frame(p, o.crop_to);
     let size = to_points.transform_rect_bbox(clip);
     let (wpt, hpt) = (size.width() as f32, size.height() as f32);
@@ -326,9 +323,6 @@ pub fn open_page_with(name: &str, bytes: &[u8], o: &OpenOptions) -> Result<Impor
     }
     if (scale * 72.0 - dpi).abs() > 0.5 {
         warnings.push(format!("PDF page opened at {:.0} ppi (the most that fits), not {dpi:.0}", scale * 72.0));
-    }
-    if n > 1 {
-        warnings.push(format!("PDF has {n} pages; opened page {}", o.page + 1));
     }
     // Truncated, as hayro sizes a page it renders.
     let mut place = Placement {
@@ -351,6 +345,26 @@ pub fn open_page_with(name: &str, bytes: &[u8], o: &OpenOptions) -> Result<Impor
             None => warnings.push("PDF page is empty: Crop To Bounding Box kept the whole sheet".into()),
         }
     }
+    Ok((place, scale, rendered))
+}
+
+/// Opens a page as a document named `name`, as Import PDF does: the chosen box at a resolution,
+/// as layers or as pixels. A page with the Reference's editing data opens as that document instead.
+pub fn open_page_with(name: &str, bytes: &[u8], o: &OpenOptions) -> Result<ImportResult, IoError> {
+    let pdf = load_with(bytes, &o.password)?;
+    let pages = pdf.pages();
+    let n = pages.len();
+    let p = pages.get(o.page).ok_or_else(|| IoError::Unsupported(format!("PDF has {n} pages; there is no page {}", o.page.saturating_add(1))))?;
+    let mut warnings = Vec::new();
+    match photoshop::read(name, &pdf, p) {
+        Some(Ok(r)) => return Ok(r),
+        Some(Err(why)) => warnings.push(format!("PDF: the Photoshop editing data can't be used ({why}); opened the page instead")),
+        None => {}
+    }
+    if n > 1 {
+        warnings.push(format!("PDF has {n} pages; opened page {}", o.page + 1));
+    }
+    let (place, scale, rendered) = placement(p, o, &mut warnings)?;
     if o.how == PageAs::Layers {
         let pdf_layers = ocg::page_layers(&pdf, p);
         if !pdf_layers.is_empty()

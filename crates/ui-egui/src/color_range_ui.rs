@@ -301,7 +301,7 @@ fn radio(ui: &mut egui::Ui, on: bool, label: &str) -> egui::Response {
     .inner
 }
 
-/// Eyedropper button: PS-JS's eyedropper, plus or minus eyedropper; labelled for accessibility.
+/// Eyedropper button: the eyedropper, plus or minus eyedropper; labelled for accessibility.
 fn eyedropper(ui: &mut egui::Ui, badge: &str, selected: bool, label: &str) -> egui::Response {
     let icon = match badge {
         "+" => "tools-eyedropper_add",

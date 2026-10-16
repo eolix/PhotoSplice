@@ -1053,3 +1053,185 @@ fn top_level_layers_save_as_pdf_layers_and_reopen_as_themselves() {
     let plain = export_with(&doc, PdfOptions { pdf_layers: false, ..Default::default() });
     assert!(!String::from_utf8_lossy(&plain).contains("/OCProperties"));
 }
+
+/// Opens the Reference's own PDFs from the verification kit (`$PHOTOSPLICE_PDF_KIT_OUT`, the
+/// kit's `out/`): each `ps-*-editing.pdf` against the Reference's PSD of the same document, each
+/// `ps-*-page.pdf` (no editing data) against its flat TIFF.
+#[test]
+#[ignore]
+fn reference_pdfs() {
+    let Some(dir) = std::env::var_os("PHOTOSPLICE_PDF_KIT_OUT") else { return };
+    let dir = std::path::PathBuf::from(dir);
+    fn tree(ls: &[photosplice_doc::Layer], depth: usize, out: &mut Vec<String>) {
+        for l in ls.iter().rev() {
+            let k = match &l.content {
+                LayerContent::Text(_) => "text",
+                LayerContent::Shape(_) => "shape",
+                LayerContent::Raster(_) => "pixels",
+                LayerContent::Group(_) => "group",
+                LayerContent::Fill(_) => "fill",
+                _ => "other",
+            };
+            out.push(format!("{}{} | {k} | visible={} opacity={:.0} blend={:?} mask={}", "  ".repeat(depth), l.name, l.visible, l.opacity * 100.0, l.blend, l.mask.is_some()));
+            if let Some(c) = l.children() {
+                tree(c, depth + 1, out);
+            }
+        }
+    }
+    let read = |name: &str| std::fs::read(dir.join(name)).unwrap();
+    for name in ["ps-rgb", "ps-cmyk", "ps-gray"] {
+        let psd = photosplice_io::import(&format!("{name}.psd"), &read(&format!("{name}.psd"))).unwrap().document;
+        let tif = photosplice_io::import(&format!("{name}.tif"), &read(&format!("{name}.tif"))).unwrap().document;
+        let editing = open_page("e.pdf", &read(&format!("{name}-editing.pdf")), 0, 72.0, PageAs::Layers).unwrap();
+        let page = open_page("p.pdf", &read(&format!("{name}-page.pdf")), 0, 72.0, PageAs::Layers).unwrap();
+        let (mut a, mut b, mut c) = (Vec::new(), Vec::new(), Vec::new());
+        tree(&psd.layers, 0, &mut a);
+        tree(&editing.document.layers, 0, &mut b);
+        tree(&page.document.layers, 0, &mut c);
+        eprintln!("==== {name}: PSD mode {:?}, editing PDF mode {:?}, page PDF mode {:?}", psd.mode, editing.document.mode, page.document.mode);
+        eprintln!("-- PSD\n{}\n-- editing PDF ({:?})\n{}\n-- page PDF ({:?})\n{}", a.join("\n"), editing.warnings, b.join("\n"), page.warnings, c.join("\n"));
+        let icc = |d: &Document| d.icc_profile.as_ref().map(|p| (p.len(), p.iter().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(u32::from(*b)))));
+        eprintln!("ICC: PSD {:?}, editing PDF {:?}", icc(&psd), icc(&editing.document));
+        let e = &editing.document;
+        {
+            let (fa, fb) = (photosplice_compose::flatten(&psd), photosplice_compose::flatten(e));
+            let w = psd.size.width as usize;
+            let (mut x0, mut y0, mut x1, mut y1, mut n) = (usize::MAX, usize::MAX, 0, 0, 0);
+            for (i, (p, q)) in fa.px.iter().zip(&fb.px).enumerate() {
+                if (0..4).any(|c| (p[c] - q[c]).abs() > 0.02) {
+                    let (x, y) = (i % w, i / w);
+                    (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+                    if n < 3 {
+                        eprintln!("  differ at {x},{y}: {p:?} vs {q:?}");
+                    }
+                    n += 1;
+                }
+            }
+            eprintln!("  composite differs in {n} px within {x0},{y0}..{x1},{y1}");
+        }
+        eprintln!("  channels {} | {}; spot {:?} | {:?}; duotone {} | {}; dpi {} | {}", psd.channels.len(), e.channels.len(), psd.channels.iter().map(|c| (&c.name, c.spot.is_some())).collect::<Vec<_>>(), e.channels.iter().map(|c| (&c.name, c.spot.is_some())).collect::<Vec<_>>(), psd.duotone.is_some(), e.duotone.is_some(), psd.resolution_dpi, e.resolution_dpi);
+        for (x, y) in psd.layers.iter().zip(&editing.document.layers) {
+            let (px, py) = (photosplice_compose::render_layer(x, psd.bounds()), photosplice_compose::render_layer(y, psd.bounds()));
+            let d = px.px.iter().zip(&py.px).map(|(p, q)| (0..4).map(|c| (p[c] - q[c]).abs()).sum::<f32>()).sum::<f32>() / px.px.len().max(1) as f32;
+            let raw = |l: &photosplice_doc::Layer| match &l.content {
+                LayerContent::Raster(s) => {
+                    let r = s.content_bounds();
+                    let mut v = Vec::new();
+                    s.read_region_into(r, &mut v);
+                    format!("{r:?} first px {:?}", v.get(..5))
+                }
+                _ => String::new(),
+            };
+            eprintln!("  layer {}: {d:.4} {} | {}", x.name, raw(x), raw(y));
+            if let (LayerContent::Shape(a), LayerContent::Shape(b)) = (&x.content, &y.content) {
+                eprintln!("    fills {:?} | {:?}", a.fill, b.fill);
+                let px = |c: &Option<photosplice_raster::Surface>| {
+                    c.as_ref().map(|c| {
+                        let r = c.content_bounds();
+                        let mut v = Vec::new();
+                        c.read_region_into(photosplice_geom::Rect::new(r.x0 + 5, r.y0 + 5, r.x0 + 6, r.y0 + 6), &mut v);
+                        (r, c.format(), v)
+                    })
+                };
+                eprintln!("    cache {:?} | {:?}", px(&a.cache), px(&b.cache));
+                eprintln!("    blocks {:?} | {:?}", x.psd_blocks.iter().map(|(k, v)| (String::from_utf8_lossy(k).into_owned(), v.len())).collect::<Vec<_>>(), y.psd_blocks.iter().map(|(k, v)| (String::from_utf8_lossy(k).into_owned(), v.len())).collect::<Vec<_>>());
+            }
+        }
+        eprintln!("editing PDF vs PSD: {:.4}; page PDF vs TIFF: {:.4}; editing PDF vs TIFF: {:.4}", mean_diff(&editing.document, &psd), mean_diff(&page.document, &tif), mean_diff(&editing.document, &tif));
+    }
+}
+
+/// A PDF of 200 × 100 pt pages, one per entry of `contents` (Helvetica as /F1 on every page).
+fn multi_page(contents: &[&str]) -> Vec<u8> {
+    let n = contents.len();
+    // 1 catalog, 2 pages, 3 font, then a page and its content per page.
+    let kids: String = (0..n).map(|i| format!("{} 0 R ", 4 + 2 * i)).collect();
+    let mut objs: Vec<String> = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".into(),
+        format!("<< /Type /Pages /Kids [{kids}] /Count {n} >>"),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+    ];
+    for (i, c) in contents.iter().enumerate() {
+        objs.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents {} 0 R /Resources << /Font << /F1 3 0 R >> >> >>", 5 + 2 * i));
+        objs.push(format!("<< /Length {} >>\nstream\n{c}\nendstream", c.len()));
+    }
+    let mut out = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offsets {
+        out.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objs.len() + 1).as_bytes());
+    out
+}
+
+#[test]
+fn every_page_opens_as_a_board_of_editable_layers() {
+    let pages = ["BT /F1 24 Tf 0 g 20 50 Td (First) Tj ET 1 0 0 rg 150 10 30 30 re f", "BT /F1 24 Tf 0 g 20 50 Td (Second) Tj ET", "0 0 1 rg 10 10 50 50 re f"];
+    let r = photosplice_io::import("doc.pdf", &multi_page(&pages)).unwrap();
+    let d = &r.document;
+    assert_eq!(d.resolution_dpi, 72.0, "a point per pixel");
+    // Three 200 × 100 boards, 30 px apart.
+    assert_eq!((d.size.width, d.size.height), (660, 100));
+    assert_eq!(d.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["Page 1", "Page 2", "Page 3"]);
+    let boards: Vec<photosplice_geom::Rect> = d.layers.iter().map(|l| match &l.content {
+        LayerContent::Group(g) => g.artboard.as_ref().expect("an artboard").rect,
+        _ => panic!("a page is a group"),
+    }).collect();
+    assert_eq!(boards, [photosplice_geom::Rect::new(0, 0, 200, 100), photosplice_geom::Rect::new(230, 0, 430, 100), photosplice_geom::Rect::new(460, 0, 660, 100)]);
+    assert_eq!(group_children(d, 0), ["text", "shape"]);
+    assert_eq!(group_children(d, 1), ["text"]);
+    assert_eq!(group_children(d, 2), ["shape"]);
+    // The second page's type and the third page's square sit on their own boards.
+    let second = &d.layers[1].children().unwrap()[0];
+    let LayerContent::Text(t) = &second.content else { panic!() };
+    assert_eq!(t.text, "Second");
+    assert!(t.transform.m[4] > 230.0 && t.transform.m[4] < 430.0, "{:?}", t.transform);
+    let px = photosplice_compose::flatten(d).px[70 * 660 + 480];
+    assert!(px[2] > 0.9 && px[0] < 0.1, "the blue square on page 3: {px:?}");
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    // One page: no board, as before.
+    let one = photosplice_io::import("one.pdf", &multi_page(&pages[..1])).unwrap().document;
+    assert_eq!(kinds(&one), ["text", "shape"]);
+}
+
+/// `PHOTOSPLICE_PDF_OPEN=<file>`: how a real PDF opens through File › Open (every page, as
+/// boards): the time, the boards, and the layers by kind.
+#[test]
+#[ignore]
+fn probe_open() {
+    let Some(path) = std::env::var_os("PHOTOSPLICE_PDF_OPEN") else { return };
+    let bytes = std::fs::read(&path).unwrap();
+    let t = std::time::Instant::now();
+    let r = photosplice_io::import("p.pdf", &bytes).unwrap();
+    let took = t.elapsed();
+    let mut count = std::collections::BTreeMap::new();
+    fn walk(ls: &[photosplice_doc::Layer], count: &mut std::collections::BTreeMap<&'static str, usize>) {
+        for l in ls {
+            let k = match &l.content {
+                LayerContent::Text(_) => "text",
+                LayerContent::Shape(_) => "shape",
+                LayerContent::Raster(_) => "pixels",
+                LayerContent::Group(g) => {
+                    walk(&g.children, count);
+                    "group"
+                }
+                LayerContent::Fill(_) => "fill",
+                _ => "other",
+            };
+            *count.entry(k).or_default() += 1;
+        }
+    }
+    walk(&r.document.layers, &mut count);
+    let d = &r.document;
+    eprintln!("{} in {took:?}: {} × {} at {} ppi, {} top-level {:?}\n{count:?}\nwarnings {:?}", path.to_string_lossy(), d.size.width, d.size.height, d.resolution_dpi, d.layers.len(), d.layers.iter().take(4).map(|l| &l.name).collect::<Vec<_>>(), r.warnings);
+    if let Some(LayerContent::Group(g)) = d.layers.first().map(|l| &l.content) {
+        let texts: Vec<&str> = g.children.iter().filter_map(|l| if let LayerContent::Text(t) = &l.content { Some(t.text.as_str()) } else { None }).take(6).collect();
+        eprintln!("page 1 type: {texts:?}");
+    }
+}

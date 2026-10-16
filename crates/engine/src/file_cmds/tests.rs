@@ -423,9 +423,9 @@ fn import_pdf_opens_the_chosen_page_at_a_resolution() {
     s.execute("file.importPdf", json!({"path": path, "page": 1, "resolution": 72, "as": "layers"})).unwrap();
     assert!(s.active().unwrap().doc.layers.iter().all(|l| l.surface().is_some()), "the page's image as a pixel layer");
     assert!(s.execute("file.importPdf", json!({"path": path, "as": "vectors"})).is_err());
-    // Several pages, each its own document, in the mode and depth asked for.
+    // Several pages, each its own document (`together: false`), in the mode and depth asked for.
     let before = s.documents().len();
-    let r = s.execute("file.importPdf", json!({"path": path, "pages": [2, 1], "resolution": 72, "mode": "grayscale", "depth": 16, "cropTo": "mediaBox"})).unwrap();
+    let r = s.execute("file.importPdf", json!({"path": path, "pages": [2, 1], "together": false, "resolution": 72, "mode": "grayscale", "depth": 16, "cropTo": "mediaBox"})).unwrap();
     assert_eq!(r["documents"].as_array().unwrap().len(), 2);
     assert_eq!(s.documents().len(), before + 2);
     let st = s.active().unwrap();
