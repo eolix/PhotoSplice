@@ -25,11 +25,50 @@ pub fn open_pages(name: &str, bytes: &[u8], pages: &[usize], o: &OpenOptions) ->
     if pages.len() == 1 || super::has_editing_data_with(bytes, first, &o.password) {
         return super::open_page_with(name, bytes, &OpenOptions { page: first, ..o.clone() });
     }
+    // Too many pages for one document at this resolution: the most that fits, said so.
+    match lay_out(name, bytes, pages, o) {
+        Err(TooBig(scale)) if scale < 1.0 => {
+            let lower = OpenOptions { dpi: (o.dpi * scale).floor().max(1.0), ..o.clone() };
+            let mut r = lay_out(name, bytes, pages, &lower).map_err(|e| e.into_error(pages.len(), lower.dpi))?;
+            r.warnings.push(format!("PDF: {} pages opened at {:.0} ppi (the most that fits in one document), not {:.0}", pages.len(), lower.dpi, o.dpi));
+            Ok(r)
+        }
+        r => r.map_err(|e| e.into_error(pages.len(), o.dpi)),
+    }
+}
+
+/// Why [`lay_out`] failed: the pages don't fit (the scale that would make them fit, 1.0 when
+/// none would) or a page didn't open.
+enum Failed {
+    TooBig(f32),
+    Io(IoError),
+}
+use Failed::TooBig;
+
+impl From<IoError> for Failed {
+    fn from(e: IoError) -> Self {
+        Failed::Io(e)
+    }
+}
+
+impl Failed {
+    fn into_error(self, pages: usize, dpi: f32) -> IoError {
+        match self {
+            Failed::Io(e) => e,
+            TooBig(_) => IoError::Unsupported(format!("PDF: {pages} pages at {dpi:.0} ppi are more than fit in one document; open fewer pages or at a lower resolution")),
+        }
+    }
+}
+
+fn lay_out(name: &str, bytes: &[u8], pages: &[usize], o: &OpenOptions) -> Result<ImportResult, Failed> {
+    use rayon::prelude::*;
+    // Each page on its own, in parallel (in page order).
+    let opened: Vec<Result<ImportResult, IoError>> = pages.par_iter().map(|&p| super::open_page_with(name, bytes, &OpenOptions { page: p, ..o.clone() })).collect();
     let mut boards = Vec::new();
     let mut warnings = Vec::new();
     let mut dpi = o.dpi;
-    for &p in pages {
-        let r = super::open_page_with(name, bytes, &OpenOptions { page: p, ..o.clone() })?;
+    for (&p, r) in pages.iter().zip(opened) {
+        let r = r?;
         warnings.extend(r.warnings.into_iter().filter(|w| !w.contains("pages; opened page")));
         dpi = r.document.resolution_dpi;
         boards.push((p, r.document));
@@ -53,8 +92,11 @@ pub fn open_pages(name: &str, bytes: &[u8], pages: &[usize], o: &OpenOptions) ->
     }
     let height = y.saturating_add(row_h);
     let limits = photosplice_codecs::Limits::default();
-    if width as u64 > u64::from(limits.max_width) || height as u64 > u64::from(limits.max_height) || (width as u64) * (height as u64) > limits.max_pixels {
-        return Err(IoError::Unsupported(format!("PDF: {} pages at {dpi:.0} ppi make a {width} × {height} document, more than fits; open fewer pages or at a lower resolution", pages.len())));
+    let (wf, hf) = (f64::from(width.max(1)), f64::from(height.max(1)));
+    let fit = (f64::from(limits.max_width) / wf).min(f64::from(limits.max_height) / hf).min((limits.max_pixels as f64 / (wf * hf)).sqrt());
+    if fit < 1.0 {
+        // A little under, for the rounding of each page's size.
+        return Err(TooBig((fit * 0.98) as f32));
     }
     let mut doc = Document::new(name, Size::new(width.max(1) as u32, height.max(1) as u32), ColorMode::Rgb, SampleType::U8);
     doc.resolution_dpi = dpi;

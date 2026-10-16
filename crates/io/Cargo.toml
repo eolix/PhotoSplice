@@ -14,6 +14,8 @@ workspace = true
 corpus = []
 
 [dependencies]
+# Pages of a PDF opened in parallel.
+rayon.workspace = true
 photosplice-geom = { workspace = true }
 photosplice-color = { workspace = true }
 photosplice-cms = { workspace = true }

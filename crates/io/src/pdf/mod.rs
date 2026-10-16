@@ -31,9 +31,8 @@ use crate::{ImportResult, IoError};
 /// Photoshop's Import PDF default resolution.
 pub const DEFAULT_DPI: f32 = 300.0;
 
-/// The resolution a PDF opens at without Import PDF: a point per pixel (type and shapes stay
-/// editable at any size).
-pub const OPEN_DPI: f32 = 72.0;
+/// The resolution a PDF opens at without Import PDF (print resolution, as Import PDF's default).
+pub const OPEN_DPI: f32 = DEFAULT_DPI;
 
 /// Whether `bytes` start like a PDF.
 pub fn is_pdf(bytes: &[u8]) -> bool {
