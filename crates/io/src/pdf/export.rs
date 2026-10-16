@@ -65,7 +65,7 @@ impl Compatibility {
 }
 
 /// Save Adobe PDF's options beyond the editing data.
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PdfOptions {
     pub compatibility: Compatibility,
     /// Image Compression: JPEG at this quality (1–100) for images without transparency; `None`
@@ -73,6 +73,16 @@ pub struct PdfOptions {
     pub jpeg_quality: Option<u8>,
     /// Downsampling: images in a document above `.1` ppi are resampled to `.0` ppi.
     pub downsample: Option<(f32, f32)>,
+    /// Each visible top-level layer (or group) as a PDF layer of its name, which Acrobat and
+    /// Illustrator show and can hide (Illustrator's "Create Acrobat Layers from Top-Level
+    /// Layers"). On by default.
+    pub pdf_layers: bool,
+}
+
+impl Default for PdfOptions {
+    fn default() -> Self {
+        PdfOptions { compatibility: Compatibility::default(), jpeg_quality: None, downsample: None, pdf_layers: true }
+    }
 }
 
 /// Saves `doc` as a one-page layered PDF; `editing` adds the Photoshop editing data (*Preserve
@@ -85,8 +95,14 @@ pub fn export_layered(doc: &Document, editing: bool) -> Result<ExportResult, IoE
 pub fn export_layered_with(doc: &Document, editing: bool, opts: &PdfOptions) -> Result<ExportResult, IoError> {
     let mut warnings = Vec::new();
     let mut pdf = new_pdf(opts)?;
-    draw_page(&mut pdf, doc, opts, &mut warnings)?;
+    let marks = draw_page(&mut pdf, doc, opts, &mut warnings)?;
     let mut bytes = finish(pdf, &doc.name)?;
+    if !marks.is_empty() {
+        match super::ocg::add_layers(bytes.clone(), &marks) {
+            Ok(b) => bytes = b,
+            Err(e) => warnings.push(format!("{e}; saved without PDF layers")),
+        }
+    }
     if editing {
         match super::photoshop::attach(bytes.clone(), doc, &mut warnings) {
             Ok(b) => bytes = b,
@@ -103,7 +119,8 @@ pub fn export_pages(docs: &[Document], title: &str) -> Result<ExportResult, IoEr
         return Err(IoError::Unsupported("PDF: no pages to write".into()));
     }
     let mut warnings = Vec::new();
-    let opts = PdfOptions::default();
+    // One page per document: no PDF layers (they would be per page, with each page's names).
+    let opts = PdfOptions { pdf_layers: false, ..PdfOptions::default() };
     let mut pdf = new_pdf(&opts)?;
     for doc in docs {
         draw_page(&mut pdf, doc, &opts, &mut warnings)?;
@@ -130,7 +147,8 @@ fn finish(mut pdf: krilla::Document, title: &str) -> Result<Vec<u8>, IoError> {
 }
 
 /// `doc` as one page of `pdf`, sized so it prints at its resolution.
-fn draw_page(pdf: &mut krilla::Document, doc: &Document, opts: &PdfOptions, warnings: &mut Vec<String>) -> Result<(), IoError> {
+/// Returns the PDF layers the page marked (see [`Writer::top_level`]).
+fn draw_page(pdf: &mut krilla::Document, doc: &Document, opts: &PdfOptions, warnings: &mut Vec<String>) -> Result<Vec<super::ocg::Mark>, IoError> {
     let dpi = if doc.resolution_dpi > 0.0 && doc.resolution_dpi.is_finite() { doc.resolution_dpi } else { 72.0 };
     let k = 72.0 / dpi;
     let (w, h) = (doc.size.width.max(1) as f32, doc.size.height.max(1) as f32);
@@ -139,7 +157,7 @@ fn draw_page(pdf: &mut krilla::Document, doc: &Document, opts: &PdfOptions, warn
     let mut surface = page.surface();
     surface.push_transform(&Transform::from_scale(k, k));
     let ink = super::ink::Ink::of(doc);
-    let mut w = Writer { doc, rastered: 0, fonts: Vec::new(), ink: ink.clone().unwrap_or(super::ink::Ink::Rgb), opts: *opts, dpi };
+    let mut w = Writer { doc, rastered: 0, fonts: Vec::new(), ink: ink.clone().unwrap_or(super::ink::Ink::Rgb), opts: *opts, dpi, marks: Vec::new() };
     if ink.is_some() {
         // Everything up to the topmost layer that works on what is beneath it, as one image.
         let cut = doc.layers.iter().rposition(|l| l.visible && needs_backdrop(l));
@@ -150,7 +168,11 @@ fn draw_page(pdf: &mut krilla::Document, doc: &Document, opts: &PdfOptions, warn
             }
             None => &doc.layers[..],
         };
-        w.layers(&mut surface, rest);
+        if opts.pdf_layers {
+            w.top_level(&mut surface, rest);
+        } else {
+            w.layers(&mut surface, rest);
+        }
     } else {
         // Lab, Indexed, Duotone…: the composite, converted for display.
         w.image_of(&mut surface, &doc.layers);
@@ -159,10 +181,11 @@ fn draw_page(pdf: &mut krilla::Document, doc: &Document, opts: &PdfOptions, warn
     surface.pop();
     surface.finish();
     page.finish();
+    let marks = std::mem::take(&mut w.marks);
     if w.rastered > 0 {
         warnings.push(format!("PDF: {} layer(s) with no PDF equivalent (effects, masks, gradients, adjustments, …) saved as images", w.rastered));
     }
-    Ok(())
+    Ok(marks)
 }
 
 struct Writer<'d> {
@@ -173,11 +196,34 @@ struct Writer<'d> {
     opts: PdfOptions,
     /// The document's resolution.
     dpi: f32,
+    /// The PDF layers marked so far, in drawing order.
+    marks: Vec<super::ocg::Mark>,
     /// Fonts already handed to krilla, by the face's data pointer and index.
     fonts: Vec<((usize, u32), Font)>,
 }
 
 impl Writer<'_> {
+    /// [`Writer::layers`] with each visible top-level layer (and the layers clipped to it) in a
+    /// marked-content sequence of its own, which [`super::ocg::add_layers`] makes a PDF layer.
+    fn top_level(&mut self, s: &mut KSurface<'_>, layers: &[Layer]) {
+        use krilla::tagging::{Artifact, ArtifactType, ContentTag};
+        let mut i = 0;
+        while let Some(l) = layers.get(i) {
+            let mut j = i + 1;
+            while layers.get(j).is_some_and(|c| c.clipped) && !l.clipped {
+                j += 1;
+            }
+            if l.visible {
+                // A bare `/Artifact BMC` (no properties): the marker the PDF layer replaces.
+                s.start_tagged(ContentTag::Artifact(Artifact::with_kind(ArtifactType::Other)));
+                self.layers(s, layers.get(i..j).unwrap_or_default());
+                s.end_tagged();
+                self.marks.push(super::ocg::Mark { name: l.name.clone(), locked: l.locks.all });
+            }
+            i = j;
+        }
+    }
+
     fn layers(&mut self, s: &mut KSurface<'_>, layers: &[Layer]) {
         let mut i = 0;
         while i < layers.len() {

@@ -541,8 +541,10 @@ fn artboards_save_as_vectors_on_their_background() {
     let r = photosplice_io::pdf::export::export_layered(&doc, false).unwrap();
     assert!(r.warnings.is_empty(), "{:?}", r.warnings);
     let back = open_page("a.pdf", &r.bytes, 0, 72.0, PageAs::Layers).unwrap().document;
-    // The board's black background and the box on it as shapes, not one image.
-    assert!(kinds(&back).iter().filter(|k| **k == "shape").count() >= 2, "{:?}", kinds(&back));
+    // The board's black background and the box on it as shapes, not one image (in the board's
+    // PDF layer, a group).
+    assert_eq!(back.layers[0].name, "Board");
+    assert!(group_children(&back, 0).iter().filter(|k| **k == "shape").count() >= 2, "{:?}", group_children(&back, 0));
     let px = photosplice_compose::flatten(&back).px[70 * 200 + 110];
     assert!(px[3] > 0.9 && px[0] < 0.1 && px[2] < 0.1, "black board: {px:?}");
 }
@@ -674,29 +676,30 @@ fn pdf_layers_become_named_groups_hidden_ones_included() {
         /OC /oc2 BDC 0 0 1 rg 100 20 50 50 re f EMC \
         /OC /oc3 BDC BT /F1 12 Tf 0 g 10 80 Td (Hi) Tj ET EMC";
     let d = open(&pdf_with_layers(&content.replace('\\', ""), &["<< /Type /XObject /Subtype /Form /BBox [0 0 1 1] /Length 0 >>\nstream\n\nendstream".into()]));
-    assert_eq!(kinds(&d), ["shape", "group", "group", "group"], "outside every layer at the bottom, then one group per layer");
+    assert_eq!(kinds(&d), ["shape", "shape", "shape", "text"], "outside every layer at the bottom, then each layer's content, its one layer named after it");
     let names: Vec<&str> = d.layers.iter().map(|l| l.name.as_str()).collect();
     assert_eq!(&names[1..], ["Back", "Hidden", "Locked art"], "names, a UTF-16 one too");
     assert_eq!(d.layers.iter().map(|l| l.visible).collect::<Vec<_>>(), [true, true, false, true]);
     assert!(d.layers[3].locks.all && !d.layers[1].locks.all);
-    // Each group holds just its layer's content; the hidden layer's square came in too.
-    assert_eq!(group_children(&d, 1), ["shape"]);
-    assert_eq!(group_children(&d, 2), ["shape"]);
-    assert_eq!(group_children(&d, 3), ["text"]);
+    // A layer with more than one item is a group of them.
+    let content = "/OC /oc1 BDC 1 0 0 rg 20 20 50 50 re f 0 0 1 rg 100 20 50 50 re f EMC";
+    let d = open(&pdf_with_layers(content, &["<< /Type /XObject /Subtype /Form /BBox [0 0 1 1] /Length 0 >>\nstream\n\nendstream".into()]));
+    assert_eq!(kinds(&d), ["group"]);
+    assert_eq!(d.layers[0].name, "Back");
+    assert_eq!(group_children(&d, 0), ["shape", "shape"]);
 }
 
 #[test]
 fn a_form_in_a_pdf_layer_lands_in_its_group() {
     let form = "<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] /OC 7 0 R /Length 22 >>\nstream\n0 1 0 rg 0 0 40 40 re f\nendstream";
     let d = open(&pdf_with_layers("/Fm Do", &[form.into()]));
-    assert_eq!(kinds(&d), ["group"], "only the layer the form is in, which is off");
+    assert_eq!(kinds(&d), ["shape"], "only the layer the form is in, which is off");
     assert_eq!(d.layers[0].name, "Hidden");
     assert!(!d.layers[0].visible);
-    assert_eq!(group_children(&d, 0), ["shape"]);
     // With content outside every layer too, the form's layer holds only the form's content.
     let d = open(&pdf_with_layers("0.5 g 0 0 10 10 re f /Fm Do", &[form.into()]));
-    assert_eq!(kinds(&d), ["shape", "group"]);
-    assert_eq!(group_children(&d, 1), ["shape"]);
+    assert_eq!(kinds(&d), ["shape", "shape"]);
+    assert_eq!(d.layers[1].name, "Hidden");
 }
 
 #[test]
@@ -1021,4 +1024,32 @@ fn a_password_protected_pdf_opens_with_its_password() {
     let open = encrypted_pdf("", "owner");
     assert!(!photosplice_io::pdf::needs_password(&open));
     assert_eq!(kinds(&open_page("o.pdf", &open, 0, 72.0, PageAs::Layers).unwrap().document), ["shape"]);
+}
+
+#[test]
+fn top_level_layers_save_as_pdf_layers_and_reopen_as_themselves() {
+    use photosplice_io::pdf::export::PdfOptions;
+    let mut doc = sample();
+    doc.layers[2].locks.all = true;
+    let mut hidden = doc.layers[1].clone();
+    hidden.name = "Hidden".into();
+    hidden.visible = false;
+    doc.layers.push(hidden);
+    let bytes = export_with(&doc, PdfOptions::default());
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    assert!(text.contains("/OCProperties") && text.contains("/Type /OCG"), "PDF layers written");
+    // Any reader: the visible layers, each a PDF layer of its name; the hidden one isn't drawn.
+    let back = open_page("s.pdf", &bytes, 0, 72.0, PageAs::Layers).unwrap().document;
+    assert_eq!(kinds(&back), ["shape", "pixels", "text"], "a PDF layer of one layer is that layer");
+    assert_eq!(back.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["Box", "Green", "Saved"]);
+    assert!(back.layers[2].locks.all && !back.layers[0].locks.all, "locked stays locked");
+    assert!(mean_diff(&doc, &back) < 0.02);
+    // With the editing data on top, the document still reopens from it.
+    let r = photosplice_io::pdf::export::export_layered(&doc, true).unwrap();
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    let back = open_page("s.pdf", &r.bytes, 0, 72.0, PageAs::Layers).unwrap().document;
+    assert_eq!(back.layers.len(), 4, "every layer, the hidden one too");
+    // Off: no PDF layers.
+    let plain = export_with(&doc, PdfOptions { pdf_layers: false, ..Default::default() });
+    assert!(!String::from_utf8_lossy(&plain).contains("/OCProperties"));
 }

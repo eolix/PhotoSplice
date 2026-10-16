@@ -85,7 +85,13 @@ pub(crate) fn import_pdf_layers(
         // A layer only marked content uses is drawn alone. A form's `/OC` marks nothing, so a
         // layer a form is in keeps the whole pass, less what the outside pass drew.
         let children = if l.via_form { without(pass(Some(l.id), Keep::All, &mut warnings)?, &outside) } else { pass(Some(l.id), Keep::InLayer, &mut warnings)? };
-        let mut g = Layer::group(l.name.clone(), children);
+        // A PDF layer holding one layer is that layer (a PDF from PhotoSplice or the Reference
+        // marks each top-level layer); more become a group.
+        let mut g = match <[Layer; 1]>::try_from(children) {
+            Ok([one]) => one,
+            Err(children) => Layer::group(l.name.clone(), children),
+        };
+        g.name = l.name.clone();
         g.visible = l.visible;
         g.locks.all = l.locked;
         doc.layers.push(g);

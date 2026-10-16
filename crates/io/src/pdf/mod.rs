@@ -19,6 +19,7 @@ mod ocg;
 mod photoshop;
 mod render;
 mod shading;
+mod update;
 
 use photosplice_codecs::{self as codecs, ChannelLayout};
 

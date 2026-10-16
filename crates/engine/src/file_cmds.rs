@@ -227,6 +227,9 @@ fn pdf_options(p: &Value) -> photosplice_io::pdf::export::PdfOptions {
     if let Some(c) = p.get("pdfCompatibility").and_then(Value::as_str).and_then(Compatibility::from_id) {
         o.compatibility = c;
     }
+    if let Some(on) = p.get("pdfLayers").and_then(Value::as_bool) {
+        o.pdf_layers = on;
+    }
     if p.get("pdfCompression").and_then(Value::as_str) == Some("jpeg") {
         let q = f64_param(p, "pdfQuality").filter(|q| q.is_finite()).unwrap_or(10.0);
         o.jpeg_quality = Some((q.clamp(0.0, 12.0) / 12.0 * 99.0 + 1.0).round() as u8);
@@ -1273,7 +1276,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Save a Copy…",
             &["File"],
             Some("Cmd+Alt+S"),
-            r##"{"path":str (format from the extension),"quality":0..12? (JPEG),"layers":bool=true,"tiffLayers":bool=false (TIFF: keep the layers; flat by default),"pdfEditing":bool=true (PDF: Preserve Photoshop Editing Capabilities),"pdfCompatibility":"1.4|1.5|1.6|1.7|2.0"="1.7","pdfCompression":"zip|jpeg"="zip","pdfQuality":0..12=10 (JPEG),"pdfDownsample":[to ppi, above ppi]?}"##,
+            r##"{"path":str (format from the extension),"quality":0..12? (JPEG),"layers":bool=true,"tiffLayers":bool=false (TIFF: keep the layers; flat by default),"pdfEditing":bool=true (PDF: Preserve Photoshop Editing Capabilities),"pdfCompatibility":"1.4|1.5|1.6|1.7|2.0"="1.7","pdfCompression":"zip|jpeg"="zip","pdfQuality":0..12=10 (JPEG),"pdfDownsample":[to ppi, above ppi]?,"pdfLayers":bool=true (each visible top-level layer a PDF layer)}"##,
             native_doc,
             save_a_copy
         ),

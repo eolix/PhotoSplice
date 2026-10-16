@@ -11,6 +11,9 @@
 use std::io::Write as _;
 
 use hayro::hayro_syntax::Pdf;
+use hayro::hayro_syntax::object::ObjectIdentifier;
+
+use crate::IoError;
 use hayro::hayro_syntax::content::ops::TypedInstruction;
 use hayro::hayro_syntax::object::{Array, Dict, Name};
 use hayro::hayro_syntax::page::Page;
@@ -173,6 +176,104 @@ fn last_startxref(bytes: &[u8]) -> Option<usize> {
     std::str::from_utf8(bytes.get(at + 9..)?.get(..32.min(bytes.len() - at - 9))?).ok()?.split_whitespace().next()?.parse().ok()
 }
 
+// ---- writing ----
+
+/// A PDF layer the exporter marked: its name, and whether the layer is locked.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Mark {
+    pub name: String,
+    pub locked: bool,
+}
+
+/// What the exporter wraps each layer's content in (krilla's untyped artifact).
+const MARKER: &[u8] = b"/Artifact BMC";
+
+/// Makes the page's marked sequences (one per [`Mark`], in order) PDF layers, as an incremental
+/// update: the layers, the page's content with each marker replaced by `/OC /psN BDC`, its
+/// resources naming the layers, and the catalog listing them (top layer first, as the Layers
+/// panel shows them; locked ones locked). For the one-page PDF krilla writes.
+pub(super) fn add_layers(pdf: Vec<u8>, marks: &[Mark]) -> Result<Vec<u8>, IoError> {
+    let bad = |why: &str| IoError::Unsupported(format!("PDF: can't add the PDF layers ({why})"));
+    let (content, page_num, page_dict, res_text, catalog_num, catalog_text) = {
+        let doc = Pdf::new(pdf.clone()).map_err(|_| bad("the page can't be read"))?;
+        let xref = doc.xref();
+        let pages = doc.pages();
+        let page = pages.first().ok_or_else(|| bad("no page"))?;
+        let content = page.page_stream().ok_or_else(|| bad("no content"))?.to_vec();
+        let page_id = page.raw().obj_id().ok_or_else(|| bad("the page isn't an object"))?;
+        let dict = std::str::from_utf8(page.raw().data()).map_err(|_| bad("the page dictionary"))?;
+        let (res, dict) = take_ref(dict, "/Resources");
+        let (_, dict) = take_ref(&dict, "/Contents");
+        let res = res.ok_or_else(|| bad("the resources aren't an object"))?;
+        let resources = xref.get::<hayro::hayro_syntax::object::Dict<'_>>(ObjectIdentifier::new(res.0, res.1)).ok_or_else(|| bad("no resources"))?;
+        let res_text = std::str::from_utf8(resources.data()).map_err(|_| bad("the resources"))?.trim().to_string();
+        let root = xref.root_id();
+        let catalog = xref.get::<hayro::hayro_syntax::object::Dict<'_>>(root).ok_or_else(|| bad("no catalog"))?;
+        let catalog_text = std::str::from_utf8(catalog.data()).map_err(|_| bad("the catalog"))?.trim().to_string();
+        if res_text.contains("/Properties") || catalog_text.contains("/OCProperties") {
+            return Err(bad("the file has some already"));
+        }
+        let num = |n: i32| usize::try_from(n).map_err(|_| bad("an object number"));
+        (content, num(page_id.obj_number)?, dict, res_text, num(root.obj_number)?, catalog_text)
+    };
+    // Each marker, in order, becomes its layer's.
+    let mut out = Vec::with_capacity(content.len() + marks.len() * 8);
+    let mut rest = content.as_slice();
+    let mut n = 0;
+    while let Some(at) = rest.windows(MARKER.len()).position(|w| w == MARKER) {
+        out.extend_from_slice(rest.get(..at).unwrap_or_default());
+        let _ = write!(out, "/OC /ps{n} BDC");
+        n += 1;
+        rest = rest.get(at + MARKER.len()..).unwrap_or_default();
+    }
+    out.extend_from_slice(rest);
+    if n != marks.len() {
+        return Err(bad("the page's marks don't match the layers"));
+    }
+    let open = |d: &str| d.strip_suffix(">>").map(str::to_string).ok_or_else(|| bad("a malformed dictionary"));
+    let mut up = super::update::Update::new(pdf)?;
+    let ocgs: Vec<usize> = marks.iter().map(|m| up.object(&format!("<< /Type /OCG /Name <{}> >>", utf16_hex(&m.name)))).collect();
+    let contents = up.stream("", &out);
+    let props: String = ocgs.iter().enumerate().map(|(i, o)| format!("/ps{i} {o} 0 R ")).collect();
+    let resources = up.object(&format!("{} /Properties << {props}>> >>", open(&res_text)?));
+    up.replace_page((page_num, page_dict), &format!("/Resources {resources} 0 R /Contents {contents} 0 R"))?;
+    let refs = |ids: &mut dyn Iterator<Item = &usize>| ids.map(|o| format!("{o} 0 R ")).collect::<String>();
+    let all = refs(&mut ocgs.iter());
+    let order = refs(&mut ocgs.iter().rev());
+    let locked = refs(&mut ocgs.iter().zip(marks).filter(|(_, m)| m.locked).map(|(o, _)| o));
+    let d = format!("<< /Name (Layers) /BaseState /ON /Order [ {order}] /Locked [ {locked}] >>");
+    up.replace(catalog_num, &format!("{} /OCProperties << /OCGs [ {all}] /D {d} >> >>", open(&catalog_text)?));
+    up.finish()
+}
+
+/// `name` as a PDF text string in hex: UTF-16BE with its byte-order mark.
+fn utf16_hex(name: &str) -> String {
+    std::iter::once(0xFEFF).chain(name.encode_utf16()).map(|u| format!("{u:04X}")).collect()
+}
+
+/// Removes `key` and the reference after it (`n g R`) from a dictionary's text; returns the
+/// reference. The text is krilla's (no strings in the page or resources dictionaries).
+fn take_ref(dict: &str, key: &str) -> (Option<(i32, i32)>, String) {
+    let mut from = 0;
+    while let Some(at) = dict.get(from..).and_then(|d| d.find(key)).map(|i| i + from) {
+        let after = at + key.len();
+        // A longer name that starts the same (`/ResourcesX`) isn't this key.
+        if dict.get(after..).and_then(|r| r.chars().next()).is_some_and(|c| c.is_ascii_alphanumeric()) {
+            from = after;
+            continue;
+        }
+        let tail = dict.get(after..).unwrap_or_default();
+        let mut it = tail.split_whitespace();
+        let (Some(n), Some(g)) = (it.next(), it.next()) else { return (None, dict.to_string()) };
+        let (Ok(n), Ok(g)) = (n.parse::<i32>(), g.parse::<i32>()) else { return (None, dict.to_string()) };
+        // Where the `R` ends, in the original text.
+        let Some(r) = tail.find('R') else { return (None, dict.to_string()) };
+        let end = after + r + 1;
+        return (Some((n, g)), format!("{}{}", dict.get(..at).unwrap_or_default(), dict.get(end..).unwrap_or_default()));
+    }
+    (None, dict.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +285,20 @@ mod tests {
         assert_eq!(text_string(&[0xFE, 0xFF, 0]), "", "an odd byte is dropped, not a panic");
         assert_eq!(text_string(&[0xEF, 0xBB, 0xBF, b'x']), "x");
         assert_eq!(text_string(&[0xFF, 0xFE, b'L', 0, b'a', 0, 0, 0]), "La", "UTF-16LE, its NUL dropped");
+    }
+
+    #[test]
+    fn references_come_out_of_a_dictionary() {
+        let d = "<</Type/Page/Resources 2 0 R/MediaBox[0 0 200 100]/Parent 1 0 R/Contents 10 0 R>>";
+        let (r, d) = take_ref(d, "/Resources");
+        assert_eq!(r, Some((2, 0)));
+        let (c, d) = take_ref(&d, "/Contents");
+        assert_eq!(c, Some((10, 0)));
+        assert_eq!(d, "<</Type/Page/MediaBox[0 0 200 100]/Parent 1 0 R>>");
+        assert_eq!(take_ref("<</ResourcesX 3 0 R>>", "/Resources").0, None);
+        assert_eq!(take_ref("<</Resources <</Font 1 0 R>> >>", "/Resources").0, None, "inline: not a reference");
+        assert_eq!(take_ref("<</Resources", "/Resources").0, None);
+        assert_eq!(utf16_hex("Aé"), "FEFF004100E9");
     }
 
     #[test]

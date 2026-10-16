@@ -908,6 +908,7 @@ fn pdf_options_ui(ui: &mut egui::Ui, f: &mut Map<String, Value>, cur: photosplic
         ("pdfDownsampleMode", json!(if cur.downsample.is_some() { "bicubic" } else { "none" })),
         ("pdfDownsampleTo", json!(to.round())),
         ("pdfDownsampleAbove", json!(above.round())),
+        ("pdfLayers", json!(cur.pdf_layers)),
     ] {
         f.entry(k).or_insert(v);
     }
@@ -940,6 +941,7 @@ fn pdf_options_ui(ui: &mut egui::Ui, f: &mut Map<String, Value>, cur: photosplic
             web_number(ui, f, "pdfDownsampleAbove", 1.0..=4800.0, "ppi", 450.0);
         });
     }
+    check(ui, f, "pdfLayers", tl!("Create PDF Layers from Top-Level Layers"), cur.pdf_layers);
 }
 
 /// The PDF options the dialog's fields set (missing ones keep `cur`).
@@ -948,6 +950,9 @@ pub(crate) fn pdf_options(f: &Map<String, Value>, cur: photosplice_io::pdf::expo
     let mut o = cur;
     if let Some(c) = f.get("pdfCompatibility").and_then(Value::as_str).and_then(Compatibility::from_id) {
         o.compatibility = c;
+    }
+    if let Some(on) = f.get("pdfLayers").and_then(Value::as_bool) {
+        o.pdf_layers = on;
     }
     let num = |k: &str| f.get(k).and_then(|v| v.as_f64().or_else(|| v.as_str()?.parse().ok())).filter(|v: &f64| v.is_finite());
     match f.get("pdfCompression").and_then(Value::as_str) {
@@ -1234,7 +1239,7 @@ mod tests {
     #[test]
     fn pdf_option_fields_set_the_options_and_keep_the_rest() {
         use photosplice_io::pdf::export::{Compatibility, PdfOptions};
-        let cur = PdfOptions { compatibility: Compatibility::Pdf16, jpeg_quality: Some(50), downsample: None };
+        let cur = PdfOptions { compatibility: Compatibility::Pdf16, jpeg_quality: Some(50), downsample: None, pdf_layers: true };
         assert_eq!(pdf_options(&Map::new(), cur), cur, "no fields: as last time");
         let mut f = Map::new();
         f.insert("pdfCompatibility".into(), json!("2.0"));
@@ -1243,7 +1248,9 @@ mod tests {
         f.insert("pdfDownsampleTo".into(), json!(150));
         f.insert("pdfDownsampleAbove".into(), json!(100));
         let o = pdf_options(&f, cur);
-        assert_eq!(o, PdfOptions { compatibility: Compatibility::Pdf20, jpeg_quality: None, downsample: Some((150.0, 150.0)) }, "the threshold is never below the target");
+        assert_eq!(o, PdfOptions { compatibility: Compatibility::Pdf20, jpeg_quality: None, downsample: Some((150.0, 150.0)), pdf_layers: true }, "the threshold is never below the target");
+        f.insert("pdfLayers".into(), json!(false));
+        assert!(!pdf_options(&f, cur).pdf_layers);
         f.insert("pdfCompression".into(), json!("jpeg"));
         f.insert("pdfQuality".into(), json!("6"));
         assert_eq!(pdf_options(&f, cur).jpeg_quality, Some(51));

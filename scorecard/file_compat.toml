@@ -73,7 +73,7 @@ id = "FILE-215-10"
 target = "Multi-page PDF save, PDF presentation, layer comps to PDF, vector/text output, PDF import"
 status = "partial"
 issue = 215
-note = "io pdf/: Import PDF (pages, Crop To, resolution) as editable type/shape/gradient/image/group layers, PDF layers (optional content) as named groups, hidden ones included; Reference PDFs reopen from their editing data and saved PDFs carry it; vector + text page output; Artboards to PDF writes vector pages. Missing: PDF Presentation, Layer Comps to PDF, PDF layers on save, PDF/X and compression options"
+note = "io pdf/: Import PDF (pages, Crop To, resolution) as editable type/shape/gradient/image/group layers, PDF layers (optional content) as named groups, hidden ones included; soft masks as layer masks; password-protected files; Reference PDFs reopen from their editing data and saved PDFs carry it; vector + text page output in RGB, CMYK and Grayscale, top-level layers as PDF layers; Save Adobe PDF Compatibility, Compression (ZIP/JPEG), Downsampling; Artboards to PDF writes vector pages. Missing: PDF/X standards, security on save, Reference acceptance check (temp kit)"
 
 [[item]]
 id = "FILE-215-11"

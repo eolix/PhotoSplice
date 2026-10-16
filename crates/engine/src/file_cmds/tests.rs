@@ -544,7 +544,9 @@ fn psd_selection_survives_save_and_open() {
 fn pdf_save_params_parse_and_bad_ones_keep_the_defaults() {
     use photosplice_io::pdf::export::{Compatibility, PdfOptions};
     let o = SaveOpts::from_params(&json!({"pdfCompatibility": "1.4", "pdfCompression": "jpeg", "pdfQuality": 12, "pdfDownsample": [300, 450]})).pdf;
-    assert_eq!(o, PdfOptions { compatibility: Compatibility::Pdf14, jpeg_quality: Some(100), downsample: Some((300.0, 450.0)) });
+    assert_eq!(o, PdfOptions { compatibility: Compatibility::Pdf14, jpeg_quality: Some(100), downsample: Some((300.0, 450.0)), pdf_layers: true });
+    assert!(!SaveOpts::from_params(&json!({"pdfLayers": false})).pdf.pdf_layers);
+    assert!(SaveOpts::from_params(&json!({"pdfLayers": "no"})).pdf.pdf_layers, "unreadable: the default");
     assert_eq!(SaveOpts::from_params(&json!({"pdfCompression": "jpeg"})).pdf.jpeg_quality, Some(84), "Maximum (10) by default");
     for bad in [
         json!({"pdfCompatibility": 7, "pdfCompression": ["jpeg"], "pdfDownsample": "x"}),
