@@ -4752,7 +4752,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "arboard",
  "async-io",
@@ -4793,7 +4793,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-affinity"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -4803,7 +4803,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-algo"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "photosplice-color",
  "photosplice-geom",
@@ -4816,7 +4816,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-automation"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "cap-std",
  "getrandom 0.3.4",
@@ -4830,7 +4830,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-cms"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "moxcms",
  "rayon",
@@ -4838,7 +4838,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-codecs"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "exr",
  "flate2",
@@ -4860,7 +4860,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-color"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "photosplice-cms",
  "serde",
@@ -4868,7 +4868,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-compose"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "criterion",
  "photosplice-color",
@@ -4883,7 +4883,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-doc"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "photosplice-color",
  "photosplice-geom",
@@ -4894,7 +4894,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-engine"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "blake3",
  "craft-print",
@@ -4929,7 +4929,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-format"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "blake3",
  "crc32fast",
@@ -4950,14 +4950,14 @@ dependencies = [
 
 [[package]]
 name = "photosplice-geom"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "photosplice-gpu"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "half",
  "log",
@@ -4974,7 +4974,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-io"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "blake3",
  "bytemuck",
@@ -5014,14 +5014,14 @@ dependencies = [
 
 [[package]]
 name = "photosplice-ops"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "photosplice-doc",
 ]
 
 [[package]]
 name = "photosplice-paint"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "photosplice-color",
  "photosplice-geom",
@@ -5032,7 +5032,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-plugins"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "photosplice-color",
  "photosplice-geom",
@@ -5047,7 +5047,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-psd"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "flate2",
  "photosplice-psd",
@@ -5058,7 +5058,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-raster"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "photosplice-color",
  "photosplice-geom",
@@ -5068,7 +5068,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-raw"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "flate2",
  "image",
@@ -5083,7 +5083,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-tablet"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "block2 0.6.2",
  "objc2 0.6.4",
@@ -5095,7 +5095,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-testkit"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "memory-stats",
  "photosplice-color",
@@ -5106,7 +5106,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-text"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "flate2",
  "parley",
@@ -5120,7 +5120,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-ui-egui"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "base64 0.22.1",
  "craft-print",
@@ -5158,7 +5158,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-vector"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "photosplice-color",
  "photosplice-doc",
@@ -5169,7 +5169,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-web"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "eframe",
  "egui",
@@ -5191,7 +5191,7 @@ dependencies = [
 
 [[package]]
 name = "photosplice-web-boot"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "flate2",
  "js-sys",
@@ -8791,7 +8791,7 @@ checksum = "9440ea3e5aeabb0ac63af70daf835274065238cdd0cec83418f417eae38bacee"
 
 [[package]]
 name = "xtask"
-version = "0.9.22"
+version = "0.9.23"
 dependencies = [
  "serde",
  "serde_json",
