@@ -1383,8 +1383,11 @@ fn ra_clamped(p: vec2<i32>) -> f32 {
 }
 
 fn bevel_part(p: vec2<i32>, depth: f32, region: f32) -> f32 {
-    let gx = (ra_clamped(p + vec2(1, 0)) - ra_clamped(p - vec2(1, 0))) * 0.5 * depth;
-    let gy = (ra_clamped(p + vec2(0, 1)) - ra_clamped(p - vec2(0, 1))) * 0.5 * depth;
+    // Prewitt over the 3 × 3 neighbourhood, as `shade_into`.
+    let gx = (ra_clamped(p + vec2(1, -1)) + ra_clamped(p + vec2(1, 0)) + ra_clamped(p + vec2(1, 1))
+        - ra_clamped(p + vec2(-1, -1)) - ra_clamped(p + vec2(-1, 0)) - ra_clamped(p + vec2(-1, 1))) / 6.0 * depth;
+    let gy = (ra_clamped(p + vec2(-1, 1)) + ra_clamped(p + vec2(0, 1)) + ra_clamped(p + vec2(1, 1))
+        - ra_clamped(p + vec2(-1, -1)) - ra_clamped(p + vec2(0, -1)) - ra_clamped(p + vec2(1, -1))) / 6.0 * depth;
     let n = vec3(-gx, -gy, 1.0);
     let len = sqrt(n.x * n.x + n.y * n.y + 1.0);
     let shade = (n.x * op.p0.x + n.y * op.p0.y + n.z * op.p0.z) / len;

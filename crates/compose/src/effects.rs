@@ -1323,8 +1323,12 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
         for y in 0..shape.h as i64 {
             for x in 0..shape.w as i64 {
                 let i = y as usize * shape.w + x as usize;
-                let gx = (hc(x + 1, y) - hc(x - 1, y)) * 0.5 * depth;
-                let gy = (hc(x, y + 1) - hc(x, y - 1)) * 0.5 * depth;
+                // The height's slope over the 3 × 3 neighbourhood, all six neighbours weighted
+                // alike (Prewitt; Reference corpus bevel-emboss-smooth 1.7 % of pixels off → 0, a
+                // pillow chisel 0.23 → 0.07 max; a centre difference along each axis left
+                // diagonal edges and corners off).
+                let gx = (hc(x + 1, y - 1) + hc(x + 1, y) + hc(x + 1, y + 1) - hc(x - 1, y - 1) - hc(x - 1, y) - hc(x - 1, y + 1)) / 6.0 * depth;
+                let gy = (hc(x - 1, y + 1) + hc(x, y + 1) + hc(x + 1, y + 1) - hc(x - 1, y - 1) - hc(x, y - 1) - hc(x + 1, y - 1)) / 6.0 * depth;
                 let n = [-gx, -gy, 1.0];
                 let len = (n[0] * n[0] + n[1] * n[1] + 1.0).sqrt();
                 let shade = (n[0] * light_v[0] + n[1] * light_v[1] + n[2] * light_v[2]) / len;
