@@ -1175,15 +1175,15 @@ fn every_page_opens_as_a_board_of_editable_layers() {
     let pages = ["BT /F1 24 Tf 0 g 20 50 Td (First) Tj ET 1 0 0 rg 150 10 30 30 re f", "BT /F1 24 Tf 0 g 20 50 Td (Second) Tj ET", "0 0 1 rg 10 10 50 50 re f"];
     let r = photosplice_io::import("doc.pdf", &multi_page(&pages)).unwrap();
     let d = &r.document;
-    assert_eq!(d.resolution_dpi, 300.0, "print resolution");
-    // Three 200 × 100 pt boards (833 × 416 px at 300 ppi), 30 pt (125 px) apart.
-    assert_eq!((d.size.width, d.size.height), (2749, 416));
+    assert_eq!(d.resolution_dpi, 144.0, "two pixels per point");
+    // Three 200 × 100 pt boards (400 × 200 px at 144 ppi), 30 pt (60 px) apart.
+    assert_eq!((d.size.width, d.size.height), (1320, 200));
     assert_eq!(d.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["Page 1", "Page 2", "Page 3"]);
     let boards: Vec<photosplice_geom::Rect> = d.layers.iter().map(|l| match &l.content {
         LayerContent::Group(g) => g.artboard.as_ref().expect("an artboard").rect,
         _ => panic!("a page is a group"),
     }).collect();
-    assert_eq!(boards, [photosplice_geom::Rect::new(0, 0, 833, 416), photosplice_geom::Rect::new(958, 0, 1791, 416), photosplice_geom::Rect::new(1916, 0, 2749, 416)]);
+    assert_eq!(boards, [photosplice_geom::Rect::new(0, 0, 400, 200), photosplice_geom::Rect::new(460, 0, 860, 200), photosplice_geom::Rect::new(920, 0, 1320, 200)]);
     assert_eq!(group_children(d, 0), ["text", "shape"]);
     assert_eq!(group_children(d, 1), ["text"]);
     assert_eq!(group_children(d, 2), ["shape"]);
@@ -1191,8 +1191,8 @@ fn every_page_opens_as_a_board_of_editable_layers() {
     let second = &d.layers[1].children().unwrap()[0];
     let LayerContent::Text(t) = &second.content else { panic!() };
     assert_eq!(t.text, "Second");
-    assert!(t.transform.m[4] > 958.0 && t.transform.m[4] < 1791.0, "{:?}", t.transform);
-    let px = photosplice_compose::flatten(d).px[300 * 2749 + 2016];
+    assert!(t.transform.m[4] > 460.0 && t.transform.m[4] < 860.0, "{:?}", t.transform);
+    let px = photosplice_compose::flatten(d).px[130 * 1320 + 990];
     assert!(px[2] > 0.9 && px[0] < 0.1, "the blue square on page 3: {px:?}");
     assert!(r.warnings.is_empty(), "{:?}", r.warnings);
     // One page: no board, as before.
