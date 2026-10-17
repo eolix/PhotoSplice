@@ -54,9 +54,12 @@ fn open_three(h: &mut Harness<'static, PhotospliceApp>) {
 
 /// Run frames until no open is still reading.
 fn settle(h: &mut Harness<'static, PhotospliceApp>) {
-    for _ in 0..200 {
+    // Background opens finish on worker threads: wait for them by the clock, not a step count, so
+    // a busy machine (the whole test suite at once) doesn't run past them.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
         h.run_steps(2);
-        if h.state().jobs.opens.is_empty() && h.state().session.jobs().is_empty() {
+        if (h.state().jobs.opens.is_empty() && h.state().session.jobs().is_empty()) || std::time::Instant::now() > deadline {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
