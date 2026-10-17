@@ -131,16 +131,9 @@ fn lay_out(name: &str, bytes: &[u8], pages: &[usize], o: &OpenOptions) -> Result
     Ok(ImportResult { document: doc, warnings, selected: Vec::new(), source_read_only: false, preview_only: false })
 }
 
-/// `s` with its pixels moved by (`dx`, `dy`).
+/// `s` with its pixels moved by (`dx`, `dy`) (tile by tile, no float round trip).
 fn shift_surface(s: &Surface, dx: i32, dy: i32) -> Surface {
-    let mut out = Surface::with_default(s.format(), &s.default_pixel());
-    let r = s.content_bounds();
-    if !r.is_empty() {
-        let mut v = Vec::new();
-        s.read_region_into(r, &mut v);
-        out.write_region(r.translate(dx, dy), &v);
-    }
-    out
+    s.translated(dx, dy, s.content_bounds())
 }
 
 /// Moves a layer the importer made by (`dx`, `dy`): its pixels, paths, type and masks. A fill
