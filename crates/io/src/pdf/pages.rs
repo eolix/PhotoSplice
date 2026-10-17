@@ -122,6 +122,7 @@ fn lay_out(name: &str, bytes: &[u8], pages: &[usize], o: &OpenOptions) -> Result
         }
         doc.layers.push(board);
     }
+    warm_bounds(&doc.layers);
     let n = super::page_count_with(bytes, &o.password).unwrap_or(pages.len());
     if n > pages.len() {
         warnings.push(format!("PDF has {n} pages; opened {}", pages.len()));
@@ -129,6 +130,25 @@ fn lay_out(name: &str, bytes: &[u8], pages: &[usize], o: &OpenOptions) -> Result
     warnings.sort();
     warnings.dedup();
     Ok(ImportResult { document: doc, warnings, selected: Vec::new(), source_read_only: false, preview_only: false })
+}
+
+/// Finds the content bounds of every layer's pixels (and masks) once, in parallel: each tile
+/// keeps its bounds until it's written, so the canvas's first composite needn't scan thousands of
+/// layers' pixels on one thread.
+pub(super) fn warm_bounds(layers: &[Layer]) {
+    use rayon::prelude::*;
+    fn one(l: &Layer) {
+        if let Some(s) = l.surface() {
+            let _ = s.content_bounds();
+        }
+        if let Some(m) = &l.mask {
+            let _ = m.surface.content_bounds();
+        }
+        if let Some(c) = l.children() {
+            c.par_iter().for_each(one);
+        }
+    }
+    layers.par_iter().for_each(one);
 }
 
 /// `s` with its pixels moved by (`dx`, `dy`) (tile by tile, no float round trip).

@@ -47,6 +47,7 @@ const MAX_LAYERS: usize = 4000;
 pub(crate) fn import_layers(name: &str, page: &Page<'_>, place: &super::Placement, dpi: f32) -> (Document, Vec<String>) {
     let mut doc = empty_document(name, place, dpi);
     let (layers, warnings) = stack(page, place, dpi, doc.pixel_format(), Keep::All);
+    super::pages::warm_bounds(&layers);
     doc.layers = layers;
     if doc.layers.is_empty() {
         doc.layers.push(Layer::raster("Layer 1", doc.pixel_format()));
