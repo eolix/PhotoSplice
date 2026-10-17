@@ -106,8 +106,8 @@ pub fn write_artboard(a: &Artboard, guides: &[i32]) -> Vec<u8> {
 /// Indices of the document guides (vertical first, then horizontal, as in resource 1032) that
 /// lie inside `r`.
 pub fn guides_in(guides: &Guides, r: Rect) -> Vec<i32> {
-    let v = guides.vertical.iter().map(|x| (*x as f64) > f64::from(r.x0) && (*x as f64) < f64::from(r.x1));
-    let h = guides.horizontal.iter().map(|y| (*y as f64) > f64::from(r.y0) && (*y as f64) < f64::from(r.y1));
+    let v = guides.vertical.iter().map(|x| *x > f64::from(r.x0) && *x < f64::from(r.x1));
+    let h = guides.horizontal.iter().map(|y| *y > f64::from(r.y0) && *y < f64::from(r.y1));
     v.chain(h).enumerate().filter(|(_, inside)| *inside).map(|(i, _)| i as i32).collect()
 }
 
@@ -135,6 +135,7 @@ pub(crate) fn artboard_block(guides: &Guides, l: &Layer, raw: &mut Vec<([u8; 4],
 struct Setting {
     comps: Vec<u32>,
     visible: Option<bool>,
+    /// Kept at the file's width: whether origin + offset fits an `i32` is decided per layer (#1017).
     offset: Option<(i64, i64)>,
     appearance: Option<CompAppearance>,
 }
@@ -201,11 +202,25 @@ fn layer_cmls(l: &Layer) -> Option<Vec<u8>> {
     parse_shmd(shmd).ok()?.into_iter().find(|it| &it.key == b"cmls").map(|it| it.data)
 }
 
+/// Absolute comp position of a layer at `here` moved by a file offset; None when it does not fit
+/// an `i32` (the offsets come from the file, so the sum must not wrap or overflow, #1017).
+fn offset_position((x, y): (i32, i32), (dx, dy): (i64, i64)) -> Option<(i32, i32)> {
+    let add = |a: i32, d: i64| i64::from(a).checked_add(d).and_then(|v| i32::try_from(v).ok());
+    Some((add(x, dx)?, add(y, dy)?))
+}
+
 /// Comps, last applied comp and Last Document State described by `resource` (1065 data) and the
 /// layers' `cmls` metadata.
 pub fn comps_from_psd(resource: Option<&[u8]>, doc: &Document) -> (Vec<LayerComp>, Option<u32>, Option<LayerComp>) {
-    let Some(data) = resource else { return (Vec::new(), None, None) };
-    let Ok((vd, _)) = VersionedDescriptor::parse_prefix(data) else { return (Vec::new(), None, None) };
+    let (comps, last_applied, last, _) = decode_comps(resource, doc);
+    (comps, last_applied, last)
+}
+
+/// [`comps_from_psd`] plus import warnings for comp data that could not be represented.
+pub(crate) fn decode_comps(resource: Option<&[u8]>, doc: &Document) -> (Vec<LayerComp>, Option<u32>, Option<LayerComp>, Vec<String>) {
+    let mut warnings = Vec::new();
+    let Some(data) = resource else { return (Vec::new(), None, None, warnings) };
+    let Ok((vd, _)) = VersionedDescriptor::parse_prefix(data) else { return (Vec::new(), None, None, warnings) };
     let d = &vd.descriptor;
     let mut comps: Vec<LayerComp> = Vec::new();
     if let Some(Value::List(items)) = d.get("list") {
@@ -246,10 +261,15 @@ pub fn comps_from_psd(resource: Option<&[u8]>, doc: &Document) -> (Vec<LayerComp
                 layer: l.id,
                 visible: s.visible,
                 position: match (here, s.offset) {
-                    // An offset putting the layer outside i32 is no position (storytold/photocraft@cd03d49c).
-                    (Some((x, y)), Some((dx, dy))) => {
-                        let add = |a: i32, d: i64| i64::from(a).checked_add(d).and_then(|v| i32::try_from(v).ok());
-                        add(x, dx).zip(add(y, dy))
+                    (Some(h), Some(o)) => {
+                        let p = offset_position(h, o);
+                        if p.is_none() {
+                            warnings.push(format!(
+                                "layer \"{}\": layer comp position offset ({}, {}) is out of range; that position was not imported",
+                                l.name, o.0, o.1
+                            ));
+                        }
+                        p
                     }
                     _ => None,
                 },
@@ -264,7 +284,7 @@ pub fn comps_from_psd(resource: Option<&[u8]>, doc: &Document) -> (Vec<LayerComp
         }
     }
     let last = (!last.states.is_empty()).then_some(last);
-    (comps, last_applied, last)
+    (comps, last_applied, last, warnings)
 }
 
 /// The 1065 resource data for `doc`'s comps (None when there are none).
@@ -296,8 +316,12 @@ fn setting_value(ids: &[u32], st: Option<&CompLayerState>, here: Option<(i32, i3
         if let Some(v) = st.visible {
             s = s.with("enab", Value::Boolean(v));
         }
-        if let (Some((x, y)), Some((hx, hy))) = (st.position, here) {
-            s = s.with("Ofst", Value::Descriptor(obj("null").with("Hrzn", Value::Integer(x - hx)).with("Vrtc", Value::Integer(y - hy))));
+        // A position whose offset from the layer does not fit an `i32` (e.g. from a `.pcraft`
+        // file) is left out rather than wrapped: the comp then records no position (#1017).
+        if let (Some((x, y)), Some((hx, hy))) = (st.position, here)
+            && let (Some(dx), Some(dy)) = (x.checked_sub(hx), y.checked_sub(hy))
+        {
+            s = s.with("Ofst", Value::Descriptor(obj("null").with("Hrzn", Value::Integer(dx)).with("Vrtc", Value::Integer(dy))));
         }
         if let Some(a) = &st.appearance {
             s = appearance_keys(s, a);
@@ -393,6 +417,9 @@ mod tests {
         });
         d.last_applied_comp = Some(7);
         let res = write_comps_resource(&d).unwrap();
+        // `list` is a length-4 string id, as Photoshop writes it, never a code.
+        assert!(res.windows(8).any(|w| w == b"\0\0\0\x04list"));
+        assert!(!res.windows(8).any(|w| w == b"\0\0\0\0list"));
         let cm = write_cmls(&d.layer_comps, None, d.layer(lid).unwrap(), 3).unwrap();
         // Attach as Photoshop would: shmd with cmls plus another item.
         let mut raw = vec![(*b"shmd", write_shmd(&[MetadataItem::new(*b"cust", vec![1, 2])]))];
@@ -456,5 +483,76 @@ mod tests {
         assert_eq!((back.blend, back.opacity, back.fill_opacity), (look.blend, look.opacity, look.fill_opacity));
         assert_eq!(back.effects.items.len(), 1);
         assert!(matches!(&back.effects.items[0], Effect::DropShadow(s) if (s.common.opacity - 0.6).abs() < 1e-3));
+    }
+
+    /// A layer at origin (4, 4) whose `shmd` carries a `cmls` item with one `layerSettings`
+    /// entry for comp 1: visible, offset by `ofst`.
+    fn doc_with_cmls_offset(ofst: (Value, Value)) -> (Document, photosplice_doc::LayerId, Vec<u8>) {
+        let mut d = Document::with_background("t", Size::new(32, 32), ColorMode::Rgb, SampleType::U8, Color::WHITE);
+        let mut l = Layer::raster("A", PixelFormat::RGBA8);
+        l.surface_mut().unwrap().fill_rect(Rect::new(4, 4, 8, 8), &[1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(layer_position(&l), Some((4, 4)));
+        let setting = obj("null")
+            .with("enab", Value::Boolean(true))
+            .with("compList", Value::List(vec![Value::Integer(1)]))
+            .with("Ofst", Value::Descriptor(obj("null").with("Hrzn", ofst.0).with("Vrtc", ofst.1)));
+        let cmls = VersionedDescriptor::new(Descriptor::new("null").with("layerSettings", Value::List(vec![Value::Descriptor(setting)]))).to_bytes();
+        l.psd_blocks = vec![(*b"shmd", std::sync::Arc::new(write_shmd(&[MetadataItem::new(*b"cmls", cmls)])))];
+        let lid = l.id;
+        d.layers.push(l);
+        let comp = Descriptor::new("Comp").with("Nm  ", Value::Text(nul_name())).with("compID", Value::Integer(1)).with("capturedInfo", Value::Integer(3));
+        let res = VersionedDescriptor::new(Descriptor::new("CompList").with("list", Value::List(vec![Value::Descriptor(comp)]))).to_bytes();
+        (d, lid, res)
+    }
+
+    #[test]
+    fn unrepresentable_comp_offsets_are_dropped_not_wrapped() {
+        // #1017: the layer origin plus a file-supplied offset left i32 range and panicked on
+        // import (wrapped in release builds). The position is dropped with a warning; the
+        // visibility of the same entry is kept.
+        for (h, v) in [(i32::MAX, 0), (0, i32::MAX)] {
+            let (d, lid, res) = doc_with_cmls_offset((Value::Integer(h), Value::Integer(v)));
+            let (comps, _, _, warnings) = decode_comps(Some(&res), &d);
+            let st = comps[0].state(lid).unwrap();
+            assert_eq!((st.visible, st.position), (Some(true), None), "({h}, {v})");
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(warnings[0].contains("layer comp position"), "{warnings:?}");
+            assert_eq!(comps_from_psd(Some(&res), &d).0, comps);
+        }
+        // Offsets wider than i32 (64-bit integers) are dropped too, not truncated.
+        let (d, lid, res) = doc_with_cmls_offset((Value::LargeInteger(i64::from(u32::MAX) + 2), Value::Integer(0)));
+        let (comps, _, _, warnings) = decode_comps(Some(&res), &d);
+        assert_eq!(comps[0].state(lid).unwrap().position, None);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        // Control: an ordinary offset still decodes to layer origin + offset, without warnings.
+        let (d, lid, res) = doc_with_cmls_offset((Value::Integer(6), Value::Integer(-3)));
+        let (comps, _, _, warnings) = decode_comps(Some(&res), &d);
+        assert_eq!(comps[0].state(lid).unwrap().position, Some((10, 1)));
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn unrepresentable_comp_positions_are_written_without_offset() {
+        // #1017: a stored position minus the layer origin left i32 range and panicked on export.
+        // The offset is omitted (the comp then records no position for that layer).
+        let mut l = Layer::raster("A", PixelFormat::RGBA8);
+        l.surface_mut().unwrap().fill_rect(Rect::new(4, 4, 8, 8), &[1.0, 0.0, 0.0, 1.0]);
+        let comp = |position| LayerComp {
+            id: 1,
+            name: "One".into(),
+            comment: String::new(),
+            apply_visibility: true,
+            apply_position: true,
+            apply_appearance: false,
+            states: vec![CompLayerState { layer: l.id, visible: Some(false), position, appearance: None }],
+        };
+        for p in [(i32::MIN, 0), (0, i32::MIN)] {
+            let cm = write_cmls(&[comp(Some(p))], None, &l, 1).unwrap();
+            let s = parse_cmls(&cm).unwrap();
+            assert_eq!(s[0], Setting { comps: vec![1], visible: Some(false), offset: None, appearance: None }, "{p:?}");
+        }
+        // Control: an ordinary position is written as its offset from the layer origin.
+        let cm = write_cmls(&[comp(Some((10, 1)))], None, &l, 1).unwrap();
+        assert_eq!(parse_cmls(&cm).unwrap()[0].offset, Some((6, -3)));
     }
 }

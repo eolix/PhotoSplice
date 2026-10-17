@@ -20,6 +20,8 @@ use serde_json::{Value, json};
 use crate::commands::{CommandSpec, layer_param};
 use crate::{EngineError, Result, Session};
 
+mod batch_naming;
+
 // ---------- predicates ----------
 
 fn has_doc(s: &Session) -> std::result::Result<(), String> {
@@ -74,9 +76,9 @@ fn is_file(_path: &str) -> bool {
     false
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 /// Every file the engine opens is read here: in bounded reads, with a clear error when it does
 /// not fit in memory (see [`photosplice_format::read`]).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn read_file(path: &str) -> Result<Vec<u8>> {
     photosplice_format::read_file(std::path::Path::new(path)).map_err(|e| EngineError::Other(format!("{path}: {e}")))
 }
@@ -85,9 +87,9 @@ pub(crate) fn read_file(path: &str) -> Result<Vec<u8>> {
     Err(EngineError::Other(format!("cannot read {path}: no file system on the web")))
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 /// Every file the engine writes goes through here: crash-safe (temp file + fsync + rename, see
 /// [`photosplice_format::atomic`]), so a failed save never destroys the previous file.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn write_file(path: &str, bytes: &[u8]) -> Result<()> {
     photosplice_format::atomic_write(std::path::Path::new(path), bytes).map_err(|e| EngineError::Other(e.to_string()))
 }
@@ -98,7 +100,7 @@ pub(crate) fn write_file(path: &str, _bytes: &[u8]) -> Result<()> {
 
 /// Files of a folder that look like images we can open, sorted by name.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn list_images(dir: &str) -> Result<Vec<String>> {
+pub fn list_images(dir: &str) -> Result<Vec<String>> {
     let rd = std::fs::read_dir(dir).map_err(|e| EngineError::Other(format!("{dir}: {e}")))?;
     let mut out: Vec<String> = rd
         .filter_map(|e| e.ok())
@@ -110,18 +112,39 @@ pub(crate) fn list_images(dir: &str) -> Result<Vec<String>> {
     Ok(out)
 }
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn list_images(dir: &str) -> Result<Vec<String>> {
+pub fn list_images(dir: &str) -> Result<Vec<String>> {
     Err(EngineError::Other(format!("cannot list {dir}: no file system on the web")))
 }
 
 /// Extensions the batch commands pick up from a folder.
+#[cfg(not(target_arch = "wasm32"))]
 const OPENABLE: &[&str] = &[
-    "psd", "psb", "pcraft", "png", "jpg", "jpeg", "tif", "tiff", "webp", "gif", "bmp", "tga", "exr", "hdr", "qoi", "ico", "pnm", "ppm", "pgm", "heic", "heif", "dng", "cr2",
-    "nef", "nrw", "arw", "pef",
+    "pdn", "ora", "kra", "krz", "psd", "psb", "pcraft", "png", "jpg", "jpeg", "tif", "tiff", "webp", "gif", "bmp", "tga", "exr", "hdr", "qoi", "ico", "pnm",
+    "ppm", "pgm", "fits", "fit", "fts", "dpx", "heic", "heif", "dng", "cr2", "nef", "nrw", "arw", "pef", "svg", "svgz", "af", "afdesign", "afphoto", "afpub",
 ];
+
+/// Whether saving `doc` as a TIFF writes Photoshop layer data (anything beyond a lone
+/// Background layer). The UI asks before such a save when the "ask before saving layered TIFF"
+/// preference is on; see `photosplice_io::tiff_layers`.
+pub fn tiff_would_write_layers(doc: &Document) -> bool {
+    photosplice_io::tiff_layers::would_write_layers(doc)
+}
 
 pub(crate) fn file_name(path: &str) -> String {
     path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
+}
+
+impl crate::DocState {
+    /// Complete a successful document save. File identity is not a history step; callers must
+    /// finish the write first and must not call this for a copy or export.
+    pub fn saved_to(&mut self, path: String) {
+        let name = file_name(&path);
+        if self.doc.name != name {
+            Arc::make_mut(&mut self.doc).name = name;
+        }
+        self.path = Some(path);
+        self.saved_revision = self.revision;
+    }
 }
 
 /// The lower-case extension of the file name in `path` (none for `.hidden` or `name`).
@@ -129,10 +152,46 @@ pub fn extension(path: &str) -> Option<String> {
     file_name(path).rsplit_once('.').filter(|(base, ext)| !base.is_empty() && !ext.is_empty()).map(|(_, ext)| ext.to_ascii_lowercase())
 }
 
-/// Whether a save without a new path may write back to `path`: only layered files (PSD, PSB,
-/// .pcraft). A flat file goes through Save As instead, so it is never flattened over the original.
+/// Whether a save without a new path may write back to `path` as far as its format goes: only
+/// layered files (PSD, PSB, OpenRaster, .pcraft, PDF). A flat file goes through Save As instead, so it
+/// is never flattened over the original. Whether this document fits is [`holds_at`].
 pub fn saves_in_place(path: &str) -> bool {
-    extension(path).is_some_and(|ext| matches!(ext.as_str(), "psd" | "psb" | "pcraft" | "pdf"))
+    extension(path).is_some_and(|ext| layered_extension(&ext))
+}
+
+/// Whether the lower-case extension `ext` names a layered document format (PSD, PSB, OpenRaster,
+/// .pcraft, and PDF with its Photoshop editing data). A save to one becomes the document's file;
+/// any other format is a copy for automation saves, desktop and headless alike (#1547, #2579).
+pub fn layered_extension(ext: &str) -> bool {
+    matches!(ext, "psd" | "psb" | "pcraft" | "ora" | "pdf")
+}
+
+/// Whether a file in format `ext` (lower-case) holds the whole of `doc`, so it can be the
+/// document's own file: PSD, PSB, .pcraft and PDF (which carries the editing data) always;
+/// OpenRaster only when it drops nothing (no adjustment layers, styles, masks…,
+/// [`photosplice_io::ora_losses`]). A save to a format that doesn't hold the document is a copy,
+/// and File › Save goes through Save As, so an editable original is never overwritten with less
+/// than it had (#3806).
+pub fn holds(doc: &photosplice_doc::Document, ext: &str) -> bool {
+    match ext {
+        "psd" | "psb" | "pcraft" | "pdf" => true,
+        "ora" => photosplice_io::ora_losses(doc).is_empty(),
+        _ => false,
+    }
+}
+
+/// [`holds`] for the file at `path`.
+pub fn holds_at(doc: &photosplice_doc::Document, path: &str) -> bool {
+    extension(path).is_some_and(|ext| holds(doc, &ext))
+}
+
+/// What a save of `doc` to `path` would leave out when its format can't hold it: OpenRaster's
+/// [`photosplice_io::ora_losses`]; empty for other formats.
+pub fn losses_at(doc: &photosplice_doc::Document, path: &str) -> Vec<String> {
+    match extension(path).as_deref() {
+        Some("ora") => photosplice_io::ora_losses(doc),
+        _ => Vec::new(),
+    }
 }
 
 /// Whether `path` names a document template (.psdt). A template opens as a new untitled document
@@ -178,11 +237,21 @@ pub(crate) fn sanitize(name: &str) -> String {
 }
 
 pub(crate) fn import(name: &str, bytes: &[u8]) -> Result<Document> {
-    photosplice_io::import(name, bytes).map(|r| r.document).map_err(|e| EngineError::Other(format!("{name}: {e}")))
+    crate::allocation::checkpoint("importing document")?;
+    let r = photosplice_io::import(name, bytes).map_err(|e| EngineError::Other(format!("{name}: {e}")))?;
+    // Auxiliary imports return only a document and cannot surface the preview's fidelity warning.
+    // Open has its own warning-preserving path; never silently place or process a thumbnail.
+    if r.preview_only {
+        return Err(EngineError::Other(format!(
+            "{name}: only this Affinity file's embedded preview could be read; open it with File › Open to see the warning, or export PSD or PNG from Affinity before using it here"
+        )));
+    }
+    Ok(r.document)
 }
 
-/// What a headless save writes beyond the format: JPEG quality and TIFF layers.
-#[derive(Debug, Clone, Copy, Default)]
+/// What a headless save writes beyond the format: JPEG quality, TIFF layers, Targa bits, PSD
+/// previews and the PSD merged image.
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct SaveOpts {
     /// Photoshop's 0–12 JPEG scale.
     pub quality: Option<f64>,
@@ -193,17 +262,51 @@ pub(crate) struct SaveOpts {
     /// PDF: Compatibility, Image Compression and Downsampling (`pdfCompatibility`,
     /// `pdfCompression`, `pdfQuality`, `pdfDownsample`).
     pub pdf: photosplice_io::pdf::export::PdfOptions,
+    /// Targa: 24 or 32 bits per pixel (`"tgaBits"`); unset, 32 with an alpha channel or
+    /// transparency, else 24.
+    pub tga_bits: Option<photosplice_io::TgaBits>,
+    /// DPX: 8, 10, 12 or 16 bits per sample (`"dpxBits"`); unset, 8 for an 8-bit document, else 16.
+    pub dpx_bits: Option<photosplice_io::DpxBits>,
+    /// PSD/PSB: embed the thumbnail resource (Preferences › File Handling › Image Previews).
+    pub image_previews: bool,
+    /// PSD/PSB: write the real merged image (Preferences › File Handling › Maximize PSD and PSB
+    /// File Compatibility).
+    pub psd_maximize_compatibility: bool,
+}
+
+impl Default for SaveOpts {
+    fn default() -> Self {
+        SaveOpts {
+            quality: None,
+            tiff_layers: false,
+            pdf_discard_editing: false,
+            pdf: photosplice_io::pdf::export::PdfOptions::default(),
+            tga_bits: None,
+            dpx_bits: None,
+            image_previews: true,
+            psd_maximize_compatibility: true,
+        }
+    }
 }
 
 impl SaveOpts {
-    /// `quality`, `tiffLayers` and `pdfEditing` from a command's params.
-    pub(crate) fn from_params(p: &Value) -> Self {
-        SaveOpts {
+    /// `quality`, `tiffLayers`, `tgaBits`, `dpxBits` and the PDF options (`pdfEditing`,
+    /// [`pdf_options`]) from command `cmd`'s params (a `tgaBits` other than 24 or 32 is an error);
+    /// the image previews and the PSD merged image from the session's File Handling preferences
+    /// (Ask When Saving has no dialog here, so it saves them, as Photoshop's Save As checkbox and
+    /// its Maximize Compatibility checkbox both start on).
+    pub(crate) fn from_params(s: &Session, p: &Value, cmd: &str) -> Result<Self> {
+        let file_handling = &s.prefs().file_handling;
+        Ok(SaveOpts {
             quality: f64_param(p, "quality"),
             tiff_layers: p.get("tiffLayers").and_then(Value::as_bool).unwrap_or(false),
             pdf_discard_editing: p.get("pdfEditing").and_then(Value::as_bool) == Some(false),
             pdf: pdf_options(p),
-        }
+            tga_bits: tga_bits_param(p, cmd)?,
+            dpx_bits: dpx_bits_param(p, cmd)?,
+            image_previews: file_handling.image_previews != crate::prefs::Ask::Never,
+            psd_maximize_compatibility: file_handling.maximize_psd_compatibility != crate::prefs::Ask::Never,
+        })
     }
 
     pub(crate) fn or_quality(mut self, q: f64) -> Self {
@@ -245,12 +348,56 @@ fn pdf_options(p: &Value) -> photosplice_io::pdf::export::PdfOptions {
     o
 }
 
+/// The Targa bits per pixel in `p` (`"tgaBits": 24 | 32`; absent or null: the automatic choice).
+/// Anything else is a bad parameter of command `cmd`. Shared by every save that takes it (the
+/// engine's commands, the app's Save As and control channel, the headless server).
+pub fn tga_bits_param(p: &Value, cmd: &str) -> Result<Option<photosplice_io::TgaBits>> {
+    match p.get("tgaBits") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .and_then(photosplice_io::TgaBits::from_bits)
+            .map(Some)
+            .ok_or_else(|| EngineError::BadParams { cmd: cmd.into(), msg: format!("`tgaBits` must be 24 or 32, got {v}") }),
+    }
+}
+
+/// The DPX bits per sample in `p` (`"dpxBits": 8 | 10 | 12 | 16`; absent or null: the document's
+/// depth). Anything else is a bad parameter of command `cmd`.
+pub fn dpx_bits_param(p: &Value, cmd: &str) -> Result<Option<photosplice_io::DpxBits>> {
+    match p.get("dpxBits") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_u64()
+            .and_then(photosplice_io::DpxBits::from_bits)
+            .map(Some)
+            .ok_or_else(|| EngineError::BadParams { cmd: cmd.into(), msg: format!("`dpxBits` must be 8, 10, 12 or 16, got {v}") }),
+    }
+}
+
 /// Encodes `doc` for `path`'s extension.
 pub(crate) fn encode(doc: &Document, path: &str, save: impl Into<SaveOpts>) -> Result<(Vec<u8>, Vec<String>)> {
+    crate::allocation::checkpoint("saving document")?;
     let save = save.into();
-    let mut opts = photosplice_io::ExportOptions { tiff_layers: save.tiff_layers, pdf_discard_editing: save.pdf_discard_editing, pdf: save.pdf, ..Default::default() };
+    let mut opts = photosplice_io::ExportOptions {
+        tiff_layers: save.tiff_layers,
+        pdf_discard_editing: save.pdf_discard_editing,
+        pdf: save.pdf,
+        tga_bits: save.tga_bits,
+        image_previews: save.image_previews,
+        psd_maximize_compatibility: save.psd_maximize_compatibility,
+        ..Default::default()
+    };
+    // No quality chosen: write the file the way it was opened (a JPEG at its own quality, a WebP
+    // lossy or lossless as it was), as Photoshop's Save does.
+    photosplice_io::apply_file_encoding(doc, &mut opts.encode);
+    opts.encode.dpx_bits = save.dpx_bits;
     if let Some(q) = save.quality {
-        opts.encode.jpeg_quality = (q.clamp(0.0, 12.0) / 12.0 * 99.0 + 1.0).round() as u8;
+        let q = (q.clamp(0.0, 12.0) / 12.0 * 99.0 + 1.0).round() as u8;
+        opts.encode.jpeg_quality = q;
+        // A quality on a WebP save asks for the lossy encoder; the default WebP stays lossless.
+        opts.encode.webp_quality = q;
+        opts.encode.webp_lossless = false;
     }
     photosplice_io::export(doc, path, &opts).map(|r| (r.bytes, r.warnings)).map_err(|e| EngineError::Other(format!("{path}: {e}")))
 }
@@ -351,12 +498,27 @@ fn save_a_copy(s: &mut Session, p: &Value) -> Result<Value> {
         let px = flattened(&doc, fmt);
         doc.layers = vec![Layer::new("Background", LayerContent::Raster(px))];
     }
-    let warnings = save_doc(&doc, &path, SaveOpts::from_params(p))?;
+    let warnings = save_doc(&doc, &path, SaveOpts::from_params(s, p, "file.saveACopy")?)?;
     Ok(json!({"path": path, "warnings": warnings}))
 }
 
 /// Open a file's bytes, decoding them as the format `as_ext` (Open As) when given.
+/// EXR/HDR rarely states its colour space, so io tags it with the linear-sRGB default.
+/// With File Handling's ACEScg option on, such an EXR opens as ACEScg instead (AP1,
+/// linear) — the working space ACES render pipelines write. Only the io default is
+/// replaced; an embedded or EXIF-declared profile is kept untouched.
+fn tag_exr_colorspace(s: &Session, name: &str, doc: &mut Document) {
+    if !name.to_ascii_lowercase().ends_with(".exr") || !s.prefs.get().file_handling.exr_aces_cg {
+        return;
+    }
+    let linear = photosplice_cms::Builtin::LinearSrgb.profile().to_bytes();
+    if doc.icc_profile.as_ref().map(|v| v.as_slice()) == Some(linear.as_slice()) {
+        doc.icc_profile = Some(photosplice_cms::Builtin::AcesCg.profile().to_bytes());
+    }
+}
+
 pub fn open_bytes_as(s: &mut Session, name: &str, bytes: &[u8], as_ext: Option<&str>, path: Option<String>) -> Result<Value> {
+    crate::allocation::checkpoint("importing document")?;
     let decode_name = match as_ext {
         Some(ext) => format!("{}.{}", stem(name), ext.trim_start_matches('.')),
         None => name.to_string(),
@@ -364,6 +526,7 @@ pub fn open_bytes_as(s: &mut Session, name: &str, bytes: &[u8], as_ext: Option<&
     let r = photosplice_io::import(&decode_name, bytes).map_err(|e| EngineError::Other(format!("{decode_name}: {e}")))?;
     let selected = r.selected;
     let mut doc = r.document;
+    tag_exr_colorspace(s, &decode_name, &mut doc);
     let path = match template_name(s, name) {
         Some(untitled) => {
             doc.name = untitled;
@@ -375,10 +538,11 @@ pub fn open_bytes_as(s: &mut Session, name: &str, bytes: &[u8], as_ext: Option<&
         }
     };
     // Color Settings policies (preserve / convert / discard the embedded profile).
-    let (i, color) = s.open_document(doc, path);
+    let (i, color) = s.open_document(doc, path.filter(|_| !r.source_read_only));
     // The layers the file had selected.
     if let Some(st) = s.docs.get_mut(i) {
         st.restore_selection(&selected);
+        st.source_read_only = r.source_read_only;
     }
     // Import notes (e.g. how a camera raw was developed, or that only its preview opened).
     Ok(json!({"document": i, "color": color, "warnings": r.warnings}))
@@ -514,27 +678,40 @@ fn import_pdf(s: &mut Session, p: &Value) -> Result<Value> {
 /// History label of an embedded place.
 pub const PLACE_EMBEDDED: &str = "Place Embedded";
 
-/// Place a file's bytes as a smart object layer, centred and (when larger than the canvas)
-/// scaled down to fit, like Photoshop's Place with "Resize Image During Place". `linked` makes it
-/// a linked smart object that refers to that path instead of embedding the bytes.
+/// Place a file's bytes as a smart object layer, centred, and (with Preferences ▸ General ▸
+/// Resize Image During Place, on by default) scaled down to fit when larger than the canvas.
+/// `linked` makes it a linked smart object that refers to that path instead of embedding the bytes.
+/// With Preferences ▸ General ▸ Always Create Smart Objects When Placing off, an embedded place
+/// lands as a plain pixel layer instead (an explicit `"smartObject": false` asks for one).
 pub fn place_bytes(s: &mut Session, name: &str, bytes: Vec<u8>, linked: Option<String>, p: &Value) -> Result<Value> {
     let d = s.active().ok_or(EngineError::NoDocument)?;
     let (cw, ch) = (d.doc.size.width as f64, d.doc.size.height as f64);
     let fmt = d.doc.pixel_format();
+    let resolution = d.doc.resolution_dpi;
+    let svg = photosplice_io::svg::is_svg(&bytes);
     // A placed PDF is its first page, at the resolution its smart object renders from.
     let src = if photosplice_io::pdf::is_pdf(&bytes) {
         photosplice_io::pdf::import_page(name, &bytes, 0, crate::smart_cmds::PDF_SOURCE_DPI).map(|r| r.document).map_err(|e| EngineError::Other(format!("{name}: {e}")))?
     } else {
-        import(name, &bytes)?
+        let max_svg_group_depth = s.prefs().file_handling.rasterize_svg_groups_deeper_than as usize;
+        let imported = photosplice_io::import_with_svg_group_depth(name, &bytes, max_svg_group_depth).map_err(|e| EngineError::Other(format!("{name}: {e}")))?;
+        if imported.preview_only {
+            return Err(EngineError::Other(format!(
+                "{name}: only this Affinity file's embedded preview could be read; open it with File › Open to see the warning, or export PSD or PNG from Affinity before using it here"
+            )));
+        }
+        imported.document
     };
     // A PDF lands at its printed size at the document's resolution, as in Photoshop (`scale` is
     // a percentage of that); other files at their pixel size.
     let vector = crate::smart_cmds::is_vector_source(&bytes);
-    let natural = if vector { (f64::from(d.doc.resolution_dpi.max(1.0)) / f64::from(crate::smart_cmds::PDF_SOURCE_DPI)).clamp(1e-4, 1e4) } else { 1.0 };
+    let natural = if vector { (f64::from(resolution.max(1.0)) / f64::from(crate::smart_cmds::PDF_SOURCE_DPI)).clamp(1e-4, 1e4) } else { 1.0 };
     let (w, h) = (src.size.width as f64, src.size.height as f64);
+    // The implicit `fit` is Preferences ▸ General ▸ Resize Image During Place (on by default).
+    let fit = p.get("fit").and_then(Value::as_bool).unwrap_or(s.prefs().general.resize_image_during_place);
     let scale = match f64_param(p, "scale") {
         Some(k) => (k / 100.0).max(1e-4) * natural,
-        None if p.get("fit").and_then(Value::as_bool) != Some(false) && (w * natural > cw || h * natural > ch) => (cw / w).min(ch / h),
+        None if fit && (w * natural > cw || h * natural > ch) => (cw / w).min(ch / h),
         None => natural,
     };
     let center = match p.get("center").and_then(Value::as_array) {
@@ -542,8 +719,11 @@ pub fn place_bytes(s: &mut Session, name: &str, bytes: Vec<u8>, linked: Option<S
         _ => (cw / 2.0, ch / 2.0),
     };
     let (dx, dy) = ((center.0 - w * scale / 2.0).round(), (center.1 - h * scale / 2.0).round());
-    // (A PDF is drawn from its source once placed, below.)
-    let px = if vector {
+    // Preferences ▸ General ▸ Always Create Smart Objects When Placing (on by default): off, an
+    // embedded place lands as a plain pixel layer. A linked place is always a smart object.
+    let smart = linked.is_some() || p.get("smartObject").and_then(Value::as_bool).unwrap_or(s.prefs().general.always_create_smart_objects_when_placing);
+    // (A vector PDF smart object is drawn from its source once placed, below.)
+    let px = if vector && smart {
         Surface::new(fmt)
     } else {
         let mut px = flattened(&src, fmt);
@@ -556,19 +736,28 @@ pub fn place_bytes(s: &mut Session, name: &str, bytes: Vec<u8>, linked: Option<S
         Some(path) => SmartSource::Linked { path },
         None => SmartSource::Embedded { file_name: file_name(name), bytes: Arc::new(bytes) },
     };
-    let so = SmartObject::new(source, Affine { m: [scale, 0.0, 0.0, scale, dx, dy] }, Some(px));
     let layer_name = stem(name);
-    let label = if matches!(so.source, SmartSource::Linked { .. }) { "Place Linked" } else { PLACE_EMBEDDED };
+    let label = if matches!(&source, SmartSource::Linked { .. }) { "Place Linked" } else { PLACE_EMBEDDED };
     let id = s.edit(label, |doc, active| {
-        let id = doc.insert_above(*active, Layer::new(layer_name, LayerContent::Smart(so)));
+        let layer = if smart {
+            let mut so = SmartObject::new(source, Affine { m: [scale, 0.0, 0.0, scale, dx, dy] }, Some(px));
+            // An SVG source renders at its placement scale instead of as a resampled raster.
+            if svg && let Some(sharp) = crate::smart_cmds::render(doc, &so)? {
+                so.cache = Some(sharp);
+            }
+            Layer::new(layer_name, LayerContent::Smart(so))
+        } else {
+            Layer::new(layer_name, LayerContent::Raster(px))
+        };
+        let id = doc.insert_above(*active, layer);
         *active = Some(id);
-        // Vector contents drawn at the placed size rather than resampled.
-        if vector {
+        // Vector PDF contents drawn at the placed size rather than resampled.
+        if vector && smart {
             crate::smart_cmds::refresh(doc, id)?;
         }
         Ok(id)
     })?;
-    Ok(json!({"layer": id.0, "scale": scale / natural * 100.0, "bounds": [dx, dy, dx + w * scale, dy + h * scale]}))
+    Ok(json!({"layer": id.0, "scale": scale / natural * 100.0, "bounds": [dx, dy, dx + w * scale, dy + h * scale], "smartObject": smart}))
 }
 
 fn place(s: &mut Session, p: &Value, linked: bool) -> Result<Value> {
@@ -677,23 +866,120 @@ pub fn read_file_info(xmp: Option<&str>) -> Value {
     Value::Object(m)
 }
 
-/// Rewrites the File Info fields of an XMP packet (creating one when there is none), keeping
-/// every other property. Edited properties move into their own `rdf:Description` (several
-/// descriptions per packet are valid XMP).
-pub fn write_file_info(xmp: Option<&str>, info: &Value) -> String {
-    let mut cur = read_file_info(xmp);
-    if let (Some(c), Some(n)) = (cur.as_object_mut(), info.as_object()) {
-        for (k, v) in n {
-            if c.contains_key(k) {
-                c.insert(k.clone(), v.clone());
-            }
+/// File Info's read-only Camera Data, as (result key, English label) in display order.
+pub const CAMERA_FIELDS: [(&str, &str); 9] = [
+    ("make", "Make"),
+    ("model", "Model"),
+    ("dateTaken", "Date Taken"),
+    ("exposure", "Exposure"),
+    ("fNumber", "F-Stop"),
+    ("iso", "ISO Speed"),
+    ("focalLength", "Focal Length"),
+    ("focalLength35mm", "Focal Length (35 mm)"),
+    ("lens", "Lens"),
+];
+
+/// `v` with at most `decimals` decimals and no trailing zeros (33.10 → "33.1", 8.0 → "8").
+fn short_num(v: f64, decimals: usize) -> String {
+    let s = format!("{v:.decimals$}");
+    if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s }
+}
+
+/// Exposure time as cameras print it: "1/250 s" for fractions of a second, "0.4 s" or "2 s"
+/// when the reciprocal isn't a whole number or the exposure is a second or longer.
+fn exposure_text(t: f64) -> Option<String> {
+    if !(t.is_finite() && t > 0.0) {
+        return None;
+    }
+    let r = 1.0 / t;
+    if t < 1.0 && (r - r.round()).abs() <= r * 0.01 {
+        return Some(format!("1/{} s", r.round()));
+    }
+    Some(format!("{} s", short_num(t, if t < 1.0 { 2 } else { 1 })))
+}
+
+/// EXIF (`2024:02:17 12:40:19`) or XMP (`2024-02-17T12:40:19.00+01:00`) dates as
+/// `2024-02-17 12:40:19`; anything else is shown as stored.
+fn date_text(s: &str) -> String {
+    let b = s.trim().as_bytes();
+    let digits = |r: &[usize]| r.iter().all(|&i| b.get(i).is_some_and(u8::is_ascii_digit));
+    let sep = |i: usize, set: &[u8]| b.get(i).is_some_and(|c| set.contains(c));
+    let ch = |i: usize| b.get(i).map_or('0', |&c| c as char);
+    let part = |r: std::ops::Range<usize>| r.map(ch).collect::<String>();
+    if !(digits(&[0, 1, 2, 3, 5, 6, 8, 9]) && sep(4, b":-") && sep(7, b":-")) {
+        return s.trim().to_string();
+    }
+    let date = format!("{}-{}-{}", part(0..4), part(5..7), part(8..10));
+    if digits(&[11, 12, 14, 15, 17, 18]) && sep(10, b" T") && sep(13, b":") && sep(16, b":") { format!("{date} {}", part(11..19)) } else { date }
+}
+
+/// A single XMP value: the first `rdf:li` of a container, element text or attribute.
+fn xmp_value(x: &str, prop: &str) -> Option<String> {
+    let v = match find_element(x, prop) {
+        Some((_, _, inner)) => li_values(inner).into_iter().next(),
+        None => find_attr(x, prop).map(|(_, _, v)| xml_unescape(v)),
+    }?;
+    let v = v.trim().to_string();
+    (!v.is_empty()).then_some(v)
+}
+
+/// An XMP number: a rational "331/10" or a decimal.
+fn xmp_number(x: &str, prop: &str) -> Option<f64> {
+    let v = xmp_value(x, prop)?;
+    let n = match v.split_once('/') {
+        Some((a, b)) => {
+            let (a, b) = (a.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?);
+            (b != 0.0).then(|| a / b)?
+        }
+        None => v.parse::<f64>().ok()?,
+    };
+    n.is_finite().then_some(n)
+}
+
+/// File Info's read-only Camera Data (keys of [`CAMERA_FIELDS`], present ones only), formatted
+/// for display. Read from the EXIF block (JPEG APP1, PSD resource 1058, …); properties it lacks
+/// fall back to the XMP `tiff:`/`exif:`/`aux:` copies (files without an EXIF block).
+pub fn camera_data(exif: Option<&[u8]>, xmp: Option<&str>) -> Value {
+    let e = exif.map(photosplice_algo::exif::read).unwrap_or_default();
+    let x = xmp.unwrap_or("");
+    let text = |v: Option<String>, props: &[&str]| v.or_else(|| props.iter().find_map(|p| xmp_value(x, p)));
+    let num =
+        |v: Option<f64>, props: &[&str]| v.filter(|v| v.is_finite() && *v > 0.0).or_else(|| props.iter().find_map(|p| xmp_number(x, p))).filter(|v| *v > 0.0);
+    let values = [
+        text(e.make, &["tiff:Make"]),
+        text(e.model, &["tiff:Model"]),
+        text(e.date_taken, &["exif:DateTimeOriginal"]).map(|d| date_text(&d)),
+        num(e.exposure_time, &["exif:ExposureTime"]).and_then(exposure_text),
+        num(e.f_number, &["exif:FNumber"]).map(|n| format!("f/{}", short_num(n, 1))),
+        num(e.iso, &["exif:ISOSpeedRatings", "exifEX:PhotographicSensitivity"]).map(|n| format!("ISO {}", n.round())),
+        num(e.focal_length, &["exif:FocalLength"]).map(|f| format!("{} mm", short_num(f, 1))),
+        num(e.focal_length_35mm, &["exif:FocalLengthIn35mmFilm"]).map(|f| format!("{} mm", short_num(f, 1))),
+        text(e.lens, &["exifEX:LensModel", "aux:Lens"]),
+    ];
+    let mut m = serde_json::Map::new();
+    for ((key, _), v) in CAMERA_FIELDS.into_iter().zip(values) {
+        // Hostile files can carry megabytes of "lens name"; the dialog shows a line.
+        if let Some(v) = v.map(|v| v.chars().take(200).collect::<String>()).filter(|v| !v.is_empty()) {
+            m.insert(key.into(), json!(v));
         }
     }
+    Value::Object(m)
+}
+
+/// Rewrites only changed File Info fields of an XMP packet (creating one when there is none),
+/// keeping the other properties verbatim. Edited properties move into their own
+/// `rdf:Description` (several descriptions per packet are valid XMP).
+pub fn write_file_info(xmp: Option<&str>, info: &Value) -> String {
+    let cur = read_file_info(xmp);
+    // The dialog submits all fields, including unchanged language alternatives.
+    let changed = |key: &str| info.get(key).is_some_and(|v| cur.get(key) != Some(v));
     let mut x = xmp.filter(|s| s.contains("</rdf:RDF>")).map(str::to_string).unwrap_or_else(|| {
         "<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n </rdf:RDF>\n</x:xmpmeta>\n<?xpacket end=\"w\"?>".to_string()
     });
-    let props: Vec<&str> = INFO_FIELDS.iter().map(|f| f.1).chain(["xmpRights:Marked", "xmpRights:WebStatement"]).collect();
-    for prop in &props {
+    for (key, prop, _) in INFO_FIELDS.into_iter().chain([("copyrightStatus", "xmpRights:Marked", ""), ("copyrightUrl", "xmpRights:WebStatement", "")]) {
+        if !changed(key) {
+            continue;
+        }
         while let Some((a, b, _)) = find_element(&x, prop) {
             x.replace_range(a..b, "");
         }
@@ -701,7 +987,7 @@ pub fn write_file_info(xmp: Option<&str>, info: &Value) -> String {
             x.replace_range(a..b, "");
         }
     }
-    let get = |k: &str| cur.get(k).cloned().unwrap_or(Value::Null);
+    let get = |k: &str| info.get(k).filter(|_| changed(k)).cloned().unwrap_or(Value::Null);
     let mut body = String::new();
     for (key, prop, kind) in INFO_FIELDS {
         let vals: Vec<String> = match get(key) {
@@ -755,7 +1041,11 @@ fn file_info(s: &mut Session, p: &Value) -> Result<Value> {
         })?;
     }
     let d = s.active().ok_or(EngineError::NoDocument)?;
-    Ok(read_file_info(d.doc.metadata.xmp.as_deref()))
+    let mut info = read_file_info(d.doc.metadata.xmp.as_deref());
+    if let Value::Object(m) = &mut info {
+        m.insert("camera".into(), camera_data(d.doc.metadata.exif.as_deref().map(Vec::as_slice), d.doc.metadata.xmp.as_deref()));
+    }
+    Ok(info)
 }
 
 // ---------- Automate ----------
@@ -841,22 +1131,123 @@ pub(crate) fn batch_inputs(p: &Value, cmd: &str) -> Result<Vec<String>> {
     }
 }
 
+/// One input of a batch run: the file, and the folder it sits in relative to the input folder
+/// (`""` at the top level, `"a/b"` two levels down), which its result keeps under `output`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BatchInput {
+    pub path: String,
+    pub rel_dir: String,
+}
+
+/// Subfolders below a batch input folder are walked at most this deep ("Include All Subfolders").
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const MAX_SUBFOLDER_DEPTH: usize = 32;
+/// A batch over subfolders lists at most this many files; a larger tree is an error, not a run
+/// that silently stops partway.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const MAX_SUBFOLDER_FILES: usize = 100_000;
+
+/// [`batch_inputs`] for the commands whose Photoshop dialog has "Include All Subfolders" (Batch,
+/// Image Processor): with `"includeSubfolders": true` a folder input also yields the images in its
+/// subfolders, each tagged with its relative folder. `output` (when inside the input folder, as
+/// the dialog's default `<input>/batch` is) is not walked, so a rerun doesn't process its results.
+pub(crate) fn batch_inputs_tree(p: &Value, cmd: &str, output: &str) -> Result<Vec<BatchInput>> {
+    let recurse = match p.get("includeSubfolders") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(EngineError::BadParams { cmd: cmd.into(), msg: "\"includeSubfolders\" must be true or false".into() }),
+    };
+    match p.get("input").or_else(|| p.get("files")) {
+        Some(Value::String(dir)) if recurse => list_images_tree(dir, output, cmd),
+        _ => Ok(batch_inputs(p, cmd)?.into_iter().map(|path| BatchInput { path, rel_dir: String::new() }).collect()),
+    }
+}
+
+/// The images under `dir` and its subfolders: each folder's files sorted by name, then its
+/// subfolders in name order (depth first). Bounded by [`MAX_SUBFOLDER_DEPTH`] and
+/// [`MAX_SUBFOLDER_FILES`]; a folder reached twice (a symlink loop) is walked once, and `skip`
+/// (the output folder) is left out.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn list_images_tree(dir: &str, skip: &str, cmd: &str) -> Result<Vec<BatchInput>> {
+    use std::path::{Path, PathBuf};
+    let canon = |p: &Path| std::fs::canonicalize(p).ok();
+    let root = Path::new(dir);
+    let root_canon = canon(root).ok_or_else(|| EngineError::Other(format!("{dir}: cannot open the folder")))?;
+    let skip = if skip.is_empty() { None } else { canon(Path::new(skip)) };
+    let mut seen = std::collections::HashSet::new();
+    seen.insert(root_canon);
+    let mut out = Vec::new();
+    // Depth first with an explicit stack (no recursion): (folder, relative folder, depth).
+    let mut stack: Vec<(PathBuf, String, usize)> = vec![(root.to_path_buf(), String::new(), 0)];
+    while let Some((folder, rel, depth)) = stack.pop() {
+        let shown = folder.to_string_lossy().into_owned();
+        // The top folder must be readable; a subfolder that isn't is skipped.
+        let files = match list_images(&shown) {
+            Ok(f) => f,
+            Err(e) if depth == 0 => return Err(e),
+            Err(_) => continue,
+        };
+        if out.len().saturating_add(files.len()) > MAX_SUBFOLDER_FILES {
+            return Err(EngineError::BadParams { cmd: cmd.into(), msg: format!("{dir} holds more than {MAX_SUBFOLDER_FILES} images with its subfolders") });
+        }
+        out.extend(files.into_iter().map(|path| BatchInput { path, rel_dir: rel.clone() }));
+        if depth >= MAX_SUBFOLDER_DEPTH {
+            continue;
+        }
+        let Ok(rd) = std::fs::read_dir(&folder) else { continue };
+        let mut subs: Vec<(String, PathBuf)> = rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .filter_map(|p| Some((p.file_name()?.to_string_lossy().into_owned(), p)))
+            .collect();
+        subs.sort();
+        // Pushed in reverse so the stack pops them in name order.
+        for (name, sub) in subs.into_iter().rev() {
+            let Some(c) = canon(&sub) else { continue };
+            if skip.as_ref() == Some(&c) || !seen.insert(c) {
+                continue;
+            }
+            let rel = if rel.is_empty() { name } else { format!("{rel}/{name}") };
+            stack.push((sub, rel, depth + 1));
+        }
+    }
+    Ok(out)
+}
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn list_images_tree(dir: &str, _skip: &str, _cmd: &str) -> Result<Vec<BatchInput>> {
+    Err(EngineError::Other(format!("cannot list {dir}: no file system on the web")))
+}
+
 /// Opens each input in a scratch session, runs `f` on it and saves it to `output` as `format`
 /// (`"same"` keeps the input's extension). Errors per file are collected, not fatal.
 pub(crate) fn process_files(inputs: &[String], output: &str, format: &str, save: SaveOpts, suffix: &str, f: &dyn Fn(&mut Session) -> Result<()>) -> Value {
+    let inputs: Vec<BatchInput> = inputs.iter().map(|path| BatchInput { path: path.clone(), rel_dir: String::new() }).collect();
+    process_tree(&inputs, output, format, save, suffix, f)
+}
+
+/// [`process_files`] for inputs from subfolders: each result goes to its input's relative folder
+/// under `output` (created as needed), so `a/x.png` and `b/x.png` don't collide.
+pub(crate) fn process_tree(inputs: &[BatchInput], output: &str, format: &str, save: SaveOpts, suffix: &str, f: &dyn Fn(&mut Session) -> Result<()>) -> Value {
+    let outputs = inputs.iter().map(|BatchInput { path, rel_dir }| {
+        let ext =
+            if format == "same" { path.rsplit('.').next().unwrap_or("png").to_ascii_lowercase() } else { format.trim_start_matches('.').to_ascii_lowercase() };
+        (path.as_str(), join(&join(output, rel_dir), &format!("{}{suffix}.{ext}", stem(path))))
+    });
+    process_outputs(outputs, save, f)
+}
+
+fn process_outputs<'a>(outputs: impl IntoIterator<Item = (&'a str, String)>, save: SaveOpts, f: &dyn Fn(&mut Session) -> Result<()>) -> Value {
     let mut files = Vec::new();
     let mut errors = Vec::new();
     let mut written = OutputClaims::default();
-    for path in inputs {
-        let ext =
-            if format == "same" { path.rsplit('.').next().unwrap_or("png").to_ascii_lowercase() } else { format.trim_start_matches('.').to_ascii_lowercase() };
-        let out = join(output, &format!("{}{suffix}.{ext}", stem(path)));
+    for (path, out) in outputs {
         let r = (|| -> Result<()> {
             written.check(&out).map_err(EngineError::Other)?;
             let bytes = read_file(path)?;
             let mut scratch = Session::new();
             let doc = import(&file_name(path), &bytes)?;
-            scratch.add_document(doc, Some(path.clone()));
+            scratch.add_document(doc, Some(path.to_string()));
             f(&mut scratch)?;
             let d = scratch.active().ok_or(EngineError::NoDocument)?;
             save_doc(&d.doc, &out, save)?;
@@ -894,36 +1285,66 @@ impl OutputClaims {
     }
 }
 
-fn batch(_s: &mut Session, p: &Value) -> Result<Value> {
+fn batch(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "file.automate.batch";
-    let steps =
+    let mut steps =
         parse_steps(p.get("steps").or_else(|| p.get("action")).ok_or_else(|| EngineError::BadParams { cmd: cmd.into(), msg: "missing \"steps\"".into() })?)?;
+    // Each result goes to the destination folder, which overrides the action's recorded Save /
+    // Save As steps (Photoshop's "Override Action 'Save As' Commands"). Recorded view steps
+    // (zoom, fit) don't change the output, so they are skipped (#2752).
+    steps.retain(|(id, _)| !crate::actions_cmds::shell_save_command(id) && !crate::actions_cmds::shell_view_command(id) && id != "file.export.quickExport");
     if let Some((id, _)) = steps.iter().find(|(id, _)| crate::commands::find(id).is_none()) {
         return Err(EngineError::BadParams { cmd: cmd.into(), msg: format!("unknown command `{id}` in the action") });
     }
-    let inputs = batch_inputs(p, cmd)?;
     let output = str_param(p, "output", cmd)?.to_string();
+    let inputs = batch_inputs_tree(p, cmd, &output)?;
     let format = p.get("format").and_then(Value::as_str).unwrap_or("same").to_string();
-    let r = process_files(&inputs, &output, &format, SaveOpts::from_params(p), "", &|scratch| {
+    // Steps that call another action play it from the caller's actions; the playback stack comes
+    // along so an action that batches itself is caught as a recursive call.
+    let list = match p.get("calledActions") {
+        None | Some(Value::Null) => s.actions.list.clone(),
+        // A droplet brings the actions it calls (#2794) and runs with those alone.
+        Some(v) => {
+            let list: Vec<crate::actions_cmds::Action> =
+                serde_json::from_value(v.clone()).map_err(|e| EngineError::BadParams { cmd: cmd.into(), msg: format!("\"calledActions\": {e}") })?;
+            if list.len() > 4096 {
+                return Err(EngineError::BadParams { cmd: cmd.into(), msg: "\"calledActions\" holds more than 4096 actions".into() });
+            }
+            list
+        }
+    };
+    let actions = crate::actions_cmds::ActionState { list, playing: s.actions.playing, playback_stack: s.actions.playback_stack.clone(), ..Default::default() };
+    let names = batch_naming::plan(&inputs, &output, &format, p)?;
+    let save = SaveOpts::from_params(s, p, cmd)?;
+    let run = |scratch: &mut Session| {
+        scratch.actions = actions.clone();
         for (id, params) in &steps {
-            scratch.execute(id, params.clone())?;
+            let r = scratch.execute(id, params.clone())?;
+            // A failed step inside a called action makes this file an error, not a saved result.
+            if let Some(error) = crate::actions_cmds::nested_failure(id, &r) {
+                return Err(EngineError::Other(error));
+            }
         }
         Ok(())
-    });
+    };
+    let r = match names {
+        Some(names) => process_outputs(inputs.iter().map(|i| i.path.as_str()).zip(names), save, &run),
+        None => process_tree(&inputs, &output, &format, save, "", &run),
+    };
     Ok(r)
 }
 
-fn image_processor(_s: &mut Session, p: &Value) -> Result<Value> {
+fn image_processor(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "file.scripts.imageProcessor";
-    let inputs = batch_inputs(p, cmd)?;
     let output = str_param(p, "output", cmd)?.to_string();
+    let inputs = batch_inputs_tree(p, cmd, &output)?;
     let format = p.get("format").and_then(Value::as_str).unwrap_or("jpg").to_string();
     let fit = match (size_param(p, "width"), size_param(p, "height")) {
         (None, None) => None,
         (w, h) => Some(json!({"width": w.unwrap_or(1e9), "height": h.unwrap_or(1e9), "dontEnlarge": true})),
     };
     let to_srgb = p.get("convertToSrgb").and_then(Value::as_bool).unwrap_or(false);
-    let r = process_files(&inputs, &output, &format, SaveOpts::from_params(p).or_quality(8.0), "", &|scratch| {
+    let r = process_tree(&inputs, &output, &format, SaveOpts::from_params(s, p, cmd)?.or_quality(8.0), "", &|scratch| {
         if to_srgb && scratch.active().is_some_and(|d| d.doc.mode != ColorMode::Rgb) {
             scratch.execute("image.mode.rgb", json!({}))?;
         }
@@ -962,15 +1383,36 @@ fn load_files_into_stack(s: &mut Session, p: &Value) -> Result<Value> {
         stack.layers.push(Layer::new(name.clone(), LayerContent::Raster(flattened(d, fmt))));
     }
     let n = stack.layers.len();
-    if p.get("createSmartObject").and_then(Value::as_bool).unwrap_or(false) {
+    let smart = p.get("createSmartObject").and_then(Value::as_bool).unwrap_or(false);
+    // "Attempt to Automatically Align Source Images": Auto-Align Layers on the loaded layers, before
+    // they go into the smart object.
+    let align = p.get("align").and_then(Value::as_bool).unwrap_or(false) && n > 1;
+    if smart && !align {
         // "Create Smart Object after Loading Layers": the layers go inside one smart object, ready
-        // for Layer › Smart Objects › Stack Mode.
-        let children = std::mem::take(&mut stack.layers);
-        let group = Layer::new(stem(&paths[0]), LayerContent::Group(photosplice_doc::Group { children, expanded: true, artboard: None, divider_blocks: Vec::new() }));
-        let smart = crate::smart_cmds::layer_to_smart(&stack, &group)?;
+        // for Layer › Smart Objects › Stack Mode. Like Photoshop, they sit at the top level of the
+        // contents, with no wrapper group.
+        let layers = std::mem::take(&mut stack.layers);
+        let smart = crate::smart_cmds::layers_to_smart(&stack, &stem(&paths[0]), layers)?;
         stack.layers = vec![smart];
     }
     let i = s.add_document(stack, None);
+    if align {
+        s.execute("select.allLayers", json!({}))?;
+        s.execute("edit.autoAlignLayers", json!({"projection": "auto"}))?;
+        if smart {
+            let name = s.active().map(|d| d.doc.name.clone()).unwrap_or_default();
+            s.edit("Convert to Smart Object", |doc, active| {
+                let layers = std::mem::take(&mut doc.layers);
+                let smart = crate::smart_cmds::layers_to_smart(doc, &name, layers)?;
+                *active = Some(smart.id);
+                doc.layers = vec![smart];
+                Ok(())
+            })?;
+            if let Some(st) = s.active_mut() {
+                st.selected_layers = st.active_layer.into_iter().collect();
+            }
+        }
+    }
     Ok(json!({"document": i, "layers": n}))
 }
 
@@ -980,8 +1422,10 @@ fn has_live_effects(l: &Layer) -> bool {
     l.effects.enabled && l.effects.items.iter().any(|e| e.enabled())
 }
 
-/// The layer rendered alone (keeping what `keep` says), as a surface in `fmt`.
-fn bake(l: &Layer, canvas: Rect, fmt: PixelFormat, keep_effects: bool) -> Surface {
+/// The layer rendered alone (keeping what `keep` says), as a surface in `fmt`. With `apply_mask`
+/// off the layer's pixel and vector masks are left out of the render, so a caller that keeps them
+/// live on the baked raster does not mask the pixels twice.
+fn bake(l: &Layer, canvas: Rect, fmt: PixelFormat, keep_effects: bool, apply_mask: bool) -> Surface {
     let mut tmp = l.clone();
     tmp.opacity = 1.0;
     tmp.blend = photosplice_color::BlendMode::Normal;
@@ -990,6 +1434,10 @@ fn bake(l: &Layer, canvas: Rect, fmt: PixelFormat, keep_effects: bool) -> Surfac
     if !keep_effects {
         tmp.effects.items.clear();
         tmp.fill_opacity = 1.0;
+    }
+    if !apply_mask {
+        tmp.mask = None;
+        tmp.vector_mask = None;
     }
     // Render over the union of the canvas and the content so off-canvas pixels survive.
     let area = l.surface().map_or(canvas, |s| s.content_bounds().union(&canvas));
@@ -1011,12 +1459,12 @@ fn flatten_all_effects(s: &mut Session) -> Result<Value> {
             if !has_live_effects(l) || matches!(l.content, LayerContent::Group(_) | LayerContent::Adjustment(_)) {
                 continue;
             }
-            let px = bake(l, canvas, fmt, true);
+            // The pixel and vector masks stay on the layer (baking must not destroy them), so the
+            // pixels are baked without them and each mask then applies once to the baked raster.
+            let px = bake(l, canvas, fmt, true, false);
             let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
             l.content = LayerContent::Raster(px);
             l.effects = Default::default();
-            l.mask = None;
-            l.vector_mask = None;
             l.fill_opacity = 1.0;
             l.fill_cache = None;
             l.psd_blocks.retain(|(k, _)| !matches!(k, b"TySh" | b"SoLd" | b"PlLd" | b"SoLE" | b"vmsk" | b"vsms" | b"vogk" | b"vscg" | b"vstk"));
@@ -1044,7 +1492,7 @@ fn flatten_all_masks(s: &mut Session) -> Result<Value> {
                 skipped += 1;
                 continue;
             }
-            let px = bake(l, canvas, fmt, false);
+            let px = bake(l, canvas, fmt, false, true);
             let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
             l.content = LayerContent::Raster(px);
             l.mask = None;
@@ -1062,12 +1510,24 @@ fn flatten_all_masks(s: &mut Session) -> Result<Value> {
 fn layers_to_files(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "file.export.layersToFiles";
     let dir = str_param(p, "dir", cmd).or_else(|_| str_param(p, "output", cmd))?.to_string();
+    let names = export_layers_with(s, p, |name, bytes| write_file(&join(&dir, name), bytes))?;
+    let files: Vec<String> = names.iter().map(|name| join(&dir, name)).collect();
+    Ok(json!({"files": files}))
+}
+
+/// The bodies of `file.export.layersToFiles`, streamed to `write` as a single-component filename
+/// plus its bytes: one file per exported layer (top to bottom, like Photoshop's numbering),
+/// encoded but never touched as a path. Automation writes exactly these bytes beneath its write
+/// root (#3216), so the two paths cannot drift. Returns the filenames written, in order.
+pub fn export_layers_with(s: &Session, p: &Value, mut write: impl FnMut(&str, &[u8]) -> Result<()>) -> Result<Vec<String>> {
+    let cmd = "file.export.layersToFiles";
     let format = p.get("format").and_then(Value::as_str).unwrap_or("png").trim_start_matches('.').to_ascii_lowercase();
     let visible_only = p.get("visibleOnly").and_then(Value::as_bool).unwrap_or(true);
+    let save = SaveOpts::from_params(s, p, cmd)?;
     let d = s.active().ok_or(EngineError::NoDocument)?;
     let prefix = p.get("prefix").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| stem(&d.doc.name));
     let doc = d.doc.clone();
-    let mut files = Vec::new();
+    let mut written = Vec::new();
     // Top-level layers (groups export merged), top to bottom like Photoshop's numbering.
     let layers: Vec<&Layer> = doc.layers.iter().rev().filter(|l| l.visible || !visible_only).collect();
     for (i, l) in layers.iter().enumerate() {
@@ -1079,17 +1539,61 @@ fn layers_to_files(s: &mut Session, p: &Value) -> Result<Value> {
         only.visible = true;
         only.clipped = false;
         one.layers = vec![only];
-        let path = join(&dir, &format!("{}_{:04}_{}.{format}", sanitize(&prefix), i, sanitize(&l.name)));
-        save_doc(&one, &path, SaveOpts::from_params(p))?;
-        files.push(path);
+        let name = format!("{}_{:04}_{}.{format}", sanitize(&prefix), i, sanitize(&l.name));
+        let (bytes, _warnings) = encode(&one, &name, save)?;
+        write(&name, &bytes)?;
+        written.push(name);
     }
-    Ok(json!({"files": files}))
+    Ok(written)
 }
 
-/// The document's visible top-level adjustment layers applied to an identity lattice, as a
-/// `.cube` 3D LUT (red fastest, values 0–1).
-pub fn bake_cube(doc: &Document, size: usize, title: &str) -> String {
-    let n = size.clamp(2, 256);
+/// Adjustment layers that can be represented as an RGB-only LUT, in document stack order.
+/// A LUT has no spatial coordinates, so masks and clipping geometry are deliberately stripped
+/// at bake time. Group adjustments need their enclosing group's compositing semantics and are
+/// not silently flattened as independent layers.
+fn lut_layers<'a>(doc: &'a Document, ids: Option<&[LayerId]>) -> Result<Vec<&'a Layer>> {
+    const CMD: &str = "file.export.colorLookupTables";
+    let mut selected = Vec::new();
+    if let Some(ids) = ids {
+        if ids.is_empty() {
+            return Err(EngineError::BadParams { cmd: CMD.into(), msg: "select at least one adjustment layer".into() });
+        }
+        for id in ids {
+            if selected.contains(id) {
+                return Err(EngineError::BadParams { cmd: CMD.into(), msg: format!("duplicate layer id {}", id.0) });
+            }
+            let Some(layer) = doc.layer(*id) else { return Err(EngineError::NoLayer(*id)) };
+            if !matches!(layer.content, LayerContent::Adjustment(_)) {
+                return Err(EngineError::BadParams { cmd: CMD.into(), msg: format!("layer {} is not an adjustment layer", id.0) });
+            }
+            if !layer.visible {
+                return Err(EngineError::BadParams { cmd: CMD.into(), msg: format!("layer {} is hidden", id.0) });
+            }
+            if !doc.layers.iter().any(|root| root.id == *id) {
+                return Err(EngineError::BadParams {
+                    cmd: CMD.into(),
+                    msg: format!("layer {} is nested in a group; export top-level adjustment layers", id.0),
+                });
+            }
+            selected.push(*id);
+        }
+    }
+    let mut layers = Vec::new();
+    for l in &doc.layers {
+        if l.visible && matches!(l.content, LayerContent::Adjustment(_)) && (ids.is_none() || selected.contains(&l.id)) {
+            layers.push(l);
+        }
+    }
+    if layers.is_empty() {
+        return Err(EngineError::BadParams { cmd: CMD.into(), msg: "no visible adjustment layers to export".into() });
+    }
+    Ok(layers)
+}
+
+/// Bake the chosen adjustment stack against an identity RGB lattice.
+/// Source order always follows the document stack, even if an explicit list is reversed.
+fn bake_cube_layers(size: usize, title: &str, layers: &[&Layer]) -> String {
+    let n = size;
     let (w, h) = ((n * n) as u32, n as u32);
     let mut lattice = Document::new("lut", photosplice_doc::Size::new(w, h), ColorMode::Rgb, photosplice_color::SampleType::F32);
     let fmt = lattice.pixel_format();
@@ -1107,8 +1611,8 @@ pub fn bake_cube(doc: &Document, size: usize, title: &str) -> String {
     let mut surf = Surface::new(fmt);
     surf.write_region(Rect::new(0, 0, w as i32, h as i32), &data);
     lattice.layers.push(Layer::new("Lattice", LayerContent::Raster(surf)));
-    for l in doc.layers.iter().filter(|l| l.visible && matches!(l.content, LayerContent::Adjustment(_))) {
-        let mut a = l.clone();
+    for l in layers {
+        let mut a = (*l).clone();
         // Masks and clipping are spatial; a LUT is the adjustment stack's colour mapping.
         a.mask = None;
         a.vector_mask = None;
@@ -1130,100 +1634,71 @@ pub fn bake_cube(doc: &Document, size: usize, title: &str) -> String {
     s
 }
 
+/// Backwards-compatible helper for exporting all visible top-level adjustments.
+pub fn bake_cube(doc: &Document, size: usize, title: &str) -> String {
+    let layers: Vec<&Layer> = doc.layers.iter().filter(|l| l.visible && matches!(l.content, LayerContent::Adjustment(_))).collect();
+    bake_cube_layers(size.clamp(2, photosplice_cms::lutfile::MAX_SIZE), title, &layers)
+}
+
+/// Export either the whole visible stack (backward-compatible default), the Layers panel's
+/// current selection, or an explicit list supplied by scripts/CLI/automation.
 fn color_lookup_tables(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "file.export.colorLookupTables";
     let d = s.active().ok_or(EngineError::NoDocument)?;
-    let size = p.get("size").and_then(Value::as_u64).unwrap_or(33) as usize;
+    let size = match p.get("size") {
+        None | Some(Value::Null) => 33,
+        Some(v) => v.as_u64().ok_or_else(|| EngineError::BadParams { cmd: CMD.into(), msg: "size must be an integer".into() })?,
+    };
+    if !(2..=photosplice_cms::lutfile::MAX_SIZE as u64).contains(&size) {
+        return Err(EngineError::BadParams { cmd: CMD.into(), msg: format!("size must be 2..={}", photosplice_cms::lutfile::MAX_SIZE) });
+    }
+    let scope = match p.get("scope") {
+        None | Some(Value::Null) => "all",
+        Some(Value::String(s)) => s.as_str(),
+        Some(_) => return Err(EngineError::BadParams { cmd: CMD.into(), msg: "scope must be all or selected".into() }),
+    };
+    if !matches!(scope, "all" | "selected") {
+        return Err(EngineError::BadParams { cmd: CMD.into(), msg: "scope must be all or selected".into() });
+    }
+    if p.get("layers").is_some() && scope == "selected" {
+        return Err(EngineError::BadParams { cmd: CMD.into(), msg: "use either layers or scope=selected, not both".into() });
+    }
+    let explicit: Option<Vec<LayerId>> = if let Some(v) = p.get("layers") {
+        let Some(a) = v.as_array() else { return Err(EngineError::BadParams { cmd: CMD.into(), msg: "layers must be an array of layer IDs".into() }) };
+        let mut out = Vec::with_capacity(a.len());
+        for id in a {
+            let Some(id) = id.as_u64() else { return Err(EngineError::BadParams { cmd: CMD.into(), msg: "layer IDs must be unsigned integers".into() }) };
+            out.push(LayerId(id));
+        }
+        Some(out)
+    } else if scope == "selected" {
+        Some(d.selected_layers())
+    } else {
+        None
+    };
+    let layers = lut_layers(&d.doc, explicit.as_deref())?;
+    let count = layers.len();
     let title = p.get("title").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| stem(&d.doc.name));
-    let cube = bake_cube(&d.doc, size, &title);
+    let cube = bake_cube_layers(size as usize, &title, &layers);
     match p.get("path").and_then(Value::as_str) {
         Some(path) => {
             write_file(path, cube.as_bytes())?;
-            Ok(json!({"path": path, "size": size.clamp(2, 256)}))
+            Ok(json!({"path": path, "size": size, "layerCount": count}))
         }
-        None => Ok(json!({"cube": cube, "size": size.clamp(2, 256)})),
+        None => Ok(json!({"cube": cube, "size": size, "layerCount": count})),
     }
 }
 
 // ---------- guides ----------
 
-fn push_unique(v: &mut Vec<f32>, x: f64) {
-    let x = x as f32;
+fn push_unique(v: &mut Vec<f64>, x: f64) {
     if !v.iter().any(|g| (g - x).abs() < 0.01) {
         v.push(x);
     }
 }
 
-/// Guide positions for `count` columns (or rows) across `[start, end]`, Photoshop-style: both
-/// edges of every column; a fixed `width` packs columns from `start` (or centres them).
-fn layout_lines(start: f64, end: f64, count: u32, width: Option<f64>, gutter: f64, center: bool, out: &mut Vec<f32>) {
-    let avail = (end - start).max(0.0);
-    if count == 0 {
-        return;
-    }
-    let n = count as f64;
-    let w = width.unwrap_or(((avail - (n - 1.0) * gutter) / n).max(0.0));
-    let total = n * w + (n - 1.0) * gutter;
-    let x0 = if center && width.is_some() { start + (avail - total) / 2.0 } else { start };
-    for i in 0..count {
-        let a = x0 + i as f64 * (w + gutter);
-        push_unique(out, a);
-        push_unique(out, a + w);
-    }
-}
-
 fn new_guide_layout(s: &mut Session, p: &Value) -> Result<Value> {
-    let d = s.active().ok_or(EngineError::NoDocument)?;
-    let (cw, ch) = (d.doc.size.width as f64, d.doc.size.height as f64);
-    let m = match p.get("margin") {
-        Some(Value::Array(a)) if a.len() == 4 => [0, 1, 2, 3].map(|i| a[i].as_f64().unwrap_or(0.0)),
-        Some(v) if v.is_number() => [v.as_f64().unwrap_or(0.0); 4],
-        _ => [0.0; 4],
-    };
-    let [top, left, bottom, right] = m;
-    let cols = p.get("columns").and_then(Value::as_u64).unwrap_or(0);
-    let rows = p.get("rows").and_then(Value::as_u64).unwrap_or(0);
-    // Each column/row costs a loop iteration plus a duplicate scan, so an
-    // absurd count from the caller would block the app for minutes (#704).
-    // Photoshop's own dialog caps at 32; 1000 is a generous ceiling that
-    // still finishes instantly.
-    const MAX_GUIDE_LINES: u64 = 1000;
-    for (n, what) in [(cols, "columns"), (rows, "rows")] {
-        if n > MAX_GUIDE_LINES {
-            return Err(EngineError::BadParams { cmd: "view.newGuideLayout".into(), msg: format!("{what} must be {MAX_GUIDE_LINES} or fewer (got {n})") });
-        }
-    }
-    let (cols, rows) = (cols as u32, rows as u32);
-    let mut v: Vec<f32> = Vec::new();
-    let mut h: Vec<f32> = Vec::new();
-    let has_margin = m.iter().any(|x| *x != 0.0);
-    if has_margin {
-        push_unique(&mut v, left);
-        push_unique(&mut v, cw - right);
-        push_unique(&mut h, top);
-        push_unique(&mut h, ch - bottom);
-    }
-    let center = p.get("centerColumns").and_then(Value::as_bool).unwrap_or(false);
-    layout_lines(left, cw - right, cols, size_param(p, "width"), f64_param(p, "gutter").unwrap_or(0.0), center, &mut v);
-    layout_lines(top, ch - bottom, rows, size_param(p, "height"), f64_param(p, "rowGutter").or_else(|| f64_param(p, "gutter")).unwrap_or(0.0), center, &mut h);
-    if v.is_empty() && h.is_empty() {
-        return Err(EngineError::BadParams { cmd: "view.newGuideLayout".into(), msg: "give \"columns\", \"rows\" or a \"margin\"".into() });
-    }
-    let clear = p.get("clearExisting").and_then(Value::as_bool).unwrap_or(false);
-    let (nv, nh) = (v.len(), h.len());
-    s.edit("New Guide Layout", |doc, _| {
-        if clear {
-            doc.guides.vertical.clear();
-            doc.guides.horizontal.clear();
-        }
-        for x in v {
-            push_unique(&mut doc.guides.vertical, x as f64);
-        }
-        for y in h {
-            push_unique(&mut doc.guides.horizontal, y as f64);
-        }
-        Ok(())
-    })?;
-    Ok(json!({"vertical": nv, "horizontal": nh}))
+    crate::guide_layout::apply(s, p)
 }
 
 fn guides_from_shape(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1249,9 +1724,9 @@ fn clear_canvas_guides(s: &mut Session) -> Result<Value> {
     // Guides inside an artboard belong to it (View › Clear Selected Artboard Guides); the rest
     // are canvas guides. Without artboards every guide is a canvas guide.
     let boards: Vec<Rect> = d.doc.artboards().iter().map(|b| b.2.rect).collect();
-    let in_x = move |x: f32| boards.iter().any(|r| f64::from(x) > f64::from(r.x0) && f64::from(x) < f64::from(r.x1));
+    let in_x = move |x: f64| boards.iter().any(|r| x > f64::from(r.x0) && x < f64::from(r.x1));
     let boards_y: Vec<Rect> = d.doc.artboards().iter().map(|b| b.2.rect).collect();
-    let in_y = move |y: f32| boards_y.iter().any(|r| f64::from(y) > f64::from(r.y0) && f64::from(y) < f64::from(r.y1));
+    let in_y = move |y: f64| boards_y.iter().any(|r| y > f64::from(r.y0) && y < f64::from(r.y1));
     let n = d.doc.guides.vertical.iter().filter(|x| !in_x(**x)).count() + d.doc.guides.horizontal.iter().filter(|y| !in_y(**y)).count();
     if n == 0 {
         return Ok(json!({"cleared": 0}));
@@ -1259,6 +1734,7 @@ fn clear_canvas_guides(s: &mut Session) -> Result<Value> {
     s.edit("Clear Canvas Guides", |doc, _| {
         doc.guides.vertical.retain(|x| in_x(*x));
         doc.guides.horizontal.retain(|y| in_y(*y));
+        doc.guides.prune_colors();
         Ok(())
     })?;
     Ok(json!({"cleared": n}))
@@ -1283,13 +1759,30 @@ pub fn specs() -> Vec<CommandSpec> {
             has_doc,
             close_others
         ),
+        // The document tab's menu (UI-217-6): the tab's own file in the platform file manager.
+        // Not a Photoshop menu-bar item; enabled when the target document has a saved path.
+        spec!("file.revealInFinder", "Reveal in Finder", &[], None, r##"{"document":index? (default active),"dryRun":bool=false}"##, native_doc, |s, p| {
+            let i = match p.get("document") {
+                Some(v) => v
+                    .as_u64()
+                    .and_then(|v| usize::try_from(v).ok())
+                    .ok_or_else(|| EngineError::BadParams { cmd: "file.revealInFinder".into(), msg: "`document` must be an index".into() })?,
+                None => s.active_index().ok_or(EngineError::NoDocument)?,
+            };
+            let path = s
+                .documents()
+                .get(i)
+                .and_then(|d| d.path.clone())
+                .ok_or_else(|| EngineError::BadParams { cmd: "file.revealInFinder".into(), msg: format!("document {i} has no saved file") })?;
+            crate::layer_menu_cmds::reveal(&path, p.get("dryRun").and_then(Value::as_bool).unwrap_or(false))
+        }),
         spec!("file.revert", "Revert", &["File"], Some("F12"), "{} (reloads the saved file as one undoable step)", can_revert, |s, _| revert(s)),
         spec!(
             "file.saveACopy",
             "Save a Copy…",
             &["File"],
             Some("Cmd+Alt+S"),
-            r##"{"path":str (format from the extension),"quality":0..12? (JPEG),"layers":bool=true,"tiffLayers":bool=false (TIFF: keep the layers; flat by default),"pdfEditing":bool=true (PDF: Preserve Photoshop Editing Capabilities),"pdfCompatibility":"1.4|1.5|1.6|1.7|2.0"="1.7","pdfCompression":"zip|jpeg"="zip","pdfQuality":0..12=10 (JPEG),"pdfDownsample":[to ppi, above ppi]?,"pdfLayers":bool=true (each visible top-level layer a PDF layer)}"##,
+            r##"{"path":str (format from the extension),"quality":0..12? (JPEG),"layers":bool=true,"tiffLayers":bool=false (TIFF: keep the layers; flat by default),"tgaBits":24|32? (TGA: 32 writes the alpha channel, or else the transparency, as the alpha; unset, 32 with an alpha channel or transparency, else 24),"dpxBits":8|10|12|16? (DPX: bits per sample; unset, 8 for an 8-bit document, else 16),"pdfEditing":bool=true (PDF: Preserve Photoshop Editing Capabilities),"pdfCompatibility":"1.4|1.5|1.6|1.7|2.0"="1.7","pdfCompression":"zip|jpeg"="zip","pdfQuality":0..12=10 (JPEG),"pdfDownsample":[to ppi, above ppi]?,"pdfLayers":bool=true (each visible top-level layer a PDF layer)}"##,
             native_doc,
             save_a_copy
         ),
@@ -1316,19 +1809,25 @@ pub fn specs() -> Vec<CommandSpec> {
             "Place Embedded…",
             &["File"],
             None,
-            r##"{"path":str,"scale":%? (default: fit when larger than the canvas),"fit":bool=true,"center":[x,y]?}"##,
+            r##"{"path":str,"scale":%? (default: fit when larger than the canvas),"fit":bool? (default: Preferences > General > Resize Image During Place),"smartObject":bool? (default: Preferences > General > Always Create Smart Objects When Placing),"center":[x,y]?}"##,
             native_doc,
             |s, p| place(s, p, false)
         ),
-        spec!("file.placeLinked", "Place Linked…", &["File"], None, r##"{"path":str,"scale":%?,"fit":bool=true,"center":[x,y]?}"##, native_doc, |s, p| place(
-            s, p, true
-        )),
+        spec!(
+            "file.placeLinked",
+            "Place Linked…",
+            &["File"],
+            None,
+            r##"{"path":str,"scale":%?,"fit":bool? (default: Preferences > General > Resize Image During Place),"center":[x,y]?}"##,
+            native_doc,
+            |s, p| place(s, p, true)
+        ),
         spec!(
             "file.fileInfo",
             "File Info…",
             &["File"],
             Some("Cmd+Alt+Shift+I"),
-            r##"{"title":str?,"author":str?,"authorTitle":str?,"description":str?,"keywords":[str]|"a; b"?,"copyright":str?,"copyrightStatus":"unknown|copyrighted|publicDomain"?,"copyrightUrl":str?} (no keys: read)"##,
+            r##"{"title":str?,"author":str?,"authorTitle":str?,"description":str?,"keywords":[str]|"a; b"?,"copyright":str?,"copyrightStatus":"unknown|copyrighted|publicDomain"?,"copyrightUrl":str?} (no keys: read; the result also has read-only "camera":{"make","model","dateTaken","exposure","fNumber","iso","focalLength","focalLength35mm","lens"}, present keys only)"##,
             has_doc,
             file_info
         ),
@@ -1337,7 +1836,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Fit Image…",
             &["File", "Automate"],
             None,
-            r##"{"width":px,"height":px,"dontEnlarge":bool=false,"resample":"bicubic|bilinear|nearest|lanczos|preserveDetails"="bicubic"}"##,
+            r##"{"width":px,"height":px,"dontEnlarge":bool=false,"resample":"automatic|preserveDetails|bicubicSmoother|bicubicSharper|bicubicAutomatic|bicubic|nearest|bilinear|lanczos"="bicubic"}"##,
             has_doc,
             fit_image
         ),
@@ -1355,7 +1854,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Batch…",
             &["File", "Automate"],
             None,
-            r##"{"steps":[[commandId,params]|{"command":id,"params":{}}…] (a recorded action),"input":folder|[paths],"output":folder,"format":"same|png|jpg|psd|tiff|…"="same","quality":0..12?,"tiffLayers":bool=false} → {files, errors} (an input whose output name was already written in the run goes to errors)"##,
+            r##"{"steps":[[commandId,params]|{"command":id,"params":{}}…] (a recorded action),"input":folder|[paths],"includeSubfolders":bool=false (a folder input also takes the images in its subfolders, up to 32 levels and 100000 files; each result keeps its subfolder under output),"output":folder,"format":"same|png|jpg|psd|tiff|…"="same","quality":0..12?,"naming":string? (blank keeps source names; {name}, {serial} padded to 3 digits, {date} as YYYY-MM-DD UTC; extension added automatically),"startingSerial":1..4294967295=1 (input position, including failed inputs),"tiffLayers":bool=false,"tgaBits":24|32?,"dpxBits":8|10|12|16? (DPX: bits per sample; unset, 8 for an 8-bit document, else 16),"calledActions":[{"name","steps"}…]? (the actions Play Action steps call; default: the session's)} → {files, errors} (an input whose output name was already written in the run goes to errors)"##,
             native,
             batch
         ),
@@ -1364,7 +1863,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Image Processor…",
             &["File", "Scripts"],
             None,
-            r##"{"input":folder|[paths],"output":folder,"format":"jpg|png|psd|tiff|…"="jpg","quality":0..12=8,"tiffLayers":bool=false,"width":px?,"height":px? (fit, never enlarge),"convertToSrgb":bool=false} → {files, errors} (an input whose output name was already written in the run goes to errors)"##,
+            r##"{"input":folder|[paths],"includeSubfolders":bool=false (a folder input also takes the images in its subfolders, up to 32 levels and 100000 files; each result keeps its subfolder under output),"output":folder,"format":"jpg|png|psd|tiff|…"="jpg","quality":0..12=8,"tiffLayers":bool=false,"tgaBits":24|32?,"dpxBits":8|10|12|16? (DPX: bits per sample; unset, 8 for an 8-bit document, else 16),"width":px?,"height":px? (fit, never enlarge),"convertToSrgb":bool=false} → {files, errors} (an input whose output name was already written in the run goes to errors)"##,
             native,
             image_processor
         ),
@@ -1373,7 +1872,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Load Files into Stack…",
             &["File", "Scripts"],
             None,
-            r##"{"paths":[str]|folder,"createSmartObject":bool=false} → new document with one layer per file (inside one smart object with createSmartObject)"##,
+            r##"{"paths":[str]|folder,"align":bool=false (Auto-Align Layers on them first),"createSmartObject":bool=false} → new document with one layer per file (inside one smart object with createSmartObject)"##,
             native,
             load_files_into_stack
         ),
@@ -1392,7 +1891,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Layers to Files…",
             &["File", "Export"],
             None,
-            r##"{"dir":folder,"format":"png|jpg|psd|tiff|…"="png","prefix":str=document name,"visibleOnly":bool=true,"quality":0..12?,"tiffLayers":bool=false} → {files}"##,
+            r##"{"dir":folder,"format":"png|jpg|psd|tiff|…"="png","prefix":str=document name,"visibleOnly":bool=true,"quality":0..12?,"tiffLayers":bool=false,"tgaBits":24|32?,"dpxBits":8|10|12|16? (DPX: bits per sample; unset, 8 for an 8-bit document, else 16)} → {files}"##,
             native_doc,
             layers_to_files
         ),
@@ -1401,7 +1900,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Color Lookup Tables…",
             &["File", "Export"],
             None,
-            r##"{"path":str? (.cube; omit to return the text),"size":2..256=33,"title":str?}"##,
+            r##"{"path":str? (.cube; omit to return the text),"size":2..129=33,"title":str?,"scope":"all|selected"="all","layers":[id,…]?} (selected layer IDs use original document stacking; masks are spatial and omitted)"##,
             has_adjustments,
             color_lookup_tables
         ),
@@ -1410,7 +1909,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "New Guide Layout…",
             &["View"],
             None,
-            r##"{"columns":n=0,"width":px?,"gutter":px=0,"rows":n=0,"height":px?,"rowGutter":px=gutter,"margin":px|[top,left,bottom,right]=0,"centerColumns":bool=false,"clearExisting":bool=false}"##,
+            r##"{"columns":n=0,"width":px?,"gutter":px=0,"rows":n=0,"height":px?,"rowGutter":px=gutter,"margin":px|[top,left,bottom,right]=0,"centerColumns":bool=false,"clearExisting":bool=false,"target":"document|selectedArtboards"="document"}"##,
             has_doc,
             new_guide_layout
         ),
@@ -1422,3 +1921,41 @@ pub fn specs() -> Vec<CommandSpec> {
 #[cfg(test)]
 #[path = "file_cmds/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod aces_exr_tests {
+    use super::*;
+
+    /// File Handling › "Open color-less EXR as ACEScg": off, an EXR opens on io's linear-sRGB
+    /// default; on, it opens as ACEScg — the working space ACES render pipelines write.
+    #[test]
+    fn exr_aces_cg_preference_retags_the_opened_document() {
+        let image = photosplice_codecs::Image::from_f32(
+            4,
+            4,
+            photosplice_codecs::ChannelLayout::Rgb,
+            &[
+                0.25, 0.5, 0.75, 1.0, 0.25, 0.5, 0.75, 1.0, 0.25, 0.5, 0.75, 1.0, 0.25, 0.5, 0.75, 1.0, 0.25, 0.5, 0.75, 1.0, 0.25, 0.5, 0.75, 1.0, 0.25, 0.5,
+                0.75, 1.0, 0.25, 0.5, 0.75, 1.0, 0.25, 0.5, 0.75, 1.0, 0.25, 0.5, 0.75, 1.0, 0.25, 0.5, 0.75, 1.0, 0.25, 0.5, 0.75, 1.0,
+            ],
+        )
+        .unwrap();
+        let bytes = photosplice_codecs::encode(&image, photosplice_codecs::Format::OpenExr, &photosplice_codecs::EncodeOptions::default()).unwrap();
+
+        let linear = photosplice_cms::Builtin::LinearSrgb.profile().to_bytes();
+        let aces = photosplice_cms::Builtin::AcesCg.profile().to_bytes();
+
+        // Off (the default): io's linear-sRGB tagging stays.
+        let mut s = Session::new();
+        open_bytes_as(&mut s, "shot.exr", &bytes, None, None).unwrap();
+        let d = &s.active().unwrap().doc;
+        assert_eq!(d.icc_profile.as_deref().map(|v| v.as_slice()), Some(linear.as_slice()));
+
+        // On: the same file opens as ACEScg.
+        let mut s = Session::new();
+        s.prefs.edit(|p| p.file_handling.exr_aces_cg = true);
+        open_bytes_as(&mut s, "shot.exr", &bytes, None, None).unwrap();
+        let d = &s.active().unwrap().doc;
+        assert_eq!(d.icc_profile.as_deref().map(|v| v.as_slice()), Some(aces.as_slice()));
+    }
+}

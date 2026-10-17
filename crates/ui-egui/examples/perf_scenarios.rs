@@ -4,7 +4,7 @@
 //! way the app creates it; the CPU compositor without an adapter).
 //!
 //! ```sh
-//! cargo run --release -p photosplice-ui-egui --example perf_scenarios -- [--quick] [--json out.json] [--only text] [--reps N] [--cpu]
+//! cargo run --release -p photosplice-ui-egui --example perf_scenarios -- [--quick] [--json out.json] [--only text] [--group layered] [--reps N] [--cpu] [--no-composite-reuse]
 //! ```
 //!
 //! `cargo xtask perf` runs this and maps the rows to scenario ids in `perf/budgets.toml`, so
@@ -16,7 +16,11 @@
 use std::time::Instant;
 
 use eframe::egui_wgpu::RenderState;
+use photosplice_algo::liquify::{LiquifyField, LiquifyStroke, LiquifyTool, ProxyImage, auto_cell};
+use photosplice_color::{ColorMode, PixelFormat, SampleType};
 use photosplice_engine::Session;
+use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 use photosplice_testkit::perf::{RssSampler, report, row, write_report};
 use photosplice_ui_egui::gpu_canvas::GpuCanvas;
 use serde_json::{Value, json};
@@ -107,6 +111,26 @@ impl Bench {
 
     /// The canvas refresh after an edit (`canvas::ensure_gpu`): the damage rect grown by the
     /// effect reach when the session reports one, else everything; waits for the GPU.
+    /// Re-composite only `r` of the active document (what the canvas hadn't shown yet).
+    fn refresh_rect(&self, s: &Session, r: photosplice_geom::Rect) -> Res<f64> {
+        let st = s.active().ok_or("no document")?;
+        let doc = &st.doc;
+        let r = r.intersect(&doc.bounds());
+        let t = Instant::now();
+        if !r.is_empty() {
+            match &self.gpu {
+                Some((g, rs)) => {
+                    g.refresh(doc.id.0, doc, Some(r), None);
+                    let _ = rs.device.poll(eframe::wgpu::PollType::Wait { submission_index: None, timeout: None });
+                }
+                None => {
+                    std::hint::black_box(photosplice_compose::render(doc, r));
+                }
+            }
+        }
+        Ok(ms(t))
+    }
+
     fn refresh(&self, s: &Session, full: bool) -> Res<f64> {
         let st = s.active().ok_or("no document")?;
         let doc = &st.doc;
@@ -122,6 +146,31 @@ impl Bench {
                 if !r.is_empty() {
                     std::hint::black_box(photosplice_compose::render(doc, r));
                 }
+            }
+        }
+        Ok(ms(t))
+    }
+
+    /// Frame `i` of a Move tool drag of `layer` (#128): the canvas shows the document with the
+    /// layer at the pointer (`layer_multi_cmds::moved`) and recomposites where it was in the
+    /// previous frame and where it is now (`move_ui::damage`).
+    fn drag_frame(&self, s: &Session, layer: u64, i: usize) -> Res<f64> {
+        let doc = s.active().ok_or("no document")?.doc.clone();
+        let id = photosplice_doc::LayerId(layer);
+        let all = photosplice_geom::Rect::new(i32::MIN / 2, i32::MIN / 2, i32::MAX / 2, i32::MAX / 2);
+        let was = doc.layer(id).and_then(|l| photosplice_compose::change_bounds(l, all)).ok_or("no bounds")?;
+        // Frame i shows offset (d, d / 2); the canvas showed the previous frame's.
+        let (d, prev) = (3 * i as i32 + 1, if i == 0 { 0 } else { 3 * i as i32 - 2 });
+        let t = Instant::now();
+        let shown = photosplice_engine::layer_multi_cmds::moved(&doc, &[id], d, d / 2).map_err(|e| e.to_string())?;
+        let damage = was.translate(prev, prev / 2).union(&was.translate(d, d / 2)).inflate(1).intersect(&doc.bounds());
+        match &self.gpu {
+            Some((g, rs)) => {
+                g.refresh(doc.id.0, &shown, Some(damage), None);
+                let _ = rs.device.poll(eframe::wgpu::PollType::Wait { submission_index: None, timeout: None });
+            }
+            None => {
+                std::hint::black_box(photosplice_compose::render(&shown, damage));
             }
         }
         Ok(ms(t))
@@ -193,6 +242,8 @@ struct Sizes {
     big_layer: (u32, u32),
     /// Layers in the "150-layer document".
     many_layers: usize,
+    /// The full-canvas layers document (L3): size and layer count.
+    full_layers: (u32, u32, usize),
     /// The 16-bit document (15000 × 10000).
     huge16: (u32, u32),
     /// The 32-bit document with 20 layers.
@@ -209,6 +260,7 @@ const FULL: Sizes = Sizes {
     layered: (5472, 3648),
     big_layer: (4243, 2828),
     many_layers: 150,
+    full_layers: (3000, 2000, 150),
     huge16: (15000, 10000),
     float32: (4000, 3000),
     ten_mp: (3872, 2592),
@@ -220,6 +272,7 @@ const QUICK: Sizes = Sizes {
     layered: (1600, 1066),
     big_layer: (1200, 800),
     many_layers: 40,
+    full_layers: (800, 600, 20),
     huge16: (2400, 1600),
     float32: (1200, 900),
     ten_mp: (1200, 800),
@@ -288,6 +341,10 @@ fn main() {
     let sz = if quick { &QUICK } else { &FULL };
     let reps: usize = arg(&args, "--reps").and_then(|v| v.parse().ok()).unwrap_or(if quick { 7 } else { 15 }).max(1);
     let gpu = if args.iter().any(|a| a == "--cpu") { None } else { canvas() };
+    let no_reuse = args.iter().any(|a| a == "--no-composite-reuse");
+    if no_reuse && let Some((canvas, _)) = &gpu {
+        canvas.set_composite_cache_budget(0);
+    }
     let adapter = gpu.as_ref().map(|(_, rs)| rs.adapter.get_info().name);
     let mut b = Bench {
         gpu,
@@ -304,21 +361,34 @@ fn main() {
     // A panic in one group (a crash the scenario found) is reported against the row that was
     // running, and the other groups still run.
     type Group = fn(&mut Bench, &Sizes);
-    let groups: [(&str, Group); 5] = [
+    let groups: [(&str, Group); 6] = [
         ("layered", layered_scenarios),
         ("many layers", many_layer_scenarios),
+        ("full-canvas layers", full_canvas_layer_scenarios),
         ("bit depths", depth_scenarios),
         ("long operations", job_scenarios),
         ("algorithms", algorithm_scenarios),
     ];
     let use_gpu = b.gpu.is_some();
+    if let Some(wanted) = arg(&args, "--group")
+        && !groups.iter().any(|(group, _)| *group == wanted)
+    {
+        eprintln!("unknown scenario group: {wanted}");
+        std::process::exit(2);
+    }
     for (i, (group, run)) in groups.into_iter().enumerate() {
+        if arg(&args, "--group").is_some_and(|wanted| wanted != group) {
+            continue;
+        }
         b.current = None;
         // Each group starts on a fresh canvas device (one document open, as in the app), so
         // GPU memory or an error left by one group never carries into the next.
         if use_gpu && i > 0 {
             b.gpu = None;
             b.gpu = canvas();
+            if no_reuse && let Some((canvas, _)) = &b.gpu {
+                canvas.set_composite_cache_budget(0);
+            }
         }
         if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&mut b, sz))) {
             let msg = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_else(|| "panic".into());
@@ -335,6 +405,8 @@ fn main() {
             "mode": if quick { "quick" } else { "full" },
             "reps": reps,
             "gpu_adapter": adapter,
+            "composite_reuse": !no_reuse,
+            "group": arg(&args, "--group"),
             "errors": b.errors.iter().map(|(n, e)| json!({"name": n, "error": e})).collect::<Vec<_>>(),
         });
         let rep = report("perf_scenarios", context, std::mem::take(&mut b.rows), Some(&b.sampler));
@@ -363,6 +435,7 @@ fn layered_scenarios(b: &mut Bench, sz: &Sizes) {
         exec(s, "layer.translate", json!({"layer": target, "dx": d, "dy": d / 2}))?;
         Ok(ms(t) + b.refresh(s, false)?)
     });
+    b.time("move tool drag frame, styled layer", &mut s, reps, true, |b, s, i| b.drag_frame(s, target, i));
     b.time("set layer opacity + refresh", &mut s, reps, true, |b, s, i| {
         let t = Instant::now();
         exec(s, "layer.setProps", json!({"layer": target, "opacity": if i % 2 == 0 { 0.6 } else { 0.9 }}))?;
@@ -399,6 +472,28 @@ fn layered_scenarios(b: &mut Bench, sz: &Sizes) {
         exec(s, "edit.redo", json!({}))?;
         Ok(ms(t) + b.refresh(s, false)?)
     });
+
+    // A layer filling the canvas, with a drop shadow (#761) and without (#128): dragged, it
+    // overhangs the canvas edge.
+    let full = (|| -> Res<u64> {
+        exec(&mut s, "layer.new.layer", json!({"name": "full"}))?;
+        exec(&mut s, "select.all", json!({}))?;
+        exec(&mut s, "edit.fill", json!({"color": "#4080c0"}))?;
+        exec(&mut s, "select.deselect", json!({}))?;
+        exec(&mut s, "layer.layerStyle.dropShadow", json!({"distance": 12, "size": 16}))?;
+        active_layer(&s)
+    })();
+    match full {
+        Ok(full) => {
+            let _ = b.refresh(&s, true);
+            b.time("move tool drag frame, full-canvas layer with drop shadow", &mut s, reps, true, |b, s, i| b.drag_frame(s, full, i));
+            let _ = exec(&mut s, "layer.layerStyle.clear", json!({"layer": full}));
+            let _ = b.refresh(&s, true);
+            b.time("move tool drag frame, full-canvas layer", &mut s, reps, true, |b, s, i| b.drag_frame(s, full, i));
+            let _ = exec(&mut s, "layer.delete", json!({"layer": full}));
+        }
+        Err(e) => b.errors.push(("full-canvas styled layer".into(), e)),
+    }
 
     // A 12 MP layer, duplicated and pasted: the first time (a fresh layer, cold caches) and
     // again (the same source).
@@ -448,11 +543,73 @@ fn layered_scenarios(b: &mut Bench, sz: &Sizes) {
     });
 }
 
-/// #209: arrow-key nudge in the 150-layer document.
+/// Layers overhaul L3: edits that redraw the whole document (a layer's opacity, hiding it) with
+/// many full-canvas layers, under the app's own GPU memory budget (Memory Usage at its default,
+/// the adapter's kind; `gpu_canvas::memory_budget`). Past what the budget holds, each one went to
+/// the CPU compositor (2.6 s at 150 layers of 6 MP on a discrete card).
+fn full_canvas_layer_scenarios(b: &mut Bench, sz: &Sizes) {
+    let opacity = "opacity of a layer among many full-canvas layers + refresh";
+    let hide = "hide a layer among many full-canvas layers + refresh";
+    if !b.wanted(opacity) && !b.wanted(hide) {
+        return;
+    }
+    b.current = Some(opacity.to_string());
+    let (w, h, n) = sz.full_layers;
+    let mut s = Session::new();
+    let built = (|| -> Res<u64> {
+        exec(&mut s, "file.new", json!({"width": w, "height": h, "background": "white"}))?;
+        let mut mid = 0;
+        for i in 0..n as u32 {
+            exec(&mut s, "layer.new.layer", json!({"name": format!("full {i}")}))?;
+            exec(&mut s, "edit.fill", json!({"color": format!("#{:02x}{:02x}80", (i * 37) % 256, (i * 91) % 256), "opacity": 3}))?;
+            if i % 7 == 3 {
+                exec(&mut s, "layer.layerStyle.dropShadow", json!({"distance": 6, "size": 8}))?;
+            }
+            if i as usize == n / 2 {
+                mid = active_layer(&s)?;
+            }
+        }
+        Ok(mid)
+    })();
+    let mid = match built {
+        Ok(v) => v,
+        Err(e) => {
+            b.errors.push((opacity.to_string(), e));
+            return;
+        }
+    };
+    if let (Some((g, _)), Some(st)) = (&b.gpu, s.active()) {
+        // As the app counts it (`canvas::gpu_budget`).
+        let pixels = st.memory_bytes() as u64;
+        let allowance = u64::from(photosplice_engine::prefs::Performance::default().memory_usage_mb) << 20;
+        g.set_memory_budget(photosplice_ui_egui::gpu_canvas::memory_budget(
+            allowance,
+            pixels,
+            photosplice_ui_egui::gpu_canvas::physical_memory(),
+            g.video_memory(),
+            0,
+        ));
+    }
+    let _ = b.refresh(&s, true);
+    let reps = b.reps;
+    b.time(opacity, &mut s, reps, true, |b, s, i| {
+        let t = Instant::now();
+        exec(s, "layer.setProps", json!({"layer": mid, "opacity": if i % 2 == 0 { 0.5 } else { 1.0 }}))?;
+        Ok(ms(t) + b.refresh(s, false)?)
+    });
+    b.time(hide, &mut s, reps, true, |b, s, i| {
+        let t = Instant::now();
+        exec(s, "layer.setProps", json!({"layer": mid, "visible": i % 2 == 1}))?;
+        Ok(ms(t) + b.refresh(s, false)?)
+    });
+}
+
+/// #209: arrow-key nudge in the 150-layer document; #1771: a new layer there.
 fn many_layer_scenarios(b: &mut Bench, sz: &Sizes) {
     // Row names stay stable across modes: the layer count is in the mode, not the key.
     let name = "nudge 1 px in the many-layer document + refresh".to_string();
-    if !b.wanted(&name) {
+    let new_layer = "new layer in the many-layer document + refresh";
+    if !b.wanted(&name) && !b.wanted(new_layer) {
         return;
     }
     // The document's first refresh is part of this row (a crash there is reported against it).
@@ -471,6 +628,15 @@ fn many_layer_scenarios(b: &mut Bench, sz: &Sizes) {
         let t = Instant::now();
         exec(s, "layer.translate", json!({"layer": mid, "dx": if i % 2 == 0 { 1 } else { -1 }, "dy": 0}))?;
         Ok(ms(t) + b.refresh(s, false)?)
+    });
+    // Layer › New › Layer: as fast at any layer count. Undone (untimed) so the count stays put.
+    b.time(new_layer, &mut s, reps, true, |b, s, _| {
+        let t = Instant::now();
+        exec(s, "layer.new.layer", json!({}))?;
+        let took = ms(t) + b.refresh(s, false)?;
+        exec(s, "edit.undo", json!({}))?;
+        b.refresh(s, false)?;
+        Ok(took)
     });
 }
 
@@ -765,6 +931,7 @@ fn algorithm_scenarios(b: &mut Bench, sz: &Sizes) {
             Err(e) => b.errors.push((names[0].into(), e)),
         }
     }
+    liquify_preview_scenario(b);
     let cmyk = "brush dab on A4 300 ppi CMYK + refresh";
     if b.wanted(cmyk) {
         let (w, h) = sz.a4;
@@ -784,4 +951,117 @@ fn algorithm_scenarios(b: &mut Bench, sz: &Sizes) {
             Ok(ms(t) + b.refresh(s, false)?)
         });
     }
+    // P32: releasing a long stroke. The canvas draws it live (untimed here); the release offers
+    // those pixels to the commit and re-composites only what the canvas hadn't shown yet.
+    let release = "brush release: 600-point stroke, 200 px soft, 24 MP";
+    if b.wanted(release) {
+        let (w, h) = sz.big_photo;
+        let mut s = Session::new();
+        if let Err(e) = exec(&mut s, "file.new", json!({"width": w, "height": h, "background": "white"}))
+            .and_then(|_| exec(&mut s, "layer.new.layer", json!({"name": "paint"})))
+        {
+            b.errors.push((release.into(), e));
+            return;
+        }
+        let _ = b.refresh(&s, true);
+        let reps = b.reps.min(5);
+        b.time(release, &mut s, reps, false, |b, s, i| {
+            use photosplice_engine::paint::StrokePoint;
+            let (fw, fh) = (f64::from(w), f64::from(h));
+            let pts: Vec<[f64; 3]> = (0..600)
+                .map(|k| {
+                    let t = k as f64 / 599.0;
+                    [fw * (0.1 + 0.8 * t), fh * (0.5 + 0.35 * (t * 12.0 + i as f64).sin()), 0.6 + 0.4 * (t * 7.0).sin().abs()]
+                })
+                .collect();
+            let mut p = json!({"points": [pts[0]], "size": 200, "hardness": 0.0, "color": "#c03020", "smoothing": 0.0});
+            let mut live = photosplice_engine::brush_cmds::LiveStroke::begin(s, &p).map_err(|e| e.to_string())?;
+            for c in pts[1..].chunks(4) {
+                let sp: Vec<StrokePoint> = c.iter().map(|q| StrokePoint::new(q[0], q[1], q[2] as f32)).collect();
+                live.push(&sp).map_err(|e| e.to_string())?;
+            }
+            p["points"] = json!(pts);
+            p["seed"] = json!(live.seed);
+            let t = Instant::now();
+            s.offer_live_stroke(live).map_err(|e| e.to_string())?;
+            let r = exec(s, "paint.stroke", p);
+            s.clear_live_stroke();
+            if r?.get("fromLive").and_then(Value::as_bool) != Some(true) {
+                return Err("the release rendered the stroke again".into());
+            }
+            // The canvas already shows every step of the stroke: nothing left to re-composite.
+            Ok(ms(t) + b.refresh_rect(s, photosplice_geom::Rect::EMPTY)?)
+        });
+    }
+}
+
+/// A source-resolution Liquify brush update on the visible part of a 3500×2200 layer.
+/// Reports the old whole-document proxy cost alongside the full-resolution cropped update.
+fn liquify_preview_scenario(b: &mut Bench) {
+    let name = "Liquify 800 px brush on 3500x2200 at full resolution";
+    if !b.wanted(name) {
+        return;
+    }
+    let canvas = Rect::new(0, 0, 3500, 2200);
+    let view = Rect::new(1150, 700, 2350, 1500);
+    let source = Surface::with_default(PixelFormat::new(ColorMode::Rgb, SampleType::U8, true), &[0.32, 0.48, 0.64, 1.0]);
+    let proxy = ProxyImage::new(&source, canvas, 1600);
+    let mut low_out = vec![[0u8; 4]; proxy.w * proxy.h];
+    let (vw, vh) = (view.width() as usize, view.height() as usize);
+    let mut full_out = vec![[0u8; 4]; vw * vh];
+    let mut source_scratch = Vec::new();
+    let mut stroke = LiquifyStroke::new(LiquifyTool::ForwardWarp, 800.0);
+    stroke.density = 100.0;
+    stroke.points = vec![vec![1470.0, 1100.0, 1.0], vec![1530.0, 1100.0, 1.0]];
+    let base = LiquifyField::new(canvas, auto_cell(canvas));
+    let update = |field: &mut LiquifyField, out: &mut [[u8; 4]], scratch: &mut Vec<[f32; 4]>, full_res: bool| -> Res<f64> {
+        let t = Instant::now();
+        let dirty = field.stroke_segment(&stroke, [1470.0, 1100.0, 1.0], [1530.0, 1100.0, 1.0]);
+        let ok = if full_res {
+            ProxyImage::render_full_resolution(&source, field, view, dirty, out, scratch)
+        } else {
+            proxy.render(field, proxy.proxy_rect(dirty), out);
+            true
+        };
+        if !ok {
+            return Err("full-resolution preview could not allocate or render its visible region".into());
+        }
+        Ok(ms(t))
+    };
+
+    // Warm both paths, then compare identical field updates. The old renderer shades a downsampled
+    // proxy; the new one produces one source pixel per preview texel at 100% zoom.
+    let mut warm_low = base.clone();
+    let _ = update(&mut warm_low, &mut low_out, &mut source_scratch, false);
+    let mut warm_full = base.clone();
+    let warm = update(&mut warm_full, &mut full_out, &mut source_scratch, true);
+    if let Err(e) = warm {
+        return b.errors.push((name.into(), e));
+    }
+
+    let mut low_samples = Vec::new();
+    let mut samples = Vec::new();
+    b.current = Some(name.into());
+    b.sampler.reset();
+    for _ in 0..b.reps.clamp(1, 5) {
+        let mut field = base.clone();
+        match update(&mut field, &mut low_out, &mut source_scratch, false) {
+            Ok(t) => low_samples.push(t),
+            Err(e) => return b.errors.push((name.into(), e)),
+        }
+        let mut field = base.clone();
+        match update(&mut field, &mut full_out, &mut source_scratch, true) {
+            Ok(t) => samples.push(t),
+            Err(e) => return b.errors.push((name.into(), e)),
+        }
+    }
+    let low_sorted = {
+        let mut v = low_samples.clone();
+        v.sort_by(f64::total_cmp);
+        v
+    };
+    if let Some(median) = low_sorted.get(low_sorted.len() / 2) {
+        println!("  existing 1600 px proxy update p50 {median:.2} ms (lower-resolution output)");
+    }
+    b.record(name, &Session::new(), &samples, Ok(()));
 }

@@ -2037,3 +2037,766 @@
 	Unnamed {mode} profile	未命名的 {mode} 配置文件
 	Warp Grid	弯曲网格
 	Working…	正在处理…
+
+# Rows from PhotoCraft's catalogue (upstream merge, 2026-10): strings this catalogue lacked.
+	Channel Color	通道颜色
+	Color Indicates:	色彩指示：
+	Solidity:	密度：
+	Masked Areas	被蒙版区域
+	Selected Areas	所选区域
+	Spot Color	专色
+	Ink Characteristics	油墨特性
+	Paper Width	纸张宽度
+	Paper Height	纸张高度
+	Columns	列
+	Rows	行
+	Number	数量
+	Margin	边距
+	Top:	上:
+	Left:	左:
+	Bottom:	下:
+	Right:	右:
+	Target:	目标:
+	Selected Artboards	所选画板
+	Center Columns	列居中
+	Clear Existing Guides	清除现有参考线
+	Invalid guide layout	参考线布局无效
+	Leave empty for automatic size	留空以自动设置大小
+	5 Columns, 3 Rows	5列，3行
+	8 Columns	8列
+	12 Columns	12列
+	Selected	已选
+	Scope	范围
+	Top Left	左上
+	Top Right	右上
+	Bottom Left	左下
+	Bottom Right	右下
+	Open EXR Parts…	打开 EXR 分段…
+	Add beauty precomp from the AOVs	从 AOV 预合成美丽通道
+	Remove from Recent	从最近文件中移除
+	Remove {name} from Recent	从最近文件中移除 {name}
+	Minimize	最小化
+	Maximize	最大化
+	Restore	向下还原
+	{name} can't keep everything in this document	{name} 无法保留此文档中的所有内容
+	Choose a format that keeps it, such as Photoshop (PSD), or save a copy.	请选择能保留全部内容的格式，例如 Photoshop (PSD)，或存储副本。
+	Source Files	源文件
+	Use:	使用:
+	Files	文件
+	Folder	文件夹
+	Add Open Files	添加打开的文件
+	Sort By Name	按名称排序
+	Attempt to Automatically Align Source Images	尝试自动对齐源图像
+	Create Smart Object after Loading Layers	载入图层后创建智能对象
+	Show in Explorer	在文件资源管理器中显示
+	Show in Folder	在文件夹中显示
+	Add to Dictionary	添加到词典
+	No Spelling Suggestions	没有拼写建议
+	Delete and Fill Selection	删除并填充选区
+	Transform Again on a Copy	复制并再次变换
+	Set horizontal skew	设置水平斜切
+	Set vertical skew	设置垂直斜切
+	Adobe PDF Presets…	Adobe PDF 预设…
+	3D…	3D…
+	Technology Previews…	技术预览…
+	Background From Layer	从图层创建背景
+	Background from Layer	从图层创建背景
+	Use Global Light	使用全局光
+	Choose Stack Mode:	选择堆栈模式：
+	Merge Group	合并组
+	Select Layer Above	选择上方图层
+	Select Layer Below	选择下方图层
+	Select Top Layer	选择顶部图层
+	Select Bottom Layer	选择底部图层
+	Add Layer Above to Selection	将上方图层添加到选择
+	Add Layer Below to Selection	将下方图层添加到选择
+	Smart Radius	智能半径
+	Shift Edge	移动边缘
+	Decontaminate	净化
+	Output	输出
+	Refine Edge	调整边缘
+	No pin selected	未选择图钉
+	Click the image to add a pin; drag a pin to move it, or its ring to change its blur. Delete removes the selected pin.	单击图像以添加图钉；拖动图钉可移动它，拖动其圆环可更改模糊程度。按 Delete 键删除所选图钉。
+	Drag the handles on the outline to resize and turn it, the square to round its corners, and the dots inside to set where the blur starts.	拖动轮廓上的手柄可调整大小并旋转，拖动方块可将角变圆，拖动内部的点可设置模糊开始的位置。
+	Drag the pin to move the band, or its ring to change its blur. Drag the solid lines to widen the sharp band, the dashed lines to set the transition, and the dots to turn it.	拖动图钉可移动条带，拖动其圆环可更改模糊程度。拖动实线可加宽清晰条带，拖动虚线可设置过渡，拖动圆点可旋转。
+	Drag the handles on the outline to resize and turn it; the ring sets the blur angle.	拖动轮廓上的手柄可调整大小并旋转；圆环设置模糊角度。
+	Blur Angle	模糊角度
+	80%	80%
+	85%	85%
+	90%	90%
+	95%	95%
+	Reset Tool	重置工具
+	Reset All Tools	重置所有工具
+	Reset all tools to their default settings?	要将所有工具重置为默认设置吗？
+	Pro Light Gray Theme	专业浅灰主题
+	Pro Light Theme	专业浅色主题
+	Adwaita Light Theme	Adwaita 浅色主题
+	Adwaita Dark Theme	Adwaita 深色主题
+	Solarized dark	Solarized 深色
+	Solarized Dark Theme	Solarized 深色主题
+	Breeze dark	Breeze 深色
+	Breeze Dark Theme	Breeze 深色主题
+	Breeze light	Breeze 浅色
+	Breeze Light Theme	Breeze 浅色主题
+	Soft dark	柔和深色
+	Soft light	柔和浅色
+	Soft Dark Theme	柔和深色主题
+	Soft Light Theme	柔和浅色主题
+	PhotoSplice Website	PhotoSplice 网站
+	PhotoSplice on GitHub	PhotoSplice 的 GitHub 页面
+	ArtCraft Website	ArtCraft 网站
+	Join the ArtCraft Discord…	加入 ArtCraft 的 Discord 社区…
+	Refine Strokes	调整描边
+	Add a mask  (from the selection; ⌥ inverts)	添加蒙版  （基于选区；⌥ 反相）
+	Add to selection  (⇧)	添加到选区  （⇧）
+	Airbrush: keeps painting while the pointer rests.	喷枪：指针停留时继续绘制。
+	All shortcuts reset to PhotoSplice defaults.	所有快捷键已重置为 PhotoSplice 默认值。
+	Add Mask to Selection	添加蒙版到选区
+	Subtract Mask from Selection	从选区中减去蒙版
+	Intersect Mask with Selection	蒙版与选区交叉
+	Custom background color	自定背景颜色
+	Save Settings…	存储设置…
+	Load Settings…	载入设置…
+	Save these settings as a Camera Raw .xmp file	将这些设置存储为 Camera Raw .xmp 文件
+	Load settings from a Camera Raw .xmp file	从 Camera Raw .xmp 文件载入设置
+	Loaded Camera Raw settings from {file}	已从 {file} 载入 Camera Raw 设置
+	Loaded Camera Raw settings from {file} ({n} not supported)	已从 {file} 载入 Camera Raw 设置（{n} 项不支持）
+	Automatic	自动
+	Bicubic Smoother (enlargement)	双三次（较平滑）（扩大）
+	Bicubic Sharper (reduction)	双三次（较锐利）（缩减）
+	Manage submitted jobs in the system print queue	在系统打印队列中管理已提交的作业
+	Click the first point or press ↵ to close · Esc cancels	单击起点或按 ↵ 闭合 · Esc 取消
+	Click to add a point · drag off or ⌘/Ctrl-click or Delete to remove	单击添加点 · 拖离、按 ⌘/Ctrl 单击或按 Delete 移除
+	Click to apply, ⌥-click to clear overrides, double-click for Style Options	单击应用，按 ⌥ 单击清除覆盖设置，双击打开样式选项
+	Click to zoom in  ·  ⌥-click to zoom out	单击放大  ·  按 ⌥ 单击缩小
+	Click: corner · Drag: smooth · Click first point: close · ↩ finish · Esc cancel	单击：角点 · 拖动：平滑点 · 单击起点：闭合 · ↩ 完成 · Esc 取消
+	Commit Perspective Warp (↩)	应用透视变形（↩）
+	Commit Puppet Warp (↩)	应用操控变形（↩）
+	Commit any current edits (⌘↩)	应用当前所有编辑（⌘↩）
+	Commit current crop operation  (↵)	应用当前裁剪操作  （↵）
+	Commit transform (↩)	应用变换（↩）
+	Commit warp (↩)	应用变形（↩）
+	Create a new layer  (⇧⌘N)	创建图层  （⇧⌘N）
+	Custom pattern	自定义图案
+	Add Shortcut	添加快捷键
+	Delete layer ‘{name}’?	删除图层“{name}”？
+	Delete {count} layers? {names}	删除 {count} 个图层？{names}
+	Delete layer?	删除图层？
+	The document is closed	文档已关闭
+	The document or selected layers changed. Please request deletion again.	文档或所选图层已更改。请重新请求删除。
+	Missing delete command	缺少删除命令
+	Invalid delete command	无效的删除命令
+	Layer deleted, but confirmation preference could not be saved: {error}	图层已删除，但无法保存确认设置：{error}
+	Discord	Discord
+	No	否
+	Yes	是
+	Native file drag-and-drop is unavailable	Wayland 上不支持原生文件拖放
+	Native file drag-and-drop is not supported on Wayland yet. Use File › Open, or copy the image in your file manager and paste it with {paste}.	Wayland 尚不支持原生文件拖放。请使用“文件 › 打开”，或在文件管理器中复制图像后使用 {paste} 粘贴。
+	To drop files, start PhotoSplice under XWayland: `{command}`	要拖放文件，请在 XWayland 下启动 PhotoSplice：`{command}`
+	Or set Preferences › Performance › Linux display server to X11: PhotoSplice then always starts under XWayland.	或将 首选项 › 性能 › Linux 显示服务器 设为 X11：PhotoSplice 将始终在 XWayland 下启动。
+	Edit › Paste	“编辑 › 粘贴”
+	Use File › Open, or paste a copied image with {paste}.	请使用“文件 › 打开”，或使用 {paste} 粘贴复制的图像。
+	Fill Screen	填充屏幕
+	General Brushes	常规画笔
+	Grid  (⌘')	网格  （⌘'）
+	Gradient Preset Options	渐变预设选项
+	Import .GRD	导入 .GRD
+	Choose a gradient file (.grd).	请选择渐变文件 (.grd)。
+	Import brushes (.abr)	导入画笔（.abr）
+	Intersect with selection  (⇧⌥)	与选区相交  （⇧⌥）
+	Join us on Discord	加入我们的 Discord 社区
+	Mixer Brush Tool	混合画笔工具
+	Color Replacement Tool	颜色替换工具
+	Color Replacement	颜色替换
+	New document…     ⌘N	新建文档…     ⌘N
+	Open…     ⌘O	打开…     ⌘O
+	Refine	调整
+	Remove Tool	移除工具
+	Import Shortcuts…	导入快捷键…
+	Load a keyboard shortcut set saved as .kys	载入保存为 .kys 的键盘快捷键集
+	Imported {n} shortcuts from {file}. Click OK to keep them.	已从 {file} 导入 {n} 个快捷键。点击“确定”保留。
+	{n} commands are not in PhotoSplice.	{n} 个命令在 PhotoSplice 中不存在。
+	Keyboard shortcuts imported	已导入键盘快捷键
+	Your keyboard shortcut set {set} is in use here: {n} shortcuts differ from the defaults. Edit › Keyboard Shortcuts shows them; Reset All to Defaults undoes this.	此处正在使用你的键盘快捷键集 {set}：{n} 个快捷键与默认值不同。可在“编辑 › 键盘快捷键”中查看；“全部重置为默认值”可撤销。
+	Import keyboard shortcuts?	导入键盘快捷键？
+	PhotoSplice found your keyboard shortcut set {set} from another image editor on this computer: {n} of its shortcuts differ from PhotoSplice's. Import it?	PhotoSplice 在这台电脑上找到了你在其他图像编辑器中的键盘快捷键集 {set}：其中 {n} 个快捷键与 PhotoSplice 不同。要导入吗？
+	Edit › Keyboard Shortcuts › Reset All to Defaults undoes an import.	“编辑 › 键盘快捷键 › 全部重置为默认值”可撤销导入。
+	Don't Import	不导入
+	The keyboard shortcut set was not imported: {error}	未导入键盘快捷键集：{error}
+	Rulers  (⌘R)	标尺  (⌘R)
+	Search commands (⌘K)	搜索命令 (⌘K)
+	Symmetry Off	关闭对称
+	Show Guides  (⌘;)	显示参考线  (⌘;)
+	Location	位置
+	Location:	位置：
+	Preserve Transparency	保留透明区域
+	Subtract from selection  (⌥)	从选区中减去  (⌥)
+	Uses the foreground and background colors.	使用前景色和背景色。
+	Slant	倾斜
+	↑↓ navigate   ↵ run   esc close	↑↓ 导航   ↵ 运行   esc 关闭
+	New Document With Mask	带蒙版的新建文档
+	New Layer With Mask	带蒙版的新建图层
+	New Layer	新建图层
+	Saved	已保存
+	Save Preset…	保存预设…
+	Preset Name	预设名称
+	No saved presets yet.	尚无已保存的预设。
+	Adds grain to the soft edges of the brush tip.	在笔尖的柔软边缘添加颗粒。
+	ArtCraft	ArtCraft
+	Pencil	铅笔
+	Block	块
+	Default PhotoSplice Size	默认 PhotoSplice 大小
+	Single Row Marquee Tool	单行选框工具
+	Single Column Marquee Tool	单列选框工具
+	Horizontal Type Mask Tool	横排文字蒙版工具
+	Vertical Type Mask Tool	直排文字蒙版工具
+	Keeps the current texture when switching presets.	切换预设时保留当前纹理。
+	Could not use the move tool because the layer is locked.	无法使用移动工具，因为图层已锁定。
+	Could not complete the Free Transform command because the layer is locked.	无法完成“自由变换”命令，因为图层已锁定。
+	Direct Selection Tool	直接选择工具
+	Add Anchor Point Tool	添加锚点工具
+	Delete Anchor Point Tool	删除锚点工具
+	Click a segment to add an anchor point · {alt}-click an anchor to delete it	单击线段以添加锚点 · {alt}-单击锚点：删除锚点
+	Click an anchor point to delete it · {alt}-click a segment to add one	单击锚点将其删除 · {alt}-单击线段：添加锚点
+	Convert Point Tool	转换点工具
+	Pro (Light)	专业（浅色）
+	Pro (Light Gray)	专业（浅灰色）
+	Rasterize Layers	栅格化图层
+	Watercolour look: lighter interior, darker rims.	水彩效果：内部较浅，边缘较深。
+	{w} {unit} x {h} {unit} ({ppi} ppi)	{w} {unit} x {h} {unit} ({ppi} ppi)
+	Show canvas dots	显示画布圆点
+	Clip thumbnails to layer bounds	将缩略图裁剪到图层边界
+	Clip Thumbnails to Layer Bounds	将缩略图裁剪到图层边界
+	Lossless	无损
+	Low resolution previews	低分辨率预览
+	Open in camera raw	在 Camera Raw 中打开
+	Pro light	专业（浅色）
+	Pro light gray	专业（浅灰色）
+	Enable animations	启用动画
+	Show highlight on rollover	鼠标悬停时显示高亮
+	System title bar	系统标题栏
+	Adwaita	Adwaita
+	Adwaita dark	Adwaita（深色）
+	Collapse group  (⌥-click: all groups)	折叠组  (⌥-单击：所有组)
+	Update the current brush with these settings	用这些设置更新当前画笔
+	Expand group  (⌥-click: all groups)	展开组  (⌥-单击：所有组)
+	Hide the layer's effects  (⌥-click: all layers)	隐藏图层效果  (⌥-单击：所有图层)
+	Import Brushes… (.abr or image)	导入画笔… (.abr 或图像)
+	Import Brush from Image…	从图像导入画笔…
+	Show the layer's effects  (⌥-click: all layers)	显示图层效果  (⌥-单击：所有图层)
+	Shadow Clipping Warning (U)	阴影剪切警告 (U)
+	Highlight Clipping Warning (O)	高光剪切警告 (O)
+	Show Lab Color Readouts	显示 Lab 颜色读数
+	Show Vectorscope	显示矢量示波器
+	Show Red at 3 o'clock	将红色显示在三点钟方向
+	Show Skin Tone Indicator	显示肤色指示线
+	Tone Histogram	色调直方图
+	Show Selected Region	显示选定区域
+cameraRaw	Light	光线
+	Camera Raw Filter ({layer})	Camera Raw 滤镜（{layer}）
+	Camera Raw ({name})	Camera Raw（{name}）
+cameraRaw	Lights	亮调
+cameraRaw	Darks	暗调
+cameraRaw	Blacks	黑色色阶
+cameraRaw	Amount	强度
+cameraRaw	Tint	色偏
+cameraRaw	Masking	蒙版保护
+cameraRaw	Blending	混合
+	Patch Tool	修补工具
+	Transform On Drop	放下时变换
+	Scale or rotate the moved area, then press {key}	缩放或旋转移动的区域，然后按 {key}
+	Now drag the selection onto another area	现在将选区拖动到另一个区域
+	Click: corner · Drag: smooth · {alt}-drag: break handle · Click or drag first point: close · {key} finish · Esc cancel	单击：角点 · 拖动：平滑点 · {alt}+拖动：断开手柄 · 单击或拖动起点：闭合 · {key} 完成 · Esc 取消
+@plural	{n} layer|{n} layers	{n} 个图层
+	More documents	更多文档
+	Rasterize Layer Style	栅格化图层样式
+	New Brush Preset…	新建画笔预设…
+	Capture Brush Size in Preset	在预设中存储画笔大小
+	Include Tool Settings	包含工具设置
+	Include Color	包含颜色
+	Enter a name for the brush preset	请输入画笔预设的名称
+	A brush preset with this name already exists	已存在同名的画笔预设
+	Brush Preset Options	画笔预设选项
+	Brush Name	画笔名称
+	Brush Stroke	画笔描边
+	Brush Tip	画笔笔尖
+	Gradient Editor	渐变编辑器
+	Gradient picker	渐变拾色器
+	Save As Preset	存储为预设
+	The gradient the Gradient tool paints with	渐变工具所使用的渐变
+	Adds the current gradient to the Gradients panel	将当前渐变添加到“渐变”面板
+	Gradient stops	渐变色标
+	Linux display server	Linux 显示服务器
+	X11	X11
+	The document “{name}” does not have an embedded {mode} profile.	文档“{name}”没有嵌入的 {mode} 配置文件。
+	The document “{name}” has an embedded color profile that does not match the current {mode} working space.	文档“{name}”嵌入的颜色配置文件与当前的 {mode} 工作空间不匹配。
+	Working: {working}	工作空间：{working}
+	Developing {name}	正在处理 {name}
+	Opened {name}	已打开 {name}
+	Saved {name}	已保存 {name}
+	Saving {name}	正在保存 {name}
+	Saving {percent}	正在保存 {percent}
+	A save to {name} is still running; try again when it finishes	仍在保存到 {name}；请在完成后重试
+	{label} is writing the file and can no longer be cancelled	{label} 正在写入文件，已无法取消
+	New Style…	新建样式…
+	Style {name} saved	已保存样式 {name}
+	Make Default	设为默认
+	Reset to Default	重置为默认
+	Full-resolution preview unavailable	全分辨率预览不可用
+	No patterns	无图案
+	Enable {name}	启用{name}
+	Hold Alt while drawing for straight segments	绘制中按住 Alt 可逐点连接直线
+	Drag or click polygon points · hold Alt during lasso for straight segments · {add} add · {sub} before drawing subtracts	拖动圈选或逐点绘制 · 圈选中按住 Alt 画直线 · {add} 添加 · 起笔前按 {sub} 减去
+	Content-Aware Move Tool	内容感知移动工具
+	Targa Options	Targa 选项
+	24 bits/pixel	24 位/像素
+	32 bits/pixel	32 位/像素
+	Magnetic Lasso Tool	磁性套索工具
+	Frequency	频率
+	Use tablet pressure to change pen width	使用绘图板压力以更改钢笔宽度
+	About	关于
+	Contributors	贡献者
+	Models	模型
+	Sort	排序
+	Username	用户名
+	Display name	显示名称
+	Real name	真实姓名
+	Reverse the order	反转顺序
+	Grab bag	列表
+	Table	表格
+	Name (A–Z)	名称 (A–Z)
+	Merged PRs	已合并的 PR
+	Commits	提交
+	Lines added	新增行数
+	Lines deleted	删除行数
+	Line delta	行数增减
+	Binary assets added	新增二进制文件
+	Binary assets removed	删除二进制文件
+	First commit	首次提交
+	First	首次
+	Last commit	最近提交
+	Last	最近
+	Contributors: {contributors} · Commits: {commits}	贡献者：{contributors} · 提交：{commits}
+	No contributor data was built into this copy.	此副本未内置贡献者数据。
+	No model credits were built into this copy.	此副本未内置模型致谢。
+	Company	公司
+	Model	模型
+	Version	版本
+	% of all commits	占全部提交的 %
+	Lines +/−	行数 +/−
+	@{login}: {prs} PRs, {commits} commits, +{added} / −{deleted} lines (Δ {delta}), +{binAdded} / −{binDeleted} binary assets, {first} – {last}	@{login}：{prs} 个 PR，{commits} 次提交，行 +{added} / −{deleted}（Δ {delta}），二进制文件 +{binAdded} / −{binDeleted}，{first} – {last}
+	Create new swatch	创建新色板
+	New Swatch…	新建色板…
+	New Swatch Group…	新建色板组…
+	Import Swatches…	导入色板…
+	Replace Swatches…	替换色板…
+	Export Swatches…	导出色板…
+	Export Swatches for Exchange…	导出色板以供交换…
+	Reset Swatches	复位色板
+	Add to Swatches	添加到色板
+	Blend If:	混合颜色带:
+	Channels:	通道:
+	Knockout	挖空
+	Apply At Canvas Bounds	应用画布边界的效果
+	Color Picker (Text Color)	拾色器（文字颜色）
+	Color Picker ({name})	拾色器（{name}）
+	Color Picker (Fill Color)	拾色器（填充颜色）
+	Fill color	填充颜色
+	Color Picker (Stroke Color)	拾色器（描边颜色）
+	Stroke color	描边颜色
+	Pick screen color	选取屏幕颜色
+	Sample a pixel anywhere on the screen	在屏幕任意位置采样像素
+	Click to pick · Esc to cancel	单击选取 · Esc 取消
+	Pick a screen pixel or press Esc to cancel	选取屏幕像素或按 Esc 取消
+	Scroll to zoom	滚动以缩放
+	Drag to pan · Scroll to zoom · Double-click to fit	拖动以平移 · 滚动以缩放 · 双击以适应窗口
+	Show/Hide All Panels	显示/隐藏所有面板
+	Show/Hide Panels	显示/隐藏面板
+	Could not open	无法打开
+	{path}: the path is not valid Unicode; rename the file and open it again.	{path}：路径不是有效的 Unicode；请重命名文件后再打开。
+	Contents:	内容：
+	Custom Pattern:	自定义图案：
+	Foreground Color	前景色
+	Color…	颜色…
+	50% Gray	50% 灰色
+	Color Adaptation	颜色自适应
+	{size} (was {old})	{size}（原为 {old}）
+	Cone	锥形
+	Cone (Inverted)	锥形（反转）
+	Domed	圆顶
+	Domed (Inverted)	圆顶（反转）
+	Diagonal (Descending)	对角线（下降）
+	Contour Editor	等高线编辑器
+	Anti-aliased	消除锯齿
+	Corner	角点
+	Gloss Contour	光泽等高线
+	Contour	等高线
+	Cone - Inverted	锥形 - 反转
+	Cove - Deep	凹槽 - 深
+	Cove - Shallow	凹槽 - 浅
+	Gaussian	高斯
+	Half Round	半圆
+	Ring	环形
+	Ring - Double	环形 - 双
+	Rolling Slope - Descending	滚动斜坡 - 递减
+	Rounded Steps	圆角梯形
+	Sawtooth 1	锯齿 1
+	Red Eye Tool	红眼工具
+	Red Eye	红眼
+	Pupil Size	瞳孔大小
+	Darken Amount	变暗程度
+	Click a red pupil to neutralize it	单击红色瞳孔以消除反光
+	open source	开源
+	…and {n} more	…以及另外 {n} 项
+	Eyedroppers:	吸管：
+	Set Black Point	设置黑场
+	Set Neutral Gray Point	设置中性灰场
+	Set White Point	设置白场
+	Unavailable in this color mode	此颜色模式下不可用
+	Selection Preview:	选区预览：
+	Black Matte	黑色背景
+	White Matte	白色背景
+	Seafoam	海沫色
+	Indigo	靛蓝色
+	Fuchsia	紫红色
+	Violet	紫罗兰色
+	Reset	复位
+	Large document: redrawing on the CPU	大型文档：正在用 CPU 重绘
+	Redrawing	正在重绘
+	This redraw took {seconds} s on the CPU.	此次 CPU 重绘耗时 {seconds} 秒。
+	Edits that change the whole document, such as a layer's blend mode, opacity or visibility, redraw all of it.	更改整个文档的编辑（如图层的混合模式、不透明度或可见性）会重绘整个文档。
+	The GPU compositor wasn't used: {reason}	未使用 GPU 合成器：{reason}
+fontWeight	Thin	极细
+fontWeight	ExtraLight	特细
+fontWeight	Light	细体
+fontWeight	Regular	常规
+fontWeight	Medium	中等
+fontWeight	SemiBold	半粗
+fontWeight	Bold	粗体
+fontWeight	ExtraBold	特粗
+fontWeight	Black	黑体
+fontWeight	Italic	斜体
+	Pattern Stamp Tool	图案图章工具
+	Pattern Stamp	图案图章
+	Impressionist	印象派
+	Rotate View	旋转视图
+	Rotate View Tool	旋转视图工具
+	Reset View	重置视图
+	Drag around the centre to rotate the view  ·  Shift constrains to 15°	绕中心拖动以旋转视图  ·  Shift 限制为 15°
+	Dual Axis	双轴
+	Diagonal	对角线
+	Transform Symmetry	变换对称轴
+	Point Sample	采样点
+	3 by 3 Average	3 × 3 平均
+	5 by 5 Average	5 × 5 平均
+	11 by 11 Average	11 × 11 平均
+	31 by 31 Average	31 × 31 平均
+	51 by 51 Average	51 × 51 平均
+	101 by 101 Average	101 × 101 平均
+	Sample Size:	采样大小：
+	All Layers No Adjustments	所有图层（不含调整）
+	Current & Below No Adjustments	当前及下方图层（不含调整）
+	Show Sampling Ring	显示采样环
+	Out of gamut for printing: click for the nearest printable colour	超出打印色域：单击使用最接近的可打印颜色
+	Not a web colour: click for the nearest web colour	不是 Web 颜色：单击使用最接近的 Web 颜色
+	Color to Alpha…	颜色转为 Alpha…
+	Transparency Threshold	透明度阈值
+	Opacity Threshold	不透明度阈值
+	PhotoSplice — Screen Color Picker	PhotoSplice — 屏幕取色器
+	Rasterize svg groups deeper than	栅格化超过此深度的 SVG 组
+	0 turns this threshold off; SVG groups nested deeper than 100 levels are always rasterized.	设为 0 可关闭此阈值；嵌套超过 100 层的 SVG 组始终会被栅格化。
+	Rule of Thirds	三等分
+	Triangle	三角形
+	Golden Ratio	黄金比例
+	Golden Spiral	金色螺线
+	Auto Show Overlay	自动显示叠加
+	Always Show Overlay	总是显示叠加
+	Never Show Overlay	从不显示叠加
+	Cycle Overlay	循环切换叠加
+	Cycle Orientation	循环切换取向
+	Set the overlay options for the Crop tool	设置裁剪工具的叠加选项
+	Alt-click went to the desktop, which moves windows with Alt-drag. Set its window-move key to Super, or latch Alt in Window › Modifier Keys.	Alt 单击被桌面环境截获了，它用 Alt 拖动来移动窗口。请把桌面的窗口移动键改为 Super，或在 窗口 › 修饰键 中锁定 Alt。
+	Color Picker (Layer Style Color)	拾色器（图层样式颜色）
+	Auto Hide Notifications	自动隐藏通知
+	Notification Duration (seconds)	通知持续时间（秒）
+	Bundle Arrow-Key Nudges	合并方向键微移
+	Nudge Bundle Pause (ms)	微移合并间隔（毫秒）
+	Appearance Mode	外观模式
+	Dark Theme	深色主题
+	Light Theme	浅色主题
+	Pro Medium	Pro Medium
+	Studio Light	Studio Light
+	Next Appearance Mode	下一个外观模式
+	Sync with system	与系统同步
+	Active	当前使用
+	Color Picker (Solid Color)	拾色器（纯色）
+	Straighten the image by drawing a line on it	通过在图像上画一条线来拉直图像
+	Set additional Crop options	设置其他裁剪选项
+	Show Cropped Area	显示裁剪区域
+	Enable Crop Shield	启用裁剪屏蔽
+	Match Canvas	匹配画布
+	Auto Adjust Opacity	自动调整不透明度
+	Crop Shield color	裁剪屏蔽颜色
+	Color Picker (Crop Shield Color)	拾色器（裁剪屏蔽颜色）
+	From Center	从中心
+	Link radii	链接半径
+	Star Ratio:	星形比例：
+	Create Rectangle	创建矩形
+	Create Ellipse	创建椭圆
+	Create Triangle	创建三角形
+	Create Polygon	创建多边形
+	Pressure curve	压感曲线
+	Click to add a point, right-click to remove	单击添加点，右键单击删除点
+	Some brush presets could not be loaded	部分画笔预设无法加载
+	Retry saving presets	重试保存预设
+	Brush preset changes are not saved: {error}	画笔预设的更改未保存：{error}
+	Keep this tab open to retain your brushes.	请保持此标签页打开以保留您的画笔。
+	Browser storage is unavailable; brushes are session-only. Keep this tab open to retain them.	浏览器存储不可用；画笔仅在本次会话中有效。请保持此标签页打开以保留它们。
+	Saving brush presets… Keep this tab open until saving finishes.	正在保存画笔预设… 请保持此标签页打开，直到保存完成。
+	Reflect	反射
+	Glow	发光
+	Negation	否定
+	XOR	XOR
+	Color Burn (Paint.NET)	颜色加深 (Paint.NET)
+	Color Dodge (Paint.NET)	颜色减淡 (Paint.NET)
+	Stroke Options	描边选项
+	Solid	实线
+	Dashed	虚线
+	Dotted	点线
+	Alignment	对齐
+	Caps	端点
+	Butt / Flat	平头
+	Corners	拐角
+	Miter	斜接
+	Round	圆角
+	Bevel	斜角
+	Miter limit	斜接限制
+	Dashed line	虚线
+	Dash	线段
+	Gap	间隔
+	Dash / gap lengths × stroke width	线段 / 间隔长度 × 描边宽度
+	Add pair	添加一对
+	Remove pair	移除一对
+	Dash offset	虚线偏移
+	Open paths use centered strokes	开放路径使用居中描边
+	Use finite lengths and a positive pattern total	请使用有限长度和正数图案总长度
+	No subject found — try Object Selection or the Lasso	未找到主体 — 请尝试对象选择工具或套索工具
+	Quick Selection found nothing there	快速选择在该处未找到任何内容
+	Object Selection found nothing there — try a tighter rectangle	对象选择在该处未找到任何内容 — 请尝试更紧凑的矩形
+	No subject found — try a rectangle around the object	未找到主体 — 请尝试在对象周围绘制矩形
+	Auto Erase	自动抹除
+	Click the first point or press {key} to close · {del} removes a point · Esc cancels	点按第一个点或按 {key} 闭合 · {del} 删除一个点 · Esc 取消
+	Click, then move along an edge · click to fasten a point · {alt}-click for a straight segment · double-click to close	点按，然后沿边缘移动 · 点按固定一个点 · {alt}-点按画直线段 · 双击闭合
+	Follows only edges this close to the pointer ([ and ] change it)	只跟随离指针这么近的边缘（用 [ 和 ] 调整）
+	Higher values follow only edges that contrast sharply with their surroundings	数值越高，只跟随与周围对比强烈的边缘
+	How often fastening points are placed by themselves	自动放置紧固点的频率
+	Scrubby Zoom	细微缩放
+	{mode} Color · {bits} bit	{mode} 颜色 · {bits} 位
+	Drag a crop box · drag inside to move · edges resize ({ratio} ratio, {centre} centre) · Space moves while drawing · arrows nudge · X swaps orientation · {commit} commits · Esc cancels	拖移绘制裁剪框 · 在框内拖移以移动 · 拖移边缘调整大小（{ratio} 比例，{centre} 中心）· 绘制时按 Space 移动 · 方向键微移 · X 切换方向 · {commit} 确认 · Esc 取消
+	Appearance Settings…	外观设置…
+	Add to favorites	添加到收藏
+	Remove from favorites	从收藏中移除
+	Camera Data	相机数据
+cameraData	Make	制造商
+cameraData	Model	型号
+cameraData	Date Taken	拍摄日期
+cameraData	Exposure	曝光时间
+cameraData	F-Stop	光圈值
+cameraData	ISO Speed	ISO 感光度
+cameraData	Focal Length	焦距
+cameraData	Focal Length (35 mm)	焦距（35 毫米等效）
+cameraData	Lens	镜头
+	Activate Panel	激活面板
+	Change Panel Group	更改面板组
+	Change Panel Layout	更改面板布局
+	Close Panel	关闭面板
+	Dock Panel	停靠面板
+	Float Panel	浮动面板
+	Move Panel	移动面板
+	Group with	与此面板分组
+	Panel menu	面板菜单
+	Resize panel window	调整面板窗口大小
+	Resize panels	调整面板大小
+	Use Classic Mode	使用经典模式
+	Auto Center Preview	自动居中预览
+	Next Document	下一个文档
+	Previous Document	上一个文档
+	W x H x Resolution	宽 x 高 x 分辨率
+	Front Image	前面的图像
+	Frame Tool	图框工具
+	Create a new rectangular frame	新建矩形图框
+	Create a new elliptical frame	新建椭圆图框
+	Include in playback	包含在播放中
+	Perspective Crop Tool	透视裁剪工具
+	Show Grid	显示网格
+	Drag a box or click four corners · drag the corners onto the edges of a skewed shape · {commit} commits · Esc cancels	拖动方框或单击四个角 · 将角拖到倾斜形状的边缘 · {commit} 确认 · Esc 取消
+	Artboard Tool	画板工具
+	Make Portrait	设为纵向
+	Make Landscape	设为横向
+	Add New Artboard	添加新画板
+	W	宽
+	H	高
+	Freeform Pen Tool	自由钢笔工具
+	Curvature Pen Tool	弯度钢笔工具
+	Curve Fit:	曲线拟合：
+	Drag: draw freehand · {alt}-click: straight segment · Release on the start point: close	拖动：自由绘制 · {alt}-单击：直线段 · 在起点松开：闭合
+	Click: smooth point · Double-click: corner · Drag a point: move · Click first point: close · {key} finish	单击：平滑点 · 双击：角点 · 拖动点：移动 · 单击起点：闭合 · {key} 完成
+	Scale:	缩放：
+	Snap to Origin	贴紧原点
+	Search settings…	搜索设置…
+	No matching settings	没有匹配的设置
+	Loading fonts…	正在加载字体…
+	Response curve	响应曲线
+	Tool	工具
+	Simulate Pressure	模拟压力
+	Stroke Path…	描边路径…
+	Background Eraser	背景橡皮擦
+	Clone Stamp	仿制图章
+	Healing Brush	修复画笔
+	Spot Healing Brush	污点修复画笔
+	History Brush	历史记录画笔
+	Smudge	涂抹
+	Dodge	减淡
+	Burn	加深
+	Sponge	海绵
+	Amount:	数量：
+	Protect:	保护：
+	Protect skin tones	保护肤色
+	Edit points to modify the curve	编辑点以修改曲线
+	Draw to modify the curve	绘制以修改曲线
+curves	Smooth	平滑
+	Smooth the curve values	平滑曲线值
+	Drag to draw the curve · {key}-click draws a straight line	拖动以绘制曲线 · 按住 {key} 单击可绘制直线
+	Edit Plane	编辑平面
+	Create Plane	创建平面
+	Grid Size:	网格大小：
+	Vanishing Point: click four corners to create a plane	消失点：单击四个角以创建平面
+	Vanishing Point is not active	消失点未处于活动状态
+	Apply Vanishing Point ({key})	应用消失点（{key}）
+	Fix the red plane first: its corners must form a convex quad	请先修正红色平面：其四个角必须构成凸四边形
+	Onion Skin	洋葱皮
+	Marching Ants	蚂蚁线
+	On Black	黑底
+	On White	白底
+	On Layers	图层上
+	Show Edge	显示边缘
+	Show Original	显示原始
+	F cycles the views; hold X to see the image	按 F 切换视图；按住 X 查看图像
+	Refine Edge Brush (R)	调整边缘画笔 (R)
+	Expand Detection Area	扩展检测区域
+	Restore Original Edge	恢复原始边缘
+	Paint over hair or fur on the image; Alt paints the other mode	在图像中的头发或毛发上涂抹；按住 Alt 以另一种模式涂抹
+	Clear Brush Strokes	清除画笔描边
+	Show rulers	显示标尺
+	New Crop Preset…	新建裁剪预设…
+	Delete Crop Preset…	删除裁剪预设…
+	Select the crop presets to delete:	选择要删除的裁剪预设：
+	Select the crop presets to delete	选择要删除的裁剪预设
+	Enter a name for the crop preset	输入裁剪预设的名称
+	There is no crop size or ratio to save	没有可保存的裁剪大小或比例
+	Presentation	演示
+	Click to place · Alt-click or drag off-canvas to remove	单击以放置 · Alt 单击或拖到画布外以移除
+	No document open	未打开任何文档
+	{n} of {max} sample points	{max} 个取样点中的 {n} 个
+	Emulsion Down	药膜朝下
+	Functions	功能
+	Print Resolution:	打印分辨率：
+	Use Previous Layer to Create Clipping Mask	使用前一图层创建剪贴蒙版
+	Fill with {mode}-neutral color (white)	使用{mode}中性色填充（白色）
+	Fill with {mode}-neutral color (black)	使用{mode}中性色填充（黑色）
+	Fill with {mode}-neutral color (50% gray)	使用{mode}中性色填充（50% 灰色）
+	(No neutral color exists for {mode} mode.)	（{mode}模式不存在中性色。）
+	Apply mask to layer before removing?	移去之前将蒙版应用到图层吗？
+	The layer or its mask changed. Drag the mask onto the Trash again.	图层或其蒙版已更改。请再次将蒙版拖到垃圾桶。
+	Delete the vector mask?	要删除矢量蒙版吗？
+	Light Blue	浅蓝色
+	Light Red	浅红色
+	Medium Blue	中蓝色
+	Light Gray	浅灰色
+	Object Finder	对象查找程序
+	No object found there — drag a rectangle around it	那里未找到对象 — 请在其周围拖动矩形
+	Remove after each stroke	每次描边后移除
+	Apply the removal ({key})	应用移除 ({key})
+	Strokes to remove: {n} (Enter applies, Esc cancels)	待移除的描边：{n}（Enter 应用，Esc 取消）
+	Show home recent files	在主屏幕上显示最近的文件
+	Clear Brush Controls	清除画笔控件
+	Reset All Locked Settings	复位所有锁定的设置
+	Copy Texture to Other Tools	将纹理复制到其他工具
+	Load Actions…	载入动作…
+	Save Actions…	存储动作…
+	{name} (Photoshop)	{name}（Photoshop）
+	{message} ({note})	{message}（{note}）
+@plural	Loaded {n} action from {file}|Loaded {n} actions from {file}	已从 {file} 载入 {n} 个动作
+@plural	{n} step has no PhotoSplice equivalent yet|{n} steps have no PhotoSplice equivalent yet	{n} 个步骤在 PhotoSplice 中尚无对应功能
+@plural	Saved {n} action to {file}|Saved {n} actions to {file}	已将 {n} 个动作存储到 {file}
+@plural	{n} step with no Photoshop equivalent left out|{n} steps with no Photoshop equivalent left out	已省略 {n} 个没有 Photoshop 对应功能的步骤
+	File Naming	文件命名
+	Starting serial	起始序号
+	Insert Stop…	插入停止…
+	Save Set…	存储组…
+	Message:	信息:
+	Allow Continue	允许继续
+	Show dialog during playback	播放时显示对话框
+	Select an action first	请先选择一个动作
+	Action playback stopped	动作播放已停止
+	Step {step} is waiting for its dialog	步骤 {step} 正在等待其对话框
+@plural	{n} action|{n} actions	{n} 个动作
+	Background (Default)	背景（默认）
+	Content-Aware Fill	内容识别填充
+	Include All Subfolders	包含所有子文件夹
+	Auto Add/Delete	自动添加/删除
+	Don't also tick Mirror Image in Print Settings…: the two flips cancel out.	不要同时勾选打印设置中的镜像：两次翻转会相互抵消。
+	Print Settings…	打印设置…
+	Remember to turn off the printer's own colour management in Print Settings…	请记得在打印设置中关闭打印机自身的色彩管理…
+	Sent to {printer}	已发送到 {printer}
+	set in Print Settings…	在打印设置中设置…
+	ICO is limited to 256 × 256 pixels	ICO 最大为 256 × 256 像素
+	Use the embedded profile ({profile})	使用嵌入的配置文件（{profile}）
+	Convert to the working space ({profile})	转换到工作空间（{profile}）
+	Remember this choice for future images	以后打开的图像都使用此选择
+	Turn the prompt back on with Ask On Mismatch in Edit › Color Settings.	可在 编辑 › 颜色设置 中打开 Ask On Mismatch，重新显示此提示。
+	Button Mode	按钮模式
+	Button Mode On	按钮模式 开
+	Darken Interface	界面变暗
+	Lighten Interface	界面变亮
+	Technique	方法
+	Chisel Hard	雕刻清晰
+	Chisel Soft	雕刻柔和
+	Open color-less EXR as ACEScg	将无色彩空间信息的 EXR 以 ACEScg 打开
+	Color Profile	颜色配置文件
+	EXIF	EXIF
+	Edit Selected Guides	编辑所选参考线
+	Clear Selected Guides	清除所选参考线
+	Delete this set	删除此组
+	New Set…	新建组…
+	PhotoSplice Defaults	PhotoSplice 默认值
+	Save a list of these shortcuts as a web page	将这些快捷键的列表存储为网页
+	Save the changes to this set	将更改存储到此组
+	Save these shortcuts as a .kys file	将这些快捷键存储为 .kys 文件
+	Save these shortcuts as a new set	将这些快捷键存储为新组
+	Set deleted.	已删除组。
+	Set saved.	已存储组。
+	Set:	组：
+	Summarize…	摘要…
+	There are too many sets: delete one first.	组太多：请先删除一个。
+	set name	组名称
+	{set} (modified)	{set}（已修改）
+	Random	随机
+	Accept and Go to Conflict	接受并转到冲突
+	Changes undone.	已撤消更改。
+	Choose a new shortcut for this command, or leave it without one.	为此命令选择新的快捷键，或保留为无快捷键。
+	Put this command's shortcuts back as they were	将此命令的快捷键恢复原样
+	Take the shortcut from the other command and select it	从另一个命令移除该快捷键并选中它
+	Undo Changes	撤消更改
+	{shortcut} is reserved by the system and can't be assigned.	{shortcut} 由系统保留，无法指定。
+	Low-Latency Drawing (vsync off, applies at next launch)	低延迟绘画（关闭垂直同步，下次启动时生效）
+	Free Transform is still being applied; try again when it has finished.	自由变换仍在应用中；请在完成后重试。
+	The transform couldn't be applied.	无法应用变换。
+	Its layers need {needed} of GPU memory; the budget leaves them {budget}.	其图层需要 {needed} GPU 内存；预算只留给它们 {budget}。
+	Set GPU Memory in Preferences › Performance to what your graphics card can hold, at most 3/8 of its memory. Automatic follows Memory Usage, within a quarter of this computer's memory and 3/8 of the card's, and doesn't count the document against a card whose memory is known. The status bar shows GPU Memory Full while they don't fit.	在 首选项 › 性能 中将 GPU 内存设置为显卡能容纳的大小，最多为其显存的 3/8。自动跟随内存使用量，不超过本机内存的四分之一和显卡显存的 3/8，且在显存已知的显卡上不把文档计入。在图层放不下期间，状态栏显示“GPU 内存已满”。
+	GPU Memory Full	GPU 内存已满
+	The layers need {needed} of GPU memory and may hold {budget}, so edits that redraw the whole document do it on the CPU. Click to set GPU Memory.	图层需要 {needed} GPU 内存，但只能占用 {budget}，因此重绘整个文档的编辑会在 CPU 上进行。点击以设置 GPU 内存。
+	GPU memory budget: {budget}	GPU 内存预算：{budget}
+	This document's layers: {needed} of {budget} for layers	此文档的图层：图层可用 {budget} 中的 {needed}
+	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	此文档的图层需要 {needed}，但只能占用 {budget}：整个文档的重绘使用 CPU
+	GPU Memory (MB, 0 = Automatic)	GPU 内存（MB，0 = 自动）

@@ -1,5 +1,5 @@
 # Scorecard checklist: automation (#219). The command count and the menu wiring number come from
-# docs/parity.md.
+# docs/parity-checklist.md.
 # Statuses must be true on main. Verified against 4b53f62 on 2026-10-05.
 area = "automation"
 title = "Automation"
@@ -9,7 +9,7 @@ order = 6
 id = "AUTO-1"
 target = "Every menu item dispatches a command id (the UI and the control channel share them)"
 status = "done"
-note = "docs/parity.md: all menu items live; menus.rs is_live"
+note = "docs/parity-checklist.md: all menu items live; menus.rs is_live"
 
 [[item]]
 id = "AUTO-219-1"
@@ -21,9 +21,9 @@ note = "actions.rs:47 copies raw journal entries with explicit layer ids"
 [[item]]
 id = "AUTO-219-2"
 target = "Actions panel: step and dialog toggles, reorder, delete a step, Stop, sets, .atn import"
-status = "missing"
+status = "done"
 issue = 219
-note = "Panel deletes whole actions only (actions.rs:146)"
+note = "2026-10-12: set folders (collapsible, drag between sets, actions.assignSet), dialog toggle column (playback opens the step's dialog seeded with its values and resumes on OK; actions.dialog), Insert Stop… (actions.insert), step toggles, reorder, delete a step; Load/Save Actions (.atn) in the panel menu, CLI batch and actions.load/save (atn_cmds.rs): 90 Photoshop events map to commands both ways, the rest are kept verbatim and fail at playback by name; step toggles, reorder and delete a step done; Stop steps play (actions.stopMessage) but there is no Insert Stop menu item; sets and dialog toggles are stored and round-trip but the panel neither groups by set nor edits the dialog toggle"
 
 [[item]]
 id = "AUTO-219-3"
@@ -35,16 +35,16 @@ note = "actions.list/get/record/stop/play/delete in actions_cmds.rs; the panel a
 [[item]]
 id = "AUTO-219-4"
 target = "Replay tests for crop, filters, selections and styled text on a second document"
-status = "missing"
+status = "done"
 issue = 219
-note = "One replay test (actions.rs:171: new layer, rect select, fill)"
+note = "actions_cmds.rs: a_recorded_edit_run_replays_on_a_second_document records a crop, a Gaussian Blur, a selection fill and faux-bold type on one document and replays all of them onto a second (plus the original layer/select/fill replay)"
 
 [[item]]
 id = "AUTO-219-5"
 target = "Batch: subfolders, open documents, naming template, progress/cancel, error log, stop"
 status = "partial"
 issue = 219
-note = "file_cmds.rs:590-631 folder/array input, per-file errors; no recursion, template or cancel"
+note = "file_cmds.rs and file_cmds/batch_naming.rs: folder/array input, per-file errors, {name}/{serial}/{date} output templates and starting serial, Include All Subfolders (includeSubfolders: depth/loop/file-count bounded, results keep their subfolder; Batch and Image Processor dialogs, #3753); no open-documents source, cancel or error-log file"
 
 [[item]]
 id = "AUTO-219-6"

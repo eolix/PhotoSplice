@@ -22,7 +22,14 @@ pub struct ChromeState {
 impl ChromeState {
     /// Is the Home screen up, given the current number of open documents? With no documents it
     /// shows by itself when `auto_show` (Preferences › General › Auto show the Home Screen).
-    pub fn shows_home(&self, documents: usize, auto_show: bool) -> bool {
+    ///
+    /// `home` stores the document count when Home was opened so File › New / Open can leave it.
+    /// Closing a tab that returns to that count must not bring Home back (#3981): once the
+    /// document set has changed, the overlay is gone until the user opens Home again.
+    pub fn shows_home(&mut self, documents: usize, auto_show: bool) -> bool {
+        if self.home.is_some_and(|n| n != documents) {
+            self.home = None;
+        }
         (documents == 0 && auto_show) || self.home == Some(documents)
     }
 }
@@ -75,6 +82,10 @@ pub fn document_sizes(doc: &Document) -> (u64, u64) {
 
 /// The status bar text for `key` (Photoshop wording).
 pub fn status_info_text(doc: &Document, key: &str, tool: &str, profile: &str) -> String {
+    status_info_text_with_units(doc, key, tool, profile, &Default::default())
+}
+
+fn status_info_text_with_units(doc: &Document, key: &str, tool: &str, profile: &str, units: &photosplice_engine::prefs::UnitsAndRulers) -> String {
     let bits = doc.depth.bits();
     match key {
         "sizes" => {
@@ -93,10 +104,18 @@ pub fn status_info_text(doc: &Document, key: &str, tool: &str, profile: &str) ->
             let n = doc.layer_count();
             crate::i18n::trn(crate::i18n::current(), n as u64, "{n} Layer", "{n} Layers")
         }
-        _ => crate::i18n::fmt(
+        _ if units.rulers == photosplice_engine::prefs::Unit::Pixels => crate::i18n::fmt(
             tl!("{w} px x {h} px ({ppi} ppi)"),
             &[("w", &doc.size.width.to_string()), ("h", &doc.size.height.to_string()), ("ppi", &widgets::fmt_num(doc.resolution_dpi as f64))],
         ),
+        _ => {
+            let dpi = doc.resolution_dpi as f64;
+            let (w, h) = (doc.size.width as f64, doc.size.height as f64);
+            crate::i18n::fmt(
+                tl!("{w} {unit} x {h} {unit} ({ppi} ppi)"),
+                &[("w", &units.format(w, dpi, w)), ("h", &units.format(h, dpi, h)), ("unit", units.rulers.suffix()), ("ppi", &widgets::fmt_num(dpi))],
+            )
+        }
     }
 }
 
@@ -124,12 +143,21 @@ pub fn status_bar_pro(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let (Some(st), Some(i)) = (app.session.active(), app.session.active_index()) else {
         ui.label(RichText::new(tl!("No document")).color(t.text_dim));
+        // A command run with no document open still reports here (#1567: File › Automate › Batch).
+        status_message(app, ui, &t);
         return;
     };
-    let text = status_info_text(&st.doc, &app.ui.chrome.status_info, tl!(app.ui.tool.label()), &profile_name(&st.doc));
+    let text = status_info_text_with_units(
+        &st.doc,
+        &app.ui.chrome.status_info,
+        tl!(app.ui.tool.label()),
+        &profile_name(&st.doc),
+        &app.session.prefs().units_and_rulers,
+    );
     let mut pct = app.ui.views[i].zoom * 100.0;
-    if widgets::value_field(ui, &mut pct, 1.0..=3200.0, "%", 64.0).changed() {
-        app.ui.views[i].zoom = pct / 100.0;
+    let control_h = crate::panels::status_bar_heights(&t).1;
+    if widgets::compact_wrapping_value_field(ui, &mut pct, crate::zoom_levels::percent_range(&app.ui.views[i]), "%", vec2(64.0, control_h)).changed() {
+        app.ui.views[i].zoom = crate::zoom_levels::clamp(pct / 100.0, app.ui.views[i].doc_size);
         app.ui.views[i].fit_pending = false;
     }
     ui.add_space(12.0);
@@ -138,9 +166,11 @@ pub fn status_bar_pro(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
     if resp.hovered() {
         ui.painter().rect_filled(r, t.radius_sm, t.hover);
     }
-    icons::paint(ui, r, "chevron-right", 11.0, t.text_dim);
+    // Points along the bar, away from the zoom field.
+    icons::paint(ui, r, if crate::direction::is_rtl() { "chevron-left" } else { "chevron-right" }, 11.0, t.text_dim);
     let resp = resp.on_hover_text(tl!("Show"));
     egui::Popup::menu(&resp).show(|ui| {
+        crate::widgets::style_spectrum_popup_menu(ui);
         ui.set_min_width(200.0);
         for (key, label) in STATUS_INFO {
             let on = app.ui.chrome.status_info == *key;
@@ -150,12 +180,36 @@ pub fn status_bar_pro(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
             }
         }
     });
-    if !app.ui.status.is_empty() {
-        let (r, _) = ui.allocate_exact_size(vec2(17.0, 16.0), Sense::hover());
-        ui.painter().line_segment([r.center_top(), r.center_bottom()], Stroke::new(1.0, t.separator));
-        let is_err = app.ui.status_error || app.ui.status.starts_with("Couldn");
-        ui.label(RichText::new(&app.ui.status).color(if is_err { t.warning } else { t.text_faint }));
+    status_message(app, ui, &t);
+}
+
+/// The active document's layers don't fit the GPU memory budget (`perf.gpuLayerFit`): edits that
+/// redraw the whole document do it on the CPU, so say so in the status bar until they fit again.
+/// Clicking it opens Preferences › Performance, where GPU Memory raises the budget.
+pub fn gpu_memory_status(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
+    let Some(doc) = app.session.active().map(|st| st.doc.id.0) else { return };
+    let Some(fit) = app.perf.gpu_layer_fit.filter(|f| f.doc == doc && !f.fits()) else { return };
+    let t = Tokens::get(ui.ctx());
+    let resp = ui
+        .add(egui::Label::new(RichText::new(tl!("GPU Memory Full")).color(t.warning).size(12.0)).sense(Sense::click()))
+        .on_hover_text(crate::i18n::fmt(
+            tl!("The layers need {needed} of GPU memory and may hold {budget}, so edits that redraw the whole document do it on the CPU. Click to set GPU Memory."),
+            &[("needed", &fmt_bytes(fit.needed)), ("budget", &fmt_bytes(fit.budget))],
+        ));
+    if resp.clicked() {
+        crate::shortcut_dispatch::dispatch(app, ui.ctx(), "edit.preferences.performance");
     }
+}
+
+/// The latest status message after a separator, in the warning colour when it is an error.
+fn status_message(app: &PhotospliceApp, ui: &mut egui::Ui, t: &Tokens) {
+    if app.ui.status.is_empty() {
+        return;
+    }
+    let (r, _) = ui.allocate_exact_size(vec2(17.0, 16.0), Sense::hover());
+    ui.painter().line_segment([r.center_top(), r.center_bottom()], Stroke::new(1.0, t.separator));
+    let is_err = app.ui.status_error || app.ui.status.starts_with("Couldn");
+    ui.label(RichText::new(&app.ui.status).color(if is_err { t.warning } else { t.text_faint }));
 }
 
 /// Marquee drag end point under the options-bar Style (Normal, Fixed Ratio, Fixed Size) and Shift
@@ -195,7 +249,7 @@ pub fn crop_ratio(key: &str, doc_w: f64, doc_h: f64) -> Option<(f64, f64)> {
         return Some((doc_w, doc_h));
     }
     let (a, b) = key.split_once(':')?;
-    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+    Some((crate::numeric_expression::parse(a)?, crate::numeric_expression::parse(b)?))
 }
 
 #[cfg(test)]
@@ -220,6 +274,98 @@ mod tests {
     }
 
     #[test]
+    fn status_dimensions_follow_ruler_units_and_document_resolution() {
+        use photosplice_engine::prefs::{PointSize, Unit, UnitsAndRulers};
+        let mut d = doc();
+        d.resolution_dpi = 300.0;
+        for (unit, expected) in [
+            (Unit::Pixels, "2400 px x 1500 px (300 ppi)"),
+            (Unit::Inches, "8 in x 5 in (300 ppi)"),
+            (Unit::Centimeters, "20.32 cm x 12.7 cm (300 ppi)"),
+            (Unit::Millimeters, "203.2 mm x 127 mm (300 ppi)"),
+            (Unit::Points, "576 pt x 360 pt (300 ppi)"),
+            (Unit::Picas, "48 pica x 30 pica (300 ppi)"),
+            (Unit::Percent, "100 % x 100 % (300 ppi)"),
+        ] {
+            let units = UnitsAndRulers { rulers: unit, ..Default::default() };
+            assert_eq!(status_info_text_with_units(&d, "dimensions", "", "", &units), expected);
+            for (key, _) in STATUS_INFO.iter().filter(|(key, _)| *key != "dimensions") {
+                assert_eq!(status_info_text_with_units(&d, key, "Brush Tool", "sRGB", &units), status_info_text(&d, key, "Brush Tool", "sRGB"));
+            }
+        }
+        d.resolution_dpi = 240.0;
+        let units = UnitsAndRulers { rulers: Unit::Points, point_size: PointSize::Traditional, ..Default::default() };
+        assert_eq!(status_info_text_with_units(&d, "dimensions", "", "", &units), "722.7 pt x 451.7 pt (240 ppi)");
+    }
+
+    /// L3: layers over the GPU memory budget show "GPU Memory Full" in the status bar, for that
+    /// document only, and clicking it opens Preferences › Performance (GPU Memory).
+    #[test]
+    fn status_bar_says_when_layers_dont_fit_gpu_memory() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        for theme in [crate::theme::ThemeKind::Midnight, crate::theme::ThemeKind::Anthracite] {
+            let mut h = Harness::builder().with_size(vec2(1200.0, 700.0)).with_max_steps(64).build_eframe(move |cc| {
+                PhotospliceApp::setup_context(&cc.egui_ctx, theme);
+                let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+                app.ui.theme = theme;
+                app
+            });
+            h.state_mut().run("file.new", json!({"width": 800, "height": 600})).unwrap();
+            h.state_mut().sync_views();
+            h.run_steps(4);
+            let doc = h.state().session.active().unwrap().doc.id.0;
+            assert!(h.query_by_label("GPU Memory Full").is_none(), "{theme:?}: nothing measured yet");
+            let over = crate::gpu_canvas::LayerFit { doc, needed: 3 << 30, budget: 2 << 30 };
+            h.state_mut().perf.gpu_layer_fit = Some(crate::gpu_canvas::LayerFit { doc: doc + 1, ..over });
+            h.run_steps(2);
+            assert!(h.query_by_label("GPU Memory Full").is_none(), "{theme:?}: another document's layers");
+            h.state_mut().perf.gpu_layer_fit = Some(crate::gpu_canvas::LayerFit { budget: 4 << 30, ..over });
+            h.run_steps(2);
+            assert!(h.query_by_label("GPU Memory Full").is_none(), "{theme:?}: they fit");
+            h.state_mut().perf.gpu_layer_fit = Some(over);
+            h.run_steps(2);
+            h.get_by_label("GPU Memory Full").click();
+            h.run_steps(4);
+            let open = h.state().ui.dialogs.iter().any(|d| d.fields.get("section") == Some(&json!("performance")));
+            assert!(open, "{theme:?}: Preferences › Performance opens");
+        }
+    }
+
+    #[test]
+    fn status_bar_updates_dimensions_after_a_ruler_preference_change() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        let mut failures = Vec::new();
+        for theme in [crate::theme::ThemeKind::Midnight, crate::theme::ThemeKind::Slate] {
+            for width in [800.0, 1200.0] {
+                let builder = Harness::builder().with_size(vec2(width, 600.0)).with_max_steps(64);
+                let mut h = builder.build_eframe(move |cc| {
+                    PhotospliceApp::setup_context(&cc.egui_ctx, theme);
+                    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+                    app.run("prefs.set", json!({"path": "interface.theme", "value": theme.id()})).unwrap();
+                    app.ui.theme = theme;
+                    app
+                });
+                h.state_mut().run("file.new", json!({"width": 1920, "height": 1080, "resolution": 72})).unwrap();
+                h.state_mut().sync_views();
+                h.run_steps(4);
+                assert_eq!(h.state().ui.theme, theme, "the fixture renders the requested theme");
+                assert!(h.query_by_label("1920 px x 1080 px (72 ppi)").is_some());
+                h.state_mut().run("prefs.set", json!({"path": "unitsAndRulers.rulers", "value": "inches"})).unwrap();
+                h.run_steps(4);
+                if h.query_by_label("26.667 in x 15 in (72 ppi)").is_none() || h.query_by_label("1920 px x 1080 px (72 ppi)").is_some() {
+                    failures.push(format!("{theme:?}, width={width}: inches"));
+                }
+                h.state_mut().run("prefs.set", json!({"path": "unitsAndRulers.rulers", "value": "cm"})).unwrap();
+                h.run_steps(4);
+                if h.query_by_label("67.73 cm x 38.1 cm (72 ppi)").is_none() {
+                    failures.push(format!("{theme:?}, width={width}: centimeters"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "the status bar must follow the preference immediately: {failures:?}");
+    }
+
+    #[test]
     fn status_profile_describes_rgb_gray_and_custom_profiles_without_mutating_the_document() {
         let mut rgb = doc();
         rgb.icc_profile = Some(photosplice_engine::color_cmds::working_profile(rgb.mode).to_bytes());
@@ -231,7 +377,7 @@ mod tests {
         let mut gray = doc();
         gray.mode = photosplice_doc::ColorMode::Grayscale;
         gray.icc_profile = Some(photosplice_engine::color_cmds::working_profile(gray.mode).to_bytes());
-        assert_eq!(profile_name(&gray), "sGray (sRGB tone curve, PhotoSplice)");
+        assert_eq!(profile_name(&gray), "Dot Gain 20%-compatible (gamma 1.732, PhotoSplice)");
 
         let mut custom = (*photosplice_engine::color_cmds::working_profile(photosplice_doc::ColorMode::Cmyk)).clone();
         custom.description = "PhotoSplice Studio CMYK".into();
@@ -276,6 +422,30 @@ mod tests {
         c.home = Some(2);
         assert!(c.shows_home(2, true));
         assert!(!c.shows_home(3, true));
+        assert!(c.home.is_none(), "leaving Home by opening a document dismisses it");
+        c.home = Some(1);
+        assert!(!c.shows_home(2, true));
+        assert!(!c.shows_home(1, true), "closing back to the stored count must not re-open Home");
+        assert!(c.home.is_none());
+    }
+
+    #[test]
+    fn closing_a_tab_does_not_return_to_home() {
+        use crate::PhotospliceApp;
+        use photosplice_engine::Session;
+        use serde_json::json;
+
+        let mut app = PhotospliceApp::new(Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 8, "height": 8, "name": "Keep"})).unwrap();
+        let n = app.session.documents().len();
+        app.ui.chrome.home = Some(n);
+        assert!(app.ui.chrome.shows_home(n, true));
+        app.run("file.new", json!({"width": 8, "height": 8, "name": "Other"})).unwrap();
+        assert!(!app.ui.chrome.shows_home(app.session.documents().len(), true));
+        app.run("file.close", json!({"document": 1, "discard": true})).unwrap();
+        assert_eq!(app.session.documents().len(), 1);
+        assert!(!app.ui.chrome.shows_home(1, true), "Home must stay dismissed after closing the extra tab");
+        assert_eq!(app.session.documents()[0].doc.name, "Keep");
     }
 
     #[test]
@@ -302,6 +472,21 @@ mod tests {
         assert_eq!(crop_ratio("", 1.0, 1.0), None);
         let (w, h) = crop_ratio("1:1", 0.0, 0.0).unwrap();
         assert_eq!(marquee_end("fixedRatio", w, h, false, [0.0, 0.0], [50.0, 20.0]), [50.0, 50.0]);
+    }
+
+    #[test]
+    fn status_message_shows_with_no_document_open() {
+        // #1567: File › Automate › Batch with no recorded action and no document answered nothing.
+        use egui_kittest::{Harness, kittest::Queryable};
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+        app.session.actions.list.clear();
+        let e = crate::menus::invoke(&mut app, &egui::Context::default(), "file.automate.batch", json!({})).unwrap_err();
+        app.ui.status = e.clone();
+        app.ui.status_error = true;
+        let mut h = Harness::builder().with_size(vec2(900.0, 40.0)).build_ui_state(|ui, app| status_bar_pro(app, ui), app);
+        h.run_steps(2);
+        assert!(h.query_by_label("No document").is_some());
+        assert!(h.query_by_label(&e).is_some(), "status bar shows {e:?}");
     }
 
     #[test]

@@ -106,6 +106,8 @@ fn new_filters() -> Vec<FilterParams> {
             offset: 0.0,
         },
         FilterParams::HsbHsl { input: HsbModel::Rgb, output: HsbModel::Hsl },
+        FilterParams::ColorToAlpha { color: WHITE, transparency_threshold: 0.0, opacity_threshold: 1.0 },
+        FilterParams::ColorToAlpha { color: [0.5, 0.25, 0.75, 1.0], transparency_threshold: 0.1, opacity_threshold: 0.9 },
         FilterParams::DeInterlace { eliminate_even: false, interpolate: true },
         FilterParams::NtscColors,
     ]
@@ -365,6 +367,13 @@ fn trace_contour_draws_line_at_level_crossing() {
     assert_eq!(up.pixel(30, 10)[0], 1.0);
     let lo = run(&s, &FilterParams::TraceContour { level: 128.0, upper: false });
     assert_eq!(lo.pixel(19, 10)[0], 0.0, "line on the dark side");
+}
+
+#[test]
+fn trace_contour_off_canvas_does_not_panic() {
+    let s = flat(SampleType::F32, Rect::new(100, 100, 120, 120), [0.8, 0.8, 0.8, 1.0]);
+    let p = FilterParams::TraceContour { level: 128.0, upper: true };
+    let _ = apply_tiled(&s, &p, s.content_bounds(), R, None, 64, None);
 }
 
 #[test]

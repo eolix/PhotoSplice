@@ -50,6 +50,14 @@ impl<'a> Rd<'a> {
 
 /// Parses one item; `None` for malformed data or non-`liFD` items.
 fn parse_item(item: &[u8]) -> Option<LinkedFile> {
+    let (uuid, file_name, start, len) = item_header(item)?;
+    let bytes = item.get(start..start.checked_add(len)?)?.to_vec();
+    Some(LinkedFile { uuid, file_name, bytes })
+}
+
+/// The uuid and file name of an embedded (`liFD`) item, and where its file bytes start and how
+/// many there are; `None` for malformed data or other items.
+fn item_header(item: &[u8]) -> Option<(String, String, usize, usize)> {
     let mut r = Rd { d: item, p: 0 };
     let kind = r.take(4)?;
     let _version = r.u32()?;
@@ -65,8 +73,26 @@ fn parse_item(item: &[u8]) -> Option<LinkedFile> {
     if kind != b"liFD" {
         return None;
     }
-    let bytes = r.take(len)?.to_vec();
-    Some(LinkedFile { uuid, file_name, bytes })
+    Some((uuid, file_name, r.p, len))
+}
+
+/// The file name of the embedded file for smart-object `uuid` among the document's preserved PSD
+/// global blocks, without copying its bytes: whether a placed layer's source is embedded.
+pub fn embedded_file_name(meta: &Metadata, uuid: &str) -> Option<String> {
+    if uuid.is_empty() {
+        return None;
+    }
+    meta.psd_global_blocks.iter().filter(|(_, k, _)| matches!(k, b"lnk2" | b"lnk3" | b"lnkD")).find_map(|(_, _, d)| {
+        let mut r = Rd { d, p: 0 };
+        while let Some(len) = r.u64() {
+            let item = r.take(usize::try_from(len).ok()?)?;
+            if let Some((_, name, ..)) = item_header(item).filter(|h| h.0 == uuid) {
+                return Some(name);
+            }
+            r.p = r.p.next_multiple_of(4);
+        }
+        None
+    })
 }
 
 /// Every embedded (`liFD`) file in one linked-layer block's data.
@@ -110,10 +136,11 @@ pub(crate) fn source_size_in_blocks<'a>(
 }
 
 /// Pixel size of an embedded source file from its header: PSD/PSB, TIFF (the default page's
-/// directory), PNG (`IHDR`) and JPEG (the frame header); any other image is decoded flat by
-/// `photosplice-codecs`. It never imports a document: a layered TIFF can carry PSD layer data
-/// whose `lnkD` holds another file, so a full import here would nest without bound.
-/// Ported from storytold/photocraft@0002d861.
+/// directory), PNG (`IHDR`) and JPEG (the frame header); WebP, GIF, BMP, EXR and the rest of
+/// `photosplice_codecs::probe_size`'s formats from their decoder's header; anything else (or a
+/// header that probe cannot read) is decoded flat by `photosplice-codecs`. It never imports a
+/// document: a layered TIFF can carry PSD layer data whose `lnkD` holds another file, so a full
+/// import here would nest without bound (#2465).
 pub(crate) fn source_size_probe(bytes: &[u8]) -> Option<(f64, f64)> {
     let be32 = |at: usize| bytes.get(at..at + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
     let size = |w: u32, h: u32| (f64::from(w), f64::from(h));
@@ -126,10 +153,7 @@ pub(crate) fn source_size_probe(bytes: &[u8]) -> Option<(f64, f64)> {
         }
         [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, ..] => be32(16).zip(be32(20)).map(|(w, h)| size(w, h)),
         [0xFF, 0xD8, ..] => jpeg_size(bytes),
-        _ => photosplice_codecs::decode(bytes).ok().map(|img| {
-            let (w, h) = img.dimensions();
-            size(w, h)
-        }),
+        _ => photosplice_codecs::probe_size(bytes).or_else(|_| photosplice_codecs::decode(bytes).map(|img| img.dimensions())).ok().map(|(w, h)| size(w, h)),
     }
 }
 
@@ -262,20 +286,118 @@ pub fn block_uuids(data: &[u8]) -> Vec<String> {
     split_items(data).into_iter().filter_map(|(u, _)| u).collect()
 }
 
+/// Copies only records accepted by `keep` (UUID and complete raw record including padding).
+/// Unlike [`rebuild_block`], unidentified records and malformed tails are discarded: clipboard
+/// copies must not carry unrelated embedded files. Empty UUIDs cannot identify source bytes.
+/// Selected identity must be provable without lossy UTF-8 decoding; an ambiguous or truncated
+/// selected ID is an error instead. No payload decoding or filesystem access is performed.
+/// `None` means the block already contains only selected complete records and can be shared.
+pub fn select_items(data: &[u8], keep: &dyn Fn(&str, &[u8]) -> bool) -> Result<Option<Vec<u8>>, crate::IoError> {
+    let error = || crate::IoError::Unsupported("can't copy a truncated selected PSD linked-layer record".into());
+    let mut selected = None;
+    let mut at = 0usize;
+    while let Some(rest) = data.get(at..).filter(|r| !r.is_empty()) {
+        let Some((item, raw)) = framed_item(rest) else {
+            if let Some(item) = rest.get(8..)
+                && selection_uuid(item, rest, keep)?.is_some_and(|uuid| keep(uuid, rest))
+            {
+                return Err(error());
+            }
+            if selected.is_none() {
+                let mut prefix = Vec::new();
+                append_selected(&mut prefix, data.get(..at).ok_or_else(error)?)?;
+                selected = Some(prefix);
+            }
+            break;
+        };
+        if selection_uuid(item, raw, keep)?.is_some_and(|uuid| keep(uuid, raw)) {
+            if let Some(out) = &mut selected {
+                append_selected(out, raw)?;
+            }
+        } else if selected.is_none() {
+            let mut prefix = Vec::new();
+            append_selected(&mut prefix, data.get(..at).ok_or_else(error)?)?;
+            selected = Some(prefix);
+        }
+        at = at.checked_add(raw.len()).ok_or_else(error)?;
+    }
+    Ok(selected)
+}
+
+// Legacy PSD readers retain lossy IDs for file fidelity. Selection needs exact identity;
+// a lossy label is used only to refuse an ambiguous transfer, never to retain a record.
+fn selection_uuid<'a>(item: &'a [u8], raw: &[u8], keep: &dyn Fn(&str, &[u8]) -> bool) -> Result<Option<&'a str>, crate::IoError> {
+    let Some(n) = item.get(8).map(|n| usize::from(*n)) else { return Ok(None) };
+    let Some(bytes) = 9usize.checked_add(n).and_then(|end| item.get(9..end)).filter(|bytes| !bytes.is_empty()) else { return Ok(None) };
+    match std::str::from_utf8(bytes) {
+        Ok(uuid) => Ok(Some(uuid)),
+        Err(_) if keep(&String::from_utf8_lossy(bytes), raw) => {
+            Err(crate::IoError::Unsupported("can't verify a PSD linked-layer source ID with invalid UTF-8".into()))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+/// Whether a complete raw record already occurs in a block, without decoding its file bytes.
+pub fn contains_item(data: &[u8], record: &[u8]) -> bool {
+    let mut remaining = data;
+    while let Some((_, raw)) = framed_item(remaining) {
+        if raw == record {
+            return true;
+        }
+        let Some(next) = remaining.get(raw.len()..) else { return false };
+        remaining = next;
+    }
+    false
+}
+
+fn framed_item(data: &[u8]) -> Option<(&[u8], &[u8])> {
+    let len = usize::try_from(u64::from_be_bytes(data.get(..8)?.try_into().ok()?)).ok()?;
+    let end = len.checked_add(8)?;
+    let item = data.get(8..end)?;
+    let padded = end.checked_add(3).map(|n| n & !3)?.min(data.len());
+    Some((item, data.get(..padded)?))
+}
+
+fn append_selected(out: &mut Vec<u8>, bytes: &[u8]) -> Result<(), crate::IoError> {
+    out.try_reserve(bytes.len()).map_err(|_| crate::IoError::Unsupported("not enough memory to copy PSD linked-layer records".into()))?;
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+/// Copies one linked item under a new UUID, preserving its embedded, external or alias payload.
+pub(crate) fn copy_item(data: &[u8], uuid: &str, new_uuid: &str) -> Option<Vec<u8>> {
+    let (_, raw) = split_items(data).into_iter().find(|(u, _)| u.as_deref() == Some(uuid))?;
+    let len = usize::try_from(u64::from_be_bytes(raw.get(..8)?.try_into().ok()?)).ok()?;
+    let item = raw.get(8..8usize.checked_add(len)?)?;
+    let old_end = 9usize.checked_add(usize::from(*item.get(8)?))?;
+    let new_len = u8::try_from(new_uuid.len()).ok()?;
+    let mut copy = item.get(..8)?.to_vec();
+    copy.push(new_len);
+    copy.extend_from_slice(new_uuid.as_bytes());
+    copy.extend_from_slice(item.get(old_end..)?);
+    let mut out = (copy.len() as u64).to_be_bytes().to_vec();
+    out.extend(copy);
+    out.resize(out.len().next_multiple_of(4), 0);
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
 
-    /// A placed source's size comes from its header, for every format a CS2 file embeds, and
-    /// never by importing it as a document.
+    /// #2465: a placed source's size comes from its header, for every format a CS2 file embeds,
+    /// and never by importing it as a document.
     #[test]
     fn source_size_probe_reads_headers() {
         use photosplice_codecs::{ChannelLayout, EncodeOptions, Format, Image, SampleType};
         let img = Image::new(7, 5, ChannelLayout::Rgb, SampleType::U8).unwrap();
-        for format in [Format::Png, Format::Jpeg, Format::Tiff, Format::Bmp] {
+        for format in [Format::Png, Format::Jpeg, Format::Tiff, Format::Bmp, Format::WebP, Format::Gif, Format::OpenExr, Format::Tga] {
             let bytes = photosplice_codecs::encode(&img, format, &EncodeOptions::default()).unwrap();
             assert_eq!(source_size_probe(&bytes), Some((7.0, 5.0)), "{format:?}");
+            // A header cut short neither panics nor invents a size (the decode fallback fails too).
+            assert_eq!(source_size_probe(&bytes[..10]), None, "{format:?} truncated");
         }
         let mut psd = b"8BPS\0\x01".to_vec();
         psd.extend([0; 6]);
@@ -348,5 +470,93 @@ mod tests {
         let mut d = encode_linked_file(&LinkedFile { uuid: "x".into(), file_name: "f".into(), bytes: vec![5; 4] });
         d.truncate(d.len() - 6);
         assert!(parse_linked_files(&d).is_empty());
+    }
+
+    #[test]
+    fn copying_linked_item_preserves_unknown_external_payload() {
+        let mut raw = encode_linked_file(&LinkedFile { uuid: "old".into(), file_name: "missing.psb".into(), bytes: vec![7; 5] });
+        raw[8..12].copy_from_slice(b"liFE");
+        let copy = copy_item(&raw, "old", "independent-copy").unwrap();
+        assert_eq!(block_uuids(&copy), vec!["independent-copy"]);
+        let original_len = u64::from_be_bytes(raw[..8].try_into().unwrap()) as usize;
+        let copied_len = u64::from_be_bytes(copy[..8].try_into().unwrap()) as usize;
+        assert_eq!(&copy[8..16], &raw[8..16]);
+        assert_eq!(&copy[17 + "independent-copy".len()..8 + copied_len], &raw[20..8 + original_len]);
+        assert!(copy_item(&raw, "missing", "new").is_none());
+    }
+    #[test]
+    fn selected_records_exclude_other_files_and_unidentified_pieces() {
+        let a = encode_linked_file(&LinkedFile { uuid: "a".into(), file_name: "a.psb".into(), bytes: vec![1; 3] });
+        let b = encode_linked_file(&LinkedFile { uuid: "b".into(), file_name: "b.psb".into(), bytes: vec![2; 4] });
+        assert!(select_items(&a, &|uuid, _| uuid == "a").unwrap().is_none(), "an exclusive block can keep its original Arc");
+        let mut data = a.clone();
+        data.extend(&b);
+        data.extend([0, 0, 0, 0, 0, 0, 1, 0, 9]);
+        assert_eq!(select_items(&data, &|uuid, _| uuid == "a").unwrap(), Some(a.clone()));
+        assert_eq!(select_items(&data, &|uuid, _| uuid == "b").unwrap(), Some(b));
+        assert_eq!(select_items(&data, &|_, _| false).unwrap(), Some(Vec::new()));
+        // A complete but unidentified item can be skipped without losing a later selected item.
+        let mut unreadable = 1u64.to_be_bytes().to_vec();
+        unreadable.extend([7, 0, 0, 0]);
+        unreadable.extend(&a);
+        assert_eq!(select_items(&unreadable, &|uuid, _| uuid == "a").unwrap(), Some(a));
+    }
+
+    #[test]
+    fn selected_external_and_alias_records_keep_unknown_payloads_verbatim() {
+        for kind in [*b"liFE", *b"liFA", *b"next"] {
+            let mut raw = encode_linked_file(&LinkedFile { uuid: "selected".into(), file_name: "missing.psb".into(), bytes: vec![7; 5] });
+            raw[8..12].copy_from_slice(&kind);
+            raw[12..16].copy_from_slice(&42u32.to_be_bytes()); // an unknown future version
+            let mut data = encode_linked_file(&LinkedFile { uuid: "unselected".into(), file_name: "other.psb".into(), bytes: vec![9; 3] });
+            data.extend(&raw);
+            assert_eq!(select_items(&data, &|uuid, _| uuid == "selected").unwrap(), Some(raw));
+        }
+    }
+
+    #[test]
+    fn truncated_selected_records_fail_instead_of_becoming_unavailable() {
+        let mut raw = encode_linked_file(&LinkedFile { uuid: "selected".into(), file_name: "missing.psb".into(), bytes: vec![7; 5] });
+        raw[..8].copy_from_slice(&u64::MAX.to_be_bytes());
+        assert!(select_items(&raw, &|uuid, _| uuid == "selected").unwrap_err().to_string().contains("truncated selected"));
+        assert_eq!(select_items(&raw, &|uuid, _| uuid == "other").unwrap(), Some(Vec::new()));
+    }
+    #[test]
+    fn existing_records_are_matched_individually_without_matching_other_payloads() {
+        let a = encode_linked_file(&LinkedFile { uuid: "a".into(), file_name: "a.psb".into(), bytes: vec![1; 3] });
+        let b = encode_linked_file(&LinkedFile { uuid: "b".into(), file_name: "b.psb".into(), bytes: vec![2; 4] });
+        let different = encode_linked_file(&LinkedFile { uuid: "a".into(), file_name: "a.psb".into(), bytes: vec![9; 3] });
+        let mut combined = a.clone();
+        combined.extend(&b);
+        assert!(contains_item(&combined, &a));
+        assert!(contains_item(&combined, &b));
+        assert!(!contains_item(&combined, &different));
+        assert_eq!(select_items(&a, &|_, raw| !contains_item(&combined, raw)).unwrap(), Some(Vec::new()));
+        assert!(select_items(&different, &|_, raw| !contains_item(&combined, raw)).unwrap().is_none());
+    }
+    #[test]
+    fn empty_uuids_are_unidentified_even_when_requested() {
+        let raw = encode_linked_file(&LinkedFile { uuid: String::new(), file_name: "unidentified.psb".into(), bytes: vec![7; 5] });
+        assert_eq!(select_items(&raw, &|_, _| true).unwrap(), Some(Vec::new()));
+        let mut truncated = raw;
+        truncated[..8].copy_from_slice(&u64::MAX.to_be_bytes());
+        assert_eq!(select_items(&truncated, &|_, _| true).unwrap(), Some(Vec::new()));
+    }
+    #[test]
+    fn selection_never_uses_lossy_uuid_aliases_as_record_identity() {
+        let mut a = encode_linked_file(&LinkedFile { uuid: "x".into(), file_name: "a.psb".into(), bytes: vec![1; 3] });
+        let mut b = encode_linked_file(&LinkedFile { uuid: "x".into(), file_name: "b.psb".into(), bytes: vec![2; 4] });
+        a[17] = 0xff;
+        b[17] = 0xfe;
+        let mut data = a;
+        data.extend(b);
+        assert_eq!(block_uuids(&data), vec!["\u{fffd}", "\u{fffd}"], "legacy lossy parsing remains unchanged");
+        assert!(select_items(&data, &|uuid, _| uuid == "\u{fffd}").unwrap_err().to_string().contains("invalid UTF-8"));
+        let valid = encode_linked_file(&LinkedFile { uuid: "valid".into(), file_name: "valid.psb".into(), bytes: vec![3; 5] });
+        data.extend(&valid);
+        assert_eq!(select_items(&data, &|uuid, _| uuid == "valid").unwrap(), Some(valid));
+        // A literal replacement character can itself be a valid UTF-8 identity.
+        let valid_unicode = encode_linked_file(&LinkedFile { uuid: "\u{fffd}".into(), file_name: "unicode.psb".into(), bytes: vec![4; 2] });
+        assert!(select_items(&valid_unicode, &|uuid, _| uuid == "\u{fffd}").unwrap().is_none());
     }
 }

@@ -160,12 +160,37 @@ fn closed_rect_stroke_and_alignment() {
         ..Default::default()
     };
     let alpha_area = |sh: &ShapeLayer| {
-        let rgba = CompiledShape::new(sh, DEFAULT_TOLERANCE).render_rgba(Rect::new(0, 0, 150, 150));
+        let rgba = CompiledShape::new(sh, DEFAULT_TOLERANCE, Rect::new(0, 0, 150, 150)).render_rgba(Rect::new(0, 0, 150, 150));
         rgba.iter().map(|p| f64::from(p[3])).sum::<f64>()
     };
     assert!((alpha_area(&shape(StrokeAlign::Inside)) - (100.0f64.powi(2) - 80.0f64.powi(2))).abs() < 0.05);
     assert!((alpha_area(&shape(StrokeAlign::Outside)) - (120.0f64.powi(2) - 100.0f64.powi(2))).abs() < 0.05);
     assert!((alpha_area(&shape(StrokeAlign::Center)) - (110.0f64.powi(2) - 90.0f64.powi(2))).abs() < 0.05);
+}
+
+#[test]
+fn aligned_dashes_keep_width_units_and_open_paths_stay_centered() {
+    let clip = Rect::new(0, 0, 100, 100);
+    let square = shapes::rect(10.0, 10.0, 80.0, 80.0);
+    for (align, y, other_y) in [(StrokeAlign::Inside, 11, 7), (StrokeAlign::Center, 9, 6), (StrokeAlign::Outside, 7, 11)] {
+        let sh = ShapeLayer {
+            path: square.clone(),
+            stroke: Some(ShapeStroke { width: 4.0, align, dashes: vec![2.0, 2.0], ..Default::default() }),
+            ..Default::default()
+        };
+        let rgba = CompiledShape::new(&sh, DEFAULT_TOLERANCE, clip).render_rgba(clip);
+        assert!(rgba[(y * 100 + 13) as usize][3] > 0.99);
+        assert!(rgba[(y * 100 + 21) as usize][3] < 0.01);
+        assert!(rgba[(other_y * 100 + 13) as usize][3] < 0.01);
+    }
+    let open = Path::new(vec![Subpath::polyline(&[(10.0, 50.0), (90.0, 50.0)])]);
+    let render = |align| {
+        let sh =
+            ShapeLayer { path: open.clone(), stroke: Some(ShapeStroke { width: 4.0, align, cap: LineCap::Round, ..Default::default() }), ..Default::default() };
+        CompiledShape::new(&sh, DEFAULT_TOLERANCE, clip).render_rgba(clip)
+    };
+    assert_eq!(render(StrokeAlign::Center), render(StrokeAlign::Inside));
+    assert_eq!(render(StrokeAlign::Center), render(StrokeAlign::Outside));
 }
 
 #[test]
@@ -219,8 +244,97 @@ fn gradient_fill_spans_bounds() {
         fill: Some(Fill::gradient(vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], 0.0, 1.0, photosplice_doc::GradientStyle::Linear, false)),
         ..Default::default()
     };
-    let rgba = CompiledShape::new(&sh, DEFAULT_TOLERANCE).render_rgba(Rect::new(0, 0, 100, 10));
+    let rgba = CompiledShape::new(&sh, DEFAULT_TOLERANCE, Rect::new(0, 0, 100, 10)).render_rgba(Rect::new(0, 0, 100, 10));
     assert!(rgba[0][0] < 0.02 && rgba[99][0] > 0.98 && (rgba[50][0] - 0.505).abs() < 0.02);
+}
+
+/// A gradient fill with every non-default field, rendered through `Paint`: the expectations
+/// below are hand-derived (the compositor's own rendering is checked against them by the
+/// parity tests in `photosplice-compose`).
+fn grad(fill: Fill, canvas: Rect) -> Vec<[f32; 4]> {
+    let sh = ShapeLayer { path: shapes::rect(0.0, 0.0, 100.0, 10.0), fill: Some(fill), ..Default::default() };
+    let c = Rect::new(0, 0, canvas.x1.min(100), canvas.y1.min(10));
+    CompiledShape::new(&sh, DEFAULT_TOLERANCE, canvas).render_rgba(c)
+}
+
+#[test]
+fn gradient_midpoints_opacity_stops_offset_and_sorted_stops() {
+    // Linear 0° over the path's 100 × 10 bounds: t is the pixel's left corner / 100, so pixel
+    // x sits at t = x / 100.
+    let g = |midpoints: Vec<f32>, opacity_stops: Vec<(f32, f32)>, offset: (f32, f32), stops: Vec<(f32, Color)>| Fill::Gradient {
+        stops,
+        angle: 0.0,
+        scale: 1.0,
+        style: photosplice_doc::GradientStyle::Linear,
+        reverse: false,
+        opacity_stops,
+        midpoints,
+        offset,
+        dither: false,
+        align: true,
+    };
+    // Midpoint 0.25: the colour is half-way at t = 0.25 (pixel 25).
+    let px = grad(g(vec![0.25], vec![], (0.0, 0.0), vec![(0.0, Color::BLACK), (1.0, Color::WHITE)]), Rect::new(0, 0, 100, 10));
+    assert!((px[25][0] - 0.5).abs() < 1e-3, "{}", px[25][0]);
+    // Opacity stop ramp 1 → 0.5: alpha at t = 0.25 is 0.875.
+    let px = grad(g(vec![], vec![(0.0, 1.0), (1.0, 0.5)], (0.0, 0.0), vec![(0.0, Color::BLACK), (1.0, Color::WHITE)]), Rect::new(0, 0, 100, 10));
+    assert!((px[25][3] - 0.875).abs() < 1e-3, "{}", px[25][3]);
+    // Centre offset half a frame right: t = 0 moves to x = 50, so pixel 75 sits at t = 0.25.
+    let px = grad(g(vec![], vec![], (0.5, 0.0), vec![(0.0, Color::BLACK), (1.0, Color::WHITE)]), Rect::new(0, 0, 100, 10));
+    assert!(px[25][0] < 0.01 && (px[75][0] - 0.25).abs() < 1e-3, "{} {}", px[25][0], px[75][0]);
+    // Unsorted stops are sorted by location: black still left, white right.
+    let px = grad(g(vec![], vec![], (0.0, 0.0), vec![(1.0, Color::WHITE), (0.0, Color::BLACK)]), Rect::new(0, 0, 100, 10));
+    assert!(px[1][0] < 0.02 && px[98][0] > 0.97, "{} {}", px[1][0], px[98][0]);
+}
+
+#[test]
+fn gradient_without_align_with_layer_uses_the_canvas_frame() {
+    let canvas = Rect::new(0, 0, 200, 10);
+    let g = |align: bool| Fill::Gradient {
+        stops: vec![(0.0, Color::BLACK), (1.0, Color::WHITE)],
+        angle: 0.0,
+        scale: 1.0,
+        style: photosplice_doc::GradientStyle::Linear,
+        reverse: false,
+        opacity_stops: vec![],
+        midpoints: vec![],
+        offset: (0.0, 0.0),
+        dither: false,
+        align,
+    };
+    // Aligned: the 100-px path bounds are the frame, pixel 55 sits at t = 0.55.
+    let px = grad(g(true), canvas);
+    assert!((px[55][0] - 0.55).abs() < 1e-3, "{}", px[55][0]);
+    // Not aligned: the 200-px canvas is the frame, the same pixel sits at t = 0.275.
+    let px = grad(g(false), canvas);
+    assert!((px[55][0] - 0.275).abs() < 1e-3, "{}", px[55][0]);
+}
+
+#[test]
+fn gradient_dither_is_deterministic_and_one_level() {
+    let g = |dither: bool| Fill::Gradient {
+        stops: vec![(0.0, Color::BLACK), (1.0, Color::WHITE)],
+        angle: 30.0,
+        scale: 1.3,
+        style: photosplice_doc::GradientStyle::Radial,
+        reverse: false,
+        opacity_stops: vec![],
+        midpoints: vec![],
+        offset: (0.1, -0.1),
+        dither,
+        align: true,
+    };
+    let a = grad(g(true), Rect::new(0, 0, 100, 10));
+    let b = grad(g(true), Rect::new(0, 0, 100, 10));
+    assert_eq!(a, b, "dither must be deterministic");
+    let plain = grad(g(false), Rect::new(0, 0, 100, 10));
+    let mut max = 0.0f32;
+    let mut changed = 0;
+    for (p, q) in a.iter().zip(&plain) {
+        max = max.max((p[0] - q[0]).abs());
+        changed += usize::from((p[0] - q[0]).abs() > 1e-6);
+    }
+    assert!(changed > 0 && max <= 1.0 / 255.0 + 1e-6, "changed={changed} max={max}");
 }
 
 #[test]
@@ -246,6 +360,37 @@ fn coverage_surface_and_vector_mask_values() {
     assert!(vector_mask_values(&empty, Rect::new(0, 0, 4, 4)).iter().all(|x| *x == 1.0));
     empty.path.inverted = true;
     assert!(vector_mask_values(&empty, Rect::new(0, 0, 4, 4)).iter().all(|x| *x == 0.0));
+}
+
+#[test]
+fn sequential_vector_masks_match_parallel_rendering() {
+    let rect = Rect::new(-3, -7, 510, 250);
+    let mut path = shapes::ellipse(10.25, 8.75, 470.0, 220.0);
+    path.subpaths.push(shapes::rect(200.5, 90.25, 45.0, 50.0).subpaths.remove(0).with_op(PathOp::Subtract));
+    for inverted in [false, true] {
+        for density in [0.0, 0.25, 1.0] {
+            path.inverted = inverted;
+            let mut mask = VectorMask::new(path.clone());
+            mask.density = density;
+            let compiled = CompiledVectorMask::new(&mask);
+            assert_eq!(compiled.render_sequential(rect), compiled.render(rect));
+        }
+    }
+    let compiled = CompiledVectorMask::new(&VectorMask::new(path.clone()));
+    for empty in [Rect::EMPTY, Rect::new(1, 1, 1, 10), Rect::new(1, 1, 10, 1)] {
+        assert_eq!(compiled.render_sequential(empty), compiled.render(empty));
+    }
+    let mut empty = VectorMask::new(Path::default());
+    for inverted in [false, true] {
+        empty.path.inverted = inverted;
+        let compiled = CompiledVectorMask::new(&empty);
+        assert_eq!(compiled.render_sequential(rect), compiled.render(rect));
+    }
+    let mut disabled = VectorMask::new(path);
+    disabled.enabled = false;
+    let compiled = CompiledVectorMask::new(&disabled);
+    assert_eq!(compiled.render_sequential(rect), compiled.render(rect));
+    assert_eq!(compiled.render_sequential(Rect::EMPTY), compiled.render(Rect::EMPTY));
 }
 
 fn iou(a: &[f32], b: &[f32]) -> f64 {
@@ -379,7 +524,7 @@ fn gradient_fill_opacity_midpoints_and_inverted_frame() {
         *midpoints = vec![0.25];
     }
     let sh = ShapeLayer { path: shapes::rect(0.0, 0.0, 100.0, 10.0), fill: Some(fill.clone()), ..Default::default() };
-    let rgba = CompiledShape::new(&sh, DEFAULT_TOLERANCE).render_rgba(Rect::new(0, 0, 100, 10));
+    let rgba = CompiledShape::new(&sh, DEFAULT_TOLERANCE, Rect::new(0, 0, 100, 10)).render_rgba(Rect::new(0, 0, 100, 10));
     assert!(rgba[0][3] > 0.98 && rgba[99][3] < 0.02, "fades out: {:?} {:?}", rgba[0], rgba[99]);
     assert!((rgba[25][0] - 0.5).abs() < 0.03, "halfway at the midpoint: {:?}", rgba[25]);
     // An inverted path without points fills the canvas; its gradient spans the canvas too.
@@ -387,4 +532,60 @@ fn gradient_fill_opacity_midpoints_and_inverted_frame() {
     let s = render_shape(&inv, PixelFormat::RGBA8, Rect::new(0, 0, 40, 4));
     let alpha = |x: i32| s.pixel(x, 1)[3];
     assert!(alpha(0) > 0.98 && alpha(39) < 0.05, "{} {}", alpha(0), alpha(39));
+}
+
+/// Content bounds of a filled shape rendered as a layer (every depth) and as a selection
+/// (every depth); they must all equal `want`.
+fn assert_rendered_bounds(path: &Path, want: Rect, what: &str) {
+    let canvas = Rect::new(0, 0, 1920, 1080);
+    let sh = ShapeLayer { path: path.clone(), fill: Some(Fill::Solid(Color::rgb(0.0, 0.0, 1.0))), ..Default::default() };
+    for sample in SampleType::ALL {
+        let fmt = PixelFormat::new(photosplice_color::ColorMode::Rgb, sample, true);
+        assert_eq!(render_shape(&sh, fmt, canvas).content_bounds(), want, "{what}: layer {sample:?}");
+        let sel = coverage_surface(&fill_rasterizer(path, DEFAULT_TOLERANCE), PixelFormat::new(photosplice_color::ColorMode::Grayscale, sample, false), canvas);
+        assert_eq!(sel.content_bounds(), want, "{what}: selection {sample:?}");
+    }
+}
+
+#[test]
+fn curved_shape_bounds_are_exact() {
+    // Issue #2537: f32 round-off left ~1e-7 coverage just right of curved edges, so curved
+    // shapes reported bounds one pixel too wide. Rectangles never showed it.
+    let p = |x: f64, y: f64| photosplice_geom::Point::new(x, y);
+    // An asymmetric Bézier blob whose extremes lie on its anchors (axis-parallel handles).
+    let blob = Path::new(vec![Subpath {
+        closed: true,
+        knots: vec![
+            photosplice_doc::Knot::smooth(p(60.0, 0.0), p(30.0, 0.0), p(80.0, 0.0)),
+            photosplice_doc::Knot::smooth(p(100.0, 45.0), p(100.0, 20.0), p(100.0, 70.0)),
+            photosplice_doc::Knot::smooth(p(40.0, 100.0), p(75.0, 100.0), p(15.0, 100.0)),
+            photosplice_doc::Knot::smooth(p(0.0, 55.0), p(0.0, 85.0), p(0.0, 25.0)),
+        ],
+        op: Default::default(),
+    }]);
+    let cases = [
+        ("ellipse", shapes::ellipse(0.0, 0.0, 100.0, 100.0), Rect::new(0, 0, 100, 100)),
+        ("ellipse 600", shapes::ellipse(660.0, 240.0, 600.0, 600.0), Rect::new(660, 240, 1260, 840)),
+        ("ellipse at x.5", shapes::ellipse(10.5, 10.0, 100.0, 100.0), Rect::new(10, 10, 111, 110)),
+        ("rounded rect", shapes::rounded_rect(0.0, 0.0, 100.0, 100.0, [20.0; 4]), Rect::new(0, 0, 100, 100)),
+        // Outer vertices at x = 50 ± 50·cos 18° (2.45, 97.55), lowest at y = 50 + 50·sin 54° (90.45).
+        ("star", shapes::polygon(0.0, 0.0, 100.0, 100.0, 5, 0.5), Rect::new(2, 0, 98, 91)),
+        ("custom path", blob, Rect::new(0, 0, 100, 100)),
+        ("rect", shapes::rect(0.0, 0.0, 100.0, 100.0), Rect::new(0, 0, 100, 100)),
+    ];
+    for (what, path, want) in &cases {
+        assert_rendered_bounds(path, *want, what);
+    }
+}
+
+#[test]
+fn thin_antialiased_edges_still_count_toward_bounds() {
+    // A quarter-pixel overhang and a 1-px bar straddling two columns are real coverage.
+    assert_rendered_bounds(&shapes::rect(0.0, 0.0, 100.25, 100.0), Rect::new(0, 0, 101, 100), "quarter overhang");
+    assert_rendered_bounds(&shapes::rect(10.5, 0.0, 1.0, 50.0), Rect::new(10, 0, 12, 50), "1-px bar");
+    assert_rendered_bounds(&shapes::rect(0.0, 0.0, 100.01, 10.0), Rect::new(0, 0, 101, 10), "1% sliver");
+    // At 32-bit even a 1e-4 sliver is kept: only round-off is dropped.
+    let r = fill_rasterizer(&shapes::rect(0.0, 0.0, 100.0001, 10.0), DEFAULT_TOLERANCE);
+    let c = r.render(Rect::new(0, 0, 102, 10));
+    assert!(c[100] > 5e-5 && c[101] == 0.0, "{} {}", c[100], c[101]);
 }

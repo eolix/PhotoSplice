@@ -18,9 +18,10 @@ avif = ["image/avif"]
 thiserror.workspace = true
 image = { workspace = true, features = ["gif", "bmp", "tga", "ico", "qoi", "hdr"] }
 png = "0.18"
-tiff = { version = "0.11", default-features = false, features = ["deflate", "lzw"] }
+tiff = { version = "0.11", default-features = false, features = ["deflate", "fax", "jpeg", "lzw"] }
 exr = { version = "1.73", default-features = false }
 half = "2"
+serde_json.workspace = true
 flate2.workspace = true
 image-webp = "0.2"
 # Lossy WebP encode (pure Rust, MIT). Decoding stays with image-webp.
@@ -36,6 +37,8 @@ heic-rs = { version = "0.1.1", default-features = false, features = ["std"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 heic-rs = { version = "0.1.1", default-features = false, features = ["std", "parallel"] }
 rayon.workspace = true
+# EXR block (de)compression runs on the rayon pool natively; wasm stays single-threaded.
+exr = { version = "1.73", default-features = false, features = ["rayon"] }
 
 [dev-dependencies]
 proptest.workspace = true

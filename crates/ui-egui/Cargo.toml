@@ -10,8 +10,12 @@ workspace = true
 [dependencies]
 # Recent-file thumbnails are encoded and decoded here (already built, via photosplice-io).
 photosplice-codecs = { workspace = true }
+craft-print = { workspace = true }
+craft-ui = { workspace = true }
 photosplice-geom = { workspace = true }
 photosplice-color = { workspace = true }
+# Colour transforms in dialogs (screen picker, open-time profile prompt, print, Camera Raw scopes).
+photosplice-cms = { workspace = true }
 photosplice-raster = { workspace = true }
 photosplice-doc = { workspace = true }
 photosplice-compose = { workspace = true }
@@ -22,10 +26,13 @@ photosplice-plugins = { workspace = true }
 photosplice-algo = { workspace = true }
 photosplice-text = { workspace = true }
 photosplice-vector = { workspace = true }
+# Only MAX_BRUSH_SIZE: `ui.set brushSize` validates against the Brush Settings range up front.
+photosplice-paint = { workspace = true }
 # Reading files to open them (bounded reads, a clear error for files larger than memory).
 photosplice-format = { workspace = true }
 egui = { workspace = true }
 egui_extras = { version = "0.36", default-features = false, features = ["svg"] }
+# egui's default fonts stay last in the stack, for the symbols and emoji Inter lacks (theme::set_fonts).
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -35,7 +42,17 @@ base64 = "0.22"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rayon = { workspace = true }
 
+# Installed RAM for the GPU memory budget (`gpu_canvas::physical_memory`): the safe binding the
+# desktop app already uses, pinned to the same version.
+[target.'cfg(target_os = "windows")'.dependencies]
+winsafe = { version = "=0.0.29", default-features = false, features = ["kernel", "dxgi"] }
+
 [dev-dependencies]
+# egui's own default fonts in tests: the oracle for egui_fonts.rs, and contexts made with
+# `Context::default()` (no install_fonts) can lay out text.
+egui = { workspace = true, features = ["default_fonts"] }
+# Synthetic raw files for the open-time Camera Raw dialog tests.
+photosplice-raw = { workspace = true, features = ["testgen"] }
 egui_kittest = { workspace = true, features = ["wgpu", "snapshot", "eframe"] }
 # Only for examples/snapshot.rs (offscreen UI renders of real files).
 # Only for examples/interactive_bench.rs (JPEG encode, .pcraft saves).

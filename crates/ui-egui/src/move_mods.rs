@@ -8,7 +8,10 @@
 //!   pointer actually moves, and the drag then moves the copies. Duplicate and move land as one
 //!   history step ("Duplicate + Move"). ⇧⌥ combines both.
 //! - Arrow keys nudge the selected layers 1 px (⇧: 10 px); ⌥ duplicates first. While Free
-//!   Transform is active they nudge the box instead.
+//!   Transform is active they nudge the box instead. A run of nudges is one History state
+//!   (`nudge_bundle`, #2259).
+//! - With a selection the drag and the arrow keys move the selected pixels (`move_ui`): ⇧ locks
+//!   the drag to multiples of 45° and ⌥ copies the pixels instead of duplicating the layer.
 //!
 //! The hooks are small and local: [`filter_event`] rewrites pointer events before the Move tool
 //! sees them and [`finish`] folds the history after the drag, so the Move drag pipeline itself is
@@ -22,7 +25,8 @@ use crate::state::Tool;
 
 /// Directions ⇧ locks a Move-tool drag to: horizontal and vertical (Photoshop's Move tool).
 pub const MOVE_DIRECTIONS: u32 = 4;
-/// Directions ⇧ locks a Free Transform body drag to: the axes and the 45° diagonals.
+/// Directions ⇧ locks a Free Transform body drag, or a Move-tool drag of selected pixels, to: the
+/// axes and the 45° diagonals.
 pub const TRANSFORM_DIRECTIONS: u32 = 8;
 /// Extra angle (degrees) the pointer must pass the half-way line by before the locked axis
 /// switches, so it doesn't flicker when dragging near the diagonal.
@@ -84,7 +88,8 @@ fn moving(app: &PhotospliceApp) -> bool {
 /// length before so [`fold_history`] can merge the copy and the move into one step.
 fn duplicate(app: &mut PhotospliceApp) -> Option<usize> {
     let before = past_len(app)?;
-    match app.run("layer.duplicate", json!({})) {
+    // In place: the copy follows the pointer from the original, artboards too (#1531).
+    match app.run("layer.duplicate", json!({"inPlace": true})) {
         Ok(_) => Some(before),
         Err(e) => {
             app.ui.status = e;
@@ -109,7 +114,7 @@ fn fold_history(app: &mut PhotospliceApp, from: usize) {
 /// Rewrites a Move-tool pointer event for the held modifiers: ⇧ locks it to an axis, and the
 /// first real movement of an ⌥-drag duplicates the layers being moved. Other tools pass through.
 pub fn filter_event(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers) -> ToolEvent {
-    if app.ui.tool != Tool::Move || app.ui.transform.is_some() {
+    if app.active_tool() != Tool::Move || app.ui.transform.is_some() {
         app.move_mods = MoveDrag::default();
         return ev;
     }
@@ -131,13 +136,15 @@ pub fn filter_event(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifie
 
 fn drag_to(app: &mut PhotospliceApp, p: [f64; 2], mods: egui::Modifiers) -> [f64; 2] {
     let Some(start) = app.move_mods.start.filter(|_| moving(app)) else { return p };
+    // Selected pixels (`move_ui`): ⌥ copied them at the press.
+    let pixels = app.drag.as_ref().is_some_and(|d| d.sel_move.is_some());
     let mut d = [p[0] - start[0], p[1] - start[1]];
     if mods.shift {
-        d = constrain(d, app.move_mods.last, MOVE_DIRECTIONS);
+        d = constrain(d, app.move_mods.last, if pixels { TRANSFORM_DIRECTIONS } else { MOVE_DIRECTIONS });
     }
     app.move_mods.last = Some(d);
-    let zoom = f64::from(app.current_zoom().max(0.01));
-    if app.move_mods.alt && app.move_mods.dup_from.is_none() && d[0].hypot(d[1]) * zoom >= DUPLICATE_THRESHOLD {
+    let zoom = f64::from(app.point_zoom().max(0.01));
+    if app.move_mods.alt && !pixels && app.move_mods.dup_from.is_none() && d[0].hypot(d[1]) * zoom >= DUPLICATE_THRESHOLD {
         app.move_mods.dup_from = duplicate(app);
         // Only once per drag, even if duplicating failed.
         app.move_mods.alt = false;
@@ -162,17 +169,24 @@ pub fn abandon(app: &mut PhotospliceApp) {
 }
 
 /// Arrow keys with the Move tool (or while Free Transform is active): nudge 1 px, ⇧ 10 px;
-/// ⌥ duplicates the layers first. Returns true when a key was used.
+/// ⌥ duplicates the layers first. ⌘-arrows (Ctrl off the Mac) do the same from most other tools,
+/// where ⌘ is the temporary Move tool (`hold_keys::cmd_nudges`, #2474). Returns true when a key
+/// was used.
 pub fn arrow_keys(app: &mut PhotospliceApp, ctx: &egui::Context) -> bool {
-    if app.ui.tool != Tool::Move && app.ui.transform.is_none() {
-        return false;
-    }
     use egui::{Key, Modifiers};
+    let cmd = ctx.input(|i| i.modifiers.command) && crate::hold_keys::cmd_nudges(app);
+    if app.ui.tool != Tool::Move && app.ui.transform.is_none() && !cmd {
+        return selection_arrow_keys(app, ctx) || crate::direct_select::arrow_keys(app, ctx) || brush_arrow_keys(app, ctx);
+    }
+    // `consume_key` never ignores an extra ⌘, so it is part of every pattern while it moves.
+    let base = if cmd { Modifiers::COMMAND } else { Modifiers::NONE };
     let keys = [(Key::ArrowLeft, -1.0, 0.0), (Key::ArrowRight, 1.0, 0.0), (Key::ArrowUp, 0.0, -1.0), (Key::ArrowDown, 0.0, 1.0)];
     for (key, ux, uy) in keys {
-        for mods in [Modifiers::NONE, Modifiers::SHIFT, Modifiers::ALT, Modifiers::SHIFT | Modifiers::ALT] {
-            if ctx.input_mut(|i| i.consume_key(mods, key)) {
+        // Most specific first: `consume_key` ignores extra ⇧ / ⌥ (`matches_logically`).
+        for mods in [Modifiers::SHIFT | Modifiers::ALT, Modifiers::SHIFT, Modifiers::ALT, Modifiers::NONE] {
+            if ctx.input_mut(|i| i.consume_key(base | mods, key)) {
                 let k = if mods.shift { 10.0 } else { 1.0 };
+                app.nudge_bundle.now = ctx.input(|i| i.time);
                 nudge(app, ux * k, uy * k, mods.alt);
                 return true;
             }
@@ -181,25 +195,99 @@ pub fn arrow_keys(app: &mut PhotospliceApp, ctx: &egui::Context) -> bool {
     false
 }
 
-/// Moves the selected layers (or the Free Transform box) by `(dx, dy)` pixels.
-pub fn nudge(app: &mut PhotospliceApp, dx: f64, dy: f64, duplicate_first: bool) {
-    if let Some(t) = app.ui.transform.as_mut() {
-        if t.warp.is_none() {
-            t.quad = t.quad.map(|q| [q[0] + dx, q[1] + dy]);
-            t.pivot = [t.pivot[0] + dx, t.pivot[1] + dy];
+/// ← / → with a painting tool: turn the brush tip 1° (⇧ 15°), as Photoshop does; → turns it
+/// clockwise. Returns true when a key was used.
+fn brush_arrow_keys(app: &mut PhotospliceApp, ctx: &egui::Context) -> bool {
+    use egui::{Key, Modifiers};
+    // Only plain or ⇧ arrows (`consume_key` ignores an extra ⌥, which kerns type), and never
+    // while type is being edited.
+    let m = ctx.input(|i| i.modifiers);
+    if !app.ui.tool.is_brushlike() || app.ui.text_edit.is_some() || m.alt || m.command || m.ctrl {
+        return false;
+    }
+    for (key, sign) in [(Key::ArrowLeft, 1.0), (Key::ArrowRight, -1.0)] {
+        // ⇧ first: `consume_key` ignores an extra ⇧.
+        for (mods, step) in [(Modifiers::SHIFT, 15.0), (Modifiers::NONE, 1.0)] {
+            if ctx.input_mut(|i| i.consume_key(mods, key)) {
+                if let Err(e) = app.run("tools.rotateBrush", json!({"degrees": sign * step})) {
+                    app.ui.status = e;
+                }
+                return true;
+            }
         }
+    }
+    false
+}
+
+/// Moves the selected layers (or the Free Transform box, or the selected pixels) by `(dx, dy)`
+/// pixels, as the Move tool (also when ⌘ makes it the temporary Move tool). Nudges that follow
+/// each other are one History state, or one Undo step of the box (`nudge_bundle`); the selected
+/// pixels float until dropped, which is one state already.
+pub fn nudge(app: &mut PhotospliceApp, dx: f64, dy: f64, duplicate_first: bool) {
+    if app.ui.transform.is_some() {
+        crate::transform_tool::nudge(app, dx, dy);
         return;
     }
     if app.drag.is_some() {
         return;
     }
+    if crate::move_ui::moves_selected_pixels_with(app, Tool::Move) {
+        crate::move_ui::float_selected(app, duplicate_first, dx, dy);
+        return;
+    }
     let from = if duplicate_first { duplicate(app) } else { None };
-    if let Err(e) = app.run("layer.translate", json!({"dx": dx, "dy": dy})) {
+    let moved = if duplicate_first {
+        // A copy is a state of its own, folded with its move below.
+        app.nudge_bundle.reset();
+        app.run("layer.translate", json!({"dx": dx, "dy": dy}))
+    } else {
+        crate::nudge_bundle::run(app, "layers", "layer.translate", json!({"dx": dx, "dy": dy}))
+    };
+    if let Err(e) = moved {
         app.ui.status = e;
     }
     if let Some(from) = from {
         fold_history(app, from);
     }
+}
+
+/// Arrow keys with a selection tool (#1428), as in Photoshop: nudge the selection outline 1 px
+/// (⇧ 10 px) through `select.transformSelection`, a run of presses being one history step
+/// (`nudge_bundle`); the pixels stay put. A floating piece (⌘-dragged pixels) moves instead, like
+/// a plain drag on it. Not while a drag, a polygon or a Magnetic Lasso border is in progress.
+/// Returns true when a key was used.
+fn selection_arrow_keys(app: &mut PhotospliceApp, ctx: &egui::Context) -> bool {
+    if !crate::tool_feedback::is_selection_tool(app.ui.tool) || app.drag.is_some() || !app.ui.polygon.is_empty() || crate::magnetic_ui::active(app) {
+        return false;
+    }
+    let floating = app.session.active().is_some_and(|st| photosplice_engine::float_cmds::floating(st).is_some());
+    if !floating && !app.session.is_enabled("select.transformSelection") {
+        return false;
+    }
+    use egui::{Key, Modifiers};
+    let keys = [(Key::ArrowLeft, -1.0, 0.0), (Key::ArrowRight, 1.0, 0.0), (Key::ArrowUp, 0.0, -1.0), (Key::ArrowDown, 0.0, 1.0)];
+    for (key, ux, uy) in keys {
+        // ⇧ first: `consume_key` ignores an extra ⇧.
+        for mods in [Modifiers::SHIFT, Modifiers::NONE] {
+            if ctx.input_mut(|i| i.consume_key(mods, key)) {
+                let k = if mods.shift { 10.0 } else { 1.0 };
+                let (dx, dy) = (ux * k, uy * k);
+                app.nudge_bundle.now = ctx.input(|i| i.time);
+                // A floating piece is no state until dropped; the outline's nudges bundle.
+                let result = if floating {
+                    app.run("select.float", json!({"dx": dx, "dy": dy}))
+                } else {
+                    crate::nudge_bundle::run(app, "selection", "select.transformSelection", json!({"dx": dx, "dy": dy}))
+                };
+                if let Err(e) = result {
+                    app.ui.status = e;
+                    app.ui.status_error = true;
+                }
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -343,5 +431,350 @@ mod tests {
         let q0 = app.ui.transform.as_ref().unwrap().quad;
         nudge(&mut app, 0.0, 10.0, false);
         assert_eq!(app.ui.transform.as_ref().unwrap().quad[0], [q0[0][0], q0[0][1] + 10.0]);
+    }
+
+    /// One key press through `arrow_keys`, as egui delivers it.
+    fn press(app: &mut PhotospliceApp, key: egui::Key, mods: egui::Modifiers) -> bool {
+        press_at(app, key, mods, 0.0)
+    }
+
+    /// [`press`] at egui time `time` (seconds).
+    fn press_at(app: &mut PhotospliceApp, key: egui::Key, mods: egui::Modifiers, time: f64) -> bool {
+        let ctx = egui::Context::default();
+        ctx.input_mut(|i| {
+            i.time = time;
+            i.modifiers = mods;
+            i.events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: mods });
+        });
+        arrow_keys(app, &ctx)
+    }
+
+    /// Photoshop's ← / → with a painting tool turn the brush tip 1°, ⇧ 15°; → is clockwise. Other
+    /// tools keep their arrows (the Hand has none, the marquee nudges the selection).
+    #[test]
+    fn arrows_turn_the_brush_tip_for_painting_tools_only() {
+        let mut app = app_with_layer();
+        for tool in [Tool::Brush, Tool::Eraser, Tool::CloneStamp] {
+            app.ui.tool = tool;
+            app.run("tools.setBrush", json!({"brush": {"angle": 0}})).unwrap();
+            assert!(press(&mut app, egui::Key::ArrowLeft, egui::Modifiers::NONE), "{tool:?}");
+            assert_eq!(app.session.tools.brush.angle, 1.0, "{tool:?}: ← anticlockwise");
+            assert!(press(&mut app, egui::Key::ArrowRight, egui::Modifiers::SHIFT));
+            assert_eq!(app.session.tools.brush.angle, -14.0, "{tool:?}: ⇧→ 15° clockwise");
+        }
+        app.run("tools.setBrush", json!({"brush": {"angle": 0}})).unwrap();
+        // ⌥-arrows are not the brush's (they kern type, and ⌘ moves).
+        assert!(!press(&mut app, egui::Key::ArrowLeft, egui::Modifiers::ALT));
+        app.ui.tool = Tool::Hand;
+        assert!(!press(&mut app, egui::Key::ArrowLeft, egui::Modifiers::NONE));
+        assert_eq!(app.session.tools.brush.angle, 0.0);
+    }
+
+    /// Real key events: ⇧ nudges 10 px and ⌥ duplicates first (egui ignores extra ⇧ / ⌥ when
+    /// matching, so the plain arrow must not be tried first).
+    #[test]
+    fn arrow_key_modifiers_reach_the_move_tool() {
+        let mut app = app_with_layer();
+        let id = app.session.active().unwrap().active_layer.unwrap();
+        let n0 = app.session.active().unwrap().doc.layers.len();
+        assert!(press(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE));
+        assert_eq!(bounds(&app, id), photosplice_geom::Rect::new(9, 8, 25, 24));
+        assert!(press(&mut app, egui::Key::ArrowDown, egui::Modifiers::SHIFT));
+        assert_eq!(bounds(&app, id), photosplice_geom::Rect::new(9, 18, 25, 34));
+        assert!(press(&mut app, egui::Key::ArrowLeft, egui::Modifiers::ALT));
+        let st = app.session.active().unwrap();
+        assert_eq!(st.doc.layers.len(), n0 + 1, "⌥ duplicated first");
+        assert_eq!(bounds(&app, id), photosplice_geom::Rect::new(9, 18, 25, 34), "the original stays");
+    }
+
+    /// ⌘ as a Mac sends it, and Ctrl as Windows and Linux send it (`command` is Ctrl there).
+    const MAC_CMD: egui::Modifiers = egui::Modifiers { alt: false, ctrl: false, shift: false, mac_cmd: true, command: true };
+    const CTRL: egui::Modifiers = egui::Modifiers { alt: false, ctrl: true, shift: false, mac_cmd: false, command: true };
+
+    /// #2474: ⌘ is the temporary Move tool, so ⌘-arrows nudge the layer from the Brush (⌘⇧ 10 px,
+    /// ⌘⌥ duplicates first); the plain arrows still do nothing there.
+    #[test]
+    fn cmd_arrows_nudge_the_layer_from_the_brush() {
+        let mut app = app_with_layer();
+        app.ui.tool = Tool::Brush;
+        let id = app.session.active().unwrap().active_layer.unwrap();
+        let n0 = app.session.active().unwrap().doc.layers.len();
+        // A plain arrow turns the Brush's tip (below), never the layer.
+        assert!(press(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE));
+        assert_eq!(bounds(&app, id), photosplice_geom::Rect::new(8, 8, 24, 24));
+        assert_eq!(app.session.tools.brush.angle, -1.0);
+        app.run("tools.setBrush", json!({"brush": {"angle": 0}})).unwrap();
+        for cmd in [CTRL, MAC_CMD] {
+            assert!(press(&mut app, egui::Key::ArrowRight, cmd));
+        }
+        assert_eq!(bounds(&app, id), photosplice_geom::Rect::new(10, 8, 26, 24), "1 px per press");
+        assert!(press(&mut app, egui::Key::ArrowDown, CTRL | egui::Modifiers::SHIFT));
+        assert_eq!(bounds(&app, id), photosplice_geom::Rect::new(10, 18, 26, 34), "⌘⇧: 10 px");
+        assert!(press(&mut app, egui::Key::ArrowLeft, CTRL | egui::Modifiers::ALT));
+        let st = app.session.active().unwrap();
+        assert_eq!(st.doc.layers.len(), n0 + 1, "⌘⌥ duplicated first");
+        assert_eq!(bounds(&app, id), photosplice_geom::Rect::new(10, 18, 26, 34), "the original stays");
+        assert_eq!(bounds(&app, st.active_layer.unwrap()), photosplice_geom::Rect::new(9, 18, 25, 34), "the copy moved");
+        assert_eq!(app.ui.tool, Tool::Brush);
+        // The Move tool itself takes ⌘-arrows as plain ones.
+        app.ui.tool = Tool::Move;
+        assert!(press(&mut app, egui::Key::ArrowUp, CTRL));
+        let copy = app.session.active().unwrap().active_layer.unwrap();
+        assert_eq!(bounds(&app, copy), photosplice_geom::Rect::new(9, 17, 25, 33));
+    }
+
+    /// #2474: tools where ⌘ means something else in Photoshop (Pen and path tools, Hand, Zoom,
+    /// Crop, Type) keep ⌘-arrows away from the layer, as does an active Free Transform.
+    #[test]
+    fn cmd_arrows_leave_the_layer_alone_where_cmd_is_not_the_move_tool() {
+        let mut app = app_with_layer();
+        let id = app.session.active().unwrap().active_layer.unwrap();
+        for tool in [Tool::Pen, Tool::PathSelection, Tool::DirectSelection, Tool::Rectangle, Tool::Hand, Tool::Zoom, Tool::Crop, Tool::Type] {
+            app.ui.tool = tool;
+            assert!(!press(&mut app, egui::Key::ArrowRight, CTRL), "{tool:?}");
+            assert!(!press(&mut app, egui::Key::ArrowRight, MAC_CMD | egui::Modifiers::SHIFT), "{tool:?}");
+        }
+        assert_eq!(bounds(&app, id), photosplice_geom::Rect::new(8, 8, 24, 24));
+        app.ui.tool = Tool::Brush;
+        crate::transform_tool::begin(&mut app, &egui::Context::default()).unwrap();
+        let q0 = app.ui.transform.as_ref().unwrap().quad;
+        assert!(!press(&mut app, egui::Key::ArrowRight, CTRL));
+        assert_eq!(app.ui.transform.as_ref().unwrap().quad, q0);
+    }
+
+    /// #2474: with a selection tool ⌘-arrows move the selected pixels (the temporary Move tool), the
+    /// plain arrows the outline.
+    #[test]
+    fn cmd_arrows_move_the_selected_pixels_with_a_selection_tool() {
+        let mut app = app_with_layer();
+        app.ui.tool = Tool::RectMarquee;
+        app.session.execute("select.rect", json!({"x": 8, "y": 8, "width": 8, "height": 8})).unwrap();
+        assert!(press(&mut app, egui::Key::ArrowRight, CTRL));
+        let offset = |app: &PhotospliceApp| photosplice_engine::float_cmds::floating(app.session.active().unwrap()).map(|f| f.offset);
+        assert_eq!(offset(&app), Some((1, 0)), "the selected pixels float, 1 px to the right");
+        assert!(press(&mut app, egui::Key::ArrowDown, CTRL | egui::Modifiers::SHIFT));
+        assert_eq!(offset(&app), Some((1, 10)), "⌘⇧: 10 px");
+        assert_eq!(app.ui.tool, Tool::RectMarquee);
+        // Not while a polygon is being drawn.
+        app.ui.tool = Tool::PolygonLasso;
+        app.ui.polygon = vec![[1.0, 1.0]];
+        assert!(!press(&mut app, egui::Key::ArrowRight, CTRL));
+    }
+
+    /// #1428: with a selection tool the arrows nudge the selection outline (⇧ 10 px); the layer
+    /// stays put. Without a selection they are left alone. One step each with Bundle Arrow-Key
+    /// Nudges off (#2259).
+    #[test]
+    fn arrow_keys_nudge_the_selection_with_a_selection_tool() {
+        let mut app = app_with_layer();
+        app.session.edit_prefs(|p| p.tools.bundle_nudges = false);
+        let id = app.session.active().unwrap().active_layer.unwrap();
+        app.ui.tool = Tool::Lasso;
+        assert!(!press(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE), "no selection: not used");
+        app.session.execute("select.rect", json!({"x": 4, "y": 4, "width": 10, "height": 10})).unwrap();
+        let sel = |app: &PhotospliceApp| app.session.active().unwrap().doc.selection.as_ref().unwrap().content_bounds();
+        let h0 = app.session.active().unwrap().history.past_len();
+        assert!(press(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE));
+        assert!(press(&mut app, egui::Key::ArrowDown, egui::Modifiers::SHIFT));
+        assert_eq!(sel(&app), photosplice_geom::Rect::new(5, 14, 15, 24));
+        assert_eq!(app.session.active().unwrap().history.past_len(), h0 + 2);
+        assert_eq!(bounds(&app, id), photosplice_geom::Rect::new(8, 8, 24, 24), "pixels stay put");
+        // Not while a polygon is being drawn.
+        app.ui.tool = Tool::PolygonLasso;
+        app.ui.polygon = vec![[1.0, 1.0]];
+        assert!(!press(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE));
+    }
+    fn history(app: &PhotospliceApp) -> usize {
+        app.session.active().unwrap().history.past_len()
+    }
+
+    fn left_edge(app: &PhotospliceApp, id: photosplice_doc::LayerId) -> i32 {
+        bounds(app, id).x0
+    }
+
+    /// #2259: tapping or holding an arrow key is one History state, so one Undo takes the whole
+    /// run back (Photoshop folds a run of nudges into one "Move").
+    #[test]
+    fn a_run_of_arrow_nudges_is_one_history_step() {
+        let mut app = app_with_layer();
+        let id = app.session.active().unwrap().active_layer.unwrap();
+        let h0 = history(&app);
+        // Twelve taps, 0.2 s apart, then ⇧ for ten more px: still the same run.
+        for i in 0..12 {
+            assert!(press_at(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE, 5.0 + 0.2 * f64::from(i)));
+        }
+        assert!(press_at(&mut app, egui::Key::ArrowDown, egui::Modifiers::SHIFT, 7.6));
+        assert_eq!(bounds(&app, id), photosplice_geom::Rect::new(20, 18, 36, 34));
+        assert_eq!(history(&app), h0 + 1, "thirteen presses, one state");
+        assert_eq!(app.session.active().unwrap().history.undo_label(), Some("Move"));
+        assert!(app.session.undo());
+        assert_eq!(bounds(&app, id), photosplice_geom::Rect::new(8, 8, 24, 24), "one Undo takes back the run");
+        assert!(app.session.redo());
+        assert_eq!(bounds(&app, id), photosplice_geom::Rect::new(20, 18, 36, 34), "and one Redo does it again");
+    }
+
+    /// A pause longer than Nudge Bundle Pause starts a new run; a longer pause setting keeps it.
+    #[test]
+    fn a_pause_ends_the_run() {
+        let mut app = app_with_layer();
+        let id = app.session.active().unwrap().active_layer.unwrap();
+        let h0 = history(&app);
+        press_at(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE, 1.0);
+        press_at(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE, 1.9);
+        assert_eq!(history(&app), h0 + 1, "0.9 s: the same run");
+        press_at(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE, 3.0);
+        assert_eq!(history(&app), h0 + 2, "1.1 s of quiet: a new run");
+        app.session.edit_prefs(|p| p.tools.nudge_bundle_pause_ms = 5000);
+        press_at(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE, 7.0);
+        assert_eq!(history(&app), h0 + 2, "4 s with a 5 s pause: the same run");
+        assert_eq!(left_edge(&app, id), 12);
+        assert!(app.session.undo());
+        assert_eq!(left_edge(&app, id), 10, "Undo takes back the second run only");
+    }
+
+    /// With Bundle Arrow-Key Nudges off every press is a state, as before (#2259).
+    #[test]
+    fn every_press_is_a_step_with_bundling_off() {
+        let mut app = app_with_layer();
+        let id = app.session.active().unwrap().active_layer.unwrap();
+        app.session.edit_prefs(|p| p.tools.bundle_nudges = false);
+        let h0 = history(&app);
+        for _ in 0..5 {
+            assert!(press(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE));
+        }
+        assert_eq!(history(&app), h0 + 5);
+        assert!(app.session.undo());
+        assert_eq!(left_edge(&app, id), 12, "one pixel back");
+        // Turning it back on bundles the next run, which doesn't swallow the earlier steps.
+        app.session.edit_prefs(|p| p.tools.bundle_nudges = true);
+        for _ in 0..3 {
+            press(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        }
+        assert_eq!(history(&app), h0 + 5);
+        assert_eq!(left_edge(&app, id), 15);
+    }
+
+    /// Any other change to the document ends the run: another edit, Undo, a different layer
+    /// selected, a save.
+    #[test]
+    fn other_changes_end_the_run() {
+        let mut app = app_with_layer();
+        let a = app.session.active().unwrap().active_layer.unwrap();
+        let tap = |app: &mut PhotospliceApp| assert!(press(app, egui::Key::ArrowRight, egui::Modifiers::NONE));
+        let h0 = history(&app);
+        tap(&mut app);
+        tap(&mut app);
+        assert_eq!(history(&app), h0 + 1);
+        // An edit of another kind between two nudges.
+        app.session.execute("layer.setProps", json!({"opacity": 0.5})).unwrap();
+        tap(&mut app);
+        tap(&mut app);
+        assert_eq!(history(&app), h0 + 3, "nudges, the edit, nudges");
+        // Undo ends it too: the next nudge is a state of its own, not folded into the one before.
+        assert!(app.session.undo());
+        tap(&mut app);
+        assert_eq!(history(&app), h0 + 3);
+        assert!(app.session.undo());
+        assert_eq!(left_edge(&app, a), 10, "the new run was undone alone");
+        // Saving keeps the saved state a step of its own.
+        tap(&mut app);
+        tap(&mut app);
+        let before = history(&app);
+        let st = app.session.active_mut().unwrap();
+        st.saved_revision = st.revision;
+        tap(&mut app);
+        assert_eq!(history(&app), before + 1, "a save between two nudges ends the run");
+        // Selecting another layer: the same keys now move that one, in a run of its own.
+        let b = {
+            app.session.execute("layer.new.layer", json!({})).unwrap();
+            app.session.active().unwrap().active_layer.unwrap()
+        };
+        assert_ne!(a, b);
+        let before = history(&app);
+        app.session
+            .edit("paint", |doc, active| {
+                doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap().fill_rect(photosplice_geom::Rect::new(0, 0, 4, 4), &[0.0, 1.0, 0.0, 1.0]);
+                Ok(())
+            })
+            .unwrap();
+        tap(&mut app);
+        app.session.select_layer(a).unwrap();
+        tap(&mut app);
+        assert_eq!(history(&app), before + 3, "paint, a nudge of the new layer, a nudge of the first");
+    }
+
+    /// ⌥ copies, so ⌥-nudges are never folded into a run (the copy is part of each step).
+    #[test]
+    fn alt_nudges_do_not_join_a_run() {
+        let mut app = app_with_layer();
+        let h0 = history(&app);
+        press(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        press(&mut app, egui::Key::ArrowRight, egui::Modifiers::ALT);
+        press(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE);
+        assert_eq!(history(&app), h0 + 3);
+        assert_eq!(app.session.active().unwrap().history.undo_label(), Some("Move"), "the run after the copy is a state of its own");
+    }
+
+    /// #2259: nudges of the selection outline bundle the same way.
+    #[test]
+    fn selection_outline_nudges_bundle_into_one_step() {
+        let mut app = app_with_layer();
+        app.ui.tool = Tool::Lasso;
+        app.session.execute("select.rect", json!({"x": 4, "y": 4, "width": 10, "height": 10})).unwrap();
+        let sel = |app: &PhotospliceApp| app.session.active().unwrap().doc.selection.as_ref().unwrap().content_bounds();
+        let h0 = history(&app);
+        for i in 0..5 {
+            assert!(press_at(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE, 2.0 + 0.1 * f64::from(i)));
+        }
+        assert!(press_at(&mut app, egui::Key::ArrowDown, egui::Modifiers::SHIFT, 2.6));
+        assert_eq!(sel(&app), photosplice_geom::Rect::new(9, 14, 19, 24));
+        assert_eq!(history(&app), h0 + 1);
+        assert!(app.session.undo());
+        assert_eq!(sel(&app), photosplice_geom::Rect::new(4, 4, 14, 14), "Undo takes the outline back where it was drawn");
+        // The layer nudge and the outline nudge are different runs even back to back.
+        app.session.execute("select.deselect", json!({})).unwrap();
+        app.ui.tool = Tool::Move;
+        let h1 = history(&app);
+        press_at(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE, 3.0);
+        assert_eq!(history(&app), h1 + 1);
+    }
+
+    /// Free Transform: nudges of the box that follow each other are one Undo step of the session
+    /// (it has its own history); a drag or a pause starts another.
+    #[test]
+    fn free_transform_nudges_bundle_into_one_undo_step() {
+        let mut app = app_with_layer();
+        let ctx = egui::Context::default();
+        crate::transform_tool::begin(&mut app, &ctx).unwrap();
+        let quad = |app: &PhotospliceApp| app.ui.transform.as_ref().unwrap().quad;
+        let q0 = quad(&app);
+        let moved = |dx: f64, dy: f64| q0.map(|q| [q[0] + dx, q[1] + dy]);
+        let settle = |app: &mut PhotospliceApp| crate::transform_tool::track_steps(app, &ctx);
+        for i in 0..6 {
+            assert!(press_at(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE, 4.0 + 0.1 * f64::from(i)));
+            settle(&mut app);
+        }
+        assert_eq!(quad(&app), moved(6.0, 0.0));
+        // A pause, and the next nudge is a step of its own.
+        assert!(press_at(&mut app, egui::Key::ArrowDown, egui::Modifiers::NONE, 9.0));
+        settle(&mut app);
+        assert_eq!(
+            quad(&app),
+            [[q0[0][0] + 6.0, q0[0][1] + 1.0], [q0[1][0] + 6.0, q0[1][1] + 1.0], [q0[2][0] + 6.0, q0[2][1] + 1.0], [q0[3][0] + 6.0, q0[3][1] + 1.0]]
+        );
+        app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(quad(&app), moved(6.0, 0.0), "Undo takes back the late nudge only");
+        app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(quad(&app), q0, "and the next one the six that were bundled");
+        app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(quad(&app), q0, "nothing is left of the session to undo");
+        // With bundling off every nudge is a step.
+        app.session.edit_prefs(|p| p.tools.bundle_nudges = false);
+        for i in 0..3 {
+            press_at(&mut app, egui::Key::ArrowRight, egui::Modifiers::NONE, 20.0 + 0.1 * f64::from(i));
+            settle(&mut app);
+        }
+        app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(quad(&app), moved(2.0, 0.0));
     }
 }

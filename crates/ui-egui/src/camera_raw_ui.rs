@@ -1,19 +1,26 @@
 //! Filter › Camera Raw Filter…: a large dialog like Adobe Camera Raw's (preview on the left,
 //! edit panels on the right: Basic, Curve, Detail, Color Mixer, Color Grading, Effects).
 //!
-//! The dialog is a large modal over the document, at most 1400 × 900 pt. The preview runs
-//! [`photosplice_algo::camera_raw::develop`] on a CPU proxy of the layer, sized to the preview
-//! (`pixel_scale` keeps pixel radii true to the full image), recomputed when a
-//! control changes. OK runs `filter.cameraRaw` with the non-default settings, so the result is
-//! one history step (or a smart filter on a smart object) and exactly replayable.
+//! The dialog is modal and opens in a window of its own (moved and resized like any window,
+//! at most 1400 × 900 pt to begin with) while the main window takes no input. Where the platform
+//! has no extra windows (the web build) it is drawn over the document in the dialogs' own frame.
+//! The preview runs [`photosplice_algo::camera_raw::develop`] on a CPU proxy of the layer, sized
+//! to the preview (`pixel_scale` keeps pixel radii true to the full image), recomputed when a
+//! control changes, and shown through the document's display transform. OK runs
+//! `filter.cameraRaw` with the non-default settings, so the result is one history step (or a
+//! smart filter on a smart object) and exactly replayable. Ctrl+Z / Shift+Ctrl+Z step through the
+//! dialog's own edits.
 //!
 //! Control channel: `ui.menu.invoke {"id":"filter.cameraRaw","params":{"ui":{"set":{…},
-//! "autoWhiteBalance":true, "whiteBalanceAt":[u, v] (0..=1 of the image), "commit":true |
-//! "cancel":true}}}`; the reply describes the dialog.
+//! "autoWhiteBalance":true, "whiteBalanceAt":[u, v] (0..=1 of the image), "undo":true,
+//! "redo":true, "commit":true | "cancel":true}}}`; the reply describes the dialog.
+
+use std::sync::Arc;
 
 use egui::{Color32, FontId, Pos2, Rect as ERect, Sense, Stroke, TextureHandle, pos2, vec2};
 use photosplice_algo::camera_raw::{CameraRaw, Wheel, curve_lut};
 use photosplice_doc::LayerId;
+use photosplice_engine::display_color::CanvasDisplay;
 use photosplice_geom::Rect;
 use serde_json::{Value, json};
 
@@ -26,6 +33,12 @@ const MAX_PROXY_SIDE: usize = 4096;
 const MIN_PROXY_SIDE: usize = 256;
 const PANEL_W: f32 = 330.0;
 const BANDS: [&str; 8] = ["Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta"];
+/// The largest side of the area the dialog works on (the engine's filter domain), and the most
+/// pixels: anything bigger is refused rather than allocated.
+const MAX_AREA_SIDE: i32 = 1_048_576;
+const MAX_AREA_PIXELS: usize = 512_000_000;
+/// How many edits Ctrl+Z can step back inside the dialog.
+const RAW_UNDO_LIMIT: usize = 40;
 
 pub struct CameraRawDialog {
     pub layer: LayerId,
@@ -33,11 +46,16 @@ pub struct CameraRawDialog {
     pub params: CameraRaw,
     /// Proxy pixels (straight RGBA) and size.
     proxy: Vec<[f32; 4]>,
+    /// The document selection at each proxy pixel (0..=1), when there is one: the command only
+    /// changes what is selected, so the preview blends the same way.
+    selection: Option<Vec<f32>>,
     pw: usize,
     ph: usize,
     full_w: usize,
     full_h: usize,
     float: bool,
+    /// How the document is shown on the monitor: the preview goes through the same transform.
+    display: Arc<CanvasDisplay>,
     tex: Option<TextureHandle>,
     before_tex: Option<TextureHandle>,
     dirty: bool,
@@ -54,6 +72,11 @@ pub struct CameraRawDialog {
     hist: Box<[[f32; 256]; 3]>,
     /// The histogram's Channel menu: 0 RGB, 1 Red, 2 Green, 3 Blue, 4 Colours (the three overlaid).
     pub hist_channel: usize,
+    /// Settings before each finished edit, so Ctrl+Z works inside the dialog.
+    undo: Vec<CameraRaw>,
+    redo: Vec<CameraRaw>,
+    /// Settings at pointer-down: one drag is one undo step.
+    edit_origin: Option<CameraRaw>,
 }
 
 /// Camera file extensions (the raw formats File › Open reads).
@@ -64,9 +87,46 @@ pub fn is_raw_name(name: &str) -> bool {
     name.rsplit_once('.').is_some_and(|(_, e)| RAW_EXTS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
+/// Should an interactive open show Camera Raw? `warnings` are the import's: only a raw developed
+/// from its sensor data qualifies (not a preview fallback), and the preference can turn it off.
+pub fn wants_open_dialog(app: &PhotospliceApp, warnings: &[String]) -> bool {
+    app.session.prefs().raw_defaults.open_in_camera_raw && warnings.iter().any(|w| w.contains(photosplice_io::raw::DEVELOPED_NOTE))
+}
+
+/// `warnings` without the "developed with default settings" note: Camera Raw shows how the raw
+/// is developed.
+pub fn without_develop_note(warnings: &[String]) -> Vec<String> {
+    warnings.iter().filter(|w| !w.contains(photosplice_io::raw::DEVELOPED_NOTE)).cloned().collect()
+}
+
+/// Queues Camera Raw on the active document, a raw file just opened (shown on the next frame,
+/// see `open_pending`). The file's name, path and bytes aren't needed: the dialog works on the
+/// developed document.
+pub fn queue_open_dialog(app: &mut PhotospliceApp, _name: &str, _path: Option<&str>, _bytes: Option<&[u8]>) {
+    if let Some(st) = app.session.active() {
+        app.camera_raw_on_open = Some(st.doc.id);
+    }
+}
+
+/// A finished background job of Camera Raw's own. Opening a raw applies its settings as an
+/// ordinary Camera Raw step (reported like any filter), so there is none: always `false`.
+pub fn on_redevelop_event(_app: &mut PhotospliceApp, _e: &photosplice_engine::jobs::JobEvent) -> bool {
+    false
+}
+
 impl CameraRawDialog {
     pub fn describe(&self) -> Value {
-        json!({"layer": self.layer.0, "params": serde_json::to_value(&self.params).unwrap_or(Value::Null), "proxy": [self.pw, self.ph], "renderMs": self.render_ms, "before": self.show_before, "openSection": self.open_section, "histogramChannel": self.hist_channel})
+        json!({"layer": self.layer.0, "params": serde_json::to_value(&self.params).unwrap_or(Value::Null), "proxy": [self.pw, self.ph], "renderMs": self.render_ms, "before": self.show_before, "openSection": self.open_section, "histogramChannel": self.hist_channel, "hasSelection": self.selection.is_some(), "canUndo": !self.undo.is_empty(), "canRedo": !self.redo.is_empty()})
+    }
+
+    /// "Camera Raw (file name)" while a camera file is being opened, "Camera Raw Filter (layer)"
+    /// otherwise.
+    fn heading(&self) -> String {
+        if self.opened_file.is_some() {
+            crate::i18n::fmt(tl!("Camera Raw ({name})"), &[("name", &self.layer_name)])
+        } else {
+            crate::i18n::fmt(tl!("Camera Raw Filter ({layer})"), &[("layer", &self.layer_name)])
+        }
     }
 
     /// Params for the engine: only the settings that differ from the defaults.
@@ -106,9 +166,16 @@ impl CameraRawDialog {
         }
     }
 
-    fn image(px: &[[f32; 4]], w: usize, h: usize) -> egui::ColorImage {
-        let enc = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-        egui::ColorImage::new([w, h], px.iter().map(|q| Color32::from_rgba_unmultiplied(enc(q[0]), enc(q[1]), enc(q[2]), enc(q[3]))).collect())
+    /// Straight-alpha pixels as the monitor shows them: through the document's display
+    /// transform (a linear document is encoded first), as the canvas does.
+    fn image(px: &[[f32; 4]], w: usize, h: usize, display: &CanvasDisplay) -> egui::ColorImage {
+        let buf = photosplice_compose::Buffer { rect: Rect::new(0, 0, w as i32, h as i32), px: px.to_vec() };
+        let img = display.to_rgba8(&buf);
+        if img.pixels.len() == w.saturating_mul(h).saturating_mul(4) {
+            egui::ColorImage::from_rgba_unmultiplied([w, h], &img.pixels)
+        } else {
+            egui::ColorImage::new([w, h], vec![Color32::TRANSPARENT; w.saturating_mul(h)])
+        }
     }
 
     fn render(&mut self, ctx: &egui::Context) {
@@ -117,27 +184,60 @@ impl CameraRawDialog {
         let mut p = self.params.clone();
         p.pixel_scale = (self.pw as f32 / self.full_w.max(1) as f32).min(1.0);
         photosplice_algo::camera_raw::develop(&mut px, self.pw, self.ph, &p, self.float);
-        let img = Self::image(&px, self.pw, self.ph);
+        // Only the selection changes, as the command does.
+        if let Some(mask) = &self.selection {
+            for ((out, original), coverage) in px.iter_mut().zip(&self.proxy).zip(mask) {
+                for (out, original) in out.iter_mut().zip(original) {
+                    *out = *original + (*out - *original) * coverage;
+                }
+            }
+        }
+        let img = Self::image(&px, self.pw, self.ph, &self.display);
         *self.hist = colour_histogram(&px);
         match &mut self.tex {
             Some(t) => t.set(img, egui::TextureOptions::LINEAR),
             None => self.tex = Some(ctx.load_texture("camera-raw-after", img, egui::TextureOptions::LINEAR)),
         }
         if self.before_tex.is_none() {
-            self.before_tex = Some(ctx.load_texture("camera-raw-before", Self::image(&self.proxy, self.pw, self.ph), egui::TextureOptions::LINEAR));
+            self.before_tex = Some(ctx.load_texture("camera-raw-before", Self::image(&self.proxy, self.pw, self.ph, &self.display), egui::TextureOptions::LINEAR));
         }
         self.render_ms = crate::gpu_canvas::now_ms() - t0;
         self.dirty = false;
     }
+
+    /// Keeps the settings before an edit for Ctrl+Z (the redo steps are dropped).
+    fn remember(&mut self, before: CameraRaw) {
+        if self.undo.len() >= RAW_UNDO_LIMIT {
+            self.undo.remove(0);
+        }
+        self.undo.push(before);
+        self.redo.clear();
+    }
+
+    fn undo_edit(&mut self) -> bool {
+        let Some(prev) = self.undo.pop() else { return false };
+        self.redo.push(std::mem::replace(&mut self.params, prev));
+        self.dirty = true;
+        self.edit_origin = None;
+        true
+    }
+
+    fn redo_edit(&mut self) -> bool {
+        let Some(next) = self.redo.pop() else { return false };
+        self.undo.push(std::mem::replace(&mut self.params, next));
+        self.dirty = true;
+        self.edit_origin = None;
+        true
+    }
 }
 
-/// The proxy's long side for an image of `w × h`: what the preview draws it at, in physical
-/// pixels, so it is shown 1:1 — neither magnified (soft) nor shrunk without mipmaps (grainy).
-fn preview_side(ctx: &egui::Context, w: usize, h: usize) -> usize {
-    let screen = widgets::tool_dialog_rect(ctx, DIALOG_MAX);
-    let (vw, vh) = ((screen.width() - PANEL_W - 32.0).max(64.0), (screen.height() - 30.0 - 48.0 - 32.0).max(64.0));
+/// The proxy's long side for an image of `w × h` in a dialog of `dialog` points: what the
+/// preview draws it at, in physical pixels, so it is shown 1:1 — neither magnified (soft) nor
+/// shrunk without mipmaps (grainy).
+fn preview_side(dialog: egui::Vec2, ppp: f32, w: usize, h: usize) -> usize {
+    let (vw, vh) = ((dialog.x - PANEL_W - 32.0).max(64.0), (dialog.y - 30.0 - 48.0 - 32.0).max(64.0));
     let fit = (vw / w.max(1) as f32).min(vh / h.max(1) as f32);
-    let side = (w.max(h) as f32 * fit * ctx.pixels_per_point()).round() as usize;
+    let side = (w.max(h) as f32 * fit * ppp).round() as usize;
     side.clamp(MIN_PROXY_SIDE, MAX_PROXY_SIDE).min(w.max(h).max(1))
 }
 
@@ -178,26 +278,56 @@ pub(crate) fn build_proxy(surf: &photosplice_raster::Surface, area: Rect, side: 
     (proxy, pw, ph)
 }
 
-/// Rebuilds the proxy when the preview's size on screen has changed noticeably (window resized,
-/// moved to a display of another density).
-fn refit_proxy(app: &mut PhotospliceApp, ctx: &egui::Context) {
+/// What the dialog works on: the engine's filter domain, the canvas and any of the layer's pixels
+/// beyond it, so spatial stages (vignette, grain, local contrast) agree with the committed result.
+/// Absurd sizes are refused rather than allocated.
+fn preview_area(surf: &photosplice_raster::Surface, canvas: Rect) -> Result<Rect, String> {
+    let area = canvas.union(&surf.content_bounds());
+    let side = |a: i32, b: i32| b.checked_sub(a).filter(|n| (1..=MAX_AREA_SIDE).contains(n));
+    let (Some(w), Some(h)) = (side(area.x0, area.x1), side(area.y0, area.y1)) else {
+        return Err("Camera Raw preview bounds are too large".into());
+    };
+    if (w as usize).checked_mul(h as usize).is_none_or(|n| n > MAX_AREA_PIXELS) {
+        return Err("Camera Raw preview bounds are too large".into());
+    }
+    Ok(area)
+}
+
+/// The document selection sampled at the centre of each proxy pixel of `area` (`pw × ph`).
+fn proxy_selection(selection: Option<&photosplice_raster::Surface>, area: Rect, pw: usize, ph: usize) -> Option<Vec<f32>> {
+    let mask = selection?;
+    let (w, h) = (area.width().max(1), area.height().max(1));
+    let (kx, ky) = (f64::from(w) / pw.max(1) as f64, f64::from(h) / ph.max(1) as f64);
+    // Offsets inside the area: at most `MAX_AREA_SIDE`, so they fit an `i32`.
+    let at = |i: usize, k: f64, len: u32| i32::try_from((((i as f64 + 0.5) * k) as u32).min(len - 1)).unwrap_or(0);
+    Some(
+        (0..ph)
+            .flat_map(|y| (0..pw).map(move |x| (x, y)))
+            .map(|(x, y)| mask.sample_channel(area.x0.saturating_add(at(x, kx, w)), area.y0.saturating_add(at(y, ky, h)), 0).clamp(0.0, 1.0))
+            .collect(),
+    )
+}
+
+/// Rebuilds the proxy when the preview's size on screen (`dialog` points at `ppp`) has changed
+/// noticeably (window resized, moved to a display of another density).
+fn refit_proxy(app: &mut PhotospliceApp, dialog: egui::Vec2, ppp: f32) {
     let Some(d) = app.camera_raw.as_ref() else { return };
-    let want = preview_side(ctx, d.full_w, d.full_h);
+    let want = preview_side(dialog, ppp, d.full_w, d.full_h);
     let have = d.pw.max(d.ph);
     if (want as f64 - have as f64).abs() < have as f64 * 0.15 {
         return;
     }
     let layer = d.layer;
     let Ok((l, surf, _)) = crate::distort_ui::active_pixels(app) else { return };
-    let Some(canvas) = app.session.active().map(|s| s.doc.bounds()) else { return };
+    let Some(st) = app.session.active() else { return };
     if l != layer {
         return;
     }
-    let area = surf.content_bounds().intersect(&canvas);
-    let area = if area.is_empty() { canvas } else { area };
+    let Ok(area) = preview_area(&surf, st.doc.bounds()) else { return };
     let (proxy, pw, ph) = build_proxy(&surf, area, want);
+    let selection = proxy_selection(st.doc.selection.as_ref(), area, pw, ph);
     if let Some(d) = app.camera_raw.as_mut() {
-        (d.proxy, d.pw, d.ph) = (proxy, pw, ph);
+        (d.proxy, d.pw, d.ph, d.selection) = (proxy, pw, ph, selection);
         d.before_tex = None;
         d.dirty = true;
     }
@@ -208,23 +338,28 @@ pub fn open(app: &mut PhotospliceApp, ctx: &egui::Context) -> Result<(), String>
     photosplice_engine::commands::find("filter.cameraRaw").map(|c| (c.enabled)(&app.session)).unwrap_or(Err("unknown command".into()))?;
     let (layer, surf, _) = crate::distort_ui::active_pixels(app)?;
     let st = app.session.active().ok_or("no document")?;
-    let canvas = st.doc.bounds();
     let name = st.doc.layer(layer).map(|l| l.name.clone()).unwrap_or_default();
-    let area = surf.content_bounds().intersect(&canvas);
-    let area = if area.is_empty() { canvas } else { area };
+    let area = preview_area(&surf, st.doc.bounds())?;
     let (w, h) = (area.width() as usize, area.height() as usize);
-    let (proxy, pw, ph) = build_proxy(&surf, area, preview_side(ctx, w, h));
+    let dialog = widgets::tool_dialog_rect(ctx, DIALOG_MAX).size();
+    let (proxy, pw, ph) = build_proxy(&surf, area, preview_side(dialog, ctx.pixels_per_point(), w, h));
+    let selection = proxy_selection(st.doc.selection.as_ref(), area, pw, ph);
     let float = surf.format().sample == photosplice_color::SampleType::F32;
+    let display = app.session.color.canvas_display(&st.doc).map_err(|e| e.to_string())?;
+    // Whites and Blacks act on light: decode the document's own transfer curve, as the command does.
+    let params = CameraRaw { encoding_gamma: photosplice_engine::lens_cmds::encoding_gamma(&st.doc), ..CameraRaw::default() };
     let mut d = CameraRawDialog {
         layer,
         layer_name: name,
-        params: CameraRaw::default(),
+        params,
         proxy,
+        selection,
         pw,
         ph,
         full_w: w,
         full_h: h,
         float,
+        display,
         tex: None,
         before_tex: None,
         dirty: true,
@@ -236,65 +371,115 @@ pub fn open(app: &mut PhotospliceApp, ctx: &egui::Context) -> Result<(), String>
         open_section: Some(tl!("Basic").to_string()),
         hist: Box::new([[0.0; 256]; 3]),
         hist_channel: HIST_COLOURS,
+        undo: Vec::new(),
+        redo: Vec::new(),
+        edit_origin: None,
     };
     d.render(ctx);
     app.camera_raw = Some(d);
     Ok(())
 }
 
+/// The control channel's `ui` properties, and which of them take a boolean.
+const UI_KEYS: &[&str] = &["set", "openSection", "autoWhiteBalance", "whiteBalanceAt", "before", "commit", "cancel", "undo", "redo"];
+const UI_FLAGS: &[&str] = &["autoWhiteBalance", "before", "commit", "cancel", "undo", "redo"];
+
 /// Menu / control-channel entry point. `None` when the call isn't for this dialog.
 pub fn menu(app: &mut PhotospliceApp, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
     if id != "filter.cameraRaw" {
         return None;
     }
-    let empty = params.as_object().is_none_or(|o| o.is_empty());
-    if empty {
+    let Some(fields) = params.as_object() else {
+        return Some(Err("Camera Raw params must be an object".into()));
+    };
+    if fields.is_empty() {
         return Some(open(app, ctx).map(|_| app.camera_raw.as_ref().map(|d| d.describe()).unwrap_or(Value::Null)));
     }
     let ui = params.get("ui")?;
-    if app.camera_raw.is_none()
-        && let Err(e) = open(app, ctx)
-    {
+    let Some(fields) = ui.as_object() else {
+        return Some(Err("Camera Raw ui must be an object".into()));
+    };
+    for (key, value) in fields {
+        if !UI_KEYS.contains(&key.as_str()) {
+            return Some(Err(format!("unknown Camera Raw ui property {key}")));
+        }
+        if UI_FLAGS.contains(&key.as_str()) && !value.is_boolean() {
+            return Some(Err(format!("Camera Raw {key} must be a boolean")));
+        }
+    }
+    if ui.get("commit").and_then(Value::as_bool) == Some(true) && ui.get("cancel").and_then(Value::as_bool) == Some(true) {
+        return Some(Err("Camera Raw cannot commit and cancel together".into()));
+    }
+    let was_closed = app.camera_raw.is_none();
+    if was_closed && let Err(e) = open(app, ctx) {
         return Some(Err(e));
     }
+    let result = menu_update(app, ctx, ui);
+    // A request that opened the dialog and then failed leaves nothing open.
+    if was_closed && result.as_ref().is_some_and(Result::is_err) {
+        app.camera_raw = None;
+    }
+    result
+}
+
+fn menu_update(app: &mut PhotospliceApp, ctx: &egui::Context, ui: &Value) -> Option<Result<Value, String>> {
+    let d = app.camera_raw.as_mut()?;
+    let before = d.params.clone();
     if let Some(set) = ui.get("set") {
-        let d = app.camera_raw.as_mut()?;
+        let Some(set) = set.as_object() else {
+            return Some(Err("bad Camera Raw settings: expected an object".into()));
+        };
         let mut cur = serde_json::to_value(&d.params).unwrap_or(json!({}));
-        if let (Value::Object(c), Value::Object(s)) = (&mut cur, set) {
-            for (k, v) in s {
+        if let Value::Object(c) = &mut cur {
+            for (k, v) in set {
+                if !c.contains_key(k) {
+                    return Some(Err(format!("unknown Camera Raw setting {k}")));
+                }
                 c.insert(k.clone(), v.clone());
             }
         }
-        match serde_json::from_value::<CameraRaw>(cur) {
-            Ok(p) => {
-                d.params = p;
-                d.render(ctx);
-            }
+        let next = match serde_json::from_value::<CameraRaw>(cur) {
+            Ok(p) => p,
             Err(e) => return Some(Err(format!("bad Camera Raw settings: {e}"))),
+        };
+        if let Err(e) = next.validate() {
+            return Some(Err(format!("bad Camera Raw settings: {e}")));
         }
+        d.dirty |= d.params != next;
+        d.params = next;
     }
-    if let Some(d) = app.camera_raw.as_mut() {
-        if let Some(s) = ui.get("openSection") {
-            d.open_section = s.as_str().map(str::to_string);
-        }
-        if ui.get("autoWhiteBalance").and_then(Value::as_bool) == Some(true) {
-            d.neutralise(None);
-        }
-        if let Some([u, v]) = ui.get("whiteBalanceAt").and_then(Value::as_array).and_then(|a| <[Value; 2]>::try_from(a.clone()).ok()) {
-            let (Some(u), Some(v)) = (u.as_f64(), v.as_f64()) else {
-                return Some(Err("whiteBalanceAt is [u, v] in 0..=1".into()));
-            };
-            let x = ((u.clamp(0.0, 1.0) * d.pw as f64) as usize).min(d.pw.saturating_sub(1));
-            let y = ((v.clamp(0.0, 1.0) * d.ph as f64) as usize).min(d.ph.saturating_sub(1));
-            d.neutralise(Some((x, y)));
-        }
-        if d.dirty {
-            d.render(ctx);
-        }
+    if let Some(s) = ui.get("openSection") {
+        d.open_section = s.as_str().map(str::to_string);
     }
-    if let Some(b) = ui.get("before").and_then(Value::as_bool)
-        && let Some(d) = app.camera_raw.as_mut()
-    {
+    if ui.get("autoWhiteBalance").and_then(Value::as_bool) == Some(true) {
+        d.neutralise(None);
+    }
+    if let Some(at) = ui.get("whiteBalanceAt") {
+        let uv = at.as_array().and_then(|a| match a.as_slice() {
+            [u, v] => Some((u.as_f64()?, v.as_f64()?)),
+            _ => None,
+        });
+        let Some((u, v)) = uv.filter(|(u, v)| u.is_finite() && v.is_finite()) else {
+            d.params = before;
+            return Some(Err("whiteBalanceAt is [u, v] in 0..=1".into()));
+        };
+        let x = ((u.clamp(0.0, 1.0) * d.pw as f64) as usize).min(d.pw.saturating_sub(1));
+        let y = ((v.clamp(0.0, 1.0) * d.ph as f64) as usize).min(d.ph.saturating_sub(1));
+        d.neutralise(Some((x, y)));
+    }
+    if d.params != before {
+        d.remember(before);
+    }
+    if ui.get("undo").and_then(Value::as_bool) == Some(true) {
+        d.undo_edit();
+    }
+    if ui.get("redo").and_then(Value::as_bool) == Some(true) {
+        d.redo_edit();
+    }
+    if d.dirty {
+        d.render(ctx);
+    }
+    if let Some(b) = ui.get("before").and_then(Value::as_bool) {
         d.show_before = b;
     }
     if ui.get("cancel").and_then(Value::as_bool) == Some(true) {
@@ -307,14 +492,18 @@ pub fn menu(app: &mut PhotospliceApp, ctx: &egui::Context, id: &str, params: &Va
     Some(Ok(app.camera_raw.as_ref().map(|d| d.describe()).unwrap_or(Value::Null)))
 }
 
+/// OK: the settings as one `filter.cameraRaw` step. The dialog stays open when the command fails.
 fn commit(app: &mut PhotospliceApp) -> Result<Value, String> {
-    let d = app.camera_raw.take().ok_or(tl!("Camera Raw isn't open"))?;
-    if d.params.is_identity() {
-        return Ok(json!({"unchanged": true}));
-    }
-    let mut p = d.command_params();
-    p["layer"] = json!(d.layer.0);
-    app.run("filter.cameraRaw", p)
+    let d = app.camera_raw.as_ref().ok_or(tl!("Camera Raw isn't open"))?;
+    let result = if d.params.is_identity() {
+        json!({"unchanged": true})
+    } else {
+        let mut p = d.command_params();
+        p["layer"] = json!(d.layer.0);
+        app.run("filter.cameraRaw", p)?
+    };
+    app.camera_raw = None;
+    Ok(result)
 }
 
 fn temp_stops() -> Vec<Color32> {
@@ -409,11 +598,20 @@ fn curve_editor(ui: &mut egui::Ui, p: &mut CameraRaw, dirty: &mut bool) {
         if resp.dragged()
             && let Some(i) = dragging
         {
-            let n = p.point_curve.len();
-            let lo = if i == 0 { 0.0 } else { p.point_curve[i - 1][0] + 1.0 };
-            let hi = if i + 1 == n { 255.0 } else { p.point_curve[i + 1][0] - 1.0 };
-            p.point_curve[i] = [q[0].clamp(lo, hi.max(lo)), q[1]];
-            *dirty = true;
+            // The curve can change under a drag (Ctrl+Z, the control channel): a point that is
+            // gone is no longer dragged.
+            let lo = match i.checked_sub(1) {
+                Some(prev) => p.point_curve.get(prev).map_or(0.0, |c| c[0] + 1.0),
+                None => 0.0,
+            };
+            let hi = p.point_curve.get(i + 1).map_or(255.0, |c| c[0] - 1.0);
+            match p.point_curve.get_mut(i) {
+                Some(pt) => {
+                    *pt = [q[0].clamp(lo, hi.max(lo)), q[1]];
+                    *dirty = true;
+                }
+                None => dragging = None,
+            }
         }
     }
     if resp.drag_stopped() {
@@ -434,234 +632,305 @@ const DIALOG_MAX: egui::Vec2 = vec2(1400.0, 900.0);
 
 pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     open_pending(app, ctx);
-    if app.camera_raw.is_none() {
+    let Some(d) = app.camera_raw.as_ref() else { return };
+    let heading = d.heading();
+    let rect = widgets::tool_dialog_rect(ctx, DIALOG_MAX);
+    // Where the platform has no extra windows (the web build), the dialogs' own frame over the
+    // document (title bar, dragging, kept below the app's title bar), at a fixed size.
+    if ctx.embed_viewports() {
+        let mut action = None;
+        crate::dialogs::frame(ctx, egui::Id::new("camera-raw-dialog"), &heading, crate::dialogs::FrameSize::Fixed(rect.size()), |ui, size| {
+            action = body(app, ui, size.unwrap_or(rect.size()));
+        });
+        let action = keys(app, ctx).or(action);
+        finish(app, ctx, action);
         return;
     }
-    refit_proxy(app, ctx);
-    let t = Tokens::get(ctx);
-    let rect = widgets::tool_dialog_rect(ctx, DIALOG_MAX);
-    let mut action: Option<&str> = None;
-    let heading = match app.camera_raw.as_ref() {
-        Some(d) if d.opened_file.is_some() => format!("Camera Raw ({})", d.layer_name),
-        Some(d) => format!("Camera Raw Filter ({})", d.layer_name),
-        None => return,
-    };
-    // The dialogs' own frame (title bar, dragging, kept below the app's title bar), at a fixed size.
-    crate::dialogs::frame(ctx, egui::Id::new("camera-raw-dialog"), &heading, crate::dialogs::FrameSize::Fixed(rect.size()), |ui, size| {
-        let Some(d) = app.camera_raw.as_mut() else { return };
-        if d.dirty {
-            d.render(ctx);
-        }
-        let (full, _) = ui.allocate_exact_size(size.unwrap_or(rect.size()), Sense::click());
-        let painter = ui.painter().clone();
-        let footer_h = 48.0;
-        let body = ERect::from_min_max(full.min, pos2(full.right(), full.bottom() - footer_h));
-        // Preview.
-        let view = ERect::from_min_max(body.min, pos2(body.right() - PANEL_W, body.bottom())).shrink(16.0);
-        painter.rect_filled(view, 0.0, t.canvas);
-        let tex = if d.show_before { d.before_tex.as_ref() } else { d.tex.as_ref() };
-        if let Some(tex) = tex {
-            let s = (view.width() / d.pw as f32).min(view.height() / d.ph as f32);
-            let r = ERect::from_center_size(view.center(), vec2(d.pw as f32 * s, d.ph as f32 * s));
-            widgets::checker(&painter, r, 8.0);
-            painter.image(tex.id(), r, ERect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
-            // White Balance eyedropper: click a neutral spot.
-            if d.wb_pick
-                && let Some(pos) = ui.ctx().pointer_hover_pos().filter(|p| r.contains(*p))
-            {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-                if ui.ctx().input(|i| i.pointer.primary_clicked()) {
-                    let x = (((pos.x - r.left()) / s) as usize).min(d.pw.saturating_sub(1));
-                    let y = (((pos.y - r.top()) / s) as usize).min(d.ph.saturating_sub(1));
-                    d.neutralise(Some((x, y)));
-                }
-            }
-        }
-        // Panels.
-        let right = ERect::from_min_max(pos2(body.right() - PANEL_W, body.top()), body.max);
-        painter.rect_filled(right, 0.0, t.dock);
-        painter.line_segment([right.left_top(), right.left_bottom()], Stroke::new(1.0, t.separator));
-        let inner = right.shrink2(vec2(14.0, 10.0));
-        // Histogram at the top, the panels scrolling below it.
-        let head = ERect::from_min_size(inner.min, vec2(inner.width(), HIST_HEADER));
-        let mut hu = ui.new_child(egui::UiBuilder::new().max_rect(head));
-        histogram(&mut hu, d);
-        painter.line_segment([pos2(right.left(), head.bottom() + 5.0), pos2(right.right(), head.bottom() + 5.0)], Stroke::new(1.0, t.separator));
-        let mut props = ui.new_child(egui::UiBuilder::new().max_rect(ERect::from_min_max(pos2(inner.left(), head.bottom() + 12.0), inner.max)));
-        let mut dirty = false;
-        let (mut pick, mut auto) = (d.wb_pick, false);
-        let mut open = d.open_section.clone();
-        egui::ScrollArea::vertical().id_salt("camera-raw-props").show(&mut props, |ui| {
-            ui.spacing_mut().item_spacing.y = 4.0;
-            let p = &mut d.params;
-            let (ts, tn) = (temp_stops(), tint_stops());
-            section(ui, &mut open, tl!("Basic"), |ui| {
-                ui.horizontal(|ui| {
-                    widgets::section_label(ui, tl!("White Balance: As Shot"));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if crate::icons::button(ui, "tools-eyedropper", 22.0, pick, tl!("Eyedropper Tool")).clicked() {
-                            pick = !pick;
-                        }
-                        auto = ui.small_button(tl!("Auto")).clicked();
-                    });
-                });
-                row(ui, &mut dirty, tl!("Temperature"), &mut p.temperature, -100.0..=100.0, Some(&ts));
-                row(ui, &mut dirty, tl!("Tint"), &mut p.tint, -100.0..=100.0, Some(&tn));
-                row(ui, &mut dirty, tl!("Exposure"), &mut p.exposure, -5.0..=5.0, None);
-                row(ui, &mut dirty, tl!("Contrast"), &mut p.contrast, -100.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Highlights"), &mut p.highlights, -100.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Shadows"), &mut p.shadows, -100.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Whites"), &mut p.whites, -100.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Blacks"), &mut p.blacks, -100.0..=100.0, None);
-                widgets::hairline(ui);
-                row(ui, &mut dirty, tl!("Texture"), &mut p.texture, -100.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Clarity"), &mut p.clarity, -100.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Dehaze"), &mut p.dehaze, -100.0..=100.0, None);
-                widgets::hairline(ui);
-                row(ui, &mut dirty, tl!("Vibrance"), &mut p.vibrance, -100.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Saturation"), &mut p.saturation, -100.0..=100.0, None);
-            });
-            section(ui, &mut open, tl!("Curve"), |ui| {
-                curve_editor(ui, p, &mut dirty);
-                row(ui, &mut dirty, tl!("Highlights"), &mut p.curve_highlights, -100.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Lights"), &mut p.curve_lights, -100.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Darks"), &mut p.curve_darks, -100.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Shadows"), &mut p.curve_shadows, -100.0..=100.0, None);
-            });
-            section(ui, &mut open, tl!("Detail"), |ui| {
-                widgets::section_label(ui, tl!("Sharpening"));
-                row(ui, &mut dirty, tl!("Amount"), &mut p.sharpen_amount, 0.0..=150.0, None);
-                row(ui, &mut dirty, tl!("Radius"), &mut p.sharpen_radius, 0.5..=3.0, None);
-                row(ui, &mut dirty, tl!("Detail"), &mut p.sharpen_detail, 0.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Masking"), &mut p.sharpen_masking, 0.0..=100.0, None);
-                widgets::section_label(ui, tl!("Noise Reduction"));
-                row(ui, &mut dirty, tl!("Luminance"), &mut p.noise_luminance, 0.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Luminance Detail"), &mut p.noise_luminance_detail, 0.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Color"), &mut p.noise_color, 0.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Color Detail"), &mut p.noise_color_detail, 0.0..=100.0, None);
-            });
-            section(ui, &mut open, tl!("Color Mixer"), |ui| {
-                ui.horizontal(|ui| {
-                    for (i, name) in [tl!("Hue"), tl!("Saturation"), tl!("Luminance")].iter().enumerate() {
-                        if widgets::pill_tab(ui, name, d.mixer_tab == i).clicked() {
-                            d.mixer_tab = i;
-                        }
-                    }
-                });
-                let arr = match d.mixer_tab {
-                    0 => &mut p.hsl_hue,
-                    1 => &mut p.hsl_sat,
-                    _ => &mut p.hsl_lum,
-                };
-                for (k, name) in BANDS.iter().enumerate() {
-                    let c = photosplice_algo::camera_raw::HSL_BANDS[k];
-                    let base = hue_color(c);
-                    let grad = [Color32::from_gray(128), base];
-                    row(ui, &mut dirty, name, &mut arr[k], -100.0..=100.0, Some(&grad));
-                }
-            });
-            section(ui, &mut open, tl!("Color Grading"), |ui| {
-                wheel(ui, &mut dirty, tl!("Shadows"), &mut p.grade_shadows);
-                wheel(ui, &mut dirty, tl!("Midtones"), &mut p.grade_midtones);
-                wheel(ui, &mut dirty, tl!("Highlights"), &mut p.grade_highlights);
-                wheel(ui, &mut dirty, tl!("Global"), &mut p.grade_global);
-                row(ui, &mut dirty, tl!("Blending"), &mut p.grade_blending, 0.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Balance"), &mut p.grade_balance, -100.0..=100.0, None);
-            });
-            section(ui, &mut open, tl!("Optics"), |ui| {
-                row(ui, &mut dirty, tl!("Distortion"), &mut p.optics_distortion, -100.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Vignetting"), &mut p.optics_vignetting, -100.0..=100.0, None);
-            });
-            section(ui, &mut open, tl!("Geometry"), |ui| {
-                row(ui, &mut dirty, tl!("Vertical"), &mut p.geometry_vertical, -100.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Horizontal"), &mut p.geometry_horizontal, -100.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Rotate"), &mut p.geometry_rotate, -10.0..=10.0, None);
-                row_reset(ui, &mut dirty, tl!("Scale"), &mut p.geometry_scale, 50.0..=150.0, None, 100.0);
-            });
-            section(ui, &mut open, tl!("Effects"), |ui| {
-                widgets::section_label(ui, tl!("Grain"));
-                row(ui, &mut dirty, tl!("Amount"), &mut p.grain_amount, 0.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Size"), &mut p.grain_size, 0.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Roughness"), &mut p.grain_roughness, 0.0..=100.0, None);
-                widgets::section_label(ui, tl!("Vignetting"));
-                let mut style = p.vignette_style.clone();
-                if widgets::dropdown(
-                    ui,
-                    "cr-vig-style",
-                    &mut style,
-                    &[
-                        ("highlightPriority".to_string(), tl!("Highlight Priority")),
-                        ("colorPriority".to_string(), tl!("Color Priority")),
-                        ("paintOverlay".to_string(), tl!("Paint Overlay")),
-                    ],
-                    200.0,
-                ) {
-                    p.vignette_style = style;
-                    dirty = true;
-                }
-                row(ui, &mut dirty, tl!("Amount"), &mut p.vignette_amount, -100.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Midpoint"), &mut p.vignette_midpoint, 0.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Roundness"), &mut p.vignette_roundness, -100.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Feather"), &mut p.vignette_feather, 0.0..=100.0, None);
-                row(ui, &mut dirty, tl!("Highlights"), &mut p.vignette_highlights, 0.0..=100.0, None);
-            });
-            section(ui, &mut open, tl!("Calibration"), |ui| {
-                widgets::section_label(ui, tl!("Shadows"));
-                let tint = tint_stops();
-                row(ui, &mut dirty, tl!("Tint"), &mut p.calibration_shadow_tint, -100.0..=100.0, Some(&tint));
-                for (title, hue, (h, s)) in [
-                    (tl!("Red Primary"), 0.0, (&mut p.calibration_red_hue, &mut p.calibration_red_saturation)),
-                    (tl!("Green Primary"), 120.0, (&mut p.calibration_green_hue, &mut p.calibration_green_saturation)),
-                    (tl!("Blue Primary"), 240.0, (&mut p.calibration_blue_hue, &mut p.calibration_blue_saturation)),
-                ] {
-                    widgets::section_label(ui, title);
-                    let hues = [hue_color(hue - 30.0), hue_color(hue), hue_color(hue + 30.0)];
-                    row(ui, &mut dirty, tl!("Hue"), h, -100.0..=100.0, Some(&hues));
-                    let sats = [Color32::from_gray(128), hue_color(hue)];
-                    row(ui, &mut dirty, tl!("Saturation"), s, -100.0..=100.0, Some(&sats));
-                }
-            });
-        });
-        d.dirty |= dirty;
-        d.wb_pick = pick;
-        d.open_section = open;
-        if auto {
-            d.neutralise(None);
-        }
-        // Footer.
-        let foot = ERect::from_min_max(pos2(full.left(), full.bottom() - footer_h), full.max);
-        painter.rect_filled(foot, 0.0, t.dock);
-        painter.line_segment([foot.left_top(), foot.right_top()], Stroke::new(1.0, t.separator));
-        let mut fu = ui.new_child(egui::UiBuilder::new().max_rect(foot.shrink2(vec2(16.0, 9.0))).layout(egui::Layout::right_to_left(egui::Align::Center)));
-        // Opening a raw file says Open, as Photoshop does.
-        let ok = if d.opened_file.is_some() { tl!("Open") } else { tl!("OK") };
-        if let Some(role) = widgets::dialog_buttons(
-            &mut fu,
-            &[widgets::DialogButton::new(widgets::ButtonRole::Default, ok, 90.0), widgets::DialogButton::new(widgets::ButtonRole::Cancel, tl!("Cancel"), 90.0)],
-        ) {
-            action = Some(if role == widgets::ButtonRole::Default { "ok" } else { "cancel" });
-        }
-        fu.add_space(12.0);
-        widgets::checkbox(&mut fu, &mut d.show_before, tl!("Before (Y)"));
-        fu.label(egui::RichText::new(format!("{:.0} ms", d.render_ms)).color(t.text_faint));
+    // Modal, as in Photoshop: the main window takes no input while Camera Raw is open (not
+    // dimmed, like the other dialogs).
+    let main = ctx.content_rect();
+    egui::Area::new(egui::Id::new("camera-raw-modal")).order(egui::Order::Foreground).fixed_pos(main.min).show(ctx, |ui| {
+        let _ = ui.allocate_exact_size(main.size(), Sense::click_and_drag());
     });
-    if ctx.input(|i| i.key_pressed(egui::Key::Y))
-        && let Some(d) = app.camera_raw.as_mut()
-    {
-        d.show_before = !d.show_before;
-    }
-    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+    // A window of its own (title bar, moved and resized like any window), like Adobe Camera Raw.
+    let builder = egui::ViewportBuilder::default().with_title(heading).with_inner_size(rect.size()).with_min_inner_size([900.0, 600.0]);
+    let mut close = false;
+    let mut action = None;
+    ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("camera-raw-window"), builder, |ui, class| {
+        if ui.ctx().input(|i| i.viewport().close_requested()) {
+            close = true;
+        }
+        let t = Tokens::get(ui.ctx());
+        // A window of its own fills it; one egui draws inside the main window keeps the size.
+        let own = class != egui::ViewportClass::EmbeddedWindow;
+        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.chrome)).show(ui, |ui| {
+            let size = if own { ui.available_size() } else { rect.size() };
+            action = body(app, ui, size);
+        });
+        action = keys(app, ui.ctx()).or(action);
+    });
+    // Closing Camera Raw's window is Cancel.
+    if close && action.is_none() {
         action = Some("cancel");
     }
+    finish(app, ctx, action);
+}
+
+/// The dialog's keys, read where it is shown: Y toggles Before, Ctrl+Z / Shift+Ctrl+Z step
+/// through its own edits, Esc cancels.
+fn keys(app: &mut PhotospliceApp, ctx: &egui::Context) -> Option<&'static str> {
+    let d = app.camera_raw.as_mut()?;
+    let cmd_shift = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+    if ctx.input_mut(|i| i.consume_key(cmd_shift, egui::Key::Z)) {
+        d.redo_edit();
+    } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)) {
+        d.undo_edit();
+    }
+    if ctx.input(|i| i.key_pressed(egui::Key::Y)) {
+        d.show_before = !d.show_before;
+    }
+    ctx.input(|i| i.key_pressed(egui::Key::Escape)).then_some("cancel")
+}
+
+/// OK or Cancel, from the buttons, the keys or the window's close box.
+fn finish(app: &mut PhotospliceApp, ctx: &egui::Context, action: Option<&str>) {
     match action {
         Some("ok") => {
             if let Err(e) = commit(app) {
                 app.ui.status = e;
+                app.ui.status_error = true;
             }
         }
         Some("cancel") => cancel(app, ctx),
         _ => {}
     }
+}
+
+/// The dialog's contents in `size` points of `ui`: the preview, the panels and the footer.
+/// Returns "ok" or "cancel" when a footer button was clicked.
+fn body(app: &mut PhotospliceApp, ui: &mut egui::Ui, size: egui::Vec2) -> Option<&'static str> {
+    let ctx = ui.ctx().clone();
+    refit_proxy(app, size, ctx.pixels_per_point());
+    // The document's display transform changed (monitor profile, Color Settings): show it.
+    let current = app.session.active().and_then(|st| app.session.color.canvas_display(&st.doc).ok());
+    let d = app.camera_raw.as_mut()?;
+    if let Some(display) = current
+        && display.key != d.display.key
+    {
+        d.display = display;
+        d.before_tex = None;
+        d.dirty = true;
+    }
+    // One drag (or click) is one undo step: the settings at pointer-down are kept until release.
+    let pointer = ctx.input(|i| i.pointer.primary_down());
+    if pointer && d.edit_origin.is_none() {
+        d.edit_origin = Some(d.params.clone());
+    }
+    if d.dirty {
+        d.render(&ctx);
+    }
+    let t = Tokens::get(&ctx);
+    let mut return_action = None;
+    let (full, _) = ui.allocate_exact_size(size, Sense::click());
+    let painter = ui.painter().clone();
+    let footer_h = 48.0;
+    let body = ERect::from_min_max(full.min, pos2(full.right(), full.bottom() - footer_h));
+    // Preview.
+    let view = ERect::from_min_max(body.min, pos2(body.right() - PANEL_W, body.bottom())).shrink(16.0);
+    painter.rect_filled(view, 0.0, t.canvas);
+    let tex = if d.show_before { d.before_tex.as_ref() } else { d.tex.as_ref() };
+    if let Some(tex) = tex {
+        let s = (view.width() / d.pw as f32).min(view.height() / d.ph as f32);
+        let r = ERect::from_center_size(view.center(), vec2(d.pw as f32 * s, d.ph as f32 * s));
+        widgets::checker(&painter, r, 8.0);
+        painter.image(tex.id(), r, ERect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        // White Balance eyedropper: click a neutral spot.
+        if d.wb_pick
+            && let Some(pos) = ui.ctx().pointer_hover_pos().filter(|p| r.contains(*p))
+        {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            if ui.ctx().input(|i| i.pointer.primary_clicked()) {
+                let x = (((pos.x - r.left()) / s) as usize).min(d.pw.saturating_sub(1));
+                let y = (((pos.y - r.top()) / s) as usize).min(d.ph.saturating_sub(1));
+                d.neutralise(Some((x, y)));
+            }
+        }
+    }
+    // Panels.
+    let right = ERect::from_min_max(pos2(body.right() - PANEL_W, body.top()), body.max);
+    painter.rect_filled(right, 0.0, t.dock);
+    painter.line_segment([right.left_top(), right.left_bottom()], Stroke::new(1.0, t.separator));
+    let inner = right.shrink2(vec2(14.0, 10.0));
+    // Histogram at the top, the panels scrolling below it.
+    let head = ERect::from_min_size(inner.min, vec2(inner.width(), HIST_HEADER));
+    let mut hu = ui.new_child(egui::UiBuilder::new().max_rect(head));
+    histogram(&mut hu, d);
+    painter.line_segment([pos2(right.left(), head.bottom() + 5.0), pos2(right.right(), head.bottom() + 5.0)], Stroke::new(1.0, t.separator));
+    let mut props = ui.new_child(egui::UiBuilder::new().max_rect(ERect::from_min_max(pos2(inner.left(), head.bottom() + 12.0), inner.max)));
+    let mut dirty = false;
+    let (mut pick, mut auto) = (d.wb_pick, false);
+    let mut open = d.open_section.clone();
+    egui::ScrollArea::vertical().id_salt("camera-raw-props").show(&mut props, |ui| {
+        ui.spacing_mut().item_spacing.y = 4.0;
+        let p = &mut d.params;
+        let (ts, tn) = (temp_stops(), tint_stops());
+        section(ui, &mut open, tl!("Basic"), |ui| {
+            ui.horizontal(|ui| {
+                widgets::section_label(ui, tl!("White Balance: As Shot"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if crate::icons::button(ui, "tools-eyedropper", 22.0, pick, tl!("Eyedropper Tool")).clicked() {
+                        pick = !pick;
+                    }
+                    auto = ui.small_button(tl!("Auto")).clicked();
+                });
+            });
+            row(ui, &mut dirty, tl!("Temperature"), &mut p.temperature, -100.0..=100.0, Some(&ts));
+            row(ui, &mut dirty, tl!("Tint"), &mut p.tint, -100.0..=100.0, Some(&tn));
+            row(ui, &mut dirty, tl!("Exposure"), &mut p.exposure, -5.0..=5.0, None);
+            row(ui, &mut dirty, tl!("Contrast"), &mut p.contrast, -100.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Highlights"), &mut p.highlights, -100.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Shadows"), &mut p.shadows, -100.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Whites"), &mut p.whites, -100.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Blacks"), &mut p.blacks, -100.0..=100.0, None);
+            widgets::hairline(ui);
+            row(ui, &mut dirty, tl!("Texture"), &mut p.texture, -100.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Clarity"), &mut p.clarity, -100.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Dehaze"), &mut p.dehaze, -100.0..=100.0, None);
+            widgets::hairline(ui);
+            row(ui, &mut dirty, tl!("Vibrance"), &mut p.vibrance, -100.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Saturation"), &mut p.saturation, -100.0..=100.0, None);
+        });
+        section(ui, &mut open, tl!("Curve"), |ui| {
+            curve_editor(ui, p, &mut dirty);
+            row(ui, &mut dirty, tl!("Highlights"), &mut p.curve_highlights, -100.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Lights"), &mut p.curve_lights, -100.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Darks"), &mut p.curve_darks, -100.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Shadows"), &mut p.curve_shadows, -100.0..=100.0, None);
+        });
+        section(ui, &mut open, tl!("Detail"), |ui| {
+            widgets::section_label(ui, tl!("Sharpening"));
+            row(ui, &mut dirty, tl!("Amount"), &mut p.sharpen_amount, 0.0..=150.0, None);
+            row(ui, &mut dirty, tl!("Radius"), &mut p.sharpen_radius, 0.5..=3.0, None);
+            row(ui, &mut dirty, tl!("Detail"), &mut p.sharpen_detail, 0.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Masking"), &mut p.sharpen_masking, 0.0..=100.0, None);
+            widgets::section_label(ui, tl!("Noise Reduction"));
+            row(ui, &mut dirty, tl!("Luminance"), &mut p.noise_luminance, 0.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Luminance Detail"), &mut p.noise_luminance_detail, 0.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Color"), &mut p.noise_color, 0.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Color Detail"), &mut p.noise_color_detail, 0.0..=100.0, None);
+        });
+        section(ui, &mut open, tl!("Color Mixer"), |ui| {
+            ui.horizontal(|ui| {
+                for (i, name) in [tl!("Hue"), tl!("Saturation"), tl!("Luminance")].iter().enumerate() {
+                    if widgets::pill_tab(ui, name, d.mixer_tab == i).clicked() {
+                        d.mixer_tab = i;
+                    }
+                }
+            });
+            let arr = match d.mixer_tab {
+                0 => &mut p.hsl_hue,
+                1 => &mut p.hsl_sat,
+                _ => &mut p.hsl_lum,
+            };
+            for (k, name) in BANDS.iter().enumerate() {
+                let c = photosplice_algo::camera_raw::HSL_BANDS[k];
+                let base = hue_color(c);
+                let grad = [Color32::from_gray(128), base];
+                row(ui, &mut dirty, name, &mut arr[k], -100.0..=100.0, Some(&grad));
+            }
+        });
+        section(ui, &mut open, tl!("Color Grading"), |ui| {
+            wheel(ui, &mut dirty, tl!("Shadows"), &mut p.grade_shadows);
+            wheel(ui, &mut dirty, tl!("Midtones"), &mut p.grade_midtones);
+            wheel(ui, &mut dirty, tl!("Highlights"), &mut p.grade_highlights);
+            wheel(ui, &mut dirty, tl!("Global"), &mut p.grade_global);
+            row(ui, &mut dirty, tl!("Blending"), &mut p.grade_blending, 0.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Balance"), &mut p.grade_balance, -100.0..=100.0, None);
+        });
+        section(ui, &mut open, tl!("Optics"), |ui| {
+            row(ui, &mut dirty, tl!("Distortion"), &mut p.optics_distortion, -100.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Vignetting"), &mut p.optics_vignetting, -100.0..=100.0, None);
+        });
+        section(ui, &mut open, tl!("Geometry"), |ui| {
+            row(ui, &mut dirty, tl!("Vertical"), &mut p.geometry_vertical, -100.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Horizontal"), &mut p.geometry_horizontal, -100.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Rotate"), &mut p.geometry_rotate, -10.0..=10.0, None);
+            row_reset(ui, &mut dirty, tl!("Scale"), &mut p.geometry_scale, 50.0..=150.0, None, 100.0);
+        });
+        section(ui, &mut open, tl!("Effects"), |ui| {
+            widgets::section_label(ui, tl!("Grain"));
+            row(ui, &mut dirty, tl!("Amount"), &mut p.grain_amount, 0.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Size"), &mut p.grain_size, 0.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Roughness"), &mut p.grain_roughness, 0.0..=100.0, None);
+            widgets::section_label(ui, tl!("Vignetting"));
+            let mut style = p.vignette_style.clone();
+            if widgets::dropdown(
+                ui,
+                "cr-vig-style",
+                &mut style,
+                &[
+                    ("highlightPriority".to_string(), tl!("Highlight Priority")),
+                    ("colorPriority".to_string(), tl!("Color Priority")),
+                    ("paintOverlay".to_string(), tl!("Paint Overlay")),
+                ],
+                200.0,
+            ) {
+                p.vignette_style = style;
+                dirty = true;
+            }
+            row(ui, &mut dirty, tl!("Amount"), &mut p.vignette_amount, -100.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Midpoint"), &mut p.vignette_midpoint, 0.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Roundness"), &mut p.vignette_roundness, -100.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Feather"), &mut p.vignette_feather, 0.0..=100.0, None);
+            row(ui, &mut dirty, tl!("Highlights"), &mut p.vignette_highlights, 0.0..=100.0, None);
+        });
+        section(ui, &mut open, tl!("Calibration"), |ui| {
+            widgets::section_label(ui, tl!("Shadows"));
+            let tint = tint_stops();
+            row(ui, &mut dirty, tl!("Tint"), &mut p.calibration_shadow_tint, -100.0..=100.0, Some(&tint));
+            for (title, hue, (h, s)) in [
+                (tl!("Red Primary"), 0.0, (&mut p.calibration_red_hue, &mut p.calibration_red_saturation)),
+                (tl!("Green Primary"), 120.0, (&mut p.calibration_green_hue, &mut p.calibration_green_saturation)),
+                (tl!("Blue Primary"), 240.0, (&mut p.calibration_blue_hue, &mut p.calibration_blue_saturation)),
+            ] {
+                widgets::section_label(ui, title);
+                let hues = [hue_color(hue - 30.0), hue_color(hue), hue_color(hue + 30.0)];
+                row(ui, &mut dirty, tl!("Hue"), h, -100.0..=100.0, Some(&hues));
+                let sats = [Color32::from_gray(128), hue_color(hue)];
+                row(ui, &mut dirty, tl!("Saturation"), s, -100.0..=100.0, Some(&sats));
+            }
+        });
+    });
+    d.dirty |= dirty;
+    d.wb_pick = pick;
+    d.open_section = open;
+    if auto {
+        d.neutralise(None);
+    }
+    // Footer.
+    let foot = ERect::from_min_max(pos2(full.left(), full.bottom() - footer_h), full.max);
+    painter.rect_filled(foot, 0.0, t.dock);
+    painter.line_segment([foot.left_top(), foot.right_top()], Stroke::new(1.0, t.separator));
+    let mut fu = ui.new_child(egui::UiBuilder::new().max_rect(foot.shrink2(vec2(16.0, 9.0))).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    // Opening a raw file says Open, as Photoshop does.
+    let ok = if d.opened_file.is_some() { tl!("Open") } else { tl!("OK") };
+    if let Some(role) = widgets::dialog_buttons(
+        &mut fu,
+        &[widgets::DialogButton::new(widgets::ButtonRole::Default, ok, 90.0), widgets::DialogButton::new(widgets::ButtonRole::Cancel, tl!("Cancel"), 90.0)],
+    ) {
+        return_action = Some(if role == widgets::ButtonRole::Default { "ok" } else { "cancel" });
+    }
+    fu.add_space(12.0);
+    widgets::checkbox(&mut fu, &mut d.show_before, tl!("Before (Y)"));
+    fu.label(egui::RichText::new(format!("{:.0} ms", d.render_ms)).color(t.text_faint));
+
+    if !pointer
+        && let Some(origin) = d.edit_origin.take()
+        && origin != d.params
+    {
+        d.remember(origin);
+    }
+    return_action
 }
 
 /// The Channel menu's Colours entry: red, green and blue overlaid.
@@ -769,7 +1038,8 @@ fn histogram(ui: &mut egui::Ui, d: &mut CameraRawDialog) {
 /// Opens Camera Raw on a camera file opened last frame, when it is still the active document.
 fn open_pending(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let Some(id) = app.camera_raw_on_open.take() else { return };
-    if app.camera_raw.is_some() || app.session.active().map(|d| d.doc.id) != Some(id) {
+    // The preference (`rawDefaults.openInCameraRaw`) can open raws straight away.
+    if !app.session.prefs().raw_defaults.open_in_camera_raw || app.camera_raw.is_some() || app.session.active().map(|d| d.doc.id) != Some(id) {
         return;
     }
     match open(app, ctx) {
@@ -966,7 +1236,7 @@ mod tests {
     #[test]
     fn camera_files_open_into_camera_raw_and_cancel_closes_them() {
         let services = crate::Services {
-            import: Some(Box::new(|name: &str, _: &[u8]| {
+            import: Some(Box::new(|name: &str, _: &[u8], _: usize| {
                 let mut d = photosplice_doc::Document::new(
                     name,
                     photosplice_geom::Size::new(32, 24),
@@ -1016,5 +1286,72 @@ mod tests {
         let r = menu(&mut app, &ctx, "filter.cameraRaw", &json!({"ui": {"whiteBalanceAt": [0.5, 0.5]}})).unwrap().unwrap();
         assert_eq!(r["params"]["temperature"].as_f64().unwrap(), t);
         assert!(menu(&mut app, &ctx, "filter.cameraRaw", &json!({"ui": {"whiteBalanceAt": ["a", 1]}})).unwrap().is_err());
+    }
+
+    /// In a window of its own, closing that window is Cancel. Without a multi-window backend
+    /// egui embeds the "window" (`ViewportClass::EmbeddedWindow`) and the close request comes
+    /// from the window it is drawn in; the in-window frame (`embed_viewports`) keeps it open.
+    #[test]
+    fn closing_the_camera_raw_window_cancels() {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
+        let ctx = egui::Context::default();
+        PhotospliceApp::setup_context(&ctx, crate::theme::ThemeKind::ALL[0]);
+        app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+        app.run("layer.new.layer", json!({})).unwrap();
+        app.run("edit.fill", json!({"color": "#808080"})).unwrap();
+        let steps = app.session.active().unwrap().history.past_len();
+        let frame = |app: &mut PhotospliceApp, close: bool| {
+            let mut input = egui::RawInput::default();
+            if close {
+                let info = input.viewports.entry(egui::ViewportId::ROOT).or_default();
+                info.events.push(egui::ViewportEvent::Close);
+            }
+            ctx.run_ui(input, |ui| show(app, ui.ctx())).textures_delta.clear();
+        };
+        open(&mut app, &ctx).unwrap();
+        frame(&mut app, false);
+        assert!(app.camera_raw.is_some(), "drawn over the main window");
+        ctx.set_embed_viewports(false);
+        frame(&mut app, false);
+        assert!(app.camera_raw.is_some(), "drawn in its window");
+        frame(&mut app, true);
+        assert!(app.camera_raw.is_none(), "closing the window is Cancel");
+        assert_eq!(app.session.active().unwrap().history.past_len(), steps);
+    }
+
+    /// Bad control requests are errors, never panics, and leave the dialog as it was; a request
+    /// that opened the dialog and failed leaves it closed. Ctrl+Z steps back through the edits.
+    #[test]
+    fn control_requests_are_validated_and_edits_undo() {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
+        let ctx = egui::Context::default();
+        app.run("file.new", json!({"width": 32, "height": 24})).unwrap();
+        app.run("layer.new.layer", json!({})).unwrap();
+        app.run("edit.fill", json!({"color": "#808080"})).unwrap();
+        for bad in [
+            json!([1, 2]),
+            json!({"ui": 3}),
+            json!({"ui": {"nope": true}}),
+            json!({"ui": {"commit": 1}}),
+            json!({"ui": {"commit": true, "cancel": true}}),
+            json!({"ui": {"set": 5}}),
+            json!({"ui": {"set": {"noSuchSetting": 1}}}),
+            json!({"ui": {"whiteBalanceAt": [f64::MAX, "x"]}}),
+            json!({"ui": {"whiteBalanceAt": [0.5]}}),
+        ] {
+            assert!(menu(&mut app, &ctx, "filter.cameraRaw", &bad).unwrap().is_err(), "{bad}");
+            assert!(app.camera_raw.is_none(), "a failed request that opened the dialog closes it: {bad}");
+        }
+        menu(&mut app, &ctx, "filter.cameraRaw", &json!({"ui": {"set": {"exposure": 0.5}}})).unwrap().unwrap();
+        menu(&mut app, &ctx, "filter.cameraRaw", &json!({"ui": {"set": {"exposure": 1.0}}})).unwrap().unwrap();
+        assert!(menu(&mut app, &ctx, "filter.cameraRaw", &json!({"ui": {"set": {"exposure": "x"}}})).unwrap().is_err());
+        assert!(app.camera_raw.is_some(), "an open dialog stays open on a bad request");
+        let r = menu(&mut app, &ctx, "filter.cameraRaw", &json!({"ui": {"undo": true}})).unwrap().unwrap();
+        assert_eq!(r["params"]["exposure"], 0.5);
+        let r = menu(&mut app, &ctx, "filter.cameraRaw", &json!({"ui": {"undo": true}})).unwrap().unwrap();
+        assert_eq!(r["params"]["exposure"], 0.0);
+        assert_eq!(r["canUndo"], false);
+        let r = menu(&mut app, &ctx, "filter.cameraRaw", &json!({"ui": {"undo": true, "redo": true}})).unwrap().unwrap();
+        assert_eq!(r["params"]["exposure"], 0.5, "nothing to undo, then one redo");
     }
 }

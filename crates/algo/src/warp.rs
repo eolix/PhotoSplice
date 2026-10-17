@@ -4,57 +4,68 @@
 //! The source rectangle is subdivided into a fine grid whose vertices are mapped forward; each
 //! cell's two triangles are rasterized in destination space with the source position
 //! interpolated barycentrically, then the source is sampled there (premultiplied, nearest /
-//! bilinear / Catmull-Rom bicubic, like Free Transform). Cells are a few source pixels across, so
-//! the piecewise-affine inverse is within a small fraction of a pixel of the true one; affine
-//! maps (the identity included) are reproduced exactly. Where the warp folds over itself the
+//! bilinear / Photoshop's Keys bicubic, like Free Transform). Cells are a few pixels across in
+//! both the source and the destination (a thin layer stretched far gets as many cells as its
+//! warped size needs), so the piecewise-affine inverse is within a small fraction of a pixel of
+//! the true one; affine
+//! maps (the identity included) are reproduced exactly. Where the warp shrinks the source, each
+//! pixel instead averages a grid of bilinear subsamples over its source footprint (about one per
+//! source pixel), so thin lines don't alias. Where the warp folds over itself the
 //! later (lower-right) cell wins. Work is split per destination tile (parallel on native).
 
 use photosplice_color::PixelFormat;
 use photosplice_geom::Rect;
 use photosplice_raster::Surface;
 
-use crate::transform::Interp;
-
-fn catmull_rom(t: f64) -> [f64; 4] {
-    let t2 = t * t;
-    let t3 = t2 * t;
-    [-0.5 * t3 + t2 - 0.5 * t, 1.5 * t3 - 2.5 * t2 + 1.0, -1.5 * t3 + 2.0 * t2 + 0.5 * t, 0.5 * t3 - 0.5 * t2]
-}
+use crate::transform::{Interp, bicubic};
 
 /// Grid cell size (source px) used to approximate the map.
 const CELL: f64 = 4.0;
 /// Most cells along one axis (bounds memory and time on huge layers).
 const MAX_CELLS: usize = 512;
+/// Most subsamples per axis when a warp shrinks the source; also the longest source step per
+/// destination pixel the filter follows (bounds the footprint each tile reads).
+const MAX_SS: f64 = 8.0;
 
 /// Places a smart object's source image (`src`, its pixels in `src_rect`) in the document:
 /// through `warp` (source space) and then the affine `t` (source → document) in one resampling
 /// pass, an exact shift for whole-pixel translations (so conversions and re-renders are
 /// lossless), bicubic otherwise. Shared by the engine's re-render and PSD export's filter cache.
-pub fn place_source(src: &Surface, src_rect: Rect, t: &photosplice_geom::Affine, warp: Option<&photosplice_geom::warp::Warp>) -> Surface {
+pub fn place_source(
+    src: &Surface,
+    src_rect: Rect,
+    t: &photosplice_geom::Affine,
+    warp: Option<&photosplice_geom::warp::Warp>,
+) -> Result<Surface, photosplice_raster::AllocationError> {
     let [a, b, c, d, e, f] = t.m;
     if let Some(w) = warp.filter(|w| !w.is_identity()) {
         let map = |x: f64, y: f64| {
             let (u, v) = w.map(x, y);
             (a * u + c * v + e, b * u + d * v + f)
         };
-        return warp_mesh_surface(src, src_rect, &map, Interp::Bicubic);
+        return Ok(warp_mesh_surface(src, src_rect, &map, Interp::Bicubic));
     }
     let near = |x: f64, y: f64| (x - y).abs() < 1e-9;
     if near(a, 1.0) && near(b, 0.0) && near(c, 0.0) && near(d, 1.0) && near(e, e.round()) && near(f, f.round()) {
-        return crate::resample::translate_surface(src, e.round() as i32, f.round() as i32);
+        return Ok(crate::resample::translate_surface(src, e.round() as i32, f.round() as i32));
     }
     crate::transform::warp_surface(src, src_rect, &crate::transform::Homography([a, c, e, b, d, f, 0.0, 0.0, 1.0]), Interp::Bicubic)
 }
 
 /// [`place_source`] through a projective map `h` (source → document; Distort, Perspective): the
 /// warp first (in source space), then `h`.
-pub fn place_source_projective(src: &Surface, src_rect: Rect, h: &crate::transform::Homography, warp: Option<&photosplice_geom::warp::Warp>) -> Surface {
+pub fn place_source_projective(
+    src: &Surface,
+    src_rect: Rect,
+    h: &crate::transform::Homography,
+    warp: Option<&photosplice_geom::warp::Warp>,
+) -> Result<Surface, photosplice_raster::AllocationError> {
     if let Some(w) = warp.filter(|w| !w.is_identity()) {
         let map = |x: f64, y: f64| {
             let (u, v) = w.map(x, y);
             h.apply(u, v)
         };
-        return warp_mesh_surface(src, src_rect, &map, Interp::Bicubic);
+        return Ok(warp_mesh_surface(src, src_rect, &map, Interp::Bicubic));
     }
     crate::transform::warp_surface(src, src_rect, h, Interp::Bicubic)
 }
@@ -68,8 +79,11 @@ pub fn warp_mesh_surface(src: &Surface, src_rect: Rect, f: &(dyn Fn(f64, f64) ->
         return Surface::new(PixelFormat::new(fmt.mode, fmt.sample, true));
     }
     let (sw, sh) = (f64::from(src_rect.width()), f64::from(src_rect.height()));
-    let nx = ((sw / CELL).ceil() as usize).clamp(1, MAX_CELLS);
-    let ny = ((sh / CELL).ceil() as usize).clamp(1, MAX_CELLS);
+    // Cells are a few pixels across on both sides of the map: a thin source stretched far (a
+    // 3 px column scaled into a wide band, then bent) needs many cells, or it comes out straight.
+    let (lu, lv) = mapped_lengths(src_rect, f);
+    let cells = |s: f64, d: f64| ((s.max(d) / CELL).ceil() as usize).clamp(1, MAX_CELLS);
+    let (nx, ny) = (cells(sw, lu), cells(sh, lv));
     // Forward-mapped vertices (and their source positions).
     let mut verts = Vec::with_capacity((nx + 1) * (ny + 1));
     for j in 0..=ny {
@@ -90,6 +104,43 @@ pub fn warp_mesh_surface(src: &Surface, src_rect: Rect, f: &(dyn Fn(f64, f64) ->
         }
     }
     warp_triangles(src, src_rect, &verts, &tris, interp)
+}
+
+/// Probe lines per axis [`mapped_lengths`] follows through the map.
+const PROBE: usize = 16;
+
+/// The longest destination length of a source row and of a source column under `f`, measured
+/// along polylines through a [`PROBE`]-step grid. Non-finite steps count as zero.
+fn mapped_lengths(src_rect: Rect, f: &(dyn Fn(f64, f64) -> (f64, f64) + Sync)) -> (f64, f64) {
+    let (x0, y0) = (f64::from(src_rect.x0), f64::from(src_rect.y0));
+    let (sw, sh) = (f64::from(src_rect.width()), f64::from(src_rect.height()));
+    let n = PROBE + 1;
+    let mut pts = Vec::with_capacity(n * n);
+    for j in 0..n {
+        for i in 0..n {
+            let (dx, dy) = f(x0 + sw * i as f64 / PROBE as f64, y0 + sh * j as f64 / PROBE as f64);
+            pts.push([dx, dy]);
+        }
+    }
+    let step = |a: [f64; 2], b: [f64; 2]| {
+        let d = (b[0] - a[0]).hypot(b[1] - a[1]);
+        if d.is_finite() { d } else { 0.0 }
+    };
+    let (mut lu, mut lv) = (0.0f64, 0.0f64);
+    for k in 0..n {
+        let (mut row, mut col) = (0.0, 0.0);
+        for m in 1..n {
+            if let (Some(&a), Some(&b)) = (pts.get(k * n + m - 1), pts.get(k * n + m)) {
+                row += step(a, b);
+            }
+            if let (Some(&a), Some(&b)) = (pts.get((m - 1) * n + k), pts.get(m * n + k)) {
+                col += step(a, b);
+            }
+        }
+        lu = lu.max(row);
+        lv = lv.max(col);
+    }
+    (lu, lv)
 }
 
 /// Rasterizes textured triangles: each vertex is `(destination, source)` in document pixels and
@@ -162,14 +213,37 @@ pub fn warp_triangles(src: &Surface, src_rect: Rect, verts: &[([f64; 2], [f64; 2
         }
         let w = t.width() as usize;
         let h = t.height() as usize;
-        // Source position per destination pixel (NaN = not covered).
+        // Subsamples along one destination axis, from the source step `j` it makes: one where
+        // the warp keeps or enlarges the source, else about one per source pixel the output pixel
+        // spans (an area average, as the transform path gets from its pre-reduction; a single
+        // bicubic sample aliases thin lines when shrinking). The subsamples are bilinear: the
+        // box does the filtering, and it is ~4x cheaper than bicubic at no loss.
+        let count = |j: [f64; 2]| if interp == Interp::Nearest { 1 } else { j[0].hypot(j[1]).round().clamp(1.0, MAX_SS) as usize };
+        // Source position per destination pixel (NaN = not covered) and the triangle it came
+        // from. Per triangle: its source step per destination pixel along x and y (`[dx_u, dx_v,
+        // dy_u, dy_v]`, the inverse map's Jacobian, constant over a triangle; zero when
+        // point-sampled) and the subsamples along each.
         let mut uv = vec![[f64::NAN; 2]; w * h];
-        for tri in tris {
+        let mut owner = vec![0u32; w * h];
+        let mut jac: Vec<([f64; 4], usize, usize)> = Vec::with_capacity(tris.len());
+        for (k, tri) in tris.iter().enumerate() {
             let [(p0, s0), (p1, s1), (p2, s2)] = tri.map(|v| verts[v]);
             let det = (p1[0] - p0[0]) * (p2[1] - p0[1]) - (p2[0] - p0[0]) * (p1[1] - p0[1]);
             if det.abs() < 1e-12 {
+                jac.push(([0.0; 4], 1, 1));
                 continue;
             }
+            let (d1, d2) = ([s1[0] - s0[0], s1[1] - s0[1]], [s2[0] - s0[0], s2[1] - s0[1]]);
+            let (l1x, l1y, l2x, l2y) = ((p2[1] - p0[1]) / det, (p0[0] - p2[0]) / det, (p0[1] - p1[1]) / det, (p1[0] - p0[0]) / det);
+            // Capped, so a sliver triangle can't ask for an unbounded footprint.
+            let cap = |j: [f64; 2]| {
+                let l = j[0].hypot(j[1]);
+                if l > MAX_SS { [j[0] * MAX_SS / l, j[1] * MAX_SS / l] } else { j }
+            };
+            let jx = cap([l1x * d1[0] + l2x * d2[0], l1x * d1[1] + l2x * d2[1]]);
+            let jy = cap([l1y * d1[0] + l2y * d2[0], l1y * d1[1] + l2y * d2[1]]);
+            let (nx, ny) = (count(jx), count(jy));
+            jac.push(if nx * ny == 1 { ([0.0; 4], 1, 1) } else { ([jx[0], jx[1], jy[0], jy[1]], nx, ny) });
             let bx0 = (p0[0].min(p1[0]).min(p2[0]) - 0.5).floor().max(f64::from(t.x0)) as i32;
             let by0 = (p0[1].min(p1[1]).min(p2[1]) - 0.5).floor().max(f64::from(t.y0)) as i32;
             let bx1 = (p0[0].max(p1[0]).max(p2[0]) + 0.5).ceil().min(f64::from(t.x1)) as i32;
@@ -187,16 +261,18 @@ pub fn warp_triangles(src: &Surface, src_rect: Rect, verts: &[([f64; 2], [f64; 2
                     }
                     let o = (y - t.y0) as usize * w + (x - t.x0) as usize;
                     uv[o] = [l0 * s0[0] + l1 * s1[0] + l2 * s2[0], l0 * s0[1] + l1 * s1[1] + l2 * s2[1]];
+                    owner[o] = k as u32;
                 }
             }
         }
-        // Source footprint of the covered pixels.
+        // Source footprint of the covered pixels, including the spread of their subsamples.
         let (mut fx0, mut fy0, mut fx1, mut fy1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-        for q in uv.iter().filter(|q| !q[0].is_nan()) {
-            fx0 = fx0.min(q[0]);
-            fy0 = fy0.min(q[1]);
-            fx1 = fx1.max(q[0]);
-            fy1 = fy1.max(q[1]);
+        for (q, j) in uv.iter().zip(&owner).filter(|(q, _)| !q[0].is_nan()).map(|(q, &k)| (q, jac[k as usize].0)) {
+            let (ex, ey) = (0.5 * (j[0].abs() + j[2].abs()), 0.5 * (j[1].abs() + j[3].abs()));
+            fx0 = fx0.min(q[0] - ex);
+            fy0 = fy0.min(q[1] - ey);
+            fx1 = fx1.max(q[0] + ex);
+            fy1 = fy1.max(q[1] + ey);
         }
         if fx0 > fx1 {
             return None;
@@ -223,11 +299,9 @@ pub fn warp_triangles(src: &Surface, src_rect: Rect, verts: &[([f64; 2], [f64; 2
         let mut outp = vec![0.0f32; w * h * n];
         let mut any = false;
         let mut acc = [0.0f64; 8];
-        for (o, q) in uv.iter().enumerate() {
-            if q[0].is_nan() {
-                continue;
-            }
-            let (u, v) = (q[0] - 0.5, q[1] - 0.5);
+        let mut one = [0.0f64; 8];
+        // One premultiplied sample at source position (u, v) (pixel centres at integers).
+        let point = |interp: Interp, u: f64, v: f64, acc: &mut [f64; 8]| {
             acc[..n].fill(0.0);
             match interp {
                 Interp::Nearest => {
@@ -252,7 +326,7 @@ pub fn warp_triangles(src: &Surface, src_rect: Rect, verts: &[([f64; 2], [f64; 2
                     let snap = |t: f64| if (t - t.round()).abs() < 1e-7 { t.round() } else { t };
                     let (u, v) = (snap(u), snap(v));
                     let (ix, iy) = (u.floor() as i32, v.floor() as i32);
-                    let (wx, wy) = (catmull_rom(u - f64::from(ix)), catmull_rom(v - f64::from(iy)));
+                    let (wx, wy) = (bicubic(u - f64::from(ix)), bicubic(v - f64::from(iy)));
                     for (j, wyj) in wy.iter().enumerate() {
                         for (i, wxi) in wx.iter().enumerate() {
                             let k = wxi * wyj;
@@ -264,6 +338,31 @@ pub fn warp_triangles(src: &Surface, src_rect: Rect, verts: &[([f64; 2], [f64; 2
                             }
                         }
                     }
+                }
+            }
+        };
+        for (o, (q, &k)) in uv.iter().zip(&owner).enumerate() {
+            if q[0].is_nan() {
+                continue;
+            }
+            let (j, nx, ny) = jac[k as usize];
+            if nx * ny == 1 {
+                point(interp, q[0] - 0.5, q[1] - 0.5, &mut acc);
+            } else {
+                acc[..n].fill(0.0);
+                for sy in 0..ny {
+                    let t = (sy as f64 + 0.5) / ny as f64 - 0.5;
+                    for sx in 0..nx {
+                        let s = (sx as f64 + 0.5) / nx as f64 - 0.5;
+                        point(Interp::Bilinear, q[0] + s * j[0] + t * j[2] - 0.5, q[1] + s * j[1] + t * j[3] - 0.5, &mut one);
+                        for (c, v) in acc.iter_mut().zip(&one).take(n) {
+                            *c += v;
+                        }
+                    }
+                }
+                let k = 1.0 / (nx * ny) as f64;
+                for c in acc.iter_mut().take(n) {
+                    *c *= k;
                 }
             }
             let al = acc[a].clamp(0.0, 1.0);
@@ -311,8 +410,10 @@ pub fn warp_mesh_gray(s: &Surface, f: &(dyn Fn(f64, f64) -> (f64, f64) + Sync), 
     let v = s.read_region(src);
     tmp.write_region(src, &v.iter().flat_map(|g| [*g, 1.0]).collect::<Vec<f32>>());
     let w = warp_mesh_surface(&tmp, src, f, interp);
-    let cover = src.union(&w.content_bounds());
-    out.write_region(cover, &vec![default; cover.width() as usize * cover.height() as usize]);
+    // Clear the old region and write the warped one separately, as `warp_gray` does: one dense
+    // `src ∪ warped` buffer grows with the square of how far a mesh moves the content (#995).
+    // `Surface` is tile-sparse, so a distant region costs only its own tiles.
+    out.write_region(src, &vec![default; src.width() as usize * src.height() as usize]);
     let b = w.content_bounds();
     if !b.is_empty() {
         let px = w.read_region(b);
@@ -338,6 +439,45 @@ mod tests {
             }
         }
         surf
+    }
+
+    #[test]
+    fn a_thin_layer_stretched_into_a_curve_keeps_the_curve() {
+        // #5793: a 3 px wide column stretched 100x and bent into an arch. The grid was sized in
+        // source pixels (one cell across), so the arch came out as a straight band.
+        let mut src = Surface::new(PixelFormat::new(ColorMode::Rgb, SampleType::U8, true));
+        src.fill_rect(Rect::new(0, 0, 3, 40), &[1.0, 0.0, 0.0, 1.0]);
+        let arch = |x: f64, y: f64| {
+            let dx = x * 100.0;
+            let t = (dx - 150.0) / 150.0;
+            (dx, y + 40.0 * (1.0 - t * t))
+        };
+        let out = warp_mesh_surface(&src, Rect::new(0, 0, 3, 40), &arch, Interp::Bilinear);
+        let alpha = |x: i32, y: i32| {
+            let mut p = [0.0f32; 4];
+            out.read_pixel(x, y, &mut p);
+            p[3]
+        };
+        // The band follows the arch: 40 px lower in the middle, about 36 px a third of the way in.
+        assert!(alpha(150, 60) > 0.99 && alpha(150, 20) < 0.01, "mid {} {}", alpha(150, 60), alpha(150, 20));
+        assert!(alpha(100, 55) > 0.99 && alpha(100, 20) < 0.01, "third {} {}", alpha(100, 55), alpha(100, 20));
+    }
+
+    #[test]
+    fn a_mesh_warp_far_off_canvas_writes_only_the_two_regions() {
+        // #995: the old and warped regions were cleared as one dense `src ∪ warped` buffer, about
+        // 37 GiB of floats for a 48 px selection moved 100000 px. Same fix as `warp_gray` (b70fbd4).
+        for sample in [SampleType::U8, SampleType::F32] {
+            let mut sel = Surface::new(PixelFormat::new(ColorMode::Grayscale, sample, false));
+            sel.fill_rect(Rect::new(8, 8, 56, 56), &[1.0]);
+            for d in [100_000.0, -100_000.0, 300.0] {
+                let out = warp_mesh_gray(&sel, &|x, y| (x + d, y + d), Interp::Bilinear);
+                let k = d as i32;
+                assert_eq!(out.content_bounds(), Rect::new(8 + k, 8 + k, 56 + k, 56 + k), "{sample:?} {d}");
+                assert_eq!(out.sample_channel(30 + k, 30 + k, 0), 1.0, "{sample:?} {d}: moved");
+                assert_eq!(out.sample_channel(30, 30, 0), 0.0, "{sample:?} {d}: old region cleared");
+            }
+        }
     }
 
     #[test]
@@ -376,6 +516,32 @@ mod tests {
         let e = arc.pixel(ex.floor() as i32, ey.floor() as i32);
         assert!(e[3] > 0.2, "a point near the top-left corner lands at its mapped position: {e:?}");
         assert!(arc.content_bounds().y0 < r.y0 - 2, "the top rises above the original box");
+    }
+
+    #[test]
+    fn a_shrinking_mesh_warp_is_prefiltered() {
+        // A warped smart object placed at ~1/5 size: a grid of 1 px lines every 4 px must come
+        // out its area average (9/16 white) everywhere, not point-sampled moiré (crinkled,
+        // doubled or missing lines), like the affine path's `large_downscale_is_prefiltered`.
+        for s in [SampleType::U8, SampleType::U16, SampleType::F32] {
+            let (w, h) = (400, 320);
+            let mut src = Surface::new(PixelFormat::new(ColorMode::Rgb, s, true));
+            let px: Vec<f32> =
+                (0..h).flat_map(|y| (0..w).map(move |x| if x % 4 == 0 || y % 4 == 0 { 0.0 } else { 1.0 })).flat_map(|v| [v, v, v, 1.0]).collect();
+            let r = Rect::new(0, 0, w, h);
+            src.write_region(r, &px);
+            let warp = Warp::preset(WarpStyle::Arc, 15.0, [0.0, 0.0, f64::from(w), f64::from(h)]);
+            let t = photosplice_geom::Affine { m: [0.2, 0.0, 0.0, 0.2, 7.0, 5.0] };
+            let out = place_source(&src, r, &t, Some(&warp)).unwrap();
+            let b = out.content_bounds();
+            let o = out.read_region(b);
+            let opaque: Vec<f32> = o.as_chunks::<4>().0.iter().filter(|p| p[3] >= 0.999).map(|p| p[0]).collect();
+            assert!(opaque.len() > 2000, "{s:?}: {} opaque pixels", opaque.len());
+            let worst = opaque.iter().map(|v| (v - 0.5625).abs()).fold(0.0f32, f32::max);
+            // An area average over the ~5 px footprint still covers one or two lines per axis
+            // (up to 0.2 off); point sampling lands wholly on or off a line (up to 0.56 off).
+            assert!(worst < 0.25, "{s:?}: worst deviation from the area average {worst}");
+        }
     }
 
     #[test]

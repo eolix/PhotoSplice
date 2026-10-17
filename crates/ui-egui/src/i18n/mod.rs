@@ -9,7 +9,9 @@
 //! 2. Add one row to [`LANGUAGES`] (code, native name, catalog, plural rule).
 //!
 //! That is all: the Preferences dropdown, the system-locale match and the catalog tests (parse,
-//! placeholders, plural forms) pick it up from the registry.
+//! placeholders, plural forms) pick it up from the registry. A right-to-left language (Arabic,
+//! Hebrew, Persian, Urdu, see [`dir_for_code`]) also mirrors the window's chrome
+//! ([`crate::direction`]).
 //!
 //! # Looking strings up
 //! - [`tr`]: a plain string. [`tr_ctx`]: when one English word needs different translations.
@@ -27,17 +29,36 @@ use catalog::Catalog;
 
 /// One supported UI language.
 pub struct LangInfo {
-    /// BCP 47 code, lowercase (`ja`, `zh-hans`, `pt-br`). Also the `interface.language` value.
+    /// BCP 47 code, lowercase (`ja`, `zh-cn`, `pt-br`). Also the `interface.language` value.
     pub code: &'static str,
     /// The language's name in itself, shown in the Preferences dropdown.
     pub name: &'static str,
     /// Catalog file contents (empty for the built-in English).
     pub source: &'static str,
-    /// Plural form index for a count (English: 0 = one, 1 = other; Japanese: always 0).
+    /// Plural form index for a count (English: 0 = one, 1 = other; Japanese: always 0; Czech:
+    /// 0 = one, 1 = few (2–4), 2 = other; French: 0 = one (0 and 1), 1 = other). A catalog's
+    /// `@plural` entries list one form per index (a missing form falls back to the last one).
     pub plural: fn(u64) -> usize,
     /// Must the catalog cover every menu string? (checked by the tests)
     pub complete_menus: bool,
     catalog: OnceLock<Catalog>,
+}
+
+/// A script's reading direction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dir {
+    Ltr,
+    Rtl,
+}
+
+/// Languages written right to left, by primary subtag: Arabic, Sorani Kurdish, Dhivehi, Persian,
+/// Hebrew, Pashto, Sindhi, Uyghur, Urdu, Yiddish.
+const RTL_LANGUAGES: [&str; 10] = ["ar", "ckb", "dv", "fa", "he", "ps", "sd", "ug", "ur", "yi"];
+
+/// The reading direction of a language code (`ar`, `fa-ir`, `he`; any case).
+pub fn dir_for_code(code: &str) -> Dir {
+    let primary = code.split(['-', '_']).next().unwrap_or("");
+    if RTL_LANGUAGES.iter().any(|l| l.eq_ignore_ascii_case(primary)) { Dir::Rtl } else { Dir::Ltr }
 }
 
 fn plural_one_other(n: u64) -> usize {
@@ -48,23 +69,67 @@ fn plural_none(_: u64) -> usize {
     0
 }
 
+/// Ukrainian and Serbian (the East and South Slavic rule): 1, 21, 31… → one; 2–4, 22–24… → few;
+/// everything else (0, 5–20, 11–14…) → many.
+fn plural_slavic(n: u64) -> usize {
+    match (n % 10, n % 100) {
+        (1, 11..=19) => 2,
+        (1, _) => 0,
+        (2..=4, 11..=19) => 2,
+        (2..=4, _) => 1,
+        _ => 2,
+    }
+}
+
+/// Czech: 1 → one, 2–4 → few, everything else (0, 5+) → other.
+fn plural_cs(n: u64) -> usize {
+    match n {
+        1 => 0,
+        2..=4 => 1,
+        _ => 2,
+    }
+}
+
+/// French: 0 and 1 take the singular, everything else the plural.
+fn plural_fr(n: u64) -> usize {
+    usize::from(n > 1)
+}
+
+/// Brazilian Portuguese: 0 and 1 take the singular, everything else the plural.
+fn plural_pt(n: u64) -> usize {
+    usize::from(n > 1)
+}
+
+/// Polish: 1 → one; 2–4, except 12–14 → few; everything else → many.
+fn plural_polish(n: u64) -> usize {
+    let last = n % 10;
+    let last_two = n % 100;
+    if n == 1 {
+        0
+    } else if (2..=4).contains(&last) && !(12..=14).contains(&last_two) {
+        1
+    } else {
+        2
+    }
+}
+
 /// The registry. English first: it is the fallback and the source language.
 pub static LANGUAGES: [LangInfo; 39] = [
     LangInfo { code: "en", name: "English", source: "", plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "ja", name: "日本語", source: include_str!("ja.tsv"), plural: plural_none, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "de", name: "Deutsch", source: include_str!("de.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "es", name: "Español", source: include_str!("es.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
-    LangInfo { code: "fr", name: "Français", source: include_str!("fr.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
+    LangInfo { code: "fr", name: "Français", source: include_str!("fr.tsv"), plural: plural_fr, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "it", name: "Italiano", source: include_str!("it.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "ko", name: "한국어", source: include_str!("ko.tsv"), plural: plural_none, complete_menus: false, catalog: OnceLock::new() },
-    LangInfo { code: "pt-br", name: "Português (Brasil)", source: include_str!("pt-br.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
+    LangInfo { code: "pt-br", name: "Português (Brasil)", source: include_str!("pt-br.tsv"), plural: plural_pt, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "zh-cn", name: "简体中文", source: include_str!("zh-cn.tsv"), plural: plural_none, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "zh-hk", name: "繁體中文", source: include_str!("zh-hk.tsv"), plural: plural_none, complete_menus: false, catalog: OnceLock::new() },
-    LangInfo { code: "cs", name: "Česky", source: include_str!("cs.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
+    LangInfo { code: "cs", name: "Česky", source: include_str!("cs.tsv"), plural: plural_cs, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "el", name: "Ελληνικά", source: include_str!("el.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "ar", name: "العربية", source: include_str!("ar.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "pt", name: "Português", source: include_str!("pt.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
-    LangInfo { code: "uk", name: "Українська", source: include_str!("uk.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
+    LangInfo { code: "uk", name: "Українська", source: include_str!("uk.tsv"), plural: plural_slavic, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "he", name: "עברית", source: include_str!("he.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "hr", name: "Hrvatski", source: include_str!("hr.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "ro", name: "Română", source: include_str!("ro.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
@@ -74,14 +139,14 @@ pub static LANGUAGES: [LangInfo; 39] = [
     LangInfo { code: "fi", name: "Suomi", source: include_str!("fi.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "sl", name: "Slovenščina", source: include_str!("sl.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "tr", name: "Türkçe", source: include_str!("tr.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
-    LangInfo { code: "pl", name: "Polski", source: include_str!("pl.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
+    LangInfo { code: "pl", name: "Polski", source: include_str!("pl.tsv"), plural: plural_polish, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "id", name: "Bahasa Indonesia", source: include_str!("id.tsv"), plural: plural_none, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "th", name: "ภาษาไทย", source: include_str!("th.tsv"), plural: plural_none, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "hu", name: "Magyar", source: include_str!("hu.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "sk", name: "Slovenčina", source: include_str!("sk.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "vi", name: "Tiếng Việt", source: include_str!("vi.tsv"), plural: plural_none, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "bg", name: "Български език", source: include_str!("bg.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
-    LangInfo { code: "sr", name: "Српски језик", source: include_str!("sr.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
+    LangInfo { code: "sr", name: "Српски језик", source: include_str!("sr.tsv"), plural: plural_slavic, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "sq", name: "Shqip", source: include_str!("sq.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "ta", name: "தமிழ்", source: include_str!("ta.tsv"), plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
     LangInfo { code: "bo", name: "བོད་ཡིག", source: include_str!("bo.tsv"), plural: plural_none, complete_menus: false, catalog: OnceLock::new() },
@@ -92,6 +157,11 @@ pub static LANGUAGES: [LangInfo; 39] = [
 ];
 
 impl LangInfo {
+    /// The catalog file's text (empty for English).
+    pub fn text(&self) -> &'static str {
+        self.source
+    }
+
     fn catalog(&self) -> &Catalog {
         self.catalog.get_or_init(|| Catalog::parse(self.source))
     }
@@ -140,6 +210,16 @@ impl Lang {
 
     pub fn name(self) -> &'static str {
         self.0.name
+    }
+
+    /// Does this language's catalog claim to cover every menu string and `tl!` literal?
+    pub fn complete_menus(self) -> bool {
+        self.0.complete_menus
+    }
+
+    /// The language's reading direction.
+    pub fn dir(self) -> Dir {
+        dir_for_code(self.0.code)
     }
 
     fn catalog(self) -> &'static Catalog {
@@ -215,19 +295,69 @@ fn detect_system_lang() -> Lang {
     Lang::EN
 }
 
-/// Index into [`LANGUAGES`] of the language the UI is drawn in this frame.
+/// Index into [`LANGUAGES`] of the language the UI was last drawn in, app-wide: worker threads
+/// (previews, exports) that never set one translate in it.
 static CURRENT: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    /// The drawing thread's own language, so independent app or test threads (and a scoped
+    /// preview language) never change each other's.
+    static LOCAL: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
 
 /// Set the UI language for drawing (the shell calls this once per frame from the preference), so
 /// widgets can translate without every call site carrying a language around.
 pub fn set_current(lang: Lang) {
     let i = LANGUAGES.iter().position(|l| l.code == lang.code()).unwrap_or(0);
+    LOCAL.set(Some(i));
     CURRENT.store(i, Ordering::Relaxed);
 }
 
-/// The language the UI is drawn in.
+/// The language the UI is drawn in: this thread's, else the app-wide one (English for unit-test
+/// threads that never set one, so parallel tests can't see each other's language).
 pub fn current() -> Lang {
-    Lang(LANGUAGES.get(CURRENT.load(Ordering::Relaxed)).unwrap_or(&LANGUAGES[0]))
+    let shared = if cfg!(test) { None } else { Some(CURRENT.load(Ordering::Relaxed)) };
+    let i = LOCAL.get().or(shared).unwrap_or(0);
+    Lang(LANGUAGES.get(i).unwrap_or(&LANGUAGES[0]))
+}
+
+/// Temporarily draw in another language, restoring the previous one even on unwinding.
+/// Preferences previews use this without changing the saved setting.
+pub fn with_language<R>(lang: Lang, draw: impl FnOnce() -> R) -> R {
+    let _restore = language_scope(lang);
+    draw()
+}
+
+/// Keep the language active until this guard is dropped. The language is app-wide (see
+/// [`CURRENT`]), so the guard belongs to the drawing thread and its frame.
+#[must_use]
+pub fn language_scope(lang: Lang) -> impl Drop {
+    struct Restore {
+        previous: Lang,
+        _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            set_current(self.previous);
+        }
+    }
+    let restore = Restore { previous: current(), _thread: std::marker::PhantomData };
+    set_current(lang);
+    restore
+}
+
+/// Apply the `interface.language` preference to this context. Fonts are re-installed only on a
+/// language change, so Han glyphs follow the selected script even when the previous font covered them.
+pub fn sync_context(ctx: &egui::Context, language: &str) {
+    let lang = Lang::from_pref(language);
+    set_current(lang);
+    let id = egui::Id::new("photosplice-ui-language");
+    let changed = ctx.data(|data| data.get_temp::<Lang>(id) != Some(lang));
+    if changed {
+        ctx.data_mut(|data| data.insert_temp(id, lang));
+        crate::theme::install_fonts(ctx);
+        ctx.request_repaint();
+    }
 }
 
 /// Does `lang` have a catalog entry for this plain string? (English never does: it is the source.)
@@ -357,10 +487,20 @@ mod tests {
 
     /// Every bundled catalog is well-formed and consistent with its sources.
     #[test]
+    fn plural_rules_pick_the_language_forms() {
+        let forms = |rule: fn(u64) -> usize| [0, 1, 2, 5, 12, 21, 22, 25].map(rule);
+        assert_eq!(forms(plural_cs), [2, 0, 1, 2, 2, 2, 2, 2]);
+        assert_eq!(forms(plural_slavic), [2, 0, 1, 2, 2, 0, 1, 2]);
+        assert_eq!(forms(plural_polish), [2, 0, 1, 2, 2, 2, 1, 2]);
+        assert_eq!(forms(plural_fr), [0, 0, 1, 1, 1, 1, 1, 1]);
+        assert_eq!(forms(plural_pt), forms(plural_fr));
+    }
+
+    #[test]
     fn bundled_catalogs_are_consistent() {
         for l in &LANGUAGES {
             assert!(l.code == l.code.to_ascii_lowercase() && !l.name.is_empty(), "{}", l.code);
-            let (entries, errors) = parse_entries(l.source);
+            let (entries, errors) = parse_entries(l.text());
             assert!(errors.is_empty(), "{}: {errors:?}", l.code);
             let mut seen = std::collections::HashSet::new();
             for (ctx, src, tr) in &entries {
@@ -423,12 +563,45 @@ mod tests {
         }
     }
 
-    /// Every `tl!("literal")` in the shell has an entry in each language that claims complete menus
-    /// (so a new label can't ship untranslated by accident). Literals that are deliberately shown as
-    /// they are (names, units) are listed in `KEEP_AS_IS`.
-    ///
-    /// A translation report, not a gate: new labels wait for their translations, so CI skips it.
-    /// Run it with `cargo test -p photosplice-ui-egui --lib every_tl_literal -- --ignored`.
+    /// `text` with each `#[cfg(test)] mod … { … }` block removed, by brace counting (the test
+    /// modules in this crate are well formed).
+    fn without_test_modules(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(at) = rest.find("#[cfg(test)]\nmod ") {
+            out.push_str(&rest[..at]);
+            let after = &rest[at..];
+            let Some(open) = after.find('{') else { return out };
+            let mut depth = 0usize;
+            let mut end = after.len();
+            for (i, c) in after[open..].char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = open + i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            rest = &after[end..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    #[test]
+    fn test_modules_are_cut_out_one_by_one() {
+        let text = "a\n#[cfg(test)]\nmod t { fn x() { tl!(\"hidden\"); } }\nb tl!(\"seen\")\n#[cfg(test)]\nmod u {}\nc";
+        let code = without_test_modules(text);
+        assert!(code.contains("tl!(\"seen\")"), "code after the first test module is scanned: {code}");
+        assert!(!code.contains("hidden"), "{code}");
+        assert!(code.starts_with("a\n") && code.ends_with("\nc"), "{code}");
+    }
+
     #[test]
     #[ignore = "translation report: run with --ignored"]
     fn every_tl_literal_is_translated() {
@@ -441,10 +614,13 @@ mod tests {
                 if path.is_dir() {
                     stack.push(path);
                 } else if path.extension().is_some_and(|e| e == "rs") && !path.ends_with("lib.rs") {
-                    let text = std::fs::read_to_string(&path).unwrap_or_default();
-                    // Test modules aside, scan every `tl!("…")`.
-                    let code = text.split("#[cfg(test)]").next().unwrap_or("");
-                    let mut rest = code;
+                    let text = std::fs::read_to_string(&path).unwrap_or_default().replace("\r\n", "\n");
+                    // Test modules aside, scan every `tl!("…")`. Each test *module* is cut out
+                    // on its own: cutting the file at the first one hid everything after a small
+                    // test module early in a file (panels.rs has one at ~line 540). A
+                    // `#[cfg(test)]` on a single item doesn't count.
+                    let code = without_test_modules(&text);
+                    let mut rest = code.as_str();
                     while let Some(at) = rest.find("tl!(\"") {
                         rest = &rest[at + 5..];
                         let mut end = 0;
@@ -472,7 +648,7 @@ mod tests {
     #[test]
     fn blend_mode_names_are_translated() {
         for l in LANGUAGES.iter().filter(|l| l.complete_menus) {
-            for m in std::iter::once(photosplice_color::BlendMode::PassThrough).chain(photosplice_color::BlendMode::LAYER_MODES) {
+            for m in std::iter::once(photosplice_color::BlendMode::PassThrough).chain(photosplice_color::BlendMode::layer_modes()) {
                 assert!(l.catalog().plain(m.label()).is_some(), "{}: blend mode {:?}", l.code, m.label());
             }
         }

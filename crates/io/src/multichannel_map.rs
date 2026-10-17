@@ -9,32 +9,19 @@
 use photosplice_color::{Color, ColorMode, PixelFormat, SampleType};
 use photosplice_doc::{AlphaChannel, Document};
 use photosplice_geom::Rect;
-use photosplice_psd::file::LayerInfoPlacement;
+use photosplice_psd::file::{GlobalLayerMask, LayerInfoPlacement};
 use photosplice_psd::resources::{ImageResource, ids, version_info_resource};
-use photosplice_psd::{ColorMode as PsdMode, Compression, Header, ImageData, PsdFile};
+use photosplice_psd::{ColorMode as PsdMode, Compression, Header, ImageData, PsdFile, TaggedBlock};
 use photosplice_raster::Surface;
 
 use crate::pixels::{encode_be, psd_depth};
 
-/// Resources that only describe layers (target and selected layers, link groups, layer groups
-/// enabled, the layer id seed, alpha ids): a Multichannel file has no layers.
-const LAYER_RESOURCES: [u16; 6] = [1024, 1026, 1069, 1072, ids::DOCUMENT_IDS_SEED, ids::ALPHA_IDS];
-
-/// The document-level tagged blocks kept from the file (`FMsk`, `Patt`, …), padded to 4 as
-/// Photoshop writes them; not layer data.
-fn global_blocks(doc: &Document, version: photosplice_psd::Version) -> Vec<photosplice_psd::TaggedBlock> {
-    doc.metadata
-        .psd_global_blocks
-        .iter()
-        .filter(|(_, key, _)| !matches!(key, b"Layr" | b"Lr16" | b"Lr32"))
-        .map(|(sig, key, data)| {
-            let mut tb = photosplice_psd::TaggedBlock::new(*key, data.to_vec());
-            tb.signature = crate::psd_export::block_signature(*sig, version);
-            tb.padding = Some(vec![0; (4 - data.len() % 4) % 4]);
-            tb
-        })
-        .collect()
-}
+/// Grid and guides.
+const GRID_AND_GUIDES: u16 = 1032;
+/// Resources that only describe layers: target layer (1024), layer groups (1026), layer
+/// selection ids (1069), layer groups enabled (1072), the layer id seed and the alpha ids (both
+/// written fresh below). A Multichannel document has no layers.
+const LAYER_ONLY_RESOURCES: [u16; 6] = [ids::LAYER_STATE, ids::LAYER_GROUP_INFO, 1069, 1072, ids::DOCUMENT_IDS_SEED, ids::ALPHA_IDS];
 
 /// Value of sample `i` of a big-endian plane.
 fn decode(plane: &[u8], i: usize, s: SampleType) -> f32 {
@@ -64,7 +51,8 @@ pub(crate) fn import(file: &PsdFile, all: &[u8], doc: &mut Document, names: &[St
         s.write_region(canvas, &vals);
         s.prune();
         let name = names.get(k).cloned().filter(|s| !s.is_empty()).unwrap_or_else(|| format!("Channel {}", k + 1));
-        // Without DisplayInfo the channels print in black, as Photoshop shows them.
+        // Without DisplayInfo the channels print in black, as Photoshop shows them. DisplayInfo
+        // turns alpha-type channels (selected / masked areas) back into alpha channels.
         doc.channels.push(AlphaChannel { spot: Some((Color::BLACK, 0.0)), ..AlphaChannel::new(name, s) });
     }
     if let Some(r) = file.resource(crate::channel_map::DISPLAY_INFO) {
@@ -80,7 +68,7 @@ pub(crate) fn document_to_psd(doc: &Document, force_psb: bool) -> (PsdFile, Vec<
     // Photoshop's Multichannel mode is 8 or 16 bits per channel.
     let sample = match doc.depth {
         SampleType::F32 => {
-            warnings.push("32-bit Multichannel written as 16 bits/channel (Photoshop has no 32-bit Multichannel)".into());
+            warnings.push("32-bit Multichannel written as 16 bits/channel (32-bit Multichannel isn't supported)".into());
             SampleType::U16
         }
         s => s,
@@ -121,8 +109,8 @@ pub(crate) fn document_to_psd(doc: &Document, force_psb: bool) -> (PsdFile, Vec<
         ImageResource::new(ids::RESOLUTION_INFO, crate::psd_export::resolution_resource(doc)),
         ImageResource::new(ids::GLOBAL_ANGLE, (doc.global_light.angle.round() as i32).to_be_bytes().to_vec()),
         ImageResource::new(ids::GLOBAL_ALTITUDE, (doc.global_light.altitude.round() as i32).to_be_bytes().to_vec()),
-        // Photoshop writes the grid and guides resource in every file.
-        ImageResource::new(1032, crate::psd_export::guides_resource(doc)),
+        // Photoshop writes the grid and guides resource in every file, guides or not.
+        ImageResource::new(GRID_AND_GUIDES, crate::psd_export::guides_resource(doc)),
     ];
     if !channels.is_empty() {
         let names: Vec<&str> = channels.iter().map(|c| c.name.as_str()).collect();
@@ -136,31 +124,37 @@ pub(crate) fn document_to_psd(doc: &Document, force_psb: bool) -> (PsdFile, Vec<
     // The layer id seed (Photoshop writes it in every file): the file's, as there are no layers.
     let seed = doc.metadata.psd_resources.iter().find(|r| r.0 == ids::DOCUMENT_IDS_SEED).and_then(|r| r.2.get(..4)).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
     resources.push(ImageResource::new(ids::DOCUMENT_IDS_SEED, seed.to_be_bytes().to_vec()));
+    // The XMP and EXIF resolution follow the ResolutionInfo resource, so no copy contradicts it.
+    let ppi = Some((doc.resolution_dpi, doc.resolution_dpi)).filter(|d| d.0 > 0.0);
     if let Some(x) = &doc.metadata.xmp {
-        resources.push(ImageResource::new(ids::XMP, x.as_bytes().to_vec()));
+        resources.push(ImageResource::new(ids::XMP, photosplice_codecs::export_xmp(x, ppi).as_bytes().to_vec()));
     }
     if let Some(e) = &doc.metadata.exif {
-        resources.push(ImageResource::new(ids::EXIF, photosplice_codecs::upright_exif(e).into_owned()));
+        resources.push(ImageResource::new(ids::EXIF, photosplice_codecs::export_exif(e, ppi).into_owned()));
     }
-    // The file's other resources (print settings, IPTC, guides, …) as imported; not the ones that
-    // only describe layers, nor any written above.
+    if let Some(data) = crate::annotations_map::fresh_scale_resource(doc) {
+        resources.push(ImageResource::new(crate::annotations_map::MEASUREMENT_SCALE, data));
+    }
+    // The file's other resources (print settings, IPTC, …) as imported; not the ones that only
+    // describe layers, nor any written above, nor a stale clipping path or measurement scale.
+    let written: Vec<u16> = resources.iter().map(|r| r.id).chain([ids::VERSION_INFO]).collect();
     for (id, name, data) in &doc.metadata.psd_resources {
-        if LAYER_RESOURCES.contains(id) || resources.iter().any(|r| r.id == *id) || *id == ids::VERSION_INFO {
+        if LAYER_ONLY_RESOURCES.contains(id) || written.contains(id) || !crate::psd_export::keep_imported_resource(doc, *id, data) {
             continue;
-        }
-        // A preserved clipping-path resource only while it names the current clipping path.
-        if *id == crate::vector_map::CLIPPING_PATH {
-            let n = usize::from(data.first().copied().unwrap_or(0));
-            let raw_name = data.get(1..1 + n).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
-            if doc.clipping_path.as_ref().is_none_or(|c| c.name != raw_name) {
-                continue;
-            }
         }
         let mut r = ImageResource::new(*id, data.to_vec());
         r.name = crate::psd_export::legacy_name(name);
         resources.push(r);
     }
     resources.push(version_info_resource(true));
+    // Document-level tagged blocks (patterns, notes, ...) are valid without a layer section; a
+    // kept layer block would describe layers the document doesn't have.
+    // Padded to 4 as Photoshop writes them; a kept `8B64` block is `8BIM` in a PSD.
+    let global_blocks: Vec<TaggedBlock> = crate::annotations_map::export_blocks(doc, crate::pattern_map::export_global_blocks(doc))
+        .into_iter()
+        .filter(|(_, key, _)| !matches!(key, b"Layr" | b"Lr16" | b"Lr32") && *key != crate::psd_export::GLOBAL_MASK_KEY)
+        .map(|(sig, key, data)| crate::psd_export::global_block(crate::psd_export::block_signature(sig, version), key, &data))
+        .collect();
     let color_mode_data = photosplice_psd::hdr::color_mode_data_for_depth(header.depth);
     let file = PsdFile {
         header,
@@ -168,8 +162,12 @@ pub(crate) fn document_to_psd(doc: &Document, force_psb: bool) -> (PsdFile, Vec<
         resources,
         layer_info: None,
         layer_info_placement: LayerInfoPlacement::Section,
-        global_layer_mask: None,
-        global_blocks: global_blocks(doc, version),
+        // The file's global layer mask info when it was kept, else the default record.
+        global_layer_mask: (!global_blocks.is_empty()).then(|| {
+            let kept = doc.metadata.psd_global_blocks.iter().find(|(_, k, _)| *k == crate::psd_export::GLOBAL_MASK_KEY);
+            kept.map_or_else(GlobalLayerMask::default, |(_, _, d)| GlobalLayerMask { data: d.to_vec() })
+        }),
+        global_blocks,
         layer_mask_trailing: Vec::new(),
         image_data,
     };

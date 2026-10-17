@@ -459,6 +459,71 @@ fn duplicated_placed_layers_get_their_own_placed_id() {
     assert_eq!(placed[0].1, placed[1].1, "one shared file");
 }
 
+/// A Displace smart filter from a Photoshop mockup PSD carries its displacement map embedded
+/// (`DspD`, stretched over the canvas): it re-renders displaced instead of passing the pixels
+/// through, and keeps that map through PSD export, `.pcraft` and a PSD re-import.
+#[test]
+fn displace_psd_filter_renders_with_its_embedded_map() {
+    use photosplice_psd::descriptor::{Descriptor, Id, UnicodeString, Value};
+    for depth in [8, 16, 32] {
+        let mut s = session(depth);
+        s.execute("layer.smartObjects.convertToSmartObject", json!({})).unwrap();
+        let id = photosplice_doc::LayerId(s.active().unwrap().active_layer.unwrap().0);
+        // Photoshop's layout: height, width, mode 3, horizontal plane (all right), vertical plane
+        // (neutral), padding. 128/255 is a hair over mid-grey: a sub-pixel vertical shift.
+        let (mw, mh) = (12u32, 8u32);
+        let n = (mw * mh) as usize;
+        let mut tdta = [mh.to_le_bytes().as_slice(), &mw.to_le_bytes(), &3u16.to_le_bytes()].concat();
+        tdta.extend(std::iter::repeat_n(255, n).chain(std::iter::repeat_n(128, n)).chain(std::iter::repeat_n(0, mw as usize)));
+        let e = |t: &str, v: &str| Value::Enumerated { type_id: Id::new(t), value: Id::new(v) };
+        let fltr = Descriptor::new("Dspl")
+            .with("HrzS", Value::Integer(10))
+            .with("VrtS", Value::Integer(10))
+            .with("DspM", e("DspM", "StrF"))
+            .with("UndA", e("UndA", "RptE"))
+            .with("DspF", Value::Alias(b"Macintosh HD:displace.psd".to_vec()))
+            .with("EmbF", Value::Boolean(true))
+            .with("DspD", Value::RawData(tdta));
+        let item = Descriptor::new("filterFX")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("Displace...")))
+            .with("enab", Value::Boolean(true))
+            .with("hasoptions", Value::Boolean(true))
+            .with("Fltr", Value::Descriptor(fltr))
+            .with("filterID", Value::Integer(1148416108));
+        let filter = photosplice_io::smart_map::filter_from_item(&item);
+        assert_eq!(filter.command, "filter.distort.displace");
+        s.edit("displace", |doc, _| {
+            let mut l = doc.layer(id).unwrap().clone();
+            let LayerContent::Smart(sm) = &mut l.content else { panic!("smart") };
+            sm.smart_filters.push(filter.clone());
+            assert!(refresh_layer(doc, &mut l).unwrap());
+            *doc.layer_mut(id).unwrap() = l;
+            Ok(())
+        })
+        .unwrap();
+        let doc = s.active().unwrap().doc.clone();
+        let alpha = |doc: &Document, x: i32| smart(doc).1.cache.unwrap().pixel(x, 30)[3];
+        // 10 % of 128 px at full map contrast: the content (x 8..80) is read from 12.8 px to the
+        // right, so it moves left over the canvas edge and leaves its right edge.
+        assert!(alpha(&doc, 2) > 0.99 && alpha(&doc, 75) < 0.01, "depth {depth}: {} {}", alpha(&doc, 2), alpha(&doc, 75));
+
+        let out = photosplice_io::export(&doc, "psd", &Default::default()).unwrap();
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+        assert_eq!(structure_errors(&out.bytes), Vec::<String>::new());
+        let back = photosplice_io::import("displace.psd", &out.bytes).unwrap().document;
+        let native = photosplice_format::load_from_bytes(&photosplice_format::save_to_bytes(&back, &Default::default()).unwrap()).unwrap();
+        for doc in [&back, &native] {
+            let (bid, after) = smart(doc);
+            assert_eq!(after.smart_filters, vec![filter.clone()], "depth {depth}");
+            let mut l = doc.layer(photosplice_doc::LayerId(bid)).unwrap().clone();
+            assert!(refresh_layer(doc, &mut l).unwrap());
+            let LayerContent::Smart(sm) = &l.content else { panic!("smart") };
+            let (a, b) = (sm.cache.as_ref().unwrap(), smart(&s.active().unwrap().doc).1.cache.unwrap());
+            assert_eq!((a.pixel(2, 30)[3], a.pixel(75, 30)[3]), (b.pixel(2, 30)[3], b.pixel(75, 30)[3]), "depth {depth}: re-render");
+        }
+    }
+}
+
 /// A version-2 `liFD` item, as in CS2's `lnkD` block: the fields every version has, and
 /// none of the version 5–7 fields after the file data.
 fn lifd_v2(f: &photosplice_io::linked::LinkedFile) -> Vec<u8> {
@@ -516,7 +581,7 @@ fn cs2_plld_only_smart_object_opens_its_contents() {
     for (a, b) in after.transform.m.iter().zip(before.transform.m) {
         assert!((a - b).abs() < 1e-9, "transform {:?} vs {:?}", after.transform, before.transform);
     }
-    let (name, src) = source_bytes(&back.metadata, &after.source).expect("the contents are available");
+    let (name, src) = photosplice_engine::smart_cmds::contents_of(&back, photosplice_doc::LayerId(bid)).expect("the contents are available");
     let inner = decode_source(&name, &src).unwrap();
     assert_eq!((inner.size, inner.layers.len()), (nested.size, nested.layers.len()));
     // It re-renders where it was placed.
@@ -551,7 +616,7 @@ fn cs2_plld_only_warped_smart_object_stays_warped() {
     let back = photosplice_io::import("cs2.psd", &cs2_layout(&doc)).unwrap().document;
     let (bid, after) = smart(&back);
     assert_eq!(after.warp, before.warp);
-    assert!(source_bytes(&back.metadata, &after.source).is_some(), "the contents are available");
+    assert!(photosplice_engine::smart_cmds::contents_of(&back, photosplice_doc::LayerId(bid)).is_ok(), "the contents are available");
     // Re-rendered from its source, it is still warped where it was placed.
     let rerender = |warp| {
         let mut l = back.layer(photosplice_doc::LayerId(bid)).unwrap().clone();
@@ -599,9 +664,64 @@ fn cs2_plld_only_smart_object_saves_its_new_transform() {
     assert!(structure_errors(&saved).is_empty(), "{:?}", structure_errors(&saved));
     assert_ne!(plld(&saved).0, plld(&cs2).0, "the old PlLd record was written back");
     let again = photosplice_io::import("again.psd", &saved).unwrap().document;
-    let (_, got) = smart(&again);
+    let (aid, got) = smart(&again);
     for (a, b) in got.transform.m.iter().zip(want.transform.m) {
         assert!((a - b).abs() < 1e-9, "transform {:?} vs {:?}", got.transform, want.transform);
     }
-    assert!(source_bytes(&again.metadata, &got.source).is_some(), "the contents are available");
+    assert!(photosplice_engine::smart_cmds::contents_of(&again, photosplice_doc::LayerId(aid)).is_ok(), "the contents are available");
+}
+
+/// Photoshop stores a smart object's filtered pixels without its filter mask and mixes the
+/// unfiltered ones back in through the mask (`compose::filter_mask`): the layer record we write
+/// holds the filtered pixels wherever the mask shows any of the filter, and opening the file
+/// mixes them back to what the document showed.
+#[test]
+fn a_soft_filter_mask_is_stored_the_way_photoshop_stores_it() {
+    use photosplice_doc::LayerMask;
+    use photosplice_raster::Surface;
+    let mut s = session(8);
+    s.execute("layer.smartObjects.convertToSmartObject", json!({})).unwrap();
+    s.execute("filter.blur.gaussianBlur", json!({"radius": 4})).unwrap();
+    let id = s.active().unwrap().active_layer.unwrap();
+    // A mask ramping from hiding the blur (left) to showing it (right).
+    s.edit("mask", |doc, _| {
+        let snapshot = doc.clone();
+        let l = doc.layer_mut(id).unwrap();
+        let LayerContent::Smart(sm) = &mut l.content else { panic!("smart") };
+        let mut m = LayerMask::reveal_all();
+        m.surface = Surface::new(photosplice_color::PixelFormat::GRAY8);
+        let r = Rect::new(0, 0, W, H);
+        m.surface.write_region(r, &(0..H).flat_map(|_| (0..W).map(|x| x as f32 / (W - 1) as f32)).collect::<Vec<_>>());
+        sm.filter_mask = Some(m);
+        refresh_layer(&snapshot, l).map(|_| ())
+    })
+    .unwrap();
+    let doc = s.active().unwrap().doc.clone();
+    let (_, sm) = smart(&doc);
+    let mixed = sm.cache.clone().unwrap();
+    // The same smart object with the mask switched off: filtered everywhere.
+    let mut unmasked = sm.clone();
+    unmasked.filter_mask.as_mut().unwrap().enabled = false;
+    let filtered = photosplice_engine::smart_cmds::render(&doc, &unmasked).unwrap().unwrap();
+
+    let out = photosplice_io::export(&doc, "psd", &Default::default()).unwrap();
+    let file = photosplice_psd::PsdFile::from_bytes(&out.bytes).unwrap();
+    let name = doc.layer(id).unwrap().name.clone();
+    let record = (0..file.layers().len()).filter_map(|i| file.layer(i)).find(|l| l.name() == name).unwrap();
+    let img = record.rgba8().unwrap();
+    // A column where the mask shows about half the blur, over opaque content.
+    let (x, y) = (W / 2, 20);
+    let at = (((y - img.top) as u32 * img.width + (x - img.left) as u32) * 4) as usize;
+    let stored = &img.data[at..at + 4];
+    let want = filtered.pixel(x, y);
+    let half = mixed.pixel(x, y);
+    let gap = (0..3).map(|c| (want[c] - half[c]).abs()).fold(0.0f32, f32::max);
+    assert!(gap > 3.0 / 255.0, "the mask's mix must show at ({x}, {y}) for this test to mean anything");
+    for c in 0..3 {
+        assert!((f32::from(stored[c]) / 255.0 - want[c]).abs() <= 1.5 / 255.0, "channel {c}: stored {stored:?}, filtered {want:?}, mixed {half:?}");
+    }
+    // Opening the file mixes the unfiltered pixels back in: it shows what the document showed.
+    let back = photosplice_io::import("x.psd", &out.bytes).unwrap().document;
+    let d = max_diff(&photosplice_compose::flatten(&back).px, &photosplice_compose::flatten(&doc).px);
+    assert!(d <= 2.0 / 255.0, "re-opened differs by {d}");
 }

@@ -12,6 +12,7 @@ use egui::{Color32, Pos2, Rect as ERect, Sense, Stroke, TextureHandle, pos2, vec
 use photosplice_algo::liquify::{LiquifyField, LiquifyStroke, LiquifyTool, ProxyImage, auto_cell};
 use photosplice_doc::LayerId;
 use photosplice_geom::Rect;
+use photosplice_raster::Surface;
 use serde_json::{Value, json};
 
 use crate::PhotospliceApp;
@@ -21,6 +22,7 @@ use crate::widgets;
 
 /// Longest side of the preview proxy (px).
 const PROXY_SIDE: usize = 1600;
+const MAX_VIEW_PREVIEW_PIXELS: usize = 8 * 1024 * 1024;
 const LEFT_W: f32 = 48.0;
 const RIGHT_W: f32 = 292.0;
 const REDO_STACK_LIMIT: usize = 100;
@@ -130,10 +132,17 @@ pub struct LiquifyDialog {
     /// The lasso polygon being drawn (document px) and whether it thaws (Alt held at pointer-down).
     lasso: Option<(bool, Vec<[f64; 2]>)>,
     proxy: ProxyImage,
+    source: Surface,
     out: Vec<[u8; 4]>,
     tex: Option<TextureHandle>,
     /// Proxy pixels to re-render and upload (x0, y0, x1, y1).
     dirty: Option<[usize; 4]>,
+    /// Document-pixel preview used above 100% zoom.
+    view_bounds: Option<Rect>,
+    view_out: Vec<[u8; 4]>,
+    view_source_scratch: Vec<[f32; 4]>,
+    view_tex: Option<TextureHandle>,
+    view_dirty: Option<Rect>,
     backdrop: Option<TextureHandle>,
     mask_tex: Option<TextureHandle>,
     mask_dirty: bool,
@@ -142,9 +151,13 @@ pub struct LiquifyDialog {
     zoom: f32,
     center: [f64; 2],
     hover: Option<[f64; 2]>,
+    /// Alt+right-drag (or Control+Alt-drag) resizing the brush: screen anchor, starting size, starting density.
+    brush_resize: Option<(Pos2, f32, f32)>,
     last_dab: f64,
     /// Last dab + proxy update time (ms), shown in the footer.
     pub dab_ms: f64,
+    /// CPU time spent refreshing the zoomed-in source-resolution preview.
+    pub preview_ms: f64,
 }
 
 fn union(a: Option<[usize; 4]>, b: [usize; 4]) -> Option<[usize; 4]> {
@@ -153,6 +166,16 @@ fn union(a: Option<[usize; 4]>, b: [usize; 4]) -> Option<[usize; 4]> {
     }
     Some(match a {
         Some(a) => [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])],
+        None => b,
+    })
+}
+
+fn union_rect(a: Option<Rect>, b: Rect) -> Option<Rect> {
+    if b.is_empty() {
+        return a;
+    }
+    Some(match a {
+        Some(a) => Rect::new(a.x0.min(b.x0), a.y0.min(b.y0), a.x1.max(b.x1), a.y1.max(b.y1)),
         None => b,
     })
 }
@@ -169,13 +192,15 @@ impl LiquifyDialog {
             "maxDisplacement": self.field.max_displacement(),
             "proxy": [self.proxy.w, self.proxy.h],
             "dabMs": self.dab_ms,
+            "fullResolutionPreview": self.view_bounds.is_some(),
+            "previewMs": self.preview_ms,
         })
     }
 
-    fn template(&self) -> LiquifyStroke {
+    fn template(&self, tool: LiquifyTool) -> LiquifyStroke {
         let o = &self.opts;
         LiquifyStroke {
-            tool: o.tool,
+            tool,
             size: f64::from(o.size),
             density: f64::from(o.density),
             pressure: f64::from(o.pressure),
@@ -190,12 +215,15 @@ impl LiquifyDialog {
             return;
         }
         self.dirty = union(self.dirty, self.proxy.proxy_rect(doc_rect));
+        self.view_dirty = union_rect(self.view_dirty, doc_rect);
         self.mask_dirty |= mask;
     }
 
-    fn begin(&mut self, p: [f64; 3], now: f64) {
+    /// Starts a stroke; `alt` draws with the selected tool's opposite (see [`alt_tool`]).
+    fn begin(&mut self, p: [f64; 3], now: f64, alt: bool) {
         self.redo.clear();
-        let mut s = self.template();
+        let tool = if alt { alt_tool(self.opts.tool) } else { self.opts.tool };
+        let mut s = self.template(tool);
         s.points.push(p.to_vec());
         let t0 = crate::gpu_canvas::now_ms();
         let d = self.field.stroke_begin(&s, p);
@@ -236,8 +264,7 @@ impl LiquifyDialog {
             pts.push(first);
         }
         self.redo.clear();
-        let mut s = self.template();
-        s.tool = LiquifyTool::LassoMask;
+        let mut s = self.template(LiquifyTool::LassoMask);
         s.amount = Some(if subtract { 0.0 } else { 1.0 });
         s.points = pts.into_iter().map(|p| p.to_vec()).collect();
         let d = self.field.apply_stroke(&s);
@@ -261,6 +288,9 @@ impl LiquifyDialog {
     fn rebuild(&mut self) {
         self.field = LiquifyField::from_strokes(self.canvas, self.cell, &self.strokes);
         self.dirty = Some([0, 0, self.proxy.w, self.proxy.h]);
+        // Undo rebuilds the whole field. The zoomed viewport is a separate buffer; leaving it
+        // clean kept the pre-undo pixels on screen until the next zoom (#4100).
+        self.view_dirty = self.view_bounds;
         self.mask_dirty = true;
         self.render_dirty();
     }
@@ -299,6 +329,87 @@ impl LiquifyDialog {
         if let Some(r) = self.dirty {
             self.proxy.render(&self.field, r, &mut self.out);
         }
+    }
+
+    /// Builds or updates the visible source-resolution viewport. At ordinary zoom the whole-layer
+    /// proxy remains cheaper; above 100%, a full-resolution crop is enough to fill the preview.
+    fn update_view_preview(&mut self, ctx: &egui::Context, area: ERect) {
+        if self.zoom <= 1.0 {
+            return;
+        }
+        let half_w = f64::from(area.width() / self.zoom) * 0.5;
+        let half_h = f64::from(area.height() / self.zoom) * 0.5;
+        let clamp_x = |x: f64| x.max(f64::from(self.canvas.x0)).min(f64::from(self.canvas.x1)) as i32;
+        let clamp_y = |y: f64| y.max(f64::from(self.canvas.y0)).min(f64::from(self.canvas.y1)) as i32;
+        let bounds = Rect::new(
+            clamp_x((self.center[0] - half_w).floor()),
+            clamp_y((self.center[1] - half_h).floor()),
+            clamp_x((self.center[0] + half_w).ceil()),
+            clamp_y((self.center[1] + half_h).ceil()),
+        );
+        if bounds.is_empty() {
+            self.view_bounds = None;
+            self.view_tex = None;
+            self.view_dirty = None;
+            return;
+        }
+        let (w, h) = (bounds.width() as usize, bounds.height() as usize);
+        let Some(len) = w.checked_mul(h).filter(|n| *n <= MAX_VIEW_PREVIEW_PIXELS) else {
+            self.view_bounds = None;
+            self.view_tex = None;
+            self.view_dirty = None;
+            return;
+        };
+        if self.view_bounds != Some(bounds) || self.view_out.len() != len {
+            if self.view_out.try_reserve(len.saturating_sub(self.view_out.len())).is_err() {
+                self.view_bounds = None;
+                self.view_tex = None;
+                self.view_dirty = None;
+                return;
+            }
+            self.view_out.resize(len, [0; 4]);
+            self.view_bounds = Some(bounds);
+            self.view_tex = None;
+            self.view_dirty = Some(bounds);
+        }
+        let Some(dirty) = self.view_dirty.take().map(|r| r.intersect(&bounds)) else { return };
+        if dirty.is_empty() {
+            return;
+        }
+        let started = crate::gpu_canvas::now_ms();
+        let rendered = ProxyImage::render_full_resolution(&self.source, &self.field, bounds, dirty, &mut self.view_out, &mut self.view_source_scratch);
+        if !rendered {
+            self.view_bounds = None;
+            self.view_tex = None;
+            self.preview_ms = crate::gpu_canvas::now_ms() - started;
+            return;
+        }
+        let x0 = (dirty.x0 - bounds.x0) as usize;
+        let y0 = (dirty.y0 - bounds.y0) as usize;
+        let x1 = (dirty.x1 - bounds.x0) as usize;
+        let y1 = (dirty.y1 - bounds.y0) as usize;
+        let mut pixels = Vec::with_capacity((x1 - x0) * (y1 - y0));
+        for y in y0..y1 {
+            if let Some(row) = self.view_out.get(y * w + x0..y * w + x1) {
+                pixels.extend(row.iter().map(|p| Color32::from_rgba_premultiplied(p[0], p[1], p[2], p[3])));
+            }
+        }
+        let image = egui::ColorImage::new([x1 - x0, y1 - y0], pixels);
+        match &mut self.view_tex {
+            Some(tex) => tex.set_partial([x0, y0], image, egui::TextureOptions::NEAREST),
+            None => {
+                // A new viewport always starts dirty over its full bounds.
+                self.view_tex = Some(ctx.load_texture(
+                    "liquify-detail",
+                    {
+                        let pixels = self.view_out.iter().map(|p| Color32::from_rgba_premultiplied(p[0], p[1], p[2], p[3])).collect();
+                        egui::ColorImage::new([w, h], pixels)
+                    },
+                    egui::TextureOptions::NEAREST,
+                ));
+            }
+        }
+        self.preview_ms = crate::gpu_canvas::now_ms() - started;
     }
 
     fn upload(&mut self, ctx: &egui::Context) {
@@ -357,9 +468,15 @@ pub fn open(app: &mut PhotospliceApp, ctx: &egui::Context) -> Result<(), String>
         cur: None,
         lasso: None,
         proxy,
+        source: surf,
         out,
         tex: None,
         dirty: None,
+        view_bounds: None,
+        view_out: Vec::new(),
+        view_source_scratch: Vec::new(),
+        view_tex: None,
+        view_dirty: None,
         backdrop: None,
         mask_tex: None,
         mask_dirty: true,
@@ -367,8 +484,10 @@ pub fn open(app: &mut PhotospliceApp, ctx: &egui::Context) -> Result<(), String>
         zoom: 0.0,
         center,
         hover: None,
+        brush_resize: None,
         last_dab: 0.0,
         dab_ms: 0.0,
+        preview_ms: 0.0,
     };
     // A sensible starting brush (about a tenth of the image), then the settings last used, so
     // Liquify opens as it was left (#418). Saved values are clamped; a bad one is skipped.
@@ -441,8 +560,36 @@ pub fn control(app: &mut PhotospliceApp, ui: &Value) -> Result<Value, String> {
     Ok(d.describe())
 }
 
-/// Pointer in document coordinates (from the preview or the control channel). Alt = subtract
-/// from the freeze mask (lasso only); Shift adds, same as no modifier.
+/// Photoshop's Alt (Option) variant of a Liquify brush: the twirls reverse direction and Pucker
+/// and Bloat swap. Other tools are unchanged.
+fn alt_tool(t: LiquifyTool) -> LiquifyTool {
+    match t {
+        LiquifyTool::TwirlCw => LiquifyTool::TwirlCcw,
+        LiquifyTool::TwirlCcw => LiquifyTool::TwirlCw,
+        LiquifyTool::Pucker => LiquifyTool::Bloat,
+        LiquifyTool::Bloat => LiquifyTool::Pucker,
+        t => t,
+    }
+}
+
+/// Alt+right-drag, and Control+Alt-drag, change the Liquify brush instead of painting (#4702).
+fn brush_resize_gesture(mods: egui::Modifiers, secondary: bool) -> bool {
+    mods.alt && (secondary || mods.ctrl)
+}
+
+/// Horizontal motion sets the diameter (the circle's edge follows the pointer). Vertical motion
+/// sets density, Liquify's edge falloff, over the same 200 px travel the canvas uses for hardness.
+fn resized_brush(start_size: f32, start_density: f32, dx: f32, dy: f32) -> (f32, f32) {
+    let dx = if dx.is_finite() { dx } else { 0.0 };
+    let dy = if dy.is_finite() { dy } else { 0.0 };
+    let size = (start_size + dx).round().clamp(1.0, 15000.0);
+    let density = (start_density + dy * 100.0 / crate::brush_resize::HARDNESS_TRAVEL).clamp(0.0, 100.0);
+    (size, (density * 10.0).round() / 10.0)
+}
+
+/// Pointer in document coordinates (from the preview or the control channel). Alt at
+/// pointer-down subtracts from the freeze mask (lasso), reverses a twirl and swaps Pucker/Bloat;
+/// Shift adds to the mask, same as no modifier.
 pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers) {
     let now = crate::gpu_canvas::now_ms();
     let Some(d) = app.distort.liquify.as_mut() else { return };
@@ -451,7 +598,7 @@ pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers) {
             if d.opts.tool == LiquifyTool::LassoMask {
                 d.lasso = Some((mods.alt, vec![[x, y]]));
             } else {
-                d.begin([x, y, f64::from(pressure)], now);
+                d.begin([x, y, f64::from(pressure)], now, mods.alt);
             }
         }
         ToolEvent::Move { x, y, pressure } => {
@@ -479,7 +626,8 @@ pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers) {
     }
 }
 
-pub fn keys(app: &mut PhotospliceApp, ctx: &egui::Context) {
+/// Ctrl+Z / Ctrl+Shift+Z inside Liquify, including while a slider's text field is focused.
+pub fn history_keys(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let Some(d) = app.distort.liquify.as_mut() else { return };
     let cmd_shift = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
     if ctx.input_mut(|i| i.consume_key(cmd_shift, egui::Key::Z)) {
@@ -487,6 +635,11 @@ pub fn keys(app: &mut PhotospliceApp, ctx: &egui::Context) {
     } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)) {
         d.undo();
     }
+}
+
+pub fn keys(app: &mut PhotospliceApp, ctx: &egui::Context) {
+    history_keys(app, ctx);
+    let Some(d) = app.distort.liquify.as_mut() else { return };
     // Ctrl+H (Hide Extras) toggles the red freeze-mask overlay; the mask itself stays active.
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::H)) {
         d.opts.show_mask = !d.opts.show_mask;
@@ -499,10 +652,11 @@ pub fn keys(app: &mut PhotospliceApp, ctx: &egui::Context) {
         d.global(LiquifyTool::ThawAll, None);
     }
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::OpenBracket)) {
-        d.opts.size = (d.opts.size * 0.9).max(1.0);
+        // At least one pixel, or 2 px * 0.9 rounds back to 2 and `[` never reaches 1.
+        d.opts.size = (d.opts.size * 0.9).round().min(d.opts.size - 1.0).clamp(1.0, 15000.0);
     }
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::CloseBracket)) {
-        d.opts.size = (d.opts.size * 1.1).min(15000.0);
+        d.opts.size = (d.opts.size * 1.1).round().max(d.opts.size + 1.0).min(15000.0);
     }
     let tools = [
         (egui::Key::W, LiquifyTool::ForwardWarp),
@@ -664,9 +818,15 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
             }
             widgets::hairline(ui);
             ui.label(
-                egui::RichText::new(format!("{} stroke(s) · field {} px/node · dab {:.2} ms", d.strokes.len(), d.cell, d.dab_ms))
-                    .color(t.text_faint)
-                    .size(11.0),
+                egui::RichText::new(format!(
+                    "{} stroke(s) · field {} px/node · dab {:.2} ms · preview {:.2} ms",
+                    d.strokes.len(),
+                    d.cell,
+                    d.dab_ms,
+                    d.preview_ms
+                ))
+                .color(t.text_faint)
+                .size(11.0),
             );
         });
         // Footer buttons.
@@ -697,11 +857,13 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
                 && let Some(hp) = resp.hover_pos()
             {
                 let before = to_doc(d, area, hp);
+                // Liquify's own preview zoom, not the canvas (`zoom_levels` doesn't apply).
                 d.zoom = (d.zoom * (scroll / 200.0).exp()).clamp(0.01, 32.0);
                 let after = to_doc(d, area, hp);
                 d.center = [d.center[0] + before[0] - after[0], d.center[1] + before[1] - after[1]];
             }
         }
+        d.update_view_preview(ctx, area);
         let img = ERect::from_min_max(
             to_screen(d, area, [f64::from(d.canvas.x0), f64::from(d.canvas.y0)]),
             to_screen(d, area, [f64::from(d.canvas.x1), f64::from(d.canvas.y1)]),
@@ -714,11 +876,23 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
         {
             clip.image(b.id(), img, uv, Color32::from_white_alpha((d.opts.backdrop_opacity / 100.0 * 255.0) as u8));
         }
-        // The proxy covers whole proxy pixels, a little past the canvas edge.
-        let pr =
-            ERect::from_min_max(img.min, img.min + vec2(d.proxy.w as f32 * d.proxy.scale as f32 * d.zoom, d.proxy.h as f32 * d.proxy.scale as f32 * d.zoom));
-        if let Some(tex) = &d.tex {
-            clip.image(tex.id(), pr, uv, Color32::WHITE);
+        if d.zoom > 1.0
+            && let (Some(bounds), Some(tex)) = (d.view_bounds, &d.view_tex)
+        {
+            let detail = ERect::from_min_max(
+                to_screen(d, area, [f64::from(bounds.x0), f64::from(bounds.y0)]),
+                to_screen(d, area, [f64::from(bounds.x1), f64::from(bounds.y1)]),
+            );
+            clip.image(tex.id(), detail, uv, Color32::WHITE);
+        } else {
+            // The proxy covers whole proxy pixels, a little past the canvas edge.
+            let pr = ERect::from_min_max(
+                img.min,
+                img.min + vec2(d.proxy.w as f32 * d.proxy.scale as f32 * d.zoom, d.proxy.h as f32 * d.proxy.scale as f32 * d.zoom),
+            );
+            if let Some(tex) = &d.tex {
+                clip.image(tex.id(), pr, uv, Color32::WHITE);
+            }
         }
         if d.opts.show_mask
             && let Some(m) = &d.mask_tex
@@ -752,9 +926,26 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
             d.hover = Some(to_doc(d, area, hp));
         }
         clip.rect_stroke(img, 0.0, Stroke::new(1.0, t.separator), egui::StrokeKind::Outside);
-        // Mouse → strokes (Space or middle button pans).
-        let pan = ui.input(|i| i.key_down(egui::Key::Space) || i.pointer.middle_down());
-        if pan && resp.dragged() {
+        // Mouse → strokes (Space or middle button pans). Alt+right-drag resizes the brush (#4702).
+        let (pan, secondary, mods_now) =
+            ui.input(|i| (i.key_down(egui::Key::Space) || i.pointer.middle_down(), i.pointer.button_down(egui::PointerButton::Secondary), i.modifiers));
+        let resize = d.brush_resize.is_some() || (resp.drag_started() && brush_resize_gesture(mods_now, secondary));
+        if resize {
+            if d.brush_resize.is_none()
+                && let Some(p) = resp.interact_pointer_pos()
+            {
+                d.brush_resize = Some((p, d.opts.size, d.opts.density));
+            }
+            if let (Some((anchor, size0, dens0)), Some(p)) = (d.brush_resize, resp.interact_pointer_pos()) {
+                let delta = p - anchor;
+                let (size, density) = resized_brush(size0, dens0, delta.x, delta.y);
+                d.opts.size = size;
+                d.opts.density = density;
+            }
+            if resp.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {
+                d.brush_resize = None;
+            }
+        } else if pan && resp.dragged() {
             let dl = resp.drag_delta();
             d.center = [d.center[0] - f64::from(dl.x / d.zoom), d.center[1] - f64::from(dl.y / d.zoom)];
         } else if let Some(pp) = resp.interact_pointer_pos() {
@@ -860,6 +1051,18 @@ fn draw_mesh(d: &LiquifyDialog, painter: &egui::Painter, area: ERect) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn alt_right_drag_resizes_the_liquify_brush_and_does_not_paint() {
+        assert!(brush_resize_gesture(egui::Modifiers::ALT, true));
+        assert!(brush_resize_gesture(egui::Modifiers::CTRL | egui::Modifiers::ALT, false));
+        assert!(!brush_resize_gesture(egui::Modifiers::ALT, false), "Alt+left stays the tool's opposite");
+        assert!(!brush_resize_gesture(egui::Modifiers::NONE, true));
+        let (size, density) = resized_brush(40.0, 50.0, 25.0, crate::brush_resize::HARDNESS_TRAVEL);
+        assert_eq!((size, density), (65.0, 100.0));
+        let (size, density) = resized_brush(40.0, 50.0, -100.0, 0.0);
+        assert_eq!((size, density), (1.0, 50.0));
+    }
+
     fn app_with_layer() -> PhotospliceApp {
         let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
         app.session.execute("file.new", json!({"width": 120, "height": 80, "depth": 8})).unwrap();
@@ -878,6 +1081,30 @@ mod tests {
             .unwrap();
         app.sync_views();
         app
+    }
+
+    #[test]
+    fn zoomed_liquify_preview_uses_only_the_visible_full_resolution_crop() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_layer();
+        open(&mut app, &ctx).unwrap();
+        let d = app.distort.liquify.as_mut().unwrap();
+        d.zoom = 2.0;
+        d.center = [60.0, 40.0];
+        d.update_view_preview(&ctx, ERect::from_min_size(pos2(0.0, 0.0), vec2(60.0, 40.0)));
+        assert_eq!(d.view_bounds, Some(Rect::new(45, 30, 75, 50)));
+        assert_eq!(d.view_out.len(), 30 * 20, "one preview texel per document pixel");
+        assert!(d.view_tex.is_some());
+
+        let before = d.view_out.clone();
+        let mut stroke = LiquifyStroke::new(LiquifyTool::ForwardWarp, 24.0);
+        stroke.points = vec![vec![50.0, 40.0, 1.0], vec![58.0, 40.0, 1.0]];
+        let dirty = d.field.stroke_segment(&stroke, [50.0, 40.0, 1.0], [58.0, 40.0, 1.0]);
+        d.mark(dirty, false);
+        d.render_dirty();
+        d.update_view_preview(&ctx, ERect::from_min_size(pos2(0.0, 0.0), vec2(60.0, 40.0)));
+        assert_ne!(d.view_out, before, "a brush update refreshes the visible source-resolution crop");
+        assert!(d.preview_ms.is_finite());
     }
 
     /// #418: the brush settings survive Cancel, OK and Esc, and come back the next time Liquify
@@ -915,6 +1142,50 @@ mod tests {
         app.session.prefs.edit(|p| p.dialogs.insert(REMEMBERED.into(), json!("not an object")));
         cancel(&mut app);
         assert!(open(&mut app, &ctx).is_ok());
+    }
+
+    /// Follow-up to #1494 / #1484: Alt is captured at stroke-down and stays recorded
+    /// through undo, redo and deterministic Liquify field reconstruction.
+    #[test]
+    fn alt_reversed_twirl_survives_replay_undo_and_redo() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_layer();
+        open(&mut app, &ctx).unwrap();
+        control(&mut app, &json!({"tool": "twirlCw", "size": 36, "rate": 80})).unwrap();
+
+        // Releasing Alt while dragging must not change the tool recorded at pointer-down.
+        pointer(&mut app, ToolEvent::Down { x: 53.0, y: 40.0, pressure: 1.0 }, egui::Modifiers::ALT);
+        pointer(&mut app, ToolEvent::Move { x: 58.0, y: 41.0, pressure: 1.0 }, egui::Modifiers::NONE);
+        pointer(&mut app, ToolEvent::Up { x: 58.0, y: 41.0 }, egui::Modifiers::NONE);
+        let d = app.distort.liquify.as_ref().unwrap();
+        assert_eq!(d.opts.tool, LiquifyTool::TwirlCw, "Alt must not change the selected tool");
+        assert_eq!(d.strokes.len(), 1);
+        assert_eq!(d.strokes[0].tool, LiquifyTool::TwirlCcw);
+        assert_eq!(LiquifyField::from_strokes(d.canvas, d.cell, &d.strokes), d.field);
+
+        // A following stroke without Alt records the original tool.
+        pointer(&mut app, ToolEvent::Down { x: 70.0, y: 40.0, pressure: 1.0 }, egui::Modifiers::NONE);
+        pointer(&mut app, ToolEvent::Move { x: 75.0, y: 42.0, pressure: 1.0 }, egui::Modifiers::ALT);
+        pointer(&mut app, ToolEvent::Up { x: 75.0, y: 42.0 }, egui::Modifiers::ALT);
+        let d = app.distort.liquify.as_ref().unwrap();
+        assert_eq!(d.strokes.len(), 2);
+        assert_eq!(d.strokes[1].tool, LiquifyTool::TwirlCw);
+        assert_eq!(LiquifyField::from_strokes(d.canvas, d.cell, &d.strokes), d.field);
+
+        control(&mut app, &json!({"undo": true})).unwrap();
+        let d = app.distort.liquify.as_ref().unwrap();
+        assert_eq!(d.strokes.len(), 1);
+        assert_eq!(d.strokes[0].tool, LiquifyTool::TwirlCcw);
+        assert_eq!(d.redo[0].tool, LiquifyTool::TwirlCw);
+        assert_eq!(LiquifyField::from_strokes(d.canvas, d.cell, &d.strokes), d.field);
+
+        control(&mut app, &json!({"redo": true})).unwrap();
+        let d = app.distort.liquify.as_ref().unwrap();
+        assert_eq!(d.strokes.len(), 2);
+        assert!(d.redo.is_empty());
+        assert_eq!(d.strokes[0].tool, LiquifyTool::TwirlCcw);
+        assert_eq!(d.strokes[1].tool, LiquifyTool::TwirlCw);
+        assert_eq!(LiquifyField::from_strokes(d.canvas, d.cell, &d.strokes), d.field);
     }
 
     #[test]
@@ -986,6 +1257,27 @@ mod tests {
     }
 
     #[test]
+    fn undo_dirties_the_zoomed_preview() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_layer();
+        open(&mut app, &ctx).unwrap();
+        control(&mut app, &json!({"tool": "forwardWarp", "size": 40})).unwrap();
+        for ev in [ToolEvent::Down { x: 35.0, y: 40.0, pressure: 1.0 }, ToolEvent::Move { x: 55.0, y: 40.0, pressure: 1.0 }, ToolEvent::Up { x: 55.0, y: 40.0 }]
+        {
+            pointer(&mut app, ev, egui::Modifiers::NONE);
+        }
+        {
+            let d = app.distort.liquify.as_mut().unwrap();
+            d.zoom = 2.0;
+            d.view_bounds = Some(Rect::new(0, 0, 20, 20));
+            d.view_dirty = None;
+        }
+        control(&mut app, &json!({"undo": true})).unwrap();
+        let d = app.distort.liquify.as_ref().unwrap();
+        assert_eq!(d.view_dirty, d.view_bounds);
+    }
+
+    #[test]
     fn liquify_redo_restores_undone_stroke_and_a_new_stroke_clears_redo() {
         let ctx = egui::Context::default();
         let mut app = app_with_layer();
@@ -1047,6 +1339,30 @@ mod tests {
         assert_eq!(app.distort.liquify.as_ref().unwrap().redo.len(), 1);
         lasso(&mut app, egui::Modifiers::NONE, [0.0, 0.0, 10.0, 10.0]);
         assert_eq!(app.distort.liquify.as_ref().unwrap().redo.len(), 0, "a new lasso clears redo");
+    }
+
+    #[test]
+    fn alt_reverses_twirl_and_swaps_pucker_and_bloat() {
+        let ctx = egui::Context::default();
+        let mut app = app_with_layer();
+        open(&mut app, &ctx).unwrap();
+        let dab = |app: &mut PhotospliceApp, m: egui::Modifiers| {
+            pointer(app, ToolEvent::Down { x: 50.0, y: 40.0, pressure: 1.0 }, m);
+            pointer(app, ToolEvent::Up { x: 50.0, y: 40.0 }, m);
+            app.distort.liquify.as_ref().unwrap().strokes.last().unwrap().tool
+        };
+        for (tool, plain, alt) in [
+            ("twirlCw", LiquifyTool::TwirlCw, LiquifyTool::TwirlCcw),
+            ("twirlCcw", LiquifyTool::TwirlCcw, LiquifyTool::TwirlCw),
+            ("pucker", LiquifyTool::Pucker, LiquifyTool::Bloat),
+            ("bloat", LiquifyTool::Bloat, LiquifyTool::Pucker),
+            ("forwardWarp", LiquifyTool::ForwardWarp, LiquifyTool::ForwardWarp),
+        ] {
+            control(&mut app, &json!({"tool": tool})).unwrap();
+            assert_eq!(dab(&mut app, egui::Modifiers::NONE), plain, "{tool}");
+            assert_eq!(dab(&mut app, egui::Modifiers::ALT), alt, "⌥ {tool}");
+            assert_eq!(app.distort.liquify.as_ref().unwrap().opts.tool, plain, "⌥ leaves the selected tool alone");
+        }
     }
 
     #[test]

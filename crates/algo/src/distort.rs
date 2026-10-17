@@ -160,19 +160,30 @@ pub(crate) fn polar(src: &Image, out: Rect, ctx: &Ctx, mode: PolarMode) -> Vec<f
     let (w, h) = (b.width().max(1) as f32, b.height().max(1) as f32);
     let (cx, cy) = (b.x0 as f32 + w / 2.0, b.y0 as f32 + h / 2.0);
     let rmax = w.min(h) / 2.0;
-    remap(src, out, ctx, Edge::Transparent, |x, y| match mode {
+    // Photoshop 27.11: the angle runs counter-clockwise from 12 o'clock, and points past the
+    // source's edge repeat its edge pixels (the corners outside the circle are filled, not empty).
+    // Photoshop evaluates the map at pixel corners and reads the source at the resulting index
+    // (half a pixel from `remap`'s centres): within 2 levels on a whole test chart in both directions.
+    remap(src, out, ctx, Edge::Repeat, |x, y| polar_map(x - 0.5, y - 0.5, mode, b, (w, h), (cx, cy), rmax))
+}
+
+fn polar_map(x: f32, y: f32, mode: PolarMode, b: Rect, (w, h): (f32, f32), (cx, cy): (f32, f32), rmax: f32) -> (f32, f32) {
+    let (sx, sy) = match mode {
         PolarMode::RectangularToPolar => {
-            // Output is polar: angle from 12 o'clock clockwise → source x,
-            // radius → source y.
+            // Output is polar: angle from 12 o'clock counter-clockwise → source x, radius → source y.
             let (dx, dy) = (x - cx, y - cy);
-            let theta = dx.atan2(-dy).rem_euclid(std::f32::consts::TAU);
+            // The 12 o'clock seam itself reads the source's right edge (360°, not 0°).
+            let theta = (-dx).atan2(-dy);
+            let theta = if theta <= 0.0 { theta + std::f32::consts::TAU } else { theta };
             let r = (dx * dx + dy * dy).sqrt();
             (b.x0 as f32 + theta / std::f32::consts::TAU * w, b.y0 as f32 + r / rmax * h)
         }
         PolarMode::PolarToRectangular => {
-            let theta = (x - b.x0 as f32) / w * std::f32::consts::TAU;
+            // Photoshop's angle is one column ahead of its radius row (fitted exactly).
+            let theta = (x + 1.0 - b.x0 as f32) / w * std::f32::consts::TAU;
             let r = (y - b.y0 as f32) / h * rmax;
-            (cx + r * theta.sin(), cy - r * theta.cos())
+            (cx - r * theta.sin(), cy - r * theta.cos())
         }
-    })
+    };
+    (sx + 0.5, sy + 0.5)
 }

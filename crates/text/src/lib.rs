@@ -1,8 +1,8 @@
 //! PhotoSplice's type engine.
 //!
 //! * [`fonts::FontDb`]: bundled fonts (Inter, JetBrains Mono; always available, including on the
-//!   web), optional system fonts from a directory scan (no fontconfig), user font data, TrueType
-//!   collections, PostScript-name lookup.
+//!   web), optional system fonts from platform directory scans plus Fontconfig's Linux file list
+//!   (no fontconfig linking), user font data, TrueType collections, PostScript-name lookup.
 //! * [`layout`]: shaping and line layout with [parley] (HarfRust shaping, bidi, line breaking),
 //!   point and paragraph (box) text, per-run styles, Photoshop leading/indent/spacing rules.
 //! * [`render`]: anti-aliased rasterization (exact-area accumulation, f32 coverage) into a
@@ -25,6 +25,8 @@ pub mod psd;
 pub mod psd_styles;
 pub mod raster;
 pub mod render;
+pub mod scripts;
+pub mod served;
 pub mod spell;
 pub mod warp;
 
@@ -104,7 +106,7 @@ impl TextEngine {
             acc += r.len;
             at < acc
         })?;
-        let em = style_run.style.size_pt * if dpi > 0.0 { dpi / 72.0 } else { 1.0 };
+        let em = style_run.style.size_pt * if dpi.is_finite() && dpi > 0.0 { dpi / 72.0 } else { 1.0 };
         if em.is_nan() || em <= 0.0 {
             return None;
         }
@@ -137,7 +139,7 @@ impl TextEngine {
     /// Lays out and rasterizes a text layer into document space.
     pub fn render(&mut self, layer: &TextLayer, dpi: f32, format: PixelFormat) -> (TextLayout, Rendered) {
         let l = self.layout(layer, dpi);
-        let warp = render::layout_warp(&l, layer);
+        let warp = render::layout_deform(&l, layer);
         let r = render::rasterize_warped(&l, &layer.transform, format, layer.antialias, warp.as_ref());
         (l, r)
     }
@@ -150,14 +152,170 @@ impl TextEngine {
     }
 }
 
+static SHARED: warm::Warm<std::sync::Mutex<TextEngine>> = warm::Warm::new();
+
+/// Whether [`shared`] scans the installed fonts (native builds, outside tests, unless
+/// `PHOTOSPLICE_NO_SYSTEM_FONTS` is set). Without the scan it is cheap to build.
+fn uses_system_fonts() -> bool {
+    cfg!(not(target_arch = "wasm32")) && !cfg!(test) && std::env::var_os("PHOTOSPLICE_NO_SYSTEM_FONTS").is_none()
+}
+
+fn new_shared() -> std::sync::Mutex<TextEngine> {
+    let mut engine = if uses_system_fonts() { TextEngine::with_system_fonts() } else { TextEngine::new() };
+    engine.fonts.mark_shared();
+    std::sync::Mutex::new(engine)
+}
+
 /// A process-wide engine for callers without their own (bundled fonts only on the web; bundled
-/// plus system fonts elsewhere). Locking is cheap relative to layout.
+/// plus system fonts elsewhere). Locking is cheap relative to layout. The first call scans the
+/// installed fonts and blocks until that is done (or until [`warm_shared`]'s scan finishes), so
+/// code that runs every UI frame uses [`try_shared`] instead.
 pub fn shared() -> &'static std::sync::Mutex<TextEngine> {
-    static ENGINE: std::sync::OnceLock<std::sync::Mutex<TextEngine>> = std::sync::OnceLock::new();
-    ENGINE.get_or_init(|| {
-        let use_system = cfg!(not(target_arch = "wasm32")) && !cfg!(test) && std::env::var_os("PHOTOSPLICE_NO_SYSTEM_FONTS").is_none();
-        std::sync::Mutex::new(if use_system { TextEngine::with_system_fonts() } else { TextEngine::new() })
-    })
+    SHARED.get_or_init(new_shared)
+}
+
+/// [`shared`] without blocking: `None` while the system font scan is still running on its
+/// background thread (started here if [`warm_shared`] has not started it yet). Without system
+/// fonts (web, tests) the engine is cheap and this always returns it.
+pub fn try_shared() -> Option<&'static std::sync::Mutex<TextEngine>> {
+    SHARED.try_get(new_shared, uses_system_fonts())
+}
+
+/// Preferences › Type › Enable Missing Glyph Protection for [`shared`]: 0 = not set yet,
+/// 1 = off, 2 = on. Read under the engine's lock, so the newest setting always wins.
+static WANT_GLYPH_PROTECTION: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// A thread is already waiting for the font scan to apply [`WANT_GLYPH_PROTECTION`].
+static GLYPH_PROTECTION_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn apply_glyph_protection(engine: &std::sync::Mutex<TextEngine>) {
+    let mut e = engine.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match WANT_GLYPH_PROTECTION.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => e.fonts.set_missing_glyph_protection(false),
+        2 => e.fonts.set_missing_glyph_protection(true),
+        _ => {}
+    }
+}
+
+/// Sets [`shared`]'s missing-glyph protection without waiting for the system font scan (#4519):
+/// applied now when the engine is built, otherwise by a helper thread once the scan finishes.
+/// Called from the UI thread at launch and on every preferences change, where [`shared`] would
+/// block until the scan is done.
+pub fn set_shared_missing_glyph_protection(on: bool) {
+    WANT_GLYPH_PROTECTION.store(if on { 2 } else { 1 }, std::sync::atomic::Ordering::SeqCst);
+    if let Some(engine) = try_shared() {
+        apply_glyph_protection(engine);
+        return;
+    }
+    if GLYPH_PROTECTION_WAITING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        // The waiting thread reads the newest setting when it applies it.
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("photosplice-glyph-protection".into()).spawn(|| apply_glyph_protection(shared()));
+    if spawned.is_err() {
+        // No thread: apply it here, as before.
+        GLYPH_PROTECTION_WAITING.store(false, std::sync::atomic::Ordering::SeqCst);
+        apply_glyph_protection(shared());
+    }
+}
+
+/// Starts building [`shared`] (the system font scan) on a background thread, so the Type tool's
+/// font menus don't stall the UI when they first draw. Call once at startup; calling again does
+/// nothing.
+pub fn warm_shared() {
+    let _ = try_shared();
+}
+
+mod warm {
+    use std::sync::{Mutex, OnceLock, PoisonError};
+    use std::thread::JoinHandle;
+
+    /// A lazily built value whose (slow) construction can run on a background thread.
+    pub(crate) struct Warm<T: 'static> {
+        cell: OnceLock<T>,
+        scan: Mutex<Option<JoinHandle<()>>>,
+    }
+
+    impl<T: Send + Sync + 'static> Warm<T> {
+        pub(crate) const fn new() -> Self {
+            Self { cell: OnceLock::new(), scan: Mutex::new(None) }
+        }
+
+        /// The value, building it on this thread (or waiting for the background build).
+        pub(crate) fn get_or_init(&'static self, init: fn() -> T) -> &'static T {
+            self.cell.get_or_init(init)
+        }
+
+        /// The value if it is built. With `background`, the first call starts building it on a
+        /// worker thread and returns `None` until that finishes; otherwise (or when no thread can
+        /// be started, or the worker died) it is built here.
+        pub(crate) fn try_get(&'static self, init: fn() -> T, background: bool) -> Option<&'static T> {
+            if let Some(v) = self.cell.get() {
+                return Some(v);
+            }
+            if !background {
+                return Some(self.get_or_init(init));
+            }
+            let mut scan = self.scan.lock().unwrap_or_else(PoisonError::into_inner);
+            match scan.as_ref() {
+                Some(worker) if !worker.is_finished() => None,
+                // Finished: the value is set, or the worker panicked and this thread retries.
+                Some(_) => {
+                    drop(scan);
+                    Some(self.get_or_init(init))
+                }
+                None => match std::thread::Builder::new().name("photosplice-font-scan".into()).spawn(move || {
+                    self.get_or_init(init);
+                }) {
+                    Ok(worker) => {
+                        *scan = Some(worker);
+                        self.cell.get()
+                    }
+                    Err(_) => {
+                        drop(scan);
+                        Some(self.get_or_init(init))
+                    }
+                },
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::Warm;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        static OPEN: AtomicBool = AtomicBool::new(false);
+
+        /// A slow build: waits until the test opens the gate (at most 2 s).
+        fn slow() -> u32 {
+            let start = Instant::now();
+            while !OPEN.load(Ordering::SeqCst) && start.elapsed() < Duration::from_secs(2) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            7
+        }
+
+        #[test]
+        fn try_get_does_not_block_while_the_background_build_runs() {
+            static W: Warm<u32> = Warm::new();
+            let start = Instant::now();
+            assert_eq!(W.try_get(slow, true), None, "the first call starts the build and returns at once");
+            assert_eq!(W.try_get(slow, true), None, "still building");
+            assert!(start.elapsed() < Duration::from_secs(1), "try_get blocked for {:?}", start.elapsed());
+            OPEN.store(true, Ordering::SeqCst);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let v = loop {
+                if let Some(v) = W.try_get(slow, true) {
+                    break *v;
+                }
+                assert!(Instant::now() < deadline, "the background build never finished");
+                std::thread::sleep(Duration::from_millis(1));
+            };
+            assert_eq!(v, 7);
+            assert_eq!(W.get_or_init(slow), &7);
+        }
+    }
 }
 
 #[cfg(test)]

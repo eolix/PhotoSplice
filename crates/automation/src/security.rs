@@ -1,11 +1,11 @@
 //! Shared security primitives for the loopback JSON control transports.
 
 use std::fs::OpenOptions;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -17,8 +17,14 @@ pub const AUTH_METHOD: &str = "auth";
 pub const MAX_REQUEST_BYTES: usize = 1 << 20;
 /// Maximum simultaneously serviced TCP connections per listener.
 pub const MAX_CONNECTIONS: usize = 16;
+/// Maximum commands or method calls in one batch.
+pub const MAX_BATCH_STEPS: usize = 256;
 /// Idle/read and write timeout for loopback TCP connections.
 pub const IO_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a new TCP connection has to authenticate, however active it is. [`IO_TIMEOUT`] starts
+/// again with every read, so a client that kept sending without ever completing `auth` held one
+/// of the [`MAX_CONNECTIONS`] permits for as long as it liked (#4965).
+pub const AUTH_DEADLINE: Duration = Duration::from_secs(10);
 
 const TOKEN_BYTES: usize = 32;
 const TOKEN_HEX_LEN: usize = TOKEN_BYTES * 2;
@@ -114,6 +120,18 @@ pub fn authentication_reply(line: &str, expected_token: &str) -> (Value, bool) {
     } else {
         (json!({"id": id, "ok": false, "error": "authentication required"}), false)
     }
+}
+
+/// Answer a repeat `auth` frame on an already authenticated connection. Returns `None` for any
+/// other frame, which the caller dispatches as usual.
+/// Without this, a second `auth` fell through to the method dispatcher as an unknown method.
+pub fn repeat_auth_reply(line: &str) -> Option<Value> {
+    let req: Value = serde_json::from_str(line).ok()?;
+    if req.get("method").and_then(Value::as_str) != Some(AUTH_METHOD) {
+        return None;
+    }
+    let id = req.get("id").cloned().unwrap_or(Value::Null);
+    Some(json!({"id": id, "ok": false, "error": "already authenticated"}))
 }
 
 fn read_token_file(path: &Path) -> Result<String, AutomationError> {
@@ -228,6 +246,44 @@ pub fn configure_stream(stream: &std::net::TcpStream) -> std::io::Result<()> {
     stream.set_write_timeout(Some(IO_TIMEOUT))
 }
 
+/// The read half of a control connection. Until [`Self::authenticated`] is called, reads fail
+/// with `TimedOut` once the authentication deadline has passed, whatever arrived in the meantime;
+/// the caller then drops the connection and its [`ConnectionPermit`].
+pub struct AuthDeadlineStream {
+    stream: std::net::TcpStream,
+    /// `None` once authenticated.
+    deadline: Option<Instant>,
+}
+
+impl AuthDeadlineStream {
+    /// `stream` must authenticate within `limit` from now (normally [`AUTH_DEADLINE`]).
+    pub fn new(stream: std::net::TcpStream, limit: Duration) -> Self {
+        // A limit too large to represent expires at once rather than never.
+        let now = Instant::now();
+        Self { stream, deadline: Some(now.checked_add(limit).unwrap_or(now)) }
+    }
+
+    /// The connection authenticated: only the idle timeout applies from here on.
+    pub fn authenticated(&mut self) -> std::io::Result<()> {
+        self.deadline = None;
+        self.stream.set_read_timeout(Some(IO_TIMEOUT))
+    }
+}
+
+impl Read for AuthDeadlineStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if let Some(deadline) = self.deadline {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "not authenticated in time"));
+            }
+            // Wait no longer than what is left, so a silent client is dropped at the deadline too.
+            self.stream.set_read_timeout(Some(left.min(IO_TIMEOUT)))?;
+        }
+        self.stream.read(buf)
+    }
+}
+
 /// Environment-aware token inputs shared by the desktop app and CLI.
 pub fn token_inputs(supplied: Option<String>, token_file: Option<PathBuf>) -> (Option<String>, Option<PathBuf>) {
     let supplied = supplied.or_else(|| std::env::var("PHOTOSPLICE_CONTROL_TOKEN").ok());
@@ -293,6 +349,17 @@ mod tests {
     }
 
     #[test]
+    fn repeat_auth_on_an_authenticated_connection_says_so() {
+        let line = json!({"id": 3, "method": AUTH_METHOD, "params": {"token": "anything"}}).to_string();
+        let reply = repeat_auth_reply(&line).unwrap();
+        assert_eq!(reply["id"], 3);
+        assert_eq!(reply["ok"], false);
+        assert_eq!(reply["error"], "already authenticated");
+        assert!(repeat_auth_reply(r#"{"id":4,"method":"methods"}"#).is_none());
+        assert!(repeat_auth_reply("{not json").is_none());
+    }
+
+    #[test]
     fn token_file_round_trips_between_server_and_client() {
         let path = std::env::temp_dir().join(format!("photosplice-control-token-{}-{}.txt", std::process::id(), generate_token().unwrap()));
         let server = server_token(None, Some(&path)).unwrap();
@@ -300,6 +367,70 @@ mod tests {
         assert_eq!(server, client);
         assert!(token_matches(&server, &client));
         std::fs::remove_file(path).unwrap();
+    }
+
+    /// A connected loopback pair: the accepted (server) end and the client end.
+    fn tcp_pair() -> (std::net::TcpStream, std::net::TcpStream) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        configure_stream(&server).unwrap();
+        (server, client)
+    }
+
+    /// #4965: activity must not extend the time a connection may stay unauthenticated.
+    #[test]
+    fn an_active_connection_is_dropped_at_the_authentication_deadline() {
+        let (server, mut client) = tcp_pair();
+        // A byte every 20 ms and never a newline: each read succeeds long before the idle timeout.
+        let trickle = std::thread::spawn(move || {
+            for _ in 0..150 {
+                if client.write_all(b"x").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let mut reader = std::io::BufReader::new(AuthDeadlineStream::new(server, Duration::from_millis(300)));
+        let mut line = String::new();
+        let started = Instant::now();
+        let err = read_bounded_line(&mut reader, &mut line).unwrap_err();
+        assert!(matches!(err.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock), "{err}");
+        assert!(started.elapsed() >= Duration::from_millis(250), "not before the deadline: {:?}", started.elapsed());
+        assert!(started.elapsed() < Duration::from_secs(3), "the trickle did not extend it: {:?}", started.elapsed());
+        // It stays expired.
+        assert!(read_bounded_line(&mut reader, &mut line).is_err());
+        drop(reader);
+        trickle.join().unwrap();
+    }
+
+    #[test]
+    fn a_silent_connection_is_dropped_at_the_authentication_deadline() {
+        let (server, _client) = tcp_pair();
+        let mut reader = std::io::BufReader::new(AuthDeadlineStream::new(server, Duration::from_millis(200)));
+        let mut line = String::new();
+        let started = Instant::now();
+        assert!(read_bounded_line(&mut reader, &mut line).is_err());
+        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn an_authenticated_connection_outlives_the_authentication_deadline() {
+        let (server, mut client) = tcp_pair();
+        let sender = std::thread::spawn(move || {
+            client.write_all(b"one\n").unwrap();
+            std::thread::sleep(Duration::from_millis(500));
+            client.write_all(b"two\n").unwrap();
+        });
+        let mut reader = std::io::BufReader::new(AuthDeadlineStream::new(server, Duration::from_millis(200)));
+        let mut line = String::new();
+        assert_eq!(read_bounded_line(&mut reader, &mut line).unwrap(), LineRead::Line);
+        assert_eq!(line, "one\n");
+        reader.get_mut().authenticated().unwrap();
+        // Sent 300 ms after the deadline: only the idle timeout applies now.
+        assert_eq!(read_bounded_line(&mut reader, &mut line).unwrap(), LineRead::Line);
+        assert_eq!(line, "two\n");
+        sender.join().unwrap();
     }
 
     #[test]

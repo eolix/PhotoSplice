@@ -12,9 +12,9 @@
   warning when no signing secrets are set).
 
   Needs: Rust (MSVC toolchain + the target), the Windows SDK (rc.exe, signtool.exe),
-  and WiX v5 with its UI extension (added below when missing):
+  and WiX v5 with its UI and Util extensions (added below when missing):
     dotnet tool install --global wix --version 5.0.2
-    wix extension add -g WixToolset.UI.wixext/5.0.2
+    wix extension add -g WixToolset.UI.wixext/5.0.2 WixToolset.Util.wixext/5.0.2
 
 .EXAMPLE
   pwsh packaging/windows/package.ps1 -Arch x64
@@ -88,15 +88,58 @@ foreach ($f in 'README.md', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE', 'THIRD-PA
 & (Join-Path $PSScriptRoot 'sign.ps1') (Join-Path $Stage 'photosplice.exe')
 
 # ---- MSI ---------------------------------------------------------------------------------------
+# The setup wizard's art, drawn here from the app icon so the MSI shows PhotoSplice rather than
+# WiX's stock bitmaps: a 493x58 banner across the top of the inner pages (the page title is drawn
+# over its left side, so that stays white) and a 493x312 backdrop for the Welcome and Finish pages
+# (their text sits on the right; the left 164 px are ours). Both must be 24-bit BMPs.
+function New-InstallerArt([string] $IconPng, [string] $BannerOut, [string] $DialogOut) {
+  Add-Type -AssemblyName System.Drawing
+  $paper = [System.Drawing.ColorTranslator]::FromHtml('#efe9dc')
+  $accent = [System.Drawing.ColorTranslator]::FromHtml('#2f7bf5')
+  $icon = [System.Drawing.Image]::FromFile($IconPng)
+  try {
+    foreach ($spec in @(@($BannerOut, 493, 58), @($DialogOut, 493, 312))) {
+      $bmp = New-Object System.Drawing.Bitmap $spec[1], $spec[2], ([System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+      $g = [System.Drawing.Graphics]::FromImage($bmp)
+      try {
+        $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $g.Clear([System.Drawing.Color]::White)
+        if ($spec[2] -eq 58) {
+          $g.DrawImage($icon, 493 - 46 - 8, 6, 46, 46)
+        } else {
+          $panel = New-Object System.Drawing.SolidBrush $paper
+          $stripe = New-Object System.Drawing.SolidBrush $accent
+          $g.FillRectangle($panel, 0, 0, 164, 312)
+          $g.FillRectangle($stripe, 160, 0, 4, 312)
+          $g.DrawImage($icon, 18, 64, 124, 124)
+          $panel.Dispose(); $stripe.Dispose()
+        }
+      } finally { $g.Dispose() }
+      $bmp.Save($spec[0], [System.Drawing.Imaging.ImageFormat]::Bmp)
+      $bmp.Dispose()
+    }
+  } finally { $icon.Dispose() }
+}
+$Banner = Join-Path $Stage 'installer-banner.bmp'
+$Dialog = Join-Path $Stage 'installer-dialog.bmp'
+New-InstallerArt (Join-Path $Root 'assets\app-icon\hicolor\256x256\apps\io.github.eolix.PhotoSplice.png') $Banner $Dialog
+
 $Msi = Join-Path $Dist "photosplice-$Version-windows-$Arch.msi"
 & (Join-Path $PSScriptRoot 'check-icons.ps1')
-# The setup wizard's dialogs come from WiX's UI extension.
-if (-not (wix extension list -g | Select-String -SimpleMatch 'WixToolset.UI.wixext')) {
-  Invoke-Native 'wix extension add' { wix extension add -g WixToolset.UI.wixext/5.0.2 }
+# The setup wizard's dialogs come from WiX's UI extension; launching the app from its Finish page
+# from the Util extension.
+foreach ($ext in 'WixToolset.UI.wixext', 'WixToolset.Util.wixext') {
+  if (-not (wix extension list -g | Select-String -SimpleMatch $ext)) {
+    Invoke-Native "wix extension add $ext" { wix extension add -g "$ext/5.0.2" }
+  }
 }
 Invoke-Native 'wix build' {
-  wix build (Join-Path $PSScriptRoot 'photosplice.wxs') -arch $Arch -ext WixToolset.UI.wixext `
-    -d "Version=$MsiVersion" -d "BinDir=$Stage" -d "IconPath=$(Join-Path $Root 'assets\app-icon\photosplice.ico')" `
+  wix build (Join-Path $PSScriptRoot 'photosplice.wxs') -arch $Arch `
+    -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext `
+    -culture en-US -loc (Join-Path $PSScriptRoot 'photosplice.en-us.wxl') `
+    -d "Version=$MsiVersion" -d "DisplayVersion=$Version" -d "BinDir=$Stage" -d "IconPath=$(Join-Path $Root 'assets\app-icon\photosplice.ico')" `
+    -d "BannerBmp=$Banner" -d "DialogBmp=$Dialog" `
     -o $Msi
 }
 Invoke-Native 'MSI shortcut icon validation (ICE50)' {

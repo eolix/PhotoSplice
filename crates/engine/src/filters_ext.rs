@@ -153,7 +153,8 @@ pub fn params_for(id: &str, p: &Value) -> Option<FilterParams> {
             vertical: f(p, "vertical", 10.0).clamp(-999.0, 999.0),
             stretch: s(p, "fit", "stretch") != "tile",
             undefined: undefined(p, "repeat"),
-            map: None,
+            // A Displace imported from PSD carries its map; `mapPath` / `mapDocument` resolve later.
+            map: photosplice_io::smart_map::displace_embedded_map(p),
         },
         "filter.distort.shear" => FilterParams::Shear {
             points: list::<[f32; 2]>(p, "points").unwrap_or_else(|| {
@@ -329,16 +330,25 @@ pub fn params_for(id: &str, p: &Value) -> Option<FilterParams> {
             pins: list::<FieldPin>(p, "pins").unwrap_or_else(|| vec![FieldPin { x: f(p, "centerX", 0.5), y: f(p, "centerY", 0.5), blur: blur(15.0) }]),
         },
         "filter.blurGallery.spinBlur" => FilterParams::SpinBlur {
-            pins: list::<SpinPin>(p, "pins").unwrap_or_else(|| {
-                vec![SpinPin {
-                    x: f(p, "centerX", 0.5),
-                    y: f(p, "centerY", 0.5),
-                    radius_x: f(p, "radiusX", 0.3).max(0.001),
-                    radius_y: f(p, "radiusY", 0.3).max(0.001),
-                    angle: f(p, "angle", 0.0),
-                    blur_angle: f(p, "blurAngle", 15.0).clamp(0.0, 360.0),
-                }]
-            }),
+            pins: list::<SpinPin>(p, "pins")
+                .map(|mut v| {
+                    for pin in &mut v {
+                        pin.angle = if pin.angle.is_finite() { pin.angle.clamp(-360.0, 360.0) } else { 0.0 };
+                        pin.blur_angle = if pin.blur_angle.is_finite() { pin.blur_angle.clamp(0.0, 360.0) } else { 0.0 };
+                    }
+                    v
+                })
+                .unwrap_or_else(|| {
+                    let a = f(p, "angle", 0.0);
+                    vec![SpinPin {
+                        x: f(p, "centerX", 0.5),
+                        y: f(p, "centerY", 0.5),
+                        radius_x: f(p, "radiusX", 0.3).max(0.001),
+                        radius_y: f(p, "radiusY", 0.3).max(0.001),
+                        angle: if a.is_finite() { a.clamp(-360.0, 360.0) } else { 0.0 },
+                        blur_angle: f(p, "blurAngle", 15.0).clamp(0.0, 360.0),
+                    }]
+                }),
         },
         "filter.blurGallery.pathBlur" => FilterParams::PathBlur {
             paths: list::<BlurPath>(p, "paths")
@@ -377,6 +387,7 @@ pub fn params_for(id: &str, p: &Value) -> Option<FilterParams> {
             };
             FilterParams::HsbHsl { input: m("inputMode", "rgb"), output: m("rowOrder", "hsb") }
         }
+        crate::color_to_alpha_cmds::ID => crate::color_to_alpha_cmds::params(p),
         // ---- Video ----
         "filter.video.deInterlace" => FilterParams::DeInterlace {
             eliminate_even: s(p, "eliminate", "oddFields") == "evenFields",
@@ -425,10 +436,8 @@ pub(crate) fn resolve(s: &Session, fp: &mut FilterParams, p: &Value) -> Result<(
         return Ok(());
     }
     let layer = p.get("mapLayer").and_then(Value::as_u64);
-    let img = if let Some(path) = p.get("mapPath").and_then(Value::as_str).filter(|p| !p.is_empty()) {
-        let bytes = std::fs::read(path).map_err(|e| EngineError::Other(format!("cannot read displacement map `{path}`: {e}")))?;
-        let imported = photosplice_io::import(path, &bytes).map_err(|e| EngineError::Other(format!("cannot open displacement map `{path}`: {e}")))?;
-        map_from_document(&imported.document, layer)
+    let img = if let Some(path) = map_path(p) {
+        map_from_path(path, layer)?
     } else if let Some(d) = p.get("mapDocument") {
         let docs = s.documents();
         let found = match d {
@@ -441,6 +450,30 @@ pub(crate) fn resolve(s: &Session, fp: &mut FilterParams, p: &Value) -> Result<(
         return Err(EngineError::Other("Displace needs a displacement map: pass `mapPath` or `mapDocument`".into()));
     };
     *map = Some(Arc::new(img.ok_or_else(|| EngineError::Other("the displacement map is empty".into()))?));
+    Ok(())
+}
+
+fn map_path(p: &Value) -> Option<&str> {
+    p.get("mapPath").and_then(Value::as_str).filter(|p| !p.is_empty())
+}
+
+/// Displace's map read from a file (flattened, or its `mapLayer`).
+fn map_from_path(path: &str, layer: Option<u64>) -> Result<Option<algo::Image>> {
+    let bytes = std::fs::read(path).map_err(|e| EngineError::Other(format!("cannot read displacement map `{path}`: {e}")))?;
+    let imported = crate::file_cmds::import(path, &bytes).map_err(|e| EngineError::Other(format!("cannot open displacement map `{path}`: {e}")))?;
+    Ok(map_from_document(&imported, layer))
+}
+
+/// The session-free part of [`resolve`]: Displace's `mapPath`. Smart filters record params, not
+/// the map, so their re-render reads the map again here; without it the filter passed the pixels
+/// through. `mapDocument` needs the session and is left unresolved.
+pub(crate) fn resolve_map_path(fp: &mut FilterParams, p: &Value) -> Result<()> {
+    if let FilterParams::Displace { map, .. } = fp
+        && map.is_none()
+        && let Some(path) = map_path(p)
+    {
+        *map = map_from_path(path, p.get("mapLayer").and_then(Value::as_u64))?.map(Arc::new);
+    }
     Ok(())
 }
 

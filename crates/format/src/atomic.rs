@@ -13,6 +13,9 @@
 //!   if it does anyway, the save fails with a clear error. It never falls back to writing the
 //!   destination in place.
 //! - **Unwritable folder:** the save fails with a clear error instead of writing in place.
+//! - **Network shares (macOS):** `sync_all` asks for a full flush to the disk's platters
+//!   (`F_FULLFSYNC`), which SMB shares and some virtual file systems refuse while a plain `fsync`
+//!   works. [`sync_file`] falls back to the plain one there (#1336).
 //!
 //! On the web there is no file system: writes go through the platform services (downloads), so
 //! this module is never reached there; on `wasm32` every call returns the `std` "unsupported"
@@ -27,8 +30,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// The file-system steps [`atomic_write_with`] performs. [`RealFs`] is the real thing; tests
 /// wrap it to inject failures.
 pub trait AtomicFs {
-    /// Create `tmp` (it must not exist), write all of `bytes` and `sync_all` it.
+    /// Create `tmp` (it must not exist), write all of `bytes` and flush it ([`sync_file`]).
     fn write_new(&self, tmp: &Path, bytes: &[u8]) -> io::Result<()>;
+    /// [`write_new`](Self::write_new), reporting the fraction of `bytes` written so far to
+    /// `progress` (a save's progress bar, #3389). By default it reports nothing.
+    fn write_new_progress(&self, tmp: &Path, bytes: &[u8], progress: &dyn Fn(f32)) -> io::Result<()> {
+        let _ = progress;
+        self.write_new(tmp, bytes)
+    }
     /// Rename `from` over `to`, replacing it.
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
     /// Remove a (temporary) file.
@@ -44,11 +53,22 @@ pub trait AtomicFs {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RealFs;
 
+/// How much [`RealFs::write_new_progress`] writes between progress reports.
+const WRITE_CHUNK: usize = 8 << 20;
+
 impl AtomicFs for RealFs {
     fn write_new(&self, tmp: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.write_new_progress(tmp, bytes, &|_| {})
+    }
+    fn write_new_progress(&self, tmp: &Path, bytes: &[u8], progress: &dyn Fn(f32)) -> io::Result<()> {
         let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()
+        let mut written = 0usize;
+        for chunk in bytes.chunks(WRITE_CHUNK) {
+            f.write_all(chunk)?;
+            written = written.saturating_add(chunk.len());
+            progress(written as f32 / bytes.len().max(1) as f32);
+        }
+        sync_file(&f)
     }
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         std::fs::rename(from, to)
@@ -59,7 +79,7 @@ impl AtomicFs for RealFs {
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
         #[cfg(unix)]
         {
-            std::fs::File::open(dir)?.sync_all()
+            sync_file(&std::fs::File::open(dir)?)
         }
         #[cfg(not(unix))]
         {
@@ -71,6 +91,37 @@ impl AtomicFs for RealFs {
         let perms = std::fs::metadata(from)?.permissions();
         std::fs::set_permissions(to, perms)
     }
+}
+
+/// Flush `file` to stable storage (`sync_all`). On Apple platforms that is a full flush
+/// (`F_FULLFSYNC`); where the file system can't do one (SMB shares refuse it with `ENOTSUP`,
+/// #1336; Tart's shared folders with `ENOTTY`) this falls back to a plain `fsync`, as Apple's own
+/// `removefile` does. Any other error is returned as it is.
+pub fn sync_file(file: &std::fs::File) -> io::Result<()> {
+    #[cfg(target_vendor = "apple")]
+    {
+        or_plain_fsync(file.sync_all(), || rustix::fs::fsync(file).map_err(io::Error::from))
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        file.sync_all()
+    }
+}
+
+/// `full`, or `fsync()` when `full` failed only because the file system can't do a full flush.
+pub fn or_plain_fsync(full: io::Result<()>, fsync: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+    match full {
+        Err(e) if full_flush_unsupported(&e) => fsync(),
+        other => other,
+    }
+}
+
+/// Whether `e` is a file system refusing a full flush (`F_FULLFSYNC`): `ENOTSUP` (45, SMB) or
+/// `ENOTTY` (25) on Apple platforms. Never elsewhere: there `sync_all` is a plain `fsync`.
+fn full_flush_unsupported(e: &io::Error) -> bool {
+    const ENOTTY: i32 = 25;
+    const ENOTSUP: i32 = 45;
+    cfg!(target_vendor = "apple") && matches!(e.raw_os_error(), Some(ENOTSUP | ENOTTY))
 }
 
 /// How hard to retry a rename that fails with `PermissionDenied`.
@@ -98,8 +149,19 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     atomic_write_with(&RealFs, RenameRetry::platform(), path, bytes)
 }
 
+/// [`atomic_write`] reporting the fraction of `bytes` written to `progress` as it goes (a save's
+/// progress bar, #3389); the flush and rename follow the last report.
+pub fn atomic_write_progress(path: &Path, bytes: &[u8], progress: &dyn Fn(f32)) -> io::Result<()> {
+    atomic_write_with_progress(&RealFs, RenameRetry::platform(), path, bytes, progress)
+}
+
 /// [`atomic_write`] through an explicit file system and retry policy (the failure-injection seam).
 pub fn atomic_write_with(fs: &dyn AtomicFs, retry: RenameRetry, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    atomic_write_with_progress(fs, retry, path, bytes, &|_| {})
+}
+
+/// [`atomic_write_with`] reporting write progress (see [`atomic_write_progress`]).
+pub fn atomic_write_with_progress(fs: &dyn AtomicFs, retry: RenameRetry, path: &Path, bytes: &[u8], progress: &dyn Fn(f32)) -> io::Result<()> {
     let target = resolve_symlink(path);
     let name = target.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("{}: not a file path", path.display())))?;
     let dir = match target.parent() {
@@ -113,7 +175,7 @@ pub fn atomic_write_with(fs: &dyn AtomicFs, retry: RenameRetry, path: &Path, byt
     let mut tmp = None;
     for _ in 0..8 {
         let candidate = dir.join(temp_name(&name.to_string_lossy()));
-        match fs.write_new(&candidate, bytes) {
+        match fs.write_new_progress(&candidate, bytes, progress) {
             Ok(()) => {
                 tmp = Some(candidate);
                 break;

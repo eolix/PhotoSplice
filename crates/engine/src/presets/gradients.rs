@@ -234,6 +234,13 @@ pub fn builtin() -> Vec<Group<GradientPreset>> {
         stops: vec![(0.0, StopColor::Foreground), (1.0, StopColor::Foreground)],
         opacity: vec![(0.0, 1.0), (1.0, 0.0)],
     };
+    // A smooth spectrum: 13 hues evenly spaced from red (0°) to magenta (300°). The pastel and
+    // neon presets reuse the same hues at a different saturation/lightness, and Rainbow Fade
+    // reuses the classic ramp with its ends transparent. Colours are our own.
+    let rainbow = GradientPreset::new(
+        "Rainbow",
+        &["#ec1313", "#ec6d13", "#ecc813", "#b6ec13", "#5bec13", "#13ec25", "#13ec80", "#13ecda", "#13a4ec", "#1349ec", "#3713ec", "#9213ec", "#ec13ec"],
+    );
     vec![
         Group::new("Basics", vec![GradientPreset::foreground_to_background(), fg_transparent, GradientPreset::new("Black, White", &["#000000", "#ffffff"])]),
         Group::new(
@@ -348,6 +355,31 @@ pub fn builtin() -> Vec<Group<GradientPreset>> {
                 ],
             ),
         ),
+        Group::new(
+            "Rainbows",
+            vec![
+                rainbow.clone(),
+                GradientPreset::new(
+                    "Pastel Rainbow",
+                    &[
+                        "#f4afaf", "#f4cbaf", "#f4e8af", "#e2f4af", "#c6f4af", "#aff4b4", "#aff4d1", "#aff4ee", "#afddf4", "#afc0f4", "#baaff4", "#d7aff4",
+                        "#f4aff4",
+                    ],
+                ),
+                GradientPreset::new(
+                    "Neon Rainbow",
+                    &[
+                        "#ff0000", "#ff6a00", "#ffd400", "#bfff00", "#55ff00", "#00ff15", "#00ff80", "#00ffea", "#00aaff", "#0040ff", "#2a00ff", "#9500ff",
+                        "#ff00ff",
+                    ],
+                ),
+                GradientPreset::new(
+                    "Oil Slick",
+                    &["#0b0f1a", "#1b2a4a", "#0f6f6f", "#1fae8a", "#5ac8a8", "#7a5cff", "#b13bd6", "#e04a8f", "#f2a65a", "#3a2a6b", "#0b0f1a"],
+                ),
+                GradientPreset { name: "Rainbow Fade".into(), opacity: vec![(0.0, 0.0), (0.125, 1.0), (0.875, 1.0), (1.0, 0.0)], ..rainbow },
+            ],
+        ),
     ]
 }
 
@@ -360,6 +392,9 @@ pub type Stops = Vec<(f32, [f32; 4])>;
 pub type FillStops = (Vec<(f32, Color)>, Vec<(f32, f32)>);
 
 const CMD_SELECT: &str = "gradient.presets.select";
+
+/// The Gradient tool's current gradient, as a one-stop edit target (`gradient.presets.stop`).
+pub const STOP: &str = "gradient.presets.stop";
 
 /// Gradient for the Gradient tool: `"gradient": preset name`, else explicit `"stops"`, else the
 /// current gradient (Gradients panel selection); explicit `"transparency"` stops replace its
@@ -417,10 +452,11 @@ fn select(s: &mut Session, p: &Value) -> Result<Value> {
     {
         let (stops_new, opacity_new) = g.fill_stops(s.tools.foreground, s.tools.background);
         s.edit("Change Gradient Fill", |doc, _| {
+            let mode = doc.mode;
             if let Some(l) = doc.layer_mut(id)
                 && let LayerContent::Fill(Fill::Gradient { stops, opacity_stops, midpoints, .. }) = &mut l.content
             {
-                *stops = stops_new;
+                *stops = stops_new.into_iter().map(|(t, c)| (t, c.in_mode(mode))).collect();
                 *opacity_stops = opacity_new;
                 midpoints.clear();
             }
@@ -429,6 +465,138 @@ fn select(s: &mut Session, p: &Value) -> Result<Value> {
         out["layer"] = json!(id.0);
     }
     Ok(out)
+}
+
+/// A preset stop colour: `"#rrggbb"`, `"foreground"` or `"background"`.
+fn stop_color_param(v: &Value, cmd: &str) -> Result<StopColor> {
+    let s = v.as_str().ok_or_else(|| bad(cmd, "a stop colour is \"#rrggbb\", \"foreground\" or \"background\""))?;
+    match s {
+        "foreground" => Ok(StopColor::Foreground),
+        "background" => Ok(StopColor::Background),
+        h if h.trim_start_matches('#').len() == 6 && h.trim_start_matches('#').chars().all(|c| c.is_ascii_hexdigit()) => Ok(StopColor::Rgb(hex(h))),
+        o => Err(bad(cmd, format!("bad stop colour `{o}`"))),
+    }
+}
+
+/// Applies a `gradient.presets.stop` edit to the Gradient tool's current gradient: the
+/// `gradient.fill.stop` grammar (add|move|delete|color and the opacity kind) without a `layer`.
+/// Midpoints are rejected — presets keep them at the centre; edit a Gradient Fill layer to move
+/// them. Pure, so the editor previews a drag with exactly what the command commits.
+pub fn apply_preset_stop(g: &GradientPreset, p: &Value, fg: [f32; 4], bg: [f32; 4], cmd: &str) -> Result<GradientPreset> {
+    let mut out = g.clone();
+    let action = p.get("action").and_then(Value::as_str).ok_or_else(|| bad(cmd, "missing `action` (add|move|delete|color|opacity)"))?;
+    if action == "midpoint" {
+        return Err(bad(cmd, "preset gradients keep midpoints at the centre (edit a Gradient Fill layer to move them)"));
+    }
+    let opacity_kind = match p.get("kind").and_then(Value::as_str).unwrap_or("color") {
+        "color" => false,
+        "opacity" => true,
+        o => return Err(bad(cmd, format!("unknown kind `{o}` (color|opacity)"))),
+    };
+    let index = || -> Result<usize> {
+        p.get("index").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()).ok_or_else(|| bad(cmd, "missing `index` (a stop number from 0)"))
+    };
+    let location = || {
+        p.get("location")
+            .and_then(Value::as_f64)
+            .map(|v| v as f32)
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(0.0, 1.0))
+            .ok_or_else(|| bad(cmd, "missing `location` (0..1)"))
+    };
+    let ramp = g.resolve(fg, bg);
+    if opacity_kind {
+        // Opacity stops: an empty list means "opaque" (two 100 % stops when first edited).
+        let mut os = if out.opacity.is_empty() { vec![(0.0, 1.0), (1.0, 1.0)] } else { out.opacity.clone() };
+        os.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let opacity =
+            || p.get("opacity").and_then(Value::as_f64).map(|v| (v as f32 / 100.0).clamp(0.0, 1.0)).ok_or_else(|| bad(cmd, "missing `opacity` (0..100)"));
+        match action {
+            "add" => {
+                let t = location()?;
+                let a = match p.get("opacity") {
+                    Some(_) => opacity()?,
+                    None => sample(&ramp, t, lerp4).map_or(1.0, |c| c[3]),
+                };
+                os.push((t, a));
+            }
+            "move" => {
+                let (i, t) = (index()?, location()?);
+                os.get_mut(i).ok_or_else(|| bad(cmd, format!("no opacity stop {i}")))?.0 = t;
+            }
+            "delete" => {
+                let i = index()?;
+                if i >= os.len() {
+                    return Err(bad(cmd, format!("no opacity stop {i}")));
+                }
+                if os.len() <= 2 {
+                    return Err(bad(cmd, "a gradient keeps at least 2 opacity stops"));
+                }
+                os.remove(i);
+            }
+            "opacity" => {
+                let (i, a) = (index()?, opacity()?);
+                os.get_mut(i).ok_or_else(|| bad(cmd, format!("no opacity stop {i}")))?.1 = a;
+            }
+            o => return Err(bad(cmd, format!("unknown action `{o}` for opacity stops (add|move|delete|opacity)"))),
+        }
+        os.sort_by(|a, b| a.0.total_cmp(&b.0));
+        if os.len() > 1024 {
+            return Err(bad(cmd, "too many opacity stops (max 1024)"));
+        }
+        // Fully opaque again (the materialized ends left after edits, say): store as no opacity
+        // stops, like `fill_stops` reads them, instead of pinning explicit 100 % ends.
+        if os.iter().all(|o| (o.1 - 1.0).abs() < 1e-6) {
+            os.clear();
+        }
+        out.opacity = os;
+        return Ok(out);
+    }
+    let mut stops = out.stops.clone();
+    stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+    match action {
+        "add" => {
+            let t = location()?;
+            // A new stop takes the colour the gradient has there (Photoshop), unless given.
+            let c = match p.get("color") {
+                Some(v) => stop_color_param(v, cmd)?,
+                None => sample(&ramp, t, lerp4).map_or(StopColor::Rgb([0.0, 0.0, 0.0]), |c| StopColor::Rgb([c[0], c[1], c[2]])),
+            };
+            stops.push((t, c));
+            if stops.len() > 1024 {
+                return Err(bad(cmd, "too many colour stops (max 1024)"));
+            }
+        }
+        "move" => {
+            let (i, t) = (index()?, location()?);
+            stops.get_mut(i).ok_or_else(|| bad(cmd, format!("no colour stop {i}")))?.0 = t;
+        }
+        "delete" => {
+            let i = index()?;
+            if i >= stops.len() {
+                return Err(bad(cmd, format!("no colour stop {i}")));
+            }
+            if stops.len() <= 2 {
+                return Err(bad(cmd, "a gradient keeps at least 2 colour stops"));
+            }
+            stops.remove(i);
+        }
+        "color" => {
+            let (i, c) = (index()?, p.get("color").ok_or_else(|| bad(cmd, "missing `color`")).and_then(|v| stop_color_param(v, cmd))?);
+            stops.get_mut(i).ok_or_else(|| bad(cmd, format!("no colour stop {i}")))?.1 = c;
+        }
+        o => return Err(bad(cmd, format!("unknown action `{o}` (add|move|delete|color)"))),
+    }
+    stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+    out.stops = stops;
+    Ok(out)
+}
+
+fn stop(s: &mut Session, p: &Value) -> Result<Value> {
+    let g = apply_preset_stop(&s.presets.gradient, p, s.tools.foreground, s.tools.background, STOP)?;
+    s.presets.gradient = g;
+    s.presets_changed();
+    Ok(json!({"current": s.presets.gradient.to_json()}))
 }
 
 fn apply(s: &mut Session, p: &Value) -> Result<Value> {
@@ -440,7 +608,7 @@ fn apply(s: &mut Session, p: &Value) -> Result<Value> {
     let style = crate::layer_style::gradient_style(p.get("style").and_then(Value::as_str).unwrap_or("linear"));
     let reverse = p.get("reverse").and_then(Value::as_bool).unwrap_or(false);
     let id = s.edit("New Gradient Fill Layer", |doc, active| {
-        let fill = Fill::gradient(stops, angle, scale, style, reverse);
+        let fill = Fill::gradient(stops, angle, scale, style, reverse).in_mode(doc.mode);
         let id = doc.insert_above(*active, Layer::new(doc.next_layer_name("Gradient Fill"), LayerContent::Fill(fill)));
         *active = Some(id);
         Ok(id)
@@ -510,6 +678,16 @@ pub fn specs() -> Vec<CommandSpec> {
             )),
             enabled: always,
             run: select,
+            journal: true,
+        },
+        CommandSpec {
+            id: STOP,
+            label: "Edit Gradient Stop",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"action":"add|move|delete|color|opacity","kind":"color|opacity"="color","index":stop number,"location":0..1,"color":"#rrggbb"|"foreground"|"background" (add: default the colour there),"opacity":0..100} → {"current"}. Edits the Gradient tool's current gradient (no layer, midpoints stay centred)."##,
+            enabled: always,
+            run: stop,
             journal: true,
         },
         CommandSpec {

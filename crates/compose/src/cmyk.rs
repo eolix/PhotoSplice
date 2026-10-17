@@ -338,6 +338,12 @@ fn ink_luts(a: &Adjustment, cx: &Ctx) -> [Vec<f32>; 4] {
     if matches!(a, Adjustment::Levels { .. } | Adjustment::Curves { .. }) {
         return crate::adjust::tone_luts_depth(a, Some(cx.depth));
     }
+    // Brightness/Contrast has its own ink curve: the legacy contrast pivots at 128 in ink, 127 of
+    // 255 stored (Reference corpus cmyk16 brightness-contrast-legacy.psd).
+    if let Adjustment::BrightnessContrast { brightness, contrast, legacy } = a {
+        let row = crate::adjust::ink_brightness_contrast_lut(*brightness, *contrast, *legacy);
+        return [row.clone(), row.clone(), row.clone(), row];
+    }
     // One curve for every channel: the RGB adjustment sampled on a gray ramp.
     let n = crate::adjust::LUT_SIZE;
     let mut ramp = Buffer { rect: Rect::new(0, 0, n as i32, 1), px: (0..n).map(|k| [k as f32 / (n - 1) as f32; 4]).collect() };

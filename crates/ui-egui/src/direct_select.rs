@@ -1,4 +1,5 @@
-//! Direct Selection tool (A, #790), and the Pen's ⌘/Ctrl (Direct Selection) and ⌥/Alt (Convert
+//! Direct Selection tool (A, #790), the Convert Point tool, the Pens' ⌘/Ctrl (Direct Selection:
+//! the Pen, Freeform Pen, Curvature Pen and the anchor point tools) and the Pen's ⌥/Alt (Convert
 //! Point) modifiers, as in Photoshop. It edits the paths the canvas shows: the targeted vector
 //! mask or the active shape layer's path, and the work path.
 //!
@@ -6,8 +7,11 @@
 //!   canvas to marquee-select anchors, click empty canvas to deselect.
 //! * Drag selected anchors to move them, a direction handle to turn it (a smooth point keeps its
 //!   handles collinear; ⌥ breaks them apart), or a segment to bend it (straight segments move).
-//! * Pen + ⌥: click an anchor to make it a corner, drag from it to pull out smooth handles, drag a
-//!   handle to move it alone.
+//!   ⇧ while dragging anchors locks the move to 45° steps. The arrow keys nudge the selected
+//!   anchors 1 px (⇧ 10 px), one history step per press.
+//! * Convert Point (the tool, or Pen + ⌥): click an anchor to make it a corner, drag from it to
+//!   pull out smooth handles, drag a handle to move it alone. The tool selects the anchor it
+//!   converts, so its handles show; a press on empty canvas or a segment does nothing.
 //!
 //! A drag previews with `photosplice_vector::edit` and commits once on release through the engine
 //! (`path.moveAnchors`, `path.moveHandle`, `path.bendSegment`, `path.convertPoint`): one history
@@ -35,7 +39,7 @@ pub enum PathRef {
 
 impl PathRef {
     /// The engine's target params for this path.
-    fn params(self) -> Value {
+    pub(crate) fn params(self) -> Value {
         match self {
             PathRef::Work => json!({"name": "work"}),
             PathRef::Layer(id) => json!({"name": "layer", "layer": id}),
@@ -76,6 +80,12 @@ pub enum Edit {
 }
 
 impl Edit {
+    /// The drag's end with ⇧ held: moving anchors locks to multiples of 45°, as in the reference
+    /// (#5475).
+    fn constrain(&self, start: [f64; 2], p: [f64; 2], shift: bool) -> [f64; 2] {
+        if shift && matches!(self, Edit::Anchors(_)) { crate::stroke_constraint::snap45(start, p) } else { p }
+    }
+
     /// The edit for a drag from `start` to `end`, as a command and its params (without target).
     fn command(&self, start: [f64; 2], end: [f64; 2]) -> (&'static str, Value) {
         let d = [end[0] - start[0], end[1] - start[1]];
@@ -104,12 +114,27 @@ impl Edit {
     }
 }
 
-/// Is Direct Selection what the pointer does now: its own tool, or the Pen with ⌘/Ctrl held.
+/// Is Direct Selection what the pointer does now: its own tool, or a Pen (the Pen, Freeform Pen
+/// or Curvature Pen), an anchor point tool or Convert Point with ⌘/Ctrl held.
 fn direct(tool: Tool, mods: Modifiers) -> bool {
-    tool == Tool::DirectSelection || (tool == Tool::Pen && mods.command)
+    tool == Tool::DirectSelection
+        || (matches!(tool, Tool::Pen | Tool::FreeformPen | Tool::CurvaturePen | Tool::AddAnchorPoint | Tool::DeleteAnchorPoint | Tool::ConvertPoint)
+            && mods.command)
 }
 
-/// Does the canvas draw Direct Selection's overlay instead of the plain path outlines?
+/// Is Convert Point what the pointer does now: its own tool, or the Pen with ⌥ held while no path
+/// is being drawn. ⌘/Ctrl wins over both (Direct Selection).
+fn converting(tool: Tool, mods: Modifiers, pen_idle: bool) -> bool {
+    !mods.command && (tool == Tool::ConvertPoint || (tool == Tool::Pen && mods.alt && pen_idle))
+}
+
+/// The tools that take every pointer event on the canvas, not just a press that hits a path.
+fn owns(tool: Tool) -> bool {
+    matches!(tool, Tool::DirectSelection | Tool::ConvertPoint)
+}
+
+/// Does the canvas draw Direct Selection's overlay instead of the plain path outlines? The Add /
+/// Delete Anchor Point tools show it too: they edit the same paths.
 pub fn shows(app: &PhotospliceApp, mods: Modifiers) -> bool {
     let anchors = matches!(app.ui.tool, Tool::ConvertPoint | Tool::AddAnchorPoint | Tool::DeleteAnchorPoint);
     direct(app.ui.tool, mods) || anchors || app.ui.direct_selection.drag.is_some()
@@ -121,6 +146,11 @@ pub(crate) fn candidates(app: &PhotospliceApp) -> Vec<(PathRef, Path)> {
     let layer = crate::vector_ui::targeted_vector_mask(app).or_else(|| crate::vector_ui::active_shape_path(app));
     let work = app.session.active().and_then(|st| st.doc.work_path.clone());
     layer.map(|(id, p)| (PathRef::Layer(id), p)).into_iter().chain(work.map(|p| (PathRef::Work, p))).collect()
+}
+
+/// The active paths, front first (the same as [`candidates`]).
+pub fn active_paths(app: &PhotospliceApp) -> Vec<(PathRef, Path)> {
+    candidates(app)
 }
 
 fn retracted(k: &photosplice_doc::Knot, h: Handle) -> bool {
@@ -154,11 +184,11 @@ pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: Modifiers) -> bool
             let pen_idle = !app.ui.pen.drawing();
             // Pen + ⌥ is Convert Point only while no path is being drawn; the Convert Point tool is
             // it always.
-            let convert = (tool == Tool::Pen && mods.alt && !mods.command && pen_idle) || (tool == Tool::ConvertPoint && !mods.command);
+            let convert = converting(tool, mods, pen_idle);
             if !(direct(tool, mods) || convert) {
                 return false;
             }
-            if tool == Tool::Pen && !pen_idle {
+            if tool != Tool::DirectSelection && !pen_idle {
                 // ⌘-click ends the path being drawn, which becomes editable, as in Photoshop.
                 crate::pen_tool::end(app);
             }
@@ -168,32 +198,34 @@ pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: Modifiers) -> bool
             let ds = &mut app.ui.direct_selection;
             match &mut ds.drag {
                 Some(Drag::Edit { base, edit, start, end, preview, .. }) => {
-                    *end = [x, y];
+                    *end = edit.constrain(*start, [x, y], mods.shift);
                     *preview = edit.preview(base, *start, *end);
                 }
                 Some(Drag::Marquee { end, .. }) => *end = [x, y],
-                None => return matches!(tool, Tool::DirectSelection | Tool::ConvertPoint),
+                None => return owns(tool),
             }
             true
         }
         ToolEvent::Up { x, y } => match app.ui.direct_selection.drag.take() {
             Some(Drag::Edit { target, edit, start, .. }) => {
-                release(app, target, &edit, start, [x, y]);
+                let end = edit.constrain(start, [x, y], mods.shift);
+                release(app, target, &edit, start, end);
                 true
             }
             Some(Drag::Marquee { start, add, .. }) => {
                 marquee(app, start, [x, y], add);
                 true
             }
-            None => matches!(tool, Tool::DirectSelection | Tool::ConvertPoint),
+            None => owns(tool),
         },
     }
 }
 
 /// A press: pick what's under the pointer and start a drag. False lets the Pen handle a ⌥-press
-/// that hit nothing.
+/// that hit nothing; the Convert Point tool has nothing else to do, so it keeps the press.
 fn press(app: &mut PhotospliceApp, p: [f64; 2], mods: Modifiers, convert: bool) -> bool {
-    let tol = 6.0 / f64::from(app.current_zoom().max(0.01));
+    let own_tool = app.ui.tool == Tool::ConvertPoint;
+    let tol = 6.0 / f64::from(app.point_zoom().max(0.01));
     let ds = &app.ui.direct_selection;
     let found = candidates(app).into_iter().find_map(|(r, path)| {
         let handles = if ds.target == Some(r) { shown_handles(ds, &path) } else { Vec::new() };
@@ -202,7 +234,7 @@ fn press(app: &mut PhotospliceApp, p: [f64; 2], mods: Modifiers, convert: bool) 
     let ds = &mut app.ui.direct_selection;
     let Some((target, base, hit)) = found else {
         if convert {
-            return false;
+            return own_tool;
         }
         ds.drag = Some(Drag::Marquee { start: p, end: p, add: mods.shift });
         return true;
@@ -217,7 +249,14 @@ fn press(app: &mut PhotospliceApp, p: [f64; 2], mods: Modifiers, convert: bool) 
             // Convert Point (or ⌥) moves a handle alone: the point becomes a corner.
             Edit::Handle(k, h, from, mods.alt || convert)
         }
-        Hit::Anchor(k) if convert => Edit::Convert(k),
+        Hit::Anchor(k) if convert => {
+            if own_tool {
+                // The tool selects the anchor it works on, so the anchor's handles show.
+                ds.segment = None;
+                ds.anchors = vec![k];
+            }
+            Edit::Convert(k)
+        }
         // Pen + ⌥ on a segment does nothing.
         Hit::Segment(..) if convert => return true,
         Hit::Anchor(k) => {
@@ -254,7 +293,7 @@ fn press(app: &mut PhotospliceApp, p: [f64; 2], mods: Modifiers, convert: bool) 
 /// End of an edit drag: commit it as one command. A click (no movement) commits nothing, except
 /// Pen + ⌥ on an anchor, which makes it a corner.
 fn release(app: &mut PhotospliceApp, target: PathRef, edit: &Edit, start: [f64; 2], end: [f64; 2]) {
-    let moved = (end[0] - start[0]).hypot(end[1] - start[1]) * f64::from(app.current_zoom()) >= 1.0;
+    let moved = (end[0] - start[0]).hypot(end[1] - start[1]) * f64::from(app.point_zoom()) >= 1.0;
     let (id, mut params) = match edit {
         Edit::Convert([s, k]) if !moved => ("path.convertPoint", json!({"subpath": s, "knot": k})),
         _ if !moved => return,
@@ -293,11 +332,44 @@ fn marquee(app: &mut PhotospliceApp, start: [f64; 2], end: [f64; 2], add: bool) 
     }
 }
 
-/// Paths with their anchors (selected ones filled), the shown handles, the drag's preview in
-/// place of its path, and the marquee.
-pub fn draw_overlay(app: &PhotospliceApp, painter: &egui::Painter, to_scr: &dyn Fn([f64; 2]) -> Pos2, accent: Color32) {
+/// Arrow keys with Direct Selection and selected anchors (#4486), as in the reference: nudge them
+/// 1 px (⇧ 10 px) through `path.moveAnchors`, one history step per press. Not while a drag is
+/// in progress. Returns true when a key was used.
+pub fn arrow_keys(app: &mut PhotospliceApp, ctx: &egui::Context) -> bool {
     let ds = &app.ui.direct_selection;
-    for (r, path) in candidates(app) {
+    let Some(target) = ds.target.filter(|_| app.ui.tool == Tool::DirectSelection && !ds.anchors.is_empty() && ds.drag.is_none()) else {
+        return false;
+    };
+    let anchors = ds.anchors.clone();
+    use egui::Key;
+    let keys = [(Key::ArrowLeft, -1.0, 0.0), (Key::ArrowRight, 1.0, 0.0), (Key::ArrowUp, 0.0, -1.0), (Key::ArrowDown, 0.0, 1.0)];
+    for (key, ux, uy) in keys {
+        // ⇧ first: `consume_key` ignores an extra ⇧.
+        for mods in [Modifiers::SHIFT, Modifiers::NONE] {
+            if ctx.input_mut(|i| i.consume_key(mods, key)) {
+                let k = if mods.shift { 10.0 } else { 1.0 };
+                let mut params = json!({"anchors": anchors, "move": [ux * k, uy * k]});
+                if let (Some(p), Some(t)) = (params.as_object_mut(), target.params().as_object()) {
+                    p.extend(t.clone());
+                }
+                if let Err(e) = app.run("path.moveAnchors", params) {
+                    app.ui.status = e;
+                    app.ui.status_error = true;
+                }
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Paths with their anchors (selected ones filled), the shown handles, the drag's preview in
+/// place of its path, and the marquee. `paths` false (View › Show › Target Path off) leaves only
+/// the marquee.
+pub fn draw_overlay(app: &PhotospliceApp, painter: &egui::Painter, to_scr: &dyn Fn([f64; 2]) -> Pos2, accent: Color32, paths: bool) {
+    let ds = &app.ui.direct_selection;
+    let shown = if paths { candidates(app) } else { Vec::new() };
+    for (r, path) in shown {
         let path = match &ds.drag {
             Some(Drag::Edit { target, preview: Some(p), .. }) if *target == r => p.clone(),
             _ => path,

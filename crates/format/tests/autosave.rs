@@ -28,6 +28,42 @@ fn autosave_then_recover() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A queued snapshot can fail later; callers must observe and retry that revision.
+#[test]
+fn background_save_outcomes_report_failure_then_recovery() {
+    let root = temp_dir("retry-failed-write");
+    let blocked = root.join("recovery");
+    std::fs::write(&blocked, b"not a directory").unwrap();
+    let saver = Autosaver::new(&blocked, "doc");
+    let doc = Arc::new(rich_doc(ColorMode::Rgb, SampleType::U8));
+    saver.request_checked(doc.clone(), 7, None, SaveOptions::default()).unwrap();
+
+    let receive = |saver: &Autosaver| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if let Some(outcome) = saver.take_completed().into_iter().next() {
+                return outcome;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("autosave worker did not report its completed write within 30 seconds");
+    };
+    let (revision, result) = receive(&saver);
+    assert_eq!(revision, 7);
+    assert!(result.is_err(), "the recovery location is not a directory");
+
+    std::fs::remove_file(&blocked).unwrap();
+    std::fs::create_dir(&blocked).unwrap();
+    saver.request_checked(doc.clone(), 7, None, SaveOptions::default()).unwrap();
+    let (revision, result) = receive(&saver);
+    assert_eq!(revision, 7);
+    result.unwrap();
+    assert_eq!(list_recovery(&blocked).len(), 1);
+    assert_eq!(recover(&list_recovery(&blocked)[0]).unwrap(), *doc);
+    drop(saver);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn repeated_autosaves_are_incremental_and_coalesced() {
     let dir = temp_dir("coalesce");
@@ -199,4 +235,22 @@ fn sidecars_cannot_point_at_other_bundles() {
     let entries = list_recovery(&inner);
     assert_eq!(entries.iter().map(|e| e.info.key.as_str()).collect::<Vec<_>>(), ["k"]);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Once the manifest is committed the save has succeeded: an unreferenced object that cannot be
+/// removed (here a folder squatting on a tile name, like a locked or vanished file) must not turn
+/// the directory save (autosave's path) into a reported failure.
+#[test]
+fn failed_cleanup_after_commit_does_not_fail_the_save() {
+    let dir = temp_dir("cleanup-best-effort").join("doc.pcraft");
+    std::fs::create_dir_all(&dir).unwrap();
+    let doc = rich_doc(ColorMode::Rgb, SampleType::U8);
+    let mut w = PcraftWriter::new();
+    w.save_dir(&doc, &dir, &SaveOptions::default()).unwrap();
+    let stuck = dir.join("tiles").join("0000000000000000000000000000000000000000000000000000000000000000.zst");
+    std::fs::create_dir_all(stuck.join("inner")).unwrap();
+    let stats = w.save_dir(&doc, &dir, &SaveOptions::default()).expect("the committed save reports success");
+    assert_eq!(stats.objects_removed, 0, "nothing was actually removed");
+    assert_eq!(load_path(&dir).unwrap(), doc);
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
 }

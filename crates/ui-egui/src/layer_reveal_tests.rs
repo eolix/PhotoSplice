@@ -55,7 +55,7 @@ fn row(h: &Harness<'static, PhotospliceApp>, name: &str) -> Option<Rect> {
 /// Fully inside the rows viewport (below the strip and the blend/lock rows, above the footer).
 fn in_view(h: &Harness<'static, PhotospliceApp>, r: Rect) -> bool {
     let layers = last_rects(&h.ctx).into_iter().find(|(g, _)| *g == Group::Layers).unwrap().1;
-    r.top() >= layers.top() + 26.0 && r.bottom() <= layers.bottom() - 36.0
+    r.top() >= layers.top() + 26.0 && r.bottom() <= layers.bottom() - (crate::widgets::FOOTER_BAR + 1.0)
 }
 
 fn expanded(app: &PhotospliceApp, group: LayerId) -> bool {
@@ -97,7 +97,7 @@ fn a_new_active_layer_opens_its_groups_and_scrolls_into_view() {
         h.run_steps(4);
         assert!(!expanded(h.state(), group), "{theme:?}: stays closed");
         // Undo and other commands that change the active layer reveal it too: undoing a new
-        // layer deep in the list makes the top layer active again.
+        // layer made deep in the list makes the layer active before it active again (#1356).
         h.state_mut().run("layer.select", json!({"layer": top.0})).unwrap();
         h.run_steps(3);
         h.state_mut().run("layer.select", json!({"layer": inner.0})).unwrap();
@@ -105,11 +105,13 @@ fn a_new_active_layer_opens_its_groups_and_scrolls_into_view() {
         assert!(expanded(h.state(), group));
         h.state_mut().run("layer.new.layer", json!({"name": "Scratch"})).unwrap();
         h.run_steps(4);
-        assert!(!in_view(&h, row(&h, "Stack 29").unwrap()));
+        h.state_mut().run("layer.select", json!({"layer": top.0})).unwrap();
+        h.run_steps(4);
+        assert!(!in_view(&h, row(&h, "Deep inside").unwrap()));
         h.state_mut().run("edit.undo", json!({})).unwrap();
         h.run_steps(4);
-        assert_eq!(h.state().session.active().unwrap().active_layer, Some(top), "{theme:?}: undo made the top layer active");
-        assert!(in_view(&h, row(&h, "Stack 29").unwrap()), "{theme:?}: undo revealed it");
+        assert_eq!(h.state().session.active().unwrap().active_layer, Some(inner), "{theme:?}: undo made the inner layer active");
+        assert!(in_view(&h, row(&h, "Deep inside").unwrap()), "{theme:?}: undo revealed it");
     }
 }
 
@@ -129,4 +131,33 @@ fn reveal_survives_odd_documents() {
     h.state_mut().run("file.close", json!({})).ok();
     h.state_mut().sync_views();
     h.run_steps(3);
+}
+#[test]
+fn layers_scroll_position_survives_document_switches() {
+    for theme in [ThemeKind::Slate, ThemeKind::Anthracite] {
+        let (app, inner, _, _, _) = tall_doc();
+        let mut h = harness(app, theme);
+        h.state_mut().run("layer.select", json!({"layer": inner.0})).unwrap();
+        h.run_steps(4);
+        let before = row(&h, "Deep inside").unwrap();
+        assert!(in_view(&h, before));
+
+        // A short second document clamps its own scroll offset to zero. That must
+        // not erase the first document's position or trigger a selection change.
+        h.state_mut().run("file.new", json!({"width": 20, "height": 20})).unwrap();
+        h.state_mut().sync_views();
+        h.run_steps(4);
+        for _ in 0..3 {
+            h.state_mut().session.set_active(0);
+            h.state_mut().sync_views();
+            h.run_steps(4);
+            assert_eq!(h.state().session.active().unwrap().active_layer, Some(inner));
+            let restored = row(&h, "Deep inside").unwrap();
+            assert!(in_view(&h, restored), "{theme:?}: restored bottom row: {restored:?}");
+            assert!((restored.top() - before.top()).abs() < 0.5, "{theme:?}: restored exact scroll position");
+            h.state_mut().session.set_active(1);
+            h.state_mut().sync_views();
+            h.run_steps(4);
+        }
+    }
 }

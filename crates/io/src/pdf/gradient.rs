@@ -33,7 +33,7 @@ enum Layout {
 /// `photosplice_vector::Paint::from_fill(f, bounds)` renders it.
 pub(super) fn shape_paint(f: &Fill, bounds: (f64, f64, f64, f64), ink: &super::ink::Ink) -> Option<Paint> {
     let Fill::Gradient { stops, angle, style, reverse, opacity_stops, midpoints, .. } = f else { return None };
-    let real = VPaint::from_fill(f, bounds);
+    let real = VPaint::from_fill(f, bounds, bounds);
     // The renderer's parameter: its own paint with a black → white ramp, read in the red channel.
     let probe = |probe_style: GradientStyle| {
         let mut p = real.clone();

@@ -254,13 +254,18 @@ pub struct ParagraphRun {
 }
 
 /// Point text grows from its anchor (text-space origin = first baseline at the anchor);
-/// paragraph (box) text wraps inside a rectangle.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// paragraph (box) text wraps inside a rectangle; path text runs along a curve.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum TextShape {
     #[default]
     Point,
     /// Text-space pixels, before the layer transform.
     Box { x: f32, y: f32, width: f32, height: f32 },
+    /// Type on a path: one line laid out like point text, then each glyph is placed on `path`
+    /// (text-space pixels, before the layer transform) by arc length and turned to follow the
+    /// curve. `start` is the arc-length offset (px) of the text origin along the path; `flip`
+    /// puts the text on the other side of the path.
+    Path { path: super::vector::Subpath, start: f32, flip: bool },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

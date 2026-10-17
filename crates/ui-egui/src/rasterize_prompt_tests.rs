@@ -20,6 +20,10 @@ fn app_with(kind: Kind) -> PhotospliceApp {
         Kind::Fill => app.run("layer.newFillLayer.solidColor", json!({"color": "#00ff00"})).map(|_| ()),
     }
     .unwrap();
+    // A new fill layer targets its mask (Photoshop); painting its content means targeting the
+    // layer itself, as a click on its thumbnail does.
+    app.ui.mask_target = false;
+    app.sync_mask_targets();
     app.run("tools.setColors", json!({"foreground": "#0000ff"})).unwrap();
     app
 }
@@ -133,7 +137,7 @@ fn a_stale_or_bad_prompt_fails_gracefully() {
     app.run("layer.rasterize.type", json!({})).unwrap();
     assert!(crate::dialogs::confirm(&mut app, id).is_err());
     // Garbage fields.
-    for f in [json!({"__rasterize": "plaid", "layer": 1}), json!({"__rasterize": "type"}), json!({"__rasterize": "type", "layer": 999_999})] {
+    for f in [json!({"__rasterize": "plaid", "layer": 1}), json!({"__rasterize": "type"}), json!({"__rasterize": "type", "layer": u64::MAX})] {
         let id = app.ui.open_dialog(crate::state::DialogKind::Command, f.as_object().unwrap().clone());
         assert!(crate::dialogs::confirm(&mut app, id).is_err(), "{f}");
     }
@@ -164,4 +168,237 @@ fn the_control_channel_sees_and_confirms_the_prompt() {
     let r = call(&mut app, "ui.dialog.confirm", json!({"dialog": id}));
     assert_eq!(r["ok"], json!(true), "{r}");
     assert_eq!(active_content(&app), "Pixel");
+}
+
+const BLUR: &str = "filter.blur.gaussianBlur";
+
+fn menu(app: &mut PhotospliceApp, id: &str) -> Result<serde_json::Value, String> {
+    crate::menus::invoke(app, &egui::Context::default(), id, json!({}))
+}
+
+/// Answers the filter prompt, then the frame runs the queued filter.
+fn answer(app: &mut PhotospliceApp, id: u64) {
+    crate::dialogs::confirm(app, id).unwrap();
+    run_pending(app, &egui::Context::default());
+}
+
+fn filter_dialog(app: &PhotospliceApp) -> Option<u64> {
+    app.ui.dialogs.iter().find(|d| d.fields.get("__command") == Some(&json!(BLUR)) && !owns(&d.fields)).map(|d| d.id)
+}
+
+/// #4303: Filter › Gaussian Blur… on a type layer is live and asks to rasterize first.
+#[test]
+fn a_filter_on_a_type_layer_asks_then_opens_on_the_rasterized_layer() {
+    let mut app = app_with(Kind::Type);
+    assert!(!app.session.is_enabled(BLUR), "the engine itself still needs pixels");
+    assert!(crate::menus::is_enabled(&app, BLUR));
+    let before = past(&app);
+    menu(&mut app, BLUR).unwrap();
+    let d = prompt(&app).expect("the prompt");
+    assert_eq!(d.fields["message"], json!(Kind::Type.message()));
+    assert!(filter_dialog(&app).is_none(), "the filter waits for the answer");
+    assert_eq!((past(&app), active_content(&app)), (before, "Type"));
+    let id = d.id;
+    answer(&mut app, id);
+    assert_eq!(active_content(&app), "Pixel");
+    assert_eq!(past(&app), before + 1);
+    let blur = filter_dialog(&app).expect("Gaussian Blur opens on the rasterized layer");
+    crate::dialogs::confirm(&mut app, blur).unwrap();
+    assert_eq!(past(&app), before + 2, "rasterize, then blur");
+    assert_eq!(app.session.journal.last().map(|(id, _)| id.as_str()), Some(BLUR));
+}
+
+#[test]
+fn cancelling_the_filter_prompt_keeps_the_type_layer() {
+    let mut app = app_with(Kind::Type);
+    let before = (past(&app), app.session.active().unwrap().doc.clone());
+    menu(&mut app, BLUR).unwrap();
+    // The menu again while it is up doesn't stack another prompt.
+    menu(&mut app, BLUR).unwrap();
+    assert_eq!(app.ui.dialogs.len(), 1);
+    let id = prompt(&app).unwrap().id;
+    crate::dialogs::cancel(&mut app, id).unwrap();
+    assert!(app.ui.dialogs.is_empty());
+    assert_eq!(past(&app), before.0);
+    assert_eq!(*app.session.active().unwrap().doc, *before.1);
+    assert_eq!(active_content(&app), "Type");
+}
+
+/// Convert to Smart Object keeps the text editable and applies the filter as a smart filter.
+#[test]
+fn convert_to_smart_object_applies_a_smart_filter() {
+    let mut app = app_with(Kind::Type);
+    menu(&mut app, BLUR).unwrap();
+    let id = prompt(&app).unwrap().id;
+    app.ui.dialog_mut(id).unwrap().fields.insert("choice".into(), json!("smartObject"));
+    answer(&mut app, id);
+    assert_eq!(active_content(&app), "Smart Object");
+    let blur = filter_dialog(&app).expect("Gaussian Blur opens on the Smart Object");
+    crate::dialogs::confirm(&mut app, blur).unwrap();
+    let st = app.session.active().unwrap();
+    let LayerContent::Smart(sm) = &st.doc.layer(st.active_layer.unwrap()).unwrap().content else { panic!("a Smart Object") };
+    assert_eq!(sm.smart_filters.iter().map(|f| f.command.as_str()).collect::<Vec<_>>(), [BLUR]);
+}
+
+/// A filter without a dialog runs straight after rasterizing.
+#[test]
+fn a_filter_without_a_dialog_runs_after_rasterizing() {
+    let mut app = app_with(Kind::Type);
+    let before = past(&app);
+    menu(&mut app, "filter.blur.blurMore").unwrap();
+    let id = prompt(&app).unwrap().id;
+    answer(&mut app, id);
+    assert!(app.ui.dialogs.is_empty());
+    assert_eq!(past(&app), before + 2);
+    assert_eq!(active_content(&app), "Pixel");
+}
+
+#[test]
+fn filters_stay_grey_where_rasterizing_would_not_help() {
+    // A locked type layer can't be rasterized either.
+    let mut app = app_with(Kind::Type);
+    app.run("layer.lockLayers", json!({"pixels": true})).unwrap();
+    assert!(!crate::menus::is_enabled(&app, BLUR));
+    // Only type layers ask: a shape layer's filters stay grey, as before.
+    let app = app_with(Kind::Shape);
+    assert!(!crate::menus::is_enabled(&app, BLUR));
+    // Non-filter commands a type layer greys are untouched.
+    let app = app_with(Kind::Type);
+    assert_eq!(crate::menus::is_enabled(&app, "edit.fill"), app.session.is_enabled("edit.fill"));
+}
+
+/// The dialogs, and the filter a prompt queued, frame by frame.
+fn harness(app: PhotospliceApp) -> egui_kittest::Harness<'static, PhotospliceApp> {
+    let h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_ui_state(
+        |ui, app| {
+            crate::dialogs::show(app, ui.ctx());
+            run_pending(app, ui.ctx());
+        },
+        app,
+    );
+    PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+    h
+}
+
+/// The prompt's buttons, clicked: Rasterize, then the filter.
+#[test]
+fn the_filter_prompt_offers_convert_rasterize_and_cancel() {
+    use egui_kittest::kittest::Queryable;
+    let app = app_with(Kind::Type);
+    let mut h = harness(app);
+    menu(h.state_mut(), BLUR).unwrap();
+    h.run_steps(4);
+    h.get_by_label("Convert to Smart Object");
+    h.get_by_label("Cancel");
+    h.get_by_label("Rasterize").click();
+    h.run_steps(4);
+    assert_eq!(active_content(h.state()), "Pixel");
+    assert!(filter_dialog(h.state()).is_some());
+}
+
+#[test]
+fn the_convert_button_converts_to_a_smart_object() {
+    use egui_kittest::kittest::Queryable;
+    let app = app_with(Kind::Type);
+    let mut h = harness(app);
+    menu(h.state_mut(), BLUR).unwrap();
+    h.run_steps(4);
+    h.get_by_label("Convert to Smart Object").click();
+    h.run_steps(4);
+    assert_eq!(active_content(h.state()), "Smart Object");
+    assert!(filter_dialog(h.state()).is_some());
+}
+
+/// The filters with their own window or mode open on the rasterized layer, or on the Smart Object.
+#[test]
+fn filters_with_their_own_window_open_after_the_prompt() {
+    type IsOpen = fn(&PhotospliceApp) -> bool;
+    let open: [(&str, IsOpen); 4] = [
+        ("filter.liquify", |a| a.distort.liquify.is_some()),
+        ("filter.filterGallery", |a| a.distort.gallery.is_some()),
+        ("filter.cameraRaw", |a| a.camera_raw.is_some()),
+        ("filter.adaptiveWideAngle", |a| a.wide_angle.is_some()),
+    ];
+    for (filter, is_open) in open {
+        for choice in ["rasterize", "smartObject"] {
+            let mut app = app_with(Kind::Type);
+            assert!(crate::menus::is_enabled(&app, filter), "{filter}");
+            menu(&mut app, filter).unwrap();
+            assert!(!is_open(&app), "{filter}: waits for the answer");
+            let id = prompt(&app).unwrap_or_else(|| panic!("{filter}: no prompt")).id;
+            app.ui.dialog_mut(id).unwrap().fields.insert("choice".into(), json!(choice));
+            answer(&mut app, id);
+            assert!(!app.ui.status_error, "{filter}/{choice}: {}", app.ui.status);
+            assert_eq!(active_content(&app), if choice == "rasterize" { "Pixel" } else { "Smart Object" }, "{filter}");
+            assert!(is_open(&app), "{filter}/{choice}: its window opens");
+        }
+    }
+}
+
+/// Last Filter asks only when there is a filter to repeat, then repeats it on the rasterized layer.
+#[test]
+fn last_filter_on_a_type_layer_needs_a_filter_to_repeat() {
+    let mut app = app_with(Kind::Type);
+    assert!(!crate::menus::is_enabled(&app, "filter.lastFilter"), "nothing to repeat yet");
+    app.run("layer.new.layer", json!({})).unwrap();
+    app.run("edit.fill", json!({"color": "#00ff00"})).unwrap();
+    app.run("filter.blur.blurMore", json!({})).unwrap();
+    let st = app.session.active().unwrap();
+    let text = st.doc.layers.iter().find(|l| matches!(l.content, LayerContent::Text(_))).unwrap().id;
+    app.run("layer.select", json!({"layer": text.0})).unwrap();
+    assert!(crate::menus::is_enabled(&app, "filter.lastFilter"));
+    let before = past(&app);
+    menu(&mut app, "filter.lastFilter").unwrap();
+    let id = prompt(&app).expect("the prompt").id;
+    answer(&mut app, id);
+    assert!(!app.ui.status_error, "{}", app.ui.status);
+    assert_eq!(active_content(&app), "Pixel");
+    assert_eq!(past(&app), before + 2, "rasterize, then Blur More again");
+    assert_eq!(app.session.journal.iter().filter(|(id, _)| id == "filter.blur.blurMore").count(), 2);
+}
+
+/// Every Filter menu item live on a pixel layer is live on a type layer and gets there through the
+/// prompt (Flame, Tree, Picture Frame already run on a type layer: they render on a new layer).
+#[test]
+fn every_filter_live_on_pixels_asks_on_a_type_layer() {
+    let ids: Vec<&str> = crate::menu_catalog::CATALOG.iter().filter(|e| e.3.starts_with("filter.")).map(|e| e.3).collect();
+    let mut pixels = app_with(Kind::Type);
+    pixels.run("layer.rasterize.type", json!({})).unwrap();
+    let mut asked = 0;
+    for id in ids {
+        let mut app = app_with(Kind::Type);
+        if !crate::menus::is_enabled(&pixels, id) || app.session.is_enabled(id) {
+            continue;
+        }
+        assert!(crate::menus::is_enabled(&app, id), "{id}");
+        menu(&mut app, id).unwrap();
+        let d = prompt(&app).unwrap_or_else(|| panic!("{id}: no prompt")).id;
+        answer(&mut app, d);
+        assert!(!app.ui.status_error, "{id}: {}", app.ui.status);
+        assert_eq!(active_content(&app), "Pixel", "{id}");
+        asked += 1;
+    }
+    assert!(asked > 40, "{asked} filters");
+}
+
+/// Vanishing Point edits pixels only: its prompt offers Rasterize, not Convert to Smart Object.
+#[test]
+fn vanishing_point_offers_only_rasterize() {
+    use egui_kittest::kittest::Queryable;
+    let app = app_with(Kind::Type);
+    let mut h = harness(app);
+    assert!(crate::menus::is_enabled(h.state(), "filter.vanishingPoint"));
+    menu(h.state_mut(), "filter.vanishingPoint").unwrap();
+    h.run_steps(4);
+    assert!(h.query_by_label("Convert to Smart Object").is_none());
+    let id = prompt(h.state()).unwrap().id;
+    h.state_mut().ui.dialog_mut(id).unwrap().fields.insert("choice".into(), json!("smartObject"));
+    assert!(crate::dialogs::confirm(h.state_mut(), id).is_err(), "no conversion behind its back");
+    assert_eq!(active_content(h.state()), "Type");
+    menu(h.state_mut(), "filter.vanishingPoint").unwrap();
+    h.run_steps(4);
+    h.get_by_label("Rasterize").click();
+    h.run_steps(4);
+    assert_eq!(active_content(h.state()), "Pixel");
+    assert!(h.state().distort.vanishing.is_some(), "Vanishing Point opens");
 }

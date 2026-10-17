@@ -4,7 +4,7 @@ Codecs for flat raster image formats, written in pure Rust. The crate is standal
 workspace crate and defines its own `Image` type. It also builds for `wasm32-unknown-unknown` and
 does no I/O: decoders take `&[u8]` and encoders return `Vec<u8>`.
 
-It follows the "avoid GIMP's hole" rules in `plan/architecture.md` §1.1:
+It follows the "Avoiding GIMP's hole" rules in `docs/architecture.md` §1.1:
 
 * **Symmetric.** Every format we write, we can also read. The only exceptions are listed in
   `ASYMMETRIC_EXCEPTIONS`, each with a reason. The test suite checks this.
@@ -35,15 +35,19 @@ let out = encode(&img, Format::Tiff, &EncodeOptions::default())?;
 | PNG | yes | yes | U8, U16 | Gray, GrayA, RGB, RGBA | yes | yes (iCCP) | yes (eXIf) | yes (iTXt `XML:com.adobe.xmp`) | yes (pHYs) | yes (tEXt/zTXt/iTXt) | no | `png` |
 | JPEG | yes | yes | U8 | Gray, RGB, CMYK | no | yes (multi-segment APP2) | yes (APP1) | yes (APP1) | yes (JFIF) | no | yes | `zune-jpeg` / `jpeg-encoder` |
 | TIFF | yes | yes | U8, U16, F32 | all six (CMYK, CMYK+A included) | yes | yes (tag 34675) | no | yes (tag 700) | yes | yes (Description, Make, Model, Software, DateTime, Artist, Copyright) | no | `tiff` |
-| WebP | yes | yes (lossless only) | U8 | RGB, RGBA | yes | yes | yes | yes | no | no | no | `image-webp` |
+| WebP | yes | yes | U8 | RGB, RGBA | yes | yes | yes | yes | no | no | yes (VP8, when `webp_lossless` is off) | `image-webp` / built-in VP8 |
 | GIF | yes | yes | U8 | RGBA | 1-bit | no | no | no | no | no | yes (256-colour palette) | `image` |
 | BMP | yes | yes | U8 | RGB, RGBA | yes | no | no | no | no | no | no | `image` |
 | TGA | yes | yes | U8 | Gray, GrayA, RGB, RGBA | yes | no | no | no | no | no | no | `image` |
 | ICO | yes | yes | U8 | RGBA (at most 256×256) | yes | no | no | no | no | no | no | `image` |
+| DDS | yes | **no** | U8 | Gray, GrayA, RGB, RGBA | yes | no | no | no | no | no | n/a | built in |
 | Netpbm (PBM/PGM/PPM/PAM/PFM) | yes | yes | U8, U16, F32 (float: PFM gray/RGB only) | all six (PAM `CMYK`/`CMYK_ALPHA`) | yes (PAM) | no | no | no | no | no | no | built in |
 | QOI | yes | yes | U8 | RGB, RGBA | yes | no | no | no | no | no | no | `image` |
 | OpenEXR | yes | yes | F16, F32 | Y, YA, RGB, RGBA | yes | no | no | no | no | no | no | `exr` |
 | Radiance HDR | yes | yes | F32 | RGB | no | no | no | no | no | no | yes (RGBE) | `image` |
+| FITS | yes | yes | U8, U16, F32 | Gray, RGB | no | no | no | no | no | yes (header cards) | no | built in |
+| DPX | yes | yes | U8, U16 (10/12-bit code values read and written exactly through U16) | Gray, RGB, RGBA | yes | no | no | no | no | DPX header fields only (creator, project, copyright, creation time, transfer, colorimetric, frame position, frame rate, time code) | no | built in |
+| Cineon | yes | **no** | U16 (10-bit code values) | Gray, RGB | no | no | no | no | no | no | n/a | built in |
 | AVIF | **no** | only with feature `avif` | U8 | RGB, RGBA | yes | no | no | no | no | no | yes | `image` + `ravif` |
 
 "Native" means the data is stored and read back without conversion. Anything else is converted by
@@ -59,7 +63,45 @@ the encode plan, and `fidelity_warnings` reports the conversion when it loses in
 `Image::convert` applies the same ICC rule: it keeps the profile only when the colour model stays
 the same.
 
+Palette BMP and PNG pixels decode as RGB(A) in `Image`; `bmp_palette` and `png_palette` expose the
+embedded table (and a PNG's transparent entry) so `photosplice-io` can open them in Indexed Color mode.
+
 ## Documented asymmetries and limitations
+
+* **DDS.** The top mip level of a 2D texture: uncompressed pixels described by channel masks
+  (8, 16, 24 or 32 bits, RGB or luminance, with or without alpha) or BC1/BC2/BC3 (DXT1/DXT3/DXT5),
+  with the legacy header or the DX10 one. Everything opens as U8; the other mip levels are
+  ignored. Cubemaps, texture arrays, volume textures, premultiplied DXT2/DXT4 and other formats
+  (BC4–BC7, float) are refused with `CodecError::Unsupported`. Writing is not provided.
+
+* **FITS.** The image in the primary HDU, or the first `IMAGE` extension, is read; `NAXIS3 = 3`
+  opens as RGB and any other plane count opens the first plane with `DecodeWarning::MorePages`.
+  Rows follow `ROWORDER` (bottom-up by default, as Siril and DS9 do). Physical values that fit
+  stay exact as U8/U16 (a camera's `BITPIX = 16`, `BZERO = 32768`); the rest become F32, taken as
+  normalised when at most 2 and scaled by 65535 (or the maximum) otherwise. Header cards are
+  kept as text (`HIERARCH` for long names). Tile-compressed (fpack) files are refused with
+  `CodecError::Unsupported`; Bayer mosaics open undebayered.
+
+* **DPX.** SMPTE 268M frames in either byte order (`SDPX`, `XPDS`): the first image element,
+  descriptor 6 (luma), 50 (RGB) or 51 (RGBA), unsigned and unencoded, at 8, 10, 12 or 16 bits.
+  10-bit data may be packed (0) or filled three to a word (1, method A; 2, method B), 12-bit data
+  packed (0) or one to a 16-bit word (1, method A). 10- and 12-bit code values open as U16
+  `round(c × 65535 / (2^b − 1))`, so a frame written back at its depth keeps them exactly. No
+  colour transform is applied: `DecodeWarning::DpxEncoding` names the transfer characteristic and
+  colorimetric specification, so a log frame is reported as log. More elements than the first
+  give `DecodeWarning::MoreElements`; the image orientation is applied on import. Writing is
+  big-endian, one unencoded element, at `EncodeOptions::dpx_bits` (8/10/12/16; by default 8 for
+  U8 and 16 otherwise), packing 1 for 10 and 12 bits; gray with alpha is written as luma.
+  Other descriptors, signed or run-length-encoded data and other bit depths return
+  `CodecError::Unsupported` naming the field.
+
+* **Cineon (read-only).** Kodak's 10-bit logarithmic film-scan format (the one DPX grew from),
+  read from the same Kodak header family: the generic 1024-byte header, big-endian, one (Gray)
+  or three (RGB) channels, three 10-bit samples packed into each 32-bit word, lines on a word
+  boundary. The 10-bit code values open as U16 `round(c × 65535 / 1023)`; the file's black/white
+  reference points are a log-conversion choice and are not applied. A depth other than 10 bits or
+  a channel count other than 1/3 returns `CodecError::Unsupported`; truncation errors rather than
+  panicking. There is no Cineon writer (`ASYMMETRIC_EXCEPTIONS`); save as DPX, TIFF or EXR.
 
 * **Camera raw files** (DNG, CR2, NEF, ARW… which are TIFF-structured) are recognised and refused
   with `CodecError::Unsupported`: they are sensor data, not flat images. `photosplice-raw` decodes
@@ -77,7 +119,10 @@ the same.
   `DecodeWarning::MoreFrames` / `MorePages` in `Image::warnings`, with the total when the file
   states it (frames and TIFF directories are counted without decoding them; reduced-resolution
   TIFF directories and transparency masks are not pages). Any TIFF page can still be opened
-  with `decode_tiff_page` (and `photosplice_io::import_tiff_page`).
+  with `decode_tiff_page` (and `photosplice_io::import_tiff_page`). Every frame of a GIF comes
+  from `decode_gif_frames`: each frame composited onto the logical screen with the disposal
+  methods applied, as RGBA8 with its delay in milliseconds, within `Limits` and
+  `MAX_GIF_FRAMES`. The video-layer commands use it (`photosplice_io::import_gif_frames`).
 * **EXIF in TIFF** is stored as a sub-IFD rather than a blob, so it is not preserved yet.
   `caps.exif = false` for TIFF, and a warning is raised.
 * **Orientation** (EXIF tag 274 in JPEG, PNG `eXIf` and WebP; the decoded page's tag in TIFF and
@@ -91,6 +136,15 @@ the same.
   size (5–8 swap width and height), and the rotated buffer is allocated fallibly.
   `Image::oriented` turns any layout and depth in parallel bands (about 10 ms for 24 MP RGB8 in
   release).
+* **Resolution** (#1691, module `resolution`): a file without a resolution of its own format
+  (no PNG `pHYs`, a WebP, HEIF, …) takes it from its XMP `tiff:XResolution` / `YResolution` /
+  `ResolutionUnit`, else from EXIF IFD0 (RATIONAL X/YResolution, unit 2 inch — the default when
+  absent — or 3 cm; unit 1 or anything malformed counts as no resolution). A JPEG uses, like
+  Photoshop, the first usable of: APP13 Photoshop ResolutionInfo (0x03ED), XMP, EXIF, and only
+  then the JFIF density (cameras write EXIF only, many tools write a default JFIF 72). On export
+  the EXIF and XMP resolution are rewritten to the image's (`export_exif`, `export_xmp`): the
+  RATIONAL values in place, ResolutionUnit set to 2, an entry that can't be rewritten removed
+  from IFD0 without moving any other data. IFD1 (the thumbnail's) is left as it is.
 * **JPEG**
   * 8-bit only. Neither decoder backend supports 12-bit.
   * A file cut off inside its image data decodes leniently (a baseline JPEG's missing rows come
@@ -99,8 +153,12 @@ the same.
   * CMYK is always written 4:4:4 (subsampled CMYK is not portable) as Adobe-inverted CMYK with an
     APP14 marker.
   * Text is not written because there is no COM-segment support.
-  * EXIF and XMP must each fit in one 64 KiB APP1 segment, otherwise the encoder returns an error.
-    Extended XMP is not written.
+  * EXIF and XMP must each fit in one APP1 segment (65 533 bytes with its header). Metadata that
+    doesn't fit is dropped and the export still succeeds, with a
+    `MetadataTooLarge` warning ("EXIF (… bytes) is too large for the format; it will be dropped").
+    Before dropping XMP, the encoder first removes the layered-document properties
+    (`DocumentAncestors`, `TextLayers`) that mean nothing in a flat JPEG. Extended XMP is not
+    written.
 * **TIFF decode**
   * Classic TIFF and BigTIFF (version 43, 8-byte offsets), both byte orders, strips or tiles,
     planar configuration 1 or 2.
@@ -123,9 +181,25 @@ the same.
 * **TIFF encode** writes classic TIFF, or BigTIFF when `EncodeOptions::tiff_bigtiff` is set or
   the file could pass 4 GiB.
 * **EXR**
-  * Reads the first valid layer at full resolution, from its data window.
+  * Multi-part files (a Maya/Arnold render writes one part per AOV) open the part that
+    looks most like a colour image — RGBA beats RGB beats YA beats a single channel, so a
+    depth-only part no longer fails the file — with `DecodeWarning::MoreParts` naming how
+    many parts exist. `exr_info` lists every part (name, view, size, channels, deep/tiled)
+    without decoding pixels, and `decode_exr_part` decodes a chosen one. Deep parts stay
+    with the deep decoder: a file that has any is refused here with a pointer to it.
+  * Reads at full resolution, from the data window.
   * Channel names are matched by suffix, so `layer.R` counts as `R`.
-  * Subsampled channels and deep data are unsupported.
+  * Subsampled channels are unsupported.
+  * Cryptomatte layers (specification 1.2, as written by Arnold, V-Ray, Redshift, Mantra/Karma
+    and Cycles) are listed and decoded structurally: `cryptomatte_layers` reads the header
+    attributes, channels and embedded manifest without pixels, `decode_cryptomatte` returns the
+    per-pixel (ID, coverage) pairs, and `cryptomatte_id`/`cryptomatte_key`/`cryptomatte_preview_color`
+    hash names to IDs the way the reference implementation does (official test vectors in the
+    test suite).
+  * Deep data (scanlines or single-level tiles, compressed NONE, RLE or ZIPS) opens as a flat
+    image: each pixel's samples are composited into one, with
+    `DecodeWarning::DeepFlattened` because per-pixel depth is not kept. Deep ZIP (16-line
+    blocks) and deep mip-map or rip-map tiles return `Unsupported`.
   * Only lossless compressions are offered for writing: None, RLE, ZIP1, ZIP16 and PIZ.
 * **Netpbm writing** picks the subtype from the image: float gives PFM, gray gives P5, RGB gives
   P6, and anything with alpha or CMYK gives P7 (PAM). Writing a `.pbm` file therefore produces
@@ -139,6 +213,8 @@ the same.
 decoding. Header dimensions are checked before the pixel buffer is allocated, and the budget is
 also passed to the underlying decoders. A violation returns `CodecError::LimitExceeded`. The
 defaults are 262144 px per side, 2^30 pixels and 8 GiB (2 GiB on 32-bit targets such as wasm).
+PNG also bounds the aggregate decoded text and XMP (UTF-8 keywords and values) by `max_alloc`,
+including chunks after IDAT. This budget is separate from pixels, not a total process-memory cap.
 
 ## Tests
 

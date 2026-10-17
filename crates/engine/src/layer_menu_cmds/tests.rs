@@ -141,6 +141,24 @@ fn global_light_blending_options_scale_effects() {
 }
 
 #[test]
+fn global_light_rejects_numbers_beyond_f32() {
+    let mut s = session(8, "rgb");
+    // In-range values still wrap into -180..=180 and clamp to 0..=90.
+    s.execute("layer.layerStyle.globalLight", json!({"angle": 450, "altitude": 120})).unwrap();
+    assert_eq!((doc(&s).global_light.angle, doc(&s).global_light.altitude), (90.0, 90.0));
+    s.execute("layer.layerStyle.globalLight", json!({"angle": 540, "altitude": 30})).unwrap();
+    assert_eq!((doc(&s).global_light.angle.abs(), doc(&s).global_light.altitude), (180.0, 30.0));
+    let before = doc(&s).global_light;
+    let steps = s.active().unwrap().history.past_len();
+    // 1e39 overflowed f32 to inf, which rem_euclid turned into a stored NaN (#4181).
+    for p in [json!({"angle": 1e39}), json!({"angle": -1e39}), json!({"altitude": 1e39}), json!({"altitude": -1e39})] {
+        assert!(s.execute("layer.layerStyle.globalLight", p.clone()).is_err(), "{p}");
+        assert_eq!(doc(&s).global_light, before, "{p}");
+        assert_eq!(s.active().unwrap().history.past_len(), steps, "{p}");
+    }
+}
+
+#[test]
 fn blending_options_blend_if() {
     for depth in DEPTHS {
         let mut s = session(depth, "rgb");
@@ -200,6 +218,101 @@ fn blend_if_rejects_bad_params() {
     }
     assert!(active(&s).blend_if.is_default());
     assert_eq!(s.active().unwrap().history.past_len(), steps);
+}
+
+#[test]
+fn blending_options_advanced_blending() {
+    use photosplice_doc::{AdvancedBlending, Knockout};
+    for depth in DEPTHS {
+        let mut s = session(depth, "rgb");
+        paint(&mut s, |x, _| if x < 20 { [0.0, 0.0, 1.0, 1.0] } else { [0.0; 4] });
+        assert!(active(&s).advanced().is_default());
+        s.execute(
+            "layer.layerStyle.blendingOptions",
+            json!({
+                "knockout": "deep",
+                "fillOpacity": 0,
+                "blendInteriorEffectsAsGroup": true,
+                "blendClippedLayersAsGroup": false,
+                "transparencyShapesLayer": false,
+                "layerMaskHidesEffects": true,
+                "vectorMaskHidesEffects": true,
+                "channels": [true, false, true],
+            }),
+        )
+        .unwrap();
+        let l = active(&s);
+        assert_eq!(
+            l.advanced(),
+            AdvancedBlending {
+                knockout: Knockout::Deep,
+                blend_interior: true,
+                blend_clipped: false,
+                transparency_shapes: false,
+                layer_mask_hides_effects: true,
+                vector_mask_hides_effects: true,
+            }
+        );
+        assert_eq!(l.excluded_channels, 0b010);
+        // A deep knockout at fill 0 with no Background reveals transparency where the layer has
+        // pixels.
+        let p = photosplice_compose::flatten(doc(&s)).get(5, 5);
+        assert!(p[3] < 2.0 / 255.0, "{depth}: {p:?}");
+        // Inspect reports the switches; omitted keys keep their values; one undo step each.
+        let info = crate::inspect::layer(active(&s));
+        assert_eq!(info["advancedBlending"]["knockout"], json!("deep"), "{info}");
+        s.execute("layer.layerStyle.blendingOptions", json!({"knockout": "Shallow"})).unwrap();
+        assert_eq!(active(&s).advanced().knockout, Knockout::Shallow);
+        assert!(!active(&s).advanced().blend_clipped);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(active(&s).advanced().knockout, Knockout::Deep);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert!(active(&s).advanced().is_default());
+        assert_eq!(active(&s).excluded_channels, 0);
+    }
+}
+
+#[test]
+fn blending_options_advanced_rejects_bad_params() {
+    let mut s = session(8, "rgb");
+    paint(&mut s, |_, _| [1.0; 4]);
+    let steps = s.active().unwrap().history.past_len();
+    for bad in [
+        json!({"knockout": "medium"}),
+        json!({"knockout": 2}),
+        json!({"knockout": true}),
+        json!({"blendInteriorEffectsAsGroup": "yes"}),
+        json!({"blendClippedLayersAsGroup": 1}),
+        json!({"transparencyShapesLayer": []}),
+        json!({"layerMaskHidesEffects": {}}),
+        json!({"vectorMaskHidesEffects": 0.5}),
+        json!({"channels": [true, true, true, true, true]}),
+        json!({"channels": [1, 0, 1]}),
+        json!({"channels": "rgb"}),
+        // A bad key fails the whole call: nothing else is applied.
+        json!({"fillOpacity": 10, "knockout": "nope"}),
+    ] {
+        assert!(s.execute("layer.layerStyle.blendingOptions", bad.clone()).is_err(), "{bad}");
+    }
+    assert!(active(&s).advanced().is_default());
+    assert_eq!(active(&s).fill_opacity, 1.0);
+    assert_eq!(s.active().unwrap().history.past_len(), steps);
+    // `null` keeps the current value.
+    s.execute("layer.layerStyle.blendingOptions", json!({"knockout": null, "channels": null})).unwrap();
+    assert!(active(&s).advanced().is_default());
+}
+
+#[test]
+fn copy_paste_layer_style_carries_advanced_blending() {
+    let mut s = session(8, "rgb");
+    paint(&mut s, |_, _| [1.0; 4]);
+    s.execute("layer.layerStyle.blendingOptions", json!({"knockout": "shallow", "blendClippedLayersAsGroup": false})).unwrap();
+    let a = active(&s).advanced();
+    s.execute("layer.layerStyle.copyLayerStyle", json!({})).unwrap();
+    s.execute("layer.new.layer", json!({})).unwrap();
+    assert!(active(&s).advanced().is_default());
+    s.execute("layer.layerStyle.pasteLayerStyle", json!({})).unwrap();
+    assert_eq!(active(&s).advanced(), a);
 }
 
 #[test]
@@ -446,4 +559,134 @@ fn blending_options_channels() {
             assert!(s.execute("layer.layerStyle.blendingOptions", json!({"channels": bad})).is_err(), "{bad}");
         }
     }
+}
+#[test]
+fn transfer_effects_moves_or_copies_between_layers() {
+    let mut s = session(8, "rgb");
+    s.execute("layer.new.layer", json!({})).unwrap();
+    let a = active(&s).id;
+    s.execute("layer.layerStyle.dropShadow", json!({})).unwrap();
+    s.execute("layer.layerStyle.colorOverlay", json!({"color": "#ff8000"})).unwrap();
+    s.execute("layer.new.layer", json!({})).unwrap();
+    let b = active(&s).id;
+    let layer = |s: &Session, id| s.active().unwrap().doc.layer(id).unwrap().clone();
+    let labels = |l: &Layer| l.effects.items.iter().map(Effect::label).collect::<Vec<_>>();
+    let both = labels(&layer(&s, a));
+    assert_eq!(both.len(), 2);
+
+    // Alt-drag of the whole fx row copies: both layers have the style.
+    s.execute("layer.layerStyle.transferEffects", json!({"from": a.0, "to": b.0, "copy": true})).unwrap();
+    assert_eq!(labels(&layer(&s, a)), both);
+    assert_eq!(labels(&layer(&s, b)), both);
+
+    // Dragging one effect row moves just that effect.
+    s.execute("layer.new.layer", json!({})).unwrap();
+    let c = active(&s).id;
+    s.execute("layer.layerStyle.transferEffects", json!({"from": a.0, "to": c.0, "effect": 1})).unwrap();
+    assert_eq!(labels(&layer(&s, a)), both[..1]);
+    assert_eq!(labels(&layer(&s, c)), both[1..]);
+
+    // Dragging the whole fx row moves everything and leaves the source without a style.
+    s.execute("layer.layerStyle.transferEffects", json!({"from": b.0, "to": a.0})).unwrap();
+    assert!(layer(&s, b).effects.items.is_empty());
+    assert_eq!(labels(&layer(&s, a)), both);
+
+    // One history step per drop.
+    let steps = s.active().unwrap().history.past_len();
+    s.execute("layer.layerStyle.transferEffects", json!({"from": a.0, "to": b.0})).unwrap();
+    assert_eq!(s.active().unwrap().history.past_len(), steps + 1);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(labels(&layer(&s, a)), both);
+    assert!(layer(&s, b).effects.items.is_empty());
+
+    // Bad input is an error and changes nothing.
+    for bad in [
+        json!({"from": a.0, "to": a.0}),
+        json!({"from": a.0}),
+        json!({"from": a.0, "to": u64::MAX}),
+        json!({"from": a.0, "to": b.0, "effect": 7}),
+        json!({"from": a.0, "to": b.0, "effect": -1}),
+        json!({"from": b.0, "to": a.0}),
+    ] {
+        assert!(s.execute("layer.layerStyle.transferEffects", bad.clone()).is_err(), "{bad}");
+    }
+    assert_eq!(s.active().unwrap().history.past_len(), steps);
+}
+
+#[test]
+fn applying_a_feathered_mask_preserves_its_soft_composite() {
+    for depth in DEPTHS {
+        let mut s = session(depth, "rgb");
+        paint(&mut s, |_, _| [1.0, 0.0, 0.0, 1.0]);
+        s.edit("mask fixture", |doc, active| {
+            let mut mask = LayerMask::hide_all();
+            mask.surface.fill_rect(Rect::new(0, 0, 20, 30), &[1.0]);
+            mask.feather = 2.0;
+            doc.layer_mut(active.unwrap()).unwrap().mask = Some(mask);
+            Ok(())
+        })
+        .unwrap();
+        let before = photosplice_compose::flatten(doc(&s)).px;
+        assert!(before[15 * 40 + 19][3] > 0.0 && before[15 * 40 + 19][3] < 1.0, "mask must start with a soft edge");
+        s.execute("layer.layerMask.apply", json!({})).unwrap();
+        assert!(active(&s).mask.is_none(), "Apply removes the pixel mask");
+        let after = photosplice_compose::flatten(doc(&s)).px;
+        for (a, b) in before.iter().zip(&after) {
+            assert!((a[3] - b[3]).abs() <= 1.0 / 255.0 + 1e-5, "depth {depth}: alpha {a:?} became {b:?}");
+        }
+        assert!(s.undo());
+        assert!(active(&s).mask.as_ref().is_some_and(|m| m.feather == 2.0));
+    }
+}
+
+#[test]
+fn applying_a_disabled_feathered_mask_does_not_hide_pixels() {
+    let mut s = session(8, "rgb");
+    paint(&mut s, |_, _| [0.7, 0.2, 0.1, 1.0]);
+    s.edit("disabled mask", |doc, active| {
+        let mut mask = LayerMask::hide_all();
+        mask.feather = 3.0;
+        mask.enabled = false;
+        doc.layer_mut(active.unwrap()).unwrap().mask = Some(mask);
+        Ok(())
+    })
+    .unwrap();
+    s.execute("layer.layerMask.apply", json!({})).unwrap();
+    assert_eq!(active(&s).surface().unwrap().rgba(20, 15)[3], 1.0);
+}
+
+#[test]
+fn from_transparency_preserves_mask_coverage_outside_the_canvas() {
+    for depth in DEPTHS {
+        let mut s = session(depth, "rgb");
+        paint(&mut s, |_, _| [1.0, 0.0, 0.0, 0.5]);
+        let before = photosplice_compose::flatten(doc(&s)).px;
+        s.execute("layer.translate", json!({"dx": 20})).unwrap();
+        s.execute("layer.layerMask.fromTransparency", json!({})).unwrap();
+        let mask = active(&s).mask.as_ref().unwrap();
+        assert!((mask.value(50, 10) - 0.5).abs() < 1.0 / 255.0 + 1e-6, "off-canvas mask at depth {depth}");
+        s.execute("layer.translate", json!({"dx": -20})).unwrap();
+        let after = photosplice_compose::flatten(doc(&s)).px;
+        for (a, b) in before.iter().zip(&after) {
+            assert!((a[3] - b[3]).abs() <= 1.0 / 255.0 + 1e-6, "alpha changed at depth {depth}: {a:?} -> {b:?}");
+        }
+    }
+}
+
+#[test]
+fn applying_a_feathered_mask_keeps_off_canvas_pixels_it_reveals() {
+    let mut s = session(8, "rgb");
+    paint(&mut s, |_, _| [1.0, 0.0, 0.0, 1.0]);
+    s.execute("layer.translate", json!({"dx": 20})).unwrap();
+    s.edit("mask fixture", |doc, active| {
+        // Reveal the whole layer, including the 20 px now past the right edge.
+        let mut mask = LayerMask::hide_all();
+        mask.surface.fill_rect(Rect::new(0, 0, 60, 30), &[1.0]);
+        mask.feather = 2.0;
+        doc.layer_mut(active.unwrap()).unwrap().mask = Some(mask);
+        Ok(())
+    })
+    .unwrap();
+    s.execute("layer.layerMask.apply", json!({})).unwrap();
+    assert_eq!(active(&s).surface().unwrap().rgba(52, 15)[3], 1.0, "off-canvas pixel stays visible");
 }

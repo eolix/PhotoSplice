@@ -12,7 +12,12 @@ use crate::state::Tool;
 
 /// A 400 × 300 document with a 100 × 60 red rectangle on its own layer at (100, 100), the Move
 /// tool active, at 100 %.
-fn harness() -> Harness<'static, PhotospliceApp> {
+pub(crate) fn harness() -> Harness<'static, PhotospliceApp> {
+    harness_tool(Tool::Move)
+}
+
+/// The same document with a chosen tool selected (e.g. Hand, #2302).
+fn harness_tool(tool: Tool) -> Harness<'static, PhotospliceApp> {
     let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
     app.run("file.new", json!({"width": 400, "height": 300})).unwrap();
     app.run("layer.new.layer", json!({})).unwrap();
@@ -21,7 +26,7 @@ fn harness() -> Harness<'static, PhotospliceApp> {
     app.run("select.deselect", json!({})).unwrap();
     app.sync_views();
     app.ui.extras.rulers = false;
-    app.ui.tool = Tool::Move;
+    app.ui.tool = tool;
     let mut h = Harness::builder().with_size(vec2(1000.0, 700.0)).build_ui_state(
         |ui, app: &mut PhotospliceApp| {
             let ctx = ui.ctx().clone();
@@ -46,12 +51,19 @@ fn harness() -> Harness<'static, PhotospliceApp> {
 fn screen(h: &Harness<'static, PhotospliceApp>, p: [f64; 2]) -> Pos2 {
     let app = h.state();
     let v = &app.ui.views[0];
-    let xf = ViewXform { rect: crate::rulers::content_rect(app, app.last_canvas_rect), zoom: v.zoom, center: v.center, flip: app.ui.view.flip_horizontal };
+    let xf = ViewXform {
+        rect: crate::rulers::content_rect(app, app.last_canvas_rect),
+        zoom: v.zoom,
+        center: v.center,
+        flip: app.ui.view.flip_horizontal,
+        rotation: v.rotation,
+        aspect: app.ui.view.display_aspect(),
+    };
     xf.to_screen(p[0] as f32, p[1] as f32)
 }
 
 /// Press at document point `from`, drag to `to` in a few steps and release.
-fn drag(h: &mut Harness<'static, PhotospliceApp>, from: [f64; 2], to: [f64; 2]) {
+pub(crate) fn drag(h: &mut Harness<'static, PhotospliceApp>, from: [f64; 2], to: [f64; 2]) {
     let (a, b) = (screen(h, from), screen(h, to));
     h.event(egui::Event::PointerMoved(a));
     h.run_steps(1);
@@ -65,7 +77,7 @@ fn drag(h: &mut Harness<'static, PhotospliceApp>, from: [f64; 2], to: [f64; 2]) 
     h.run_steps(3);
 }
 
-fn begin(h: &mut Harness<'static, PhotospliceApp>) {
+pub(crate) fn begin(h: &mut Harness<'static, PhotospliceApp>) {
     let ctx = h.ctx.clone();
     crate::menus::invoke(h.state_mut(), &ctx, "edit.freeTransform", json!({})).unwrap();
     h.run_steps(2);
@@ -86,6 +98,19 @@ fn key(h: &mut Harness<'static, PhotospliceApp>, m: Modifiers, k: Key) {
 
 fn close(a: [[f64; 2]; 4], b: [[f64; 2]; 4]) -> bool {
     a.iter().flatten().zip(b.iter().flatten()).all(|(x, y)| (x - y).abs() < 1e-6)
+}
+
+#[test]
+fn free_transform_starts_where_the_selected_pixels_were_moved() {
+    let mut h = harness();
+    h.state_mut().run("select.rect", json!({"x": 100, "y": 100, "width": 100, "height": 60})).unwrap();
+    drag(&mut h, [150.0, 130.0], [250.0, 180.0]);
+    assert_eq!(photosplice_engine::float_cmds::floating(h.state().session.active().unwrap()).unwrap().offset, (100, 50));
+    begin(&mut h);
+    assert_eq!(quad(&h), [[200.0, 150.0], [300.0, 150.0], [300.0, 210.0], [200.0, 210.0]]);
+    let st = h.state().session.active().unwrap();
+    assert!(photosplice_engine::float_cmds::floating(st).is_none());
+    assert_eq!(st.doc.selection.as_ref().unwrap().content_bounds(), photosplice_geom::Rect::new(200, 150, 300, 210));
 }
 
 /// Scale ×2, then down again, then ⌘Z: back to the ×2 box, not the fill before the transform.
@@ -199,6 +224,114 @@ fn a_press_just_off_a_corner_scales_rather_than_rotates() {
     }
 }
 
+/// With the Hand tool selected, a Free Transform drag resizes the box rather than panning the view
+/// away: the open box owns the pointer (#2302).
+#[test]
+fn the_hand_tool_does_not_steal_a_free_transform_drag() {
+    let mut h = harness_tool(Tool::Hand);
+    begin(&mut h);
+    let q0 = quad(&h);
+    let center0 = h.state().ui.views[0].center;
+    drag(&mut h, q0[2], [300.0, 220.0]);
+    let q1 = quad(&h);
+    assert!(!close(q1, q0), "the drag scaled the box, not the view: {q1:?}");
+    assert_eq!(h.state().ui.views[0].center, center0, "the Hand did not pan");
+    key(&mut h, Modifiers::NONE, Key::Enter);
+    assert!(h.state().ui.transform.is_none(), "the transform committed");
+    assert!(width(&h) > 150, "the committed resize applied: {}", width(&h));
+}
+
+/// With the Zoom tool selected, a Free Transform drag resizes the box rather than zooming the view:
+/// the open box owns the pointer, as it does for the Hand (#4799).
+#[test]
+fn the_zoom_tool_does_not_steal_a_free_transform_drag() {
+    let mut h = harness_tool(Tool::Zoom);
+    begin(&mut h);
+    let q0 = quad(&h);
+    let (zoom0, center0) = (h.state().ui.views[0].zoom, h.state().ui.views[0].center);
+    let inside = screen(&h, [150.0, 130.0]);
+    h.event(egui::Event::PointerMoved(inside));
+    h.run_steps(1);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: inside, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+        h.run_steps(1);
+    }
+    h.run_steps(2);
+    assert_eq!(h.state().ui.views[0].zoom, zoom0, "a click inside the box did not zoom");
+    drag(&mut h, q0[2], [300.0, 220.0]);
+    let q1 = quad(&h);
+    assert!(!close(q1, q0), "the drag scaled the box, not the view: {q1:?}");
+    assert_eq!(h.state().ui.views[0].zoom, zoom0, "the Zoom tool did not zoom");
+    assert_eq!(h.state().ui.views[0].center, center0, "the Zoom tool did not move the view");
+    key(&mut h, Modifiers::NONE, Key::Enter);
+    assert!(h.state().ui.transform.is_none(), "the transform committed");
+    assert!(width(&h) > 150, "the committed resize applied: {}", width(&h));
+}
+
+/// With the (freehand) Lasso selected, a Free Transform of a lasso selection follows the drag: the
+/// Lasso reads its own pointer events, and dropped the moves and release of a drag it hadn't
+/// started, so the box never changed (#2153).
+#[test]
+fn the_lasso_tool_does_not_swallow_a_free_transform_drag() {
+    let mut h = harness_tool(Tool::Lasso);
+    let outline = json!([[90, 90], [210, 90], [210, 170], [90, 170]]);
+    h.state_mut().run("select.lasso", json!({"points": outline})).unwrap();
+    begin(&mut h);
+    let q0 = quad(&h);
+    drag(&mut h, q0[2], [300.0, 220.0]);
+    let q1 = quad(&h);
+    assert!(!close(q1, q0), "the drag scaled the box: {q1:?}");
+    key(&mut h, Modifiers::NONE, Key::Enter);
+    assert!(h.state().ui.transform.is_none(), "the transform committed");
+    assert!(width(&h) > 150, "the committed resize applied: {}", width(&h));
+}
+
+/// Holding Space (the temporary Hand, #249) still pans the view while a Free Transform box is open,
+/// rather than resizing it (#2302 review): only the selected Hand yields to the box.
+#[test]
+fn holding_space_still_pans_while_transforming() {
+    let mut h = harness();
+    begin(&mut h);
+    let q0 = quad(&h);
+    let center0 = h.state().ui.views[0].center;
+    let space = |h: &mut Harness<'static, PhotospliceApp>, down: bool| {
+        h.event(egui::Event::Key { key: Key::Space, physical_key: None, pressed: down, repeat: false, modifiers: Modifiers::NONE });
+        h.run_steps(1);
+    };
+    space(&mut h, true);
+    drag(&mut h, q0[2], [300.0, 220.0]);
+    space(&mut h, false);
+    h.run_steps(2);
+    assert!(close(quad(&h), q0), "the space-drag did not touch the box: {:?}", quad(&h));
+    assert_ne!(h.state().ui.views[0].center, center0, "the view panned instead");
+}
+
+#[test]
+fn transform_preview_stays_visible_while_panning() {
+    let mut h = harness();
+    begin(&mut h);
+    let texture = h.state().transform_preview.as_ref().unwrap().texture.pick(&h.ctx, 1.0, 1.0, false).0;
+    let has_preview = |h: &Harness<'static, PhotospliceApp>| {
+        h.output().shapes.iter().any(|clipped| matches!(&clipped.shape, egui::epaint::Shape::Mesh(mesh) if mesh.texture_id == texture))
+    };
+    assert!(has_preview(&h), "the transformed pixels are visible before panning");
+
+    let center0 = h.state().ui.views[0].center;
+    let from = screen(&h, [200.0, 160.0]);
+    let to = from + vec2(50.0, 40.0);
+    h.event(egui::Event::Key { key: Key::Space, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    h.event(egui::Event::PointerMoved(from));
+    h.run_steps(1);
+    h.event(egui::Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run_steps(1);
+    h.event(egui::Event::PointerMoved(to));
+    h.run_steps(1);
+
+    assert_ne!(h.state().ui.views[0].center, center0, "the held Hand panned the view");
+    assert!(has_preview(&h), "the transformed layer stays visible during the pan");
+}
+
 /// A transform started by dragging a Move-tool control: that first drag is undoable too.
 #[test]
 fn the_first_drag_from_the_move_tools_controls_undoes() {
@@ -209,4 +342,47 @@ fn the_first_drag_from_the_move_tools_controls_undoes() {
     assert!(!close(quad(&h), [[100.0, 100.0], [200.0, 100.0], [200.0, 160.0], [100.0, 160.0]]));
     key(&mut h, Modifiers::COMMAND, Key::Z);
     assert!(close(quad(&h), [[100.0, 100.0], [200.0, 100.0], [200.0, 160.0], [100.0, 160.0]]), "{:?}", quad(&h));
+}
+
+/// #3402's layer-switch case (#5297): selected pixels moved with the Move tool, then moved again
+/// in the Free Transform box, land where the box left them when another layer is picked.
+#[test]
+fn picking_another_layer_applies_the_transform_of_moved_selected_pixels() {
+    let mut h = harness();
+    let layer = h.state().session.active().unwrap().active_layer.unwrap();
+    h.state_mut().run("select.rect", json!({"x": 100, "y": 100, "width": 100, "height": 60})).unwrap();
+    drag(&mut h, [150.0, 130.0], [250.0, 180.0]);
+    begin(&mut h);
+    // Away from the centre, where a press would take the reference point instead.
+    drag(&mut h, [220.0, 165.0], [240.0, 175.0]);
+    assert_eq!(quad(&h), [[220.0, 160.0], [320.0, 160.0], [320.0, 220.0], [220.0, 220.0]]);
+    let other = h.state().session.active().unwrap().doc.layers.iter().map(|l| l.id).find(|id| *id != layer).unwrap();
+    h.state_mut().run("layer.select", json!({"layer": other.0})).unwrap();
+    crate::transform_tool::end_if_left(h.state_mut());
+    h.run_steps(3);
+    assert!(h.state().ui.transform.is_none(), "picking another layer applies the transform");
+    let st = h.state().session.active().unwrap();
+    let landed = photosplice_geom::Rect::new(220, 160, 320, 220);
+    let (pixels, selection) = (st.doc.layer(layer).unwrap().surface().unwrap().content_bounds(), st.doc.selection.as_ref().map(|s| s.content_bounds()));
+    assert_eq!((pixels, selection), (landed, Some(landed)));
+}
+
+/// #5297 through the real canvas: ⌘T with a selection wider than the layer opens the box on the
+/// selection, and dragging it moves the selected pixels and the selection together.
+#[test]
+fn free_transform_opens_on_the_selection_and_moves_it_with_the_pixels() {
+    let mut h = harness();
+    let layer = h.state().session.active().unwrap().active_layer.unwrap();
+    // The left 60 px of the red rectangle, and empty layer to its left, above and below.
+    h.state_mut().run("select.rect", json!({"x": 60, "y": 80, "width": 100, "height": 120})).unwrap();
+    begin(&mut h);
+    assert_eq!(quad(&h), [[60.0, 80.0], [160.0, 80.0], [160.0, 200.0], [60.0, 200.0]]);
+    drag(&mut h, [80.0, 100.0], [130.0, 130.0]);
+    assert_eq!(quad(&h), [[110.0, 110.0], [210.0, 110.0], [210.0, 230.0], [110.0, 230.0]]);
+    key(&mut h, Modifiers::NONE, Key::Enter);
+    assert!(h.state().ui.transform.is_none());
+    let st = h.state().session.active().unwrap();
+    assert_eq!(st.doc.selection.as_ref().unwrap().content_bounds(), photosplice_geom::Rect::new(110, 110, 210, 230));
+    // What stayed (160..200 × 100..160) and what moved (to 150..210 × 130..190).
+    assert_eq!(st.doc.layer(layer).unwrap().surface().unwrap().content_bounds(), photosplice_geom::Rect::new(150, 100, 210, 190));
 }

@@ -2037,3 +2037,1580 @@
 	Unnamed {mode} profile	Hồ sơ {mode} không tên
 	Warp Grid	Lưới làm cong
 	Working…	Đang xử lý…
+
+# Rows from PhotoCraft's catalogue (upstream merge, 2026-10): strings this catalogue lacked.
+	Channel Color	Màu kênh
+	Color Indicates:	Màu biểu thị:
+	Solidity:	Độ đặc:
+	Ink Characteristics	Đặc tính mực
+	Paper Width	Chiều rộng giấy
+	Paper Height	Chiều cao giấy
+	Source Files	Tệp nguồn
+	Use:	Dùng:
+	Files	Tệp
+	Folder	Thư mục
+	Add Open Files	Thêm các tệp đang mở
+	Sort By Name	Sắp xếp theo tên
+	Attempt to Automatically Align Source Images	Thử tự căn các ảnh nguồn
+	Create Smart Object after Loading Layers	Tạo đối tượng thông minh sau khi tải lớp
+	Add to Dictionary	Thêm vào từ điển
+	No Spelling Suggestions	Không có gợi ý chính tả
+	Maximize	Phóng to
+	Minimize	Thu nhỏ
+	Restore	Khôi phục
+	Set horizontal skew	Đặt độ nghiêng ngang
+	Set vertical skew	Đặt độ nghiêng dọc
+	{name} can't keep everything in this document	{name} không thể giữ mọi thứ trong tài liệu này
+	Choose a format that keeps it, such as Photoshop (PSD), or save a copy.	Hãy chọn một định dạng giữ được mọi thứ, như Photoshop (PSD), hoặc lưu bản sao.
+	Choose Stack Mode:	Chọn chế độ chồng:
+	No pin selected	Chưa chọn ghim nào
+	Click the image to add a pin; drag a pin to move it, or its ring to change its blur. Delete removes the selected pin.	Bấm vào ảnh để thêm ghim; kéo ghim để di chuyển, hoặc kéo vòng của ghim để đổi độ mờ. Delete xóa ghim đã chọn.
+	Drag the handles on the outline to resize and turn it, the square to round its corners, and the dots inside to set where the blur starts.	Kéo các tay nắm trên đường viền để đổi kích thước và xoay, kéo ô vuông để bo tròn góc, và kéo các chấm bên trong để đặt nơi bắt đầu làm mờ.
+	Drag the pin to move the band, or its ring to change its blur. Drag the solid lines to widen the sharp band, the dashed lines to set the transition, and the dots to turn it.	Kéo ghim để di chuyển dải, hoặc kéo vòng của ghim để đổi độ mờ. Kéo các đường liền để nới rộng dải sắc nét, các đường nét đứt để đặt vùng chuyển tiếp, và các chấm để xoay dải.
+	Drag the handles on the outline to resize and turn it; the ring sets the blur angle.	Kéo các tay nắm trên đường viền để đổi kích thước và xoay; vòng tròn đặt góc làm mờ.
+	ArtCraft Website	Trang web ArtCraft
+	Join the ArtCraft Discord…	Tham gia Discord ArtCraft…
+	PhotoSplice on GitHub	PhotoSplice trên GitHub
+	PhotoSplice Website	Trang web PhotoSplice
+	Pencil Tool	Công cụ Bút chì
+	Magnetic Lasso Tool	Công cụ Lasso từ tính
+	Vertical Type Tool	Công cụ Chữ dọc
+	Patch Tool	Công cụ Vá
+	Content-Aware Move Tool	Công cụ Di chuyển theo nội dung
+	Direct Selection Tool	Công cụ Chọn trực tiếp
+	Scrubby Zoom	Thu phóng kéo
+	Auto Erase	Tự động tẩy
+	Use tablet pressure to change pen width	Dùng áp lực bảng vẽ để đổi độ rộng nét
+	Fill Screen	Lấp đầy màn hình
+	Frequency	Tần suất
+	Drag or click polygon points · hold Alt during lasso for straight segments · {add} add · {sub} before drawing subtracts	Kéo hoặc bấm điểm đa giác · giữ Alt khi Lasso để có đoạn thẳng · {add} thêm · {sub} trước khi vẽ sẽ trừ
+	Hold Alt while drawing for straight segments	Giữ Alt khi vẽ để có đoạn thẳng
+	Click the first point or press {key} to close · {del} removes a point · Esc cancels	Bấm điểm đầu hoặc nhấn {key} để đóng · {del} xóa điểm · Esc hủy
+	Click, then move along an edge · click to fasten a point · {alt}-click for a straight segment · double-click to close	Bấm, rồi di chuyển dọc cạnh · bấm để ghim điểm · {alt}-bấm cho đoạn thẳng · nhấp đúp để đóng
+	Follows only edges this close to the pointer ([ and ] change it)	Chỉ theo cạnh gần con trỏ trong khoảng này ([ và ] để đổi)
+	Higher values follow only edges that contrast sharply with their surroundings	Giá trị cao hơn chỉ theo cạnh tương phản rõ với xung quanh
+	How often fastening points are placed by themselves	Tần suất tự đặt điểm ghim
+	Drag a crop box · drag inside to move · edges resize ({ratio} ratio, {centre} centre) · Space moves while drawing · {commit} commits · Esc cancels	Kéo khung cắt · kéo bên trong để di chuyển · cạnh đổi kích thước ({ratio} tỷ lệ, {centre} tâm) · Space di chuyển khi vẽ · {commit} áp dụng · Esc hủy
+	Adjustment Layer	Lớp điều chỉnh
+	Pixel	Pixel
+	Adjustment	Điều chỉnh
+	Add Mask to Selection	Thêm mặt nạ vào vùng chọn
+	Subtract Mask from Selection	Trừ mặt nạ khỏi vùng chọn
+	Intersect Mask with Selection	Giao mặt nạ với vùng chọn
+	Merge Group	Gộp nhóm
+	Kerning: Metrics, Optical or a value in 1/1000 em (Alt+←/→ at the caret)	Kerning: Metrics, Optical hoặc giá trị 1/1000 em (Alt+←/→ tại con trỏ)
+	Basic Latin	Latin cơ bản
+	Latin 1	Latin 1
+	Latin Extended-A	Latin mở rộng A
+	Latin Extended-B	Latin mở rộng B
+	Greek	Hy Lạp
+	Cyrillic	Kirin
+	Punctuation	Dấu câu
+	Numbers	Số
+	Currency	Tiền tệ
+	Symbols	Ký hiệu
+	Math Symbols	Ký hiệu toán
+	Arrows	Mũi tên
+	Enable {name}	Bật {name}
+	RGB	RGB
+	Duplicate Channel	Nhân bản kênh
+	Delete Channel	Xóa kênh
+	Rename Channel…	Đổi tên kênh…
+	Merge Spot Channel	Gộp kênh spot
+	Convert to Alpha Channel	Chuyển thành kênh alpha
+	Exit Quick Mask	Thoát mặt nạ nhanh
+	New Channel…	Kênh mới…
+	New Spot Channel…	Kênh spot mới…
+	Split Channels	Tách kênh
+	Merge Channels…	Gộp kênh…
+	Color Indicates Masked Areas	Màu chỉ vùng bị che
+	Color Indicates Selected Areas	Màu chỉ vùng được chọn
+	✓ Color Indicates Masked Areas	✓ Màu chỉ vùng bị che
+	✓ Color Indicates Selected Areas	✓ Màu chỉ vùng được chọn
+	Make Selection	Tạo vùng chọn
+	Fill Path	Tô đường dẫn
+	Stroke Path	Đi nét đường dẫn
+	Save Path	Lưu đường dẫn
+	Duplicate Path	Nhân bản đường dẫn
+	Delete Path	Xóa đường dẫn
+	Mixer Brush Tool	Công cụ Cọ trộn
+	Save Settings…	Lưu cài đặt…
+	Load Settings…	Tải cài đặt…
+	Save these settings as a Camera Raw .xmp file	Lưu các cài đặt này thành tệp .xmp Camera Raw
+	Load settings from a Camera Raw .xmp file	Tải cài đặt từ tệp .xmp Camera Raw
+	Loaded Camera Raw settings from {file}	Đã tải cài đặt Camera Raw từ {file}
+	Loaded Camera Raw settings from {file} ({n} not supported)	Đã tải cài đặt Camera Raw từ {file} ({n} không được hỗ trợ)
+	Camera Raw Filter ({layer})	Bộ lọc Camera Raw ({layer})
+	Full-resolution preview unavailable	Không có bản xem trước độ phân giải đầy đủ
+	Highlight Clipping Warning (O)	Cảnh báo cắt vùng sáng (O)
+	Shadow Clipping Warning (U)	Cảnh báo cắt vùng tối (U)
+	Show Lab Color Readouts	Hiện số đọc màu Lab
+	Show Red at 3 o'clock	Hiện đỏ ở vị trí 3 giờ
+	Show Selected Region	Hiện vùng đã chọn
+	Show Skin Tone Indicator	Hiện chỉ báo tông da
+	Show Vectorscope	Hiện Vectorscope
+	Tone Histogram	Biểu đồ tông
+cameraRaw	Light	Ánh sáng
+cameraRaw	Lights	Vùng sáng vừa
+cameraRaw	Darks	Vùng tối vừa
+cameraRaw	Blacks	Điểm đen
+cameraRaw	Amount	Mức
+cameraRaw	Tint	Sắc độ
+cameraRaw	Masking	Mặt nạ
+cameraRaw	Blending	Độ hòa trộn
+cameraRaw	Highlights	Vùng sáng
+cameraRaw	Shadows	Vùng tối
+	Lossless	Không mất dữ liệu
+	System title bar	Thanh tiêu đề hệ thống
+	Yes	Có
+	No	Không
+	About	Giới thiệu
+	Contributors	Người đóng góp
+	Models	Mô hình
+	Manage submitted jobs in the system print queue	Quản lý các lệnh in đã gửi trong hàng đợi in của hệ thống
+	The document “{name}” does not have an embedded {mode} profile.	Tài liệu “{name}” không có hồ sơ {mode} nhúng.
+	The document “{name}” has an embedded color profile that does not match the current {mode} working space.	Tài liệu “{name}” có hồ sơ màu nhúng không khớp với không gian làm việc {mode} hiện tại.
+	Working: {working}	Không gian làm việc: {working}
+	Native file drag-and-drop is unavailable	Kéo thả tệp gốc không khả dụng
+	Native file drag-and-drop is not supported on Wayland yet. Use File › Open, or run PhotoSplice under XWayland with `WAYLAND_DISPLAY= photosplice`.	Kéo thả tệp gốc chưa được hỗ trợ trên Wayland. Dùng Tệp › Mở, hoặc chạy PhotoSplice dưới XWayland với `WAYLAND_DISPLAY= photosplice`.
+	Temporary	Tạm thời
+	none	Không
+	red	Đỏ
+	orange	Cam
+	yellow	Vàng
+	green	Xanh lục
+	blue	Xanh dương
+	violet	Tím
+	gray	Xám
+	Color Settings	Cài đặt màu
+	Working Rgb	RGB làm việc
+	Working Cmyk	CMYK làm việc
+	Working Gray	Xám làm việc
+	Policy Rgb	Chính sách RGB
+	Policy Cmyk	Chính sách CMYK
+	Policy Gray	Chính sách xám
+	Preserve	Giữ hồ sơ nhúng
+	Convert	Chuyển sang không gian màu làm việc
+	Ask On Mismatch	Hỏi khi hồ sơ không khớp
+	Ask On Paste	Hỏi khi dán
+	Ask On Missing	Hỏi khi thiếu hồ sơ
+	Intent	Phương thức chuyển màu
+	Bpc	Bù điểm đen
+	Blend Text Gamma	Hòa trộn màu chữ theo gamma
+	Monitor Profile	Hồ sơ màn hình
+	Display-p3	Display P3
+	Adobe-rgb-compat	Adobe RGB (compat)
+	Prophoto-compat	ProPhoto RGB (compat)
+	Linear-srgb	Linear sRGB
+	Rec2020	Rec. 2020
+	Coated-cmyk	Coated CMYK
+	Sgray	sGray
+	Gray-gamma-2.2	Gray Gamma 2.2
+	Working Spaces	Không gian màu làm việc
+	Color Management Policies	Chính sách quản lý màu
+	Preset Manager	Quản lý thiết lập sẵn
+	Export/Import Presets	Xuất/Nhập thiết lập sẵn
+	Camera Raw	Camera Raw
+cameraRaw	Color	Màu
+cameraRaw	Effects	Hiệu ứng
+cameraRaw	Whites	Điểm trắng
+cameraRaw	Exposure	Phơi sáng
+cameraRaw	Contrast	Độ tương phản
+cameraRaw	Texture	Kết cấu
+cameraRaw	Clarity	Độ rõ
+cameraRaw	Dehaze	Khử sương
+cameraRaw	Temperature	Nhiệt độ màu
+cameraRaw	Vibrance	Độ sống động
+cameraRaw	Saturation	Độ bão hòa
+cameraRaw	Curve	Đường cong
+cameraRaw	Color Mixer	Bộ trộn màu
+cameraRaw	Hue	Sắc màu
+cameraRaw	Luminance	Độ sáng
+cameraRaw	Red	Đỏ
+cameraRaw	Orange	Cam
+cameraRaw	Yellow	Vàng
+cameraRaw	Green	Xanh lá
+cameraRaw	Aqua	Xanh ngọc
+cameraRaw	Blue	Xanh dương
+cameraRaw	Purple	Tím
+cameraRaw	Magenta	Đỏ tía
+cameraRaw	Color Grading	Phân cấp màu
+cameraRaw	Midtones	Tông trung gian
+cameraRaw	Global	Tổng thể
+cameraRaw	Balance	Cân bằng
+cameraRaw	Detail	Chi tiết
+cameraRaw	Radius	Bán kính
+cameraRaw	Luminance Detail	Chi tiết độ sáng
+cameraRaw	Color Detail	Chi tiết màu
+cameraRaw	Feather	Độ mềm cạnh
+cameraRaw	Midpoint	Điểm giữa
+cameraRaw	Roundness	Độ tròn
+cameraRaw	Roughness	Độ thô
+cameraRaw	Size	Kích thước
+	Use File › Open to open an image.	Dùng Tệp › Mở để mở hình ảnh.
+	Custom background color	Màu nền tùy chỉnh
+document	Orientation	Hướng trang
+	Export As	Xuất dạng
+	Arc	Cung
+	Arc Lower	Cung dưới
+	Arc Upper	Cung trên
+	Arch	Vòm
+	Bulge	Phồng
+	Shell Lower	Vỏ dưới
+	Shell Upper	Vỏ trên
+	Flag	Cờ
+	Wave	Sóng
+	Fish	Cá
+	Rise	Nhô
+	Inflate	Phồng to
+	Squeeze	Ép
+	Twist	Xoắn
+	Forward Warp	Đẩy biến dạng
+	Twirl Clockwise	Xoáy thuận
+	Twirl Counterclockwise	Xoáy ngược
+	Pucker	Co vào
+	Bloat	Phồng ra
+	Push Left	Đẩy trái
+	Freeze Mask	Đóng băng mặt nạ
+	Thaw Mask	Rã đông mặt nạ
+	Freeze Lasso	Lasso đóng băng
+	Reconstruct All	Khôi phục tất cả
+	Mask None	Bỏ mặt nạ
+	Invert Mask	Đảo mặt nạ
+	New Style…	Kiểu mới…
+	Style {name} saved	Đã lưu kiểu {name}
+	Reset to Default	Đặt lại mặc định
+	Make Default	Đặt làm mặc định
+	Use Global Light	Dùng ánh sáng chung
+	Contour	Đường bao
+	Up	Lên
+	To	Đến
+colorRange	Invert	Đảo ngược
+@plural	{n} layer|{n} layers	{n} lớp
+	Tool	Công cụ
+	Join us on Discord	Tham gia Discord
+layers	Fill	Độ tô
+layers	Fill:	Độ tô:
+	Pattern Stamp Tool	Công cụ Con dấu họa tiết
+	Pattern Stamp	Con dấu họa tiết
+	Impressionist	Ấn tượng
+	Scope	Phạm vi
+	Selected	Đã chọn
+	Camera Raw ({name})	Camera Raw ({name})
+	Developing {name}	Đang xử lý {name}
+	101 by 101 Average	Trung bình 101 × 101
+	11 by 11 Average	Trung bình 11 × 11
+	3 by 3 Average	Trung bình 3 × 3
+	31 by 31 Average	Trung bình 31 × 31
+	5 by 5 Average	Trung bình 5 × 5
+	51 by 51 Average	Trung bình 51 × 51
+	Add pair	Thêm cặp
+	Add to Swatches	Thêm vào mẫu màu
+	Adds the current gradient to the Gradients panel	Thêm chuyển sắc hiện tại vào bảng Chuyển sắc
+	All Layers No Adjustments	Mọi lớp không điều chỉnh
+	Auto Adjust Opacity	Tự động điều chỉnh độ mờ
+	Blend If:	Điều kiện hòa trộn:
+	Bottom Left	Dưới trái
+	Bottom Right	Dưới phải
+	Brush Name	Tên cọ
+	Brush Preset Options	Tùy chọn thiết lập sẵn cọ
+	Brush Stroke	Nét cọ
+	Brush Tip	Đầu cọ
+	Channels:	Kênh:
+	Click a red pupil to neutralize it	Nhấp vào đồng tử đỏ để trung hòa
+	Click to pick · Esc to cancel	Nhấp để chọn · Esc để hủy
+	Color Picker (Layer Style Color)	Ống hút màu (Màu kiểu lớp)
+	Color Picker (Text Color)	Ống hút màu (Màu chữ)
+	Color to Alpha…	Màu sang alpha…
+	Create new swatch	Tạo mẫu màu mới
+	Crop Shield color	Màu màn che vùng cắt
+	Current & Below No Adjustments	Hiện tại & dưới không điều chỉnh
+	Cycle Overlay	Đổi lớp phủ
+	Darken Amount	Mức làm tối
+	Dash / gap lengths × stroke width	Độ dài nét đứt / khoảng trống × độ dày nét
+	Dashed line	Nét đứt
+	Diagonal	Đường chéo
+	Dual Axis	Hai trục
+	Enable Crop Shield	Bật màn che vùng cắt
+	Export Swatches for Exchange…	Xuất mẫu màu để trao đổi…
+	Export Swatches…	Xuất mẫu màu…
+	Eyedroppers:	Ống hút màu:
+	From Center	Từ tâm
+	Gradient Editor	Trình sửa chuyển sắc
+	Gradient picker	Bộ chọn chuyển sắc
+	Gradient stops	Điểm dừng chuyển sắc
+	Import brushes (.abr)	Nhập cọ (.abr)
+	Import Swatches…	Nhập mẫu màu…
+	Knockout	Đục lỗ
+	Link radii	Liên kết bán kính
+	Match Canvas	Khớp canvas
+	New Brush Preset…	Thiết lập sẵn cọ mới…
+	Capture Brush Size in Preset	Lưu kích thước cọ vào thiết lập sẵn
+	Include Tool Settings	Bao gồm thiết lập công cụ
+	Include Color	Bao gồm màu
+	Enter a name for the brush preset	Nhập tên cho thiết lập sẵn cọ
+	A brush preset with this name already exists	Đã có thiết lập sẵn cọ với tên này
+	New Swatch Group…	Nhóm mẫu màu mới…
+	New Swatch…	Mẫu màu mới…
+	No patterns	Không có họa tiết
+	No subject found — try a rectangle around the object	Không tìm thấy chủ thể — thử khung chữ nhật quanh đối tượng
+	No subject found — try Object Selection or the Lasso	Không tìm thấy chủ thể — thử Chọn đối tượng hoặc Lasso
+	Not a web colour: click for the nearest web colour	Không phải màu web: nhấp để lấy màu web gần nhất
+	Now drag the selection onto another area	Bây giờ kéo vùng chọn sang vùng khác
+	Object Selection found nothing there — try a tighter rectangle	Chọn đối tượng không tìm thấy gì — thử khung chữ nhật chặt hơn
+	Open paths use centered strokes	Đường dẫn mở dùng nét căn giữa
+	Out of gamut for printing: click for the nearest printable colour	Ngoài gamut in: nhấp để lấy màu in được gần nhất
+	Pick screen color	Lấy màu màn hình
+	Pick Color From Image	Lấy màu từ hình ảnh
+	Point Sample	Mẫu điểm
+	Pupil Size	Kích thước đồng tử
+	Quick Selection found nothing there	Chọn nhanh không tìm thấy gì
+	Remove pair	Xóa cặp
+	Replace Swatches…	Thay thế mẫu màu…
+	Reset Swatches	Đặt lại mẫu màu
+	Sample a pixel anywhere on the screen	Lấy mẫu một điểm ảnh bất kỳ trên màn hình
+	Sample Size:	Kích thước mẫu:
+	Save As Preset	Lưu thành thiết lập sẵn
+	Scroll to zoom	Cuộn để thu phóng
+	Drag to pan · Scroll to zoom · Double-click to fit	Kéo để xem toàn cảnh · Cuộn để thu phóng · Bấm đúp để vừa khung
+	Selection Preview:	Xem trước vùng chọn:
+	Set additional Crop options	Đặt tùy chọn Cắt bổ sung
+	Set Black Point	Đặt điểm đen
+	Set Neutral Gray Point	Đặt điểm xám trung tính
+	Set the overlay options for the Crop tool	Đặt tùy chọn lớp phủ cho công cụ Cắt
+	Set White Point	Đặt điểm trắng
+	Show Cropped Area	Hiện vùng đã cắt
+	Show Sampling Ring	Hiện vòng lấy mẫu
+	Star Ratio:	Tỷ lệ sao:
+	Straighten the image by drawing a line on it	Chỉnh thẳng ảnh bằng cách vẽ một đường trên ảnh
+	Stroke color	Màu nét
+	Stroke Options	Tùy chọn nét
+	Symmetry Off	Tắt đối xứng
+	The gradient the Gradient tool paints with	Chuyển sắc mà công cụ Chuyển sắc dùng để tô
+	Top Left	Trên trái
+	Top Right	Trên phải
+	Unavailable in this color mode	Không dùng được ở chế độ màu này
+	Update the current brush with these settings	Cập nhật cọ hiện tại với các thiết lập này
+	Use finite lengths and a positive pattern total	Dùng độ dài hữu hạn và tổng họa tiết dương
+	A save to {name} is still running; try again when it finishes	Đang lưu {name}; thử lại khi hoàn tất
+	Adwaita Dark Theme	Chủ đề Adwaita tối
+	Adwaita Light Theme	Chủ đề Adwaita sáng
+	All shortcuts reset to PhotoSplice defaults.	Đã đặt lại mọi phím tắt về mặc định PhotoSplice.
+	Appearance Mode	Chế độ giao diện
+	Click to add a point, right-click to remove	Nhấp để thêm điểm, nhấp chuột phải để xóa
+	Color Picker (Fill Color)	Ống hút màu (Màu tô)
+	Color Picker (Stroke Color)	Ống hút màu (Màu nét)
+	Contents:	Nội dung:
+	Custom Pattern:	Họa tiết tùy chỉnh:
+	Delete layer ‘{name}’?	Xóa lớp ‘{name}’?
+	Delete layer?	Xóa lớp?
+	Delete {count} layers? {names}	Xóa {count} lớp? {names}
+	Edit › Paste	Chỉnh sửa › Dán
+	Edits that change the whole document, such as a layer's blend mode, opacity or visibility, redraw all of it.	Các chỉnh sửa thay đổi cả tài liệu, như chế độ hòa trộn, độ mờ hoặc hiện/ẩn của lớp, sẽ vẽ lại toàn bộ.
+	Fill color	Màu tô
+	Import Shortcuts…	Nhập phím tắt…
+	Imported {n} shortcuts from {file}. Click OK to keep them.	Đã nhập {n} phím tắt từ {file}. Nhấp OK để giữ.
+	Large document: redrawing on the CPU	Tài liệu lớn: đang vẽ lại trên CPU
+	Redrawing	Đang vẽ lại
+	Layer deleted, but confirmation preference could not be saved: {error}	Đã xóa lớp, nhưng không lưu được tùy chọn xác nhận: {error}
+	Load a keyboard shortcut set saved as .kys	Tải bộ phím tắt đã lưu dạng .kys
+	Location	Vị trí
+	Location:	Vị trí:
+	More documents	Thêm tài liệu
+	Next Appearance Mode	Chế độ giao diện tiếp theo
+	No saved presets yet.	Chưa có thiết lập sẵn nào.
+	open source	mã nguồn mở
+	Pick a screen pixel or press Esc to cancel	Chọn một điểm ảnh trên màn hình hoặc nhấn Esc để hủy
+	Preserve Transparency	Giữ độ trong suốt
+	Preset Name	Tên thiết lập sẵn
+	Reset View	Đặt lại khung nhìn
+	Rotate View	Xoay khung nhìn
+	Save Preset…	Lưu thiết lập sẵn…
+	Saved	Đã lưu
+	Saving {name}	Đang lưu {name}
+	Show/Hide All Panels	Hiện/Ẩn mọi bảng
+	Show/Hide Panels	Hiện/Ẩn bảng
+	Solarized Dark Theme	Chủ đề Solarized tối
+	Sync with system	Đồng bộ với hệ thống
+	The document is closed	Tài liệu đã đóng
+	The document or selected layers changed. Please request deletion again.	Tài liệu hoặc các lớp đã chọn đã thay đổi. Hãy yêu cầu xóa lại.
+	The GPU compositor wasn't used: {reason}	Không dùng bộ tổng hợp GPU: {reason}
+	This redraw took {seconds} s on the CPU.	Lần vẽ lại này mất {seconds} s trên CPU.
+	Transform Symmetry	Biến đổi đối xứng
+	Use File › Open, or paste a copied image with {paste}.	Dùng Tệp › Mở, hoặc dán ảnh đã sao chép bằng {paste}.
+	{label} is writing the file and can no longer be cancelled	{label} đang ghi tệp và không thể hủy nữa
+	{n} commands are not in PhotoSplice.	{n} lệnh không có trong PhotoSplice.
+	{size} (was {old})	{size} (trước là {old})
+	…and {n} more	…và {n} nữa
+	% of all commits	% tổng số commit
+	@{login}: {prs} PRs, {commits} commits, +{added} / −{deleted} lines (Δ {delta}), +{binAdded} / −{binDeleted} binary assets, {first} – {last}	@{login}: {prs} PR, {commits} commit, dòng +{added} / −{deleted} (Δ {delta}), tài sản nhị phân +{binAdded} / −{binDeleted}, {first} – {last}
+	0 turns this threshold off; SVG groups nested deeper than 100 levels are always rasterized.	0 tắt ngưỡng này; nhóm SVG lồng nhau sâu hơn 100 cấp luôn được raster hóa.
+	Alt-click went to the desktop, which moves windows with Alt-drag. Set its window-move key to Super, or latch Alt in Window › Modifier Keys.	Alt+nhấp bị desktop chiếm (Alt-kéo để di chuyển cửa sổ). Đặt phím di chuyển cửa sổ thành Super, hoặc cố định Alt trong Cửa sổ › Phím bổ trợ.
+	Binary assets added	Tài sản nhị phân thêm
+	Binary assets removed	Tài sản nhị phân xóa
+	Commits	Commit
+	Company	Công ty
+	Contributors: {contributors} · Commits: {commits}	Người đóng góp: {contributors} · Commit: {commits}
+	Display name	Tên hiển thị
+	First	Đầu
+	First commit	Commit đầu
+	Grab bag	Tổng hợp
+	Last	Cuối
+	Last commit	Commit cuối
+	Line delta	Chênh lệch dòng
+	Lines +/−	Dòng +/−
+	Lines added	Dòng thêm
+	Lines deleted	Dòng xóa
+	Merged PRs	PR đã gộp
+	Model	Mô hình
+	Name (A–Z)	Tên (A–Z)
+	No contributor data was built into this copy.	Bản sao này không có dữ liệu người đóng góp.
+	No model credits were built into this copy.	Bản sao này không có ghi công mô hình.
+	Real name	Tên thật
+	Reverse the order	Đảo thứ tự
+	Sort	Sắp xếp
+	Table	Bảng
+	Username	Tên người dùng
+	Version	Phiên bản
+	Active	Đang dùng
+shape	Appearance	Diện mạo
+	ArtCraft	ArtCraft
+	Cycle Orientation	Đổi hướng khung
+	Discord	Discord
+	Invalid delete command	Lệnh xóa không hợp lệ
+	Missing delete command	Thiếu lệnh xóa
+	Reset	Đặt lại
+	Import keyboard shortcuts?	Nhập phím tắt?
+	PhotoSplice found your keyboard shortcut set {set} from another image editor on this computer: {n} of its shortcuts differ from PhotoSplice's. Import it?	PhotoSplice tìm thấy bộ phím tắt {set} từ trình chỉnh sửa ảnh khác trên máy này: {n} phím tắt khác với PhotoSplice. Nhập vào?
+	Edit › Keyboard Shortcuts › Reset All to Defaults undoes an import.	Chỉnh sửa › Phím tắt › Đặt lại tất cả về mặc định sẽ hoàn tác lần nhập.
+	Don't Import	Không nhập
+	The keyboard shortcut set was not imported: {error}	Không nhập được bộ phím tắt: {error}
+	Auto Center Preview	Tự động căn giữa xem trước
+	Color Picker ({name})	Bộ chọn màu ({name})
+	Front Image	Ảnh phía trước
+	Next Document	Tài liệu tiếp theo
+	Open EXR Parts…	Mở các phần EXR…
+	Pencil	Bút chì
+	PhotoSplice — Screen Color Picker	PhotoSplice — Bộ chọn màu màn hình
+	Previous Document	Tài liệu trước
+	Refine	Tinh chỉnh
+	Remove from Recent	Xóa khỏi Gần đây
+	Remove {name} from Recent	Xóa {name} khỏi Gần đây
+	Use Classic Mode	Dùng chế độ cổ điển
+	W x H x Resolution	Rộng x Cao x Độ phân giải
+	Block	Khối
+	(No neutral color exists for {mode} mode.)	(Không có màu trung tính cho chế độ {mode}.)
+	24 bits/pixel	24 bit/pixel
+	32 bits/pixel	32 bit/pixel
+	Activate Panel	Kích hoạt bảng
+	Add New Artboard	Thêm artboard mới
+	Add to favorites	Thêm vào mục yêu thích
+	Alignment	Căn chỉnh
+	Amount:	Lượng:
+	Anti-aliased	Khử răng cưa
+	Appearance Settings…	Cài đặt giao diện…
+	Apply Vanishing Point ({key})	Áp dụng Điểm tụ ({key})
+	Automatic	Tự động
+	Background From Layer	Nền từ lớp
+	Background from Layer	Nền từ lớp
+	Bicubic Sharper (reduction)	Bicubic sắc hơn (thu nhỏ)
+	Bicubic Smoother (enlargement)	Bicubic mượt hơn (phóng to)
+	Bottom:	Dưới:
+	Breeze Dark Theme	Chủ đề Breeze tối
+	Breeze Light Theme	Chủ đề Breeze sáng
+	Soft dark	Dịu tối
+	Soft light	Dịu sáng
+	Soft Dark Theme	Giao diện dịu tối
+	Soft Light Theme	Giao diện dịu sáng
+	Caps	Đầu nét
+	Center Columns	Căn giữa các cột
+	Change Panel Group	Đổi nhóm bảng
+	Change Panel Layout	Đổi bố cục bảng
+	Clear Brush Strokes	Xóa nét cọ
+	Clear Existing Guides	Xóa các đường căn hiện có
+	Click a segment to add an anchor point · {alt}-click an anchor to delete it	Bấm vào một đoạn để thêm điểm neo · {alt}-bấm vào điểm neo để xóa
+	Click an anchor point to delete it · {alt}-click a segment to add one	Bấm vào điểm neo để xóa · {alt}-bấm vào một đoạn để thêm điểm neo
+	Click to place · Alt-click or drag off-canvas to remove	Bấm để đặt · Alt-bấm hoặc kéo ra ngoài canvas để xóa
+	Click: corner · Drag: smooth · {alt}-drag: break handle · Click or drag first point: close · {key} finish · Esc cancel	Bấm: điểm góc · Kéo: điểm trơn · {alt}-kéo: tách tay nắm · Bấm hoặc kéo điểm đầu: đóng · {key} hoàn tất · Esc hủy
+	Click: smooth point · Double-click: corner · Drag a point: move · Click first point: close · {key} finish	Bấm: điểm trơn · Bấm đúp: điểm góc · Kéo một điểm: di chuyển · Bấm điểm đầu: đóng · {key} hoàn tất
+	Close Panel	Đóng bảng
+	Columns	Cột
+	Contour Editor	Trình chỉnh sửa đường bao
+	Corner	Góc
+	Corners	Góc
+	Create Plane	Tạo mặt phẳng
+	Create a new elliptical frame	Tạo khung elip mới
+	Create a new rectangular frame	Tạo khung chữ nhật mới
+	Curve Fit:	Độ khớp đường cong:
+	Dash offset	Độ lệch nét đứt
+	Delete Crop Preset…	Xóa thiết lập sẵn cắt…
+	Dock Panel	Gắn bảng
+	Drag to draw the curve · {key}-click draws a straight line	Kéo để vẽ đường cong · {key}-bấm để vẽ đường thẳng
+	Drag: draw freehand · {alt}-click: straight segment · Release on the start point: close	Kéo: vẽ tự do · {alt}-bấm: đoạn thẳng · Thả tại điểm đầu: đóng
+	Draw to modify the curve	Vẽ để chỉnh đường cong
+	Edit Plane	Sửa mặt phẳng
+	Edit points to modify the curve	Chỉnh các điểm để thay đổi đường cong
+	Emulsion Down	Mặt thuốc ở dưới
+	Enter a name for the crop preset	Nhập tên cho thiết lập sẵn cắt
+	Expand Detection Area	Mở rộng vùng phát hiện
+	F cycles the views; hold X to see the image	F để chuyển chế độ xem; giữ X để xem ảnh
+	Fill with {mode}-neutral color (50% gray)	Tô bằng màu trung tính của {mode} (xám 50%)
+	Fill with {mode}-neutral color (black)	Tô bằng màu trung tính của {mode} (đen)
+	Fill with {mode}-neutral color (white)	Tô bằng màu trung tính của {mode} (trắng)
+	Fix the red plane first: its corners must form a convex quad	Hãy sửa mặt phẳng đỏ trước: các góc phải tạo thành tứ giác lồi
+	Float Panel	Thả nổi bảng
+	Functions	Hàm
+	Grid Size:	Cỡ lưới:
+	Group with	Nhóm với
+	H	C
+	Include in playback	Bao gồm khi phát lại
+	Invalid guide layout	Bố cục đường căn không hợp lệ
+	Leave empty for automatic size	Để trống để tự động chọn kích thước
+	Left:	Trái:
+	Light Blue	Xanh lam nhạt
+	Light Gray	Xám nhạt
+	Light Red	Đỏ nhạt
+	Loading fonts…	Đang tải phông chữ…
+	Make Landscape	Chuyển sang khổ ngang
+	Make Portrait	Chuyển sang khổ dọc
+	Marching Ants	Đường viền kiến bò
+	Margin	Lề
+	Medium Blue	Xanh lam vừa
+	Miter limit	Giới hạn góc nhọn
+	Move Panel	Di chuyển bảng
+	New Crop Preset…	Thiết lập sẵn cắt mới…
+	New Layer	Lớp mới
+	No document open	Không có tài liệu nào đang mở
+	No matching settings	Không có cài đặt phù hợp
+	Number	Số
+	On Black	Trên nền đen
+	On Layers	Trên các lớp
+	On White	Trên nền trắng
+	Onion Skin	Hiện khung lân cận
+	Opened {name}	Đã mở {name}
+	Paint over hair or fur on the image; Alt paints the other mode	Tô lên tóc hoặc lông trong ảnh; Alt tô theo chế độ còn lại
+	Panel menu	Menu bảng
+	Print Resolution:	Độ phân giải in:
+	Pro Light Gray Theme	Chủ đề Pro xám nhạt
+	Pro Light Theme	Chủ đề Pro sáng
+	Protect skin tones	Bảo vệ tông da
+	Protect:	Bảo vệ:
+	Refine Edge Brush (R)	Cọ tinh chỉnh cạnh (R)
+	Remove from favorites	Xóa khỏi mục yêu thích
+	Reset All Tools	Đặt lại mọi công cụ
+	Reset Tool	Đặt lại công cụ
+	Reset all tools to their default settings?	Đặt lại mọi công cụ về thiết lập mặc định?
+	Resize panel window	Đổi kích thước cửa sổ bảng
+	Resize panels	Đổi kích thước các bảng
+	Restore Original Edge	Khôi phục cạnh gốc
+	Right:	Phải:
+	Rows	Hàng
+	Saved {name}	Đã lưu {name}
+	Saving {percent}	Đang lưu {percent}
+	Scale or rotate the moved area, then press {key}	Co giãn hoặc xoay vùng đã di chuyển, rồi nhấn {key}
+	Scale:	Tỷ lệ:
+	Search settings…	Tìm cài đặt…
+	Select the crop presets to delete	Chọn các thiết lập sẵn cắt cần xóa
+	Select the crop presets to delete:	Chọn các thiết lập sẵn cắt cần xóa:
+	Show Edge	Hiện cạnh
+	Show Grid	Hiện lưới
+	Show Original	Hiện bản gốc
+	Slant	Độ nghiêng
+	Smooth the curve values	Làm mượt giá trị đường cong
+	Snap to Origin	Bám vào gốc tọa độ
+	Solid	Liền
+	Targa Options	Tùy chọn Targa
+	Target:	Đích:
+	The layer or its mask changed. Drag the mask onto the Trash again.	Lớp hoặc mặt nạ của nó đã thay đổi. Hãy kéo mặt nạ vào Thùng rác lần nữa.
+	There is no crop size or ratio to save	Không có kích thước hoặc tỷ lệ cắt để lưu
+	Top:	Trên:
+	Transform On Drop	Biến đổi khi thả
+	Use Previous Layer to Create Clipping Mask	Dùng lớp trước để tạo mặt nạ cắt
+	Vanishing Point is not active	Điểm tụ chưa được kích hoạt
+	Vanishing Point: click four corners to create a plane	Điểm tụ: bấm bốn góc để tạo mặt phẳng
+	W	R
+	{n} of {max} sample points	{n} trên {max} điểm lấy mẫu
+	{w} {unit} x {h} {unit} ({ppi} ppi)	{w} {unit} x {h} {unit} ({ppi} ppi)
+@plural	Exported {n} swatch to {file}|Exported {n} swatches to {file}	Đã xuất {n} mẫu màu vào {file}
+@plural	Imported {n} brush from {group}|Imported {n} brushes from {group}	Đã nhập {n} cọ từ {group}
+@plural	Imported {n} swatch from {file}|Imported {n} swatches from {file}	Đã nhập {n} mẫu màu từ {file}
+@plural	Played {n} step|Played {n} steps	Đã phát {n} bước
+@plural	Saved for Web: {n} file|Saved for Web: {n} files	Lưu cho web: {n} tệp
+@plural	Updated {n} linked smart object changed on disk|Updated {n} linked smart objects changed on disk	Đã cập nhật {n} đối tượng thông minh liên kết đã thay đổi trên đĩa
+@plural	{n} layer recorded by this comp was deleted. Update the comp, or clear the warning.|{n} layers recorded by this comp were deleted. Update the comp, or clear the warning.	{n} lớp được ghi trong tổ hợp này đã bị xóa. Hãy cập nhật tổ hợp hoặc xóa cảnh báo.
+@plural	{n} plane|{n} planes	{n} mặt phẳng
+@plural	{n} preset|{n} presets	{n} thiết lập sẵn
+@plural	{n} sample point removed|{n} sample points removed	Đã xóa {n} điểm lấy mẫu
+@plural	{n} slice|{n} slices	{n} lát cắt
+@plural	{n} step|{n} steps	{n} bước
+@plural	{warning} (+{n} more brush preset warning)|{warning} (+{n} more brush preset warnings)	{warning} (+{n} cảnh báo thiết lập sẵn cọ khác)
+@plural	{what} with {n} warning|{what} with {n} warnings	{what} với {n} cảnh báo
+	Add beauty precomp from the AOVs	Thêm precomp beauty từ các AOV
+	Show in Explorer	Hiện trong Explorer
+	Show in Folder	Hiện trong thư mục
+	Delete and Fill Selection	Xoá và tô vùng chọn
+	Transform Again on a Copy	Biến đổi lại trên một bản sao
+	Select Layer Above	Chọn lớp phía trên
+	Select Layer Below	Chọn lớp phía dưới
+	Select Top Layer	Chọn lớp trên cùng
+	Select Bottom Layer	Chọn lớp dưới cùng
+	Add Layer Above to Selection	Thêm lớp phía trên vào vùng chọn
+	Add Layer Below to Selection	Thêm lớp phía dưới vào vùng chọn
+	Output	Đầu ra
+	80%	80%
+	85%	85%
+	90%	90%
+	95%	95%
+	Solarized dark	Solarized tối
+	Breeze dark	Breeze tối
+	Breeze light	Breeze sáng
+@id	select.all	Chọn tất cả
+	Native file drag-and-drop is not supported on Wayland yet. Use File › Open, or copy the image in your file manager and paste it with {paste}.	Chưa hỗ trợ kéo-thả tệp gốc trên Wayland. Hãy dùng Tệp › Mở, hoặc sao chép ảnh trong trình quản lý tệp và dán bằng {paste}.
+	To drop files, start PhotoSplice under XWayland: `{command}`	Để thả tệp, hãy khởi chạy PhotoSplice dưới XWayland: `{command}`
+	Or set Preferences › Performance › Linux display server to X11: PhotoSplice then always starts under XWayland.	Hoặc đặt Tùy chọn › Hiệu năng › Máy chủ hiển thị Linux thành X11: PhotoSplice sẽ luôn khởi chạy dưới XWayland.
+	Remove Tool	Gỡ bỏ công cụ
+	Keyboard shortcuts imported	Đã nhập phím tắt
+	Your keyboard shortcut set {set} is in use here: {n} shortcuts differ from the defaults. Edit › Keyboard Shortcuts shows them; Reset All to Defaults undoes this.	Bộ phím tắt {set} của bạn đang được dùng ở đây: {n} phím tắt khác với mặc định. Chỉnh sửa › Phím tắt hiển thị chúng; Đặt lại tất cả về mặc định huỷ thay đổi này.
+	Default PhotoSplice Size	Kích thước mặc định của PhotoSplice
+	Single Row Marquee Tool	Công cụ chọn một hàng
+	Single Column Marquee Tool	Công cụ chọn một cột
+	Horizontal Type Mask Tool	Công cụ mặt nạ chữ ngang
+	Vertical Type Mask Tool	Công cụ mặt nạ chữ dọc
+	Could not use the move tool because the layer is locked.	Không thể dùng công cụ di chuyển vì lớp đã bị khoá.
+	Could not complete the Free Transform command because the layer is locked.	Không thể hoàn tất lệnh Biến đổi tự do vì lớp đã bị khoá.
+	Add Anchor Point Tool	Công cụ thêm điểm neo
+	Delete Anchor Point Tool	Công cụ xoá điểm neo
+	Pro (Light)	Pro (Sáng)
+	Pro (Light Gray)	Pro (Xám nhạt)
+	Rasterize Layers	Raster hoá các lớp
+	Show canvas dots	Hiện chấm vùng vẽ
+	Clip thumbnails to layer bounds	Cắt hình thu nhỏ theo biên của lớp
+	Clip Thumbnails to Layer Bounds	Cắt hình thu nhỏ theo biên của lớp
+	Low resolution previews	Ảnh xem trước độ phân giải thấp
+	Open in camera raw	Mở trong camera raw
+	Pro light	Pro sáng
+	Pro light gray	Pro xám nhạt
+	Show highlight on rollover	Hiện làm nổi bật khi rê chuột
+	Adwaita	Adwaita
+	Adwaita dark	Adwaita tối
+	Rasterize Layer Style	Raster hoá kiểu lớp
+	Color Replacement Tool	Công cụ thay thế màu
+	Color Replacement	Thay thế màu
+	Linux display server	Máy chủ hiển thị Linux
+	X11	X11
+	Apply At Canvas Bounds	Áp dụng tại biên vùng vẽ
+	Could not open	Không thể mở
+	{path}: the path is not valid Unicode; rename the file and open it again.	{path}: đường dẫn không phải Unicode hợp lệ; hãy đổi tên tệp và mở lại.
+	Foreground Color	Màu trước
+	Color…	Màu…
+	50% Gray	Xám 50%
+	Color Adaptation	Thích ứng màu
+	Cone	Hình nón
+	Cone (Inverted)	Hình nón (đảo ngược)
+	Domed	Vòm
+	Domed (Inverted)	Vòm (đảo ngược)
+	Diagonal (Descending)	Chéo (giảm dần)
+	Gaussian	Gauss
+	Ring	Vòng
+	Red Eye Tool	Công cụ đỏ mắt
+	Red Eye	Đỏ mắt
+	Black Matte	Nền lót đen
+	White Matte	Nền lót trắng
+	Seafoam	Màu biển sóng
+	Indigo	Chàm
+	Fuchsia	Đỏ tươi
+	Violet	Tím
+fontWeight	Thin	Mỏng
+fontWeight	ExtraLight	Rất mỏng
+fontWeight	Light	Nhẹ
+fontWeight	Regular	Thường
+fontWeight	Medium	Vừa
+fontWeight	SemiBold	Nửa đậm
+fontWeight	Bold	Đậm
+fontWeight	ExtraBold	Rất đậm
+fontWeight	Black	Đen
+fontWeight	Italic	Nghiêng
+	Rotate View Tool	Công cụ xoay khung nhìn
+	Drag around the centre to rotate the view  ·  Shift constrains to 15°	Kéo vòng quanh tâm để xoay khung nhìn  ·  Shift giới hạn ở 15°
+	Transparency Threshold	Ngưỡng trong suốt
+	Opacity Threshold	Ngưỡng độ mờ
+	Rasterize svg groups deeper than	Raster hoá các nhóm svg sâu hơn
+	Rule of Thirds	Quy tắc 1/3
+	Triangle	Tam giác
+	Golden Ratio	Tỉ lệ vàng
+	Golden Spiral	Xoắn ốc vàng
+	Auto Show Overlay	Tự động hiện lớp phủ
+	Always Show Overlay	Luôn hiện lớp phủ
+	Never Show Overlay	Không bao giờ hiện lớp phủ
+	Auto Hide Notifications	Tự động ẩn thông báo
+	Notification Duration (seconds)	Thời lượng thông báo (giây)
+	Bundle Arrow-Key Nudges	Gộp dịch chuyển bằng phím mũi tên
+	Nudge Bundle Pause (ms)	Thời gian chờ gộp dịch chuyển (ms)
+	Dark Theme	Giao diện tối
+	Light Theme	Giao diện sáng
+	Pro Medium	Pro trung bình
+	Studio Light	Studio sáng
+	Color Picker (Solid Color)	Bộ chọn màu (màu đặc)
+	Color Picker (Crop Shield Color)	Bộ chọn màu (màu màn chắn cắt)
+	Create Rectangle	Tạo hình chữ nhật
+	Create Ellipse	Tạo hình elip
+	Create Triangle	Tạo tam giác
+	Create Polygon	Tạo đa giác
+	Pressure curve	Đường cong áp lực
+	Some brush presets could not be loaded	Không tải được một số cài đặt trước cọ
+	Retry saving presets	Thử lưu cài đặt trước lại
+	Brush preset changes are not saved: {error}	Thay đổi cài đặt trước cọ chưa được lưu: {error}
+	Keep this tab open to retain your brushes.	Hãy giữ thẻ này mở để giữ các cọ của bạn.
+	Browser storage is unavailable; brushes are session-only. Keep this tab open to retain them.	Bộ nhớ trình duyệt không dùng được; các cọ chỉ tồn tại trong phiên này. Hãy giữ thẻ này mở để giữ chúng.
+	Saving brush presets… Keep this tab open until saving finishes.	Đang lưu cài đặt trước cọ… Hãy giữ thẻ này mở cho tới khi lưu xong.
+	Reflect	Phản chiếu
+	Glow	Ánh sáng
+	Negation	Phủ định
+	XOR	XOR
+	Color Burn (Paint.NET)	Trộn màu tối (Paint.NET)
+	Color Dodge (Paint.NET)	Trộn màu sáng (Paint.NET)
+	Dashed	Đứt quãng
+	Dotted	Chấm
+	Butt / Flat	Phẳng
+	Miter	Vát xiên
+	Round	Tròn
+	Bevel	Vát
+	Dash	Nét đứt
+	Gap	Khoảng hở
+	{mode} Color · {bits} bit	Màu {mode} · {bits} bit
+	Drag a crop box · drag inside to move · edges resize ({ratio} ratio, {centre} centre) · Space moves while drawing · arrows nudge · X swaps orientation · {commit} commits · Esc cancels	Kéo hộp cắt · kéo bên trong để di chuyển · cạnh để đổi kích thước ({ratio} tỉ lệ, {centre} giữa) · Space di chuyển khi đang vẽ · phím mũi tên dịch nhẹ · X đổi chiều · {commit} chốt · Esc huỷ
+	Camera Data	Dữ liệu máy ảnh
+cameraData	Make	Hãng sản xuất
+cameraData	Model	Kiểu máy
+cameraData	Date Taken	Ngày chụp
+cameraData	Exposure	Phơi sáng
+cameraData	F-Stop	Khẩu độ F
+cameraData	ISO Speed	Tốc độ ISO
+cameraData	Focal Length	Tiêu cự
+cameraData	Focal Length (35 mm)	Tiêu cự (35 mm)
+cameraData	Lens	Ống kính
+	Perspective Crop Tool	Công cụ cắt phối cảnh
+	Drag a box or click four corners · drag the corners onto the edges of a skewed shape · {commit} commits · Esc cancels	Kéo một hộp hoặc bấm bốn góc · kéo các góc lên cạnh của một hình bị méo · {commit} chốt · Esc huỷ
+	Artboard Tool	Công cụ khung vẽ
+	Freeform Pen Tool	Công cụ bút tự do
+	Curvature Pen Tool	Công cụ bút độ cong
+	32-bit Preview Options	Tuỳ chọn xem trước 32 bit
+	3D	3D
+	Accented Edges	Viền nhấn
+	Accurate	Chính xác
+	Adaptive Wide Angle	Góc rộng thích ứng
+	Add Noise	Thêm nhiễu
+	Add to	Thêm vào
+	Adjust Interval For Loops	Điều chỉnh khoảng cách cho các vòng lặp
+	Adjustment Properties	Thuộc tính điều chỉnh
+	Adobe RGB (1998)	Adobe RGB (1998)
+	Advanced Blending	Pha trộn nâng cao
+	Alpha	Alpha
+	Alternative	Thay thế
+	Ambience	Không khí
+	Ambient	Môi trường
+	Amplitude Max	Biên độ lớn nhất
+	Amplitude Min	Biên độ nhỏ nhất
+	Angled Strokes	Nét chéo
+	Anisotropic	Dị hướng
+	Aperture	Độ khẩu
+	Apply Data Set	Áp dụng tập dữ liệu
+	Apply Image	Áp dụng ảnh
+	Apply Layer Comp	Áp dụng bố cục lớp
+	Arbitrary	Tùy ý
+	Area	Diện tích
+	Around Center	Quanh tâm
+	Arrangement	Sắp xếp
+	Artboard from Group	Khung vẽ từ nhóm
+	Artboard from Layers	Khung vẽ từ các lớp
+	Artist	Nghệ sĩ
+	Artistic	Nghệ thuật
+	Assign Profile	Gán hồ sơ
+	At	Tại
+	Author	Tác giả
+	Auto Scale	Tự động căn cỡ
+	Auto-Align Layers	Tự động căn lớp
+	Auto-Blend Layers	Tự động pha trộn lớp
+	Background Level	Mức màu sau
+	Bamboo	Tre
+	Bas Relief	Phù điêu nổi
+	Base Tree Type	Loại cây nền
+	Baseline Shift	Dịch đường cơ sở
+	Batch	Hàng loạt
+	Berries	Quả mọng
+	Best	Tốt nhất
+	Black Clip	Cắt đen
+	Black Intensity	Cường độ đen
+	Blade Curvature	Độ cong lưỡi
+	Blast	Nổ
+	Bleach Bypass	Bypass tẩy
+	Blend	Trộn
+	Blocks	Khối
+	Blue Yellow	Xanh dương Vàng
+	Blur Angle	Góc làm mờ
+	Bold Italic	Đậm nghiêng
+	Border	Viền
+	Border Thickness	Độ dày viền
+	Box Blur	Làm mờ hộp
+	Branches Color	Màu cành
+	Branches Height	Chiều cao cành
+	Branches Thickness	Độ dày cành
+	Brick	Gạch
+	Bristle Detail	Chi tiết sợi
+	Browse	Duyệt
+	Brush Detail	Chi tiết cọ
+	Brush Size	Cỡ cọ
+	Brush Strokes	Nét cọ
+	Brush Type	Loại cọ
+	Burlap	Vải thô
+	Burn	Làm tối
+	Calculations	Tính toán
+	Camera Calibration	Hiệu chuẩn máy ảnh
+	Camera Raw Filter	Bộ lọc Camera Raw
+	Candle Light	Ánh nến
+	Canvas Size	Kích thước vùng vẽ
+	Caption	Chú thích
+	Category	Thể loại
+	Cell Size	Cỡ ô
+	Center X	Tâm X
+	Center Y	Tâm Y
+	Chalk & Charcoal	Phấn & than
+	Chalk Area	Vùng phấn
+	Channel	Kênh
+	Channel1	Kênh 1
+	Channel2	Kênh 2
+	Channel3	Kênh 3
+	Channel4	Kênh 4
+	Charcoal	Than chì
+	Charcoal Area	Vùng than chì
+	Charcoal Thickness	Độ dày than chì
+	Chrome	Crom
+	Circle	Tròn
+	Circularity	Độ tròn
+	Cleanliness	Độ sạch
+	Clear Amount	Mức trong
+	Clipping Path	Đường dẫn cắt
+	Clone	Nhân bản
+	Clone Stamp	Đóng dấu nhân bản
+	Clumped	Kết tụ
+	Coarse Dots	Chấm thô
+	Color Decontaminate	Khử ô nhiễm màu
+	Color Halftone	Chữ điểm bán tông
+	Color Lookup Tables	Bảng tra màu
+	Color Profile	Hồ sơ màu
+	Color Range	Dải màu
+	Color Table	Bảng màu
+	Color indicates	Màu biểu thị
+	Colored Pencil	Bút chì màu
+	Compatibility	Tương thích
+	Compose	Bố cục
+	Condensed	Hẹp
+	Conditional Mode Change	Đổi chế độ có điều kiện
+	Constraints	Ràng buộc
+	Content-Aware Fill	Tô nhận biết nội dung
+	Contract	Thu nhỏ
+	Contrasty	Tương phản mạnh
+	Conté Crayon	Bút sáp Conté
+	Convert to Linked	Chuyển thành liên kết
+	Convert to Profile	Chuyển sang hồ sơ
+	Cool	Mát
+	Cooling L B B	Lạnh L B B
+	Cooling80	Lạnh80
+	Cooling82	Lạnh82
+	Copyright Status	Trạng thái bản quyền
+	Copyrighted	Được bảo vệ bản quyền
+	Correct C A	Hiệu chỉnh C A
+	Correct Distortion	Hiệu chỉnh độ méo
+	Correct Vignette	Hiệu chỉnh làm tối viền
+	Crack Brightness	Độ sáng vết nứt
+	Crack Depth	Độ sâu vết nứt
+	Crack Spacing	Khoảng cách vết nứt
+	Craquelure	Vết nứt
+	Create By	Tạo theo
+	Cross	Chữ thập
+	Cross Process	Xử lý chéo
+	Crosshatch	Chéo sọc
+	Crystallize	Tinh thể hoá
+	Current	Hiện tại
+	Curve Darks	Đường cong vùng tối đậm
+	Curve Highlights	Đường cong vùng sáng
+	Curve Lights	Đường cong vùng sáng nhấn
+	Curve Shadows	Đường cong vùng tối
+	Curve Splits	Đường cong tách đôi
+	Custom Branch Color	Màu cành tuỳ chỉnh
+	Cutout	Cắt ra
+	Daisies	Cúc hoa
+	Dark Intensity	Cường độ tối
+	Dark Rough	Tối thô
+	Dark Strokes	Nét tối
+	Darken Only	Chỉ làm tối
+	Darkness	Độ tối
+	Data	Dữ liệu
+	Date and Time	Ngày và giờ
+	Day For Night	Ngày đổi thành đêm
+	De-Interlace	Khử xen kẽ
+	Deep Blue	Xanh dương đậm
+	Deep Emerald	Ngọc lục bảo đậm
+	Deep Red	Đỏ đậm
+	Deep Yellow	Vàng đậm
+	Default Foreground and Background Colors	Màu trước và màu sau mặc định
+	Default Leaves	Lá mặc định
+	Define Brush Preset	Định nghĩa cài đặt cọ
+	Define Custom Shape	Định nghĩa hình tuỳ chỉnh
+	Define Pattern	Định nghĩa mẫu
+	Definition	Độ rõ nét
+	Defringe	Khử viền sai màu
+	Depth Map	Bản đồ độ sâu
+	Depth Mode	Chế độ độ sâu
+	Diffuse	Khuếch tán
+	Diffuse Glow	Ánh sáng khuếch tán
+	Digits	Chữ số
+	Direction Balance	Cân bằng hướng
+	Displace	Dịch chuyển
+	Distortion	Độ méo
+	Distribution	Phân bố
+	Dodge	Làm sáng
+	Dot	Chấm
+	Double Line	Đường đôi
+	Draft	Bản nháp
+	Dry Brush	Cọ khô
+	Duplicate	Nhân bản
+	Duplicate Layer	Nhân bản lớp
+	Duplicate Layer Comp	Nhân bản bố cục lớp
+	Duplicate Layers	Nhân bản các lớp
+	Duplication	Nhân bản
+	Duration	Thời lượng
+	Dust & Scratches	Bụi & vết xước
+	Dynamics	Động lực
+	EXIF	EXIF
+	Edge Brightness	Độ sáng cạnh
+	Edge Extension	Mở rộng cạnh
+	Edge Fidelity	Độ trung thành của cạnh
+	Edge Intensity	Cường độ cạnh
+	Edge Only	Chỉ cạnh
+	Edge Simplicity	Độ đơn giản của cạnh
+	Edge Thickness	Độ dày cạnh
+	Edge Width	Độ rộng cạnh
+	Elevation	Cao độ
+	Eliminate	Loại bỏ
+	End X	Kết thúc X
+	End Y	Kết thúc Y
+	Enlarged	Phóng lớn
+	Errors	Lỗi
+	Even Fields	Trường đều
+	Export Contents	Xuất nội dung
+	Export Preferences	Xuất tùy chọn
+	Extensions	Tiện ích
+	Extra Bold	Rất đậm
+	Extra Light	Rất mỏng
+	Extrude	Đúc nổi
+	F	F
+	Faded Film	Phim phai
+	Fast	Nhanh
+	Fiber Length	Độ dài sợi
+	Fibers	Sợi
+	Field Blur	Làm mờ trường
+	File Info	Thông tin tệp
+	Film Grain	Hạt phim
+	Filter Gallery	Thư viện bộ lọc
+	Fine	Mịn
+	Fine Dots	Chấm mịn
+	First Line Indent	Thụt lề dòng đầu
+	Fit Image	Vừa khung ảnh
+	Flame	Ngọn lửa
+	Flame Bottom Alignment	Căn đáy ngọn lửa
+	Flame Lines	Các vệt ngọn lửa
+	Flame Shape	Hình ngọn lửa
+	Flame Style	Kiểu ngọn lửa
+	Flame Type	Loại ngọn lửa
+	Flash	Đèn flash
+	Flat	Phẳng
+	Flat Shading	Tô bóng phẳng
+	Flower Color	Màu hoa
+	Focal Distance	Khoảng cách lấy nét
+	Focal Length35mm	Tiêu cự 35mm
+	Focus	Lấy nét
+	Focus Area	Vùng lấy nét
+	Foreground Level	Mức màu trước
+	Frame	Khung
+	Fresco	Tranh fresco
+	From Left	Từ trái
+	From Right	Từ phải
+	Frosted	Sương giá
+	Fuzziness	Độ mờ
+	Gamma	Gamma
+	Gaussian Blur	Làm mờ Gauss
+	Generators	Bộ sinh
+	Generic	Tổng quát
+	Glass	Kính
+	Global Light	Ánh sáng toàn cục
+	Gloss	Độ bóng
+	Glow Amount	Mức ánh sáng
+	Glow Brightness	Độ sáng của ánh sáng
+	Glow Size	Cỡ ánh sáng
+	Glowing Edges	Viền phát sáng
+	Glyph	Glyph
+	Good	Tốt
+	Grade Balance	Phân cấp cân bằng
+	Grade Blending	Phân cấp pha trộn
+	Grade Global	Phân cấp toàn cục
+	Grade Highlights	Phân cấp vùng sáng
+	Grade Midtones	Phân cấp vùng trung tính
+	Grade Shadows	Phân cấp vùng tối
+	Grain Amount	Mức hạt
+	Grain Roughness	Độ thô của hạt
+	Grain Size	Cỡ hạt
+	Grain Type	Loại hạt
+	Graininess	Độ hạt
+	Grainy Dots	Chấm hạt
+	Graphic Pen	Bút vẽ
+	Graphic and web	Đồ hoạ và web
+	Gray Value (Maximum)	Giá trị xám (lớn nhất)
+	Gray Value (Mean)	Giá trị xám (trung bình)
+	Gray Value (Median)	Giá trị xám (trung vị)
+	Gray Value (Minimum)	Giá trị xám (nhỏ nhất)
+	Grout Width	Bề rộng đường chỉa
+	HDR Toning	Tô màu HDR
+	Halftone Pattern	Mẫu chữ điểm bán tông
+	Hand	Tay
+	Heal	Vá
+	Healing	Vá
+	Hearts	Trái tim
+	Heptagon	Thất giác
+	Hexagon	Lục giác
+	Hide	Ẩn
+	High	Cao
+	High Pass	Lọc cao tần
+	Highlight	Vùng sáng
+	Highlight Amount	Mức vùng sáng
+	Highlight Area	Vùng sáng
+	Highlight Radius	Bán kính vùng sáng
+	Highlight Strength	Cường độ vùng sáng
+	Highlight Tone	Tông vùng sáng
+	History Brush	Cọ lịch sử
+	Horizontal Only	Chỉ theo chiều ngang
+	Hotspot	Điểm nóng
+	Hsb	Hsb
+	Hsl	Hsl
+	Hsl Hue	HSL sắc độ
+	Hsl Lum	HSL độ sáng
+	Hsl Sat	HSL bão hoà
+	ISO	ISO
+	ISO Speed	Tốc độ ISO
+	Image Balance	Cân bằng ảnh
+	Image Processor	Xử lý ảnh
+	Import Brushes	Nhập các cọ
+	In	Bắt đầu
+	In Black	Vào đen
+	In White	Vào trắng
+	Infinite	Vô hạn
+	Ink Outlines	Nét viền mực
+	Input Mode	Chế độ đầu vào
+	Integrated Density	Mật độ tích phân
+	Intensity	Cường độ ánh sáng
+	Interpolation	Nội suy
+	Interpret Footage	Diễn giải dữ liệu video
+	Interval	Khoảng cách
+	Iris Blur	Làm mờ mống mắt
+	Ivy	Cây thường xuân
+	Jag	Răng cưa
+	Justification	Căn đều
+	Justify	Căn đều
+	Kernel	Hạt nhân
+	Keywords	Từ khoá
+	Label	Nhãn
+	Layer Comp	Bố cục lớp
+	Layer Content Options	Tuỳ chọn nội dung lớp
+	Layer From Background	Lớp từ nền
+	Layer Properties	Thuộc tính lớp
+	Leaf Color	Màu lá
+	Leaves Amount	Mức lá
+	Leaves Color	Màu lá
+	Leaves Size	Cỡ lá
+	Left Diagonal	Chéo trái
+	Legacy	Kiểu cũ
+	Length	Chiều dài
+	Lens	Ống kính
+	Lens Blur	Làm mờ ống kính
+	Lens Correction	Sửa ống kính
+	Lens Flare	Ánh sáng loé ống kính
+	Letter Spacing	Khoảng cách chữ
+	Level Based	Theo mức
+	Libraries	Thư viện
+	Ligature	Liên kết chữ
+	Light Dark Balance	Cân bằng sáng tối
+	Light Direction	Hướng ánh sáng
+	Light Intensity	Cường độ sáng
+	Light Rough	Sáng thô
+	Light Source	Nguồn sáng
+	Light Type	Loại ánh sáng
+	Light X	Ánh sáng X
+	Light Y	Ánh sáng Y
+	Light Z	Ánh sáng Z
+	Lighten Grout	Làm sáng đường chỉa
+	Lighten Only	Chỉ làm sáng
+	Lighting	Ánh sáng
+	Lighting Effects	Hiệu ứng ánh sáng
+	Liquify	Hoà lỏng
+	List	Danh sách
+	Load Selection	Tải vùng chọn
+	Lock Layers	Khoá các lớp
+	Long Lines	Đường dài
+	Long Strokes	Nét dài
+	Loop	Lặp
+	Low	Thấp
+	Lower	Dưới
+	Lum	Độ sáng
+	Lut	LUT
+	Magnetic Lasso	Dây mềm từ tính
+	Make	Hãng sản xuất
+	Make Work Path	Tạo đường dẫn làm việc
+	Map Document	Ánh xạ tài liệu
+	Map Layer	Ánh xạ lớp
+	Map Path	Ánh xạ đường dẫn
+	Mask	Mặt nạ
+	Mask Incomplete Blocks	Che các khối chưa hoàn chỉnh
+	Masked Areas	Vùng được che
+	Match Color	Khớp màu
+	Max Offset	Độ lệch lớn nhất
+	Max Radius	Bán kính lớn nhất
+	Measure	Đo
+	Medium Dots	Chấm vừa
+	Medium Lines	Đường vừa
+	Medium Strokes	Nét vừa
+	Metallic	Ánh kim
+	Method	Phương pháp
+	Mezzotint	Mezzotint
+	Midtone	Trung tính
+	Mono Contrast	Tương phản đơn sắc
+	Monochromatic	Đơn sắc
+	Mosaic	Khảm
+	Mosaic Tiles	Ô khảm
+	Motion Blur	Làm mờ chuyển động
+	Move Layer	Di chuyển lớp
+	Movie Prime	Phim Prime
+	Multiple Flames Along Path	Nhiều ngọn lửa dọc đường dẫn
+	Multiple Flames One Direction	Nhiều ngọn lửa cùng hướng
+	Multiple Flames Path Directions	Nhiều ngọn lửa theo hướng đường dẫn
+	Multiple Flames Various Length	Nhiều ngọn lửa với độ dài khác nhau
+	Neon Glow	Ánh sáng neon
+	Neutralize	Trung tính hoá
+	New Channel	Kênh mới
+	New Group	Nhóm mới
+	New Guide	Đường dẫn mới
+	New Guide Layout	Bố cục đường dẫn mới
+	New Layer Comp	Bố cục lớp mới
+	New Layer…	Lớp mới…
+	New Video Layer from File	Lớp video mới từ tệp
+	New document	Tài liệu mới
+	New document…     ⌘N	Tài liệu mới…     ⌘N
+	Noise Color	Nhiễu màu
+	Noise Color Detail	Nhiễu chi tiết màu
+	Noise Luminance	Nhiễu độ sáng
+	Noise Luminance Detail	Nhiễu chi tiết độ sáng
+	Note Paper	Giấy ghi chú
+	Number Of Levels	Số mức
+	Ocean Ripple	Gợn sóng biển
+	Octagon	Bát giác
+	Odd Fields	Trường lệch
+	Oil Paint	Sơn dầu
+	One Flame Along Path	Một ngọn lửa dọc đường dẫn
+	Open As	Mở bằng
+	Opening	Đang mở
+	Operation	Thao tác
+	Out	Kết thúc
+	Out Black	Ra đen
+	Out From Center	Từ tâm ra ngoài
+	Out White	Ra trắng
+	Oval	Hình bầu dục
+	Overlay Edge	Phủ viền
+	Package	Đóng gói
+	Paint Daubs	Vết sơn
+	Palette Knife	Dao vẽ
+	Paper Brightness	Độ sáng giấy
+	Parallel	Song song
+	Patchwork	Vá ví dụ
+	Path Blur	Làm mờ theo đường dẫn
+	Pattern Type	Loại mẫu
+	Pen	Bút
+	Pencil Width	Độ rộng nét bút chì
+	Pentagon	Ngũ giác
+	Perimeter	Chu vi
+	Perspective Crop	Cắt phối cảnh
+	Phone	Điện thoại
+	Photocopy	Bản sao photocopy
+	Photomerge	Ghép ảnh
+	Picture Frame	Khung tranh
+	Pinch	Bóp
+	Pins	Các ghim
+	Place Embedded	Đặt gài trong
+	Place Linked	Đặt liên kết
+	Place Scale Marker	Đặt dấu tỉ lệ
+	Plane	Mặt phẳng
+	Planes	Các mặt phẳng
+	Plaster	Thạch cao
+	Plastic Wrap	Màng bọc
+	Point	Điểm
+	Point Curve	Đường cong điểm
+	Point Curve Blue	Đường cong điểm xanh dương
+	Point Curve Green	Đường cong điểm xanh lá
+	Point Curve Red	Đường cong điểm đỏ
+	Pointed	Nhọn
+	Pointillize	Chấm điểm
+	Polar Coordinates	Toạ độ cực
+	Polar To Rectangular	Cực sang chữ nhật
+	Pond Ripples	Gợn sóng ao
+	Poster Edges	Viền áp phích
+	Posterization	Dàn màu
+	Prime105	Prime105
+	Prime35	Prime35
+	ProPhoto	ProPhoto
+	Profile	Hồ sơ
+	Public Domain	Miền công cộng
+	Pyramids	Kim tự tháp
+	Quick Selection	Chọn nhanh
+	Radial Blur	Làm mờ toả tròn
+	Radius X	Bán kính X
+	Radius Y	Bán kính Y
+	Random	Ngẫu nhiên
+	Randomize Length	Ngẫu nhiên hoá độ dài
+	Randomize Shapes	Ngẫu nhiên hoá các hình
+	Raw Data	Dữ liệu thô
+	Raw Defaults	Mặc định Raw
+	Reading	Đang đọc
+	Recovery	Khôi phục
+	Rectangle	Hình chữ nhật
+	Rectangular Selection	Vùng chọn hình chữ nhật
+	Rectangular To Polar	Chữ nhật sang cực
+	Red Cyan	Đỏ Cyan
+	Reduce Color Noise	Giảm nhiễu màu
+	Reduce Noise	Giảm nhiễu
+	Relief	Phù điêu
+	Relink to File	Liên kết lại với tệp
+	Remove Jpeg Artifact	Loại artefact JPEG
+	Rename Brush	Đổi tên cọ
+	Rename Group	Đổi tên nhóm
+	Rename Layer Comp	Đổi tên bố cục lớp
+	Render Video	Kết xuất video
+	Reorder Layer	Sắp xếp lại lớp
+	Repeat	Lặp lại
+	Replace Color	Thay thế màu
+	Replace Contents	Thay nội dung
+	Replace Footage	Thay dữ liệu video
+	Resolve Missing Fonts	Khôi phục phông còn thiếu
+	Result	Kết quả
+	Reticulation	Mạng lưới nổi
+	Rgb	Rgb
+	Ridges	Sống lưng
+	Right Diagonal	Chéo phải
+	Ripple	Gợn sóng
+	Ripple Magnitude	Biên độ gợn sóng
+	Ripple Size	Cỡ gợn sóng
+	Roman	Chữ thường
+	Rope	Dây thừng
+	Roses	Hoa hồng
+	Rough Pastels	Màu phấm thô
+	Row Order	Thứ tự hàng
+	Ruler	Thước
+	Sampler	Lấy mẫu
+	Sandstone	Đá sa mạc
+	Sat	Bão hoà
+	Save As	Lưu thành
+	Save Selection	Lưu vùng chọn
+	Save for Web (Legacy)	Lưu cho web (bản cũ)
+	Scale Effects	Căn cỡ hiệu ứng
+	Scale Factor	Hệ số tỉ lệ
+	Scale Units	Đơn vị đo
+	Scaling	Tỉ lệ
+	Scallops	Vỏ sò
+	Script Events Manager	Trình quản lý sự kiện script
+	Search menus	Tìm trong trình đơn
+	Seed	Hạt giống
+	Select All Layers	Chọn tất cả lớp
+	Select Layer	Chọn lớp
+	Select and Mask	Chọn và Mặt nạ
+	Selected Areas	Vùng đã chọn
+	Semi Bold	Nửa đậm
+	Sepia	Nâu sepia
+	Set Colors	Đặt màu
+	Set Measurement Scale	Đặt tỉ lệ đo
+	Settings	Cài đặt
+	Shadow	Bóng
+	Shadow Amount	Mức bóng
+	Shadow Intensity	Cường độ vùng tối
+	Shadow Radius	Bán kính bóng
+	Shadow Tone	Tông bóng
+	Shadows/Highlights	Vùng tối/Vùng sáng
+	Shape Blur	Làm mờ hình
+	Sharpen Amount	Mức tăng nét
+	Sharpen Detail	Chi tiết tăng nét
+	Sharpen Details	Tăng nét chi tiết
+	Sharpen Masking	Che tăng nét
+	Sharpen Radius	Bán kính tăng nét
+	Sharpness	Độ nét
+	Shear	Cắt chéo
+	Shine	Ánh loáng
+	Short Lines	Đường ngắn
+	Short Strokes	Nét ngắn
+	Simple	Đơn giản
+	Sine	Sin
+	Sketch	Phác thảo
+	Slice Options	Tuỳ chọn lát cắt
+	Smart Blur	Làm mờ thông minh
+	Smart Sharpen	Tăng nét thông minh
+	Smoothness	Độ mượt
+	Smudge Stick	Thanh nhoè
+	Snapshots	Ảnh chụp
+	Snowflakes	Bông tuyết
+	Softness	Độ mềm
+	Software	Phần mềm
+	Solid Color	Màu đặc
+	Solid Front Faces	Mặt trước kín
+	Source Layer	Lớp nguồn
+	Sparkle	Lấp lánh
+	Spatter	Vẩy
+	Speckle	Lấm tấm
+	Speed	Tốc độ
+	Spherize	Cầu hoá
+	Spin	Xoáy
+	Spin Blur	Làm mờ xoáy
+	Sponge	Xốp
+	Spot	Điểm
+	Spot Color	Màu điểm
+	Spot Healing	Vá điểm
+	Spray Radius	Bán kính phun
+	Sprayed Strokes	Nét phun
+	Sprinkles	Rắc
+	Square Size	Cỡ ô vuông
+	Squareness	Độ vuông
+	Stagger	So le
+	Stained Glass	Kính màu
+	Stamp	Con dấu
+	Star	Ngôi sao
+	Stars	Các ngôi sao
+	Start X	Bắt đầu X
+	Start Y	Bắt đầu Y
+	Statistics	Thống kê
+	Step Backward	Lùi một bước
+	Stippled	Gạch chấm
+	Stop	Dừng
+	Stops	Các điểm dừng
+	Strength	Cường độ
+	Stretch	Kéo giãn
+	Stroke Detail	Chi tiết nét vẽ
+	Stroke Direction	Hướng nét
+	Stroke Length	Độ dài nét
+	Stroke Pressure	Áp lực nét vẽ
+	Stroke Size	Cỡ nét vẽ
+	Stroke Width	Độ rộng nét
+	Strokes	Các nét
+	Stylization	Phong cách hoá
+	Sumi-e	Sumi-e
+	Surface Blur	Làm mờ bề mặt
+	Switch Foreground and Background Colors	Đổi chỗ màu trước và màu sau
+	Taper	Độ thon
+	Target	Đích
+	Target X	Đích X
+	Target Y	Đích Y
+	Teal Orange	Xanh ngọc & Cam
+	Texture Coverage	Độ phủ kết cấu
+	Texturizer	Tạo kết cấu
+	Thickness	Độ dày
+	Tile Size	Cỡ ô
+	Tiles	Gạch men
+	Tilt	Độ nghiêng
+	Tilt-Shift	Dốc lệch dịch chuyển
+	Time	Thời gian
+	Timing	Định thời
+	Tint Color	Màu nhuộm
+	Tiny Lens	Ống kính nhỏ
+	To Center	Về tâm
+	Tone Curve	Đường cong tông
+	Toolbars	Các thanh công cụ
+	Torn Edges	Cạnh xé
+	Trace Contour	Đường viền nét
+	Transition	Chuyển tiếp
+	Trap	Bẫy
+	Tree	Cây
+	Trim	Cắt bỏ
+	Turbulent	Rối
+	Twirl	Xoáy
+	Unaltered	Không thay đổi
+	Undefined Areas	Vùng chưa xác định
+	Underpainting	Lớp nền
+	Underwater	Dưới nước
+	Uniform	Đồng đều
+	Units	Đơn vị
+	Unix	Unix
+	Unknown	Không rõ
+	Unsharp Mask	Mặt nạ không làm nét
+	Update Layer Comp	Cập nhật bố cục lớp
+	Upper	Trên
+	Use Custom Color	Dùng màu tuỳ chỉnh
+	Use Selection In Source	Dùng vùng chọn trong nguồn
+	Use Selection In Target	Dùng vùng chọn trong đích
+	Vanishing Point	Điểm tụ
+	Variable Data Sets	Tập dữ liệu biến
+	Vertical Only	Chỉ theo chiều dọc
+	Video Frames to Layers	Khung hình video ra lớp
+	Vignette Amount	Mức làm tối viền
+	Vignette Feather	Làm mềm viền
+	Vignette Highlights	Vùng sáng viền
+	Vignette Midpoint	Điểm giữa viền
+	Vignette Roundness	Độ tròn viền
+	Vignette Style	Kiểu viền
+	Vine Color	Màu dây leo
+	Vine With Flowers	Dây leo có hoa
+	Vine With Leaves	Dây leo có lá
+	Violent	Dữ dội
+	Wand	Cọ thần thánh
+	Warm	Ấm
+	Warming L B A	Ấm L B A
+	Warming81	Ấm81
+	Warming85	Ấm85
+	Warmth	Độ ấm
+	Warp Text	Uốn chữ
+	Water Paper	Giấy nước
+	Watercolor	Màu nước
+	Wavelength Max	Bước sóng lớn nhất
+	Wavelength Min	Bước sóng nhỏ nhất
+	Waves	Sóng
+	Wetness	Độ ướt
+	White Clip	Cắt trắng
+	White Intensity	Cường độ trắng
+	White Is High	Trắng là cao
+	Wide Blurry	Rộng mờ
+	Wide Sharp	Rộng sắc nét
+	Wind	Gió
+	Working	Đang xử lý
+	Wrap	Cuộn
+	X	X
+	Y	Y
+	ZigZag	Zigzag
+	Zigzag	Zigzag
+	sRGB	sRGB
+	sRGB IEC61966-2.1	sRGB IEC61966-2.1
+	shortcut	phím tắt
+	Drag (lasso) or click points (polygonal) · {add} add · {sub} subtract	Kéo (dây mềm) hoặc bấm các điểm (đa giác) · {add} thêm · {sub} trừ
+	Selected Artboards	Các artboard đã chọn
+	5 Columns, 3 Rows	5 cột, 3 hàng
+	8 Columns	8 cột
+	12 Columns	12 cột
+	Smart Radius	Bán kính thông minh
+	Shift Edge	Dịch cạnh
+	Decontaminate	Khử nhiễm màu
+	Refine Edge	Tinh chỉnh cạnh
+	Refine Strokes	Tinh chỉnh nét
+	New Document With Mask	Tài liệu mới có mặt nạ
+	New Layer With Mask	Lớp mới có mặt nạ
+	Convert Point Tool	Công cụ Chuyển đổi điểm
+	Enable animations	Bật hiệu ứng chuyển động
+	Gloss Contour	Đường bao bóng
+	Cone - Inverted	Hình nón - Đảo ngược
+	Cove - Deep	Lõm - Sâu
+	Cove - Shallow	Lõm - Nông
+	Half Round	Nửa tròn
+	Ring - Double	Vòng - Kép
+	Rolling Slope - Descending	Dốc lượn - Đi xuống
+	Rounded Steps	Bậc bo tròn
+	Sawtooth 1	Răng cưa 1
+	Frame Tool	Công cụ Khung
+	Simulate Pressure	Mô phỏng áp lực
+	Background Eraser	Tẩy nền
+	Healing Brush	Cọ phục hồi
+	Spot Healing Brush	Cọ sửa khuyết điểm
+	Smudge	Bôi nhòe
+curves	Smooth	Làm mượt
+	Show rulers	Hiện thước
+	Stroke Path…	Đi nét đường dẫn…
+	Apply mask to layer before removing?	Áp dụng mặt nạ vào lớp trước khi xóa?
+	Delete the vector mask?	Xóa mặt nạ vectơ?
+	Add Shortcut	Thêm phím tắt
+	Response curve	Đường cong phản hồi
+	Object Finder	Trình tìm đối tượng
+	No object found there — drag a rectangle around it	Không tìm thấy đối tượng ở đó — hãy kéo một hình chữ nhật quanh nó
+	Remove after each stroke	Xóa sau mỗi nét vẽ
+	Apply the removal ({key})	Áp dụng việc xóa ({key})
+	Strokes to remove: {n} (Enter applies, Esc cancels)	Nét vẽ cần xóa: {n} (Enter áp dụng, Esc hủy)
+	Show home recent files	Hiện tệp gần đây trên màn hình chính
+	Clear Brush Controls	Xóa điều khiển cọ
+	Reset All Locked Settings	Đặt lại tất cả cài đặt đã khóa
+	Copy Texture to Other Tools	Sao chép họa tiết sang các công cụ khác
+	Load Actions…	Nạp hành động…
+	Save Actions…	Lưu hành động…
+	{name} (Photoshop)	{name} (Photoshop)
+	{message} ({note})	{message} ({note})
+@plural	Loaded {n} action from {file}|Loaded {n} actions from {file}	Đã nạp {n} hành động từ {file}
+@plural	{n} step has no PhotoSplice equivalent yet|{n} steps have no PhotoSplice equivalent yet	{n} bước chưa có chức năng tương ứng trong PhotoSplice
+@plural	Saved {n} action to {file}|Saved {n} actions to {file}	Đã lưu {n} hành động vào {file}
+@plural	{n} step with no Photoshop equivalent left out|{n} steps with no Photoshop equivalent left out	Đã bỏ qua {n} bước không có chức năng tương ứng trong Photoshop
+	File Naming	Đặt tên tệp
+	Starting serial	Số thứ tự bắt đầu
+	Insert Stop…	Chèn điểm dừng…
+	Save Set…	Lưu bộ…
+	Message:	Thông báo:
+	Allow Continue	Cho phép tiếp tục
+	Show dialog during playback	Hiện hộp thoại khi phát
+	Select an action first	Hãy chọn một hành động trước
+	Action playback stopped	Đã dừng phát hành động
+	Step {step} is waiting for its dialog	Bước {step} đang chờ hộp thoại của nó
+@plural	{n} action|{n} actions	{n} hành động
+	Background (Default)	Nền (mặc định)
+	Presentation	Trình bày
+	Include All Subfolders	Bao gồm tất cả thư mục con
+	Gradient Preset Options	Tùy chọn thiết lập sẵn chuyển sắc
+	Import .GRD	Nhập .GRD
+	Choose a gradient file (.grd).	Chọn tệp chuyển sắc (.grd).
+	Auto Add/Delete	Tự động thêm/xóa
+	Don't also tick Mirror Image in Print Settings…: the two flips cancel out.	Đừng bật thêm Ảnh phản chiếu trong thiết lập in: hai lần lật sẽ triệt tiêu nhau.
+	Print Settings…	Thiết lập in…
+	Remember to turn off the printer's own colour management in Print Settings…	Nhớ tắt quản lý màu riêng của máy in trong thiết lập in…
+	Sent to {printer}	Đã gửi tới {printer}
+	set in Print Settings…	đặt trong thiết lập in…
+	ICO is limited to 256 × 256 pixels	ICO giới hạn ở 256 × 256 pixel
+	Use the embedded profile ({profile})	Dùng hồ sơ nhúng ({profile})
+	Convert to the working space ({profile})	Chuyển sang không gian làm việc ({profile})
+	Remember this choice for future images	Ghi nhớ lựa chọn này cho các ảnh sau
+	Turn the prompt back on with Ask On Mismatch in Edit › Color Settings.	Bật lại câu hỏi bằng Ask On Mismatch trong Chỉnh sửa › Cài đặt màu.
+	Button Mode	Chế độ nút
+	Button Mode On	Chế độ nút bật
+	Darken Interface	Làm tối giao diện
+	Lighten Interface	Làm sáng giao diện
+	Technique	Kỹ thuật
+	Chisel Hard	Đục cứng
+	Chisel Soft	Đục mềm
+	Open color-less EXR as ACEScg	Mở EXR không khai báo màu sắc dưới dạng ACEScg
+	Edit Selected Guides	Sửa đường căn đã chọn
+	Clear Selected Guides	Xóa đường căn đã chọn
+	Delete this set	Xóa bộ này
+	New Set…	Bộ mới…
+	PhotoSplice Defaults	Mặc định của PhotoSplice
+	Save a list of these shortcuts as a web page	Lưu danh sách các phím tắt này thành trang web
+	Save the changes to this set	Lưu thay đổi vào bộ này
+	Save these shortcuts as a .kys file	Lưu các phím tắt này thành tệp .kys
+	Save these shortcuts as a new set	Lưu các phím tắt này thành bộ mới
+	Set deleted.	Đã xóa bộ.
+	Set saved.	Đã lưu bộ.
+	Set:	Bộ:
+	Summarize…	Tóm tắt…
+	There are too many sets: delete one first.	Có quá nhiều bộ: hãy xóa một bộ trước.
+	set name	tên bộ
+	{set} (modified)	{set} (đã sửa đổi)
+	Accept and Go to Conflict	Chấp nhận và đến xung đột
+	Changes undone.	Đã hoàn tác thay đổi.
+	Choose a new shortcut for this command, or leave it without one.	Chọn phím tắt mới cho lệnh này, hoặc để lệnh không có phím tắt.
+	Put this command's shortcuts back as they were	Khôi phục phím tắt của lệnh này như cũ
+	Take the shortcut from the other command and select it	Lấy phím tắt khỏi lệnh kia và chọn lệnh đó
+	Undo Changes	Hoàn tác thay đổi
+	{shortcut} is reserved by the system and can't be assigned.	{shortcut} được hệ thống dành riêng và không thể gán.
+	Low-Latency Drawing (vsync off, applies at next launch)	Vẽ độ trễ thấp (tắt vsync, áp dụng ở lần khởi động sau)
+	Free Transform is still being applied; try again when it has finished.	Biến đổi tự do vẫn đang được áp dụng; hãy thử lại khi hoàn tất.
+	The transform couldn't be applied.	Không thể áp dụng phép biến đổi.
+	Its layers need {needed} of GPU memory; the budget leaves them {budget}.	Các lớp cần {needed} bộ nhớ GPU; ngân sách chỉ dành cho chúng {budget}.
+	Set GPU Memory in Preferences › Performance to what your graphics card can hold, at most 3/8 of its memory. Automatic follows Memory Usage, within a quarter of this computer's memory and 3/8 of the card's, and doesn't count the document against a card whose memory is known. The status bar shows GPU Memory Full while they don't fit.	Đặt Bộ nhớ GPU trong Tùy chọn › Hiệu năng bằng mức card đồ họa của bạn chứa được, tối đa 3/8 bộ nhớ của card. Tự động theo mức sử dụng bộ nhớ, trong giới hạn một phần tư bộ nhớ máy này và 3/8 bộ nhớ card, và không tính tài liệu vào card đã biết dung lượng bộ nhớ. Khi chúng chưa vừa, thanh trạng thái hiện Bộ nhớ GPU đầy.
+	GPU Memory Full	Bộ nhớ GPU đầy
+	The layers need {needed} of GPU memory and may hold {budget}, so edits that redraw the whole document do it on the CPU. Click to set GPU Memory.	Các lớp cần {needed} bộ nhớ GPU và chỉ được dùng {budget}, nên những chỉnh sửa vẽ lại toàn bộ tài liệu sẽ làm trên CPU. Nhấp để đặt Bộ nhớ GPU.
+	GPU memory budget: {budget}	Ngân sách bộ nhớ GPU: {budget}
+	This document's layers: {needed} of {budget} for layers	Các lớp của tài liệu này: {needed} trên {budget} dành cho lớp
+	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	Các lớp của tài liệu này cần {needed} nhưng chỉ được dùng {budget}: vẽ lại toàn bộ tài liệu dùng CPU
+	GPU Memory (MB, 0 = Automatic)	Bộ nhớ GPU (MB, 0 = Tự động)

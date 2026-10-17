@@ -88,6 +88,10 @@ impl Coverage {
         }
         let (dir, (x0, y0), (x1, y1)) = if p0.1 < p1.1 { (1.0f32, p0, p1) } else { (-1.0f32, p1, p0) };
         let (x0, y0, x1, y1) = (x0 as f32, y0 as f32, x1 as f32, y1 as f32);
+        // A finite f64 beyond f32 range becomes infinite here.
+        if !(x0.is_finite() && y0.is_finite() && x1.is_finite() && y1.is_finite()) {
+            return;
+        }
         if y1 <= 0.0 || y0 >= h {
             return;
         }

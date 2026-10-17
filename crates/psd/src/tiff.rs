@@ -18,9 +18,12 @@
 //! as in a PSD, and RLE row-count tables follow the container. [`ImageSourceData::from_bytes`]
 //! normalizes either order to the big-endian PSD model, and [`ImageSourceData::to_bytes`] writes
 //! either order, by transcoding every structure it knows field by field ([`transcode`]).
-//! Blocks the transcoder does not know are kept verbatim when no byte swap is needed, and dropped
-//! with a warning otherwise (a byte-swapped block passed through unchanged would be read as
-//! garbage by every other application).
+//! A block the transcoder does not know is never dropped on the way in: its bytes are kept
+//! verbatim with the signature `MIB8` (`46B8` for `8B64`) marking that they are in little-endian
+//! layout ([`TaggedBlock::is_foreign_order`]), so a later save to a little-endian TIFF writes it
+//! back exactly. Only a save to the *other* byte order has to drop such a block, with a warning:
+//! a byte-swapped block passed through unchanged would be read as garbage by every other
+//! application (and would end the block list for readers that stop at a bad signature).
 
 use crate::descriptor::MAX_DEPTH;
 use crate::error::{PsdError, Result};
@@ -30,7 +33,7 @@ use crate::image_data::ImageData;
 use crate::io::{Reader, WriteExt};
 use crate::layer::{LayerInfo, LayerMask, mask_parameter_bytes};
 use crate::resources::ImageResource;
-use crate::tagged::{TaggedBlock, read_blocks, uses_long_length, write_blocks};
+use crate::tagged::{TaggedBlock, read_blocks, uses_long_length};
 
 /// The byte order of a TIFF container (and so of the Photoshop data inside it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -154,29 +157,28 @@ impl ImageSourceData {
     /// dropped because they could not be converted to a little-endian layout.
     pub fn to_bytes(&self, order: ByteOrder) -> Result<(Vec<u8>, Vec<String>)> {
         let version = self.version;
-        let mut blocks = Vec::with_capacity(self.global_blocks.len() + 2);
+        let mut body = Vec::new();
         if let Some(info) = &self.layer_info {
-            let mut info = info.clone();
-            info.pad_to(version, 4)?;
+            // Pad to 4 without cloning the layers (and all their pixel data) just to set `padding`.
+            let pad = info.pad_len(version, 4)?;
             let mut data = Vec::new();
-            info.write_body(&mut data, version)?;
-            blocks.push(padded_block(self.layer_info_key, data));
+            data.try_reserve(info.channel_data_len().saturating_add(pad)).map_err(|_| PsdError::LimitExceeded("not enough memory for the layer data"))?;
+            info.write_unpadded(&mut data, version)?;
+            data.resize(data.len() + pad, 0);
+            padded_block(self.layer_info_key, data).write(&mut body, version, 4)?;
         }
+        // Blocks without explicit padding are padded to 4 as they are written (alignment 4), so
+        // the global mask and blocks are written from the model, without a copy of their data.
+        // The signature stays (a foreign-order marker included).
         if let Some(m) = &self.global_layer_mask {
             // Photoshop always writes the 14-byte record (and refuses a Photoshop PDF whose
             // `LMsk` is empty, which a PSD's empty global-mask section would otherwise become).
-            let data = if m.data.is_empty() { DEFAULT_GLOBAL_MASK.to_vec() } else { m.data.clone() };
-            blocks.push(padded_block(*b"LMsk", data));
+            let data: &[u8] = if m.data.is_empty() { &DEFAULT_GLOBAL_MASK } else { &m.data };
+            TaggedBlock::write_parts(&mut body, *b"8BIM", *b"LMsk", data, None, version, 4)?;
         }
         for b in &self.global_blocks {
-            let mut b = b.clone();
-            if b.padding.is_none() {
-                b = padded_block(b.key, b.data);
-            }
-            blocks.push(b);
+            b.write(&mut body, version, 4)?;
         }
-        let mut body = Vec::new();
-        write_blocks(&mut body, &blocks, version)?;
         body.put(&self.trailing);
         let (body, warnings) =
             if order.is_little() { transcode::transcode_blocks(&body, version, ByteOrder::Big, ByteOrder::Little)? } else { (body, Vec::new()) };
@@ -297,8 +299,14 @@ pub mod transcode {
         Ok(t.finish())
     }
 
+    /// A block signature as stored in `little` or big-endian data. Big-endian data (the model)
+    /// also carries the `MIB8` / `46B8` markers of blocks kept from a little-endian file.
     fn is_sig(b: &[u8], little: bool) -> bool {
-        if little { b.starts_with(b"MIB8") || b.starts_with(b"46B8") } else { b.starts_with(b"8BIM") || b.starts_with(b"8B64") }
+        if little {
+            b.starts_with(b"MIB8") || b.starts_with(b"46B8")
+        } else {
+            b.starts_with(b"8BIM") || b.starts_with(b"8B64") || TaggedBlock::is_foreign_order_signature(b)
+        }
     }
 
     fn height(top: i32, bottom: i32) -> usize {
@@ -337,6 +345,19 @@ pub mod transcode {
 
         fn finish(self) -> (Vec<u8>, Vec<String>) {
             (self.out, self.warnings)
+        }
+
+        /// A walker over `data` (a nested structure) that writes into this walker's output: it
+        /// takes the buffer, so a nested structure is written once, not copied up per level. Hand
+        /// the buffer back with [`Self::adopt`] before returning, error or not.
+        fn nested<'b>(&mut self, data: &'b [u8], depth: usize) -> Tx<'b> {
+            let r = if self.from.is_little() { Reader::new_little(data) } else { Reader::new(data) };
+            Tx { r, out: std::mem::take(&mut self.out), from: self.from, to: self.to, version: self.version, warnings: Vec::new(), depth }
+        }
+
+        /// Takes the output buffer back from a [`Self::nested`] walker.
+        fn adopt(&mut self, child: &mut Tx<'_>) {
+            self.out = std::mem::take(&mut child.out);
         }
 
         fn same_order(&self) -> bool {
@@ -464,15 +485,15 @@ pub mod transcode {
         /// Transcodes the next `len` bytes with `f`; whatever `f` leaves is copied verbatim.
         fn region(&mut self, len: u64, f: impl FnOnce(&mut Tx<'_>) -> Result<()>) -> Result<()> {
             let data = self.r.bytes_u64(len)?;
-            let mut child = Tx::new(data, self.version, self.from, self.to);
-            child.depth = self.depth;
-            f(&mut child)?;
-            child.rest()?;
-            if child.out.len() != data.len() {
+            let start = self.out.len();
+            let mut child = self.nested(data, self.depth);
+            let res = f(&mut child).and_then(|()| child.rest());
+            self.adopt(&mut child);
+            res?;
+            if self.out.len() - start != data.len() {
                 return Err(PsdError::invalid("byte-order conversion changed a structure's length"));
             }
             self.warnings.append(&mut child.warnings);
-            self.out.extend_from_slice(&child.out);
             Ok(())
         }
 
@@ -495,13 +516,13 @@ pub mod transcode {
                 len = len.checked_sub(4).ok_or_else(|| PsdError::invalid("length shorter than its own field"))?;
             }
             let data = self.r.bytes_u64(len)?;
-            let mut child = Tx::new(data, self.version, self.from, self.to);
-            child.depth = self.depth;
-            f(&mut child)?;
-            child.rest()?;
+            let start = self.out.len();
+            let mut child = self.nested(data, self.depth);
+            let res = f(&mut child).and_then(|()| child.rest());
+            self.adopt(&mut child);
+            res?;
             self.warnings.append(&mut child.warnings);
-            self.patch_len(at, long, child.out.len() as u64 + if inclusive { 4 } else { 0 })?;
-            self.out.extend_from_slice(&child.out);
+            self.patch_len(at, long, (self.out.len() - start) as u64 + if inclusive { 4 } else { 0 })?;
             Ok(())
         }
 
@@ -661,15 +682,46 @@ pub mod transcode {
 
         fn block(&mut self) -> Result<()> {
             let before = self.out.len();
-            self.key()?;
+            // A `MIB8` / `46B8` marker in big-endian data: a block kept verbatim from a
+            // little-endian file. Written back as it was into little-endian output (its `8BIM`
+            // signature reversed, as every signature there), copied as is otherwise.
+            if !self.from.is_little() && TaggedBlock::is_foreign_order_signature(self.r.peek_rest()) {
+                let sig = self.r.array::<4>()?;
+                let mut key = self.r.array::<4>()?;
+                // Only reached with `from == Big`: the key is canonical here whatever the
+                // target order. `TaggedBlock::write` sizes the length field from that same key.
+                // Reversing it for the target order before the check
+                // asked about a key `PSB_LONG_KEYS` never contains, so a PSB long key's 8-byte
+                // length was read as 4 and every later block was copied unconverted.
+                let long = uses_long_length(self.version, &key);
+                let len = self.r.len_field(long)?;
+                let data = self.r.bytes_u64(len)?;
+                if self.to.is_little() {
+                    key.reverse();
+                }
+                self.out.extend_from_slice(&sig);
+                self.out.extend_from_slice(&key);
+                let n = self.out.len();
+                self.out.extend_from_slice(if long { &[0u8; 8] } else { &[0u8; 4] });
+                self.patch_len(n, long, len)?;
+                self.out.extend_from_slice(data);
+                let rest = self.r.peek_rest();
+                let pad = (0..=3usize).find(|&k| k == rest.len() || (k < rest.len() && is_sig(&rest[k..], self.from.is_little()))).unwrap_or(0);
+                let pad_bytes = self.r.bytes(pad)?;
+                self.out.extend_from_slice(pad_bytes);
+                return Ok(());
+            }
+            let sig_at = self.out.len();
+            let sig = self.key()?;
             let key = self.key()?;
             let long = uses_long_length(self.version, &key);
             let len = self.r.len_field(long)?;
             let len_at = self.out.len();
             self.out.extend_from_slice(if long { &[0u8; 8] } else { &[0u8; 4] });
             let data = self.r.bytes_u64(len)?;
-            let mut child = Tx::new(data, self.version, self.from, self.to);
-            child.depth = self.depth + 1;
+            // The body is transcoded straight into this output, after the length placeholder.
+            let data_at = self.out.len();
+            let mut child = self.nested(data, self.depth + 1);
             let handled = if child.depth > MAX_DEPTH {
                 Err(PsdError::LimitExceeded("tagged block nesting too deep"))
             } else if data.is_empty() {
@@ -677,19 +729,32 @@ pub mod transcode {
             } else {
                 child.block_body(&key)
             };
+            let rest = if matches!(handled, Ok(true)) { child.rest() } else { Ok(()) };
+            self.adopt(&mut child);
+            rest?;
+            if !matches!(handled, Ok(true)) {
+                // A body that was not transcoded leaves nothing: it is copied as stored or dropped.
+                self.out.truncate(data_at);
+            }
             // Padding: the smallest k in 0..=3 after which the next block (or the end) starts.
             let rest = self.r.peek_rest();
             let pad = (0..=3usize).find(|&k| k == rest.len() || (k < rest.len() && is_sig(&rest[k..], self.from.is_little()))).unwrap_or(0);
             let pad_bytes = self.r.bytes(pad)?;
             match handled {
                 Ok(true) => {
-                    child.rest()?;
                     self.warnings.append(&mut child.warnings);
-                    self.patch_len(len_at, long, child.out.len() as u64)?;
-                    self.out.extend_from_slice(&child.out);
+                    self.patch_len(len_at, long, (self.out.len() - data_at) as u64)?;
                     self.out.extend_from_slice(pad_bytes);
                 }
                 Ok(false) if self.same_order() => {
+                    self.patch_len(len_at, long, data.len() as u64)?;
+                    self.out.extend_from_slice(data);
+                    self.out.extend_from_slice(pad_bytes);
+                }
+                // Little-endian in, big-endian model: keep the bytes as they are, marked.
+                Ok(false) if self.from.is_little() => {
+                    let marker: &[u8; 4] = if &sig == b"8B64" { b"46B8" } else { b"MIB8" };
+                    self.out[sig_at..sig_at + 4].copy_from_slice(marker);
                     self.patch_len(len_at, long, data.len() as u64)?;
                     self.out.extend_from_slice(data);
                     self.out.extend_from_slice(pad_bytes);
@@ -703,6 +768,14 @@ pub mod transcode {
                     ));
                 }
                 Err(e) if self.same_order() => return Err(PsdError::invalid(format!("{} block: {e}", String::from_utf8_lossy(&key)))),
+                Err(e) if self.from.is_little() => {
+                    let marker: &[u8; 4] = if &sig == b"8B64" { b"46B8" } else { b"MIB8" };
+                    self.out[sig_at..sig_at + 4].copy_from_slice(marker);
+                    self.patch_len(len_at, long, data.len() as u64)?;
+                    self.out.extend_from_slice(data);
+                    self.out.extend_from_slice(pad_bytes);
+                    self.warnings.push(format!("{} block ({} bytes) kept as stored, in little-endian layout: {e}", String::from_utf8_lossy(&key), data.len()));
+                }
                 Err(e) => {
                     self.out.truncate(before);
                     self.warnings.push(format!("{} block ({} bytes) dropped: {e}", String::from_utf8_lossy(&key), data.len()));
@@ -726,8 +799,8 @@ pub mod transcode {
                         self.u32()?;
                     }
                 }
-                // lyvr layer version, sn2P and vowv (shape and vector flags), lmgm.
-                b"lyid" | b"lspf" | b"lyvr" | b"sn2P" | b"vowv" | b"lmgm" => {
+                // lyvr layer version, sn2P and vowv (shape and vector flags).
+                b"lyid" | b"lspf" | b"lyvr" | b"sn2P" | b"vowv" => {
                     self.u32()?;
                 }
                 // Text-engine global data: a textual structure, no byte order.
@@ -735,7 +808,9 @@ pub mod transcode {
                 b"lnsr" => {
                     self.key()?;
                 }
-                b"clbl" | b"infx" | b"knko" | b"tsly" | b"iOpa" => {
+                // Advanced Blending flags and fill opacity: one byte, then padding (Adobe spec,
+                // "Additional Layer Information"; `lmgm`/`vmgm` = layer/vector mask hides effects).
+                b"clbl" | b"infx" | b"knko" | b"tsly" | b"lmgm" | b"vmgm" | b"iOpa" => {
                     self.u8()?;
                 }
                 b"lclr" => self.u16s_upto(4)?,
@@ -1004,7 +1079,11 @@ pub mod transcode {
                         Ok(())
                     })?;
                     mask_heights = mh;
-                    t.sized_region(false, |x| x.u32s_to_end())?;
+                    // Blending ranges are bytes (black low/high, white low/high per channel), so
+                    // Photoshop stores them in the same order in either byte order: an Intel-order
+                    // layered TIFF holds the default ranges as `00 00 ff ff`. Swapping them as u32s
+                    // turned every range into `ff ff 00 00`, which hides every pixel of the layer.
+                    t.sized_region(false, |x| x.rest())?;
                     t.pascal(4)?;
                     t.blocks()
                 })?;
@@ -1849,6 +1928,13 @@ mod tests {
             (*b"lspf", vec![0, 0, 0, 5]),
             (*b"lnsr", b"layr".to_vec()),
             (*b"knko", vec![1, 0, 0, 0]),
+            (*b"knko", vec![2, 0, 0, 0]),
+            (*b"infx", vec![1, 0, 0, 0]),
+            (*b"clbl", vec![0, 0, 0, 0]),
+            (*b"tsly", vec![0, 0, 0, 0]),
+            (*b"lmgm", vec![1, 0, 0, 0]),
+            (*b"vmgm", vec![1, 0, 0, 0]),
+            (*b"iOpa", vec![128, 0, 0, 0]),
         ] {
             let (big, little) = block_rt(key, data.clone());
             if data.len() >= 2 && key != *b"nvrt" {
@@ -2093,21 +2179,65 @@ mod tests {
         let (back, w) = ImageSourceData::from_bytes(&big).unwrap();
         assert!(w.is_empty());
         assert_eq!(back.global_blocks, d.global_blocks);
+        // Big-endian data of unknown layout cannot go into a little-endian file.
         let (little, w) = d.to_bytes(ByteOrder::Little).unwrap();
         assert_eq!(w.iter().filter(|w| w.starts_with("Zzzz block (5 bytes) dropped")).count(), 1, "{w:?}");
         let (back, w) = ImageSourceData::from_bytes(&little).unwrap();
         assert!(w.is_empty());
         assert_eq!(back.global_blocks.iter().map(|b| b.key).collect::<Vec<_>>(), vec![*b"Patt", *b"FMsk"]);
         assert_eq!(known(&back).layer_info, known(&d).layer_info);
-        // A little-endian file with an unknown block: the block is dropped on read, with a warning.
+    }
+
+    #[test]
+    fn unknown_blocks_from_a_little_endian_file_are_kept_with_their_byte_order() {
+        let d = sample_layers();
+        let (little, _) = d.to_bytes(ByteOrder::Little).unwrap();
+        // A little-endian file with a block of unknown layout, among known ones.
         let mut raw = little.clone();
         raw.extend_from_slice(b"MIB8zzzZ");
+        raw.extend_from_slice(&6u32.to_le_bytes());
+        raw.extend_from_slice(&[9, 8, 7, 6, 5, 4, 0, 0]);
+        raw.extend_from_slice(b"MIB8diyl");
         raw.extend_from_slice(&4u32.to_le_bytes());
-        raw.extend_from_slice(&[9, 9, 9, 9]);
+        raw.extend_from_slice(&7u32.to_le_bytes());
         let (back, w) = ImageSourceData::from_bytes(&raw).unwrap();
-        assert_eq!(w.len(), 1);
-        assert!(w[0].starts_with("Zzzz block (4 bytes) dropped"), "{}", w[0]);
+        assert!(w.is_empty(), "{w:?}");
         assert_eq!(known(&back).layer_info, known(&d).layer_info);
+        let kept = back.global_blocks.iter().find(|b| &b.key == b"Zzzz").expect("kept");
+        assert!(kept.is_foreign_order());
+        assert_eq!(kept.signature, *b"MIB8");
+        assert_eq!(kept.data, [9, 8, 7, 6, 5, 4]);
+        // The known block after it was still converted.
+        assert_eq!(back.global_blocks.iter().find(|b| &b.key == b"lyid").unwrap().data, 7u32.to_be_bytes());
+        // Written back to a little-endian TIFF, the bytes are exactly what was read.
+        let (again, w) = back.to_bytes(ByteOrder::Little).unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        let tail = &raw[raw.len() - 18 - 16..];
+        assert!(again.windows(tail.len()).any(|x| x == tail), "foreign-order block restored verbatim");
+        assert_eq!(ImageSourceData::from_bytes(&again).unwrap().0.global_blocks, back.global_blocks);
+        // The big-endian (PSD) model keeps the marker, so a PSD writer can tell it apart.
+        let (big, _) = back.to_bytes(ByteOrder::Big).unwrap();
+        assert!(big.windows(8).any(|x| x == b"MIB8Zzzz"));
+        assert_eq!(ImageSourceData::from_bytes(&big).unwrap().0.global_blocks, back.global_blocks);
+    }
+
+    /// A PSB keeps `Mt16`/`Mt32`/`Mtrn`/`Alph` blocks of unknown layout verbatim, and their
+    /// length field is 8 bytes (a PSB long key). Writing them into a little-endian TIFF must
+    /// read that width; the old code looked the key up after reversing it for the target
+    /// order, which never matches `PSB_LONG_KEYS`.
+    #[test]
+    fn psb_foreign_order_long_key_roundtrips() {
+        let d = ImageSourceData {
+            version: Version::Psb,
+            byte_order: ByteOrder::Little,
+            global_blocks: vec![TaggedBlock { signature: *b"MIB8", key: *b"Mt16", data: vec![9, 8, 7, 6, 5, 4], padding: None }],
+            ..Default::default()
+        };
+        let (little, w) = d.to_bytes(ByteOrder::Little).unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        let (back, w) = ImageSourceData::from_bytes(&little).unwrap();
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(back.global_blocks, d.global_blocks, "the 8-byte length and the bytes survive");
     }
 
     #[test]
@@ -2141,6 +2271,24 @@ mod tests {
         let counts = &ch.data[..table];
         let swapped: Vec<u8> = counts.chunks(2).flat_map(|c| [c[1], c[0]]).collect();
         assert!(little.windows(table + samples.len()).any(|w| w[..table] == swapped[..] && w[table..] == *samples));
+    }
+
+    #[test]
+    fn blending_ranges_are_bytes_in_either_order() {
+        let mut file = testgen::layered(Version::Psd, ColorMode::Rgb, 8, Compression::Rle);
+        let ranges: Vec<u8> = [0u8, 0, 255, 255].repeat(10);
+        let marked: Vec<u8> = (1u8..=40).collect();
+        for (i, l) in file.layer_info.as_mut().unwrap().layers.iter_mut().enumerate() {
+            l.blending_ranges.data = if i == 0 { marked.clone() } else { ranges.clone() };
+        }
+        let d = ImageSourceData::from_psd(&file);
+        let (little, _) = d.to_bytes(ByteOrder::Little).unwrap();
+        // Written verbatim (what Photoshop writes in an `II` TIFF), not swapped per u32.
+        assert!(little.windows(marked.len()).any(|w| w == marked));
+        let (back, _) = ImageSourceData::from_bytes(&little).unwrap();
+        for (a, b) in d.layer_info.as_ref().unwrap().layers.iter().zip(&back.layer_info.as_ref().unwrap().layers) {
+            assert_eq!(a.blending_ranges, b.blending_ranges);
+        }
     }
 
     #[test]
@@ -2225,5 +2373,72 @@ mod tests {
         assert_eq!(known(&ImageSourceData::from_psd(&again)).layer_info, expected.layer_info);
         assert_eq!(again.global_blocks, expected.global_blocks);
         assert_eq!(again.layer_tree().len(), file.layer_tree().len());
+    }
+
+    /// Global blocks are padded as they are written, not on a copy: the bytes are those of the
+    /// former path (each block cloned with explicit padding to 4, written with `write_blocks`).
+    #[test]
+    fn global_blocks_written_without_copies_keep_their_bytes() {
+        for version in [Version::Psd, Version::Psb] {
+            let mut d = ImageSourceData { version, global_layer_mask: Some(GlobalLayerMask { data: vec![0, 1, 0, 2, 0, 3, 0, 4, 9] }), ..Default::default() };
+            for n in 0..8u8 {
+                d.global_blocks.push(TaggedBlock::new(*b"FMsk", (0..n).collect()));
+            }
+            let mut explicit = TaggedBlock::new(*b"FMsk", vec![1, 2, 3]);
+            explicit.padding = Some(vec![]);
+            d.global_blocks.push(explicit);
+            let mut odd = TaggedBlock::new(*b"FMsk", vec![1, 2]);
+            odd.padding = Some(vec![0, 0, 0, 0, 0]);
+            d.global_blocks.push(odd);
+            let mut copies = vec![padded_block(*b"LMsk", d.global_layer_mask.as_ref().unwrap().data.clone())];
+            for b in &d.global_blocks {
+                let mut b = b.clone();
+                if b.padding.is_none() {
+                    b.padding = Some(vec![0; (4 - b.data.len() % 4) % 4]);
+                }
+                copies.push(b);
+            }
+            let mut body = Vec::new();
+            crate::tagged::write_blocks(&mut body, &copies, version, 2).unwrap();
+            let signature = if version.is_psb() { SIGNATURE_PSB } else { SIGNATURE };
+            assert_eq!(d.to_bytes(ByteOrder::Big).unwrap().0, [signature, &body[..]].concat());
+            let (little, _) = transcode_blocks(&body, version, ByteOrder::Big, ByteOrder::Little).unwrap();
+            assert_eq!(d.to_bytes(ByteOrder::Little).unwrap().0, [signature, &little[..]].concat());
+        }
+    }
+
+    /// Nested structures are transcoded into one shared buffer. A block whose body fails
+    /// part-way leaves no partial bytes: dropped on the way out (with the enclosing lengths
+    /// patched as if it had never been there), or kept exactly as stored on the way in.
+    #[test]
+    fn a_nested_block_that_fails_part_way_leaves_nothing_behind() {
+        let clean = sample_layers();
+        let mut fx = Vec::new();
+        fx.put_u32(0);
+        fx.extend_from_slice(&VersionedDescriptor::new(Descriptor::new("null").with("Opct", Value::Double(1.0))).to_bytes());
+        // A whole number of 4-byte units, so dropping it cannot change any padding.
+        fx.resize(fx.len().next_multiple_of(4), 0);
+        let mut d = clean.clone();
+        d.layer_info.as_mut().unwrap().layers[0].blocks.insert(0, TaggedBlock::new(*b"lfx2", fx.clone()));
+        let (mut little, w) = d.to_bytes(ByteOrder::Little).unwrap();
+        assert!(!w.iter().any(|w| w.starts_with("lfx2")), "{w:?}");
+        // An unknown value type after the descriptor's header: parsing fails part-way.
+        let at = little.windows(4).position(|w| w == b"buod").unwrap();
+        little[at..at + 4].copy_from_slice(b"????");
+        let (back, w) = ImageSourceData::from_bytes(&little).unwrap();
+        assert_eq!(w.iter().filter(|w| w.starts_with("lfx2 block")).count(), 1, "{w:?}");
+        let kept = &back.layer_info.as_ref().unwrap().layers[0].blocks[0];
+        assert!(kept.is_foreign_order());
+        let stored = little.windows(4).position(|w| w == b"2xfl").unwrap() + 8;
+        assert_eq!(kept.data, little[stored..stored + fx.len()]);
+        // Big-endian data that fails part-way cannot go into a little-endian file: dropped.
+        let mut big_bad = d.clone();
+        let mut broken = fx.clone();
+        let at = broken.windows(4).position(|w| w == b"doub").unwrap();
+        broken[at..at + 4].copy_from_slice(b"????");
+        big_bad.layer_info.as_mut().unwrap().layers[0].blocks[0].data = broken;
+        let (little, w) = big_bad.to_bytes(ByteOrder::Little).unwrap();
+        assert_eq!(w.iter().filter(|w| w.starts_with("lfx2 block")).count(), 1, "{w:?}");
+        assert_eq!(little, clean.to_bytes(ByteOrder::Little).unwrap().0);
     }
 }

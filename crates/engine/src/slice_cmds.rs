@@ -88,7 +88,7 @@ fn layer_slice_rect(doc: &Document, s: &Slice) -> Option<Rect> {
     let l = doc.layer(s.layer?)?;
     let b = layer_bounds(l);
     let [t, le, bo, r] = s.outsets;
-    Some(if b.is_empty() { b } else { Rect::new(b.x0 - le, b.y0 - t, b.x1 + r, b.y1 + bo) })
+    Some(if b.is_empty() { b } else { Rect::new(b.x0.saturating_sub(le), b.y0.saturating_sub(t), b.x1.saturating_add(r), b.y1.saturating_add(bo)) })
 }
 
 /// Re-fits layer-based slices of the active document to their layers; drops slices whose layer
@@ -283,8 +283,8 @@ fn from_guides(s: &mut Session) -> Result<Value> {
     let b = d.doc.bounds();
     let mut xs: Vec<i32> = vec![b.x0, b.x1];
     let mut ys: Vec<i32> = vec![b.y0, b.y1];
-    xs.extend(d.doc.guides.vertical.iter().map(|g| (*g as f64).round() as i32).filter(|x| *x > b.x0 && *x < b.x1));
-    ys.extend(d.doc.guides.horizontal.iter().map(|g| (*g as f64).round() as i32).filter(|y| *y > b.y0 && *y < b.y1));
+    xs.extend(d.doc.guides.vertical.iter().map(|g| g.round() as i32).filter(|x| *x > b.x0 && *x < b.x1));
+    ys.extend(d.doc.guides.horizontal.iter().map(|g| g.round() as i32).filter(|y| *y > b.y0 && *y < b.y1));
     if xs.len() == 2 && ys.len() == 2 {
         return Err(EngineError::Other("the document has no guides inside the canvas".into()));
     }
@@ -378,6 +378,11 @@ fn delete(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"deleted": n}))
 }
 
+/// The most parts one Divide Slice makes. Resolving the slice list is quadratic in the slice count
+/// (`slices::resolve`), so a 1000 x 1000 division, a million slices, left every later list or
+/// export with ~5e11 steps of work (#1020).
+const MAX_DIVIDE_PARTS: i32 = 10_000;
+
 fn divide(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "slice.divide";
     let t = find(s, p, cmd)?;
@@ -386,11 +391,14 @@ fn divide(s: &mut Session, p: &Value) -> Result<Value> {
     if down == 1 && across == 1 {
         return Err(bad(cmd, "give \"horizontal\" (slices down) and/or \"vertical\" (slices across) > 1"));
     }
+    if down * across > MAX_DIVIDE_PARTS {
+        return Err(bad(cmd, format!("{down} x {across} = {} parts is more than one division makes ({MAX_DIVIDE_PARTS})", down * across)));
+    }
     let r = match t {
         Target::Auto(r) => r,
         Target::Stored(id) => s.active().and_then(|d| d.doc.slices.get(id)).map(|sl| sl.rect).ok_or_else(|| bad(cmd, "no such slice"))?,
     };
-    if (r.width() as i32) < across || (r.height() as i32) < down {
+    if r.width() < across as u32 || r.height() < down as u32 {
         return Err(bad(cmd, "the slice is too small to divide that many times"));
     }
     let n = (down * across) as usize;
@@ -405,10 +413,11 @@ fn divide(s: &mut Session, p: &Value) -> Result<Value> {
         let mut next_id = doc.slices.next_id();
         for j in 0..down {
             for i in 0..across {
-                let x0 = r.x0 + (r.width() as i32 * i) / across;
-                let x1 = r.x0 + (r.width() as i32 * (i + 1)) / across;
-                let y0 = r.y0 + (r.height() as i32 * j) / down;
-                let y1 = r.y0 + (r.height() as i32 * (j + 1)) / down;
+                // Products can exceed i32 even when every interpolated edge fits the rect.
+                let x = |k: i32| (i64::from(r.x0) + i64::from(r.width()) * i64::from(k) / i64::from(across)) as i32;
+                let y = |k: i32| (i64::from(r.y0) + i64::from(r.height()) * i64::from(k) / i64::from(down)) as i32;
+                let (x0, x1) = (x(i), x(i + 1));
+                let (y0, y1) = (y(j), y(j + 1));
                 let nid = if ids.is_empty() {
                     id
                 } else {
@@ -516,7 +525,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "slice.divide",
             "Divide Slice…",
             &[],
-            r##"{"slice":id | "number":n,"horizontal":n=1 (slices down),"vertical":n=1 (slices across)} → {slices}"##,
+            r##"{"slice":id | "number":n,"horizontal":n=1 (slices down),"vertical":n=1 (slices across); at most 10000 parts} → {slices}"##,
             unlocked,
             divide
         ),

@@ -1,7 +1,7 @@
 //! Photoshop's Color Picker (Foreground / Background Color) dialog: a 2D colour field and a slider
-//! for the selected component (H, S, B, R, G or B radio), new/current swatches, and HSB, RGB, Lab,
-//! CMYK and hex fields. The colour lives in the dialog fields (`color` as `#rrggbb`, plus the HSB
-//! floats so hue survives greys), so `ui.dialog.set` drives it; OK runs `tools.setColors`.
+//! for the selected component (H, S, B, R, G, B, L, a or b radio), new/current swatches, and HSB,
+//! RGB, Lab, CMYK and hex fields. The colour lives in the dialog fields (`color` as `#rrggbb`, plus
+//! the HSB floats so hue survives greys), so `ui.dialog.set` drives it; OK runs `tools.setColors`.
 //! While it is the top dialog the image is its eyedropper, as in Photoshop: the pointer over the
 //! canvas is a pipette, and a click or drag there samples into the new colour ([`sample_at`]).
 
@@ -15,34 +15,44 @@ use crate::widgets;
 
 /// Radio components, Photoshop order: H, S, B, R, G, B.
 pub const MODES: &[(&str, &str)] = &[("h", "H:"), ("s", "S:"), ("v", "B:"), ("r", "R:"), ("g", "G:"), ("b", "B:")];
-/// The Lab radios, which pick the field's component too (Photoshop's L, a and b).
-pub const LAB_MODES: &[(&str, &str)] = &[("labL", "L:"), ("labA", "a:"), ("labB", "b:")];
+/// Lab radio components (Photoshop's right-hand column): L, a, b.
+pub const LAB_MODES: &[(&str, &str)] = &[("lab_l", "L:"), ("lab_a", "a:"), ("lab_b", "b:")];
 
-/// Lab at field position (x, y) (y down) and slider `z` (all 0..1) in Lab `mode`, the component
-/// the field doesn't vary taken from `lab`: L selected, the field is a (across) by b (up); a or
-/// b selected, it is the other one across by L up.
-fn lab_at(mode: &str, z: f32, x: f32, y: f32) -> [f32; 3] {
-    let ab = |v: f32| v * 255.0 - 128.0;
+/// The Lab colour at field position (x, y) in 0..1 (y down) with the slider at `z`, for a Lab
+/// `mode`, as Photoshop 25.4 lays them out: L shows a across and b upwards; a shows b across and L
+/// upwards; b shows a across and L upwards (a and b run -128..127, L 0..100).
+fn field_lab(mode: &str, z: f32, x: f32, y: f32) -> Option<[f32; 3]> {
+    let ab = |t: f32| t * 255.0 - 128.0;
     match mode {
-        "labA" => [(1.0 - y) * 100.0, ab(z), ab(x)],
-        "labB" => [(1.0 - y) * 100.0, ab(x), ab(z)],
-        _ => [z * 100.0, ab(x), ab(1.0 - y)],
+        "lab_l" => Some([z * 100.0, ab(x), ab(1.0 - y)]),
+        "lab_a" => Some([(1.0 - y) * 100.0, ab(z), ab(x)]),
+        "lab_b" => Some([(1.0 - y) * 100.0, ab(x), ab(z)]),
+        _ => None,
     }
 }
 
-/// Field position and slider value of `lab` in Lab `mode` (inverse of [`lab_at`]).
-fn lab_locate(mode: &str, lab: [f32; 3]) -> (f32, f32, f32) {
-    let u = |v: f32| ((v + 128.0) / 255.0).clamp(0.0, 1.0);
-    let l = (lab[0] / 100.0).clamp(0.0, 1.0);
-    match mode {
-        "labA" => (u(lab[2]), 1.0 - l, u(lab[1])),
-        "labB" => (u(lab[1]), 1.0 - l, u(lab[2])),
-        _ => (u(lab[1]), 1.0 - u(lab[2]), l),
-    }
-}
-
+/// Lab → sRGB, clamped to what the field can show.
 fn lab_rgb(lab: [f32; 3]) -> [f32; 3] {
     photosplice_color::convert::lab_to_srgb(lab).map(|c| c.clamp(0.0, 1.0))
+}
+
+/// Colour differences the CMYK round trip leaves inside the printable gamut (ΔE ≤ 0.4, black ≈ 1.4
+/// with black-point compensation) stay below this; out-of-gamut colours move far more.
+const GAMUT_DE: f32 = 3.0;
+
+/// The nearest printable colour, when `rgb` is outside the CMYK gamut (Photoshop's ⚠ warning).
+pub fn out_of_gamut(rgb: [f32; 3]) -> Option<[f32; 3]> {
+    use photosplice_color::convert::{cmyk_to_rgb, rgb_to_cmyk, srgb_to_lab};
+    let back = cmyk_to_rgb(rgb_to_cmyk(rgb)).map(|c| c.clamp(0.0, 1.0));
+    let (a, b) = (srgb_to_lab(rgb), srgb_to_lab(back));
+    let de = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+    (de > GAMUT_DE).then_some(back)
+}
+
+/// The nearest web colour (channels in steps of 51), when `rgb` isn't one.
+pub fn not_web_safe(rgb: [f32; 3]) -> Option<[f32; 3]> {
+    let web = rgb.map(|v| (v.clamp(0.0, 1.0) * 5.0).round() / 5.0);
+    (hex(web) != hex(rgb)).then_some(web)
 }
 
 pub fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
@@ -94,6 +104,9 @@ pub fn parse_hex(s: &str) -> Option<[f32; 3]> {
 /// The colour at field position (x, y) in 0..1 (y down) for `mode` with the slider at `z` (0..1),
 /// given the current HSV/RGB (used for the components the field doesn't vary).
 pub fn field_color(mode: &str, z: f32, x: f32, y: f32) -> [f32; 3] {
+    if let Some(lab) = field_lab(mode, z, x, y) {
+        return lab_rgb(lab);
+    }
     match mode {
         "s" => hsv_to_rgb(x * 360.0, z, 1.0 - y),
         "v" => hsv_to_rgb(x * 360.0, 1.0 - y, z),
@@ -105,9 +118,14 @@ pub fn field_color(mode: &str, z: f32, x: f32, y: f32) -> [f32; 3] {
 }
 
 /// Field position and slider value of a colour in `mode` (inverse of [`field_color`]).
-pub fn locate(mode: &str, hsv: [f32; 3], rgb: [f32; 3]) -> (f32, f32, f32) {
+pub fn locate(mode: &str, hsv: [f32; 3], rgb: [f32; 3], lab: [f32; 3]) -> (f32, f32, f32) {
     let h = hsv[0] / 360.0;
+    let ab = |v: f32| ((v + 128.0) / 255.0).clamp(0.0, 1.0);
+    let l = (lab[0] / 100.0).clamp(0.0, 1.0);
     match mode {
+        "lab_l" => (ab(lab[1]), 1.0 - ab(lab[2]), l),
+        "lab_a" => (ab(lab[2]), 1.0 - l, ab(lab[1])),
+        "lab_b" => (ab(lab[1]), 1.0 - l, ab(lab[2])),
         "s" => (h, 1.0 - hsv[2], hsv[1]),
         "v" => (h, 1.0 - hsv[1], hsv[2]),
         "r" => (rgb[2], 1.0 - rgb[1], rgb[0]),
@@ -118,7 +136,10 @@ pub fn locate(mode: &str, hsv: [f32; 3], rgb: [f32; 3]) -> (f32, f32, f32) {
 }
 
 /// Colour for slider position `z` (0..1) in `mode`, other components from the current colour.
-fn slider_color(mode: &str, z: f32, hsv: [f32; 3], rgb: [f32; 3]) -> [f32; 3] {
+fn slider_color(mode: &str, z: f32, hsv: [f32; 3], rgb: [f32; 3], lab: [f32; 3]) -> [f32; 3] {
+    if let Some(l) = slider_lab(mode, z, lab) {
+        return lab_rgb(l);
+    }
     match mode {
         "s" => hsv_to_rgb(hsv[0], z, hsv[2]),
         "v" => hsv_to_rgb(hsv[0], hsv[1], z),
@@ -126,6 +147,17 @@ fn slider_color(mode: &str, z: f32, hsv: [f32; 3], rgb: [f32; 3]) -> [f32; 3] {
         "g" => [rgb[0], z, rgb[2]],
         "b" => [rgb[0], rgb[1], z],
         _ => hsv_to_rgb(z * 360.0, 1.0, 1.0),
+    }
+}
+
+/// The Lab colour with the slider of a Lab `mode` at `z`, the other components kept.
+fn slider_lab(mode: &str, z: f32, lab: [f32; 3]) -> Option<[f32; 3]> {
+    let ab = z * 255.0 - 128.0;
+    match mode {
+        "lab_l" => Some([z * 100.0, lab[1], lab[2]]),
+        "lab_a" => Some([lab[0], ab, lab[2]]),
+        "lab_b" => Some([lab[0], lab[1], ab]),
+        _ => None,
     }
 }
 
@@ -138,27 +170,46 @@ fn c32(c: [f32; 3]) -> Color32 {
 pub fn open(app: &mut PhotospliceApp, target: &str) -> u64 {
     let c = if target == "background" { app.session.tools.background } else { app.session.tools.foreground };
     let rgb = [c[0], c[1], c[2]];
-    let hsv = rgb_to_hsv(rgb);
+    let label = if target == "background" { "Color Picker (Background Color)" } else { "Color Picker (Foreground Color)" };
+    let mut fields = initial_fields(target, label, rgb);
+    // A colour that was picked as CMYK shows the inks it was picked as, not what its sRGB stand-in converts to (#4196).
+    if let Some(cmyk) = app.session.tools.picked_cmyk(rgb) {
+        fields.insert("__cmyk".into(), json!(cmyk));
+    }
+    app.ui.open_dialog(DialogKind::Command, fields)
+}
+
+/// Shared initial state for every target; the picker layout is independent of its destination.
+pub(crate) fn initial_fields(target: &str, label: &str, rgb: [f32; 3]) -> Map<String, Value> {
     let mut f = Map::new();
     f.insert("__colorPicker".into(), json!(target));
-    f.insert("__label".into(), json!(if target == "background" { "Color Picker (Background Color)" } else { "Color Picker (Foreground Color)" }));
+    f.insert("__label".into(), json!(label));
     f.insert("color".into(), json!(hex(rgb)));
     f.insert("__orig".into(), json!(hex(rgb)));
-    f.insert("__hsv".into(), json!(hsv));
+    f.insert("__hsv".into(), json!(rgb_to_hsv(rgb)));
     f.insert("__mode".into(), json!("h"));
     f.insert("__webOnly".into(), json!(false));
-    app.ui.open_dialog(DialogKind::Command, f)
+    f
 }
 
 /// Open the picker on `rgb` for something other than the tool colours: OK runs `command` with
 /// `params` plus `"color": "#rrggbb"` (e.g. a gradient stop's colour).
 pub fn open_for_command(app: &mut PhotospliceApp, label: &str, rgb: [f32; 3], command: &str, params: Value) -> u64 {
-    let hsv = rgb_to_hsv(rgb);
-    let mut f = Map::new();
-    f.insert("__colorPicker".into(), json!("command"));
-    f.insert("__label".into(), json!(label));
+    let mut f = initial_fields("command", label, rgb);
     f.insert("__command".into(), json!(command));
     f.insert("__params".into(), params);
+    app.ui.open_dialog(DialogKind::Command, f)
+}
+
+/// Open the picker on `rgb` for a colour field of another dialog (e.g. Edit › Fill's Color…): OK
+/// writes `"#rrggbb"` into `field` of dialog `dialog`, which stays open; Cancel leaves it alone.
+pub fn open_for_field(app: &mut PhotospliceApp, label: &str, rgb: [f32; 3], dialog: u64, field: &str) -> u64 {
+    let hsv = rgb_to_hsv(rgb);
+    let mut f = Map::new();
+    f.insert("__colorPicker".into(), json!("field"));
+    f.insert("__label".into(), json!(label));
+    f.insert("__dialog".into(), json!(dialog));
+    f.insert("__field".into(), json!(field));
     f.insert("color".into(), json!(hex(rgb)));
     f.insert("__orig".into(), json!(hex(rgb)));
     f.insert("__hsv".into(), json!(hsv));
@@ -167,8 +218,98 @@ pub fn open_for_command(app: &mut PhotospliceApp, label: &str, rgb: [f32; 3], co
     app.ui.open_dialog(DialogKind::Command, f)
 }
 
+/// Open the picker on `rgb` for a colour the shell keeps itself (e.g. the Crop shield's custom
+/// colour): OK hands `"#rrggbb"` to `target`'s setter in [`confirm`]; Cancel leaves it alone.
+pub fn open_for_target(app: &mut PhotospliceApp, target: &str, label: &str, rgb: [f32; 3]) -> u64 {
+    let hsv = rgb_to_hsv(rgb);
+    let mut f = Map::new();
+    f.insert("__colorPicker".into(), json!(target));
+    f.insert("__label".into(), json!(label));
+    f.insert("color".into(), json!(hex(rgb)));
+    f.insert("__orig".into(), json!(hex(rgb)));
+    f.insert("__hsv".into(), json!(hsv));
+    f.insert("__mode".into(), json!("h"));
+    f.insert("__webOnly".into(), json!(false));
+    app.ui.open_dialog(DialogKind::Command, f)
+}
+
+/// Set by a dialog body (to the picker's title) to open the Color Picker on its `color` field.
+const REQUEST: &str = "__pickColor";
+
+/// A dialog body asks for the Color Picker on its `color` field (Edit › Fill's Color… and colour
+/// swatch, Edit › Stroke's swatch). The dialog loop opens it ([`open_requested`]), since that
+/// needs the dialog's id.
+pub fn request(f: &mut Map<String, Value>, title: &str) {
+    request_field(f, "color", title);
+}
+
+/// [`request`] for another `"#rrggbb"` field of the dialog: a top-level key (`vineColor`), or a
+/// JSON pointer into the fields (`/values/guidesGridAndSlices/guideColor`).
+pub fn request_field(f: &mut Map<String, Value>, field: &str, title: &str) {
+    f.insert(REQUEST.into(), json!({ "title": title, "field": field }));
+}
+
+/// The picker's title for the colour called `name`: "Color Picker (Vine Color)".
+pub fn title_for(name: &str) -> String {
+    crate::i18n::fmt(tl!("Color Picker ({name})"), &[("name", name)])
+}
+
+/// The `"#rrggbb"` at `field` of `f` (a key or a JSON pointer).
+fn field_value<'a>(f: &'a Map<String, Value>, field: &str) -> Option<&'a str> {
+    match field.strip_prefix('/') {
+        Some(rest) => {
+            let (first, tail) = rest.split_once('/').unwrap_or((rest, ""));
+            let v = f.get(first)?;
+            if tail.is_empty() { v.as_str() } else { v.pointer(&format!("/{tail}"))?.as_str() }
+        }
+        None => f.get(field)?.as_str(),
+    }
+}
+
+/// Sets `field` of `f` (a key or a JSON pointer to an existing value) to `value`.
+fn set_field(f: &mut Map<String, Value>, field: &str, value: Value) -> Result<(), String> {
+    match field.strip_prefix('/') {
+        Some(rest) => {
+            let (first, tail) = rest.split_once('/').unwrap_or((rest, ""));
+            let v = f.get_mut(first).ok_or("the dialog has no such colour")?;
+            let slot = if tail.is_empty() { v } else { v.pointer_mut(&format!("/{tail}")).ok_or("the dialog has no such colour")? };
+            *slot = value;
+        }
+        None => {
+            f.insert(field.into(), value);
+        }
+    }
+    Ok(())
+}
+
+/// Opens the Color Picker dialog `id`'s body asked for ([`request`], [`request_field`]), on its
+/// colour: OK sets that field of the dialog (not the foreground), Cancel leaves it as it was.
+pub fn open_requested(app: &mut PhotospliceApp, id: u64) {
+    let Some(d) = app.ui.dialog_mut(id) else { return };
+    let (title, field) = match d.fields.remove(REQUEST) {
+        Some(Value::String(title)) => (title, "color".to_string()),
+        Some(Value::Object(o)) => {
+            let get = |k: &str| o.get(k).and_then(Value::as_str).map(str::to_string);
+            let (Some(title), Some(field)) = (get("title"), get("field")) else { return };
+            (title, field)
+        }
+        _ => return,
+    };
+    let rgb = field_value(&d.fields, &field).and_then(parse_hex).unwrap_or([0.0; 3]);
+    open_for_field(app, &title, rgb, id, &field);
+}
+
 pub fn owns(f: &Map<String, Value>) -> bool {
     f.contains_key("__colorPicker")
+}
+
+/// Alt+Cancel (Reset): restore the colour from when the picker opened (same as clicking Current).
+pub fn reset(f: &mut Map<String, Value>) {
+    if !owns(f) {
+        return;
+    }
+    let orig = f.get("__orig").and_then(Value::as_str).and_then(parse_hex).unwrap_or([0.0; 3]);
+    set_rgb(f, orig, Keep::Nothing);
 }
 
 /// The Color Picker, when it is the top dialog (another dialog opened over it takes the input).
@@ -264,28 +405,64 @@ fn grid_mesh(rect: Rect, n: usize, color: impl Fn(f32, f32) -> [f32; 3]) -> Mesh
     m
 }
 
+/// Cells per side of the banded Only Web Colors field: fine enough that the band edges follow the
+/// colour model, coarse enough to stay cheap to draw each frame.
+const WEB_CELLS: usize = 64;
+
+/// Snap each channel to the web-safe ramp (00, 33, 66, 99, CC, FF).
+fn web_safe(c: [f32; 3]) -> [f32; 3] {
+    c.map(|v| (v.clamp(0.0, 1.0) * 5.0).round() / 5.0)
+}
+
+/// Like [`grid_mesh`], but every cell is one flat colour sampled at its centre, so a quantized
+/// field shows hard bands instead of blending between the snapped corners.
+fn flat_grid_mesh(rect: Rect, n: usize, color: impl Fn(f32, f32) -> [f32; 3]) -> Mesh {
+    let mut m = Mesh::default();
+    let n = n.max(1);
+    let (cw, ch) = (rect.width() / n as f32, rect.height() / n as f32);
+    for j in 0..n {
+        for i in 0..n {
+            let c = c32(color((i as f32 + 0.5) / n as f32, (j as f32 + 0.5) / n as f32));
+            let (x0, y0) = (rect.left() + i as f32 * cw, rect.top() + j as f32 * ch);
+            let a = m.vertices.len() as u32;
+            for (dx, dy) in [(0.0, 0.0), (cw, 0.0), (cw, ch), (0.0, ch)] {
+                m.colored_vertex(pos2(x0 + dx, y0 + dy), c);
+            }
+            m.add_triangle(a, a + 1, a + 2);
+            m.add_triangle(a, a + 2, a + 3);
+        }
+    }
+    m
+}
+
 /// Width of the dialog's content: the field and its slider, then two columns, each a header
 /// (the swatches; the buttons) over its fields, rows lined up across them.
 pub const WIDTH: f32 = 532.0;
+/// The content width the dialog host sets (the same layout as [`WIDTH`]).
+pub(crate) const CONTENT_WIDTH: f32 = WIDTH;
 /// Height of the two column headers, so the rows below them line up.
 const HEADER: f32 = 116.0;
 const COLUMN: f32 = 104.0;
 
-pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
+/// Draw the picker with its own OK / Cancel (top right). `Some(true)` confirms, `Some(false)`
+/// cancels.
+pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) -> Option<bool> {
+    ui.set_width(CONTENT_WIDTH);
     let t = Tokens::get(ui.ctx());
     let mode = f.get("__mode").and_then(Value::as_str).unwrap_or("h").to_string();
-    let lab_mode = mode.starts_with("lab");
     let now = current(f);
     let (rgb, hsv, lab) = (now.rgb, now.hsv, now.lab);
-    let (fx, fy, fz) = if lab_mode { lab_locate(&mode, lab) } else { locate(&mode, hsv, rgb) };
+    let (fx, fy, fz) = locate(&mode, hsv, rgb, lab);
+    let web_only = f.get("__webOnly").and_then(Value::as_bool).unwrap_or(false);
+    // Only Web Colors bands the field to the 216 web-safe colours (#4107).
+    let mesh = |rect: Rect, color: &dyn Fn(f32, f32) -> [f32; 3]| {
+        if web_only { flat_grid_mesh(rect, WEB_CELLS, |x, y| web_safe(color(x, y))) } else { grid_mesh(rect, 32, color) }
+    };
+    let mut outcome = None;
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
             let (field, resp) = ui.allocate_exact_size(vec2(256.0, 256.0), Sense::click_and_drag());
-            if lab_mode {
-                ui.painter().add(grid_mesh(field, 32, |x, y| lab_rgb(lab_at(&mode, fz, x, y))));
-            } else {
-                ui.painter().add(grid_mesh(field, 32, |x, y| field_color(&mode, fz, x, y)));
-            }
+            ui.painter().add(mesh(field, &|x, y| field_color(&mode, fz, x, y)));
             ui.painter().rect_stroke(field, 0.0, Stroke::new(1.0, t.field_border), StrokeKind::Outside);
             let marker = pos2(field.left() + fx * field.width(), field.top() + fy * field.height());
             ui.painter().with_clip_rect(field.expand(6.0)).circle_stroke(
@@ -295,60 +472,38 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
             );
             if let Some(p) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked()) {
                 let (x, y) = (((p.x - field.left()) / field.width()).clamp(0.0, 1.0), ((p.y - field.top()) / field.height()).clamp(0.0, 1.0));
-                if lab_mode {
-                    let l = lab_at(&mode, fz, x, y);
-                    set_rgb(f, lab_rgb(l), Keep::Lab(l));
-                } else {
-                    let c = field_color(&mode, fz, x, y);
-                    let keep = match mode.as_str() {
-                        "h" => Keep::Hsv([fz * 360.0, x, 1.0 - y]),
-                        "s" => Keep::Hsv([x * 360.0, fz, 1.0 - y]),
-                        "v" => Keep::Hsv([x * 360.0, 1.0 - y, fz]),
-                        _ => Keep::Nothing,
-                    };
-                    set_rgb(f, c, keep);
-                }
+                let c = field_color(&mode, fz, x, y);
+                let keep = match mode.as_str() {
+                    "h" => Keep::Hsv([fz * 360.0, x, 1.0 - y]),
+                    "s" => Keep::Hsv([x * 360.0, fz, 1.0 - y]),
+                    "v" => Keep::Hsv([x * 360.0, 1.0 - y, fz]),
+                    m => field_lab(m, fz, x, y).map_or(Keep::Nothing, Keep::Lab),
+                };
+                set_rgb(f, c, keep);
             }
             ui.add_space(12.0);
-            let mut web = f.get("__webOnly").and_then(Value::as_bool).unwrap_or(false);
+            let mut web = web_only;
             if widgets::checkbox(ui, &mut web, tl!("Only Web Colors")).changed() {
                 f.insert("__webOnly".into(), json!(web));
-                set_rgb(f, rgb, Keep::Nothing);
+                set_rgb(f, current(f).rgb, Keep::Nothing);
             }
         });
         ui.add_space(8.0);
-        // Component slider (hue runs 360° at the top to 0° at the bottom, like Photoshop).
+        // Component slider (hue runs 360° at the top to 0° at the bottom, like the reference).
         let (strip, sresp) = ui.allocate_exact_size(vec2(20.0, 256.0), Sense::click_and_drag());
-        if lab_mode {
-            let c = |z: f32| {
-                let mut l = lab;
-                match mode.as_str() {
-                    "labA" => l[1] = z * 255.0 - 128.0,
-                    "labB" => l[2] = z * 255.0 - 128.0,
-                    _ => l[0] = z * 100.0,
-                }
-                l
+        ui.painter().add(mesh(strip, &|_, y| slider_color(&mode, 1.0 - y, hsv, rgb, lab)));
+        if let Some(p) = sresp.interact_pointer_pos().filter(|_| sresp.dragged() || sresp.clicked()) {
+            let z = 1.0 - ((p.y - strip.top()) / strip.height()).clamp(0.0, 1.0);
+            let h = match mode.as_str() {
+                "h" => Some([z * 360.0, hsv[1], hsv[2]]),
+                "s" => Some([hsv[0], z, hsv[2]]),
+                "v" => Some([hsv[0], hsv[1], z]),
+                _ => None,
             };
-            ui.painter().add(grid_mesh(strip, 32, |_, y| lab_rgb(c(1.0 - y))));
-            if let Some(p) = sresp.interact_pointer_pos().filter(|_| sresp.dragged() || sresp.clicked()) {
-                let z = 1.0 - ((p.y - strip.top()) / strip.height()).clamp(0.0, 1.0);
-                let l = c(z);
-                set_rgb(f, lab_rgb(l), Keep::Lab(l));
-            }
-        } else {
-            ui.painter().add(grid_mesh(strip, 32, |_, y| slider_color(&mode, 1.0 - y, hsv, rgb)));
-            if let Some(p) = sresp.interact_pointer_pos().filter(|_| sresp.dragged() || sresp.clicked()) {
-                let z = 1.0 - ((p.y - strip.top()) / strip.height()).clamp(0.0, 1.0);
-                let h = match mode.as_str() {
-                    "h" => Some([z * 360.0, hsv[1], hsv[2]]),
-                    "s" => Some([hsv[0], z, hsv[2]]),
-                    "v" => Some([hsv[0], hsv[1], z]),
-                    _ => None,
-                };
-                match h {
-                    Some(h) => set_rgb(f, hsv_to_rgb(h[0], h[1], h[2]), Keep::Hsv(h)),
-                    None => set_rgb(f, slider_color(&mode, z, hsv, rgb), Keep::Nothing),
-                }
+            match (h, slider_lab(&mode, z, lab)) {
+                (Some(h), _) => set_rgb(f, hsv_to_rgb(h[0], h[1], h[2]), Keep::Hsv(h)),
+                (None, Some(l)) => set_rgb(f, lab_rgb(l), Keep::Lab(l)),
+                (None, None) => set_rgb(f, slider_color(&mode, z, hsv, rgb, lab), Keep::Nothing),
             }
         }
         let sy = strip.top() + (1.0 - fz) * strip.height();
@@ -367,7 +522,9 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
             let cur = Rect::from_min_max(pos2(sw.min.x, sw.center().y), sw.max);
             ui.painter().rect_filled(cur, 0.0, c32(orig));
             ui.painter().rect_stroke(sw, 0.0, Stroke::new(1.0, t.field_border), StrokeKind::Outside);
-            if ui.interact(cur, ui.id().with("cp-current"), Sense::click()).on_hover_text(tl!("Click to restore the current colour")).clicked() {
+            let click_cur = ui.interact(cur, ui.id().with("cp-current"), Sense::click());
+            click_cur.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), tl!("Click to restore the current colour")));
+            if click_cur.on_hover_text(tl!("Click to restore the current colour")).clicked() {
                 set_rgb(f, orig, Keep::Nothing);
             }
             let caption = egui::FontId::proportional(12.0);
@@ -383,16 +540,17 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                 ui.set_min_height(HEADER);
                 ui.add_space(2.0);
                 if widgets::primary_button(ui, tl!("OK"), COLUMN).clicked() {
-                    f.insert("__outcome".into(), json!("ok"));
+                    outcome = Some(true);
                 }
                 ui.add_space(6.0);
                 if widgets::secondary_button(ui, tl!("Cancel"), COLUMN).clicked() {
-                    f.insert("__outcome".into(), json!("cancel"));
+                    outcome = Some(false);
                 }
             });
             fields(ui, f, &mode, &now, true);
         });
     });
+    outcome
 }
 
 /// One column of component radios and fields: H S B, R G B and # (`right` false), or L a b
@@ -402,13 +560,14 @@ fn fields(ui: &mut egui::Ui, f: &mut Map<String, Value>, mode: &str, now: &Compo
     let &Components { rgb, hsv, lab, cmyk } = now;
     let mut edit: Option<([f32; 3], Keep)> = None;
     let mut new_mode: Option<&str> = None;
-    let radio = |ui: &mut egui::Ui, key: &'static str, new_mode: &mut Option<&'static str>| {
+    let radio = |ui: &mut egui::Ui, key: &'static str, label: &str, new_mode: &mut Option<&'static str>| {
         let on = mode == key;
         let (r, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
         ui.painter().circle_stroke(r.center(), 6.0, Stroke::new(1.2, if on { t.accent } else { t.text_faint }));
         if on {
             ui.painter().circle_filled(r.center(), 3.2, t.accent);
         }
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, ui.is_enabled(), on, label));
         if resp.clicked() {
             *new_mode = Some(key);
         }
@@ -429,7 +588,7 @@ fn fields(ui: &mut egui::Ui, f: &mut Map<String, Value>, mode: &str, now: &Compo
             let ranges = [0.0..=360.0, 0.0..=100.0, 0.0..=100.0, 0.0..=255.0, 0.0..=255.0, 0.0..=255.0];
             for row in 0..6 {
                 let (key, l) = MODES[row];
-                radio(ui, key, &mut new_mode);
+                radio(ui, key, l, &mut new_mode);
                 label(ui, l);
                 let mut v = vals[row].round();
                 if widgets::value_field(ui, &mut v, ranges[row].clone(), "", 46.0).changed() {
@@ -452,9 +611,30 @@ fn fields(ui: &mut egui::Ui, f: &mut Map<String, Value>, mode: &str, now: &Compo
             // it from the colour every frame would throw away every keystroke until six valid
             // digits were in.
             let id = ui.id().with("cp-hex");
-            let typing = if ui.memory(|m| m.has_focus(id)) { ui.data(|d| d.get_temp::<String>(id)) } else { None };
-            let mut h = typing.unwrap_or_else(|| hex(rgb).trim_start_matches('#').to_string());
+            crate::field_tab::register(ui.ctx(), id);
+            // The picker opens with the hex digits focused and selected, so typing replaces them.
+            // Not in the grid's first, invisible sizing pass: a widget there can't take focus.
+            if !f.contains_key("__focused") && ui.is_visible() && !ui.is_sizing_pass() {
+                f.insert("__focused".into(), json!(true));
+                crate::field_tab::focus(ui.ctx(), id);
+                let current_hex = hex(rgb);
+                crate::field_tab::select_all(ui.ctx(), id, current_hex.trim_start_matches('#'));
+                ui.memory_mut(|m| m.request_focus(id));
+            }
+            let focused = ui.memory(|m| m.has_focus(id));
+            let pasted = if focused { take_hex_paste(ui) } else { None };
+            let typing = if focused { ui.data(|d| d.get_temp::<String>(id)) } else { None };
+            let mut h = match pasted {
+                Some(c) => hex(c).trim_start_matches('#').to_ascii_uppercase(),
+                None => typing.unwrap_or_else(|| hex(rgb).trim_start_matches('#').to_ascii_uppercase()),
+            };
             let r = ui.add(egui::TextEdit::singleline(&mut h).id(id).char_limit(6).desired_width(58.0).font(crate::theme::mono(12.0)));
+            if let Some(c) = pasted {
+                edit = Some((c, Keep::Nothing));
+            }
+            if r.gained_focus() {
+                crate::field_tab::select_all(ui.ctx(), id, &h);
+            }
             if r.has_focus() {
                 ui.data_mut(|d| d.insert_temp(id, h.clone()));
             } else {
@@ -469,7 +649,7 @@ fn fields(ui: &mut egui::Ui, f: &mut Map<String, Value>, mode: &str, now: &Compo
         } else {
             for row in 0..3 {
                 let (key, l) = LAB_MODES[row];
-                radio(ui, key, &mut new_mode);
+                radio(ui, key, l, &mut new_mode);
                 label(ui, l);
                 let range = if row == 0 { 0.0..=100.0 } else { -128.0..=127.0 };
                 let mut x = lab[row].round();
@@ -502,8 +682,44 @@ fn fields(ui: &mut egui::Ui, f: &mut Map<String, Value>, mode: &str, now: &Compo
     }
 }
 
+fn take_hex_paste(ui: &egui::Ui) -> Option<[f32; 3]> {
+    ui.input_mut(|i| {
+        let mut found = None;
+        i.events.retain(|e| match e {
+            egui::Event::Paste(s) => match parse_hex(s) {
+                Some(c) => {
+                    found = Some(c);
+                    false
+                }
+                None => true,
+            },
+            _ => true,
+        });
+        found
+    })
+}
+
+/// Add to Swatches was clicked: add the picked colour to the Swatches panel.
+pub fn take_add_swatch(app: &mut PhotospliceApp, f: &mut Map<String, Value>) {
+    if f.remove("__addSwatch").and_then(|v| v.as_bool()) == Some(true) {
+        crate::swatches_ui::add_from_picker(app, f);
+    }
+}
+
 /// OK: set the foreground or background colour.
 pub fn confirm(app: &mut PhotospliceApp, f: &Map<String, Value>) -> Result<Value, String> {
+    if crate::type_panels_ui::color_picker::owns(f) {
+        return crate::type_panels_ui::color_picker::confirm(app, f);
+    }
+    if crate::layer_style::color_picker::owns(f) {
+        return crate::layer_style::color_picker::confirm(app, f);
+    }
+    if crate::solid_fill_ui::owns(f) {
+        return crate::solid_fill_ui::confirm(app, f);
+    }
+    if crate::shape_fill_ui::owns(f) {
+        return crate::shape_fill_ui::confirm(app, f);
+    }
     let target = f.get("__colorPicker").and_then(Value::as_str).unwrap_or("foreground");
     let color = f.get("color").and_then(Value::as_str).unwrap_or("#000000");
     if let Some(cmd) = f.get("__command").and_then(Value::as_str) {
@@ -511,7 +727,33 @@ pub fn confirm(app: &mut PhotospliceApp, f: &Map<String, Value>) -> Result<Value
         p["color"] = json!(color);
         return app.run(cmd, p);
     }
-    let r = app.run("tools.setColors", json!({ target: color }))?;
+    if target == "field" {
+        let (Some(dialog), Some(field)) = (f.get("__dialog").and_then(Value::as_u64), f.get("__field").and_then(Value::as_str)) else {
+            return Err("the Color Picker has no field to set".into());
+        };
+        let d = app.ui.dialog_mut(dialog).ok_or("the dialog this colour was for is closed")?;
+        set_field(&mut d.fields, field, json!(color))?;
+        return Ok(json!({ "color": color }));
+    }
+    if target == "cropShield" {
+        crate::crop_shield::set_custom_color(app, color)?;
+        return Ok(json!({ "color": color }));
+    }
+    // The Note tool's colour for new notes (#2144).
+    if target == "noteColor" {
+        app.ui.analysis.note_color = parse_hex(color).ok_or("not a colour")?;
+        return Ok(json!({ "color": color }));
+    }
+    if target == "pasteboard" {
+        // The pasteboard menu's Select Custom Color…: the custom colour, and use it.
+        return app.run("prefs.set", json!({"values": {"interface.canvasColor": "custom", "interface.canvasCustomColor": color}}));
+    }
+    let mut params = json!({ target: color });
+    // The CMYK values the person entered stay the colour's inks: a CMYK document is filled with them (#4196).
+    if let Some(cmyk) = parse_hex(color).and_then(|rgb| kept::<4>(f, "__cmyk", rgb, photosplice_color::convert::cmyk_to_rgb)) {
+        params[format!("{target}Cmyk")] = json!(cmyk);
+    }
+    let r = app.run("tools.setColors", params)?;
     if target == "foreground" {
         crate::type_tool::foreground_changed(app);
     }
@@ -526,10 +768,28 @@ mod tests {
 
     use super::*;
 
+    /// #4107: with Only Web Colors on, the field is drawn in flat web-safe bands.
+    #[test]
+    fn web_only_field_is_flat_web_safe_bands() {
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 200.0));
+        let m = flat_grid_mesh(rect, WEB_CELLS, |x, y| web_safe(field_color("h", 0.3, x, y)));
+        let ramp = [0u8, 51, 102, 153, 204, 255];
+        for v in &m.vertices {
+            assert!([v.color.r(), v.color.g(), v.color.b()].iter().all(|c| ramp.contains(c)), "{:?}", v.color);
+        }
+        // Each cell's four corners share one colour (no blending between bands).
+        for q in m.vertices.chunks(4) {
+            assert!(q.iter().all(|v| v.color == q[0].color));
+        }
+        let distinct: std::collections::HashSet<_> = m.vertices.iter().map(|v| v.color).collect();
+        assert!(distinct.len() > 1 && distinct.len() <= 216);
+    }
+
     fn picker(color: &str) -> Harness<'static, Map<String, Value>> {
         let mut f = Map::new();
         f.insert("__colorPicker".into(), json!("foreground"));
         f.insert("color".into(), json!(color));
+        f.insert("__orig".into(), json!(color));
         let mut h = Harness::builder().with_size(vec2(700.0, 500.0)).build_ui_state(
             |ui, f: &mut Map<String, Value>| {
                 if ui.ctx().fonts(|fonts| fonts.families().contains(&egui::FontFamily::Name("medium".into()))) {
@@ -556,6 +816,13 @@ mod tests {
     }
 
     #[test]
+    fn hex_field_shows_uppercase_without_rewriting_the_selected_color() {
+        let h = picker("#12abef");
+        assert_eq!(h.get_by_role(Role::TextInput).value().as_deref(), Some("12ABEF"));
+        assert_eq!(color(&h), "#12abef", "casing is presentation only");
+    }
+
+    #[test]
     fn hex_field_takes_typed_digits() {
         let mut h = picker("#000000");
         h.get_by_role(Role::TextInput).click();
@@ -571,6 +838,62 @@ mod tests {
         h.key_press(egui::Key::Tab);
         h.run_steps(2);
         assert_eq!(color(&h), "#ff8800");
+    }
+
+    #[test]
+    fn hex_field_takes_every_paste_with_or_without_hash() {
+        let mut h = picker("#336699");
+        for (paste, want) in [("ff8800", "#ff8800"), ("#00ff00", "#00ff00"), (" 1234AB\n", "#1234ab")] {
+            h.event(egui::Event::Paste(paste.into()));
+            h.run_steps(2);
+            assert_eq!(color(&h), want, "paste {paste:?}");
+            assert_eq!(h.get_by_role(Role::TextInput).value().as_deref(), Some(&want[1..].to_ascii_uppercase()[..]));
+        }
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.run_steps(1);
+        h.event(egui::Event::Paste("ff".into()));
+        h.run_steps(2);
+        assert_eq!(h.get_by_role(Role::TextInput).value().as_deref(), Some("ff"));
+        assert_eq!(color(&h), "#1234ab");
+    }
+
+    #[test]
+    fn color_picker_opens_with_hex_focused_and_selected() {
+        let mut h = picker("#336699");
+        let hex_field = h.get_by_role(Role::TextInput);
+        assert!(hex_field.is_focused(), "the hex field automatically has focus on open");
+        // Typing directly replaces the selected hex digits without manual clicking or Command+A.
+        type_keys(&mut h, "ff8800");
+        assert_eq!(color(&h), "#ff8800", "typing replaces the selected hex code");
+    }
+
+    #[test]
+    fn color_picker_dialog_hex_field_is_in_tab_order_and_confirms_typed_color() {
+        let app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+        let mut h = Harness::builder().with_size(vec2(760.0, 480.0)).build_ui_state(|ui, app| crate::dialogs::show(app, ui.ctx()), app);
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        open(h.state_mut(), "foreground");
+        h.run_steps(3);
+        assert!(h.get_by_role(Role::TextInput).is_focused(), "hex field has focus in dialog frame");
+        for ch in "ff8800".chars() {
+            h.event(egui::Event::Text(ch.to_string()));
+            h.run_steps(1);
+        }
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        assert_eq!(hex([h.state().session.tools.foreground[0], h.state().session.tools.foreground[1], h.state().session.tools.foreground[2]]), "#ff8800");
+    }
+
+    #[test]
+    fn alt_reset_restores_orig_color() {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+        app.session.tools.foreground = [0.2, 0.4, 0.6, 1.0];
+        let id = open(&mut app, "foreground");
+        let f = &mut app.ui.dialog_mut(id).unwrap().fields;
+        f.insert("color".into(), json!("#ff0000"));
+        reset(f);
+        assert_eq!(f["color"], json!(hex([0.2, 0.4, 0.6])));
+        assert_eq!(f["__orig"], json!(hex([0.2, 0.4, 0.6])));
     }
 
     #[test]
@@ -591,6 +914,84 @@ mod tests {
             h.key_press(egui::Key::Tab);
             h.run_steps(2);
             assert_eq!(color(&h), hex(want), "field {field} <- {typed}");
+        }
+    }
+
+    #[test]
+    fn picker_places_actions_above_two_columns_and_web_colors_under_the_field() {
+        let h = picker("#336699");
+        let inputs: Vec<_> = h.query_all_by_role(Role::SpinButton).map(|n| n.rect()).collect();
+        assert_eq!(inputs.len(), 13);
+        let (hue, red, lightness, cyan, black) = (inputs[0], inputs[3], inputs[6], inputs[9], inputs[12]);
+        assert!(lightness.left() > hue.right(), "Lab is beside HSB, not below RGB");
+        assert!((lightness.top() - hue.top()).abs() < 1.0);
+        assert!((cyan.top() - red.top()).abs() < 1.0, "CMYK and RGB start at the same height");
+        let ok = h.get_by_label("OK").rect();
+        let cancel = h.get_by_label("Cancel").rect();
+        assert!(ok.left() > hue.left() && ok.bottom() < hue.top(), "actions are above the values and beside the preview: {ok:?}, {hue:?}");
+        assert!((ok.left() - cancel.left()).abs() < 1.0 && cancel.top() > ok.bottom());
+        assert_eq!(h.query_all_by_label("OK").count(), 1);
+        let web = h.get_by_label("Only Web Colors").rect();
+        assert!(web.left() < hue.left() && web.top() > hue.bottom());
+        // The full dialog should fit even in PhotoSplice's minimum 760 x 480 window.
+        assert!(black.bottom() - ok.top() < 360.0);
+        assert!(black.right() - web.left() < 600.0);
+        let hex = h.get_by_role(Role::TextInput).rect();
+        assert!(hex.left() < lightness.left() && hex.top() > inputs[5].bottom());
+    }
+
+    #[test]
+    fn web_colors_and_current_swatch_still_update_the_picker() {
+        let mut h = picker("#123456");
+        h.get_by_label("Only Web Colors").click();
+        h.run_steps(2);
+        assert_eq!(color(&h), "#003366");
+        h.get_by_label("Only Web Colors").click();
+        h.run_steps(2);
+        h.get_by_label("Click to restore the current colour").click();
+        h.run_steps(2);
+        assert_eq!(color(&h), "#123456");
+    }
+
+    #[test]
+    fn side_buttons_and_keyboard_confirm_or_cancel_without_changing_the_other_color() {
+        for target in ["foreground", "background"] {
+            for action in ["OK", "Cancel", "Enter", "Escape"] {
+                let app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
+                let mut h = Harness::builder().with_size(vec2(760.0, 480.0)).build_ui_state(|ui, app| crate::dialogs::show(app, ui.ctx()), app);
+                PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+                let original_fg = h.state().session.tools.foreground;
+                let original_bg = h.state().session.tools.background;
+                let id = open(h.state_mut(), target);
+                h.state_mut().ui.dialog_mut(id).unwrap().fields.insert("color".into(), json!("#336699"));
+                h.run_steps(4);
+                let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(760.0, 480.0));
+                for node in h.query_all_by_role(Role::SpinButton) {
+                    assert!(screen.contains_rect(node.rect()), "numeric inputs fit the minimum window");
+                }
+                for label in ["OK", "Cancel", "Only Web Colors"] {
+                    assert!(screen.contains_rect(h.get_by_label(label).rect()), "{label} fits the minimum window");
+                }
+                match action {
+                    "Enter" => h.key_press(egui::Key::Enter),
+                    "Escape" => h.key_press(egui::Key::Escape),
+                    _ => h.get_by_label(action).click(),
+                }
+                h.run_steps(3);
+                assert!(h.state().ui.dialogs.is_empty(), "{target}: {action} closes the picker");
+                let confirm = matches!(action, "OK" | "Enter");
+                let tools = &h.state().session.tools;
+                if confirm && target == "foreground" {
+                    assert_eq!(hex([tools.foreground[0], tools.foreground[1], tools.foreground[2]]), "#336699");
+                } else {
+                    assert_eq!(tools.foreground, original_fg);
+                }
+                if confirm && target == "background" {
+                    assert_eq!(hex([tools.background[0], tools.background[1], tools.background[2]]), "#336699");
+                } else {
+                    assert_eq!(tools.background, original_bg);
+                }
+            }
         }
     }
 
@@ -617,12 +1018,44 @@ mod tests {
     #[test]
     fn field_and_locate_are_inverse_in_every_mode() {
         let rgb = [0.8, 0.3, 0.2];
-        let hsv = rgb_to_hsv(rgb);
-        for (m, _) in MODES {
-            let (x, y, z) = locate(m, hsv, rgb);
+        let (hsv, lab) = (rgb_to_hsv(rgb), photosplice_color::convert::srgb_to_lab(rgb));
+        for (m, _) in MODES.iter().chain(LAB_MODES) {
+            let (x, y, z) = locate(m, hsv, rgb, lab);
             let c = field_color(m, z, x, y);
             assert_eq!(hex(c), hex(rgb), "mode {m}");
         }
+    }
+
+    #[test]
+    fn lab_fields_are_laid_out_like_photoshops() {
+        // Photoshop 25.4. L: a across (green to red), b upwards (blue to yellow).
+        let l = |x, y| photosplice_color::convert::srgb_to_lab(field_color("lab_l", 0.6, x, y));
+        assert!(l(0.0, 0.5)[1] < -40.0 && l(1.0, 0.5)[1] > 40.0, "{:?} {:?}", l(0.0, 0.5), l(1.0, 0.5));
+        assert!(l(0.5, 1.0)[2] < -40.0 && l(0.5, 0.0)[2] > 40.0, "{:?} {:?}", l(0.5, 1.0), l(0.5, 0.0));
+        // a: b across, L upwards (white at the top, black at the bottom).
+        assert!(field_color("lab_a", 0.5, 0.5, 0.0).iter().all(|&c| c > 0.99), "white at the top");
+        assert!(field_color("lab_a", 0.5, 0.5, 1.0).iter().all(|&c| c < 0.01), "black at the bottom");
+        let a = |x| photosplice_color::convert::srgb_to_lab(field_color("lab_a", 0.5, x, 0.5));
+        assert!(a(0.0)[2] < -40.0 && a(1.0)[2] > 40.0);
+        // b: a across, L upwards; its slider runs from yellow (top) to blue.
+        let b = |x| photosplice_color::convert::srgb_to_lab(field_color("lab_b", 0.5, x, 0.5));
+        assert!(b(0.0)[1] < -40.0 && b(1.0)[1] > 40.0);
+        let lab = [60.0, 0.0, 0.0];
+        let top = photosplice_color::convert::srgb_to_lab(slider_color("lab_b", 1.0, [0.0; 3], [0.0; 3], lab));
+        let bottom = photosplice_color::convert::srgb_to_lab(slider_color("lab_b", 0.0, [0.0; 3], [0.0; 3], lab));
+        assert!(top[2] > 40.0 && bottom[2] < -40.0, "{top:?} {bottom:?}");
+    }
+
+    #[test]
+    fn gamut_and_web_warnings() {
+        // Photoshop 25.4: #714343 is printable but not a web colour; #fd0303 is neither.
+        let rgb = |h| parse_hex(h).unwrap();
+        assert_eq!(out_of_gamut(rgb("#714343")), None);
+        assert!(out_of_gamut(rgb("#fd0303")).is_some());
+        assert_eq!(out_of_gamut(rgb("#000000")), None, "black prints");
+        assert_eq!(out_of_gamut(rgb("#ffffff")), None);
+        assert_eq!(not_web_safe(rgb("#714343")).map(hex).as_deref(), Some("#663333"));
+        assert_eq!(not_web_safe(rgb("#cc3366")), None);
     }
 
     #[test]
@@ -638,6 +1071,24 @@ mod tests {
         let fields = d.fields.clone();
         confirm(&mut app, &fields).unwrap();
         assert_eq!(hex([app.session.tools.background[0], app.session.tools.background[1], app.session.tools.background[2]]), "#3366cc");
+    }
+
+    /// #4196: CMYK values typed into the picker survive OK, so the colour fills a CMYK document with those inks and
+    /// reopening the picker shows them again.
+    #[test]
+    fn cmyk_values_survive_ok_and_a_reopen() {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
+        let cyan = [1.0, 0.0, 0.0, 0.0];
+        let id = open(&mut app, "foreground");
+        let d = app.ui.dialog_mut(id).unwrap();
+        set_rgb(&mut d.fields, photosplice_color::convert::cmyk_to_rgb(cyan).map(|c| c.clamp(0.0, 1.0)), Keep::Cmyk(cyan));
+        let fields = d.fields.clone();
+        confirm(&mut app, &fields).unwrap();
+        let fg = app.session.tools.foreground;
+        assert_eq!(app.session.tools.picked_cmyk([fg[0], fg[1], fg[2]]), Some(cyan));
+        let id = open(&mut app, "foreground");
+        let again = current(&app.ui.dialogs.iter().find(|d| d.id == id).unwrap().fields);
+        assert_eq!(again.cmyk, cyan);
     }
 
     fn dialog_color(app: &PhotospliceApp, id: u64) -> &str {

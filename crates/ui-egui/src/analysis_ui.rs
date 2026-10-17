@@ -1,10 +1,12 @@
-//! Image › Analysis and Notes in the shell: the Ruler, Count and Note tools (eyedropper group),
-//! their canvas overlays and options bars, Window › Measurement Log and Window › Notes, and the
-//! Set Measurement Scale / Select Data Points / Place Scale Marker dialogs.
+//! Image › Analysis and Notes in the shell: the Ruler, Count, Note and Color Sampler tools
+//! (eyedropper group), their canvas overlays and options bars, Window › Measurement Log and
+//! Window › Notes, and the Set Measurement Scale / Select Data Points / Place Scale Marker dialogs.
 //!
 //! Every change goes through engine commands (`image.analysis.*`, `count.*`, `notes.*`,
-//! `measurementLog.*`); this module only holds view state ([`AnalysisUi`], part of the
-//! serialisable UI state so the control channel can read and drive it).
+//! `view.colorSamplers.*`, `measurementLog.*`); this module only holds view state ([`AnalysisUi`],
+//! part of the serialisable UI state so the control channel can read and drive it). The Color
+//! Sampler points themselves live in the engine (`DocState.color_samplers`) so every front end
+//! shares them; this module only maps pointer input and draws the numbered markers.
 
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, RichText, Stroke, pos2, vec2};
 use photosplice_doc::{Document, Ruler};
@@ -27,6 +29,9 @@ pub enum Drag {
     Count(usize, usize, [f64; 2]),
     /// Moving note `index`: grab offset from its position.
     Note(usize, [f64; 2]),
+    /// Moving Color Sampler point `index` from where the press landed (a click, not a drag, does
+    /// nothing; dragging off the canvas removes the point).
+    Sampler(usize, [f64; 2]),
 }
 
 /// View state of the analysis tools and panels.
@@ -82,8 +87,9 @@ pub fn checked(app: &PhotospliceApp, id: &str) -> Option<bool> {
         "image.analysis.countTool" => Some(app.ui.tool == Tool::Count),
         _ => {
             // View › Proof Setup simulations: checked while that proof is shown.
+            // A check item with no document too: an item's kind never changes (native menus).
             let kind = id.strip_prefix("view.proofSetup.").and_then(photosplice_engine::proof_sim::ProofKind::from_id)?;
-            let d = app.session.active()?;
+            let Some(d) = app.session.active() else { return Some(false) };
             let pv = app.session.color.proof(d.doc.id);
             Some(pv.enabled && pv.setup.kind == kind)
         }
@@ -158,18 +164,18 @@ pub fn menu(app: &mut PhotospliceApp, id: &str, params: &Value) -> Option<Result
             }
             r
         }
-        "file.import.notes" => {
-            let (name, bytes) = match app.pick_file_bytes()? {
-                Ok(picked) => picked,
-                Err(e) => return Some(Err(e)),
-            };
-            let r = photosplice_engine::notes_cmds::import_notes_from(&mut app.session, &name, &bytes).map_err(|e| e.to_string());
-            if r.is_ok() {
-                app.ui.analysis.notes = true;
-                app.sync_views();
-            }
-            r
-        }
+        "file.import.notes" => match app.active_doc_id() {
+            Ok(doc) => app.pick_file_bytes(move |app, name, bytes| {
+                app.refocus(doc)?;
+                let r = photosplice_engine::notes_cmds::import_notes_from(&mut app.session, &name, &bytes).map_err(|e| e.to_string());
+                if r.is_ok() {
+                    app.ui.analysis.notes = true;
+                    app.sync_views();
+                }
+                r
+            }),
+            Err(e) => Err(e),
+        },
         "measurementLog.export" => export_log(app, None),
         _ => return None,
     })
@@ -192,16 +198,17 @@ fn export_log(app: &mut PhotospliceApp, rows: Option<Vec<u64>>) -> Result<Value,
     let p = rows.map_or(json!({}), |r| json!({"rows": r}));
     let csv = app.run("measurementLog.export", p)?;
     let text = csv["csv"].as_str().unwrap_or_default().to_string();
-    let path = app.services.pick_save.as_mut().and_then(|f| f("Measurements.csv")).ok_or("cancelled")?;
-    let write = app.services.write.as_mut().ok_or("no writer configured")?;
-    write(&path, text.as_bytes())?;
-    Ok(json!({"path": path, "rows": csv["rows"]}))
+    app.pick_save("Measurements.csv", move |app, path| {
+        let write = app.services.write.as_mut().ok_or("no writer configured")?;
+        write(&path, text.as_bytes())?;
+        Ok(json!({"path": path, "rows": csv["rows"]}))
+    })
 }
 
 // ------------------------------------------------------------------ tools
 
 fn tolerance(app: &PhotospliceApp) -> f64 {
-    7.0 / f64::from(app.current_zoom().max(0.01))
+    7.0 / f64::from(app.point_zoom().max(0.01))
 }
 
 fn dist(a: [f64; 2], b: [f64; 2]) -> f64 {
@@ -223,14 +230,22 @@ fn set_ruler(app: &mut PhotospliceApp, r: Ruler) {
     let _ = app.run("image.analysis.rulerTool", json!({"start": r.start, "end": r.end, "protractor": r.protractor}));
 }
 
-/// Pointer input for the Ruler, Count and Note tools. Returns true when consumed.
+/// Pointer input for the Ruler, Count, Note and Color Sampler tools. Returns true when consumed.
 pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers) -> bool {
-    let tool = app.ui.tool;
-    if !matches!(tool, Tool::Ruler | Tool::Count | Tool::Note) {
+    let tool = app.active_tool();
+    if !matches!(tool, Tool::Ruler | Tool::Count | Tool::Note | Tool::ColorSampler) {
         return false;
     }
-    let Some(doc) = app.session.active().map(|d| d.doc.clone()) else { return true };
+    let Some(doc) = app.session.active().map(|d| d.doc.clone()) else {
+        // With no document the Color Sampler does nothing and says so, as the other tools are inert.
+        if tool == Tool::ColorSampler && matches!(ev, ToolEvent::Down { .. }) {
+            app.ui.status = tl!("No document open").into();
+            app.ui.status_error = false;
+        }
+        return true;
+    };
     let tol = tolerance(app);
+    let samplers: Vec<[f64; 2]> = app.session.active().map(|d| d.color_samplers.clone()).unwrap_or_default();
     match (tool, ev) {
         (Tool::Ruler, ToolEvent::Down { x, y, .. }) => {
             let p = [x, y];
@@ -292,7 +307,7 @@ pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers) -
             }
         }
         (Tool::Note, ToolEvent::Down { x, y, .. }) => {
-            let z = f64::from(app.current_zoom().max(0.01));
+            let z = f64::from(app.point_zoom().max(0.01));
             let hit =
                 doc.notes.iter().rposition(|n| x >= n.position[0] && x <= n.position[0] + 16.0 / z && y >= n.position[1] && y <= n.position[1] + 20.0 / z);
             match hit {
@@ -319,9 +334,57 @@ pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers) -
                 }
             }
         }
+        (Tool::ColorSampler, ToolEvent::Down { x, y, .. }) => {
+            let p = [x, y];
+            match nearest_sampler(&samplers, p, tol) {
+                // ⌥-click a point removes it.
+                Some(i) if mods.alt => {
+                    let _ = app.run("view.colorSamplers.delete", json!({"index": i}));
+                }
+                // A plain click on a point starts a move (committed on release).
+                Some(i) => app.ui.analysis.drag = Some(Drag::Sampler(i, p)),
+                // ⌥-click on empty space does nothing; a plain click inside places a new point.
+                None if mods.alt => {}
+                None if (0.0..f64::from(doc.size.width)).contains(&x) && (0.0..f64::from(doc.size.height)).contains(&y) => {
+                    let r = app.run("view.colorSamplers.add", json!({"x": x, "y": y}));
+                    status_on_err(app, r);
+                }
+                // A click outside the canvas places nothing, as in Photoshop.
+                None => {}
+            }
+        }
+        (Tool::ColorSampler, ToolEvent::Up { x, y }) => {
+            if let Some(Drag::Sampler(i, from)) = app.ui.analysis.drag.take() {
+                if dist(from, [x, y]) <= 0.5 {
+                    return true; // a click on a point, not a drag: nothing to do
+                }
+                // Dropped inside the canvas: move it. Dropped outside: remove just that point.
+                let inside = (0.0..f64::from(doc.size.width)).contains(&x) && (0.0..f64::from(doc.size.height)).contains(&y);
+                let r = if inside {
+                    app.run("view.colorSamplers.move", json!({"index": i, "x": x, "y": y}))
+                } else {
+                    app.run("view.colorSamplers.delete", json!({"index": i}))
+                };
+                status_on_err(app, r);
+            }
+        }
+        (Tool::ColorSampler, ToolEvent::Move { .. }) => {}
         _ => {}
     }
     true
+}
+
+/// The nearest Color Sampler point within `tol` document pixels, or `None`.
+fn nearest_sampler(points: &[[f64; 2]], at: [f64; 2], tol: f64) -> Option<usize> {
+    points.iter().enumerate().filter(|(_, q)| dist(**q, at) <= tol).min_by(|a, b| dist(*a.1, at).total_cmp(&dist(*b.1, at))).map(|(i, _)| i)
+}
+
+/// Show a command error in the status bar without treating the sample-limit message as a fault.
+fn status_on_err(app: &mut PhotospliceApp, r: Result<Value, String>) {
+    if let Err(e) = r {
+        app.ui.status = e;
+        app.ui.status_error = false;
+    }
 }
 
 fn nearest_marker(d: &Document, at: [f64; 2], tol: f64) -> Option<(usize, usize)> {
@@ -401,6 +464,23 @@ pub fn draw_overlay(app: &PhotospliceApp, painter: &egui::Painter, xf: &ViewXfor
             }
         }
     }
+    // Color Sampler points (#1046): persistent numbered markers, drawn whatever the active tool is.
+    for (i, p) in app.session.active().map(|d| d.color_samplers.clone()).unwrap_or_default().iter().enumerate() {
+        let at = xf.to_screen(p[0] as f32, p[1] as f32);
+        // A small target reticle, double-stroked so it reads on any pixel.
+        for (w, c) in [(3.0, Color32::from_black_alpha(170)), (1.0, Color32::WHITE)] {
+            painter.circle_stroke(at, 5.0, Stroke::new(w, c));
+            painter.line_segment([at - vec2(8.0, 0.0), at - vec2(6.0, 0.0)], Stroke::new(w, c));
+            painter.line_segment([at + vec2(6.0, 0.0), at + vec2(8.0, 0.0)], Stroke::new(w, c));
+            painter.line_segment([at - vec2(0.0, 8.0), at - vec2(0.0, 6.0)], Stroke::new(w, c));
+            painter.line_segment([at + vec2(0.0, 6.0), at + vec2(0.0, 8.0)], Stroke::new(w, c));
+        }
+        // The number, upper right so several points stay readable when they overlap.
+        let font = FontId::proportional(11.0);
+        let anchor = at + vec2(7.0, -7.0);
+        painter.text(anchor + vec2(1.0, 1.0), Align2::LEFT_BOTTOM, format!("{}", i + 1), font.clone(), Color32::from_black_alpha(180));
+        painter.text(anchor, Align2::LEFT_BOTTOM, format!("{}", i + 1), font, Color32::WHITE);
+    }
 }
 
 // ------------------------------------------------------------------ options bars
@@ -412,9 +492,11 @@ fn readout(ui: &mut egui::Ui, label: &str, value: Option<f64>) {
     ui.add_space(6.0);
 }
 
-/// Options bar of the Ruler, Count and Note tools. Returns true when drawn.
+/// Options bar of the Ruler, Count, Note and Color Sampler tools. Returns true when drawn.
 pub fn options_bar(app: &mut PhotospliceApp, ui: &mut egui::Ui, tool: Tool) -> bool {
-    let Some(doc) = app.session.active().map(|d| d.doc.clone()) else { return matches!(tool, Tool::Ruler | Tool::Count | Tool::Note) };
+    let Some(doc) = app.session.active().map(|d| d.doc.clone()) else {
+        return matches!(tool, Tool::Ruler | Tool::Count | Tool::Note | Tool::ColorSampler);
+    };
     match tool {
         Tool::Ruler => {
             let sc = doc.measurement.scale.clone();
@@ -455,9 +537,16 @@ pub fn options_bar(app: &mut PhotospliceApp, ui: &mut egui::Ui, tool: Tool) -> b
                 if crate::icons::button(ui, eye, 22.0, false, tl!("Toggle count group visibility")).clicked() {
                     let _ = app.run("count.setGroup", json!({"group": gi, "visible": !g.visible}));
                 }
-                let mut rgb = g.color.to_rgb();
-                if ui.color_edit_button_rgb(&mut rgb).changed() {
-                    let _ = app.run("count.setGroup", json!({"group": gi, "color": [rgb[0], rgb[1], rgb[2]], "coalesce": "count-color"}));
+                let rgb = g.color.to_rgb();
+                // PhotoSplice's Color Picker (sRGB), as everywhere else (#2144).
+                if crate::widgets::color_swatch_button(ui, color32(rgb), tl!("Color")).clicked() {
+                    crate::color_picker_ui::open_for_command(
+                        app,
+                        &crate::color_picker_ui::title_for(tl!("Color")),
+                        rgb,
+                        "count.setGroup",
+                        json!({"group": gi}),
+                    );
                 }
                 if crate::icons::button(ui, "trash", 22.0, false, tl!("Delete count group")).clicked() {
                     let _ = app.run("count.deleteGroup", json!({"group": gi}));
@@ -477,7 +566,7 @@ pub fn options_bar(app: &mut PhotospliceApp, ui: &mut egui::Ui, tool: Tool) -> b
                 ui.label(RichText::new(tl!("Label Size")).color(t.text_dim).size(11.0));
                 let b = crate::widgets::value_field(ui, &mut ls, 8.0..=72.0, "", 44.0).changed();
                 if a || b {
-                    let _ = app.run("count.setGroup", json!({"markerSize": ms.round(), "labelSize": ls.round()}));
+                    let _ = app.run("count.setGroup", count_size_params(ms, ls));
                 }
             }
             true
@@ -487,7 +576,10 @@ pub fn options_bar(app: &mut PhotospliceApp, ui: &mut egui::Ui, tool: Tool) -> b
             ui.label(RichText::new(tl!("Author:")).color(t.text_dim).size(11.0));
             ui.add(egui::TextEdit::singleline(&mut app.ui.analysis.note_author).desired_width(120.0));
             ui.label(RichText::new(tl!("Color:")).color(t.text_dim).size(11.0));
-            ui.color_edit_button_rgb(&mut app.ui.analysis.note_color);
+            let rgb = app.ui.analysis.note_color;
+            if crate::widgets::color_swatch_button(ui, color32(rgb), tl!("Color")).clicked() {
+                crate::color_picker_ui::open_for_target(app, "noteColor", &crate::color_picker_ui::title_for(tl!("Color")), rgb);
+            }
             if ui.add_enabled_ui(!doc.notes.is_empty(), |ui| crate::widgets::secondary_button(ui, tl!("Clear All"), 0.0)).inner.clicked() {
                 let _ = app.run("notes.delete", json!({"all": true}));
                 app.ui.analysis.note_selected = None;
@@ -497,11 +589,37 @@ pub fn options_bar(app: &mut PhotospliceApp, ui: &mut egui::Ui, tool: Tool) -> b
             }
             true
         }
+        Tool::ColorSampler => {
+            let t = Tokens::get(ui.ctx());
+            let n = app.session.active().map_or(0, |d| d.color_samplers.len());
+            ui.label(
+                RichText::new(crate::i18n::fmt(
+                    tl!("{n} of {max} sample points"),
+                    &[("n", &n.to_string()), ("max", &photosplice_engine::sampler_cmds::MAX_SAMPLERS.to_string())],
+                ))
+                .color(t.text)
+                .size(11.0),
+            );
+            crate::widgets::vline(ui, 22.0);
+            if ui.add_enabled_ui(n > 0, |ui| crate::widgets::secondary_button(ui, tl!("Clear All"), 0.0)).inner.clicked() {
+                let _ = app.run("view.colorSamplers.clear", json!({}));
+            }
+            crate::widgets::vline(ui, 22.0);
+            ui.label(RichText::new(tl!("Click to place · Alt-click or drag off-canvas to remove")).color(t.text_dim).size(11.0));
+            true
+        }
         _ => false,
     }
 }
 
 // ------------------------------------------------------------------ panels and dialogs
+
+/// `count.setGroup` params for the options bar's Marker Size and Label Size fields, sent as JSON
+/// integers (the fields edit `f32`s; `8.0` is a float on the wire).
+fn count_size_params(marker: f32, label: f32) -> Value {
+    let whole = |v: f32, lo: f32, hi: f32| if v.is_finite() { v.round().clamp(lo, hi) as u32 } else { lo as u32 };
+    json!({"markerSize": whole(marker, 1.0, 10.0), "labelSize": whole(label, 8.0, 72.0)})
+}
 
 fn float_frame(t: &Tokens) -> egui::Frame {
     egui::Frame::NONE
@@ -673,7 +791,9 @@ fn notes_panel(app: &mut PhotospliceApp, ctx: &egui::Context) {
             if ui.add_enabled_ui(n > 1, |ui| crate::icons::button(ui, "chevrons-right", 22.0, false, tl!("Next note"))).inner.clicked() {
                 sel = sel.map(|i| (i + 1) % n);
             }
-            ui.label(RichText::new(sel.map_or("0 of 0".into(), |i| format!("{} of {n}", i + 1))).color(t.text_dim).size(11.0));
+            let template = "{index} of {total}";
+            let position = crate::i18n::fmt(tl!(template), &[("index", &sel.map_or(0, |i| i + 1).to_string()), ("total", &n.to_string())]);
+            ui.label(RichText::new(position).color(t.text_dim).size(11.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add_enabled_ui(sel.is_some(), |ui| crate::icons::button(ui, "trash", 22.0, false, tl!("Delete note"))).inner.clicked() {
                     delete = true;
@@ -1021,5 +1141,108 @@ pub(crate) mod tests {
         assert!(app.ui.analysis.measurement_log);
         assert_eq!(app.session.analysis.log.last().unwrap().values["source"], "Count Tool");
         render(&mut app, &ctx, windows);
+    }
+
+    #[test]
+    fn color_sampler_tool_places_moves_and_removes_points() {
+        let (mut app, ctx) = app();
+        app.ui.tool = Tool::ColorSampler;
+        let pts = |app: &PhotospliceApp| app.session.active().unwrap().color_samplers.clone();
+        down(&mut app, 20.0, 20.0, egui::Modifiers::NONE);
+        up(&mut app, 20.0, 20.0);
+        down(&mut app, 60.0, 40.0, egui::Modifiers::NONE);
+        up(&mut app, 60.0, 40.0);
+        assert_eq!(pts(&app), vec![[20.0, 20.0], [60.0, 40.0]]);
+        // Drag the first point to a new pixel (committed on release).
+        down(&mut app, 20.0, 20.0, egui::Modifiers::NONE);
+        mv(&mut app, 30.0, 25.0, egui::Modifiers::NONE);
+        up(&mut app, 30.0, 25.0);
+        assert_eq!(pts(&app)[0], [30.0, 25.0]);
+        // A click on a point, with no drag, leaves it where it is.
+        down(&mut app, 30.0, 25.0, egui::Modifiers::NONE);
+        up(&mut app, 30.0, 25.0);
+        assert_eq!(pts(&app)[0], [30.0, 25.0]);
+        // ⌥-click removes that one point.
+        down(&mut app, 60.0, 40.0, egui::Modifiers::ALT);
+        up(&mut app, 60.0, 40.0);
+        assert_eq!(pts(&app).len(), 1);
+        // Dragging a point off the canvas removes it.
+        down(&mut app, 30.0, 25.0, egui::Modifiers::NONE);
+        mv(&mut app, -50.0, 25.0, egui::Modifiers::NONE);
+        up(&mut app, -50.0, 25.0);
+        assert!(pts(&app).is_empty());
+        assert_eq!(app.session.active().unwrap().history.past_len(), 0, "sampling adds no history");
+        // The overlay and the options bar render without panicking.
+        down(&mut app, 10.0, 10.0, egui::Modifiers::NONE);
+        up(&mut app, 10.0, 10.0);
+        render(&mut app, &ctx, windows);
+        let xf = ViewXform {
+            rect: egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 100.0)),
+            zoom: 1.0,
+            center: [100.0, 50.0],
+            flip: false,
+            rotation: 0.0,
+            aspect: 1.0,
+        };
+        let mut o = ctx.run_ui(Default::default(), |ui| draw_overlay(&app, ui.painter(), &xf));
+        o.textures_delta.clear();
+    }
+
+    #[test]
+    fn color_sampler_readout_and_crop_removal_report() {
+        let (mut app, _) = app();
+        app.ui.tool = Tool::ColorSampler;
+        down(&mut app, 5.0, 5.0, egui::Modifiers::NONE);
+        up(&mut app, 5.0, 5.0);
+        down(&mut app, 150.0, 90.0, egui::Modifiers::NONE);
+        up(&mut app, 150.0, 90.0);
+        // The list reports both, numbered, with their position and RGB/CMYK readout.
+        let l = app.run("view.colorSamplers.list", json!({})).unwrap();
+        assert_eq!(l["samplers"].as_array().unwrap().len(), 2);
+        assert_eq!(l["samplers"][0]["number"], 1);
+        assert_eq!(l["samplers"][1]["position"], json!([150.0, 90.0]));
+        assert!(l["samplers"][0]["rgb"].as_array().is_some_and(|a| a.len() == 3));
+        // Cropping to the top-left drops the outside point and reports how many went.
+        app.run("image.crop", json!({"x": 0, "y": 0, "width": 10, "height": 10})).unwrap();
+        assert_eq!(app.session.active().unwrap().color_samplers, vec![[5.0, 5.0]]);
+        assert!(app.ui.status.contains("removed"), "{}", app.ui.status);
+        assert!(!app.ui.status_error);
+    }
+
+    #[test]
+    fn color_sampler_is_per_document_and_inert_without_one() {
+        let (mut app, _) = app();
+        app.ui.tool = Tool::ColorSampler;
+        down(&mut app, 10.0, 10.0, egui::Modifiers::NONE);
+        up(&mut app, 10.0, 10.0);
+        // A second document starts empty; the first keeps its own point.
+        app.run("file.new", json!({"width": 50, "height": 50})).unwrap();
+        assert!(app.session.active().unwrap().color_samplers.is_empty());
+        down(&mut app, 20.0, 20.0, egui::Modifiers::NONE);
+        up(&mut app, 20.0, 20.0);
+        assert_eq!(app.session.active().unwrap().color_samplers, vec![[20.0, 20.0]]);
+        app.run("document.activate", json!({"document": 0})).unwrap();
+        assert_eq!(app.session.active().unwrap().color_samplers, vec![[10.0, 10.0]]);
+        // With no document the tool says so (no dialog, no panic) and the commands error.
+        let mut empty = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+        empty.ui.tool = Tool::ColorSampler;
+        down(&mut empty, 5.0, 5.0, egui::Modifiers::NONE);
+        assert_eq!(empty.ui.status, "No document open");
+        assert!(!empty.ui.status_error);
+        assert!(empty.run("view.colorSamplers.add", json!({"x": 1, "y": 1})).is_err());
+        assert!(empty.run("view.colorSamplers.list", json!({})).is_err());
+    }
+
+    #[test]
+    fn count_size_fields_send_whole_numbers_the_engine_applies() {
+        let p = count_size_params(7.6, 20.0);
+        assert_eq!(p, json!({"markerSize": 8, "labelSize": 20}));
+        assert!(p["markerSize"].is_u64() && p["labelSize"].is_u64());
+        assert_eq!(count_size_params(f32::NAN, 500.0), json!({"markerSize": 1, "labelSize": 72}));
+        let (mut app, _ctx) = app();
+        app.run("count.add", json!({"x": 10, "y": 10})).unwrap();
+        app.run("count.setGroup", count_size_params(8.0, 20.0)).unwrap();
+        let g = &app.session.active().unwrap().doc.measurement.count_groups[0];
+        assert_eq!((g.marker_size, g.label_size), (8, 20));
     }
 }

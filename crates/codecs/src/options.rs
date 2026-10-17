@@ -3,8 +3,8 @@
 use crate::error::CodecError;
 use crate::image::{ChannelLayout, SampleType};
 
-/// Decompression-bomb guards. All checks happen on header values *before*
-/// the pixel buffer is allocated.
+/// Decompression-bomb guards. Dimension checks precede pixel allocation;
+/// metadata decoding checks its budget before growing decoded output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     pub max_width: u32,
@@ -13,14 +13,18 @@ pub struct Limits {
     pub max_pixels: u64,
     /// Maximum bytes for the decoded pixel buffer (and passed on as the
     /// allocation budget to underlying decoders).
+    /// PNG also applies this to the aggregate decoded text/XMP UTF-8 bytes,
+    /// including keywords, separately from pixels. This is not a total RSS cap.
     pub max_alloc: u64,
 }
 
 impl Default for Limits {
     fn default() -> Self {
         // 2^30 pixels (e.g. 32768²) and, on 64-bit targets, 8 GiB: enough for the large
-        // documents Photoshop users open (a 20000² RGBA 16-bit image is 3.2 GB).
-        let max_alloc = if cfg!(target_pointer_width = "64") { 8 << 30 } else { 2 << 30 };
+        // documents Photoshop users open (a 20000² RGBA 16-bit image is 3.2 GB). On 32-bit
+        // targets (wasm32 has a 4 GiB address space shared with the document, history and
+        // the decoder's own buffers) 1 GiB is the most one buffer can safely ask for.
+        let max_alloc = if cfg!(target_pointer_width = "64") { 8 << 30 } else { 1 << 30 };
         Limits { max_width: 1 << 18, max_height: 1 << 18, max_pixels: 1 << 30, max_alloc }
     }
 }
@@ -58,6 +62,19 @@ impl Limits {
         Ok(())
     }
 
+    /// Decompression-bomb guard for formats that compress: refuse a file too small to hold
+    /// `declared_bytes` of (stored, pre-expansion) image data, given that the compression
+    /// never beats `max_ratio`:1. Called before the output buffer is allocated, so a
+    /// header-only hostile file cannot make the decoder reserve gigabytes. A fixed 1 MiB of
+    /// slack keeps tiny images and headers with large metadata unaffected.
+    pub(crate) fn check_plausible(declared_bytes: u64, file_len: usize, max_ratio: u64) -> Result<(), CodecError> {
+        let capacity = (file_len as u64).saturating_mul(max_ratio).saturating_add(1 << 20);
+        if declared_bytes > capacity {
+            return Err(CodecError::LimitExceeded(format!("a {file_len} byte file cannot hold {declared_bytes} bytes of image data")));
+        }
+        Ok(())
+    }
+
     pub(crate) fn alloc_usize(&self) -> usize {
         usize::try_from(self.max_alloc).unwrap_or(usize::MAX)
     }
@@ -83,12 +100,13 @@ pub enum PngCompression {
     Best,
 }
 
-/// TIFF strip compression.
+/// TIFF strip compression. The default is none, as in Photoshop: uncompressed strips are the
+/// only kind every TIFF reader opens (Deflate and the predictor are not baseline TIFF, #4484).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TiffCompression {
+    #[default]
     None,
     Lzw,
-    #[default]
     Deflate,
     PackBits,
 }
@@ -102,6 +120,38 @@ pub enum ExrCompression {
     #[default]
     Zip16,
     Piz,
+}
+
+/// Bits per sample of a DPX file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DpxBits {
+    Bits8,
+    Bits10,
+    Bits12,
+    Bits16,
+}
+
+impl DpxBits {
+    /// `8`, `10`, `12` or `16` as [`DpxBits`]; any other number is `None`.
+    pub fn from_bits(bits: u64) -> Option<Self> {
+        match bits {
+            8 => Some(DpxBits::Bits8),
+            10 => Some(DpxBits::Bits10),
+            12 => Some(DpxBits::Bits12),
+            16 => Some(DpxBits::Bits16),
+            _ => None,
+        }
+    }
+
+    /// The bits per sample.
+    pub fn bits(self) -> u8 {
+        match self {
+            DpxBits::Bits8 => 8,
+            DpxBits::Bits10 => 10,
+            DpxBits::Bits12 => 12,
+            DpxBits::Bits16 => 16,
+        }
+    }
 }
 
 /// Options for [`crate::encode`].
@@ -123,6 +173,8 @@ pub struct EncodeOptions {
     /// only when it could pass the 4 GiB a classic TIFF can address.
     pub tiff_bigtiff: bool,
     pub exr_compression: ExrCompression,
+    /// DPX bits per sample. `None` follows the image: 8 for 8-bit, 16 otherwise.
+    pub dpx_bits: Option<DpxBits>,
     /// Embed the ICC profile when the format supports it.
     pub embed_icc: bool,
     /// Embed EXIF/XMP/DPI/text when the format supports it.
@@ -138,11 +190,22 @@ impl Default for EncodeOptions {
             png_interlaced: false,
             webp_lossless: true,
             webp_quality: 90,
-            tiff_compression: TiffCompression::Deflate,
+            tiff_compression: TiffCompression::None,
             tiff_bigtiff: false,
             exr_compression: ExrCompression::Zip16,
+            dpx_bits: None,
             embed_icc: true,
             embed_metadata: true,
         }
     }
+}
+
+/// A zero-filled buffer of `len` elements, allocated fallibly: an allocation failure becomes
+/// [`CodecError::LimitExceeded`] instead of aborting the process (which `catch_unwind` cannot
+/// stop).
+pub(crate) fn alloc_zeroed<T: Copy + Default>(len: usize) -> Result<Vec<T>, CodecError> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(len).map_err(|_| CodecError::LimitExceeded(format!("cannot allocate {len} elements for the image")))?;
+    v.resize(len, T::default());
+    Ok(v)
 }

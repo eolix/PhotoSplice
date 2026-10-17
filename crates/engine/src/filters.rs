@@ -4,12 +4,17 @@
 //! smart object, recording a smart filter), respects the selection, and is
 //! undoable. `filter.lastFilter` re-runs the most recent filter command.
 
-use photosplice_algo::{self as algo, Distribution, FilterParams, PolarMode, Preserve, RadialMethod, RippleSize, SpherizeMode, UndefinedAreas, WaveType};
+use photosplice_algo::{
+    self as algo, Distribution, FilterParams, PolarMode, Preserve, RadialMethod, RadialQuality, RippleSize, SpherizeMode, UndefinedAreas, WaveType,
+};
 use photosplice_doc::{LayerContent, SmartFilter};
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
 use crate::{EngineError, Result, Session};
+
+mod validation;
+pub(crate) use validation::validate_params;
 
 fn f(p: &Value, k: &str, d: f32) -> f32 {
     p.get(k).and_then(Value::as_f64).map_or(d, |v| v as f32)
@@ -24,6 +29,10 @@ fn b(p: &Value, k: &str, d: bool) -> bool {
 }
 fn s<'a>(p: &'a Value, k: &str, d: &'a str) -> &'a str {
     p.get(k).and_then(Value::as_str).unwrap_or(d)
+}
+fn seed(p: &Value) -> u32 {
+    // New calls accept the entire documented u32 range; keep legacy record decoding otherwise.
+    p.get("seed").and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok()).unwrap_or_else(|| i(p, "seed", 0) as u32)
 }
 fn undefined(p: &Value) -> UndefinedAreas {
     match s(p, "undefinedAreas", "wrap") {
@@ -43,7 +52,22 @@ fn preserve(p: &Value) -> Preserve {
 fn preset(id: &str) -> Option<(&'static str, FilterParams)> {
     Some(match id {
         "filter.blur.blur" => ("Blur", FilterParams::GaussianBlur { radius: 0.6 }),
-        "filter.blur.blurMore" => ("Blur More", FilterParams::GaussianBlur { radius: 1.4 }),
+        // Photoshop 27.11's Blur More is the 3×3 kernel [1 2 1; 2 2 2; 1 2 1] / 14 (its response
+        // to a single white pixel, exactly).
+        "filter.blur.blurMore" => (
+            "Blur More",
+            FilterParams::Custom {
+                kernel: vec![
+                    0.0, 0.0, 0.0, 0.0, 0.0, //
+                    0.0, 1.0, 2.0, 1.0, 0.0, //
+                    0.0, 2.0, 2.0, 2.0, 0.0, //
+                    0.0, 1.0, 2.0, 1.0, 0.0, //
+                    0.0, 0.0, 0.0, 0.0, 0.0,
+                ],
+                scale: 14.0,
+                offset: 0.0,
+            },
+        ),
         "filter.sharpen.sharpen" => ("Sharpen", FilterParams::UnsharpMask { amount: 60.0, radius: 0.5, threshold: 0.0 }),
         "filter.sharpen.sharpenMore" => ("Sharpen More", FilterParams::UnsharpMask { amount: 150.0, radius: 0.6, threshold: 0.0 }),
         "filter.sharpen.sharpenEdges" => ("Sharpen Edges", FilterParams::UnsharpMask { amount: 100.0, radius: 0.8, threshold: 6.0 }),
@@ -53,7 +77,8 @@ fn preset(id: &str) -> Option<(&'static str, FilterParams)> {
 }
 
 /// Builds the algorithm parameters for a filter command id from JSON params
-/// (Photoshop dialog units).
+/// (Photoshop dialog units). Stored smart filters and previews retain their tolerant decoding;
+/// new command invocations pass through `validate_params` before any document changes.
 pub fn params_for(id: &str, p: &Value) -> Option<FilterParams> {
     if let Some((_, fp)) = preset(id) {
         return Some(fp);
@@ -65,6 +90,12 @@ pub fn params_for(id: &str, p: &Value) -> Option<FilterParams> {
         "filter.blur.radialBlur" => FilterParams::RadialBlur {
             amount: f(p, "amount", 10.0).clamp(1.0, 100.0),
             method: if s(p, "method", "spin") == "zoom" { RadialMethod::Zoom } else { RadialMethod::Spin },
+            quality: match s(p, "quality", "good") {
+                "draft" => RadialQuality::Draft,
+                "best" => RadialQuality::Best,
+                "good" => RadialQuality::Good,
+                _ => RadialQuality::Good,
+            },
             center_x: f(p, "centerX", 0.5),
             center_y: f(p, "centerY", 0.5),
         },
@@ -86,7 +117,7 @@ pub fn params_for(id: &str, p: &Value) -> Option<FilterParams> {
             amount: f(p, "amount", 12.5).clamp(0.1, 400.0),
             distribution: if s(p, "distribution", "uniform") == "gaussian" { Distribution::Gaussian } else { Distribution::Uniform },
             monochromatic: b(p, "monochromatic", false),
-            seed: i(p, "seed", 0) as u32,
+            seed: seed(p),
         },
         "filter.noise.median" => FilterParams::Median { radius: f(p, "radius", 1.0).clamp(1.0, 500.0) },
         "filter.noise.dustAndScratches" => {
@@ -123,7 +154,7 @@ pub fn params_for(id: &str, p: &Value) -> Option<FilterParams> {
                 _ => WaveType::Sine,
             },
             undefined: undefined(p),
-            seed: i(p, "seed", 0) as u32,
+            seed: seed(p),
         },
         "filter.distort.ripple" => FilterParams::Ripple {
             amount: f(p, "amount", 100.0).clamp(-999.0, 999.0),
@@ -143,8 +174,9 @@ pub fn params_for(id: &str, p: &Value) -> Option<FilterParams> {
 /// Runs filter command `id` with JSON `params` on `surf` (the pixel function behind every
 /// `filter.*` command; smart filters re-run it on re-render). `bounds` frames distortions;
 /// `selection` limits the result. Like layer filters, neighbourhood filters repeat the edge pixels
-/// of `canvas` ∪ the surface's content instead of fading in transparency, and the output is
-/// clipped to it. `None` for ids that aren't pixel filters.
+/// `None` for ids that aren't pixel filters. `Err` when the requesting session's authority denies
+/// the filter's params (an ambient path the session may not read): the caller must surface the
+/// error rather than render unfiltered pixels.
 pub fn apply_filter_to_surface(
     id: &str,
     params: &Value,
@@ -152,28 +184,36 @@ pub fn apply_filter_to_surface(
     bounds: photosplice_geom::Rect,
     selection: Option<&photosplice_raster::Surface>,
     canvas: photosplice_geom::Rect,
-) -> Option<photosplice_raster::Surface> {
+) -> Result<Option<photosplice_raster::Surface>> {
+    // Replays bypass command dispatch; nested paths must still obey the requesting session's
+    // authority, including adjustment LUTs and plug-ins, before any resolver can read them.
+    crate::jobs::authorize_render_command(id, params)?;
     // Liquify / Puppet Warp / Perspective Warp smart filters (distort_cmds).
     if let Some(out) = crate::distort_cmds::apply_to_surface(id, params, surf, canvas) {
-        return Some(out);
+        return Ok(Some(out));
     }
     // Lens Correction / Adaptive Wide Angle / Camera Raw smart filters (lens_cmds).
     if let Some(out) = crate::lens_cmds::apply_to_surface(id, params, surf, canvas) {
-        return Some(out);
+        return Ok(Some(out));
     }
     // Image › Adjustments recorded as smart filters (Levels, Curves, Shadows/Highlights… from PSD).
     if let Some(kind) = id.strip_prefix("image.adjustments.") {
-        return crate::adjust_cmds::adjust_as_filter(kind, params, surf);
+        return Ok(crate::adjust_cmds::adjust_as_filter(kind, params, surf));
     }
     // WebAssembly plug-in smart filters (plugin_cmds).
     if id == crate::plugin_cmds::RUN {
-        return crate::plugin_cmds::apply_to_surface(id, params, surf, selection, canvas);
+        return Ok(crate::plugin_cmds::apply_to_surface(id, params, surf, selection, canvas));
     }
-    let fp = params_for(id, params)?;
+    let Some(mut fp) = params_for(id, params) else { return Ok(None) };
+    // A map that can no longer be read (moved or deleted since) leaves the pixels alone, like an
+    // unknown filter; the command itself already refused an unreadable map when it was added.
+    if crate::filters_ext::resolve_map_path(&mut fp, params).is_err() {
+        return Ok(None);
+    }
     let sel_bounds = selection.map(photosplice_raster::Surface::content_bounds);
     let content = surf.content_bounds();
     let area = algo::output_area(&fp, content, bounds, sel_bounds);
-    Some(algo::apply_in(surf, &fp, area, bounds, selection, canvas.union(&content)))
+    Ok(Some(algo::apply_in(surf, &fp, area, bounds, selection, canvas.union(&content))))
 }
 
 pub(crate) fn has_filterable_layer(s: &Session) -> std::result::Result<(), String> {
@@ -187,11 +227,12 @@ pub(crate) fn has_filterable_layer(s: &Session) -> std::result::Result<(), Strin
     match &l.content {
         LayerContent::Raster(_) => Ok(()),
         LayerContent::Smart(sm) if sm.cache.is_some() => Ok(()),
-        other => Err(format!("filters need a pixel layer (active layer is a {} layer)", other.kind_name())),
+        other => Err(format!("filters need a pixel layer (active layer is {} {} layer)", other.article(), other.kind_name())),
     }
 }
 
 pub(crate) fn run_filter(s: &mut Session, id: &str, p: &Value) -> Result<Value> {
+    validate_params(id, p)?;
     // Session state some filters read (colours) becomes explicit params; external inputs resolve here.
     let prepared = crate::filters_ext::prepare(s, id, p);
     let p = &prepared;
@@ -227,12 +268,25 @@ pub(crate) fn run_filter(s: &mut Session, id: &str, p: &Value) -> Result<Value> 
             // Neighbourhood filters repeat edge pixels at the canvas edge (or past it, where the
             // layer has off-canvas pixels) instead of fading in transparency, as Photoshop does.
             if let Some(surf) = crate::channel_cmds::channel_surface_for_filter(doc, Some(layer), &p)? {
-                let content = surf.content_bounds();
+                let content = doc_bounds.union(&surf.content_bounds());
                 let area = algo::output_area(&fp, content, bounds, sel_bounds);
                 *surf = filter(surf, &fp, area, bounds, selection.as_ref(), doc_bounds.union(&content))?;
                 return Ok(fp.clone());
             }
+            // Filters that make pixels transparent (Color to Alpha) turn the Background into a
+            // normal layer first, as the erasers do: it can't hold transparency.
+            if fp.makes_transparency() {
+                crate::extra_cmds::background_to_layer_for_mask(doc, layer);
+            }
+            let locks = doc.effective_locks(layer);
             let l = doc.layer_mut(layer).ok_or(EngineError::NoLayer(layer))?;
+            if locks.pixels || locks.all {
+                return Err(EngineError::Other(format!("Could not complete your request because the layer \"{}\" is locked", l.name)));
+            }
+            // Putting the old alpha back (below) would leave unmixed colours fully opaque.
+            if locks.transparency && fp.makes_transparency() && matches!(l.content, LayerContent::Raster(_)) {
+                return Err(EngineError::Other(format!("Could not complete your request because the transparency of layer \"{}\" is locked", l.name)));
+            }
             let mut fp = fp.clone();
             crate::filters_ext::resolve_in_layer(&mut fp, l, bounds);
             let surf = match &mut l.content {
@@ -245,13 +299,39 @@ pub(crate) fn run_filter(s: &mut Session, id: &str, p: &Value) -> Result<Value> 
                 }
                 _ => return Err(EngineError::Other("not a pixel layer".into())),
             };
+            let before = locks.transparency.then(|| surf.clone());
             let content = surf.content_bounds();
             let area = algo::output_area(&fp, content, bounds, sel_bounds);
             *surf = filter(surf, &fp, area, bounds, selection.as_ref(), doc_bounds.union(&content))?;
+            if let Some(before) = &before {
+                keep_alpha(before, surf);
+            }
             Ok(fp)
         },
         move |fp| json!({ "layer": layer_id, "filter": serde_json::to_value(&fp).unwrap_or(Value::Null) }),
     )
+}
+
+/// Lock transparency: put the layer's alpha back after a filter, in the tiles it changed.
+fn keep_alpha(old: &photosplice_raster::Surface, new: &mut photosplice_raster::Surface) {
+    if old.format() != new.format() || !new.format().alpha {
+        return;
+    }
+    let mut coords: Vec<_> = new.tiles().filter(|(c, t)| old.tile(**c).is_none_or(|o| !std::sync::Arc::ptr_eq(o, t))).map(|(c, _)| *c).collect();
+    coords.extend(old.tiles().filter(|(c, _)| new.tile(**c).is_none()).map(|(c, _)| *c));
+    let n = new.channels();
+    for c in coords {
+        let r = c.rect();
+        let o = old.read_region(r);
+        let mut v = new.read_region(r);
+        for (pn, po) in v.chunks_exact_mut(n).zip(o.chunks_exact(n)) {
+            if let (Some(a), Some(b)) = (pn.last_mut(), po.last()) {
+                *a = *b;
+            }
+        }
+        new.write_region(r, &v);
+    }
+    new.prune();
 }
 
 macro_rules! filter_cmd {
@@ -285,7 +365,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "filter.blur.radialBlur",
             "Radial Blur…",
             ["Filter", "Blur"],
-            r##"{"amount":1..100=10,"method":"spin|zoom","centerX":0..1=0.5,"centerY":0..1=0.5}"##
+            r##"{"amount":1..100=10,"method":"spin|zoom","quality":"draft|good|best"="good","centerX":0..1=0.5,"centerY":0..1=0.5}"##
         ),
         filter_cmd!("filter.blur.surfaceBlur", "Surface Blur…", ["Filter", "Blur"], r##"{"radius":1..100=5,"threshold":2..255=15}"##),
         filter_cmd!(
@@ -351,9 +431,15 @@ pub fn specs() -> Vec<CommandSpec> {
     ]
 }
 
-/// The most recent filter command in the session journal.
-fn last_filter(s: &Session) -> Option<(String, Value)> {
-    s.journal.iter().rev().find(|(id, _)| params_for(id, &Value::Null).is_some() && id.starts_with("filter.")).cloned()
+/// The most recent filter command in the session journal, retargeted at the active layer: dialogs
+/// such as the Filter Gallery record the layer they ran on, and Last Filter applies to the
+/// current layer, as in Photoshop (#1270).
+pub fn last_filter(s: &Session) -> Option<(String, Value)> {
+    let (id, mut params) = s.journal.iter().rev().find(|(id, _)| params_for(id, &Value::Null).is_some() && id.starts_with("filter.")).cloned()?;
+    if let Value::Object(m) = &mut params {
+        m.remove("layer");
+    }
+    Some((id, params))
 }
 
 #[cfg(test)]
@@ -372,6 +458,29 @@ mod tests {
         let d = s.active().unwrap();
         let l = d.doc.layer(d.active_layer.unwrap()).unwrap();
         l.surface().unwrap().read_region(photosplice_geom::Rect::new(0, 0, 48, 32))
+    }
+
+    fn mask_session(reveal_selection: bool) -> Session {
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 16, "height": 16, "background": "#ff0000"})).unwrap();
+        if reveal_selection {
+            s.execute("select.all", json!({})).unwrap();
+            s.execute("layer.layerMask.revealSelection", json!({})).unwrap();
+        } else {
+            s.execute("layer.layerMask.revealAll", json!({})).unwrap();
+        }
+        s
+    }
+
+    fn mask_pixels(s: &Session) -> Vec<f32> {
+        let d = s.active().unwrap();
+        let mask = d.doc.layer(d.active_layer.unwrap()).unwrap().mask.as_ref().unwrap();
+        mask.surface.read_region(d.doc.bounds())
+    }
+
+    fn canvas_pixels(s: &Session) -> Vec<f32> {
+        let d = s.active().unwrap();
+        d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap().read_region(d.doc.bounds())
     }
 
     fn paint_pattern(s: &mut Session) {
@@ -501,6 +610,68 @@ mod tests {
     }
 
     #[test]
+    fn solarize_and_add_noise_process_untouched_reveal_all_masks() {
+        for (id, params) in [
+            ("filter.stylize.solarize", json!({"target": "mask"})),
+            ("filter.noise.addNoise", json!({"amount": 100, "seed": 1, "monochromatic": true, "target": "mask"})),
+        ] {
+            let mut reveal_all = mask_session(false);
+            let mut reveal_selection = mask_session(true);
+            let all_mask = reveal_all.active().unwrap().doc.layer(reveal_all.active().unwrap().active_layer.unwrap()).unwrap().mask.as_ref().unwrap();
+            assert!(all_mask.surface.content_bounds().is_empty(), "{id}: Reveal All stores its white canvas in the default pixel");
+            let initial_all = mask_pixels(&reveal_all);
+            let initial_selection = mask_pixels(&reveal_selection);
+            assert_eq!(initial_all, initial_selection, "{id}: masks start with equal white values");
+            assert_eq!(initial_all, vec![1.0; 16 * 16], "{id}: the full canvas starts revealed");
+            let pixels_before = canvas_pixels(&reveal_all);
+
+            reveal_all.execute(id, params.clone()).unwrap();
+            reveal_selection.execute(id, params).unwrap();
+
+            let actual = mask_pixels(&reveal_all);
+            let expected = mask_pixels(&reveal_selection);
+            assert!(
+                actual == expected,
+                "{id}: Reveal All differs from Reveal Selection: first={:?}/{:?}, changed pixels={}/{}",
+                actual[0],
+                expected[0],
+                actual.iter().filter(|&&v| v != 1.0).count(),
+                expected.iter().filter(|&&v| v != 1.0).count()
+            );
+            assert_eq!(canvas_pixels(&reveal_all), pixels_before, "{id}: the mask target must leave layer pixels unchanged");
+            if id == "filter.stylize.solarize" {
+                assert!(actual.iter().all(|&v| v == 0.0), "Solarize maps the white mask to black");
+            } else {
+                assert!(actual.iter().any(|&v| v != 1.0), "seeded Add Noise changes the Reveal All mask");
+            }
+        }
+    }
+
+    #[test]
+    fn minimum_signed_offset_matches_its_wrapped_distance() {
+        for depth in [8, 16, 32] {
+            let make_session = || {
+                let mut s = Session::new();
+                s.execute("file.new", json!({"width": 48, "height": 32, "depth": depth})).unwrap();
+                s.execute("layer.new.layer", json!({})).unwrap();
+                paint_pattern(&mut s);
+                s
+            };
+            let mut actual = make_session();
+            let before = active_pixels(&actual);
+            actual.execute("filter.other.offset", json!({"horizontal": i32::MIN, "vertical": i32::MIN})).unwrap();
+            let mut expected = make_session();
+            expected.execute("filter.other.offset", json!({"horizontal": i32::MIN.rem_euclid(48), "vertical": i32::MIN.rem_euclid(32)})).unwrap();
+            let after = active_pixels(&actual);
+            assert_eq!(after, active_pixels(&expected), "depth {depth}");
+            assert_ne!(after, before);
+            actual.execute("edit.undo", json!({})).unwrap();
+            assert_eq!(active_pixels(&actual), before);
+            actual.execute("edit.redo", json!({})).unwrap();
+            assert_eq!(active_pixels(&actual), after);
+        }
+    }
+    #[test]
     fn huge_offsets_clamp_instead_of_wrapping() {
         // 3e9 wrapped to a negative offset through `as i32`; it saturates now, so it
         // equals the maximal in-range offset instead of shifting the other way.
@@ -529,8 +700,55 @@ mod tests {
     }
 
     #[test]
+    fn recorded_last_filter_replays_the_filter_it_repeated() {
+        // #3089: the action holds the filter with its settings, not a "repeat whatever ran
+        // last" step that fails in a new session.
+        let mut s = session();
+        paint_pattern(&mut s);
+        s.execute("filter.other.offset", json!({"horizontal": 3})).unwrap();
+        s.execute("actions.record", json!({"name": "Again"})).unwrap();
+        s.execute("filter.lastFilter", json!({})).unwrap();
+        s.execute("actions.stop", json!({})).unwrap();
+        let steps = s.execute("actions.get", json!({"action": "Again"})).unwrap()["steps"].clone();
+        assert_eq!(steps, json!([["filter.other.offset", {"horizontal": 3}]]));
+        let action = s.actions.list[0].clone();
+
+        let mut fresh = session();
+        paint_pattern(&mut fresh);
+        fresh.actions.list.push(action);
+        let played = fresh.execute("actions.play", json!({"action": "Again"})).unwrap();
+        assert!(played.get("failed").is_none(), "{played}");
+        let mut direct = session();
+        paint_pattern(&mut direct);
+        direct.execute("filter.other.offset", json!({"horizontal": 3})).unwrap();
+        assert_eq!(active_pixels(&fresh), active_pixels(&direct));
+    }
+
+    #[test]
+    fn last_filter_applies_to_the_active_layer() {
+        let mut s = session();
+        paint_pattern(&mut s);
+        let first = s.active().unwrap().active_layer.unwrap();
+        // Dialogs (Filter Gallery, Camera Raw…) record the layer they ran on.
+        s.execute("filter.other.offset", json!({"horizontal": 3, "layer": first.0})).unwrap();
+        let first_once = active_pixels(&s);
+        s.execute("layer.new.layer", json!({})).unwrap();
+        paint_pattern(&mut s);
+        let before = active_pixels(&s);
+        s.execute("filter.lastFilter", json!({})).unwrap();
+        assert_ne!(active_pixels(&s), before, "the active layer is filtered");
+        let d = s.active().unwrap();
+        let l = d.doc.layer(first).unwrap();
+        assert_eq!(l.surface().unwrap().read_region(photosplice_geom::Rect::new(0, 0, 48, 32)), first_once, "the first layer is left alone");
+    }
+
+    #[test]
     fn params_map_to_algorithm_units() {
         assert_eq!(params_for("filter.blur.gaussianBlur", &json!({"radius": 4.5})), Some(FilterParams::GaussianBlur { radius: 4.5 }));
+        assert_eq!(
+            params_for("filter.blur.radialBlur", &json!({"quality": "best"})),
+            Some(FilterParams::RadialBlur { amount: 10.0, method: RadialMethod::Spin, quality: RadialQuality::Best, center_x: 0.5, center_y: 0.5 })
+        );
         assert_eq!(
             params_for("filter.noise.addNoise", &json!({"amount": 10, "distribution": "gaussian", "monochromatic": true})),
             Some(FilterParams::AddNoise { amount: 10.0, distribution: Distribution::Gaussian, monochromatic: true, seed: 0 })
@@ -585,6 +803,7 @@ mod tests {
             let l = Layer::new(
                 "so",
                 LayerContent::Smart(SmartObject {
+                    contents_id: photosplice_doc::SmartContentsId::fresh(),
                     source: SmartSource::Linked { path: String::new() },
                     transform: photosplice_geom::Affine::IDENTITY,
                     smart_filters: vec![],

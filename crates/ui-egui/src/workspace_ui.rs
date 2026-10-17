@@ -174,7 +174,13 @@ fn new_workspace(app: &mut PhotospliceApp, p: &Value) -> Result<Value, String> {
         return Err(format!("\"{name}\" is a built-in workspace"));
     }
     let prefs = app.session.prefs().clone();
-    let mut ws = json!({"panels": app.ui.panels, "dockTabs": app.ui.dock_tabs, "dock": app.ui.dock});
+    let mut ws = json!({"panels": app.ui.panels, "dockTabs": app.ui.dock_tabs, "dock": app.ui.dock, "timelineOpen": app.ui.timeline.open, "docking": app.ui.docking, "dockingHidden": app.ui.docking_hidden, "dockingCollapsed": app.ui.docking_collapsed});
+    // The icon rail and menu bar flags belong to an embedding app's session, not to a saved
+    // layout: a workspace never brings back a window without its menus.
+    if let Some(panels) = ws.get_mut("panels").and_then(Value::as_object_mut) {
+        panels.remove("rail");
+        panels.remove("menu_bar");
+    }
     if p.get("keyboardShortcuts").and_then(Value::as_bool) == Some(true) {
         ws["shortcuts"] = json!(prefs.shortcuts);
     }
@@ -275,6 +281,26 @@ fn custom_par(app: &mut PhotospliceApp, p: &Value) -> Result<Value, String> {
     Ok(json!({"pixelAspectRatio": c.ratio, "name": c.name}))
 }
 
+/// The Show Extras Options… checkboxes as (field, label). The fields are the serialized
+/// [`crate::view_cmds::Show`] names, the keys the dialog is seeded with and its command accepts.
+fn extras_options() -> [(&'static str, &'static str); 13] {
+    [
+        ("layer_edges", tl!("Layer Edges")),
+        ("selection_edges", tl!("Selection Edges")),
+        ("target_path", tl!("Target Path")),
+        ("notes", tl!("Notes")),
+        ("pixel_grid", tl!("Pixel Grid")),
+        ("slices", tl!("Slices")),
+        ("count", tl!("Count")),
+        ("smart_guides", tl!("Smart Guides")),
+        ("brush_preview", tl!("Brush Preview")),
+        ("mesh", tl!("Mesh")),
+        ("edit_pins", tl!("Edit Pins")),
+        ("canvas_guides", tl!("Canvas Guides")),
+        ("artboard_guides", tl!("Artboard Guides")),
+    ]
+}
+
 /// The open dialog's OK as (command id, params).
 pub fn dialog_command(kind: &str, f: &Map<String, Value>) -> Option<(&'static str, Value)> {
     Some(match kind {
@@ -285,6 +311,29 @@ pub fn dialog_command(kind: &str, f: &Map<String, Value>) -> Option<(&'static st
         "extrasOptions" => ("view.show.showExtrasOptions", Value::Object(f.clone())),
         _ => return None,
     })
+}
+
+/// The title of a dialog kind.
+pub fn title(kind: &str) -> &'static str {
+    match kind {
+        "newWorkspace" => "New Workspace",
+        "deleteWorkspace" => "Delete Workspace",
+        "customPar" => "Save Pixel Aspect Ratio",
+        "preview32" => "32-bit Preview Options",
+        _ => "Show Extras Options",
+    }
+}
+
+/// OK on the open dialog (its button, or `ui.dialog.confirm {"dialog": "shell"}`): runs its
+/// command, then closes it; on an error the dialog stays open.
+pub fn confirm(app: &mut PhotospliceApp, ctx: &egui::Context) -> Result<Value, String> {
+    let (kind, f) = app.ui.shell.dialog.clone().ok_or("no dialog is open")?;
+    let (id, p) = dialog_command(&kind, &f).ok_or_else(|| format!("unknown dialog `{kind}`"))?;
+    let r = crate::menus::invoke(app, ctx, id, p);
+    if r.is_ok() {
+        app.ui.shell.dialog = None;
+    }
+    r
 }
 
 /// Draws the Modifier Keys panel and the open dialog.
@@ -316,13 +365,7 @@ pub fn windows(app: &mut PhotospliceApp, ctx: &egui::Context) {
 fn dialog(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let Some((kind, mut f)) = app.ui.shell.dialog.clone() else { return };
     let t = Tokens::get(ctx);
-    let title = match kind.as_str() {
-        "newWorkspace" => "New Workspace",
-        "deleteWorkspace" => "Delete Workspace",
-        "customPar" => "Save Pixel Aspect Ratio",
-        "preview32" => "32-bit Preview Options",
-        _ => "Show Extras Options",
-    };
+    let title = title(&kind);
     let names: Vec<String> = app.session.prefs().workspaces.keys().cloned().collect();
     let mut result: Option<bool> = None;
     egui::Window::new(title).id(egui::Id::new("shell-dialog")).collapsible(false).resizable(false).anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0)).show(
@@ -380,6 +423,9 @@ fn dialog(app: &mut PhotospliceApp, ctx: &egui::Context) {
                     number(ui, &mut f, "ratio", tl!("Factor:"), 0.1..=10.0);
                 }
                 "preview32" => {
+                    // A slider fills its available width. Keep its field above it, so the
+                    // field cannot grow an auto-sized window beyond that width each frame.
+                    ui.set_width((ctx.content_rect().width() - 32.0).clamp(0.0, 320.0));
                     let mut m = f.get("method").and_then(Value::as_str).unwrap_or("exposureGamma").to_string();
                     if crate::widgets::dropdown(
                         ui,
@@ -391,26 +437,16 @@ fn dialog(app: &mut PhotospliceApp, ctx: &egui::Context) {
                         f.insert("method".into(), json!(m));
                     }
                     ui.add_enabled_ui(m == "exposureGamma", |ui| {
-                        number(ui, &mut f, "exposure", tl!("Exposure:"), -20.0..=20.0);
-                        number(ui, &mut f, "gamma", tl!("Gamma:"), 0.1..=9.99);
+                        for (key, label, range) in [("exposure", tl!("Exposure:"), -20.0..=20.0), ("gamma", tl!("Gamma:"), 0.1..=9.99)] {
+                            let mut v = f.get(key).and_then(Value::as_f64).unwrap_or(0.0) as f32;
+                            if crate::widgets::slider_row(ui, label, &mut v, range, "", None).changed() {
+                                f.insert(key.into(), json!(v));
+                            }
+                        }
                     });
                 }
                 _ => {
-                    for (k, label) in [
-                        ("layerEdges", tl!("Layer Edges")),
-                        ("selectionEdges", tl!("Selection Edges")),
-                        ("targetPath", tl!("Target Path")),
-                        ("notes", tl!("Notes")),
-                        ("pixelGrid", tl!("Pixel Grid")),
-                        ("slices", tl!("Slices")),
-                        ("count", tl!("Count")),
-                        ("smartGuides", tl!("Smart Guides")),
-                        ("brushPreview", tl!("Brush Preview")),
-                        ("mesh", tl!("Mesh")),
-                        ("editPins", tl!("Edit Pins")),
-                        ("canvasGuides", tl!("Canvas Guides")),
-                        ("artboardGuides", tl!("Artboard Guides")),
-                    ] {
+                    for (k, label) in extras_options() {
                         check(ui, &mut f, k, label);
                     }
                 }
@@ -434,15 +470,10 @@ fn dialog(app: &mut PhotospliceApp, ctx: &egui::Context) {
     );
     match result {
         Some(true) => {
-            if let Some((id, p)) = dialog_command(&kind, &f) {
-                match crate::menus::invoke(app, ctx, id, p) {
-                    Ok(_) => app.ui.shell.dialog = None,
-                    Err(e) => {
-                        app.ui.status = e;
-                        app.ui.status_error = true;
-                        app.ui.shell.dialog = Some((kind, f));
-                    }
-                }
+            app.ui.shell.dialog = Some((kind, f));
+            if let Err(e) = confirm(app, ctx) {
+                app.ui.status = e;
+                app.ui.status_error = true;
             }
         }
         Some(false) => app.ui.shell.dialog = None,
@@ -460,6 +491,83 @@ mod tests {
     }
 
     #[test]
+    fn saved_workspaces_preserve_host_chrome_on_select_and_reset() {
+        for (menu_bar, rail) in [(false, false), (false, true), (true, false), (true, true)] {
+            for legacy_flags in [false, true] {
+                let (mut app, ctx) = app();
+                app.ui.panels.history = true;
+                app.ui.panels.navigator = true;
+                app.ui.timeline.open = true;
+                crate::menus::invoke(&mut app, &ctx, "window.workspace.newWorkspace", json!({"name": "Host layout"})).unwrap();
+                let saved = app.session.prefs().workspaces["Host layout"].clone();
+                assert!(saved["panels"].get("menu_bar").is_none() && saved["panels"].get("rail").is_none());
+                if legacy_flags {
+                    app.session.prefs.edit(|p| {
+                        let panels = &mut p.workspaces.get_mut("Host layout").unwrap()["panels"];
+                        panels["menu_bar"] = json!(!menu_bar);
+                        panels["rail"] = json!(!rail);
+                    });
+                }
+                app.ui.panels.menu_bar = menu_bar;
+                app.ui.panels.rail = rail;
+                crate::menus::invoke(&mut app, &ctx, "window.workspace.painting", json!({})).unwrap();
+                crate::menus::invoke(&mut app, &ctx, "window.workspace.select", json!({"name": "Host layout"})).unwrap();
+                assert_eq!((app.ui.panels.menu_bar, app.ui.panels.rail), (menu_bar, rail), "select: legacy_flags={legacy_flags}");
+                let restored = json!({"dock": app.ui.dock, "dockTabs": app.ui.dock_tabs, "timelineOpen": app.ui.timeline.open});
+                for key in ["dock", "dockTabs", "timelineOpen"] {
+                    assert_eq!(restored[key], saved[key], "select restores {key}");
+                }
+                assert!(app.ui.panels.history && app.ui.panels.navigator);
+                app.ui.panels.menu_bar = !menu_bar;
+                app.ui.panels.rail = !rail;
+                app.ui.panels.history = false;
+                app.ui.panels.navigator = false;
+                app.ui.timeline.open = false;
+                crate::menus::invoke(&mut app, &ctx, "window.workspace.resetWorkspace", json!({})).unwrap();
+                assert_eq!((app.ui.panels.menu_bar, app.ui.panels.rail), (!menu_bar, !rail), "reset: legacy_flags={legacy_flags}");
+                let restored = json!({"dock": app.ui.dock, "dockTabs": app.ui.dock_tabs, "timelineOpen": app.ui.timeline.open});
+                for key in ["dock", "dockTabs", "timelineOpen"] {
+                    assert_eq!(restored[key], saved[key], "reset restores {key}");
+                }
+                assert!(app.ui.panels.history && app.ui.panels.navigator);
+            }
+        }
+    }
+
+    #[test]
+    fn saved_workspace_keeps_host_menu_and_rail_hidden_in_the_rendered_ui() {
+        let mut failures = Vec::new();
+        for theme in crate::theme::ThemeKind::ALL {
+            for width in [800.0, 1200.0] {
+                let builder = egui_kittest::Harness::builder().with_size(egui::vec2(width, 800.0)).with_max_steps(64);
+                let mut h = builder.build_eframe(move |cc| {
+                    PhotospliceApp::setup_context(&cc.egui_ctx, theme);
+                    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+                    app.run("prefs.set", json!({"path": "interface.theme", "value": theme.id()})).unwrap();
+                    app.ui.theme = theme;
+                    app.ui.panels.menu_bar = false;
+                    app.ui.panels.rail = false;
+                    app
+                });
+                let ctx = h.ctx.clone();
+                crate::menus::invoke(h.state_mut(), &ctx, "window.workspace.newWorkspace", json!({"name": "Embedded"})).unwrap();
+                crate::menus::invoke(h.state_mut(), &ctx, "window.workspace.select", json!({"name": "Embedded"})).unwrap();
+                h.run_steps(4);
+                assert_eq!(h.state().ui.theme, theme, "the fixture renders the requested theme");
+                for name in ["title_bar", "rail"] {
+                    if egui::containers::panel::PanelState::load(&h.ctx, egui::Id::new(name)).is_some() {
+                        failures.push(format!("{theme:?}, width={width}: {name} is drawn"));
+                    }
+                }
+                if h.state().ui.panels.menu_bar || h.state().ui.panels.rail {
+                    failures.push(format!("{theme:?}, width={width}: host flags were overwritten"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "saved workspaces expose host chrome: {failures:?}");
+    }
+
+    #[test]
     fn new_select_delete_workspaces() {
         let (mut app, ctx) = app();
         let inv = |app: &mut PhotospliceApp, id: &str, p: Value| crate::menus::invoke(app, &ctx, id, p);
@@ -472,6 +580,8 @@ mod tests {
         });
         inv(&mut app, "window.workspace.newWorkspace", json!({"name": "Retouch", "keyboardShortcuts": true})).unwrap();
         assert_eq!(app.ui.workspace, "Retouch");
+        let saved = &app.session.prefs().workspaces["Retouch"]["panels"];
+        assert!(saved.get("menu_bar").is_none() && saved.get("rail").is_none(), "embedding-only flags are not saved");
         assert!(inv(&mut app, "window.workspace.newWorkspace", json!({"name": "Painting"})).is_err());
         assert!(inv(&mut app, "window.workspace.newWorkspace", json!({"name": " "})).is_err());
         // The current workspace can't be deleted.
@@ -551,6 +661,58 @@ mod tests {
         assert!(!app.ui.view.show.count);
         assert!(inv(&mut app, "view.show.showExtrasOptions", json!({"bogus": true})).is_err());
         crate::analysis_ui::tests::render(&mut app, &ctx, windows);
+    }
+
+    #[test]
+    fn extras_options_checkboxes_show_and_change_every_flag() {
+        let (mut app, ctx) = app();
+        let before = serde_json::to_value(app.ui.view.show).unwrap();
+        crate::menus::invoke(&mut app, &ctx, "view.show.showExtrasOptions", json!({})).unwrap();
+        let (kind, mut f) = app.ui.shell.dialog.clone().unwrap();
+        // Every checkbox reads the seeded value of its flag (Selection Edges is on by default).
+        assert_eq!(extras_options().len(), f.len());
+        for (k, _) in extras_options() {
+            assert!(before[k].is_boolean(), "{k} is not a Show field");
+            assert_eq!(f.get(k).and_then(Value::as_bool), before[k].as_bool(), "{k}");
+        }
+        // Ticking every box (one- and multi-word flags in one submission) applies them all on OK.
+        for (k, _) in extras_options() {
+            let on = !f.get(k).and_then(Value::as_bool).unwrap();
+            f.insert(k.into(), json!(on));
+        }
+        let (id, p) = dialog_command(&kind, &f).unwrap();
+        crate::menus::invoke(&mut app, &ctx, id, p).unwrap();
+        let after = serde_json::to_value(app.ui.view.show).unwrap();
+        for (k, _) in extras_options() {
+            assert_eq!(after[k].as_bool(), before[k].as_bool().map(|b| !b), "{k}");
+        }
+    }
+
+    #[test]
+    fn thirty_two_bit_preview_window_fits_and_stops_growing() {
+        use egui_kittest::{Harness, kittest::Queryable};
+
+        for (size, scale) in [(vec2(760.0, 480.0), 1.0), (vec2(420.0, 360.0), 2.0)] {
+            for theme in crate::theme::ThemeKind::ALL {
+                let (mut app, _) = app();
+                app.run("file.new", json!({"width": 20, "height": 20, "depth": 32})).unwrap();
+                let mut h = Harness::builder().with_size(size).with_pixels_per_point(scale).build_ui_state(|ui, app| windows(app, ui.ctx()), app);
+                PhotospliceApp::setup_context(&h.ctx, theme);
+                let ctx = h.ctx.clone();
+                crate::menus::invoke(h.state_mut(), &ctx, "view.thirtyTwoBitPreviewOptions", json!({})).unwrap();
+                h.run_steps(4);
+                let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+                let first = h.ctx.memory(|m| m.area_rect(egui::Id::new("shell-dialog"))).unwrap();
+                h.run_steps(20);
+                let last = h.ctx.memory(|m| m.area_rect(egui::Id::new("shell-dialog"))).unwrap();
+                assert!(screen.contains_rect(last), "{theme:?} at {size:?}: dialog {last:?} must fit");
+                assert!((last.width() - first.width()).abs() < 1.0, "{theme:?}: width grew from {first:?} to {last:?}");
+                for label in ["Exposure:", "Gamma:", "OK", "Cancel"] {
+                    let rect = h.get_by_label(label).rect();
+                    assert!(last.contains_rect(rect) && screen.contains_rect(rect), "{label} must remain visible: {rect:?}");
+                }
+            }
+        }
     }
 
     #[test]

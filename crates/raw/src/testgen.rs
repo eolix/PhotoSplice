@@ -1,11 +1,46 @@
 //! Synthetic raw-file generators for tests and fuzz seeds: a lossless-JPEG
-//! (T.81 process 14) encoder, a small TIFF writer, and DNG / CR2 / TIFF-EP
-//! builders. The files are written from the public specifications only and
+//! (T.81 process 14) encoder, a small TIFF writer, and DNG / CR2 / TIFF-EP /
+//! RW2 / ORF / RAF builders. The files are written from the public specifications only and
 //! are meant to exercise the decoder, not to be camera-accurate.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 
 // ---------------------------------------------------------------- lossless JPEG
+
+/// A CR3 container holding one JPEG track and CMT1 orientation. It deliberately
+/// contains no CRX data: used to test explicit preview fallback and BMFF bounds.
+pub fn cr3_preview(jpeg: &[u8], orientation: u16) -> Vec<u8> {
+    fn bx(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut b = ((data.len() + 8) as u32).to_be_bytes().to_vec();
+        b.extend_from_slice(kind);
+        b.extend_from_slice(data);
+        b
+    }
+    fn moov(jpeg_len: usize, offset: u64, orientation: u16) -> Vec<u8> {
+        let mut tiff = TiffBuilder::default();
+        let ifd = tiff.ifd(vec![(274, Val::Short(vec![orientation]))]);
+        tiff.chain = vec![ifd];
+        let mut meta = vec![0x85, 0xc0, 0xb6, 0x87, 0x82, 0x0f, 0x11, 0xe0, 0x81, 0x11, 0xf4, 0xce, 0x46, 0x2b, 0x6a, 0x48];
+        meta.extend(bx(b"CMT1", &tiff.build()));
+        let mut entry = vec![0; 82];
+        entry.extend(bx(b"JPEG", &[0; 4]));
+        let mut description = vec![0, 0, 0, 0, 0, 0, 0, 1];
+        description.extend(bx(b"CRAW", &entry));
+        let mut sizes = vec![0; 4];
+        sizes.extend_from_slice(&(jpeg_len as u32).to_be_bytes());
+        sizes.extend_from_slice(&1u32.to_be_bytes());
+        let mut offsets = vec![0, 0, 0, 0, 0, 0, 0, 1];
+        offsets.extend_from_slice(&offset.to_be_bytes());
+        let mapping: Vec<u8> = [0u32, 1, 1, 1, 1].iter().flat_map(|n| n.to_be_bytes()).collect();
+        let table = [bx(b"stsd", &description), bx(b"stsz", &sizes), bx(b"co64", &offsets), bx(b"stsc", &mapping)].concat();
+        let track = bx(b"trak", &bx(b"mdia", &bx(b"minf", &bx(b"stbl", &table))));
+        bx(b"moov", &[bx(b"uuid", &meta), track].concat())
+    }
+    let ftyp = bx(b"ftyp", b"crx \0\0\0\x01crx isom");
+    let header = moov(jpeg.len(), 0, orientation);
+    let offset = ftyp.len() + header.len() + 8;
+    [ftyp, moov(jpeg.len(), offset as u64, orientation), bx(b"mdat", jpeg)].concat()
+}
 
 /// Huffman code lengths assigned to categories in decreasing frequency
 /// order. Kraft sum < 1 and no code is all ones.
@@ -363,15 +398,43 @@ fn urat(v: f64) -> (u32, u32) {
 
 // ---------------------------------------------------------------- DNG
 
+/// Encodes 8-bit samples (1 gray or 3 RGB per pixel, row-major) as a baseline JPEG at
+/// quality 60, the way a lossy DNG segment is stored (an RGB segment is coded as YCbCr).
+pub fn baseline_jpeg(samples: &[u8], width: usize, height: usize, per_pixel: usize) -> Vec<u8> {
+    use image::ImageEncoder as _;
+    let colour = if per_pixel == 3 { image::ExtendedColorType::Rgb8 } else { image::ExtendedColorType::L8 };
+    let mut j = Vec::new();
+    let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut j, 60);
+    enc.write_image(samples, width as u32, height as u32, colour).expect("jpeg segment");
+    j
+}
+
 /// How the DNG stores its raw data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DngStorage {
     /// One strip per `rows` rows, uncompressed at `bits` per sample (8, 12, 16…).
     Strips { rows: usize },
+    /// Adobe DNG compression 34892: baseline JPEG tiles at tile size (edge tiles padded), one
+    /// gray component for CFA and monochrome data, three (YCbCr-coded RGB) for LinearRaw. The
+    /// spec's `bits` should be 8 (the DNG spec's depth for lossy JPEG; the reader rejects others);
+    /// wider samples are written as their top 8 bits. Quality 60 leaves visible-but-mild artifacts.
+    LossyJpegTiles { width: usize, height: usize },
+    /// Adobe DNG compression 34892 in strips of this many rows: each strip is a baseline JPEG
+    /// of the image width by the strip's own row count (the last strip is shorter).
+    LossyJpegStrips { rows: usize },
+    /// Adobe DNG compression 8: zlib streams with the TIFF predictor (1 = none, 2 = horizontal
+    /// differencing) applied before compressing.
+    DeflateStrips { rows: usize, predictor: u16 },
     /// Lossless-JPEG tiles of this size (2 components per JPEG row, as Adobe writes CFA tiles).
     Lj92Tiles { width: usize, height: usize },
     /// Lossless-JPEG strips of this many rows, 1 component.
     Lj92Strips { rows: usize },
+    /// JPEG XL strips of this many rows (Compression 52546): one codestream per strip, taken from
+    /// [`DngSpec::jxl_segments`] (the tests encode them; this crate has no JPEG XL encoder).
+    JxlStrips { rows: usize },
+    /// JPEG XL tiles of this size, one codestream per tile in row-major order from
+    /// [`DngSpec::jxl_segments`].
+    JxlTiles { width: usize, height: usize },
 }
 
 /// A synthetic DNG.
@@ -379,8 +442,10 @@ pub enum DngStorage {
 pub struct DngSpec {
     pub width: usize,
     pub height: usize,
-    /// 1 (CFA) or 3 (LinearRaw).
+    /// 1 (CFA, or monochrome LinearRaw with `monochrome`) or 3 (LinearRaw).
     pub samples: usize,
+    /// With `samples` 1: a monochrome LinearRaw image (no CFA tags) instead of CFA data.
+    pub monochrome: bool,
     /// Row-major samples (`width * height * samples`).
     pub data: Vec<u16>,
     pub bits: u16,
@@ -389,6 +454,7 @@ pub struct DngSpec {
     pub big_endian: bool,
     pub black: Vec<u32>,
     pub black_repeat: (u16, u16),
+    /// WhiteLevel; 0 leaves the tag out (the reader then defaults to the bit depth's maximum).
     pub white: u32,
     /// top, left, bottom, right
     pub active_area: Option<[u32; 4]>,
@@ -396,6 +462,8 @@ pub struct DngSpec {
     pub default_crop: Option<([u32; 2], [u32; 2])>,
     /// Double-precision origin override for malformed-metadata regression tests.
     pub default_crop_origin_double: Option<[f64; 2]>,
+    /// A DefaultCropSize with no DefaultCropOrigin (`default_crop` must be `None`).
+    pub default_crop_size_only: Option<[u32; 2]>,
     pub linearization: Option<Vec<u16>>,
     /// (illuminant code, ColorMatrix row-major)
     pub color_matrix1: Option<(u16, [f64; 9])>,
@@ -406,9 +474,19 @@ pub struct DngSpec {
     pub baseline_exposure: Option<f64>,
     /// Raw OpcodeList2 bytes (see [`gain_map_opcode_list`]).
     pub opcode_list2: Option<Vec<u8>>,
+    /// Encoded segments for [`DngStorage::JxlStrips`] / [`DngStorage::JxlTiles`].
+    pub jxl_segments: Vec<Vec<u8>>,
+    /// Pre-encoded segments for [`DngStorage::LossyJpegTiles`] / [`DngStorage::LossyJpegStrips`]
+    /// (row-major), used instead of encoding `data` where present: for tiles that disagree with
+    /// the IFD (hostile-input tests).
+    pub lossy_segments: Vec<Vec<u8>>,
+    /// Raw ProfileGainTableMap bytes, written to IFD0 (contents are not interpreted).
+    pub profile_gain_table_map: Option<Vec<u8>>,
     pub orientation: u16,
     pub make: String,
     pub model: String,
+    /// Extra IFD0 entries, written after the generated ones (e.g. malformed colour tags).
+    pub ifd0_extra: Vec<(u16, Val)>,
 }
 
 impl DngSpec {
@@ -418,6 +496,7 @@ impl DngSpec {
             width,
             height,
             samples: 1,
+            monochrome: false,
             data,
             bits: 16,
             cfa: [0, 1, 1, 2],
@@ -429,6 +508,7 @@ impl DngSpec {
             active_area: None,
             default_crop: None,
             default_crop_origin_double: None,
+            default_crop_size_only: None,
             linearization: None,
             color_matrix1: None,
             color_matrix2: None,
@@ -438,9 +518,29 @@ impl DngSpec {
             baseline_exposure: None,
             orientation: 1,
             opcode_list2: None,
+            jxl_segments: Vec::new(),
+            lossy_segments: Vec::new(),
+            profile_gain_table_map: None,
             make: "Photosplice".into(),
             model: "Synthetic".into(),
+            ifd0_extra: Vec::new(),
         }
+    }
+
+    /// A monochrome (one-sample LinearRaw) DNG around `data`, as monochrome cameras and film
+    /// scanners write them: no CFA tags and no colour matrices.
+    pub fn monochrome(width: usize, height: usize, data: Vec<u16>) -> Self {
+        DngSpec { monochrome: true, ..Self::cfa(width, height, data) }
+    }
+
+    fn is_cfa(&self) -> bool {
+        self.samples == 1 && !self.monochrome
+    }
+
+    /// The 8-bit sample a lossy JPEG segment stores for `v`: the value itself at 8 bits, else
+    /// its top 8 bits.
+    fn sample8(&self, v: u16) -> u8 {
+        (v >> self.bits.saturating_sub(8)) as u8
     }
 
     fn pack(&self, rows: std::ops::Range<usize>) -> Vec<u8> {
@@ -479,20 +579,58 @@ impl DngSpec {
             (256, Val::Long(vec![self.width as u32])),
             (257, Val::Long(vec![self.height as u32])),
             (258, Val::Short(vec![self.bits; self.samples])),
-            (262, Val::Short(vec![if self.samples == 1 { 32803 } else { 34892 }])),
+            (262, Val::Short(vec![if self.is_cfa() { 32803 } else { 34892 }])),
             (277, Val::Short(vec![self.samples as u16])),
             (284, Val::Short(vec![1])),
-            (50717, Val::Long(vec![self.white; self.samples])),
             (50713, Val::Short(vec![self.black_repeat.0, self.black_repeat.1])),
             (50714, Val::Long(self.black.clone())),
         ];
-        if self.samples == 1 {
+        if self.white != 0 {
+            raw.push((50717, Val::Long(vec![self.white; self.samples])));
+        }
+        if self.is_cfa() {
             raw.push((33421, Val::Short(vec![2, 2])));
             raw.push((33422, Val::Byte(self.cfa.to_vec())));
             raw.push((50710, Val::Byte(vec![0, 1, 2])));
             raw.push((50711, Val::Short(vec![1])));
         }
         match self.storage {
+            DngStorage::DeflateStrips { rows, predictor } => {
+                use std::io::Write;
+                let mut offs = Vec::new();
+                let mut lens = Vec::new();
+                for y in (0..self.height).step_by(rows) {
+                    let r = (y + rows).min(self.height) - y;
+                    let n = self.width * self.samples;
+                    let mut v: Vec<u16> = self.data[y * n..(y + r) * n].to_vec();
+                    if predictor == 2 {
+                        // Horizontal differencing on the sample values, before byte packing
+                        // (the reader undoes predictor after unpacking, per row, per channel).
+                        let plane = if self.samples.is_multiple_of(3) { 3 } else { 1 };
+                        for row in v.chunks_mut(n) {
+                            for i in (plane..row.len()).rev() {
+                                row[i] = row[i].wrapping_sub(row[i - plane]);
+                            }
+                        }
+                    }
+                    // Pack the delta'd values with the file's byte order and bit depth.
+                    let bytes: Vec<u8> = match self.bits {
+                        8 => v.iter().map(|&x| x as u8).collect(),
+                        16 => v.iter().flat_map(|&x| if self.big_endian { x.to_be_bytes() } else { x.to_le_bytes() }).collect(),
+                        _ => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+                    };
+                    let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                    e.write_all(&bytes).expect("zlib");
+                    let z = e.finish().expect("zlib");
+                    lens.push(z.len() as u32);
+                    offs.push(t.blob(z));
+                }
+                raw.push((259, Val::Short(vec![8])));
+                raw.push((317, Val::Short(vec![predictor])));
+                raw.push((278, Val::Long(vec![rows as u32])));
+                raw.push((273, Val::Blobs(offs)));
+                raw.push((279, Val::Long(lens)));
+            }
             DngStorage::Strips { rows } => {
                 let mut offs = Vec::new();
                 let mut lens = Vec::new();
@@ -502,6 +640,50 @@ impl DngSpec {
                     offs.push(t.blob(b));
                 }
                 raw.push((259, Val::Short(vec![1])));
+                raw.push((278, Val::Long(vec![rows as u32])));
+                raw.push((273, Val::Blobs(offs)));
+                raw.push((279, Val::Long(lens)));
+            }
+            DngStorage::LossyJpegTiles { width: tw, height: th } => {
+                let mut offs = Vec::new();
+                let mut lens = Vec::new();
+                let s = self.samples;
+                for ty in (0..self.height).step_by(th) {
+                    for tx in (0..self.width).step_by(tw) {
+                        // Edge tiles are padded by repeating the last row / column.
+                        let mut tile = vec![0u8; tw * th * s];
+                        for y in 0..th {
+                            for x in 0..tw {
+                                let sy = (ty + y).min(self.height - 1);
+                                let sx = (tx + x).min(self.width - 1);
+                                for c in 0..s {
+                                    tile[(y * tw + x) * s + c] = self.sample8(self.data[(sy * self.width + sx) * s + c]);
+                                }
+                            }
+                        }
+                        let j = self.lossy_segments.get(offs.len()).cloned().unwrap_or_else(|| baseline_jpeg(&tile, tw, th, s));
+                        lens.push(j.len() as u32);
+                        offs.push(t.blob(j));
+                    }
+                }
+                raw.push((259, Val::Short(vec![34892])));
+                raw.push((322, Val::Long(vec![tw as u32])));
+                raw.push((323, Val::Long(vec![th as u32])));
+                raw.push((324, Val::Blobs(offs)));
+                raw.push((325, Val::Long(lens)));
+            }
+            DngStorage::LossyJpegStrips { rows } => {
+                let mut offs = Vec::new();
+                let mut lens = Vec::new();
+                let n = self.width * self.samples;
+                for y in (0..self.height).step_by(rows) {
+                    let r = (y + rows).min(self.height) - y;
+                    let strip: Vec<u8> = self.data[y * n..(y + r) * n].iter().map(|&v| self.sample8(v)).collect();
+                    let j = self.lossy_segments.get(offs.len()).cloned().unwrap_or_else(|| baseline_jpeg(&strip, self.width, r, self.samples));
+                    lens.push(j.len() as u32);
+                    offs.push(t.blob(j));
+                }
+                raw.push((259, Val::Short(vec![34892])));
                 raw.push((278, Val::Long(vec![rows as u32])));
                 raw.push((273, Val::Blobs(offs)));
                 raw.push((279, Val::Long(lens)));
@@ -554,6 +736,23 @@ impl DngSpec {
                 raw.push((324, Val::Blobs(offs)));
                 raw.push((325, Val::Long(lens)));
             }
+            DngStorage::JxlStrips { rows } => {
+                let lens = self.jxl_segments.iter().map(|j| j.len() as u32).collect();
+                let offs = self.jxl_segments.iter().map(|j| t.blob(j.clone())).collect();
+                raw.push((259, Val::Short(vec![52546])));
+                raw.push((278, Val::Long(vec![rows as u32])));
+                raw.push((273, Val::Blobs(offs)));
+                raw.push((279, Val::Long(lens)));
+            }
+            DngStorage::JxlTiles { width: tw, height: th } => {
+                let lens = self.jxl_segments.iter().map(|j| j.len() as u32).collect();
+                let offs = self.jxl_segments.iter().map(|j| t.blob(j.clone())).collect();
+                raw.push((259, Val::Short(vec![52546])));
+                raw.push((322, Val::Long(vec![tw as u32])));
+                raw.push((323, Val::Long(vec![th as u32])));
+                raw.push((324, Val::Blobs(offs)));
+                raw.push((325, Val::Long(lens)));
+            }
         }
         if let Some(a) = self.active_area {
             raw.push((50829, Val::Long(a.to_vec())));
@@ -564,6 +763,8 @@ impl DngSpec {
             raw.push((50720, Val::Long(s.to_vec())));
         } else if let Some(origin) = self.default_crop_origin_double {
             raw.push((50719, Val::Double(origin.to_vec())));
+        } else if let Some(size) = self.default_crop_size_only {
+            raw.push((50720, Val::Long(size.to_vec())));
         }
         if let Some(o) = &self.opcode_list2 {
             raw.push((51009, Val::Undefined(o.clone())));
@@ -613,6 +814,10 @@ impl DngSpec {
         if let Some(b) = self.baseline_exposure {
             ifd0.push((50730, Val::SRational(vec![srat(b)])));
         }
+        if let Some(m) = &self.profile_gain_table_map {
+            ifd0.push((52525, Val::Undefined(m.clone())));
+        }
+        ifd0.extend(self.ifd0_extra.iter().cloned());
         let i0 = t.ifd(ifd0);
         t.chain = vec![i0];
         t.build()
@@ -658,7 +863,7 @@ pub struct Cr2Spec {
     pub slices: Vec<usize>,
     /// Image borders: left, top, right, bottom (inclusive), as in SensorInfo.
     pub borders: Option<[u16; 4]>,
-    /// As-shot RGGB levels written to ColorData at word offset 0x3F.
+    /// As-shot RGGB levels written to ColorData at word offset 0x47 (the PowerShot version).
     pub wb_rggb: Option<[u16; 4]>,
     pub orientation: u16,
     /// Canon model ID written to MakerNote tag 0x0010.
@@ -698,9 +903,14 @@ impl Cr2Spec {
             mn.push((0x00E0, Val::Short(vec![34, w as u16, h as u16, 0, 0, l, tp, r, b, 0, 0, 0, 0, 0, 0, 0, 0])));
         }
         if let Some(wb) = self.wb_rggb {
-            let mut cd = vec![0u16; 1273];
-            cd[0x3F..0x43].copy_from_slice(&wb);
-            mn.push((0x4001, Val::Short(cd)));
+            // Canon writes ColorData (0x4001) as UNDEFINED bytes that are 16-bit words; the
+            // WB_RGGBLevelsAsShot of the PowerShot version sits at word offset 0x47 (the EOS
+            // versions use 0x3F — see as_shot_wb).
+            let mut cd = vec![0u8; 2 * 1273];
+            for (i, v) in wb.iter().enumerate() {
+                cd[2 * (0x47 + i)..2 * (0x47 + i) + 2].copy_from_slice(&v.to_le_bytes());
+            }
+            mn.push((0x4001, Val::Undefined(cd)));
         }
         let mut exif: Vec<(u16, Val)> = vec![(33434, Val::Rational(vec![(1, 100)]))];
         if !mn.is_empty() {
@@ -766,6 +976,39 @@ pub fn tiff_ep(make: &str, width: usize, height: usize, data: &[u16], cfa: [u8; 
         (279, Val::Long(vec![12])),
         (330, Val::Ifds(vec![raw_ifd])),
     ]);
+    t.chain = vec![ifd0];
+    t.build()
+}
+
+/// A synthetic Nikon NEF with a Huffman-compressed (34713) strip: IFD0 with
+/// Make and an EXIF IFD whose maker note (`Nikon\0`, version 2.10, then an
+/// embedded TIFF in the given byte order) holds `note_tags` (for example
+/// `0x0096`, the decode table, and `0x003d`, BlackLevel).
+pub fn nef_compressed(width: usize, height: usize, bits: u16, strip: Vec<u8>, cfa: [u8; 4], note_big_endian: bool, note_tags: Vec<(u16, Val)>) -> Vec<u8> {
+    let mut note = TiffBuilder { big_endian: note_big_endian, ..Default::default() };
+    let n = note.ifd(note_tags);
+    note.chain = vec![n];
+    let mut maker = b"Nikon\0\x02\x10\0\0".to_vec();
+    maker.extend(note.build());
+    let mut t = TiffBuilder::default();
+    let len = strip.len();
+    let strip = t.blob(strip);
+    let raw_ifd = t.ifd(vec![
+        (254, Val::Long(vec![0])),
+        (256, Val::Long(vec![width as u32])),
+        (257, Val::Long(vec![height as u32])),
+        (258, Val::Short(vec![bits])),
+        (259, Val::Short(vec![34713])),
+        (262, Val::Short(vec![32803])),
+        (273, Val::Blobs(vec![strip])),
+        (277, Val::Short(vec![1])),
+        (278, Val::Long(vec![height as u32])),
+        (279, Val::Long(vec![len as u32])),
+        (33421, Val::Short(vec![2, 2])),
+        (33422, Val::Byte(cfa.to_vec())),
+    ]);
+    let exif = t.ifd(vec![(37500, Val::Undefined(maker))]);
+    let ifd0 = t.ifd(vec![(271, Val::Ascii("NIKON CORPORATION".into())), (330, Val::Ifds(vec![raw_ifd])), (34665, Val::Ifds(vec![exif]))]);
     t.chain = vec![ifd0];
     t.build()
 }
@@ -911,6 +1154,136 @@ pub fn rw2(width: usize, height: usize, data: &[u16], bits: u32) -> Vec<u8> {
     b
 }
 
+/// Byte split of the vendor-compressed (RawFormat 3/4) stream (see `rw2.rs`).
+const RW2_COMPRESSED_SPLIT: usize = 0x2008;
+
+/// Writer for the vendor-compressed RW2 stream: mirrors the decoder's cursor
+/// (page addressing, downward field order) and deposits every field where the
+/// reader will pick it up.
+struct V4Writer<'a> {
+    buf: &'a mut [u8],
+    base: usize,
+    pos: usize,
+    nbits: u32,
+}
+
+impl V4Writer<'_> {
+    /// Consumes one byte of the row seek (the decoder reads 8-bit fields).
+    fn skip_byte(&mut self) {
+        if 8 > self.nbits {
+            self.nbits += (RW2_PAGE as u32) * 8;
+            self.pos += RW2_PAGE;
+        }
+        self.nbits -= 8;
+    }
+
+    fn put(&mut self, v: u32, num: u32) {
+        if num > self.nbits {
+            self.nbits += (RW2_PAGE as u32) * 8;
+            self.pos += RW2_PAGE;
+        }
+        let mut at = ((self.nbits - num) >> 3) as usize ^ 0x3FF0;
+        at = (at + RW2_PAGE - RW2_COMPRESSED_SPLIT) % RW2_PAGE;
+        let at = self.base + at + self.pos - RW2_PAGE;
+        self.nbits -= num;
+        let cur = u32::from(self.buf[at]) | (u32::from(self.buf[at + 1]) << 8);
+        let cur = cur | ((v & ((1 << num) - 1)) << (self.nbits & 7));
+        self.buf[at] = cur as u8;
+        self.buf[at + 1] = (cur >> 8) as u8;
+    }
+
+    /// Encodes one row as 14-pixel groups: the scale selector is always 0 and
+    /// the two first pixels of each group are absolute (8 + 4 bits); later
+    /// pixels use the 8-bit delta path. Callers keep values inside 16..4096
+    /// and stepping by at most ±127 between pixels of the same parity.
+    fn row(&mut self, pixels: &[u16]) {
+        for group in pixels.as_chunks::<14>().0 {
+            let mut pred = [0i32; 2];
+            let mut nonz = [0i32; 2];
+            for (i, &px) in group.iter().enumerate() {
+                if i % 3 == 2 {
+                    self.put(0, 2); // sh = 0
+                }
+                let p = i & 1;
+                let t = i32::from(px);
+                if nonz[p] == 0 {
+                    let nz = (t >> 4) & 0xFF;
+                    self.put(nz as u32, 8);
+                    if nz != 0 || i > 11 {
+                        self.put((t & 0xF) as u32, 4);
+                        pred[p] = t;
+                    } else {
+                        pred[p] = 0;
+                    }
+                    nonz[p] = nz;
+                } else {
+                    let q = (pred[p] - 0x80).max(0);
+                    let j = t - q;
+                    assert!((1..=0xFF).contains(&j), "{t} is not encodable from {}", pred[p]);
+                    self.put(j as u32, 8);
+                    pred[p] = q + j;
+                }
+                assert_eq!(pred[p], t);
+            }
+        }
+    }
+}
+
+/// The vendor-compressed (RawFormat 3/4) stream of a whole image; see
+/// [`V4Writer::row`] for the value constraints.
+pub fn rw2_v4_pack(data: &[u16], width: usize) -> Vec<u8> {
+    assert_eq!(width % 14, 0);
+    let height = data.len() / width;
+    assert_eq!(data.len(), width * height);
+    let row_bytes = width / 14 * 16;
+    let mut buf = vec![0u8; row_bytes * height + 2 * RW2_PAGE];
+    for (row, pixels) in data.chunks_exact(width).enumerate() {
+        let skip = row_bytes * row;
+        let mut w = V4Writer { buf: &mut buf, base: skip / RW2_PAGE * RW2_PAGE, pos: 0, nbits: 0 };
+        for _ in 0..(skip % RW2_PAGE) {
+            w.skip_byte();
+        }
+        w.row(pixels);
+    }
+    buf
+}
+
+/// A synthetic Panasonic RW2 (RawFormat 4, vendor-compressed) with an RGGB
+/// sensor, a 2-pixel border on every side, black levels 128 / 129 / 130 and
+/// WB levels 512 / 256 / 384; see [`V4Writer::row`] for the pixel constraints.
+pub fn rw2_format4(width: usize, height: usize, data: &[u16]) -> Vec<u8> {
+    let mut t = TiffBuilder::default();
+    let raw = t.blob(rw2_v4_pack(data, width));
+    let ifd0 = t.ifd(vec![
+        (0x0002, Val::Short(vec![width as u16])),
+        (0x0003, Val::Short(vec![height as u16])),
+        (0x0004, Val::Short(vec![2])),
+        (0x0005, Val::Short(vec![2])),
+        (0x0006, Val::Short(vec![height as u16 - 2])),
+        (0x0007, Val::Short(vec![width as u16 - 2])),
+        (0x0009, Val::Short(vec![1])),
+        (0x000A, Val::Short(vec![12])),
+        (0x000E, Val::Short(vec![4095])),
+        (0x000F, Val::Short(vec![4095])),
+        (0x0010, Val::Short(vec![4095])),
+        (0x001C, Val::Short(vec![128])),
+        (0x001D, Val::Short(vec![129])),
+        (0x001E, Val::Short(vec![130])),
+        (0x0024, Val::Short(vec![512])),
+        (0x0025, Val::Short(vec![256])),
+        (0x0026, Val::Short(vec![384])),
+        (0x002D, Val::Short(vec![4])),
+        (0x010F, Val::Ascii("Panasonic".into())),
+        (0x0110, Val::Ascii("DC-Synthetic".into())),
+        (0x0112, Val::Short(vec![1])),
+        (0x0118, Val::Blobs(vec![raw])),
+    ]);
+    t.chain = vec![ifd0];
+    let mut b = t.build();
+    b[2..4].copy_from_slice(b"U\0");
+    b
+}
+
 // ---------------------------------------------------------------- Olympus ORF
 
 /// A little-endian IFD whose value offsets are relative to `base` (the IFD
@@ -1001,6 +1374,258 @@ pub fn orf(width: usize, height: usize, data: &[u16]) -> Vec<u8> {
     let mut b = t.build();
     b[2..4].copy_from_slice(b"RO");
     b
+}
+
+// ---------------------------------------------------------------- Fujifilm RAF
+
+/// How a synthetic RAF stores its samples (see `raf.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RafPacking {
+    /// 16-bit containers; little-endian (`II`) or big-endian (`MM`) CFA TIFF.
+    U16 { le: bool },
+    /// 12-bit, little-endian bit stream, least significant bit first.
+    Lsb12,
+    /// 14-bit, most significant bit first in little-endian 32-bit words.
+    Words14,
+    /// A short `IS…` strip standing in for Fujifilm's compressed data.
+    Compressed,
+}
+
+/// The X-Trans repeat at the data origin, as observed (row major, 0 = R, 1 = G, 2 = B).
+pub const XTRANS: [u8; 36] = [
+    1, 1, 0, 1, 1, 2, //
+    1, 1, 2, 1, 1, 0, //
+    2, 0, 1, 0, 2, 1, //
+    1, 1, 2, 1, 1, 0, //
+    1, 1, 0, 1, 1, 2, //
+    0, 2, 1, 2, 0, 1,
+];
+
+/// A synthetic Fujifilm RAF.
+#[derive(Debug, Clone)]
+pub struct RafSpec {
+    pub width: usize,
+    pub height: usize,
+    pub data: Vec<u16>,
+    pub bits: u32,
+    pub packing: RafPacking,
+    /// CFA colours at the data origin: 36 (X-Trans, 6×6) or 4 (Bayer, 2×2), row major.
+    pub cfa: Vec<u8>,
+    /// RawImageCropTopLeft / RawImageCroppedSize: top, left, height, width.
+    pub crop: Option<[u16; 4]>,
+    pub black: Vec<u32>,
+    /// WB_GRBLevels: G, R, B.
+    pub wb_grb: Option<[u32; 3]>,
+    /// RawExposureBias as numerator / denominator.
+    pub exposure_bias: Option<(i16, i16)>,
+    /// EXIF orientation of the preview JPEG.
+    pub orientation: u16,
+    /// `false` writes an early-FinePix-style file without the CFA TIFF.
+    pub cfa_tiff: bool,
+}
+
+impl RafSpec {
+    pub fn new(width: usize, height: usize, data: Vec<u16>, cfa: Vec<u8>) -> Self {
+        RafSpec {
+            width,
+            height,
+            data,
+            bits: 14,
+            packing: RafPacking::U16 { le: true },
+            cfa,
+            crop: None,
+            black: vec![1024],
+            wb_grb: Some([302, 604, 453]),
+            exposure_bias: None,
+            orientation: 1,
+            cfa_tiff: true,
+        }
+    }
+
+    /// The samples as stored.
+    fn strip(&self) -> Vec<u8> {
+        match self.packing {
+            RafPacking::U16 { le } => self.data.iter().flat_map(|v| if le { v.to_le_bytes() } else { v.to_be_bytes() }).collect(),
+            RafPacking::Lsb12 => {
+                let (mut out, mut acc, mut n) = (Vec::new(), 0u64, 0u32);
+                for &v in &self.data {
+                    acc |= u64::from(v & 0xFFF) << n;
+                    n += 12;
+                    while n >= 8 {
+                        out.push(acc as u8);
+                        acc >>= 8;
+                        n -= 8;
+                    }
+                }
+                if n > 0 {
+                    out.push(acc as u8);
+                }
+                out
+            }
+            RafPacking::Words14 => {
+                let (mut logical, mut acc, mut n) = (Vec::new(), 0u64, 0u32);
+                for &v in &self.data {
+                    acc = (acc << 14) | u64::from(v & 0x3FFF);
+                    n += 14;
+                    while n >= 8 {
+                        logical.push((acc >> (n - 8)) as u8);
+                        n -= 8;
+                    }
+                }
+                if n > 0 {
+                    logical.push((acc << (8 - n)) as u8);
+                }
+                logical.resize(logical.len().next_multiple_of(4), 0);
+                logical.chunks(4).flat_map(|w| w.iter().rev().copied().collect::<Vec<u8>>()).collect()
+            }
+            RafPacking::Compressed => {
+                let mut v = b"IS\x01\x00".to_vec();
+                v.resize(self.width * self.height / 2, 0x5A);
+                v
+            }
+        }
+    }
+
+    /// The CFA region: a TIFF whose IFD0 points (0xF000) at the Fuji raw IFD.
+    fn cfa_region(&self) -> Vec<u8> {
+        let le = !matches!(self.packing, RafPacking::U16 { le: false });
+        let u16b = |v: u16| if le { v.to_le_bytes() } else { v.to_be_bytes() };
+        let u32b = |v: u32| if le { v.to_le_bytes() } else { v.to_be_bytes() };
+        let strip = self.strip();
+        let strip_at = 2048u32;
+        let entries: Vec<(u16, Vec<u32>)> = vec![
+            (0xF001, vec![self.width as u32]),
+            (0xF002, vec![self.height as u32]),
+            (0xF003, vec![self.bits]),
+            (0xF007, vec![strip_at]),
+            (0xF008, vec![strip.len() as u32]),
+            (0xF00A, self.black.clone()),
+        ]
+        .into_iter()
+        .chain(self.wb_grb.map(|w| (0xF00E, w.to_vec())))
+        .collect();
+        let mut out = if le { b"II*\0".to_vec() } else { b"MM\0*".to_vec() };
+        out.extend_from_slice(&u32b(8));
+        // IFD0: one entry, 0xF000 (type IFD) → the Fuji IFD at 26.
+        out.extend_from_slice(&u16b(1));
+        out.extend_from_slice(&u16b(0xF000));
+        out.extend_from_slice(&u16b(13));
+        out.extend_from_slice(&u32b(1));
+        out.extend_from_slice(&u32b(26));
+        out.extend_from_slice(&u32b(0));
+        let fuji_at = out.len();
+        let mut extra_at = fuji_at + 2 + 12 * entries.len() + 4;
+        let mut extra = Vec::new();
+        out.extend_from_slice(&u16b(entries.len() as u16));
+        for (tag, vals) in &entries {
+            out.extend_from_slice(&u16b(*tag));
+            out.extend_from_slice(&u16b(4));
+            out.extend_from_slice(&u32b(vals.len() as u32));
+            if vals.len() == 1 {
+                out.extend_from_slice(&u32b(vals[0]));
+            } else {
+                out.extend_from_slice(&u32b(extra_at as u32));
+                for v in vals {
+                    extra.extend_from_slice(&u32b(*v));
+                }
+                extra_at += 4 * vals.len();
+            }
+        }
+        out.extend_from_slice(&u32b(0));
+        out.extend_from_slice(&extra);
+        assert!(out.len() <= strip_at as usize);
+        out.resize(strip_at as usize, 0);
+        out.extend_from_slice(&strip);
+        out
+    }
+
+    /// A tiny baseline-JPEG preview (APP1 EXIF with make, model and
+    /// orientation; SOF0 32×24; EOI).
+    fn preview(&self) -> Vec<u8> {
+        let mut t = TiffBuilder::default();
+        let ifd0 = t.ifd(vec![(271, Val::Ascii("FUJIFILM".into())), (272, Val::Ascii("X-Synthetic".into())), (274, Val::Short(vec![self.orientation]))]);
+        t.chain = vec![ifd0];
+        let mut app1 = b"Exif\0\0".to_vec();
+        app1.extend_from_slice(&t.build());
+        let mut j = vec![0xFF, 0xD8, 0xFF, 0xE1];
+        j.extend_from_slice(&((app1.len() + 2) as u16).to_be_bytes());
+        j.extend_from_slice(&app1);
+        j.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x0B, 8, 0x00, 24, 0x00, 32, 1, 1, 0x11, 0, 0xFF, 0xD9]);
+        j
+    }
+
+    /// The metadata directory.
+    fn meta(&self) -> Vec<u8> {
+        let mut recs: Vec<(u16, Vec<u8>)> = Vec::new();
+        if let Some([top, left, h, w]) = self.crop {
+            recs.push((0x0110, [top.to_be_bytes(), left.to_be_bytes()].concat()));
+            recs.push((0x0111, [h.to_be_bytes(), w.to_be_bytes()].concat()));
+        }
+        if self.cfa.len() == 36 {
+            recs.push((0x0130, vec![0x0C; 4]));
+            recs.push((0x0131, self.cfa.iter().rev().copied().collect()));
+        } else {
+            // Bayer: reversed, colour in the low two bits, the second green as 3.
+            let mut greens = 0;
+            let codes: Vec<u8> = self
+                .cfa
+                .iter()
+                .map(|&c| {
+                    if c == 1 {
+                        greens += 1;
+                        if greens == 1 { 0x09 } else { 0x0B }
+                    } else {
+                        0x08 | c
+                    }
+                })
+                .collect();
+            recs.push((0x0130, codes.into_iter().rev().collect()));
+        }
+        if let Some((n, d)) = self.exposure_bias {
+            recs.push((0x9650, [n.to_be_bytes(), d.to_be_bytes()].concat()));
+        }
+        let mut out = (recs.len() as u32).to_be_bytes().to_vec();
+        for (tag, d) in recs {
+            out.extend_from_slice(&tag.to_be_bytes());
+            out.extend_from_slice(&(d.len() as u16).to_be_bytes());
+            out.extend_from_slice(&d);
+        }
+        out
+    }
+
+    pub fn build(&self) -> Vec<u8> {
+        let mut b = b"FUJIFILMCCD-RAW 0201FF000000".to_vec();
+        b.extend_from_slice(b"X-Synthetic");
+        b.resize(60, 0);
+        b.extend_from_slice(b"0100");
+        b.resize(160, 0);
+        let preview = self.preview();
+        let meta = self.meta();
+        let region = if self.cfa_tiff { self.cfa_region() } else { self.strip() };
+        let (p_at, m_at) = (b.len(), b.len() + preview.len());
+        let c_at = m_at + meta.len();
+        for (at, v) in [(84, p_at), (88, preview.len()), (92, m_at), (96, meta.len()), (100, c_at), (104, region.len())] {
+            b[at..at + 4].copy_from_slice(&(v as u32).to_be_bytes());
+        }
+        b.extend_from_slice(&preview);
+        b.extend_from_slice(&meta);
+        b.extend_from_slice(&region);
+        b
+    }
+}
+
+/// Mosaics linear RGB through any CFA repeat (`cfa`: `cfa_w` colours per
+/// row) anchored at (0, 0), like [`mosaic`].
+pub fn mosaic_cfa(rgb: &[[f32; 3]], width: usize, cfa: &[u8], cfa_w: usize, black: u16, white: u16) -> Vec<u16> {
+    let cfa_h = cfa.len() / cfa_w;
+    rgb.iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let (x, y) = (i % width, i / width);
+            let c = cfa[(y % cfa_h) * cfa_w + x % cfa_w] as usize;
+            (f32::from(black) + p[c].clamp(0.0, 1.0) * f32::from(white - black)).round() as u16
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------- scenes

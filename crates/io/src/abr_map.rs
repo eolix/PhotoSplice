@@ -30,7 +30,9 @@ pub struct AbrImport {
     pub version: u16,
 }
 
-/// Parse an `.abr` file into presets in group `group` (usually the file name).
+/// Parse an `.abr` file into presets in group `group` (usually the file name). The file's own
+/// folders (Photoshop CC's preset hierarchy) become each preset's [`BrushPreset::folder`] inside
+/// that group, the way Photoshop's Import Brushes puts them in a folder named after the file.
 pub fn read_abr(bytes: &[u8], group: &str) -> Result<AbrImport, String> {
     read_abr_with(bytes, group, &photosplice_raster::Interrupt::NONE)
 }
@@ -38,7 +40,7 @@ pub fn read_abr(bytes: &[u8], group: &str) -> Result<AbrImport, String> {
 /// [`read_abr`] that checks `ctl` before each brush (and reports progress): a cancelled import
 /// fails with "cancelled".
 pub fn read_abr_with(bytes: &[u8], group: &str, ctl: &photosplice_raster::Interrupt) -> Result<AbrImport, String> {
-    let f = abr::parse(bytes).map_err(|e| format!("not a readable Photoshop brush file: {e}"))?;
+    let f = abr::parse(bytes).map_err(|e| format!("not a readable brush file (.abr): {e}"))?;
     // Parsing is the small part; mapping (tip decoding) reports 10–100 %.
     ctl.progress(0.1);
     let cancel = || ctl.cancelled();
@@ -84,7 +86,7 @@ pub fn map_file_with(f: &AbrFile, group: &str, ctl: &photosplice_raster::Interru
                 }
             };
             let name = if b.name.trim().is_empty() { default_name } else { b.name.trim().to_string() };
-            out.presets.push(BrushPreset { name, brush, builtin: false, group: group.to_string() });
+            out.presets.push(BrushPreset { name, brush, builtin: false, group: group.to_string(), folder: Vec::new(), captures: Default::default() });
         }
     } else if f.presets.is_empty() {
         // Tips without a settings section (early v6 files): one preset per tip.
@@ -92,14 +94,26 @@ pub fn map_file_with(f: &AbrFile, group: &str, ctl: &photosplice_raster::Interru
             step(i)?;
             let (tip, size) = m.tip(s);
             let brush = BrushSettings { pressure_size: false, spacing: 0.25, size, tip, ..Default::default() };
-            out.presets.push(BrushPreset { name: format!("Sampled Brush {}", i + 1), brush, builtin: false, group: group.to_string() });
+            out.presets.push(BrushPreset {
+                name: format!("Sampled Brush {}", i + 1),
+                brush,
+                builtin: false,
+                group: group.to_string(),
+                folder: Vec::new(),
+                captures: Default::default(),
+            });
         }
     } else {
         for (i, d) in f.presets.iter().enumerate() {
             step(i)?;
             let name = text(d, "Nm  ").filter(|n| !n.trim().is_empty()).map(|n| n.trim().to_string()).unwrap_or_else(|| format!("Brush {}", i + 1));
             match m.preset(d) {
-                Some(brush) => out.presets.push(BrushPreset { name, brush, builtin: false, group: group.to_string() }),
+                // The file's folders nest inside `group`, as Photoshop nests them inside a folder
+                // named after the imported file.
+                Some(brush) => {
+                    let folder = f.folders.get(i).cloned().unwrap_or_default();
+                    out.presets.push(BrushPreset { name, brush, builtin: false, group: group.to_string(), folder, captures: Default::default() });
+                }
                 None => {
                     m.warnings.insert(format!("\"{name}\": its sampled tip is missing from the file; skipped"));
                 }
@@ -276,6 +290,7 @@ impl Mapper<'_> {
             control,
             fade_steps: num(d, "fStp").map_or(25, |v| v.clamp(1.0, 9999.0) as u32),
             minimum: pct(d, "Mnm ").unwrap_or(0.0).clamp(0.0, 1.0),
+            ..Dynamic::default()
         }
     }
 
@@ -382,7 +397,9 @@ impl Mapper<'_> {
             t.invert = boolean(d, "InvT").unwrap_or(false);
             t.scale = pct(d, "textureScale").unwrap_or(1.0).clamp(0.01, 10.0);
             t.brightness = (num(d, "textureBrightness").unwrap_or(0.0) / 150.0).clamp(-1.0, 1.0) as f32;
-            t.contrast = (num(d, "textureContrast").unwrap_or(0.0) / 50.0).clamp(-1.0, 2.0) as f32;
+            // Photoshop's -50..100 onto the model's -1..1 (negative and positive scale apart).
+            let c = num(d, "textureContrast").unwrap_or(0.0);
+            t.contrast = (if c < 0.0 { c / 50.0 } else { c / 100.0 }).clamp(-1.0, 1.0) as f32;
             t.mode = mask_mode(enum_value(d, "textureBlendMode")).unwrap_or(MaskMode::Multiply);
             t.depth = pct(d, "textureDepth").unwrap_or(1.0).clamp(0.0, 1.0);
             let mut dj = self.dynamic(obj(d, "textureDepthDynamics"));
@@ -413,7 +430,12 @@ impl Mapper<'_> {
             }
             dual.mode = mask_mode(enum_value(db, "BlnM")).unwrap_or(MaskMode::Multiply);
             dual.flip = boolean(db, "Flip").unwrap_or(false);
-            if let Some(v) = pct(db, "Spcn") {
+            // The dual tip's own spacing (`Brsh › Spcn`) is what Photoshop's Dual Brush panel
+            // shows. The `Spcn` beside it on the `dualBrush` object reads 100 % in Photoshop CC
+            // presets whatever the panel says (#4809), so it only stands in for a tip without one.
+            if obj(db, "Brsh").and_then(|t| pct(t, "Spcn")).is_none()
+                && let Some(v) = pct(db, "Spcn")
+            {
                 dual.spacing = v.clamp(0.01, 10.0);
             }
             dual.scatter = self.dynamic(obj(db, "scatterDynamics")).jitter;
@@ -469,9 +491,8 @@ impl Mapper<'_> {
             }
             b.pressure_size = boolean(to, "usePressureOverridesSize").unwrap_or(false);
             b.pressure_opacity = boolean(to, "usePressureOverridesOpacity").unwrap_or(false);
-            if boolean(to, "smoothing").unwrap_or(true)
-                && let Some(v) = pct(to, "smoothingValue")
-            {
+            b.smoothing.enabled = boolean(to, "smoothing").unwrap_or(true);
+            if let Some(v) = pct(to, "smoothingValue") {
                 b.smoothing.amount = v.clamp(0.0, 1.0);
             }
             if let Some(v) = boolean(to, "smoothingRadiusMode") {
@@ -507,10 +528,17 @@ fn fit(w: u32, h: u32, v: Vec<f32>, max: u32) -> (u32, u32, Vec<f32>) {
     let k = (w.max(h) as f32 / max as f32).max(1.0);
     let (nw, nh) = (((w as f32 / k).round() as u32).clamp(1, max), ((h as f32 / k).round() as u32).clamp(1, max));
     let mut out = vec![0.0f32; nw as usize * nh as usize];
+    // Source rows/columns `[i * n / m, (i + 1) * n / m)` (at least one) for output index `i` of
+    // `m`; in u64, as `(i + 1) * n` passes u32 for a plane over 2^32 / `max` long. The parsers'
+    // edge caps keep today's inputs below that, but this function should not depend on them.
+    let span = |i: u32, n: u32, m: u32| {
+        let at = |k: u32| usize::try_from(u64::from(k) * u64::from(n) / u64::from(m)).unwrap_or(usize::MAX);
+        (at(i), at(i + 1).max(at(i).saturating_add(1)).min(n as usize))
+    };
     for y in 0..nh {
-        let (y0, y1) = ((y * h / nh) as usize, (((y + 1) * h / nh) as usize).max((y * h / nh) as usize + 1).min(h as usize));
+        let (y0, y1) = span(y, h, nh);
         for x in 0..nw {
-            let (x0, x1) = ((x * w / nw) as usize, (((x + 1) * w / nw) as usize).max((x * w / nw) as usize + 1).min(w as usize));
+            let (x0, x1) = span(x, w, nw);
             let (mut sum, mut n) = (0.0, 0usize);
             for yy in y0..y1 {
                 for xx in x0..x1 {
@@ -573,3 +601,18 @@ fn pattern_tile(p: &PsdPattern) -> Option<GrayTile> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod fit_tests {
+    use super::fit;
+
+    /// A tall, narrow plane: `(y + 1) * h` passes `u32::MAX` once `h` is over 2^32 / `max` rows.
+    /// The ABR and pattern parsers cap edges well below that, but `fit` must not rely on it.
+    #[test]
+    fn fit_tall_planes_without_overflow() {
+        let h = 5_000_000u32;
+        let (w, nh, out) = fit(1, h, vec![1.0; h as usize], 1024);
+        assert_eq!((w, nh), (1, 1024));
+        assert!(out.iter().all(|v| (*v - 1.0).abs() < 1e-6), "every output row averages real input rows");
+    }
+}

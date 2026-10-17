@@ -34,7 +34,11 @@ fn check_format(format: Format) {
     } else {
         assert!(warnings.contains(&FidelityWarning::IccDropped), "{format:?}");
     }
-    if c.exif {
+    if c.exif && format == Format::Tiff {
+        // TIFF writes the block's directories as its own and rebuilds a block from them on
+        // reading (tests/tiff_exif.rs); IFD0's orientation here is the image's.
+        assert!(!warnings.contains(&FidelityWarning::ExifDropped), "{format:?}");
+    } else if c.exif {
         assert_eq!(back.meta.exif, img.meta.exif, "{format:?} exif");
     } else {
         assert!(warnings.contains(&FidelityWarning::ExifDropped), "{format:?}");
@@ -92,6 +96,10 @@ fn tga_metadata() {
 #[test]
 fn ico_metadata() {
     check_format(Format::Ico);
+}
+#[test]
+fn fits_metadata() {
+    check_format(Format::Fits);
 }
 #[test]
 fn pnm_metadata() {

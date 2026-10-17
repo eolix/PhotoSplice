@@ -142,7 +142,7 @@ mod tests {
         let bg = s.active().unwrap().doc.layers[0].id.0;
         for p in [
             json!({"layer": bg}),
-            json!({"layer": 9999}),
+            json!({"layer": u64::MAX}),
             json!({"layer": "x"}),
             json!({"layer": -1}),
             json!({"expanded": "yes", "all": true}),

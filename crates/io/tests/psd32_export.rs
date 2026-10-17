@@ -160,3 +160,87 @@ fn photoshop_32bit_corpus_round_trip() {
         assert!(d <= 1e-4, "{name}: render differs by {d}");
     }
 }
+
+// Supply independent float merged planes: using the RGBA8 preview as the oracle
+// silently clips these samples, even though Photoshop stores the full range.
+#[test]
+fn merged_oracle_preserves_signed_hdr_samples() {
+    for mode in [ColorMode::Rgb, ColorMode::Grayscale] {
+        for alpha in [1.0, 0.5] {
+            let doc = Document::new("float merged", Size::new(3, 1), mode, SampleType::F32);
+            let mut file = PsdFile::from_bytes(&export_psd(&doc)).unwrap();
+            let color_channels = if mode == ColorMode::Rgb { 3 } else { 1 };
+            file.layer_info = None;
+            file.header.channels = color_channels + u16::from(alpha != 1.0);
+            file.image_data.compression = Compression::Raw;
+            // Photoshop's merged pixels are matted against white when alpha is present.
+            file.image_data.data =
+                (0..color_channels).flat_map(|_| [-0.125_f32, 0.123456, 4.0].into_iter().flat_map(|v| (v * alpha + 1.0 - alpha).to_be_bytes())).collect();
+            if alpha != 1.0 {
+                file.image_data.data.extend((0..3).flat_map(|_| alpha.to_be_bytes()));
+            }
+            let pixels = merged_composite(&file).unwrap();
+            for (p, value) in pixels.iter().zip([-0.125, 0.123456, 4.0]) {
+                for (got, want) in p.iter().zip([value, value, value, alpha]) {
+                    assert!((got - want).abs() < 1e-6, "{mode:?}, alpha {alpha}: {p:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn merged_oracle_does_not_treat_extra_channels_as_transparency() {
+    for mode in [ColorMode::Rgb, ColorMode::Grayscale] {
+        let doc = Document::new("extra channel", Size::new(1, 1), mode, SampleType::F32);
+        let mut file = PsdFile::from_bytes(&export_psd(&doc)).unwrap();
+        let color_channels = if mode == ColorMode::Rgb { 3 } else { 1 };
+        file.header.channels = color_channels + 1;
+        // The export of a transparent document names its merged transparency (1006 / 1045, id 0
+        // in 1053), which marks the first extra channel as transparency as Reference does; the
+        // extra channel here is an unnamed one.
+        file.resources.retain(|r| ![1006, 1045, 1053].contains(&r.id));
+        file.layer_info = Some(photosplice_psd::LayerInfo { merged_alpha: false, layers: Vec::new(), padding: None });
+        file.image_data.compression = Compression::Raw;
+        file.image_data.data = (0..color_channels).flat_map(|_| 2.0_f32.to_be_bytes()).chain(0.0_f32.to_be_bytes()).collect();
+        assert!(!file.merged_has_alpha());
+        assert_eq!(merged_composite(&file).unwrap(), vec![[2.0, 2.0, 2.0, 1.0]], "{mode:?}");
+    }
+}
+
+// Photoshop saves a transparent 32-bit document with a positive layer count and an `Mt32`
+// ("Saving Merged Transparency") global block: the merged image's first extra channel, named
+// "Transparency", is its transparency (psd-tools transparentbg.psd). The oracle reads it as the
+// composite's alpha, and opening the file doesn't turn it into an alpha channel.
+#[test]
+fn mt32_marks_the_merged_transparency() {
+    let mut doc = Document::new("transparent", Size::new(2, 1), ColorMode::Rgb, SampleType::F32);
+    let fmt = doc.pixel_format();
+    let mut layer = photosplice_doc::Layer::raster("shape", fmt);
+    if let Some(s) = layer.surface_mut() {
+        s.fill_rect(photosplice_geom::Rect::new(0, 0, 1, 1), &[0.0, 0.0, 0.0, 1.0]);
+    }
+    doc.layers.push(layer);
+    let mut file = PsdFile::from_bytes(&export_psd(&doc)).unwrap();
+    file.header.channels = 4;
+    if let Some(li) = file.layer_info.as_mut() {
+        li.merged_alpha = false;
+    }
+    file.image_data.compression = Compression::Raw;
+    let plane = |v: [f32; 2]| v.into_iter().flat_map(f32::to_be_bytes).collect::<Vec<u8>>();
+    file.image_data.data = [plane([0.0, 1.0]), plane([0.0, 1.0]), plane([0.0, 1.0]), plane([1.0, 0.0])].concat();
+    // Without names or ids, a positive layer count alone says there is no transparency. (A name
+    // list that starts with "Transparency", or id 0 in 1053, also marks it: see
+    // `PsdFile::merged_has_alpha`.)
+    file.resources.retain(|r| ![1006, 1045, 1053].contains(&r.id));
+    assert!(!file.merged_has_alpha(), "a positive layer count alone");
+    file.global_blocks.push(photosplice_psd::TaggedBlock::new(*b"Mt32", Vec::new()));
+    assert!(file.merged_has_alpha());
+    let name: Vec<u8> = [0u8, 0, 0, 13].into_iter().chain("Transparency\0".encode_utf16().flat_map(u16::to_be_bytes)).collect();
+    file.resources.push(photosplice_psd::ImageResource::new(1045, name));
+    assert!(file.merged_has_alpha());
+    let merged = merged_composite(&file).unwrap();
+    assert_eq!(merged.iter().map(|p| p[3]).collect::<Vec<_>>(), vec![1.0, 0.0]);
+    let opened = import("transparent.psd", &file.to_bytes().unwrap()).unwrap();
+    assert!(opened.document.channels.is_empty(), "{:?}", opened.document.channels.iter().map(|c| &c.name).collect::<Vec<_>>());
+}

@@ -21,19 +21,31 @@ pub enum ChannelLayout {
     /// Ink amounts, `0 = no ink`, `max = full ink` (not Adobe-inverted).
     Cmyk,
     CmykA,
+    /// CIE L*a*b* (D50), as PhotoSplice's Lab documents hold it: L* 0..100 as 0..1, a* and b*
+    /// −128..127 as `(v + 128) / 255` (Photoshop's unsigned encoding).
+    Lab,
+    LabA,
 }
 
 impl ChannelLayout {
-    pub const ALL: [ChannelLayout; 6] =
-        [ChannelLayout::Gray, ChannelLayout::GrayA, ChannelLayout::Rgb, ChannelLayout::Rgba, ChannelLayout::Cmyk, ChannelLayout::CmykA];
+    pub const ALL: [ChannelLayout; 8] = [
+        ChannelLayout::Gray,
+        ChannelLayout::GrayA,
+        ChannelLayout::Rgb,
+        ChannelLayout::Rgba,
+        ChannelLayout::Cmyk,
+        ChannelLayout::CmykA,
+        ChannelLayout::Lab,
+        ChannelLayout::LabA,
+    ];
 
     /// Total number of channels including alpha.
     pub const fn channels(self) -> usize {
         match self {
             ChannelLayout::Gray => 1,
             ChannelLayout::GrayA => 2,
-            ChannelLayout::Rgb => 3,
-            ChannelLayout::Rgba | ChannelLayout::Cmyk => 4,
+            ChannelLayout::Rgb | ChannelLayout::Lab => 3,
+            ChannelLayout::Rgba | ChannelLayout::Cmyk | ChannelLayout::LabA => 4,
             ChannelLayout::CmykA => 5,
         }
     }
@@ -44,7 +56,7 @@ impl ChannelLayout {
     }
 
     pub const fn has_alpha(self) -> bool {
-        matches!(self, ChannelLayout::GrayA | ChannelLayout::Rgba | ChannelLayout::CmykA)
+        matches!(self, ChannelLayout::GrayA | ChannelLayout::Rgba | ChannelLayout::CmykA | ChannelLayout::LabA)
     }
 
     pub const fn is_gray(self) -> bool {
@@ -59,12 +71,17 @@ impl ChannelLayout {
         matches!(self, ChannelLayout::Cmyk | ChannelLayout::CmykA)
     }
 
+    pub const fn is_lab(self) -> bool {
+        matches!(self, ChannelLayout::Lab | ChannelLayout::LabA)
+    }
+
     /// The same colour model with alpha added.
     pub const fn with_alpha(self) -> Self {
         match self {
             ChannelLayout::Gray | ChannelLayout::GrayA => ChannelLayout::GrayA,
             ChannelLayout::Rgb | ChannelLayout::Rgba => ChannelLayout::Rgba,
             ChannelLayout::Cmyk | ChannelLayout::CmykA => ChannelLayout::CmykA,
+            ChannelLayout::Lab | ChannelLayout::LabA => ChannelLayout::LabA,
         }
     }
 
@@ -74,12 +91,13 @@ impl ChannelLayout {
             ChannelLayout::Gray | ChannelLayout::GrayA => ChannelLayout::Gray,
             ChannelLayout::Rgb | ChannelLayout::Rgba => ChannelLayout::Rgb,
             ChannelLayout::Cmyk | ChannelLayout::CmykA => ChannelLayout::Cmyk,
+            ChannelLayout::Lab | ChannelLayout::LabA => ChannelLayout::Lab,
         }
     }
 
     /// `true` if both layouts share a colour model (ignoring alpha).
     pub const fn same_model(self, other: Self) -> bool {
-        (self.is_gray() && other.is_gray()) || (self.is_rgb() && other.is_rgb()) || (self.is_cmyk() && other.is_cmyk())
+        (self.is_gray() && other.is_gray()) || (self.is_rgb() && other.is_rgb()) || (self.is_cmyk() && other.is_cmyk()) || (self.is_lab() && other.is_lab())
     }
 }
 
@@ -148,12 +166,42 @@ pub enum DecodeWarning {
     MoreFrames { total: Option<u32> },
     /// Only the first page of a multi-page file was decoded; `total` counts every page when known.
     MorePages { total: Option<u32> },
+    /// Only one part of a multi-part file was decoded; `total` counts every part when known.
+    MoreParts { total: Option<u32> },
+    /// The image opened on the full `display_window` stage; the data region sits at `origin`.
+    DisplayWindowStage { stage: (u32, u32), origin: (i32, i32) },
     /// The image data ends early (truncated or damaged file); the decoder filled in the rest
     /// (a baseline JPEG's missing rows come out grey).
     Truncated { format: Format },
     /// Deep image data (per-pixel sample lists) was composited into the flat image; the samples
     /// themselves (Z and other deep channels) are not part of the flat result.
     DeepFlattened { format: Format, max_samples_per_pixel: u32 },
+    /// Only the first image element of a DPX file was decoded; `total` counts them all.
+    MoreElements { total: u32 },
+    /// A DPX element's transfer characteristic and colorimetric specification (SMPTE 268M codes,
+    /// 255 when undefined). The code values are imported as stored, without a colour transform.
+    DpxEncoding { transfer: u8, colorimetric: u8 },
+}
+
+/// The SMPTE 268M name of a transfer characteristic or colorimetric code.
+fn dpx_code_name(code: u8) -> &'static str {
+    match code {
+        0 => "user-defined",
+        1 => "printing density",
+        2 => "linear",
+        3 => "logarithmic",
+        4 => "unspecified video",
+        5 => "SMPTE 274M",
+        6 => "ITU-R BT.709",
+        7 => "ITU-R BT.601 625-line",
+        8 => "ITU-R BT.601 525-line",
+        9 => "NTSC composite video",
+        10 => "PAL composite video",
+        11 => "Z linear",
+        12 => "Z homogeneous",
+        255 => "undefined",
+        _ => "unknown",
+    }
 }
 
 impl fmt::Display for DecodeWarning {
@@ -163,6 +211,11 @@ impl fmt::Display for DecodeWarning {
             DecodeWarning::MoreFrames { total: None } => write!(f, "only the first frame of the animation was imported"),
             DecodeWarning::MorePages { total: Some(n) } => write!(f, "only the first of {n} pages was imported"),
             DecodeWarning::MorePages { total: None } => write!(f, "only the first page of the file was imported"),
+            DecodeWarning::MoreParts { total: Some(n) } => write!(f, "only one of {n} EXR parts was imported"),
+            DecodeWarning::MoreParts { total: None } => write!(f, "only one EXR part of the file was imported"),
+            DecodeWarning::DisplayWindowStage { stage, origin } => {
+                write!(f, "opened on the full display window stage ({}x{}); the data sits at ({}, {})", stage.0, stage.1, origin.0, origin.1)
+            }
             DecodeWarning::Truncated { format } => {
                 write!(f, "{} data ends early (the file is truncated or damaged); part of the image is missing", format.name())
             }
@@ -170,6 +223,13 @@ impl fmt::Display for DecodeWarning {
                 f,
                 "{format} deep data was composited into a flat image (up to {max_samples_per_pixel} samples per pixel); per-pixel depth is not kept",
                 format = format.name()
+            ),
+            DecodeWarning::MoreElements { total } => write!(f, "only the first of {total} image elements was imported"),
+            DecodeWarning::DpxEncoding { transfer, colorimetric } => write!(
+                f,
+                "DPX transfer characteristic: {} ({transfer}), colorimetric: {} ({colorimetric}); the code values were imported as stored, without a colour transform",
+                dpx_code_name(*transfer),
+                dpx_code_name(*colorimetric)
             ),
         }
     }
@@ -195,6 +255,13 @@ pub struct DeepChannel {
 pub struct DeepImage {
     pub width: u32,
     pub height: u32,
+    /// The full stage the image opens on: the EXR `display_window` size, when the file declares
+    /// one the data region fits into and the limits allow. `None` when absent, absurd or not
+    /// containing the data region — then the image opens on the data window alone, as before.
+    pub stage: Option<(u32, u32)>,
+    /// Where this image's (0, 0) sits on the stage: `data_window.position - display_window.position`.
+    /// `(0, 0)` when [`Self::stage`] is `None`.
+    pub origin: (i32, i32),
     /// The sample channels in file order.
     pub channels: Vec<DeepChannel>,
     /// Cumulative sample counts, `len == width as usize * height as usize + 1`: pixel `i`
@@ -218,6 +285,107 @@ impl DeepImage {
     /// The total number of samples over all pixels.
     pub fn total_samples(&self) -> u64 {
         self.counts.last().copied().unwrap_or(0)
+    }
+}
+
+/// One channel of an [`ExrPartInfo`]: the name as in the file (a Maya/Arnold AOV layer
+/// keeps its prefix, e.g. `diffuse.R`) and the sample type that part stores it with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExrChannelInfo {
+    pub name: String,
+    pub sample: SampleType,
+}
+
+/// One part of a multi-part OpenEXR file (what a Maya/Arnold render writes per AOV):
+/// header facts only, no pixel data. [`crate::exr_info`] lists them, and the index is
+/// what [`crate::decode_exr_part`] decodes; [`crate::decode_as_with`] opens the part
+/// the ranking in [`ExrPartInfo::color_rank`] prefers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExrPartInfo {
+    /// Index into the part list, in file order.
+    pub index: usize,
+    /// The part `name` attribute, when the file records one (Arnold names parts after AOVs).
+    pub name: Option<String>,
+    /// The part `view` attribute for stereo files (`left`/`right`).
+    pub view: Option<String>,
+    pub width: u32,
+    pub height: u32,
+    /// True for `deepscanline`/`deeptile` parts; those are composited by the deep
+    /// decoder ([`crate::decode_deep_exr`]), not decoded part by part.
+    pub deep: bool,
+    /// True when the part is stored as tiles instead of scanlines.
+    pub tiled: bool,
+    /// The part's channels in file order.
+    pub channels: Vec<ExrChannelInfo>,
+}
+
+impl ExrPartInfo {
+    /// How much this part looks like a colour image the plain [`Image`] decode can show:
+    /// 4 RGBA, 3 RGB, 2 YA, 1 any-single-channel, 0 anything else (e.g. `Z` beside `A`).
+    /// The auto-pick takes the highest rank; ties go to the earlier part.
+    pub fn color_rank(&self) -> u8 {
+        let has = |n: &str| self.channels.iter().any(|c| base_channel_name(&c.name) == n);
+        if has("R") && has("G") && has("B") {
+            return if has("A") { 4 } else { 3 };
+        }
+        if has("Y") {
+            return if has("A") { 2 } else { 1 };
+        }
+        u8::from(self.channels.len() == 1)
+    }
+}
+
+/// Strip an optional `layer.` prefix from a channel name (`diffuse.R` → `R`).
+pub(crate) fn base_channel_name(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
+/// One Cryptomatte layer of an EXR file (Cryptomatte specification 1.2): per-pixel object or
+/// material IDs with coverage, as written by Arnold, V-Ray, Redshift, Mantra/Karma or Cycles.
+/// Header facts plus the parsed manifest; the samples come from
+/// [`crate::decode_cryptomatte`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct CryptomatteLayer {
+    /// The part (see [`crate::exr_info`]) the channels and attributes live in.
+    pub part: usize,
+    /// The `cryptomatte/<key>/name` attribute, e.g. `CryptoAsset` or `crypto_asset`.
+    pub name: String,
+    /// The 7-hex-digit metadata key of the layer.
+    pub key: String,
+    /// The `conversion` attribute, when recorded (canonically `uint32_to_float32`).
+    pub conversion: Option<String>,
+    /// The manifest: object names with their ID values. A sidecar manifest file is only
+    /// recorded in [`Self::sidecar_manifest`] and not read here (the codec is I/O free).
+    pub manifest: Vec<(f32, String)>,
+    /// The `manif_file` sidecar attribute, when the manifest is not embedded.
+    pub sidecar_manifest: Option<String>,
+    /// The stream channel bases in file order, e.g. `["crypto_asset00", "crypto_asset01"]`;
+    /// each holds an ID (`.red`) and a coverage (`.green`) channel.
+    pub channels: Vec<String>,
+}
+
+impl CryptomatteLayer {
+    /// The manifest name for an ID value, when the manifest lists it.
+    pub fn name_of(&self, id: f32) -> Option<&str> {
+        self.manifest.iter().find(|(i, _)| *i == id).map(|(_, n)| n.as_str())
+    }
+}
+
+/// Decoded Cryptomatte samples: per pixel the (ID, coverage) pairs with coverage above zero,
+/// sorted by descending coverage. The IDs are the float values as stored (compared by value,
+/// never by bit pattern, like the reference readers).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CryptomatteBuffer {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<Vec<(f32, f32)>>,
+}
+
+impl CryptomatteBuffer {
+    /// The pairs of one pixel; empty for a pixel covered by nothing.
+    pub fn at(&self, x: u32, y: u32) -> &[(f32, f32)] {
+        let i = y as usize * self.width as usize + x as usize;
+        self.pixels.get(i).map_or(&[], |v| v)
     }
 }
 
@@ -407,6 +575,8 @@ impl Image {
                 out.extend_from_slice(&one);
             }
             out
+        } else if let Some(fast) = self.convert_int_direct(layout, sample) {
+            fast
         } else if layout == self.layout {
             quantize(&self.to_normalized(), sample)
         } else {
@@ -424,6 +594,55 @@ impl Image {
             meta: self.meta.clone(),
             warnings: self.warnings.clone(),
         }
+    }
+
+    /// Integer fast path of [`Image::convert`] for U8/U16 sources and targets whose result is
+    /// a pure channel copy: same colour model (alpha added as opaque, or dropped) or gray to
+    /// RGB. Bit-identical to the generic f32 route (see the equivalence tests) but without
+    /// the two intermediate f32 buffers. Returns `None` for everything else.
+    fn convert_int_direct(&self, layout: ChannelLayout, sample: SampleType) -> Option<Vec<u8>> {
+        let int = |s: SampleType| matches!(s, SampleType::U8 | SampleType::U16);
+        if !int(self.sample) || !int(sample) {
+            return None;
+        }
+        let gray_to_rgb = self.layout.is_gray() && layout.is_rgb();
+        if !gray_to_rgb && !layout.same_model(self.layout) {
+            return None;
+        }
+        let one: &[u8] = match sample {
+            SampleType::U8 => &[u8::MAX],
+            _ => &u16::MAX.to_ne_bytes(),
+        };
+        let (fc, tc) = (self.layout.channels(), layout.channels());
+        let (sb, db) = (self.sample.bytes(), sample.bytes());
+        let (src_color, dst_color) = (self.layout.color_channels(), layout.color_channels());
+        let n = self.data.len() / (fc * sb);
+        let mut out = Vec::with_capacity(n.checked_mul(tc)?.checked_mul(db)?);
+        macro_rules! run {
+            ($conv:expr) => {{
+                let conv = $conv;
+                for px in self.data.chunks_exact(fc * sb) {
+                    for j in 0..dst_color {
+                        let c = if src_color == 1 { 0 } else { j };
+                        conv(&px[c * sb..(c + 1) * sb], &mut out);
+                    }
+                    if layout.has_alpha() {
+                        if self.layout.has_alpha() {
+                            conv(&px[src_color * sb..(src_color + 1) * sb], &mut out);
+                        } else {
+                            out.extend_from_slice(one);
+                        }
+                    }
+                }
+            }};
+        }
+        match (self.sample, sample) {
+            (SampleType::U8, SampleType::U8) => run!(|s: &[u8], o: &mut Vec<u8>| o.push(s[0])),
+            (SampleType::U16, SampleType::U16) => run!(|s: &[u8], o: &mut Vec<u8>| o.extend_from_slice(s)),
+            (SampleType::U8, SampleType::U16) => run!(|s: &[u8], o: &mut Vec<u8>| o.extend_from_slice(&(u16::from(s[0]) * 257).to_ne_bytes())),
+            _ => run!(|s: &[u8], o: &mut Vec<u8>| o.push(((u32::from(u16::from_ne_bytes([s[0], s[1]])) + 128) / 257) as u8)),
+        }
+        Some(out)
     }
 
     /// [`Image::convert`], borrowing `self` when it already has that layout and sample type
@@ -522,6 +741,7 @@ pub(crate) fn convert_layout(src: &[f32], from: ChannelLayout, to: ChannelLayout
                 ChannelLayout::Gray | ChannelLayout::GrayA => [color[0]; 3],
                 ChannelLayout::Rgb | ChannelLayout::Rgba => [color[0], color[1], color[2]],
                 ChannelLayout::Cmyk | ChannelLayout::CmykA => cmyk_to_rgb(color[0], color[1], color[2], color[3]),
+                ChannelLayout::Lab | ChannelLayout::LabA => crate::lab::lab_to_srgb([color[0], color[1], color[2]]),
             };
             match to {
                 ChannelLayout::Gray | ChannelLayout::GrayA => {
@@ -529,6 +749,7 @@ pub(crate) fn convert_layout(src: &[f32], from: ChannelLayout, to: ChannelLayout
                 }
                 ChannelLayout::Rgb | ChannelLayout::Rgba => out.extend_from_slice(&rgb),
                 ChannelLayout::Cmyk | ChannelLayout::CmykA => out.extend_from_slice(&rgb_to_cmyk(rgb[0], rgb[1], rgb[2])),
+                ChannelLayout::Lab | ChannelLayout::LabA => out.extend_from_slice(&crate::lab::srgb_to_lab(rgb)),
             }
         }
         if to.has_alpha() {
@@ -555,6 +776,66 @@ mod tests {
     }
 
     use super::*;
+
+    /// The generic f32 route `convert` used before the integer fast paths (the reference).
+    fn convert_via_f32(img: &Image, layout: ChannelLayout, sample: SampleType) -> Vec<u8> {
+        quantize(&convert_layout(&img.to_normalized(), img.layout, layout), sample)
+    }
+
+    #[test]
+    fn int_fast_path_matches_f32_route_for_every_value() {
+        // Every U8 and every U16 value through every depth pair (alpha goes through the same per-sample conversion; covered by the layout test).
+        let all8: Vec<u8> = (0..=255).collect();
+        let all16: Vec<u16> = (0..=65535).collect();
+        for (src, to) in
+            [(SampleType::U8, SampleType::U8), (SampleType::U8, SampleType::U16), (SampleType::U16, SampleType::U8), (SampleType::U16, SampleType::U16)]
+        {
+            let img = if src == SampleType::U8 {
+                Image::from_u8(256, 1, ChannelLayout::Gray, all8.clone()).unwrap()
+            } else {
+                Image::from_u16(65536, 1, ChannelLayout::Gray, &all16).unwrap()
+            };
+            for layout in [ChannelLayout::Gray, ChannelLayout::Rgb] {
+                assert_eq!(img.convert(layout, to).data(), &convert_via_f32(&img, layout, to)[..], "{src:?}->{to:?} {layout:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn int_fast_path_matches_f32_route_for_every_layout() {
+        let mut seed = 0x9e3779b97f4a7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for from_s in [SampleType::U8, SampleType::U16] {
+            for from_l in ChannelLayout::ALL {
+                let n = 64 * from_l.channels();
+                let mut vals = Vec::new();
+                for i in 0..n {
+                    // Edge values (0, 1, max-1, max, mid) mixed with random ones.
+                    let r = next();
+                    let v = match i % 7 {
+                        0 => 0.0,
+                        1 => 1.0,
+                        2 => 1.0 / 255.0,
+                        3 => 254.0 / 255.0,
+                        _ => (r % 65536) as f32 / 65535.0,
+                    };
+                    vals.push(v);
+                }
+                let img = Image::from_normalized(64, 1, from_l, from_s, &vals).unwrap();
+                for to_l in ChannelLayout::ALL {
+                    for to_s in SampleType::ALL {
+                        let got = img.convert(to_l, to_s);
+                        assert_eq!(got.data(), &convert_via_f32(&img, to_l, to_s)[..], "{from_l:?}/{from_s:?} -> {to_l:?}/{to_s:?}");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn u8_u16_roundtrip_exact() {

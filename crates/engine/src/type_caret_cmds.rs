@@ -69,7 +69,7 @@ struct Frame {
 fn frame(doc: &Document, id: LayerId, cmd: &str) -> Result<Frame> {
     let layer = doc.layer(id).ok_or(EngineError::NoLayer(id))?;
     let LayerContent::Text(t) = &layer.content else {
-        return Err(bad(cmd, format!("layer {} is a {} layer, not a type layer", id.0, layer.content.kind_name())));
+        return Err(bad(cmd, format!("layer {} is {} {} layer, not a type layer", id.0, layer.content.article(), layer.content.kind_name())));
     };
     let text = t.text.clone();
     let transform = t.transform;
@@ -103,8 +103,12 @@ impl Frame {
 
 /// Topmost visible type layer under the point. `walk` is bottom-up; the Type tool hits the top first.
 fn topmost(doc: &Document, x: f64, y: f64) -> Option<Frame> {
-    let mut ids: Vec<LayerId> =
-        doc.walk().into_iter().filter(|(_, _, l)| l.visible && matches!(l.content, LayerContent::Text(_))).map(|(_, _, l)| l.id).collect();
+    let mut ids: Vec<LayerId> = doc
+        .walk()
+        .into_iter()
+        .filter(|(path, _, layer)| matches!(layer.content, LayerContent::Text(_)) && doc.shown_at(path))
+        .map(|(_, _, layer)| layer.id)
+        .collect();
     ids.reverse();
     ids.into_iter().find_map(|id| {
         let f = frame(doc, id, "type.hitTest").ok()?;
@@ -260,7 +264,8 @@ mod tests {
             assert_eq!(u(&h, "index"), i as u64, "{text:?} index {i} at ({x}, {y}) -> {h}");
             assert_eq!(h["line"], c["line"], "{text:?} index {i}");
             assert_eq!(u(&h, "layer"), id);
-            let on_line = lines.iter().position(|ln| {
+            // A shared soft-wrap boundary belongs to the following line, where the caret is drawn (#3068).
+            let on_line = lines.iter().rposition(|ln| {
                 let a = ln["start"].as_u64().unwrap();
                 let b = ln["end"].as_u64().unwrap();
                 (i as u64) >= a && (i as u64) <= b
@@ -375,6 +380,25 @@ mod tests {
     }
 
     #[test]
+    fn wrapped_caret_queries_use_the_line_that_contains_the_caret() {
+        let mut s = session();
+        let id = create(&mut s, json!({"text": "ab cd", "box": [20, 20, 20, 70], "size": 12, "font": "Inter"}));
+        let info = s.execute("type.info", json!({"layer": id})).unwrap();
+        let lines = info["lines"].as_array().unwrap();
+        assert!(lines.len() >= 2, "{lines:?}");
+        let index = lines[1]["start"].as_u64().unwrap() as usize;
+        assert_eq!(index as u64, lines[0]["end"].as_u64().unwrap(), "shared wrap boundary");
+        assert_eq!(s.execute("type.caret", json!({"layer": id, "index": index})).unwrap()["line"], 1);
+        assert_eq!(go(&mut s, id, index, "lineStart", None), index as u64);
+        assert_eq!(go(&mut s, id, index, "lineEnd", None), lines[1]["end"].as_u64().unwrap());
+
+        let hard = create(&mut s, json!({"text": "ab\ncd", "x": 30, "y": 100, "size": 12, "font": "Inter"}));
+        assert_eq!(s.execute("type.caret", json!({"layer": hard, "index": 3})).unwrap()["line"], 1);
+        assert_eq!(go(&mut s, hard, 3, "lineStart", None), 3);
+        assert_eq!(go(&mut s, hard, 3, "lineEnd", None), 5);
+    }
+
+    #[test]
     fn hit_test_picks_the_topmost_visible_type_layer_and_empty_text_is_index_zero() {
         let mut s = session();
         let lower = create(&mut s, json!({"x": 50, "y": 80, "text": "AAAA", "size": 36}));
@@ -406,6 +430,30 @@ mod tests {
     }
 
     #[test]
+    fn automatic_hit_test_skips_hidden_parent_groups() {
+        let mut s = session();
+        let text = create(&mut s, json!({"x": 50, "y": 80, "text": "AB", "size": 36}));
+        let caret = s.execute("type.caret", json!({"layer": text, "index": 1})).unwrap();
+        let x = (caret["segment"][0][0].as_f64().unwrap() + caret["segment"][1][0].as_f64().unwrap()) / 2.0;
+        let y = (caret["segment"][0][1].as_f64().unwrap() + caret["segment"][1][1].as_f64().unwrap()) / 2.0;
+
+        assert_eq!(u(&s.execute("type.hitTest", json!({"x": x, "y": y})).unwrap(), "layer"), text);
+        s.execute("layer.new.groupFromLayers", json!({"name": "Inner"})).unwrap();
+        s.execute("layer.new.groupFromLayers", json!({"name": "Outer"})).unwrap();
+        s.execute("layer.setProps", json!({"visible": false})).unwrap();
+
+        assert!(s.execute("type.hitTest", json!({"x": x, "y": y})).is_err(), "hidden ancestor must suppress automatic targeting");
+        assert_eq!(
+            u(&s.execute("type.hitTest", json!({"layer": text, "x": x, "y": y})).unwrap(), "layer"),
+            text,
+            "explicit targeting of hidden text is still allowed"
+        );
+
+        s.execute("layer.setProps", json!({"visible": true})).unwrap();
+        assert_eq!(u(&s.execute("type.hitTest", json!({"x": x, "y": y})).unwrap(), "layer"), text);
+    }
+
+    #[test]
     fn bad_params_are_errors() {
         let mut bare = Session::new();
         assert!(matches!(bare.execute("type.hitTest", json!({"x": 0, "y": 0})), Err(EngineError::Disabled(..))));
@@ -434,7 +482,7 @@ mod tests {
         bad(&mut s, "type.navigate", json!({"layer": id, "index": 9, "move": "end"}));
         bad(&mut s, "type.navigate", json!({"layer": id, "index": 0, "move": "lineNext", "x": "no"}));
         bad(&mut s, "type.navigate", json!({"layer": pixel, "index": 0, "move": "start"}));
-        assert!(matches!(s.execute("type.caret", json!({"layer": 9_999_999, "index": 0})), Err(EngineError::NoLayer(_))));
+        assert!(matches!(s.execute("type.caret", json!({"layer": u64::MAX, "index": 0})), Err(EngineError::NoLayer(_))));
         // A point on the named layer but outside its text still returns a caret, marked outside.
         let far = s.execute("type.hitTest", json!({"layer": id, "x": 390, "y": 290})).unwrap();
         assert_eq!(far["inside"], false);

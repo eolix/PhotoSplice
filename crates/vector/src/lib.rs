@@ -6,6 +6,7 @@
 //!
 //! * [`edit`]: point-level path editing (Direct Selection, Convert Point) and hit testing.
 //! * [`flatten`]: cubic Bézier flattening with a distance tolerance.
+//! * [`map`]: non-affine maps of paths (Distort, Perspective, Warp).
 //! * [`raster`]: exact area-coverage scanline rasterizer (non-zero / even-odd per component,
 //!   boolean combination of components, inversion).
 //! * [`stroke`]: polygon stroking with miter/round/bevel joins, butt/round/square caps, dashes.
@@ -20,6 +21,7 @@
 
 pub mod edit;
 pub mod flatten;
+pub mod map;
 pub mod raster;
 pub mod shapes;
 pub mod stroke;
@@ -43,10 +45,12 @@ pub const DEFAULT_TOLERANCE: f64 = 0.01;
 /// folded with the subpath operations; open subpaths are closed implicitly.
 pub fn fill_rasterizer(path: &Path, tol: f64) -> Rasterizer {
     let mut r = Rasterizer::new(path.inverted);
+    // One point budget for the whole path, then one edge sort for all components.
+    let polys: Vec<Vec<(f64, f64)>> = flatten_path(path, tol).into_iter().map(|l| l.pts).collect();
     for c in path.components() {
-        let polys: Vec<Vec<(f64, f64)>> = path.subpaths[c.clone()].iter().map(|s| flatten_subpath(s, tol).pts).collect();
-        r.add_component(&polys, path.effective_op(c.start), path.fill_rule);
+        r.push_component(polys.get(c.clone()).unwrap_or_default(), path.effective_op(c.start), path.fill_rule);
     }
+    r.sort_edges();
     r
 }
 
@@ -105,16 +109,37 @@ impl CompiledVectorMask {
 
     /// Effective mask values over `rect`, with invocation-local rasterization state.
     pub fn render(&self, rect: Rect) -> Vec<f32> {
+        self.render_with(rect, Rasterizer::render)
+    }
+
+    /// Effective mask values without entering a thread pool. Use this while
+    /// initializing a shared result that other Rayon workers may wait for.
+    pub fn render_sequential(&self, rect: Rect) -> Vec<f32> {
+        self.render_with(rect, |rasterizer, rect| {
+            let mut v = vec![0.0; rect.width() as usize * rect.height() as usize];
+            if !v.is_empty() {
+                rasterizer.render_into(rect, &mut v);
+            }
+            v
+        })
+    }
+
+    /// Mask values over `rect`, with a path's coverage from `coverage`.
+    fn render_with(&self, rect: Rect, coverage: impl FnOnce(&Rasterizer, Rect) -> Vec<f32>) -> Vec<f32> {
         let mut v = match &self.geometry {
             MaskGeometry::Constant(value) => vec![*value; rect.width() as usize * rect.height() as usize],
-            MaskGeometry::Path(rasterizer) => rasterizer.render(rect),
+            MaskGeometry::Path(rasterizer) => coverage(rasterizer, rect),
         };
+        self.apply_density(&mut v);
+        v
+    }
+
+    fn apply_density(&self, v: &mut [f32]) {
         if let Some(d) = self.density {
-            for x in &mut v {
+            for x in v {
                 *x = 1.0 - d * (1.0 - *x);
             }
         }
-        v
     }
 }
 
@@ -218,27 +243,41 @@ pub enum Paint {
         /// Opacity stops (sorted; empty = opaque).
         opacity: Vec<(f32, f32)>,
         style: GradientStyle,
+        /// Angle, scale and centre offset (fractions of the frame) after the whole-pixel layout
+        /// ([`gradient::gradient_layout`]).
         angle: f32,
         scale: f32,
         reverse: bool,
-        /// Centre offset, as fractions of the frame.
         offset: (f32, f32),
-        /// The frame the gradient is laid out in (the shape's bounds).
+        /// Dither: one level of the shared noise breaks 8-bit banding.
+        dither: bool,
+        /// The frame the gradient is laid out in: the shape's bounds, or the canvas when the fill
+        /// does not align with the layer.
         frame: Rect,
     },
 }
 
 impl Paint {
-    /// Paint for a model fill, with gradients laid out over `bounds` (`x0, y0, x1, y1`).
-    /// Patterns are not rendered yet (transparent), matching the compositor.
-    pub fn from_fill(f: &Fill, bounds: (f64, f64, f64, f64)) -> Paint {
+    /// Paint for a model fill, with gradients laid out over `bounds` (`x0, y0, x1, y1`) — the
+    /// layer's frame — or over `canvas` when the fill is not aligned with the layer. Every
+    /// gradient field is honoured (midpoints, opacity stops, centre offset, dither, unsorted
+    /// stops), rendering the same pixels as the compositor's fill layers; the parity tests in
+    /// `photosplice-compose` (which this crate cannot depend on) keep the two in step. Pattern
+    /// fills are not rendered (transparent): they need the document's pattern table, which
+    /// lives above this crate.
+    pub fn from_fill(f: &Fill, bounds: (f64, f64, f64, f64), canvas: (f64, f64, f64, f64)) -> Paint {
         let rgba = |c: &photosplice_color::Color| {
             let v = c.to_rgb();
             [v[0], v[1], v[2], c.alpha]
         };
         match f {
             Fill::Solid(c) => Paint::Solid(rgba(c)),
-            Fill::Gradient { stops, angle, scale, style, reverse, opacity_stops, midpoints, offset, .. } => {
+            // No `..` here on purpose: a new gradient field must fail to compile until the
+            // shape renderer honours it (the same sentinel the document/compositor pair uses).
+            Fill::Gradient { stops, angle, scale, style, reverse, opacity_stops, midpoints, offset, dither, align } => {
+                let frame = frame_of(if *align { bounds } else { canvas });
+                // Linear and Reflected end points on whole pixels, as fill layers lay them out.
+                let (angle, scale, offset) = gradient::gradient_layout(*style, *angle, *scale, *offset, frame);
                 let mut stops: Vec<(f32, [f32; 4])> = stops.iter().map(|(p, c)| (*p, rgba(c))).collect();
                 stops.sort_by(|a, b| a.0.total_cmp(&b.0));
                 let mut opacity = opacity_stops.clone();
@@ -248,11 +287,12 @@ impl Paint {
                     mids: midpoints.clone(),
                     opacity,
                     style: *style,
-                    angle: *angle,
-                    scale: *scale,
+                    angle,
+                    scale,
                     reverse: *reverse,
-                    offset: *offset,
-                    frame: frame_of(bounds),
+                    offset,
+                    dither: *dither,
+                    frame,
                 }
             }
             Fill::Pattern { .. } => Paint::None,
@@ -264,8 +304,12 @@ impl Paint {
         match self {
             Paint::None => [0.0; 4],
             Paint::Solid(c) => *c,
-            Paint::Gradient { style, angle, scale, reverse, offset, frame, .. } => {
-                self.sample(gradient::gradient_t(*style, *angle, *scale, *reverse, *offset, *frame, x as f32, y as f32))
+            Paint::Gradient { style, angle, scale, reverse, offset, dither: dith, frame, .. } => {
+                let mut c = self.sample(gradient::gradient_t(*style, *angle, *scale, *reverse, *offset, *frame, x as f32, y as f32));
+                if *dith {
+                    dither(&mut c, x.floor() as i32, y.floor() as i32);
+                }
+                c
             }
         }
     }
@@ -287,6 +331,15 @@ fn frame_of(b: (f64, f64, f64, f64)) -> Rect {
     Rect::new(px(b.0).floor() as i32, px(b.1).floor() as i32, px(b.2).ceil() as i32, px(b.3).ceil() as i32)
 }
 
+/// Adds one level of the shared dither noise to a colour's channels (as the Gradient tool and
+/// the compositor's fill layers do).
+fn dither(c: &mut [f32; 4], x: i32, y: i32) {
+    let n = (photosplice_color::dither_noise(x, y) - 0.5) / 255.0;
+    for ch in c.iter_mut().take(3) {
+        *ch = (*ch + n).clamp(0.0, 1.0);
+    }
+}
+
 /// Everything needed to render a shape layer, compiled once.
 pub struct CompiledShape {
     fill: Option<(Rasterizer, Paint)>,
@@ -297,24 +350,21 @@ pub struct CompiledShape {
 }
 
 impl CompiledShape {
-    pub fn new(shape: &ShapeLayer, tol: f64) -> Self {
-        Self::new_in(shape, tol, None)
-    }
-
-    /// [`CompiledShape::new`] on a `canvas`: an inverted path (or one without points) fills the
-    /// whole canvas, so its gradients are laid out over the canvas, as Photoshop lays a shape
-    /// layer's gradient over the layer's bounds (psd-tools vector-mask2.psd).
-    pub fn new_in(shape: &ShapeLayer, tol: f64, canvas: Option<Rect>) -> Self {
-        let whole = canvas.filter(|_| shape.path.inverted || shape.path.control_bounds().is_none());
-        let pb = match whole {
-            Some(c) => (f64::from(c.x0), f64::from(c.y0), f64::from(c.x1), f64::from(c.y1)),
-            None => shape.path.control_bounds().unwrap_or((0.0, 0.0, 0.0, 0.0)),
+    /// Compiles the shape at flattening tolerance `tol` on a `canvas`: the frame of gradients
+    /// without "Align with layer", and of an inverted path (or one without points), which fills
+    /// the whole canvas, as Photoshop lays a shape layer's gradient over the layer's bounds
+    /// (psd-tools vector-mask2.psd).
+    pub fn new(shape: &ShapeLayer, tol: f64, canvas: Rect) -> Self {
+        let cb = (f64::from(canvas.x0), f64::from(canvas.y0), f64::from(canvas.x1), f64::from(canvas.y1));
+        let pb = match shape.path.control_bounds() {
+            Some(b) if !shape.path.inverted => b,
+            _ => cb,
         };
         let area = fill_rasterizer(&shape.path, tol);
         let mut bounds = None;
         let fill = shape.fill.as_ref().map(|f| {
             bounds = area.pixel_bounds();
-            (area.clone(), Paint::from_fill(f, pb))
+            (area.clone(), Paint::from_fill(f, pb, cb))
         });
         let all_closed = shape.path.subpaths.iter().all(|s| s.closed);
         let mut align = None;
@@ -331,7 +381,7 @@ impl CompiledShape {
                 (Some(a), Some(b)) => Some(a.union(&b)),
                 (a, b) => a.or(b),
             };
-            (r, Paint::from_fill(&s.paint, pb), s.opacity.clamp(0.0, 1.0))
+            (r, Paint::from_fill(&s.paint, pb, cb), s.opacity.clamp(0.0, 1.0))
         });
         if shape.path.inverted && shape.fill.is_some() {
             bounds = Some(Rect::new(i32::MIN / 4, i32::MIN / 4, i32::MAX / 4, i32::MAX / 4));
@@ -388,7 +438,8 @@ impl CompiledShape {
         out
     }
 
-    /// Renders into a new surface of `format` over `clip` (typically the canvas).
+    /// Renders into a new surface of `format` over `clip` (typically the canvas: it bounds the
+    /// render and anchors gradients whose fill is not aligned with the layer).
     pub fn render(&self, format: PixelFormat, clip: Rect) -> Surface {
         let mut s = Surface::new(format);
         let Some(b) = self.bounds else { return s };
@@ -409,9 +460,10 @@ impl CompiledShape {
     }
 }
 
-/// Renders a shape layer's appearance (fill, then stroke over it) in `format`, clipped to `clip`.
+/// Renders a shape layer's appearance (fill, then stroke over it) in `format`, clipped to
+/// `clip` — the canvas, which also lays out gradients whose fill is not aligned with the layer.
 pub fn render_shape(shape: &ShapeLayer, format: PixelFormat, clip: Rect) -> Surface {
-    CompiledShape::new_in(shape, DEFAULT_TOLERANCE, Some(clip)).render(format, clip)
+    CompiledShape::new(shape, DEFAULT_TOLERANCE, clip).render(format, clip)
 }
 
 #[cfg(test)]

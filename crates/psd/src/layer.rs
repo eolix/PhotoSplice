@@ -5,7 +5,7 @@ use crate::compression::{Compression, PlaneLayout, decode_planes, encode_planes}
 use crate::error::{PsdError, Result};
 use crate::header::{MAX_DIMENSION, Version};
 use crate::io::{Reader, WriteExt, decode_legacy_name, read_pascal, write_pascal};
-use crate::tagged::{BlockData, SectionDivider, SectionType, TaggedBlock, read_blocks, write_blocks};
+use crate::tagged::{BlockData, SectionDivider, SectionType, TaggedBlock, read_blocks, uses_long_length, write_blocks};
 
 /// Channel id of the transparency mask.
 pub const CHANNEL_TRANSPARENCY: i16 = -1;
@@ -217,7 +217,10 @@ impl LayerMask {
 
     /// Whether `d` (a whole mask record with mask parameters) stores the real-mask fields before
     /// the parameters, as Photoshop does. The spec's order wins when it reads as parameters
-    /// followed by padding alone (no real mask), the one layout the two orders can share.
+    /// followed by padding alone (no real mask), the one layout the two orders can share. When
+    /// both orders fit the record's length, Photoshop's is taken unless its reading is
+    /// implausible (a real-mask background that is neither 0 nor 255, or parameter flag bits
+    /// the spec does not define) while the spec's reading with a real mask is sound.
     pub(crate) fn real_before_parameters(d: &[u8]) -> bool {
         // Parameters at `pf_at`, then 0..=3 bytes of padding, and nothing else.
         let fits =
@@ -269,6 +272,18 @@ impl LayerMask {
         // The order only matters when both are present; otherwise default to Photoshop's.
         let real_first = real_first || real.is_none() || parameters.is_none();
         Ok(LayerMask { rect, default_color, flags, parameters, real, trailing: r.peek_rest().to_vec(), real_first })
+    }
+
+    /// Bytes [`Self::write`] produces.
+    fn encoded_len(&self) -> u64 {
+        let real = if self.real.is_some() { 18 } else { 0 };
+        let parameters = self.parameters.as_ref().map_or(0, |p| {
+            1 + u64::from(p.user_density.is_some())
+                + 8 * u64::from(p.user_feather.is_some())
+                + u64::from(p.vector_density.is_some())
+                + 8 * u64::from(p.vector_feather.is_some())
+        });
+        18 + real + parameters + self.trailing.len() as u64
     }
 
     fn write(&self, out: &mut Vec<u8>) {
@@ -585,6 +600,36 @@ impl LayerRecord {
         Ok((LayerRecord { rect, channels, blend_mode, opacity, clipping, flags, filler, mask, blending_ranges, name, blocks, extra_trailing }, lens))
     }
 
+    /// Bytes [`Self::write`] produces, computed without serializing. Errors where `write` would.
+    fn encoded_len(&self, version: Version) -> Result<u64> {
+        let too_big = || PsdError::LimitExceeded("section too large for 32-bit length (use PSB)");
+        u16::try_from(self.channels.len()).map_err(|_| PsdError::LimitExceeded("too many channels"))?;
+        let channel_len: u64 = if version.is_psb() { 8 } else { 4 };
+        if !version.is_psb() && self.channels.iter().any(|c| u32::try_from(c.stored_len()).is_err()) {
+            return Err(too_big());
+        }
+        let mask = match &self.mask {
+            MaskData::None => 0,
+            MaskData::Mask(mask) => mask.encoded_len(),
+            MaskData::Raw(b) => b.len() as u64,
+        };
+        u32::try_from(mask).map_err(|_| too_big())?;
+        let ranges = self.blending_ranges.data.len() as u64;
+        u32::try_from(ranges).map_err(|_| too_big())?;
+        let name = 1 + self.name.len().min(255) as u64;
+        let name = name.next_multiple_of(4);
+        let mut extra = (4 + mask).saturating_add(4 + ranges).saturating_add(name).saturating_add(self.extra_trailing.len() as u64);
+        for b in &self.blocks {
+            if !uses_long_length(version, &b.key) && u32::try_from(b.data.len()).is_err() {
+                return Err(too_big());
+            }
+            extra = extra.saturating_add(b.encoded_len(version) as u64);
+        }
+        u32::try_from(extra).map_err(|_| too_big())?;
+        // rect, channel count, channel entries, signature + blend key, four flag bytes, extra length.
+        Ok((16 + 2 + self.channels.len() as u64 * (2 + channel_len) + 8 + 4 + 4).saturating_add(extra))
+    }
+
     fn write(&self, out: &mut Vec<u8>, version: Version) -> Result<()> {
         self.rect.write(out);
         let nch = u16::try_from(self.channels.len()).map_err(|_| PsdError::LimitExceeded("too many channels"))?;
@@ -610,7 +655,7 @@ impl LayerRecord {
         out.put_len(self.blending_ranges.data.len() as u64, false)?;
         out.put(&self.blending_ranges.data);
         write_pascal(out, &self.name, 4);
-        write_blocks(out, &self.blocks, version)?;
+        write_blocks(out, &self.blocks, version, 2)?;
         out.put(&self.extra_trailing);
         out.end_len(at, false)
     }
@@ -666,12 +711,12 @@ impl LayerInfo {
     /// Length of the body (layer count, records and channel data) without
     /// its trailing padding.
     pub fn unpadded_len(&self, version: Version) -> Result<u64> {
-        let mut records = Vec::new();
-        records.put_i16(0);
+        // Computed from the field sizes: serializing the records just to measure them would copy
+        // every tagged block.
+        let mut n = 2u64;
         for l in &self.layers {
-            l.write(&mut records, version)?;
+            n = n.saturating_add(l.encoded_len(version)?);
         }
-        let mut n = records.len() as u64;
         for c in self.layers.iter().flat_map(|l| &l.channels).filter(|c| c.compression.is_some()) {
             n = n.saturating_add(2).saturating_add(c.data.len() as u64);
         }
@@ -683,15 +728,25 @@ impl LayerInfo {
     /// block in 4-byte units (psd-tools) misread the blocks after a body that
     /// is only padded to even.
     pub fn pad_to(&mut self, version: Version, align: u64) -> Result<()> {
-        let align = align.max(1);
-        let len = self.unpadded_len(version)?;
-        self.padding = Some(vec![0; ((align - len % align) % align) as usize]);
+        self.padding = Some(vec![0; self.pad_len(version, align)?]);
         Ok(())
     }
 
-    /// Serializes the body (without a length field).
-    pub(crate) fn write_body(&self, out: &mut Vec<u8>, version: Version) -> Result<()> {
-        let start = out.len();
+    /// Number of zero bytes [`Self::pad_to`] would set, without touching `self`.
+    pub(crate) fn pad_len(&self, version: Version, align: u64) -> Result<usize> {
+        let align = align.max(1);
+        let len = self.unpadded_len(version)?;
+        Ok(((align - len % align) % align) as usize)
+    }
+
+    /// Bytes of channel data and their compression fields: the part of the body worth reserving up
+    /// front (the records are small next to the pixels). Saturates instead of overflowing.
+    pub(crate) fn channel_data_len(&self) -> usize {
+        self.layers.iter().flat_map(|l| &l.channels).filter(|c| c.compression.is_some()).fold(0usize, |n, c| n.saturating_add(2).saturating_add(c.data.len()))
+    }
+
+    /// Serializes the body without any trailing padding (the padding field is ignored).
+    pub(crate) fn write_unpadded(&self, out: &mut Vec<u8>, version: Version) -> Result<()> {
         let n = i16::try_from(self.layers.len()).map_err(|_| PsdError::LimitExceeded("more than 32767 layers"))?;
         out.put_i16(if self.merged_alpha { -n } else { n });
         for l in &self.layers {
@@ -705,6 +760,13 @@ impl LayerInfo {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Serializes the body (without a length field).
+    pub(crate) fn write_body(&self, out: &mut Vec<u8>, version: Version) -> Result<()> {
+        let start = out.len();
+        self.write_unpadded(out, version)?;
         match &self.padding {
             Some(p) => out.put(p),
             None => {
@@ -1019,6 +1081,71 @@ mod tests {
         let info = LayerInfo { layers: vec![rec], ..Default::default() };
         rt(&info, Version::Psd);
         assert_eq!(info.layers[0].decode_channel(0, 8, Version::Psd).unwrap(), Vec::<u8>::new());
+    }
+
+    /// The computed length matches the bytes written for every mask form, long names, custom block
+    /// padding, long-length blocks and trailing bytes.
+    #[test]
+    fn unpadded_len_matches_the_written_body() {
+        for version in [Version::Psd, Version::Psb] {
+            let mut layers = vec![sample_record(version), LayerRecord::default()];
+            for (params, real, real_first) in [(true, true, true), (true, true, false), (true, false, true), (false, true, true)] {
+                let mut mask = LayerMask::new(Rect::from_xywh(1, 2, 3, 4), 0, LayerMask::FLAG_PARAMETERS);
+                mask.parameters = params.then_some(MaskParameters {
+                    flags: 0x0f,
+                    user_density: Some(1),
+                    user_feather: Some(2.5),
+                    vector_density: Some(3),
+                    vector_feather: None,
+                });
+                mask.real = real.then_some(RealMask { flags: 0, background: 255, rect: Rect::from_xywh(0, 0, 1, 1) });
+                mask.real_first = real_first;
+                mask.trailing = vec![0; 3];
+                let mut rec = sample_record(version);
+                rec.mask = MaskData::Mask(mask);
+                rec.name = vec![b'n'; 300];
+                rec.blocks.push(TaggedBlock { signature: *b"8BIM", key: *b"lsct", data: vec![1; 5], padding: Some(vec![0; 3]) });
+                rec.blocks.push(TaggedBlock { signature: *b"8BIM", key: *b"Lr16", data: vec![2; 7], padding: None });
+                rec.extra_trailing = vec![9; 2];
+                layers.push(rec);
+            }
+            layers.push(LayerRecord { mask: MaskData::Raw(vec![5; 11]), name: b"ab".to_vec(), ..Default::default() });
+            let info = LayerInfo { layers, ..Default::default() };
+            let mut out = Vec::new();
+            info.write_unpadded(&mut out, version).unwrap();
+            assert_eq!(info.unpadded_len(version).unwrap(), out.len() as u64, "{version:?}");
+        }
+    }
+
+    /// Padding without cloning the layers writes the same bytes as `pad_to` on a clone, and the
+    /// channel data length hint is exact.
+    #[test]
+    fn unpadded_write_matches_pad_to_on_a_clone() {
+        use crate::{ColorMode, Compression, testgen};
+        for version in [Version::Psd, Version::Psb] {
+            for depth in [8u16, 16, 32] {
+                for compression in [Compression::Raw, Compression::Rle] {
+                    let file = testgen::layered(version, ColorMode::Rgb, depth, compression);
+                    let mut info = file.layer_info.clone().unwrap();
+                    for align in [1u64, 2, 4, 8] {
+                        let mut cloned = info.clone();
+                        cloned.pad_to(version, align).unwrap();
+                        let mut want = Vec::new();
+                        cloned.write_body(&mut want, version).unwrap();
+                        let pad = info.pad_len(version, align).unwrap();
+                        let mut got = Vec::new();
+                        info.write_unpadded(&mut got, version).unwrap();
+                        assert!(got.len() >= info.channel_data_len());
+                        got.resize(got.len() + pad, 0);
+                        assert_eq!(got, want, "{version:?} {depth} {compression:?} align {align}");
+                    }
+                    info.padding = Some(vec![7, 7]);
+                    let mut with_padding = Vec::new();
+                    info.write_body(&mut with_padding, version).unwrap();
+                    assert!(with_padding.ends_with(&[7, 7]));
+                }
+            }
+        }
     }
 
     #[test]

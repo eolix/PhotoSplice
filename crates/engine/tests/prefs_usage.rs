@@ -3,7 +3,8 @@
 //! Walks every key of `Preferences::default()` serialised to JSON (`section.key`) and checks
 //! the workspace sources: each one is either read outside `prefs.rs` or listed in
 //! `prefs::HIDDEN_UNTIL_IMPLEMENTED`, never both. A setting that appears in the dialog but that
-//! nothing reads is a control that silently does nothing.
+//! nothing reads is a control that silently does nothing. Preferences PhotoSplice keeps out of
+//! the dialog (`prefs::HIDDEN_IN_PHOTOSPLICE`) are not checked: no control shows them.
 //!
 //! "Read" is a source scan (no type information), so it is deliberately simple:
 //! - a member access `.<snake_key>` in a non-test source file that also names the section
@@ -14,7 +15,7 @@
 //! - or `self.<snake_key>` in an inherent `impl` of the section's struct in `prefs.rs` (helpers
 //!   such as `TransparencyAndGamut::colors`).
 
-use photosplice_engine::prefs::{HIDDEN_UNTIL_IMPLEMENTED, Preferences};
+use photosplice_engine::prefs::{HIDDEN_IN_PHOTOSPLICE, HIDDEN_UNTIL_IMPLEMENTED, Preferences};
 use std::path::{Path, PathBuf};
 
 fn snake(camel: &str) -> String {
@@ -143,6 +144,10 @@ fn every_preference_is_read_or_hidden() {
                 (path, read)
             }
         };
+        // Kept out of the dialog by PhotoSplice: whether they are read or not, nothing to flag.
+        if HIDDEN_IN_PHOTOSPLICE.contains(&path.as_str()) {
+            continue;
+        }
         let hidden = HIDDEN_UNTIL_IMPLEMENTED.contains(&path.as_str());
         if !read && !hidden {
             unread.push(path);
@@ -150,10 +155,14 @@ fn every_preference_is_read_or_hidden() {
             stale.push(path);
         }
     }
-    for h in HIDDEN_UNTIL_IMPLEMENTED {
+    for h in HIDDEN_UNTIL_IMPLEMENTED.iter().chain(HIDDEN_IN_PHOTOSPLICE) {
         assert!(
             paths.iter().any(|(s, k)| k.as_ref().map(|k| format!("{s}.{k}")).as_deref() == Some(*h)),
-            "HIDDEN_UNTIL_IMPLEMENTED lists `{h}`, which is not a preference"
+            "prefs lists `{h}` as hidden, which is not a preference"
+        );
+        assert!(
+            !(HIDDEN_UNTIL_IMPLEMENTED.contains(h) && HIDDEN_IN_PHOTOSPLICE.contains(h)),
+            "`{h}` is in both HIDDEN_UNTIL_IMPLEMENTED and HIDDEN_IN_PHOTOSPLICE"
         );
     }
     assert!(

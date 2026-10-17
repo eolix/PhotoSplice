@@ -17,6 +17,8 @@ pub enum Badge {
     Add,
     Subtract,
     Intersect,
+    /// Four arrows: a press drags the point under the pointer (the Curvature Pen over an anchor).
+    Move,
 }
 
 impl Badge {
@@ -33,7 +35,19 @@ impl Badge {
 
 /// Tools whose cursor carries the selection-mode badge.
 pub fn is_selection_tool(tool: Tool) -> bool {
-    matches!(tool, Tool::RectMarquee | Tool::EllipseMarquee | Tool::Lasso | Tool::PolygonLasso | Tool::MagneticLasso | Tool::MagicWand | Tool::QuickSelection | Tool::ObjectSelection)
+    matches!(
+        tool,
+        Tool::RectMarquee
+            | Tool::EllipseMarquee
+            | Tool::SingleRowMarquee
+            | Tool::SingleColumnMarquee
+            | Tool::Lasso
+            | Tool::PolygonLasso
+            | Tool::MagneticLasso
+            | Tool::MagicWand
+            | Tool::QuickSelection
+            | Tool::ObjectSelection
+    )
 }
 
 /// The effective selection mode of `tool` for the options-bar mode `bar` (0 New, 1 Add,
@@ -72,12 +86,40 @@ pub fn selection_mode(tool: Tool, bar: u8, m: egui::Modifiers) -> &'static str {
     }
 }
 
-/// The badge the cursor of `tool` shows with modifiers `m` (None for non-selection tools or New).
+/// [`selection_mode`] for the active document: with nothing selected, ⌥ (or ⇧⌥) has nothing to
+/// subtract from or intersect with, so it draws a new selection, as in Photoshop (where ⌥ then
+/// only draws a marquee from its centre). An options-bar Subtract or Intersect is kept (#1106).
+pub fn document_selection_mode(app: &PhotospliceApp, tool: Tool, m: egui::Modifiers) -> &'static str {
+    let mode = selection_mode(tool, app.ui.selection_mode, m);
+    let selected = app.session.active().and_then(|st| st.doc.selection.as_ref()).is_some_and(|s| !s.content_bounds().is_empty());
+    if m.alt && !selected && matches!(mode, "subtract" | "intersect") && selection_mode(tool, app.ui.selection_mode, egui::Modifiers::NONE) == "replace" {
+        "replace"
+    } else {
+        mode
+    }
+}
+
+/// The badge the cursor of `tool` shows with modifiers `m` (None for non-selection tools or New;
+/// the anchor point tools show theirs).
 pub fn badge(app: &PhotospliceApp, tool: Tool, m: egui::Modifiers) -> Option<Badge> {
+    // Add / Delete Anchor Point: + or − beside the crosshair, as on Photoshop's pen cursors (⌥
+    // swaps them; ⌘ is Direct Selection, which shows none).
+    if matches!(tool, Tool::AddAnchorPoint | Tool::DeleteAnchorPoint) {
+        let add = (tool == Tool::AddAnchorPoint) != m.alt;
+        return (!m.command).then_some(if add { Badge::Add } else { Badge::Subtract });
+    }
     if !is_selection_tool(tool) {
         return None;
     }
-    let m = app.drag.as_ref().filter(|d| d.tool == Tool::Lasso && tool == Tool::Lasso).map_or(m, |d| d.modifiers);
+    // ⌘ (⌘⌥) drags pixels or the layer instead of combining selections.
+    if m.command && app.drag.is_none() {
+        return None;
+    }
+    let mut m = app.drag.as_ref().filter(|d| d.tool == Tool::Lasso && tool == Tool::Lasso).map_or(m, |d| d.modifiers);
+    // The Lasso's Alt with nothing selected draws straight segments; it subtracts nothing.
+    if matches!(tool, Tool::Lasso | Tool::PolygonLasso) && app.drag.is_none() && app.session.active().is_none_or(|st| st.doc.selection.is_none()) {
+        m.alt = false;
+    }
     Badge::from_mode(selection_mode(tool, app.ui.selection_mode, m))
 }
 
@@ -86,6 +128,17 @@ pub fn badge_glyph(b: Badge, c: Pos2, h: f32) -> Vec<[Pos2; 2]> {
     match b {
         Badge::Add => vec![[c - vec2(h, 0.0), c + vec2(h, 0.0)], [c - vec2(0.0, h), c + vec2(0.0, h)]],
         Badge::Subtract => vec![[c - vec2(h, 0.0), c + vec2(h, 0.0)]],
+        Badge::Move => {
+            let a = h * 0.45;
+            let mut v = vec![[c - vec2(h, 0.0), c + vec2(h, 0.0)], [c - vec2(0.0, h), c + vec2(0.0, h)]];
+            for d in [vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0)] {
+                let tip = c + d * h;
+                let side = vec2(-d.y, d.x) * a;
+                v.push([tip, tip - d * a + side]);
+                v.push([tip, tip - d * a - side]);
+            }
+            v
+        }
         Badge::Intersect => {
             let d = h * 0.8;
             vec![[c + vec2(-d, -d), c + vec2(d, d)], [c + vec2(-d, d), c + vec2(d, -d)]]
@@ -198,12 +251,18 @@ mod tests {
         let none = egui::Modifiers::NONE;
         let (shift, alt) = (egui::Modifiers::SHIFT, egui::Modifiers::ALT);
         let both = egui::Modifiers { shift: true, alt: true, ..Default::default() };
+        app.run("file.new", serde_json::json!({"width": 40, "height": 30})).unwrap();
+        app.run("select.rect", serde_json::json!({"x": 5, "y": 5, "width": 10, "height": 10})).unwrap();
         for t in [Tool::RectMarquee, Tool::EllipseMarquee, Tool::Lasso, Tool::PolygonLasso, Tool::MagicWand] {
             assert_eq!(badge(&app, t, none), None, "{t:?}: New selection has no badge");
             assert_eq!(badge(&app, t, shift), Some(Badge::Add));
             assert_eq!(badge(&app, t, alt), Some(Badge::Subtract));
             assert_eq!(badge(&app, t, both), Some(Badge::Intersect));
         }
+        // With nothing selected the Lasso's Alt draws straight segments: no − badge.
+        app.run("select.deselect", serde_json::json!({})).unwrap();
+        assert_eq!(badge(&app, Tool::Lasso, alt), None);
+        assert_eq!(badge(&app, Tool::RectMarquee, alt), Some(Badge::Subtract));
         // The options bar's mode shows without any key held; keys still override it.
         app.ui.selection_mode = 2;
         assert_eq!(badge(&app, Tool::Lasso, none), Some(Badge::Subtract));

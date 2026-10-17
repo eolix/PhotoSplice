@@ -1,6 +1,7 @@
 //! Edit › Puppet Warp on the canvas: click on the mesh to add pins, drag pins to move them,
 //! ⌥-click a pin to remove it; the options bar sets mode, density, expansion, mesh visibility,
-//! the selected pin's depth and rotation. ↩ / Commit runs `edit.puppetWarp` with the pins.
+//! the selected pin's depth and rotation. ⌘Z / ⌘⇧Z undo and redo pin edits inside the session
+//! (#4440). ↩ / Commit runs `edit.puppetWarp` with the pins.
 //!
 //! The preview is the layer texture on the deformed triangle mesh (an egui textured mesh, drawn
 //! by the GPU), re-solved with a few warm-started ARAP rounds per drag event (well under a
@@ -37,9 +38,47 @@ pub struct PuppetSession {
     texture: TextureHandle,
     opacity: f32,
     pub preview_doc: Arc<Document>,
+    /// Pins before each edit of this session, newest last (⌘Z), and the edits undone (⌘⇧Z).
+    undo: Vec<Vec<PuppetPin>>,
+    redo: Vec<Vec<PuppetPin>>,
+    /// The pins when the current drag started: one undo step per drag that moved something.
+    drag_from: Option<Vec<PuppetPin>>,
 }
 
 impl PuppetSession {
+    /// Records `before` as one undoable pin edit.
+    fn record(&mut self, before: Vec<PuppetPin>) {
+        if before != self.warp.pins {
+            self.undo.push(before);
+            self.redo.clear();
+        }
+    }
+
+    /// Puts `pins` back (undo or redo), keeping the selection when that pin still exists.
+    fn restore(&mut self, pins: Vec<PuppetPin>) {
+        self.warp.pins = pins;
+        self.selected = self.selected.filter(|i| *i < self.warp.pins.len());
+        self.drag = None;
+        self.drag_from = None;
+        self.rebind();
+    }
+
+    /// ⌘Z: the last pin edit undone. False when there is none.
+    pub fn undo(&mut self) -> bool {
+        let Some(pins) = self.undo.pop() else { return false };
+        self.redo.push(std::mem::replace(&mut self.warp.pins, pins.clone()));
+        self.restore(pins);
+        true
+    }
+
+    /// ⌘⇧Z: the last undone pin edit redone. False when there is none.
+    pub fn redo(&mut self) -> bool {
+        let Some(pins) = self.redo.pop() else { return false };
+        self.undo.push(std::mem::replace(&mut self.warp.pins, pins.clone()));
+        self.restore(pins);
+        true
+    }
+
     pub fn describe(&self) -> Value {
         json!({
             "layer": self.layer.0,
@@ -56,6 +95,20 @@ impl PuppetSession {
     fn rebuild_mesh(&mut self) {
         self.mesh = build_mesh(&self.surface, self.bounds, self.warp.density, self.warp.expansion);
         self.rebind();
+    }
+
+    /// Remeshes for a new density or expansion. One that leaves no pixels is refused, as `begin`
+    /// refuses a layer without any: the previous `density` and `expansion` and their mesh come
+    /// back (#951).
+    fn remesh_or_restore(&mut self, density: PuppetDensity, expansion: f64) -> Result<(), String> {
+        self.rebuild_mesh();
+        if self.mesh.tris.is_empty() {
+            self.warp.density = density;
+            self.warp.expansion = expansion;
+            self.rebuild_mesh();
+            return Err("Could not use Puppet Warp: no opaque pixels at this density and expansion".into());
+        }
+        Ok(())
     }
 
     /// New solver for the current pin set (pins added/removed, rotation fixed or freed).
@@ -148,6 +201,9 @@ pub fn begin(app: &mut PhotospliceApp, ctx: &egui::Context, command: &str) -> Re
         texture,
         opacity,
         preview_doc,
+        undo: Vec::new(),
+        redo: Vec::new(),
+        drag_from: None,
     };
     s.rebuild_mesh();
     if s.mesh.tris.is_empty() {
@@ -178,7 +234,16 @@ pub fn control(app: &mut PhotospliceApp, ui: &Value) -> Result<Value, String> {
         return Ok(json!({"cancelled": true}));
     }
     let s = app.distort.puppet.as_mut().ok_or(tl!("Puppet Warp is not active"))?;
+    if ui.get("undo").and_then(Value::as_bool) == Some(true) {
+        s.undo();
+        return Ok(s.describe());
+    }
+    if ui.get("redo").and_then(Value::as_bool) == Some(true) {
+        s.redo();
+        return Ok(s.describe());
+    }
     let mut remesh = false;
+    let (density, expansion) = (s.warp.density, s.warp.expansion);
     if let Some(m) = ui.get("mode").and_then(Value::as_str) {
         s.warp.mode = PuppetMode::parse(m).ok_or("mode: rigid|normal|distort")?;
     }
@@ -194,7 +259,7 @@ pub fn control(app: &mut PhotospliceApp, ui: &Value) -> Result<Value, String> {
         s.show_mesh = v;
     }
     if remesh {
-        s.rebuild_mesh();
+        s.remesh_or_restore(density, expansion)?;
     } else {
         s.solve(true);
     }
@@ -207,14 +272,17 @@ pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers) {
     match ev {
         ToolEvent::Down { x, y, .. } => {
             let p = [x, y];
+            let before = s.warp.pins.clone();
             if let Some(i) = s.pin_at(p, tol) {
                 if mods.alt {
                     s.warp.pins.remove(i);
                     s.selected = None;
                     s.rebind();
+                    s.record(before);
                 } else {
                     s.selected = Some(i);
                     s.drag = Some(i);
+                    s.drag_from = Some(before);
                 }
             } else if !mods.alt
                 && let Some(src) = s.rest_of(p)
@@ -223,6 +291,8 @@ pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers) {
                 s.selected = Some(s.warp.pins.len() - 1);
                 s.drag = s.selected;
                 s.rebind();
+                // Placing a pin is one step; dragging it on from there is part of that step.
+                s.record(before);
             }
         }
         ToolEvent::Move { x, y, .. } => {
@@ -240,6 +310,9 @@ pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers) {
                     pin.dst = [x, y];
                 }
                 s.solve(true);
+                if let Some(before) = s.drag_from.take() {
+                    s.record(before);
+                }
             }
         }
     }
@@ -290,6 +363,8 @@ pub fn draw(s: &PuppetSession, painter: &egui::Painter, xf: &ViewXform) {
 
 pub fn options_bar(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
     let Some(s) = app.distort.puppet.as_mut() else { return };
+    // Pin depth, rotation and Remove All Pins are undoable pin edits too.
+    let pins_before = s.warp.pins.clone();
     let mut remesh = false;
     let mut resolve = false;
     let mut rebind = false;
@@ -314,6 +389,7 @@ pub fn options_bar(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
     );
     remesh |= density != s.warp.density;
     ui.label(tl!("Expansion:"));
+    let expansion = s.warp.expansion;
     let mut e = s.warp.expansion as f32;
     if crate::widgets::value_field(ui, &mut e, -50.0..=100.0, "px", 56.0).changed() {
         s.warp.expansion = f64::from(e);
@@ -353,8 +429,10 @@ pub fn options_bar(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
         s.selected = None;
         rebind = true;
     }
+    s.record(pins_before);
     if remesh {
-        s.rebuild_mesh();
+        // A refused value snaps the fields back to the previous settings.
+        let _ = s.remesh_or_restore(density, expansion);
     } else if rebind {
         s.rebind();
     } else if resolve {
@@ -375,6 +453,97 @@ pub fn options_bar(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #5092: a Puppet Warp session left open does not follow the user to a new document.
+    #[test]
+    fn session_is_dropped_when_another_document_becomes_active() {
+        let ctx = egui::Context::default();
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
+        app.session.execute("file.new", json!({"width": 100, "height": 80, "depth": 8})).unwrap();
+        app.session.execute("layer.new.layer", json!({})).unwrap();
+        app.session
+            .edit("paint", |doc, active| {
+                doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap().fill_rect(Rect::new(20, 30, 80, 50), &[1.0, 0.0, 0.0, 1.0]);
+                Ok(())
+            })
+            .unwrap();
+        app.sync_views();
+        crate::distort_ui::menu(&mut app, &ctx, "edit.puppetWarp", &json!({})).unwrap().unwrap();
+        crate::distort_ui::drop_foreign(&mut app);
+        assert!(app.distort.puppet.is_some());
+        app.session.execute("file.new", json!({"width": 32, "height": 32, "depth": 8})).unwrap();
+        assert!(crate::distort_ui::display_doc(&app, 1).is_some());
+        crate::distort_ui::drop_foreign(&mut app);
+        assert!(app.distort.puppet.is_none());
+        assert!(crate::distort_ui::display_doc(&app, 1).is_none());
+        // Closing the document it was started on drops it too.
+        assert!(app.session.set_active(0));
+        crate::distort_ui::menu(&mut app, &ctx, "edit.puppetWarp", &json!({})).unwrap().unwrap();
+        crate::distort_ui::drop_foreign(&mut app);
+        assert!(app.distort.puppet.is_some());
+        assert!(app.session.close(0).is_some());
+        crate::distort_ui::drop_foreign(&mut app);
+        assert!(app.distort.puppet.is_none());
+    }
+
+    /// #4440: ⌘Z / ⌘⇧Z undo and redo pin edits while Puppet Warp is open: placing a pin,
+    /// dragging one and removing one are a step each; a click that moves nothing isn't one.
+    #[test]
+    fn pin_edits_undo_and_redo_inside_the_session() {
+        let ctx = egui::Context::default();
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
+        app.session.execute("file.new", json!({"width": 100, "height": 80, "depth": 8})).unwrap();
+        app.session.execute("layer.new.layer", json!({})).unwrap();
+        app.session
+            .edit("paint", |doc, active| {
+                doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap().fill_rect(Rect::new(20, 30, 80, 50), &[1.0, 0.0, 0.0, 1.0]);
+                Ok(())
+            })
+            .unwrap();
+        app.sync_views();
+        crate::distort_ui::menu(&mut app, &ctx, "edit.puppetWarp", &json!({})).unwrap().unwrap();
+        let ev = |app: &mut PhotospliceApp, e| crate::distort_ui::pointer(app, e, egui::Modifiers::NONE);
+        let pins = |app: &PhotospliceApp| app.distort.puppet.as_ref().unwrap().warp.pins.iter().map(|p| p.dst).collect::<Vec<_>>();
+        ev(&mut app, ToolEvent::Down { x: 25.0, y: 40.0, pressure: 1.0 });
+        ev(&mut app, ToolEvent::Up { x: 25.0, y: 40.0 });
+        ev(&mut app, ToolEvent::Down { x: 75.0, y: 40.0, pressure: 1.0 });
+        ev(&mut app, ToolEvent::Up { x: 75.0, y: 40.0 });
+        // Drag the second pin up; then a click on it that moves nothing.
+        ev(&mut app, ToolEvent::Down { x: 75.0, y: 40.0, pressure: 1.0 });
+        ev(&mut app, ToolEvent::Move { x: 75.0, y: 30.0, pressure: 1.0 });
+        ev(&mut app, ToolEvent::Up { x: 75.0, y: 20.0 });
+        ev(&mut app, ToolEvent::Down { x: 75.0, y: 20.0, pressure: 1.0 });
+        ev(&mut app, ToolEvent::Up { x: 75.0, y: 20.0 });
+        crate::distort_ui::pointer(&mut app, ToolEvent::Down { x: 25.0, y: 40.0, pressure: 1.0 }, egui::Modifiers { alt: true, ..Default::default() });
+        assert_eq!(pins(&app), [[75.0, 20.0]]);
+        // ⌘Z, through the keyboard: the removed pin comes back, then the drag is undone.
+        let press = |app: &mut PhotospliceApp, modifiers: egui::Modifiers| {
+            let ev = egui::Event::Key { key: egui::Key::Z, physical_key: None, pressed: true, repeat: false, modifiers };
+            let input = egui::RawInput { events: vec![ev], ..Default::default() };
+            ctx.run_ui(input, |ui| assert!(crate::distort_ui::keys(app, ui.ctx()))).textures_delta.clear();
+        };
+        press(&mut app, egui::Modifiers::COMMAND);
+        assert_eq!(pins(&app), [[25.0, 40.0], [75.0, 20.0]]);
+        press(&mut app, egui::Modifiers::COMMAND);
+        assert_eq!(pins(&app), [[25.0, 40.0], [75.0, 40.0]], "the drag, not the click after it");
+        // ⌘⇧Z redoes it; a new edit after an undo drops what was undone.
+        press(&mut app, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT);
+        assert_eq!(pins(&app), [[25.0, 40.0], [75.0, 20.0]]);
+        control(&mut app, &json!({"undo": true})).unwrap();
+        control(&mut app, &json!({"undo": true})).unwrap();
+        assert_eq!(pins(&app), [[25.0, 40.0]]);
+        ev(&mut app, ToolEvent::Down { x: 50.0, y: 40.0, pressure: 1.0 });
+        ev(&mut app, ToolEvent::Up { x: 50.0, y: 40.0 });
+        control(&mut app, &json!({"redo": true})).unwrap();
+        assert_eq!(pins(&app), [[25.0, 40.0], [50.0, 40.0]], "nothing left to redo");
+        // Undo past the first pin stops there, and the document's History is untouched.
+        let past = app.session.active().unwrap().history.past_len();
+        for _ in 0..5 {
+            control(&mut app, &json!({"undo": true})).unwrap();
+        }
+        assert!(pins(&app).is_empty());
+        assert_eq!(app.session.active().unwrap().history.past_len(), past);
+    }
 
     #[test]
     fn pins_drag_and_commit_through_the_engine() {
@@ -417,5 +586,34 @@ mod tests {
         let st = app.session.active().unwrap();
         let b = st.doc.layer(st.active_layer.unwrap()).unwrap().surface().unwrap().content_bounds();
         assert!(b.y0 < 25, "the right end went up: {b:?}");
+    }
+
+    #[test]
+    fn an_expansion_that_empties_the_mesh_is_refused() {
+        // #951: remeshing to no vertices rebound the pins to a vertex that doesn't exist and
+        // panicked. -50 is the options bar's minimum and also empties this 20 px tall bar.
+        let ctx = egui::Context::default();
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
+        app.session.execute("file.new", json!({"width": 100, "height": 80, "depth": 8})).unwrap();
+        app.session.execute("layer.new.layer", json!({})).unwrap();
+        app.session
+            .edit("paint", |doc, active| {
+                doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap().fill_rect(Rect::new(20, 30, 80, 50), &[1.0, 0.0, 0.0, 1.0]);
+                Ok(())
+            })
+            .unwrap();
+        app.sync_views();
+        crate::distort_ui::menu(&mut app, &ctx, "edit.puppetWarp", &json!({})).unwrap().unwrap();
+        crate::distort_ui::pointer(&mut app, ToolEvent::Down { x: 50.0, y: 40.0, pressure: 1.0 }, egui::Modifiers::NONE);
+        crate::distort_ui::pointer(&mut app, ToolEvent::Up { x: 50.0, y: 40.0 }, egui::Modifiers::NONE);
+        let before = app.distort.puppet.as_ref().unwrap().describe();
+        for e in [-200, -50] {
+            assert!(control(&mut app, &json!({"expansion": e})).is_err(), "{e}");
+            assert_eq!(app.distort.puppet.as_ref().unwrap().describe(), before, "{e}: the previous settings and mesh stay");
+        }
+        // A smaller shrink still remeshes.
+        let v = control(&mut app, &json!({"expansion": -2})).unwrap();
+        assert_eq!(v["expansion"], -2.0);
+        assert!(v["triangles"].as_u64().unwrap() > 0);
     }
 }

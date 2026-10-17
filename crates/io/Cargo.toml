@@ -35,11 +35,14 @@ image = { workspace = true, features = ["png"] }
 # Layered PDF output (pure Rust, MIT OR Apache-2.0): paths, text in embedded subset fonts, images,
 # transparency groups. No text shaping of its own (ours is used).
 krilla = { version = "0.8", default-features = false, features = ["raster-images"] }
-# The Photoshop editing data added to a saved PDF (Flate streams).
+# The Photoshop editing data added to a saved PDF (Flate streams); svg.rs inflates `.svgz` itself
+# (with a size cap) so the XML can be checked before it is parsed; pdn.rs inflates Paint.NET's gzip
+# pixel chunks.
 flate2 = { workspace = true }
 # EXIF (camera, lens, exposure) read from and written for camera raw files.
 photosplice-algo = { workspace = true }
 photosplice-raw = { workspace = true }
+photosplice-affinity = { workspace = true }
 photosplice-text = { workspace = true }
 photosplice-paint = { workspace = true }
 photosplice-vector = { workspace = true }
@@ -47,8 +50,20 @@ photosplice-format = { path = "../format" }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
 blake3 = { version = "1.8", default-features = false, features = ["pure"] }
+# ora.rs reads OpenRaster's stack.xml (already in the tree through usvg).
+roxmltree = "0.20"
+# SVG import (svg.rs): usvg parses, resvg rasterises what the shape model can't hold. Both are
+# already in the tree through the UI's icon loader; text shaping needs the fonts feature set.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts", "raster-images"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+resvg = { version = "0.45", default-features = false, features = ["text", "raster-images"] }
 
 [dev-dependencies]
+crc32fast = "1.5"
+photosplice-affinity = { workspace = true, features = ["synth"] }
+flate2 = { workspace = true }
 photosplice-psd = { workspace = true, features = ["testgen"] }
 photosplice-raw = { workspace = true, features = ["testgen"] }
 proptest = { workspace = true }

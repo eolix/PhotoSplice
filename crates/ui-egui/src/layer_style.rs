@@ -4,12 +4,54 @@
 use egui::{Color32, RichText, Sense, Stroke, StrokeKind, vec2};
 use photosplice_color::ColorMode;
 use photosplice_doc::blend_if::BlendRange;
-use photosplice_doc::effects::{FxPaint, StrokePosition};
+use photosplice_doc::effects::{FxPaint, GlowSource, StrokePosition};
 use photosplice_doc::{Effect, Layer};
 use serde_json::{Map, Value, json};
 
 use crate::theme::Tokens;
 use crate::{PhotospliceApp, widgets};
+
+/// The hand-off to the separate Color Picker dialog that the shared dialog plumbing (dialogs,
+/// canvas preview, control channel) knows about. This dialog edits its colours in place, so a
+/// picker is never bound to it: nothing owns a picker, nothing is previewed, and opening one is
+/// reported as unsupported.
+pub(crate) mod color_picker {
+    use std::borrow::Cow;
+
+    use serde_json::{Map, Value};
+
+    use crate::PhotospliceApp;
+
+    pub(crate) fn owns(_fields: &Map<String, Value>) -> bool {
+        false
+    }
+
+    pub(crate) fn child_of(_fields: &Map<String, Value>, _parent: u64) -> bool {
+        false
+    }
+
+    pub(crate) fn has_child(_app: &PhotospliceApp, _parent: u64) -> bool {
+        false
+    }
+
+    pub(crate) fn open(_app: &mut PhotospliceApp, _parent: u64, _effect: &str, _field: &str) -> Result<u64, String> {
+        Err("unsupported: Layer Style colours are edited in the dialog".into())
+    }
+
+    pub(crate) fn take_request(_app: &mut PhotospliceApp, _parent: u64) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub(crate) fn preview_fields<'a>(_app: &PhotospliceApp, _parent: u64, fields: &'a Map<String, Value>) -> Cow<'a, Map<String, Value>> {
+        Cow::Borrowed(fields)
+    }
+
+    pub(crate) fn confirm(_app: &mut PhotospliceApp, _fields: &Map<String, Value>) -> Result<Value, String> {
+        Err("unsupported: no Layer Style colour picker is open".into())
+    }
+
+    pub(crate) fn prune(_app: &mut PhotospliceApp) {}
+}
 
 #[derive(Clone, Copy)]
 enum P {
@@ -282,6 +324,10 @@ fn values_of(e: &Effect, light: f32) -> Value {
             set(&mut v, if matches!(e, Effect::OuterGlow(_)) { "spread" } else { "choke" }, json!((g.spread * 100.0).round()));
             set(&mut v, "size", json!(g.size));
             set(&mut v, "range", json!((g.range * 100.0).round()));
+            if matches!(e, Effect::InnerGlow(_)) {
+                // Shown, so a Center glow isn't turned into an Edge one on OK.
+                set(&mut v, "source", json!(if g.source == GlowSource::Center { "center" } else { "edge" }));
+            }
         }
         Effect::Stroke(s) => {
             set(&mut v, "blend", json!(s.common.blend.label()));
@@ -434,12 +480,98 @@ pub fn initial_fields(layer: &Layer, mode: ColorMode, select: Option<&str>, ligh
 }
 
 pub fn open(app: &mut PhotospliceApp, select: Option<&str>) -> Option<u64> {
+    // An open Free Transform box is applied first, as in Photoshop (#4821): the canvas shows the
+    // box's preview while it is open, so the dialog's preview would not show until Enter.
+    if app.ui.transform.is_some() {
+        crate::transform_tool::commit(app);
+        if app.ui.transform.is_some() && crate::transform_tool::committing(app).is_none() {
+            return None; // refused: the box stays open, with the reason in the status bar
+        }
+    }
     let st = app.session.active()?;
     let layer = st.doc.layer(st.active_layer?)?.clone();
     let light = st.doc.global_light.angle;
     let mut f = initial_fields(&layer, st.doc.mode, select, light);
     f.insert("patternList".into(), pattern_list(app));
     Some(app.ui.open_dialog(crate::state::DialogKind::LayerStyle, f))
+}
+
+/// Double-click on an effect row of the Layers panel: open Layer Style for that row's layer. A
+/// row of another layer selects it first, as its right-click menu does (Photoshop does the same).
+pub fn open_for_layer(app: &mut PhotospliceApp, layer: photosplice_doc::LayerId, select: Option<&str>) -> Option<u64> {
+    let active = app.session.active().is_some_and(|s| s.active_layer == Some(layer));
+    if !active {
+        app.run("layer.select", json!({"layer": layer.0})).ok()?;
+    }
+    open(app, select)
+}
+
+/// Sets `key` in row `row`'s params, sharing the angle between globally lit rows
+/// ([`share_global_light`]).
+fn set_row_param(f: &mut Map<String, Value>, row: &str, key: &str, value: Value) {
+    let Some(p) = f.get_mut(&format!("p:{row}")).and_then(Value::as_object_mut) else { return };
+    p.insert(key.into(), value);
+    share_global_light(f, row, key);
+}
+
+/// Every row that uses the global light shows one angle, as in Photoshop (off rows too): after
+/// `key` changed on `row`, an edited angle becomes theirs, and a row switched to Use Global Light
+/// takes the angle the others share (else the document's).
+fn share_global_light(f: &mut Map<String, Value>, row: &str, key: &str) {
+    let global = |v: &Value| v.get("useGlobalLight").and_then(Value::as_bool) == Some(true);
+    let me = format!("p:{row}");
+    let Some(p) = f.get(&me).filter(|p| global(p)) else { return };
+    let angle = match key {
+        "angle" => p.get("angle").cloned(),
+        "useGlobalLight" => f
+            .iter()
+            .filter(|(k, v)| k.starts_with("p:") && **k != me && global(v))
+            .find_map(|(_, v)| v.get("angle").cloned())
+            .or_else(|| f.get("globalLight").cloned()),
+        _ => None,
+    };
+    let Some(angle) = angle.filter(|a| a.as_f64().is_some_and(f64::is_finite)) else { return };
+    for (k, v) in f.iter_mut() {
+        if k.starts_with("p:")
+            && global(v)
+            && let Some(o) = v.as_object_mut()
+        {
+            o.insert("angle".into(), angle.clone());
+        }
+    }
+}
+
+/// Whether the selected page is a Drop Shadow or Inner Shadow, which a drag on the image moves
+/// while the dialog is open, as in Photoshop (#5701; [`drag_shadow`]).
+pub fn drags_shadow(f: &Map<String, Value>) -> bool {
+    let selected = f.get("selected").and_then(Value::as_str).unwrap_or_default();
+    matches!(base_kind(selected), "dropShadow" | "innerShadow") && f.get(&format!("p:{selected}")).is_some_and(Value::is_object)
+}
+
+/// A drag on the image with a shadow page selected: `start` is true on the press (it records the
+/// shadow's angle and distance then), `total` the pointer's movement since in document pixels.
+/// The shadow's offset follows the pointer, kept as a whole-degree angle and whole-pixel distance
+/// (offset = (−cos angle, sin angle) × distance, the light opposite the shadow); with Use Global
+/// Light the shared angle moves too.
+pub fn drag_shadow(f: &mut Map<String, Value>, start: bool, total: [f64; 2]) {
+    const KEY: &str = "__shadowDrag";
+    let Some(row) = f.get("selected").and_then(Value::as_str).map(str::to_string).filter(|_| drags_shadow(f)) else { return };
+    let Some(p) = f.get(&format!("p:{row}")) else { return };
+    if start || f.get(KEY).is_none() {
+        let angle = p.get("angle").and_then(Value::as_f64).unwrap_or(120.0);
+        let distance = p.get("distance").and_then(Value::as_f64).unwrap_or(0.0);
+        f.insert(KEY.into(), json!([angle, distance]));
+    }
+    let Some([angle, distance]) = f.get(KEY).and_then(Value::as_array).and_then(|a| Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?])) else { return };
+    let a = angle.to_radians();
+    let (ox, oy) = (-a.cos() * distance + total[0], a.sin() * distance + total[1]);
+    let d = ox.hypot(oy);
+    if !d.is_finite() {
+        return;
+    }
+    let new_angle = if d >= 0.5 { oy.atan2(-ox).to_degrees().round() } else { angle };
+    set_row_param(f, &row, "angle", json!(new_angle));
+    set_row_param(f, &row, "distance", json!(d.round().clamp(0.0, 30000.0)));
 }
 
 /// `[[id, name], …]` of the patterns a style can use (document's, then the library's).
@@ -612,7 +744,7 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>, patterns: &photosplic
                             egui::Align2::LEFT_CENTER,
                             tl!(label),
                             egui::FontId::proportional(12.5),
-                            if on || is_sel { t.text } else { t.text_dim },
+                            fx_label_color(on, &t),
                         );
                         if plus.is_some_and(|p| p.clicked()) {
                             action = Some(RowAction::Add(row.clone()));
@@ -666,6 +798,7 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>, patterns: &photosplic
             let params = f.get(&pkey).cloned().unwrap_or_else(|| defaults(kind));
             // A group that isn't an object keeps its value and draws no controls.
             if let Some(mut p) = params.as_object().map(|o| Value::Object(o.clone())) {
+                let before = p.clone();
                 for &(key, label, kind) in spec(kind) {
                     match (selected.as_str(), key) {
                         (BLENDING, "blend") => group(ui, "General Blending", false),
@@ -693,8 +826,11 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>, patterns: &photosplic
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new(tl!(&label)).color(t.text_dim));
                                 let mut cur = p.get(key).and_then(Value::as_str).unwrap_or("Normal").to_string();
+                                // The reference's modes, plus the layer's own Paint.NET mode when it
+                                // has one (an imported .pdn), so the list shows what it is.
+                                let own = photosplice_color::BlendMode::PAINT_NET_MODES.into_iter().find(|m| m.label() == cur);
                                 let opts: Vec<(String, &str)> =
-                                    photosplice_color::BlendMode::LAYER_MODES.iter().map(|m| (m.label().to_string(), m.label())).collect();
+                                    photosplice_color::BlendMode::LAYER_MODES.into_iter().chain(own).map(|m| (m.label().to_string(), m.label())).collect();
                                 if widgets::dropdown(ui, &format!("fx-blend-{selected}"), &mut cur, &opts, 150.0) {
                                     p[key] = json!(cur);
                                 }
@@ -745,7 +881,11 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>, patterns: &photosplic
                 if selected == BLENDING {
                     advanced_blending(ui, f, &mut p);
                 }
+                let shared = ["angle", "useGlobalLight"].into_iter().find(|k| before.get(*k) != p.get(*k));
                 f.insert(pkey, p);
+                if let Some(key) = shared {
+                    share_global_light(f, &selected, key);
+                }
             }
         });
         seps.push(gap(ui));
@@ -808,6 +948,12 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>, patterns: &photosplic
     for x in seps {
         ui.painter().line_segment([egui::pos2(x, r.top()), egui::pos2(x, r.bottom())], Stroke::new(1.0, t.separator));
     }
+}
+
+/// Disabled effects keep their muted labels even when their page stays selected: selecting a
+/// page is distinct from enabling its effect (#2288).
+fn fx_label_color(enabled: bool, t: &Tokens) -> Color32 {
+    if enabled { t.text } else { t.text_dim }
 }
 
 /// What the effect list's "+" and its buttons below do to a row.
@@ -1451,5 +1597,98 @@ mod tests {
         .unwrap();
 
         assert!(!commands.iter().any(|cmd| cmd == "layer.layerStyle.globalLight"));
+    }
+
+    #[test]
+    fn dragging_on_the_image_moves_the_selected_shadow() {
+        let l = Layer::raster("x", photosplice_doc::PixelFormat::RGBA8);
+        let mut f = initial_fields(&l, ColorMode::Rgb, Some("dropShadow"), 120.0);
+        assert!(drags_shadow(&f));
+        f["p:dropShadow"]["useGlobalLight"] = json!(false);
+        f["p:dropShadow"]["angle"] = json!(90.0);
+        f["p:dropShadow"]["distance"] = json!(10.0);
+        // The shadow sits 10 px below; dragging 10 px right puts it at (10, 10).
+        drag_shadow(&mut f, true, [10.0, 0.0]);
+        assert_eq!((f["p:dropShadow"]["angle"].as_f64(), f["p:dropShadow"]["distance"].as_f64()), (Some(135.0), Some(14.0)));
+        // Movements are measured from the press, not added up.
+        drag_shadow(&mut f, false, [0.0, 0.0]);
+        assert_eq!((f["p:dropShadow"]["angle"].as_f64(), f["p:dropShadow"]["distance"].as_f64()), (Some(90.0), Some(10.0)));
+        drag_shadow(&mut f, false, [f64::NAN, 0.0]);
+        assert_eq!(f["p:dropShadow"]["distance"].as_f64(), Some(10.0), "no NaN reaches the params");
+        // With Use Global Light the shared angle moves too.
+        f["p:dropShadow"]["useGlobalLight"] = json!(true);
+        drag_shadow(&mut f, true, [10.0, 0.0]);
+        assert_eq!(f["p:bevelEmboss"]["angle"].as_f64(), Some(135.0));
+        // Other pages don't take the drag.
+        f.insert("selected".into(), json!("stroke"));
+        assert!(!drags_shadow(&f));
+        let before = f.clone();
+        drag_shadow(&mut f, true, [50.0, 50.0]);
+        assert_eq!(f, before);
+    }
+
+    #[test]
+    fn globally_lit_rows_share_one_angle() {
+        let l = Layer::raster("x", photosplice_doc::PixelFormat::RGBA8);
+        let mut f = initial_fields(&l, ColorMode::Rgb, None, 120.0);
+        set_row_param(&mut f, "dropShadow", "angle", json!(30.0));
+        assert_eq!(f["p:bevelEmboss"]["angle"].as_f64(), Some(30.0));
+        assert_eq!(f["p:innerShadow"]["angle"].as_f64(), Some(30.0));
+        assert_eq!(f["p:satin"]["angle"].as_f64(), Some(19.0), "satin has no global light");
+        // A local angle stays its own; switching back to the global light takes the shared one.
+        set_row_param(&mut f, "innerShadow", "useGlobalLight", json!(false));
+        set_row_param(&mut f, "innerShadow", "angle", json!(-45.0));
+        assert_eq!(f["p:dropShadow"]["angle"].as_f64(), Some(30.0));
+        set_row_param(&mut f, "innerShadow", "useGlobalLight", json!(true));
+        assert_eq!(f["p:innerShadow"]["angle"].as_f64(), Some(30.0));
+        // OK sets the document's light to the shared angle.
+        let (mut s, _) = styled_session(json!([]));
+        let id = s.active().unwrap().active_layer.unwrap();
+        f.insert("layer".into(), json!(id.0));
+        f.insert("on:dropShadow".into(), json!(true));
+        apply(&f, |cmd, p| s.execute(cmd, p).map_err(|e| e.to_string())).unwrap();
+        assert_eq!(s.active().unwrap().doc.global_light.angle, 30.0);
+    }
+
+    /// Double-clicking an effect row of a layer that isn't active selects that layer first, so
+    /// the dialog holds its effects (and OK edits it), not the active layer's.
+    #[test]
+    fn effect_row_of_another_layer_opens_that_layers_style() {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
+        app.run("layer.new.layer", json!({})).unwrap();
+        let with_fx = app.session.active().unwrap().active_layer.unwrap();
+        app.run("layer.layerStyle.replace", json!({"layer": with_fx.0, "effects": [{"kind": "dropShadow", "params": defaults("dropShadow")}]})).unwrap();
+        app.run("layer.new.layer", json!({})).unwrap();
+        let plain = app.session.active().unwrap().active_layer.unwrap();
+        assert_ne!(plain, with_fx);
+
+        let id = open_for_layer(&mut app, with_fx, Some("dropShadow")).unwrap();
+        assert_eq!(app.session.active().unwrap().active_layer, Some(with_fx), "the row's layer becomes active");
+        let d = app.ui.dialogs.iter().find(|d| d.id == id).unwrap();
+        assert_eq!(d.fields["layer"], json!(with_fx.0));
+        assert!(d.fields["fx:dropShadow"].is_object(), "the existing drop shadow");
+        assert!(!d.fields.contains_key("rows:dropShadow"), "not a second instance");
+    }
+
+    /// #2288: the selected effect row must dim again when its checkbox is cleared.
+    #[test]
+    fn disabled_effect_row_uses_muted_text_even_when_selected() {
+        for theme in crate::theme::ThemeKind::ALL {
+            let tokens = Tokens::for_kind(theme);
+            assert_eq!(fx_label_color(true, &tokens), tokens.text, "{theme:?}: checked");
+            assert_eq!(fx_label_color(false, &tokens), tokens.text_dim, "{theme:?}: unchecked");
+        }
+    }
+
+    /// The dialog shows a Center-source Inner Glow as Center, and OK keeps it.
+    #[test]
+    fn inner_glow_center_source_survives_ok() {
+        let (mut s, layer) = styled_session(json!([{"kind": "innerGlow", "params": {"source": "center"}}]));
+        let f = initial_fields(&layer, ColorMode::Rgb, None, 120.0);
+        assert_eq!(f["p:innerGlow"]["source"], json!("center"));
+        apply(&f, |cmd, p| s.execute(cmd, p).map_err(|e| e.to_string())).unwrap();
+        let fx = &s.active().unwrap().doc.layer(layer.id).unwrap().effects.items;
+        assert!(fx.iter().any(|e| matches!(e, Effect::InnerGlow(g) if g.source == GlowSource::Center)), "{fx:?}");
     }
 }

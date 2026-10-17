@@ -1,17 +1,22 @@
 //! Photoshop gradient appearance → dense linear stops.
 //!
 //! Photoshop interpolates gradient colours with a *Smoothness* setting (0–100 %) and, since the
-//! 2023 releases, an interpolation *method* (Perceptual / Linear / Classic). The compositors
+//! 2023 releases, an interpolation *method* (Smooth / Perceptual / Linear / Classic). The compositors
 //! interpolate stops linearly in sRGB, so on import we sample Photoshop's curve into dense stops.
 //! The model was fitted to Photoshop's own composites in the test corpus (clean-room, from
 //! pixels): Smoothness blends linear interpolation with a Catmull-Rom spline through the stop
 //! colours (end tangents at half the chord slope); Perceptual interpolates in Oklab, Linear in
 //! linear light, Classic in sRGB. Stop midpoints remap each segment piecewise-linearly.
+//! Smooth (Photoshop's default since 2024) goes straight across each segment in Oklab with its own
+//! easing, measured on Photoshop 27.11 (scripted gradients, sampled every 8 px on three colour
+//! pairs: the same curve for each pair, and Smoothness doesn't change it). The curve fits no simple
+//! formula, so it is kept as the measured table [`SMOOTH_EASE`].
 
 use photosplice_color::{Color, ColorMode};
 
+/// Photoshop's gradient interpolation methods.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Method {
+pub enum Method {
     Classic,
     Perceptual,
     Linear,
@@ -21,6 +26,16 @@ pub(crate) enum Method {
 }
 
 impl Method {
+    /// The method a command names (`classic`, `perceptual`, `linear`, `smooth`); `None` otherwise.
+    pub fn from_name(name: &str) -> Option<Method> {
+        match name.to_ascii_lowercase().as_str() {
+            "classic" => Some(Method::Classic),
+            "perceptual" => Some(Method::Perceptual),
+            "linear" => Some(Method::Linear),
+            "smooth" => Some(Method::Smooth),
+            _ => None,
+        }
+    }
     pub(crate) fn from_code(code: Option<&[u8]>) -> Method {
         match code {
             Some(b"Perc") => Method::Perceptual,
@@ -95,12 +110,15 @@ fn smooth_ease(u: f32) -> f32 {
 /// Colour at `t` for sorted stops (positions in 0..1) in `m`'s space.
 fn eval(stops: &[(f32, [f32; 3])], mids: &[f32], smooth: f32, t: f32, m: Method) -> [f32; 3] {
     let n = stops.len();
-    if t <= stops[0].0 {
-        return stops[0].1;
+    let (Some(first), Some(last)) = (stops.first(), stops.last()) else { return [0.0; 3] };
+    // A lone stop (even at a NaN position, which neither test below catches) is the colour.
+    if t <= first.0 || n < 2 {
+        return first.1;
     }
-    if t >= stops[n - 1].0 {
-        return stops[n - 1].1;
+    if t >= last.0 {
+        return last.1;
     }
+    // From here `stops[i + 1]` and the tangents' `n - 2` are in range: `i < n - 1` and `n >= 2`.
     let i = stops.windows(2).position(|w| t >= w[0].0 && t <= w[1].0).unwrap_or(0);
     let (t0, t1) = (stops[i].0, stops[i + 1].0);
     let h = (t1 - t0).max(1e-6);
@@ -131,13 +149,15 @@ fn eval(stops: &[(f32, [f32; 3])], mids: &[f32], smooth: f32, t: f32, m: Method)
         let linear = p0[c] + (p1[c] - p0[c]) * u;
         // Kept between the segment's two stop colours (Reference corpus gradient-map.psd: blue
         // 80 → 60 → 160 holds 60 before the middle stop, where the spline dips to 57).
-        let spline = (h00 * p0[c] + h10 * h * m0[c] + h01 * p1[c] + h11 * h * m1[c]).clamp(p0[c].min(p1[c]), p0[c].max(p1[c]));
+        // Catmull-Rom tangents can overshoot neighbouring stops, turning even a flat segment into
+        // a dip. A NaN or infinite stop leaves the bounds unusable (clamp would panic), so skip it.
+        let spline = h00 * p0[c] + h10 * h * m0[c] + h01 * p1[c] + h11 * h * m1[c];
+        let (lo, hi) = (p0[c].min(p1[c]), p0[c].max(p1[c]));
+        let spline = if lo.is_finite() && hi.is_finite() { spline.clamp(lo, hi) } else { spline };
         linear + (spline - linear) * smooth
     })
 }
 
-/// Dense linear stops reproducing Photoshop's interpolation. Returns the input unchanged when it
-/// already interpolates linearly in sRGB.
 /// CMYK stops (all of them CMYK, Classic method) baked like [`bake`] but in inks (C, M, Y, K,
 /// 1 = full ink), as Photoshop interpolates them in a CMYK document; `None` otherwise.
 pub(crate) fn bake_inks(stops: &[(f32, Color)], midpoints: &[f32], smoothness: f32, method: Method) -> Option<Vec<(f32, [f32; 4])>> {
@@ -169,7 +189,9 @@ pub(crate) fn bake_keeping_inks(stops: Vec<(f32, Color)>, midpoints: &[f32], smo
     inks.into_iter().map(|(t, c)| (t, Color { mode: ColorMode::Cmyk, c, alpha: alpha(t) })).collect()
 }
 
-pub(crate) fn bake(stops: Vec<(f32, Color)>, midpoints: &[f32], smoothness: f32, method: Method) -> Vec<(f32, Color)> {
+/// Dense linear stops reproducing Photoshop's interpolation. Returns the input unchanged when it
+/// already interpolates linearly in sRGB.
+pub fn bake(stops: Vec<(f32, Color)>, midpoints: &[f32], smoothness: f32, method: Method) -> Vec<(f32, Color)> {
     let plain_mids = midpoints.iter().all(|m| (m - 0.5).abs() < 1e-3);
     // Classic interpolates in the stops' own model: Lab stops (Lab documents) blend in L*a*b*, which the
     // compositors' sRGB interpolation can't reproduce (psd-tools 4x4_16bit_lab).
@@ -257,6 +279,16 @@ mod tests {
     }
 
     #[test]
+    fn smoothness_does_not_overshoot_a_flat_stop_segment() {
+        let gray = |v: f32| Color::rgb(v, v, v);
+        let dark = 28.0 / 255.0;
+        let stops = vec![(0.0, gray(202.0 / 255.0)), (0.27, gray(dark)), (0.53, gray(dark)), (0.72, gray(148.0 / 255.0))];
+        let baked = bake(stops, &[0.5, 0.5, 0.5], 1.0, Method::Classic);
+        let sample = at(&baked, 0.4);
+        assert!(sample.iter().all(|v| (*v - dark).abs() < 1e-4), "flat segment dipped below its stops: {sample:?}");
+    }
+
+    #[test]
     fn perceptual_matches_photoshop_sample() {
         // Measured from Photoshop's composite (ag-psd gradient-mode): orange→blue, Perceptual,
         // 100 % smoothness; at t≈0.491 Photoshop shows (0.592, 0.612, 0.596).
@@ -269,6 +301,31 @@ mod tests {
         let p = at(&s, 0.113);
         for (got, want) in p.iter().zip([0.839f32, 0.608, 0.290]) {
             assert!((got - want).abs() < 0.012, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn smooth_matches_photoshop() {
+        // Photoshop 27.11, Gradient tool, Method Smooth, dither off, 256 px wide, every 32 px.
+        type Row = (&'static str, [f32; 3], [f32; 3], [[u8; 3]; 8]);
+        let measured: [Row; 2] = [
+            ("black→white", [0.0; 3], [1.0; 3], [[0; 3], [4; 3], [29; 3], [63; 3], [99; 3], [137; 3], [179; 3], [221; 3]]),
+            (
+                "red→blue",
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [[255, 0, 0], [232, 51, 67], [202, 71, 105], [171, 81, 136], [140, 83, 162], [109, 80, 188], [76, 69, 213], [41, 49, 236]],
+            ),
+        ];
+        for (name, a, b, want) in measured {
+            let s = bake(vec![(0.0, Color::rgb(a[0], a[1], a[2])), (1.0, Color::rgb(b[0], b[1], b[2]))], &[0.5], 1.0, Method::Smooth);
+            for (k, w) in want.iter().enumerate() {
+                let x = k * 32;
+                let got = at(&s, (x as f32 + 0.5) / 256.0).map(|v| (v * 255.0).round() as i32);
+                for c in 0..3 {
+                    assert!((got[c] - i32::from(w[c])).abs() <= 2, "{name} x {x}: {got:?} vs Photoshop {w:?}");
+                }
+            }
         }
     }
 
@@ -290,5 +347,15 @@ mod tests {
     fn midpoint_shifts_the_half_way_colour() {
         let s = bake(vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], &[0.25], 0.0, Method::Classic);
         assert!((at(&s, 0.25)[0] - 0.5).abs() < 0.01);
+    }
+
+    /// `eval` guards its own stops instead of relying on `bake`'s two-stop check.
+    #[test]
+    fn eval_with_fewer_than_two_stops_does_not_index_out_of_range() {
+        assert_eq!(eval(&[], &[], 1.0, 0.5, Method::Smooth), [0.0; 3]);
+        let lone = [(f32::NAN, [0.25, 0.5, 0.75])];
+        for m in [Method::Classic, Method::Smooth] {
+            assert_eq!(eval(&lone, &[], 1.0, 0.5, m), [0.25, 0.5, 0.75]);
+        }
     }
 }

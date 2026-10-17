@@ -123,8 +123,9 @@ fn vertical_orientation_renders_columns_inside_the_canvas() {
     assert!(l.vertical && l.lines.len() == 2);
     let [x0, y0, x1, y1] = l.bounds().unwrap();
     assert!(x1 > 0.0 && x0 < -40.0 && y0 >= -1e-3 && y1 > 60.0, "{:?}", l.bounds());
-    // Bad layer ids fail cleanly.
-    assert!(s.execute("type.orientation.vertical", json!({"layer": 9999})).is_err());
+    // Bad layer ids fail cleanly. Not a small number like 9999: ids come from one process-wide
+    // counter, so in a full test run a layer made above can get it (#3343).
+    assert!(s.execute("type.orientation.vertical", json!({"layer": u64::MAX})).is_err());
 }
 
 #[test]
@@ -296,4 +297,120 @@ fn rasterize_type_layer() {
     s.execute("type.rasterizeTypeLayer", json!({})).unwrap();
     assert!(matches!(s.active().unwrap().doc.layer(id).unwrap().content, LayerContent::Raster(_)));
     assert!(!s.is_enabled("type.rasterizeTypeLayer"));
+}
+
+#[test]
+fn type_attaches_to_a_path_and_releases_it() {
+    let mut s = session(8);
+    let id = text_layer(&mut s, "Hello path");
+    assert!(s.is_enabled("type.attachToPath"));
+    assert!(!s.is_enabled("type.detachFromPath"));
+    // No work path yet, a bad subpath and bad params are errors, not panics.
+    assert!(s.execute("type.attachToPath", json!({})).is_err());
+    let flat = ink(&s, id);
+    s.edit("path", |doc, _| {
+        doc.work_path = Some(Path::new(vec![Subpath::polyline(&[(150.0, 10.0), (150.0, 110.0)])]));
+        Ok(())
+    })
+    .unwrap();
+    assert!(s.execute("type.attachToPath", json!({"subpath": 5})).is_err());
+    assert!(s.execute("type.attachToPath", json!({"start": "far"})).is_err());
+    assert!(s.execute("type.attachToPath", json!({"shape": u64::MAX})).is_err());
+    s.execute("type.attachToPath", json!({"start": 4})).unwrap();
+    assert!(matches!(text(&s, id).shape, TextShape::Path { start, .. } if start == 4.0));
+    let on_path = ink(&s, id);
+    assert!(on_path.height() > on_path.width(), "the type runs down the vertical path: {on_path:?}");
+    assert!(on_path.height() > flat.height());
+    assert!(!s.is_enabled("type.convertToPointText"));
+    s.execute("type.detachFromPath", json!({})).unwrap();
+    assert_eq!(text(&s, id).shape, TextShape::Point);
+    assert!(ink(&s, id).width() > ink(&s, id).height());
+    assert!(s.undo());
+    assert!(matches!(text(&s, id).shape, TextShape::Path { .. }));
+}
+
+#[test]
+fn all_locked_layer_rejects_paste_lorem_ipsum_without_history() {
+    // #4188: Lock All stopped type.edit (#3132) but not Paste Lorem Ipsum into the layer.
+    let mut s = session(8);
+    let id = text_layer(&mut s, "Hi");
+    s.execute("layer.setProps", json!({"layer": id.0, "locked": true})).unwrap();
+    let history = s.active().unwrap().history.past_len();
+    for params in [json!({}), json!({"layer": id.0})] {
+        let result = s.execute("type.pasteLoremIpsum", params);
+        assert!(matches!(&result, Err(EngineError::Other(message)) if message.contains("locked")), "{result:?}");
+        assert_eq!(text(&s, id).text, "Hi");
+        assert_eq!(s.active().unwrap().history.past_len(), history);
+    }
+}
+
+/// A type layer stored with a family label that is not installed, as a PSD keeps the family it
+/// guessed from a PostScript name whose face was absent when the file was opened.
+fn guessed_family_layer(s: &mut Session, text: &str, ps: Option<&str>) -> (LayerId, Value) {
+    let mut p = json!({"x": 20, "y": 70, "text": text, "font": "Imported Wrong Family"});
+    if let Some(ps) = ps {
+        p["postscriptName"] = json!(ps);
+    }
+    let r = s.execute("type.create", p).unwrap();
+    (LayerId(r["layer"].as_u64().unwrap()), r)
+}
+
+#[test]
+fn installed_postscript_face_is_not_missing_or_replaced() {
+    // Opening a PSD corrects the label when the face is installed; a run set by command, or one
+    // reopened from .pcraft after its face was installed, keeps it.
+    let mut s = session(8);
+    let (id, created) = guessed_family_layer(&mut s, "test", Some("Inter-SemiBold"));
+    let bytes = photosplice_format::save_to_bytes(&s.active().unwrap().doc, &Default::default()).unwrap();
+    let reopened = photosplice_io::import("reopened.pcraft", &bytes).unwrap().document;
+    let LayerContent::Text(t) = &reopened.layer(id).unwrap().content else { panic!("text") };
+    assert_eq!(t.char_runs()[0].style.font_family, "Imported Wrong Family", ".pcraft open keeps the stored label");
+    let on_open = missing_font_warnings(&reopened);
+    s.add_document(reopened, None);
+    let replaced = s.execute("type.replaceAllMissingFonts", json!({})).unwrap()["replaced"].clone();
+    assert_eq!((created.get("warnings"), on_open, replaced), (None, Vec::<String>::new(), json!(0)));
+}
+
+#[test]
+fn replacing_missing_family_preserves_a_resolved_run_with_the_same_label() {
+    let mut s = session(8);
+    let (good, _) = guessed_family_layer(&mut s, "good", Some("Inter-SemiBold"));
+    let (bad, _) = guessed_family_layer(&mut s, "bad", None);
+    assert_eq!(s.execute("type.replaceAllMissingFonts", json!({})).unwrap()["replaced"], 1);
+    assert_eq!(text(&s, good).char_runs()[0].style.postscript_name.as_deref(), Some("Inter-SemiBold"));
+    assert_eq!(text(&s, bad).char_runs()[0].style.font_family, "Inter");
+}
+
+/// `source` renamed in memory to `family` with the PostScript name `ps`; no font file is added.
+fn renamed_face(source: &[u8], family: &str, ps: &str) -> Vec<u8> {
+    let mut bytes = source.to_vec();
+    let count = u16::from_be_bytes([bytes[4], bytes[5]]) as usize;
+    let record = (0..count).map(|i| 12 + i * 16).find(|r| &bytes[*r..*r + 4] == b"name").unwrap();
+    let names = [(1u16, family), (2, "Regular"), (6, ps), (16, family), (17, "Regular")];
+    let mut table: Vec<u8> = [0u16, names.len() as u16, (6 + names.len() * 12) as u16].iter().flat_map(|v| v.to_be_bytes()).collect();
+    let mut strings = Vec::new();
+    for (id, value) in names {
+        let encoded: Vec<u8> = value.encode_utf16().flat_map(u16::to_be_bytes).collect();
+        for n in [3, 1, 0x409, id, encoded.len() as u16, strings.len() as u16] {
+            table.extend(n.to_be_bytes());
+        }
+        strings.extend(encoded);
+    }
+    table.extend(strings);
+    let offset = bytes.len() as u32;
+    bytes[record + 8..record + 12].copy_from_slice(&offset.to_be_bytes());
+    bytes[record + 12..record + 16].copy_from_slice(&(table.len() as u32).to_be_bytes());
+    bytes.extend(table);
+    bytes
+}
+
+#[test]
+fn exact_postscript_face_outside_the_guessed_family_is_not_missing() {
+    let mut fonts = photosplice_text::FontDb::new();
+    fonts.register_font_data(renamed_face(&photosplice_text::fonts::INTER_REGULAR, "Exact Only Test", "UnrelatedPS30"));
+    let style =
+        |ps: &str| photosplice_doc::text::CharStyle { font_family: "Imported Wrong Family".into(), postscript_name: Some(ps.into()), ..Default::default() };
+    // Neither the stored family nor the family guessed from the name is installed: only the exact face.
+    assert!(!fonts.has_family(&photosplice_text::fonts::guess_from_postscript("UnrelatedPS30").family));
+    assert_eq!((style_font_missing(&mut fonts, &style("UnrelatedPS30")), style_font_missing(&mut fonts, &style("UnrelatedPS31"))), (false, true));
 }

@@ -22,6 +22,22 @@ fn default_dir(app: &PhotospliceApp) -> String {
     app.session.active().and_then(|d| d.path.as_deref()).and_then(|p| p.rfind(['/', '\\']).map(|i| p[..i].to_string())).unwrap_or_else(|| ".".into())
 }
 
+/// A packaged macOS app does not start in a useful writable working directory. A saved
+/// document keeps its own folder; otherwise prefer the user's Documents folder.
+fn droplet_default_dir(app: &PhotospliceApp) -> String {
+    let dir = default_dir(app);
+    if dir != "." {
+        return dir;
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = std::path::PathBuf::from(home);
+        let documents = home.join("Documents");
+        return if documents.is_dir() { documents } else { home }.to_string_lossy().into_owned();
+    }
+    dir
+}
+
 fn doc_stem(app: &PhotospliceApp) -> String {
     app.session.active().map(|d| d.doc.name.rsplit_once('.').map_or(d.doc.name.clone(), |(a, _)| a.to_string())).unwrap_or_else(|| tl!("Untitled").into())
 }
@@ -38,6 +54,11 @@ fn form(app: &mut PhotospliceApp, command: &str, label: &str, fields: Value, cho
     }
     json!({"dialog": app.ui.open_dialog(DialogKind::Command, f)})
 }
+
+/// File › Scripts › Browse… lists Photoshop's script types (matching its filter, #2452) plus the
+/// JSON/text/droplet files the engine parses; selecting a Photoshop script gets the engine's
+/// "not Photoshop ExtendScript" error instead of hiding those files from the picker.
+const SCRIPT_EXTENSIONS: &[&str] = &["psjs", "ccjs", "jsx", "js", "jsxbin", "json", "txt", "pcdroplet"];
 
 /// Menu items fronted here (dialogs before the engine command). `None` when not ours.
 pub fn invoke(app: &mut PhotospliceApp, ctx: &egui::Context, id: &str, params: &Value) -> Option<Result<Value, String>> {
@@ -68,6 +89,7 @@ pub fn invoke(app: &mut PhotospliceApp, ctx: &egui::Context, id: &str, params: &
             json!({"units": ["inches", "cm", "pixels"], "mode": ["rgb", "gray", "cmyk", "lab"]}),
         ),
         "file.automate.createDroplet" => {
+            let dir = droplet_default_dir(app);
             let Some(action) = crate::actions::selected_action(app) else {
                 return Some(Err("record an action in the Actions panel first".into()));
             };
@@ -81,20 +103,16 @@ pub fn invoke(app: &mut PhotospliceApp, ctx: &egui::Context, id: &str, params: &
                 json!({"format": ["same", "png", "jpg", "psd", "tiff"]}),
             )
         }
-        "file.scripts.statistics" => {
-            let modes: Vec<&str> = photosplice_doc::StackMode::ALL.iter().map(|m| m.id()).collect();
-            form(app, id, "Image Statistics", json!({"mode": "median", "input": dir, "align": false}), json!({"mode": modes}))
-        }
+        "file.scripts.statistics" => json!({"dialog": crate::stack_dialog::open_statistics(app)}),
         "file.scripts.browse" => {
-            let (name, bytes) = match app.pick_file_bytes()? {
-                Ok(picked) => picked,
-                Err(e) => return Some(Err(e)),
-            };
-            let r = app.run(id, json!({"script": String::from_utf8_lossy(&bytes)}));
-            if r.is_ok() {
-                app.ui.status = format!("Ran script {name}");
-            }
-            return Some(r);
+            return Some(app.pick_file_bytes_filtered(SCRIPT_EXTENSIONS, |app, name, bytes| {
+                let r = app.run("file.scripts.browse", json!({"name": name, "script": String::from_utf8_lossy(&bytes)}));
+                if r.is_ok() {
+                    let template = "Ran script {name}";
+                    app.ui.status = crate::i18n::fmt(tl!(template), &[("name", &name)]);
+                }
+                r
+            }));
         }
         "file.scripts.scriptEventsManager" => {
             let enabled = app.session.prefs().script_events.enabled;
@@ -178,6 +196,7 @@ fn b(f: &Map<String, Value>, k: &str, d: bool) -> bool {
 
 // ---------- Save for Web ----------
 
+const WEB_COMMAND: &str = "file.export.saveForWebLegacy";
 const WEB_FORMATS: [(&str, &str); 7] =
     [("gif", "GIF"), ("png8", "PNG-8"), ("png24", "PNG-24"), ("jpeg", "JPEG"), ("webp", "WebP"), ("webpLossless", "WebP (lossless)"), ("wbmp", "WBMP")];
 
@@ -235,12 +254,18 @@ pub fn save_in_place(app: &mut PhotospliceApp) -> Option<Result<Value, String>> 
     });
     if let Some(mut p) = web {
         p["path"] = json!(path);
-        return Some(app.run("file.export.saveForWebLegacy", p).inspect(|_| saved_as(app, &path)));
+        return Some(app.run(WEB_COMMAND, p).inspect(|_| saved_as(app, &path)));
     }
     if !writes_in_place(&path) {
         return None;
     }
-    Some(app.save_as(Some(path)).map(|(p, w)| json!({"path": p, "warnings": w})))
+    // Recorded as a plain File › Save, so an action writes whichever file it is played on.
+    let journaled = app.session.journal.len();
+    let r = app.save_as(Some(path.clone()));
+    if r.is_ok() && app.session.journal.len() > journaled {
+        app.journal_as_plain_save(&path);
+    }
+    Some(r)
 }
 
 /// The document is now the file at `path`, saved.
@@ -277,13 +302,22 @@ pub fn open_save_as(app: &mut PhotospliceApp) -> u64 {
 pub fn open_web(app: &mut PhotospliceApp) -> u64 {
     let mut f = Map::new();
     f.insert("__web".into(), json!(true));
+    f.insert("__command".into(), json!(WEB_COMMAND));
     f.insert("__label".into(), json!("Save for Web (Legacy)"));
     f.insert("__view".into(), json!("2up"));
-    // Start from the last settings, like Photoshop.
-    let last = app.session.file_menu.last_web.clone().unwrap_or_else(|| json!({"format": "jpeg", "quality": 60}));
+    // Remember encoding choices, but each document starts at its own full size. This session's
+    // last export lives in `file_menu`; the last one before a restart comes from the
+    // preferences' remembered dialog settings (`web_cmds::remember_web_settings`).
+    let last = app
+        .session
+        .file_menu
+        .last_web
+        .clone()
+        .or_else(|| app.session.prefs().dialogs.get(WEB_COMMAND).cloned())
+        .unwrap_or_else(|| json!({"format": "jpeg", "quality": 60}));
     if let Value::Object(m) = last {
         for (k, v) in m {
-            if !matches!(k.as_str(), "path" | "dir") {
+            if !matches!(k.as_str(), "path" | "dir" | "width" | "height" | "percent" | "colorTable" | "colorTableEdits") {
                 f.insert(k, v);
             }
         }
@@ -317,6 +351,10 @@ fn variants(p: &Value) -> Vec<Value> {
     let fmt = p["format"].as_str().unwrap_or("jpeg");
     for k in [2.0, 4.0] {
         let mut v = p.clone();
+        if let Some(m) = v.as_object_mut() {
+            m.remove("colorTable");
+            m.remove("colorTableEdits");
+        }
         if fmt == "jpeg" || fmt == "webp" {
             v["quality"] = json!((p["quality"].as_f64().unwrap_or(60.0) / k).round().max(1.0));
         } else if fmt == "gif" || fmt == "png8" {
@@ -581,6 +619,27 @@ fn web_crop(ui: &egui::Ui, doc: &photosplice_doc::Document, rev: u64, size_sig: 
     Some((tex, egui::Rect::from_min_max(egui::pos2(crop.x0 as f32, crop.y0 as f32), egui::pos2(crop.x1 as f32, crop.y1 as f32))))
 }
 
+/// Print's Printer menu: the default printer (value ""), then every printer `file.printers`
+/// listed. A saved name the spooler no longer lists stays selectable rather than vanishing.
+/// CUPS queue names stand in for spaces with `_`; the labels show the spaces.
+fn printer_options(list: Option<&Value>, current: &str) -> Vec<(String, String)> {
+    let printers: Vec<(&str, bool)> = list
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|p| Some((p.get("name")?.as_str()?, p.get("default").and_then(Value::as_bool).unwrap_or(false)))).collect())
+        .unwrap_or_default();
+    let pretty = |n: &str| n.replace('_', " ");
+    let default = match printers.iter().find(|p| p.1) {
+        Some((n, _)) => format!("{} ({})", tl!("Default printer"), pretty(n)),
+        None => tl!("Default printer").to_string(),
+    };
+    let mut opts = vec![(String::new(), default)];
+    opts.extend(printers.iter().map(|(n, _)| (n.to_string(), pretty(n))));
+    if !current.is_empty() && !printers.iter().any(|p| p.0 == current) {
+        opts.push((current.to_string(), pretty(current)));
+    }
+    opts
+}
+
 fn dropdown_str(ui: &mut egui::Ui, id: &str, f: &mut Map<String, Value>, key: &str, opts: &[(&str, &str)], w: f32) {
     let mut v = s(f, key, opts.first().map_or("", |o| o.0));
     let o: Vec<(String, &str)> = opts.iter().map(|(k, l)| (k.to_string(), *l)).collect();
@@ -679,7 +738,7 @@ fn web_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, Val
             let (strip, _) = ui.allocate_exact_size(egui::vec2(preview.x, 28.0), egui::Sense::hover());
             ui.painter().rect_filled(strip, egui::CornerRadius { nw: 3, ne: 3, sw: 0, se: 0 }, t.tab_strip);
             ui.add_enabled_ui(!doc_fmt, |ui| {
-                crate::tab_strip::pro_tabs(ui, ui.id().with("web-tabs"), strip, strip.right(), &names, &mut sel, false);
+                crate::tab_strip::pro_tabs(ui, ui.id().with("web-tabs"), strip, strip.right(), &names, &mut sel, false, false);
             });
             if !doc_fmt {
                 f.insert("__view".into(), json!(keys[sel]));
@@ -975,35 +1034,60 @@ fn web_confirm(app: &mut PhotospliceApp, f: &Map<String, Value>) -> Result<Value
     let save_as = f.contains_key("__saveAs");
     let fmt = s(f, "format", "jpeg");
     if save_as && is_doc_format(&fmt) {
-        let path = match f.get("path").and_then(Value::as_str) {
-            Some(p) => p.to_string(),
-            None => {
-                let suggested = format!("{}.{fmt}", doc_stem(app));
-                app.services.pick_save.as_mut().and_then(|pick| pick(&suggested)).ok_or("cancelled")?
-            }
-        };
         if fmt == "pdf" {
             app.pdf_preserve_editing = b(f, "pdfEditing", app.pdf_preserve_editing);
             app.pdf_options = pdf_options(f, app.pdf_options);
         }
-        return app.save_as(Some(path)).map(|(p, w)| json!({"path": p, "warnings": w}));
+        // A document format saves the document itself, which takes the new path.
+        return match f.get("path").and_then(Value::as_str) {
+            Some(p) => app.save_as(Some(p.to_string())),
+            None => {
+                let suggested = format!("{}.{fmt}", doc_stem(app));
+                app.pick_save(&suggested, |app, path| app.save_as(Some(path)))
+            }
+        };
     }
+    // Check while the control/input policy is still installed, before an asynchronous picker
+    // can outlive the request. A browser download uses the interactive platform writer.
+    let authorize = |p: &Value| -> Result<(), String> {
+        if let Some(authorize) = app.session.authorize.or(if app.automation_input { app.services.automation_authorize } else { None }) {
+            authorize(WEB_COMMAND, p).map_err(|e| e.to_string())?;
+        }
+        if app.automation_input
+            && let Some(authorize) = app.services.automation_command.as_ref()
+        {
+            authorize(WEB_COMMAND, p)?;
+        }
+        Ok(())
+    };
     let mut p = params(f);
+    authorize(&p)?;
+    if p.get("path").is_some() || p.get("dir").is_some() {
+        return save_for_web(app, p, save_as);
+    }
     let doc = app.session.active().ok_or("no document")?.doc.clone();
     let has_slices = !doc.slices.is_empty();
-    if p.get("path").is_none() && p.get("dir").is_none() {
-        let st = WebSettings::from_params(&p, "file.export.saveForWebLegacy").map_err(|e| e.to_string())?;
-        let base = photosplice_doc::slices::base_name(&doc);
-        let suggested = if has_slices && b(f, "html", true) { format!("{base}.html") } else { format!("{base}.{}", st.format.ext()) };
-        let path = app.services.pick_save.as_mut().and_then(|pick| pick(&suggested)).ok_or("cancelled")?;
+    let html = b(f, "html", true);
+    let st = WebSettings::from_params(&p, WEB_COMMAND).map_err(|e| e.to_string())?;
+    let base = photosplice_doc::slices::base_name(&doc);
+    let suggested = if has_slices && html { format!("{base}.html") } else { format!("{base}.{}", st.format.ext()) };
+    app.pick_save(&suggested, move |app, path| {
+        app.refocus(doc.id)?;
         if has_slices {
             let dir = path.rfind(['/', '\\']).map(|i| path[..i].to_string()).unwrap_or_else(|| ".".into());
             p["dir"] = json!(dir);
-            p["html"] = json!(b(f, "html", true));
+            p["html"] = json!(html);
         } else {
             p["path"] = json!(path);
         }
-    }
+        save_for_web(app, p, save_as)
+    })
+}
+
+/// Runs Save for Web with `p`, which says where to write. From the Save As screen (`save_as`)
+/// one file written means the document now is that file (sliced output stays an export), and
+/// File › Save writes it again with these settings.
+fn save_for_web(app: &mut PhotospliceApp, p: Value, save_as: bool) -> Result<Value, String> {
     // What File › Save writes this file with next time: these settings, at the document's size.
     let mut again = p.clone();
     if let Some(m) = again.as_object_mut() {
@@ -1011,13 +1095,20 @@ fn web_confirm(app: &mut PhotospliceApp, f: &Map<String, Value>) -> Result<Value
             m.remove(k);
         }
     }
-    let r = app.run("file.export.saveForWebLegacy", p)?;
-    app.ui.status = format!("Saved for Web: {} file(s)", r["files"].as_array().map_or(0, Vec::len));
-    // Save As: one file written, so the document now is that file (sliced output stays an export).
-    if save_as
-        && !has_slices
-        && let Some(path) = r["files"].as_array().filter(|a| a.len() == 1).and_then(|a| a[0].as_str()).map(str::to_string)
-    {
+    let retarget = save_as && p.get("path").is_some();
+    #[cfg(target_arch = "wasm32")]
+    let result = download_for_web(app, p);
+    #[cfg(not(target_arch = "wasm32"))]
+    let result = app.run(WEB_COMMAND, p);
+    let r = result.inspect_err(|error| {
+        app.ui.status = error.clone();
+        app.ui.status_error = true;
+    })?;
+    app.sync_views();
+    app.ui.status =
+        crate::i18n::trn(crate::i18n::current(), r["files"].as_array().map_or(0, Vec::len) as u64, "Saved for Web: {n} file", "Saved for Web: {n} files");
+    app.ui.status_error = false;
+    if retarget && let Some(path) = r["files"].as_array().filter(|a| a.len() == 1).and_then(|a| a[0].as_str()).map(str::to_string) {
         saved_as(app, &path);
         if let Some(st) = app.session.active_mut() {
             st.save_options = photosplice_engine::SaveOptions { web: Some(again), ..Default::default() };
@@ -1026,12 +1117,25 @@ fn web_confirm(app: &mut PhotospliceApp, f: &Map<String, Value>) -> Result<Value
     Ok(r)
 }
 
+#[cfg(any(test, target_arch = "wasm32"))]
+fn download_for_web(app: &mut PhotospliceApp, mut p: Value) -> Result<Value, String> {
+    // Browser downloads have no directory hierarchy. Keep the HTML's image and spacer URLs
+    // beside the downloaded page, matching the names handed to the platform service.
+    p["imagesFolder"] = json!("");
+    let write = app.services.write.as_mut().ok_or("no download service")?;
+    web_cmds::save_for_web_with_writer(&mut app.session, &p, &mut |path, bytes| write(path, bytes).map_err(photosplice_engine::EngineError::Other))
+        .map_err(|e| e.to_string())
+}
+
 // ---------- Print ----------
 
 pub fn open_print(app: &mut PhotospliceApp) -> u64 {
     let mut f = Map::new();
     f.insert("__print".into(), json!(true));
     f.insert("__label".into(), json!("PhotoSplice Print Settings"));
+    // Asked once per opening: the Printer menu lists what the spooler knows now.
+    let printers = app.session.execute("file.printers", json!({})).unwrap_or_default();
+    f.insert("__systemPrinters".into(), printers["printers"].clone());
     if let Some(Value::Object(m)) = app.session.file_menu.last_print.clone() {
         f.extend(m);
     }
@@ -1054,16 +1158,138 @@ pub fn open_print(app: &mut PhotospliceApp) -> u64 {
         ("registrationMarks", json!(false)),
         ("description", json!(false)),
         ("labels", json!(false)),
+        ("emulsionDown", json!(false)),
+        ("units", json!("cm")),
         ("output", json!("")),
     ] {
         f.entry(k.to_string()).or_insert(v);
     }
+    // Windows: the system's printers, and the paper from the chosen printer's driver settings.
+    if let Ok(list) = craft_print::rgb::printers() {
+        f.insert("__printers".into(), json!(list.iter().map(|p| p.name.clone()).collect::<Vec<_>>()));
+        let known = |n: &str| list.iter().any(|p| p.name == n);
+        if !known(&s(&f, "printer", "")) {
+            let fallback = list.iter().find(|p| p.default).or(list.first()).map(|p| p.name.clone()).unwrap_or_default();
+            f.insert("printer".into(), json!(fallback));
+            f.remove("printerSettings");
+        }
+    }
     app.ui.open_dialog(DialogKind::Command, f)
+}
+
+/// Takes the paper from the printer's driver settings (Windows), as Photoshop does.
+fn driver_page(f: &mut Map<String, Value>) {
+    let printer = s(f, "printer", "");
+    let settings = f.get("printerSettings").and_then(Value::as_str).and_then(|h| craft_print::rgb::DevMode::from_hex(h).ok());
+    match craft_print::rgb::page(&printer, settings.as_ref()) {
+        Ok(pg) => {
+            f.insert("paper".into(), json!([pg.paper.0, pg.paper.1]));
+            f.insert("orientation".into(), json!("portrait"));
+            f.remove("__pageError");
+        }
+        Err(e) => {
+            f.insert("__pageError".into(), json!(e.to_string()));
+        }
+    }
+}
+
+/// Points per unit for the Position and Size fields.
+fn unit_pt(units: &str) -> f64 {
+    match units {
+        "mm" => 72.0 / 25.4,
+        "in" => 72.0,
+        _ => 72.0 / 2.54,
+    }
+}
+
+/// A number field in `units` for a value kept in points; true when edited.
+fn length_field(ui: &mut egui::Ui, label: &str, pt: &mut f64, units: &str) -> bool {
+    length_field_prec(ui, label, pt, units, 0)
+}
+
+fn length_field_prec(ui: &mut egui::Ui, label: &str, pt: &mut f64, units: &str, decimals: u32) -> bool {
+    let t = Tokens::get(ui.ctx());
+    let k = unit_pt(units);
+    let mut v = (*pt / k) as f32;
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(label).color(t.text_dim));
+        let before = v;
+        crate::widgets::value_field_prec(ui, &mut v, 0.0..=10000.0, units, 70.0, decimals);
+        if (v - before).abs() > 1e-4 && v.is_finite() {
+            *pt = f64::from(v) * k;
+            changed = true;
+        }
+    });
+    changed
+}
+
+/// Unrotated paper dimensions in points, for either the current preset or a custom array.
+fn print_paper_size(value: Option<&Value>) -> (f64, f64) {
+    let default = (612.0, 792.0);
+    match value {
+        Some(Value::Array(a)) => (a.first().and_then(Value::as_f64).unwrap_or(default.0), a.get(1).and_then(Value::as_f64).unwrap_or(default.1)),
+        Some(Value::String(name)) => photosplice_engine::print_cmds::PAPERS.iter().find(|p| p.0.eq_ignore_ascii_case(name)).map_or(default, |p| (p.1, p.2)),
+        _ => default,
+    }
+}
+
+fn print_paper_controls(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
+    let previous = f.get("paper").cloned();
+    let mut selected = if previous.as_ref().is_some_and(Value::is_array) { "custom".to_string() } else { s(f, "paper", "letter") };
+    ui.horizontal(|ui| {
+        let mut papers: Vec<_> = photosplice_engine::print_cmds::PAPERS.iter().map(|p| (p.0.to_string(), p.0)).collect();
+        papers.push(("custom".to_string(), tl!("Custom")));
+        if crate::widgets::dropdown(ui, "print-paper", &mut selected, &papers, 110.0) {
+            if selected == "custom" {
+                let (w, h) = print_paper_size(f.get("__customPaper").or(previous.as_ref()));
+                f.insert("paper".into(), json!([w, h]));
+            } else {
+                if let Some(paper @ Value::Array(_)) = previous {
+                    f.insert("__customPaper".into(), paper);
+                }
+                f.insert("paper".into(), json!(selected));
+            }
+        }
+        dropdown_str(ui, "print-orient", f, "orientation", &[("portrait", tl!("Portrait")), ("landscape", tl!("Landscape"))], 110.0);
+    });
+    if f.get("paper").is_some_and(Value::is_array) {
+        let (mut w, mut h) = print_paper_size(f.get("paper"));
+        let units = s(f, "units", "cm");
+        let changed = ui
+            .horizontal(|ui| {
+                let wc = length_field_prec(ui, tl!("Paper Width"), &mut w, &units, 2);
+                let hc = length_field_prec(ui, tl!("Paper Height"), &mut h, &units, 2);
+                wc || hc
+            })
+            .inner;
+        if changed {
+            // Keep points in the command, and let the engine apply orientation and validation.
+            f.insert("paper".into(), json!([w, h]));
+            f.insert("__customPaper".into(), json!([w, h]));
+        }
+    }
 }
 
 fn print_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     let t = Tokens::get(ui.ctx());
     let Some(doc) = app.session.active().map(|d| d.doc.clone()) else { return };
+    // PDF exports and previews retain editable paper on Windows too. Only a real native
+    // submission takes its media from the printer; entering that mode refreshes the driver
+    // geometry after any export-only paper edits.
+    let printers: Option<Vec<String>> = if !b(f, "dryRun", false) && s(f, "output", "").is_empty() {
+        f.get("__printers").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+    } else {
+        None
+    };
+    if printers.is_some() {
+        if !b(f, "__driverPageInitialized", false) {
+            driver_page(f);
+            f.insert("__driverPageInitialized".into(), json!(true));
+        }
+    } else {
+        f.remove("__driverPageInitialized");
+    }
     let p = params(f);
     ui.horizontal_top(|ui| {
         // Page preview.
@@ -1078,6 +1304,8 @@ fn print_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, V
                     ui.painter().rect_filled(page, 0.0, egui::Color32::WHITE);
                     ui.painter().rect_stroke(page, 0.0, egui::Stroke::new(1.0, t.separator), egui::StrokeKind::Outside);
                     let (x, y, w, h) = l.rect;
+                    // Emulsion Down shows the page as it prints: mirrored.
+                    let x = if l.emulsion_down { pw - x - w } else { x };
                     let img = egui::Rect::from_min_size(
                         egui::pos2(page.left() + x as f32 * k, page.bottom() - (y + h) as f32 * k),
                         egui::vec2(w as f32 * k, h as f32 * k),
@@ -1092,7 +1320,12 @@ fn print_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, V
                         tx
                     });
                     let clip = ui.painter().with_clip_rect(page);
-                    clip.image(tex.id(), img, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+                    let uv = if l.emulsion_down {
+                        egui::Rect::from_min_max(egui::pos2(1.0, 0.0), egui::pos2(0.0, 1.0))
+                    } else {
+                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0))
+                    };
+                    clip.image(tex.id(), img, uv, egui::Color32::WHITE);
                     let mark = egui::Stroke::new(1.0, egui::Color32::BLACK);
                     if l.marks.corner_crop {
                         for (c, dx, dy) in
@@ -1133,19 +1366,57 @@ fn print_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, V
                 ui.label(egui::RichText::new(s).font(crate::theme::semibold(12.0)).color(t.text));
             };
             head(ui, tl!("Printer Setup"));
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(tl!("Printer")).color(t.text_dim));
-                let mut pr = s(f, "printer", "");
-                if ui.add(egui::TextEdit::singleline(&mut pr).hint_text(tl!("Default printer")).desired_width(180.0)).changed() {
-                    f.insert("printer".into(), json!(pr));
+            if let Some(printers) = &printers {
+                // Windows: Photoshop's Printer menu and Print Settings… (the driver's own dialog).
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tl!("Printer")).color(t.text_dim));
+                    let before = s(f, "printer", "");
+                    let opts: Vec<(&str, &str)> = printers.iter().map(|n| (n.as_str(), n.as_str())).collect();
+                    dropdown_str(ui, "print-printer", f, "printer", &opts, 220.0);
+                    if s(f, "printer", "") != before {
+                        f.remove("printerSettings");
+                        driver_page(f);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    number(ui, f, "copies", tl!("Copies"), 1.0..=999.0, "", 1.0);
+                    if ui.button(tl!("Print Settings…")).clicked() {
+                        let printer = s(f, "printer", "");
+                        let current = f.get("printerSettings").and_then(Value::as_str).and_then(|h| craft_print::rgb::DevMode::from_hex(h).ok());
+                        match craft_print::rgb::settings_dialog(&printer, current.as_ref(), None) {
+                            Ok(Some(dm)) => {
+                                f.insert("printerSettings".into(), json!(dm.to_hex()));
+                                driver_page(f);
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                f.insert("__pageError".into(), json!(e.to_string()));
+                            }
+                        }
+                    }
+                });
+                let paper = p.get("paper").and_then(Value::as_array).map(|a| (a.first().and_then(Value::as_f64), a.get(1).and_then(Value::as_f64)));
+                let text = match paper {
+                    Some((Some(w), Some(h))) => format!("{:.0} × {:.0} mm  ·  {}", w / 72.0 * 25.4, h / 72.0 * 25.4, tl!("set in Print Settings…")),
+                    _ => String::new(),
+                };
+                ui.label(egui::RichText::new(text).color(t.text_dim).size(11.0));
+                if let Some(e) = f.get("__pageError").and_then(Value::as_str) {
+                    ui.label(egui::RichText::new(e).color(t.warning).size(11.0));
                 }
-            });
-            number(ui, f, "copies", tl!("Copies"), 1.0..=999.0, "", 1.0);
-            ui.horizontal(|ui| {
-                let papers: Vec<(&str, &str)> = photosplice_engine::print_cmds::PAPERS.iter().map(|p| (p.0, p.0)).collect();
-                dropdown_str(ui, "print-paper", f, "paper", &papers, 110.0);
-                dropdown_str(ui, "print-orient", f, "orientation", &[("portrait", tl!("Portrait")), ("landscape", tl!("Landscape"))], 110.0);
-            });
+            } else {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tl!("Printer")).color(t.text_dim));
+                    let mut pr = s(f, "printer", "");
+                    let opts = printer_options(f.get("__systemPrinters"), &pr);
+                    let o: Vec<(String, &str)> = opts.iter().map(|(k, l)| (k.clone(), l.as_str())).collect();
+                    if crate::widgets::dropdown(ui, "print-printer", &mut pr, &o, 240.0) {
+                        f.insert("printer".into(), json!(pr));
+                    }
+                });
+                number(ui, f, "copies", tl!("Copies"), 1.0..=999.0, "", 1.0);
+                print_paper_controls(ui, f);
+            }
             head(ui, tl!("Color Management"));
             dropdown_str(
                 ui,
@@ -1160,20 +1431,27 @@ fn print_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, V
                 240.0,
             );
             if s(f, "colorHandling", "") == "photospliceManages" {
-                dropdown_str(
-                    ui,
-                    "print-profile",
-                    f,
-                    "printerProfile",
-                    &[
-                        ("coated-cmyk", tl!("Coated CMYK")),
-                        ("srgb", "sRGB IEC61966-2.1"),
-                        ("adobe-rgb-compat", tl!("Adobe RGB (1998) compatible")),
-                        ("display-p3", tl!("Display P3")),
-                        ("gray-gamma-2.2", tl!("Gray Gamma 2.2")),
-                    ],
-                    240.0,
-                );
+                // Photoshop's Printer Profile menu: the built-ins, then every installed printer
+                // (output class) profile by its description.
+                let installed: Vec<_> = photosplice_engine::installed_profiles::installed()
+                    .into_iter()
+                    .filter(|p| p.is_destination() && p.class == photosplice_cms::ProfileClass::Output)
+                    .collect();
+                let mut profiles: Vec<(&str, &str)> = vec![
+                    ("coated-cmyk", tl!("Coated CMYK")),
+                    ("srgb", "sRGB IEC61966-2.1"),
+                    ("adobe-rgb-compat", tl!("Adobe RGB (1998) compatible")),
+                    ("display-p3", tl!("Display P3")),
+                    ("gray-gamma-2.2", tl!("Gray Gamma 2.2")),
+                ];
+                profiles.extend(installed.iter().map(|p| (p.path.as_str(), p.description.as_str())));
+                // A remembered profile that is no longer installed still shows, by its file name.
+                let cur = s(f, "printerProfile", "coated-cmyk");
+                let stem = std::path::Path::new(&cur).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if !profiles.iter().any(|(v, _)| *v == cur) {
+                    profiles.push((cur.as_str(), stem.as_str()));
+                }
+                dropdown_str(ui, "print-profile", f, "printerProfile", &profiles, 240.0);
                 ui.horizontal(|ui| {
                     dropdown_str(
                         ui,
@@ -1190,18 +1468,61 @@ fn print_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, V
                     );
                     check(ui, f, "bpc", tl!("Black Point Compensation"), true);
                 });
+                if printers.is_some() {
+                    ui.label(
+                        egui::RichText::new(tl!("Remember to turn off the printer's own colour management in Print Settings…")).color(t.warning).size(11.0),
+                    );
+                }
             }
             head(ui, tl!("Position and Size"));
+            dropdown_str(ui, "print-units", f, "units", &[("cm", tl!("Centimeters")), ("mm", tl!("Millimeters")), ("in", tl!("Inches"))], 130.0);
+            let units = s(f, "units", "cm");
             check(ui, f, "center", tl!("Center"), true);
             if !b(f, "center", true) {
                 ui.horizontal(|ui| {
-                    number(ui, f, "top", tl!("Top"), 0.0..=100.0, "in", 0.0);
-                    number(ui, f, "left", tl!("Left"), 0.0..=100.0, "in", 0.0);
+                    // Kept in inches (Photoshop's Position fields), shown in the chosen units.
+                    for (key, label) in [("top", tl!("Top")), ("left", tl!("Left"))] {
+                        let mut pt = n(f, key, 0.0) * 72.0;
+                        if length_field(ui, label, &mut pt, &units) {
+                            f.insert(key.into(), json!(pt / 72.0));
+                        }
+                    }
                 });
             }
             check(ui, f, "scaleToFit", tl!("Scale to Fit Media"), false);
-            if !b(f, "scaleToFit", false) {
-                number(ui, f, "scale", tl!("Scale"), 1.0..=1000.0, "%", 100.0);
+            // Scaled Print Size: Scale, Height and Width move together; Print Resolution follows.
+            if let Ok(l) = photosplice_engine::print_cmds::layout(&doc, &params(f), "file.print") {
+                let (_, _, w, h) = l.rect;
+                let (mut w2, mut h2) = (w, h);
+                let fit = b(f, "scaleToFit", false);
+                if !fit {
+                    // Two decimals: Height and Width set fractional scales.
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(tl!("Scale")).color(t.text_dim));
+                        let mut v = n(f, "scale", 100.0) as f32;
+                        crate::widgets::value_field(ui, &mut v, 1.0..=1000.0, "%", 64.0);
+                        f.insert("scale".into(), json!((f64::from(v) * 100.0).round() / 100.0));
+                    });
+                }
+                ui.horizontal(|ui| {
+                    let hc = length_field(ui, tl!("Height"), &mut h2, &units);
+                    let wc = length_field(ui, tl!("Width"), &mut w2, &units);
+                    let k = if wc && w > 0.0 {
+                        Some(w2 / w)
+                    } else if hc && h > 0.0 {
+                        Some(h2 / h)
+                    } else {
+                        None
+                    };
+                    if let Some(k) = k.filter(|k| k.is_finite() && *k > 0.0) {
+                        f.insert("scale".into(), json!(((l.scale * k * 100.0) * 100.0).round() / 100.0));
+                        f.insert("scaleToFit".into(), json!(false));
+                    }
+                });
+                if w > 0.0 {
+                    let ppi = f64::from(doc.size.width) / (w / 72.0);
+                    ui.label(egui::RichText::new(format!("{} {ppi:.0} PPI", tl!("Print Resolution:"))).color(t.text_dim).size(11.0));
+                }
             }
             head(ui, tl!("Printing Marks"));
             ui.horizontal(|ui| {
@@ -1213,6 +1534,11 @@ fn print_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, V
                 check(ui, f, "description", tl!("Description"), false);
                 check(ui, f, "labels", tl!("Labels"), false);
             });
+            head(ui, tl!("Functions"));
+            check(ui, f, "emulsionDown", tl!("Emulsion Down"), false);
+            if b(f, "emulsionDown", false) && printers.is_some() {
+                ui.label(egui::RichText::new(tl!("Don't also tick Mirror Image in Print Settings…: the two flips cancel out.")).color(t.text_dim).size(11.0));
+            }
             head(ui, tl!("Save as PDF"));
             let mut out = s(f, "output", "");
             if ui.add(egui::TextEdit::singleline(&mut out).hint_text(tl!("(print to the printer)")).desired_width(300.0)).changed() {
@@ -1224,12 +1550,23 @@ fn print_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, V
 
 fn print_confirm(app: &mut PhotospliceApp, f: &Map<String, Value>) -> Result<Value, String> {
     let r = app.run("file.print", params(f))?;
-    app.ui.status = if r["sent"] == json!(true) {
-        format!("Sent to the printer ({})", r["spooler"].as_str().unwrap_or(""))
-    } else {
-        format!("Printed to {}", r["pdf"].as_str().unwrap_or(""))
-    };
+    if r["pending"] != json!(true) {
+        print_status(app, &r);
+    }
     Ok(r)
+}
+
+pub(crate) fn print_status(app: &mut PhotospliceApp, r: &Value) {
+    app.ui.status = if let Some(printer) = r["spooler"]["printer"].as_str() {
+        crate::i18n::fmt(tl!("Sent to {printer}"), &[("printer", printer)])
+    } else if r["sent"] == json!(true) {
+        let template = "Sent to the printer ({spooler})";
+        crate::i18n::fmt(tl!(template), &[("spooler", r["spooler"].as_str().unwrap_or(""))])
+    } else {
+        let template = "Printed to {path}";
+        crate::i18n::fmt(tl!(template), &[("path", r["pdf"].as_str().unwrap_or(""))])
+    };
+    app.ui.status_error = false;
 }
 
 #[cfg(test)]
@@ -1359,6 +1696,97 @@ mod tests {
     }
 
     #[test]
+    fn droplet_folder_follows_the_document_or_uses_a_safe_fallback() {
+        let (mut app, _) = app();
+        let fallback = droplet_default_dir(&app);
+        #[cfg(target_os = "macos")]
+        if std::env::var_os("HOME").is_some() {
+            assert!(std::path::Path::new(&fallback).is_absolute());
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(fallback, ".");
+        app.session.active_mut().unwrap().path = Some("/tmp/photosplice/drawing.pcraft".into());
+        assert_eq!(droplet_default_dir(&app), "/tmp/photosplice");
+    }
+
+    /// A fresh session's dialog seeds from the preferences: the last export before a restart is
+    /// remembered there (`web_cmds::remember_web_settings`), as `file_menu` is not saved.
+    #[test]
+    fn the_save_for_web_dialog_seeds_from_the_remembered_preferences() {
+        let (mut app, _) = app();
+        app.session.prefs.edit(|p| {
+            p.dialogs.insert(WEB_COMMAND.into(), json!({"format": "png8", "colors": 64}));
+        });
+        let id = open_web(&mut app);
+        let f = &app.ui.dialog_mut(id).unwrap().fields;
+        assert_eq!(f["format"], "png8");
+        assert_eq!(f["colors"], 64);
+    }
+
+    #[test]
+    fn save_for_web_downloads_images_and_html_through_the_platform_writer() {
+        let (mut app, _) = app();
+        let downloads = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let captured = downloads.clone();
+        app.services.write = Some(Box::new(move |path, bytes| {
+            captured.borrow_mut().push((path.to_string(), bytes.to_vec()));
+            Ok(())
+        }));
+        download_for_web(&mut app, json!({"path": "web.png", "format": "png24"})).unwrap();
+        assert_eq!(downloads.borrow()[0].0, "web.png");
+        assert!(downloads.borrow()[0].1.starts_with(b"\x89PNG\r\n\x1a\n"));
+        downloads.borrow_mut().clear();
+
+        app.run("slice.new", json!({"rect": [0, 0, 60, 80], "name": "left"})).unwrap();
+        download_for_web(&mut app, json!({"dir": ".", "format": "png24", "html": true, "imagesFolder": "images"})).unwrap();
+        let files = downloads.borrow();
+        let html = std::str::from_utf8(&files.iter().find(|(path, _)| path.ends_with(".html")).unwrap().1).unwrap();
+        assert!(!html.contains("images/"), "downloaded files are siblings, not an images directory");
+        for (path, bytes) in files.iter().filter(|(path, _)| !path.ends_with(".html")) {
+            let name = std::path::Path::new(path).file_name().unwrap().to_str().unwrap();
+            assert!(html.contains(&format!("src=\"{name}\"")), "missing downloaded image {name}");
+            assert!(!bytes.is_empty());
+        }
+        assert!(files.iter().any(|(path, _)| path.ends_with("spacer.gif")));
+        drop(files);
+
+        app.services.write = Some(Box::new(|_, _| Err("download failed".into())));
+        assert_eq!(download_for_web(&mut app, json!({"path": "fail.png", "format": "png24"})).unwrap_err(), "download failed");
+        app.services.write = None;
+        assert_eq!(download_for_web(&mut app, json!({"path": "missing.png"})).unwrap_err(), "no download service");
+    }
+
+    #[test]
+    fn save_for_web_authorizes_before_opening_a_picker() {
+        fn deny(_: &str, _: &Value) -> photosplice_engine::Result<()> {
+            Err(photosplice_engine::EngineError::Other("export denied".into()))
+        }
+        for explicit_path in [false, true] {
+            for synthetic_input in [false, true] {
+                let (mut app, ctx) = app();
+                let id = open_web(&mut app);
+                if explicit_path {
+                    app.ui.dialog_mut(id).unwrap().fields.insert("path".into(), json!("denied.png"));
+                }
+                app.services.automation_authorize = Some(deny);
+                app.services.file_dialog = Some(Box::new(|_, _, _| panic!("denied export must not show a picker")));
+                app.services.write = Some(Box::new(|_, _| panic!("denied export must not write")));
+                let error = if synthetic_input {
+                    app.automation_input = true;
+                    crate::dialogs::confirm(&mut app, id).unwrap_err()
+                } else {
+                    let (request, _) = crate::control::ControlRequest::new("ui.dialog.confirm", json!({"dialog": id}));
+                    let crate::control::Outcome::Done(reply) = crate::control::handle(&mut app, &ctx, &request) else { panic!("expected immediate denial") };
+                    assert_eq!(reply["ok"], false);
+                    reply["error"].as_str().unwrap().to_string()
+                };
+                assert_eq!(error, "export denied");
+                assert!(!app.file_dialog_open());
+            }
+        }
+    }
+
+    #[test]
     fn print_dialog_and_toggles() {
         let (mut app, ctx) = app();
         let r = crate::menus::invoke(&mut app, &ctx, "file.print", json!({})).unwrap();
@@ -1377,6 +1805,41 @@ mod tests {
         for id in ["file.automate.contactSheetII", "file.scripts.statistics", "file.scripts.scriptEventsManager", "file.package"] {
             let r = crate::menus::invoke(&mut app, &ctx, id, json!({})).unwrap();
             assert!(r["dialog"].is_u64(), "{id}");
+        }
+    }
+
+    #[test]
+    fn printer_menu_lists_the_spooler_printers_after_the_default() {
+        let list = json!([{"name": "HP_OfficeJet_3830_series", "default": true}, {"name": "DNP_DP_DS620", "default": false}]);
+        let o = printer_options(Some(&list), "");
+        let keys: Vec<&str> = o.iter().map(|p| p.0.as_str()).collect();
+        assert_eq!(keys, ["", "HP_OfficeJet_3830_series", "DNP_DP_DS620"]);
+        assert!(o[0].1.ends_with("(HP OfficeJet 3830 series)"), "{}", o[0].1);
+        assert_eq!(o[2].1, "DNP DP DS620");
+        // A remembered printer that's gone stays selectable; no list still offers the default.
+        let o = printer_options(Some(&list), "Old_Queue");
+        assert_eq!(o.last().unwrap().0, "Old_Queue");
+        assert_eq!(printer_options(None, "").len(), 1);
+        // The dialog asks the engine, and the list never reaches file.print's params.
+        let (mut app, ctx) = app();
+        let id = crate::menus::invoke(&mut app, &ctx, "file.print", json!({})).unwrap()["dialog"].as_u64().unwrap();
+        let f = &app.ui.dialog_mut(id).unwrap().fields;
+        assert!(f.get("__systemPrinters").is_some_and(Value::is_array));
+        assert!(params(f).get("__systemPrinters").is_none());
+        assert!(params(f).get("__printers").is_none());
+    }
+
+    #[test]
+    fn print_dialog_does_not_inherit_scripted_send_override() {
+        for send in [false, true] {
+            let (mut app, ctx) = app();
+            let out = std::env::temp_dir().join(format!("pc-printui-state-{}-{send}.pdf", std::process::id())).to_string_lossy().into_owned();
+            app.session.execute("file.print", json!({"output": out, "send": send, "dryRun": true})).unwrap();
+            assert!(app.session.file_menu.last_print.as_ref().unwrap().get("send").is_none());
+            let r = crate::menus::invoke(&mut app, &ctx, "file.print", json!({})).unwrap();
+            let id = r["dialog"].as_u64().unwrap();
+            assert!(app.ui.dialog_mut(id).unwrap().fields.get("send").is_none());
+            std::fs::remove_file(out).unwrap();
         }
     }
 }

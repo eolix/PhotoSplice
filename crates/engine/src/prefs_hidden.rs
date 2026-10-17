@@ -8,7 +8,7 @@
 //! [`HIDDEN_MENU_ADDED`]: preferences saved by an older version take those once, on load.
 
 /// Incremented whenever the lists below change.
-pub const DEFAULTS_VERSION: u32 = 6;
+pub const DEFAULTS_VERSION: u32 = 7;
 
 pub const HIDDEN_MENU_ITEMS: &[&str] = &[
     "edit.checkSpelling",
@@ -29,6 +29,7 @@ pub const HIDDEN_MENU_ITEMS: &[&str] = &[
     "file.export.artboardsToPdf",
     "file.import.variableDataSets",
     "file.import.wiaSupport",
+    "file.openExrParts",
     "file.package",
     "file.placeLinked",
     "file.revert",
@@ -38,6 +39,7 @@ pub const HIDDEN_MENU_ITEMS: &[&str] = &[
     "filter.adaptiveWideAngle",
     "filter.blurGallery.tiltShift",
     "filter.distort.zigZag",
+    "filter.other.colorToAlpha",
     "filter.other.hsbHsl",
     "filter.pixelate.facet",
     "filter.render.flame",
@@ -56,8 +58,11 @@ pub const HIDDEN_MENU_ITEMS: &[&str] = &[
     "image.trap",
     "image.variables.dataSets",
     "layer.matting.defringe",
+    "layer.mergeGroup",
     "layer.new.artboard",
     "layer.new.artboardFromGroup",
+    "layer.new.backgroundFromLayer",
+    "layer.rasterize.layerStyle",
     "layer.rasterize.video",
     "layer.smartObjects.convertToEmbedded",
     "layer.smartObjects.convertToLinked",
@@ -167,6 +172,12 @@ pub const HIDDEN_MENU_ADDED: &[(u32, &str)] = &[
     (5, "file.automate.createDroplet"),
     (6, "edit.menus"),
     (6, "edit.toolbar"),
+    // Menu commands the upstream merge brought in.
+    (7, "file.openExrParts"),
+    (7, "filter.other.colorToAlpha"),
+    (7, "layer.mergeGroup"),
+    (7, "layer.new.backgroundFromLayer"),
+    (7, "layer.rasterize.layerStyle"),
 ];
 
 /// `Tool` enum variant names, as `ToolbarCustomization::hidden` stores them.

@@ -41,7 +41,10 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod abr;
+pub mod aco;
+pub mod ase;
 pub mod asl;
+pub mod atn;
 pub mod blend;
 pub mod builder;
 pub mod compression;
@@ -60,6 +63,7 @@ pub mod path;
 pub mod patterns;
 pub mod pixels;
 pub mod resources;
+pub mod shc;
 pub mod slices;
 pub mod tagged;
 #[cfg(any(test, feature = "testgen"))]

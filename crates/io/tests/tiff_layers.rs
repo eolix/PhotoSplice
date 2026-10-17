@@ -107,6 +107,48 @@ fn every_compression_keeps_the_layers() {
     }
 }
 
+/// The Artist tag's text, and the bytes every EXIF assertion looks for.
+const ARTIST: &[u8] = b"fixture-artist";
+
+/// A minimal little-endian EXIF (TIFF) block with a single Artist tag and no Orientation, so
+/// `upright_exif` passes it through untouched.
+fn exif() -> Vec<u8> {
+    let mut artist = ARTIST.to_vec();
+    artist.push(0); // ASCII NUL terminator
+    let mut v = b"II*\0\x08\0\0\0".to_vec(); // TIFF header, first IFD at 8
+    v.extend_from_slice(&1u16.to_le_bytes()); // one entry
+    v.extend_from_slice(&0x013bu16.to_le_bytes()); // Artist
+    v.extend_from_slice(&2u16.to_le_bytes()); // ASCII
+    v.extend_from_slice(&(artist.len() as u32).to_le_bytes());
+    v.extend_from_slice(&26u32.to_le_bytes()); // value offset: 8 + 2 + 12 + 4
+    v.extend_from_slice(&0u32.to_le_bytes()); // no next IFD
+    v.extend_from_slice(&artist);
+    v
+}
+
+/// #1545: a layered TIFF carries EXIF as Photoshop resource 1058 and reads it back, so it must
+/// not report a loss it never makes. A flat TIFF writes it as its own tags and keeps it too.
+#[test]
+fn layered_tiff_keeps_exif_without_claiming_a_loss() {
+    let mut d = gen_doc(ColorMode::Rgb, SampleType::U8, Features::PIXELS);
+    d.metadata.exif = Some(std::sync::Arc::new(exif()));
+
+    let r = tiff(&d, true);
+    assert!(!r.warnings.iter().any(|w| w.contains("EXIF")), "a layered TIFF keeps EXIF, so it must not claim to drop it: {:?}", r.warnings);
+    // ...and the tags really are in the file, so the missing warning is a true absence of loss.
+    let back = import("x.tif", &r.bytes).unwrap().document;
+    let kept = back.metadata.exif.as_deref().expect("EXIF survives the layered export");
+    assert!(kept.windows(ARTIST.len()).any(|w| w == ARTIST), "the Artist tag did not survive: {kept:?}");
+
+    // The flat path writes the EXIF block's tags as the TIFF's own (here IFD0's Artist, which
+    // reads back as the document's Artist text), so it reports no loss either.
+    let flat = tiff(&d, false);
+    assert!(!flat.warnings.iter().any(|w| w.contains("EXIF")), "a flat TIFF keeps EXIF: {:?}", flat.warnings);
+    let back = import("x.tif", &flat.bytes).unwrap().document;
+    let artist = std::str::from_utf8(ARTIST).unwrap().trim_end_matches('\0');
+    assert!(back.metadata.text.iter().any(|(k, v)| k == "Artist" && v == artist), "{:?}", back.metadata.text);
+}
+
 #[test]
 fn discard_layers_writes_a_flat_file() {
     let d = gen_doc(ColorMode::Rgb, SampleType::U8, Features::PIXELS);
@@ -228,6 +270,54 @@ fn psdtags_fixtures_open_with_their_layers() {
     }
 }
 
+/// Advanced Blending (`knko`, `infx`, `clbl`, `tsly`, `lmgm`, `vmgm`), fill opacity (`iOpa`),
+/// channel restrictions (`brst`) and Blend If (the records' blending ranges) survive a layered
+/// TIFF with its layer data in either byte order: the encoder's own, and the other one made by
+/// transcoding the tag (the same length, spliced in place).
+#[test]
+fn advanced_blending_survives_layered_tiff_in_both_byte_orders() {
+    use photosplice_doc::{AdvancedBlending, BlendRange, Knockout};
+    for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        let mut d = gen_doc(ColorMode::Rgb, depth, Features::PIXELS);
+        let adv = AdvancedBlending {
+            knockout: Knockout::Deep,
+            blend_interior: true,
+            blend_clipped: false,
+            transparency_shapes: false,
+            layer_mask_hides_effects: true,
+            vector_mask_hides_effects: true,
+        };
+        d.layers[1].set_advanced(adv);
+        d.layers[1].fill_opacity = 64.0 / 255.0;
+        d.layers[1].excluded_channels = 0b010;
+        d.layers[1].blend_if.set(0, [BlendRange { black: [10, 40], white: [200, 250] }, BlendRange { black: [0, 0], white: [128, 128] }]);
+        d.layers[2].knockout = Knockout::Shallow;
+        let r = tiff(&d, true);
+        let (_, layers) = tags(&r.bytes);
+        let layers = layers.expect("layer data");
+        let (isd, w) = ImageSourceData::from_bytes(&layers).expect("parse");
+        assert!(w.is_empty(), "{w:?}");
+        let native = isd.byte_order;
+        let other = if native == ByteOrder::Little { ByteOrder::Big } else { ByteOrder::Little };
+        let (swapped, w) = isd.to_bytes(other).expect("transcode");
+        assert!(w.is_empty(), "{depth:?}: blocks dropped while transcoding: {w:?}");
+        assert_eq!(swapped.len(), layers.len());
+        let at = r.bytes.windows(layers.len()).position(|x| x == &layers[..]).expect("tag data in the file");
+        let mut flipped = r.bytes.clone();
+        flipped[at..at + layers.len()].copy_from_slice(&swapped);
+        for (order, bytes) in [(native, &r.bytes), (other, &flipped)] {
+            let back = import("x.tif", bytes).unwrap_or_else(|e| panic!("{depth:?} {order:?}: {e}")).document;
+            let l = &back.layers[1];
+            assert_eq!(l.advanced(), adv, "{depth:?} {order:?}");
+            assert_eq!(l.fill_opacity, 64.0 / 255.0, "{depth:?} {order:?}");
+            assert_eq!(l.excluded_channels, 0b010, "{depth:?} {order:?}");
+            assert_eq!(l.blend_if, d.layers[1].blend_if, "{depth:?} {order:?}");
+            assert_eq!(back.layers[2].knockout, Knockout::Shallow, "{depth:?} {order:?}");
+            assert_docs_eq(&expected(&d), &back);
+        }
+    }
+}
+
 #[test]
 fn damaged_layer_data_opens_flattened() {
     let d = gen_doc(ColorMode::Rgb, SampleType::U8, Features::PIXELS);
@@ -273,4 +363,32 @@ fn default_export_options_write_a_flat_tiff() {
     let r = export(&d, "x.tif", &ExportOptions::default()).unwrap();
     assert_eq!(tags(&r.bytes), (None, None));
     assert_eq!(import("x.tif", &r.bytes).unwrap().document.layers.len(), 1);
+}
+
+/// #2940: layered TIFF data whose groups nest past the document's cap is rejected with the same
+/// limit error as a PSD, instead of being converted.
+#[test]
+fn layered_tiff_nested_past_the_cap_is_rejected() {
+    use photosplice_psd::{GroupSpec, LayerSpec, PixelData, PsdBuilder, PsdFile};
+    let tiff_nested = |levels: usize| {
+        let mut b = PsdBuilder::new(4, 4);
+        for _ in 0..levels {
+            b.begin_group(GroupSpec::new("g"));
+        }
+        b.push_layer(LayerSpec::new("deep", 0, 0, 1, 1, PixelData::Rgba8(vec![1, 2, 3, 4])));
+        for _ in 0..levels {
+            b.end_group().unwrap();
+        }
+        let file = PsdFile::from_bytes(&b.to_bytes().unwrap()).unwrap();
+        let order = if photosplice_codecs::tiff_writes_little_endian() { ByteOrder::Little } else { ByteOrder::Big };
+        let layers = ImageSourceData::from_psd(&file).to_bytes(order).unwrap().0;
+        let d = gen_doc(ColorMode::Rgb, SampleType::U8, Features::PIXELS);
+        let mut img = photosplice_codecs::decode(&tiff(&d, false).bytes).unwrap();
+        img.meta.photoshop_layers = Some(layers);
+        photosplice_codecs::encode(&img, photosplice_codecs::Format::Tiff, &photosplice_codecs::EncodeOptions::default()).unwrap()
+    };
+    let err = import("deep.tif", &tiff_nested(101)).unwrap_err();
+    assert!(err.to_string().contains("nested deeper than 100"), "{err}");
+    let r = import("hundred.tif", &tiff_nested(100)).unwrap();
+    assert_eq!(r.document.max_group_depth(), 100);
 }

@@ -2,7 +2,7 @@
 //! smart objects, locks and label colors.
 
 use photosplice_color::{Color, ColorMode};
-use photosplice_doc::{BlendIf, BlendRange, Fill, GradientStyle, LabelColor, Locks};
+use photosplice_doc::{AdvancedBlending, BlendIf, BlendRange, Fill, GradientStyle, Knockout, LabelColor, Locks};
 use photosplice_geom::Affine;
 use photosplice_psd::descriptor::{Descriptor, Id, UnicodeString, Value, VersionedDescriptor};
 use photosplice_psd::layer::BlendingRanges;
@@ -16,6 +16,62 @@ pub fn parse_brst(data: &[u8]) -> u32 {
 /// Inverse of [`parse_brst`]; `None` when every channel blends (no block).
 pub fn brst_data(mask: u32) -> Option<Vec<u8>> {
     (mask != 0).then(|| (0..32u32).filter(|i| mask & 1 << i != 0).flat_map(u32::to_be_bytes).collect())
+}
+
+/// The Advanced Blending blocks, as (key, value for `a`, Photoshop's default value): `knko`
+/// (0 none, 1 shallow, 2 deep), `infx`, `clbl`, `tsly`, `lmgm`, `vmgm`. Each is stored as one
+/// byte followed by three bytes of padding (Adobe PSD spec, "Additional Layer Information").
+pub fn advanced_flags(a: &AdvancedBlending) -> [([u8; 4], u8, u8); 6] {
+    [
+        (*b"knko", a.knockout.to_psd(), 0),
+        (*b"infx", u8::from(a.blend_interior), 0),
+        (*b"clbl", u8::from(a.blend_clipped), 1),
+        (*b"tsly", u8::from(a.transparency_shapes), 1),
+        (*b"lmgm", u8::from(a.layer_mask_hides_effects), 0),
+        (*b"vmgm", u8::from(a.vector_mask_hides_effects), 0),
+    ]
+}
+
+/// Advanced Blending from a layer record's blocks (`block(key)` gives a block's data). A missing
+/// or empty block keeps Photoshop's default.
+pub fn advanced_from_blocks<'a>(block: impl Fn(&[u8; 4]) -> Option<&'a [u8]>) -> AdvancedBlending {
+    let mut a = AdvancedBlending::default();
+    let flag = |k: &[u8; 4]| block(k).and_then(|d| d.first().copied());
+    if let Some(v) = flag(b"knko") {
+        a.knockout = Knockout::from_psd(v);
+    }
+    let set = |k: &[u8; 4], f: &mut bool| {
+        if let Some(v) = flag(k) {
+            *f = v != 0;
+        }
+    };
+    set(b"infx", &mut a.blend_interior);
+    set(b"clbl", &mut a.blend_clipped);
+    set(b"tsly", &mut a.transparency_shapes);
+    set(b"lmgm", &mut a.layer_mask_hides_effects);
+    set(b"vmgm", &mut a.vector_mask_hides_effects);
+    a
+}
+
+/// Writes the Advanced Blending blocks into an exported layer's preserved block list: a block
+/// already there is rewritten in place (keeping Photoshop's block order); a missing one is added
+/// only when its value differs from the default, so plain layers gain no blocks.
+pub fn put_advanced(a: &AdvancedBlending, raw: &mut Vec<([u8; 4], Vec<u8>)>) {
+    for (key, v, default) in advanced_flags(a) {
+        match raw.iter_mut().find(|(k, _)| *k == key) {
+            Some(e) => {
+                // Keep any extra bytes a reader wrote; the flag is the first byte.
+                if e.1.len() < 4 {
+                    e.1.resize(4, 0);
+                }
+                if let Some(b) = e.1.first_mut() {
+                    *b = v;
+                }
+            }
+            None if v != default => raw.push((key, vec![v, 0, 0, 0])),
+            None => {}
+        }
+    }
 }
 
 /// Layer-record blending ranges (Adobe PSD spec, "Layer blending ranges data": the composite
@@ -71,6 +127,11 @@ pub fn label_from_index(v: u16) -> LabelColor {
         5 => LabelColor::Blue,
         6 => LabelColor::Violet,
         7 => LabelColor::Gray,
+        // Photoshop 2024 added these without renumbering the original labels.
+        8 => LabelColor::Seafoam,
+        9 => LabelColor::Indigo,
+        10 => LabelColor::Magenta,
+        11 => LabelColor::Fuchsia,
         _ => LabelColor::None,
     }
 }
@@ -86,6 +147,10 @@ pub fn label_index(l: LabelColor) -> u16 {
         LabelColor::Blue => 5,
         LabelColor::Violet => 6,
         LabelColor::Gray => 7,
+        LabelColor::Seafoam => 8,
+        LabelColor::Indigo => 9,
+        LabelColor::Magenta => 10,
+        LabelColor::Fuchsia => 11,
     }
 }
 
@@ -255,7 +320,7 @@ pub(crate) fn gradient_style_value(s: GradientStyle) -> Value {
 pub(crate) type Stops = (Vec<(f32, Color)>, Vec<(f32, f32)>);
 
 /// Stops of a `Grdn` descriptor, baked to Photoshop's interpolation (smoothness `Intr`, stop
-/// midpoints, and the parent's `gs99` interpolation method when given).
+/// midpoints, and the parent's interpolation method when given, see [`gradient_method`]).
 pub(crate) fn gradient_stops_with(grad: &Descriptor, method: Option<&[u8]>) -> Stops {
     let raw = gradient_stops_raw(grad);
     let stops = if raw.stops.len() >= 2 && !raw.noise {
@@ -587,24 +652,8 @@ pub(crate) fn with_pattern_placement(mut d: Descriptor, angle: f32, link: bool, 
 
 /// The warp of a placed layer (`SoLd`/`SoLE` `warp` descriptor): style, bend, distortions,
 /// axis, bounds and, for `warpCustom`, the 4 × 4 `customEnvelopeWarp` mesh. Read-only: the raw
-/// block is what gets written back. `None` when absent or `warpNone` with no mesh.
-/// The source-space box Reference maps onto a placed layer's `Trnf` quad: the bounding box of a
-/// single-patch custom warp's 16 control points, which may spill past the source, else the source
-/// rect `0..w × 0..h`. Mapping the source rect instead counted the overhang twice and stretched
-/// the placement (storytold/photocraft@5ed75876). A degenerate or non-finite box falls back to the
-/// source rect.
-pub(crate) fn placed_frame(warp: Option<&photosplice_geom::warp::Warp>, w: f64, h: f64) -> [f64; 4] {
-    let rect = [0.0, 0.0, w, h];
-    let Some(m) = warp.filter(|wp| wp.style == photosplice_geom::warp::WarpStyle::Custom).and_then(|wp| wp.mesh.as_ref()).filter(|m| m.points.len() == 16)
-    else {
-        return rect;
-    };
-    let inf = f64::INFINITY;
-    let b = m.points.iter().fold([inf, inf, -inf, -inf], |b, [x, y]| [b[0].min(*x), b[1].min(*y), b[2].max(*x), b[3].max(*y)]);
-    let ok = b.iter().all(|v| v.is_finite()) && b[2] - b[0] > 1e-9 && b[3] - b[1] > 1e-9;
-    if ok { b } else { rect }
-}
-
+/// block is what gets written back. `None` when absent or `warpNone` with no mesh. A `PlLd`
+/// record keeps its warp elsewhere: see [`parse_plld_warp`].
 pub fn parse_placed_warp(key: &[u8; 4], data: &[u8]) -> Option<photosplice_geom::warp::Warp> {
     if key != b"SoLd" && key != b"SoLE" {
         return None;
@@ -679,6 +728,22 @@ pub fn parse_tysh(data: &[u8]) -> Option<(String, Affine)> {
 /// Parses a version-16 descriptor at the start of `data` (trailing bytes allowed).
 pub(crate) fn parse_prefix_versioned(data: &[u8]) -> Option<Descriptor> {
     VersionedDescriptor::parse_prefix(data).ok().map(|(v, _)| v.descriptor)
+}
+
+/// The source-space box Photoshop maps onto a placed layer's `Trnf` quad: the bounding box of a
+/// single-patch custom warp's 16 control points, which may spill past the source, else the source
+/// rect `0..w × 0..h`. Mapping the source rect instead counts the overhang twice and stretches the
+/// placement. A degenerate or non-finite box falls back to the source rect.
+pub(crate) fn placed_frame(warp: Option<&photosplice_geom::warp::Warp>, w: f64, h: f64) -> [f64; 4] {
+    let rect = [0.0, 0.0, w, h];
+    let Some(m) = warp.filter(|wp| wp.style == photosplice_geom::warp::WarpStyle::Custom).and_then(|wp| wp.mesh.as_ref()).filter(|m| m.points.len() == 16)
+    else {
+        return rect;
+    };
+    let inf = f64::INFINITY;
+    let b = m.points.iter().fold([inf, inf, -inf, -inf], |b, [x, y]| [b[0].min(*x), b[1].min(*y), b[2].max(*x), b[3].max(*y)]);
+    let ok = b.iter().all(|v| v.is_finite()) && b[2] - b[0] > 1e-9 && b[3] - b[1] > 1e-9;
+    if ok { b } else { rect }
 }
 
 /// Smart object identifier and transform from `SoLd`/`SoLE` (best effort). A `PlLd` block
@@ -944,6 +1009,37 @@ mod tests {
         assert_eq!(r.data.len(), 5 * 8);
         assert_eq!(&r.data[..8], &[5, 5, 255, 255, 0, 0, 255, 255]);
         assert_eq!(&r.data[8..], &BlendingRanges::full(3).data[..]);
+    }
+
+    #[test]
+    fn advanced_blending_blocks_round_trip() {
+        use photosplice_doc::{AdvancedBlending, Knockout};
+        let a = AdvancedBlending {
+            knockout: Knockout::Deep,
+            blend_interior: true,
+            blend_clipped: false,
+            transparency_shapes: false,
+            layer_mask_hides_effects: true,
+            vector_mask_hides_effects: true,
+        };
+        let mut raw = Vec::new();
+        super::put_advanced(&a, &mut raw);
+        assert_eq!(raw.len(), 6);
+        assert!(raw.contains(&(*b"knko", vec![2, 0, 0, 0])));
+        assert!(raw.contains(&(*b"clbl", vec![0, 0, 0, 0])));
+        let get = |k: &[u8; 4]| raw.iter().find(|(bk, _)| bk == k).map(|(_, d)| d.as_slice());
+        assert_eq!(super::advanced_from_blocks(get), a);
+        // Defaults: nothing added to a plain layer; existing blocks rewritten in place, in order.
+        let mut plain = Vec::new();
+        super::put_advanced(&AdvancedBlending::default(), &mut plain);
+        assert!(plain.is_empty());
+        let mut kept = vec![(*b"luni", vec![0; 4]), (*b"knko", vec![1, 0, 0, 0]), (*b"clbl", vec![1])];
+        super::put_advanced(&AdvancedBlending::default(), &mut kept);
+        assert_eq!(kept, vec![(*b"luni", vec![0; 4]), (*b"knko", vec![0, 0, 0, 0]), (*b"clbl", vec![1, 0, 0, 0])]);
+        // Missing and empty blocks read as Photoshop's defaults.
+        assert!(super::advanced_from_blocks(|_| None).is_default());
+        assert!(super::advanced_from_blocks(|_| Some(&[][..])).is_default());
+        assert_eq!(super::advanced_from_blocks(|k| (k == b"knko").then_some(&[1u8][..])).knockout, Knockout::Shallow);
     }
 
     #[test]
@@ -1295,6 +1391,63 @@ mod more_tests {
         assert_eq!(parse_plld_warp(&[data[..end].to_vec(), vec![0, 0, 0, 0, 0, 0, 0, 16, 1, 2]].concat()), PlldWarp::Unreadable);
         assert_eq!(parse_plld_warp(&data[..end - 1]), PlldWarp::Unreadable, "the record itself");
         assert_eq!(parse_plld_warp(&[]), PlldWarp::Unreadable);
+    }
+
+    /// `SoLd` data with a 50 × 25 source, the quad `trnf` and, when given, a custom warp whose
+    /// 16 control points are `pts`.
+    fn sold_with_warp(trnf: [f64; 8], pts: Option<&[[f64; 2]]>) -> Vec<u8> {
+        use photosplice_psd::descriptor::ObjectArray;
+        let e = |t: &str, v: &str| Value::Enumerated { type_id: Id::new(t), value: Id::new(v) };
+        let mut d = Descriptor::new("null")
+            .with("Idnt", Value::Text(UnicodeString::new_nul("uuid-1")))
+            .with("Trnf", Value::List(trnf.map(Value::Double).to_vec()))
+            .with("Sz  ", Value::Descriptor(Descriptor::new("Pnt ").with("Wdth", Value::Double(50.0)).with("Hght", Value::Double(25.0))));
+        if let Some(pts) = pts {
+            let bounds = Descriptor::new("Rctn")
+                .with("Top ", Value::Double(0.0))
+                .with("Left", Value::Double(0.0))
+                .with("Btom", Value::Double(25.0))
+                .with("Rght", Value::Double(50.0));
+            let mesh = Descriptor::new("null")
+                .with("Hrzn", Value::UnitFloats { unit: *b"#Pxl", values: pts.iter().map(|p| p[0]).collect() })
+                .with("Vrtc", Value::UnitFloats { unit: *b"#Pxl", values: pts.iter().map(|p| p[1]).collect() });
+            let warp = Descriptor::new("warp").with("warpStyle", e("warpStyle", "warpCustom")).with("bounds", Value::Descriptor(bounds)).with(
+                "customEnvelopeWarp",
+                Value::Descriptor(Descriptor::new("customEnvelopeWarp").with("meshPoints", Value::ObjectArray(ObjectArray { prefix: 16, body: mesh }))),
+            );
+            d = d.with("warp", Value::Descriptor(warp));
+        }
+        let mut data = b"soLD".to_vec();
+        data.extend_from_slice(&4u32.to_be_bytes());
+        data.extend(VersionedDescriptor::new(d).to_bytes());
+        data
+    }
+
+    /// Photoshop's `Trnf` is the image of the custom warp's control-point bounding box, not of the
+    /// source rect: a mesh spilling to x = -10, y = -5 and x = 60 frames a 70 × 30 box.
+    #[test]
+    fn smart_transform_maps_the_warp_control_box_onto_the_quad() {
+        let mut pts = photosplice_geom::warp::BezierMesh::identity([0.0, 0.0, 50.0, 25.0], 1, 1).points;
+        pts[0] = [-10.0, -5.0];
+        pts[15] = [60.0, 25.0];
+        let quad = [100.0, 200.0, 240.0, 200.0, 240.0, 260.0, 100.0, 260.0];
+        let (_, a) = parse_smart(b"SoLd", &sold_with_warp(quad, Some(&pts)));
+        assert_eq!(a.m, [2.0, 0.0, 0.0, 2.0, 120.0, 210.0]);
+        // Without a warp the source rect is the frame, as before.
+        assert_eq!(parse_smart(b"SoLd", &sold_with_warp(quad, None)).1.m, [2.8, 0.0, 0.0, 2.4, 100.0, 200.0]);
+    }
+
+    /// A custom mesh with no area (every control point on one spot) can't frame the quad: the
+    /// source rect does, with no division by zero.
+    #[test]
+    fn smart_transform_with_a_degenerate_warp_box_uses_the_source_rect() {
+        let quad = [100.0, 200.0, 240.0, 200.0, 240.0, 260.0, 100.0, 260.0];
+        let (_, a) = parse_smart(b"SoLd", &sold_with_warp(quad, Some(&[[7.0, 7.0]; 16])));
+        assert_eq!(a.m, [2.8, 0.0, 0.0, 2.4, 100.0, 200.0]);
+        let mut warp = photosplice_geom::warp::Warp::preset(photosplice_geom::warp::WarpStyle::Custom, 0.0, [0.0, 0.0, 50.0, 25.0]);
+        warp.mesh = Some(photosplice_geom::warp::BezierMesh { us: vec![0.0, 1.0], vs: vec![0.0, 1.0], points: vec![[f64::NAN, 1.0]; 16] });
+        assert_eq!(placed_frame(Some(&warp), 50.0, 25.0), [0.0, 0.0, 50.0, 25.0]);
+        assert_eq!(placed_frame(None, 50.0, 25.0), [0.0, 0.0, 50.0, 25.0]);
     }
 
     #[test]

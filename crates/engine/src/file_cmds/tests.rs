@@ -92,6 +92,28 @@ fn revert_reloads_as_one_undoable_step() {
 }
 
 #[test]
+fn injected_import_failure_does_not_open_a_document() {
+    let mut s = session(8, 8, 8);
+    let before = s.documents().len();
+    crate::allocation::fail_next_for_test();
+    let result = open_bytes_as(&mut s, "image.png", b"not decoded", None, None);
+    assert!(result.as_ref().is_err_and(|e| e.to_string().contains("not enough memory for importing document")));
+    assert_eq!(s.documents().len(), before);
+}
+
+#[test]
+fn injected_save_failure_does_not_modify_the_destination() {
+    let dir = tmp("allocation-save");
+    let path = join(&dir, "existing.psd");
+    std::fs::write(&path, b"previous file").unwrap();
+    let s = session(8, 8, 8);
+    crate::allocation::fail_next_for_test();
+    let result = save_doc(doc(&s), &path, None);
+    assert!(result.as_ref().is_err_and(|e| e.to_string().contains("not enough memory for saving document")));
+    assert_eq!(std::fs::read(path).unwrap(), b"previous file");
+}
+
+#[test]
 fn save_a_copy_keeps_path_and_dirty_state() {
     let dir = tmp("copy");
     let mut s = session(20, 10, 16);
@@ -111,6 +133,109 @@ fn save_a_copy_keeps_path_and_dirty_state() {
     s.execute("file.saveACopy", json!({"path": flat, "layers": false})).unwrap();
     assert_eq!(photosplice_io::import("flat.psd", &std::fs::read(&flat).unwrap()).unwrap().document.layers.len(), 1);
     assert!(s.execute("file.saveACopy", json!({})).is_err());
+}
+
+/// `tgaBits` picks the Targa's bits per pixel (byte 16 of the header); unset, a document with an
+/// alpha channel is written as 32-bit, with the channel as the alpha.
+#[test]
+fn save_a_copy_writes_the_targa_bits_asked_for() {
+    let dir = tmp("tga-bits");
+    let mut s = session(20, 10, 8);
+    s.execute("select.all", json!({})).unwrap();
+    s.execute("select.saveSelection", json!({})).unwrap();
+    for (params, bpp) in [(json!({}), 32), (json!({"tgaBits": 24}), 24), (json!({"tgaBits": 32}), 32), (json!({"tgaBits": null}), 32)] {
+        let out = join(&dir, "a.tga");
+        let mut p = params.clone();
+        p["path"] = json!(out);
+        s.execute("file.saveACopy", p).unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        assert_eq!(bytes[16], bpp, "{params}");
+        let back = photosplice_io::import("a.tga", &bytes).unwrap().document;
+        assert_eq!(back.channels.len(), usize::from(bpp == 32), "{params}: the selection reopens as Alpha 1");
+    }
+}
+
+/// `dpxBits` picks a DPX's bits per sample (byte 803 of the header); unset, it follows the
+/// document's depth. Anything but 8, 10, 12 or 16 is refused before anything is written.
+#[test]
+fn save_a_copy_writes_the_dpx_bits_asked_for() {
+    let dir = tmp("dpx-bits");
+    for (depth, params, bits) in
+        [(8, json!({}), 8), (16, json!({}), 16), (16, json!({"dpxBits": 10}), 10), (8, json!({"dpxBits": 12}), 12), (16, json!({"dpxBits": null}), 16)]
+    {
+        let mut s = session(12, 6, depth);
+        let out = join(&dir, "a.dpx");
+        let mut p = params.clone();
+        p["path"] = json!(out);
+        s.execute("file.saveACopy", p).unwrap();
+        let bytes = std::fs::read(&out).unwrap();
+        assert_eq!((&bytes[..4], bytes[803]), (&b"SDPX"[..], bits), "{depth}-bit {params}");
+        assert_eq!(photosplice_io::import("a.dpx", &bytes).unwrap().document.size, photosplice_geom::Size::new(12, 6));
+    }
+    let mut s = session(8, 8, 8);
+    for bad in [json!(24), json!(0), json!("10"), json!(10.5)] {
+        let out = join(&dir, "bad.dpx");
+        let r = s.execute("file.saveACopy", json!({"path": out, "dpxBits": bad}));
+        assert!(matches!(r, Err(EngineError::BadParams { .. })), "{bad}: {r:?}");
+        assert!(!std::path::Path::new(&out).exists(), "{bad}: nothing written");
+    }
+}
+
+/// A `tgaBits` other than 24 or 32 is a bad parameter, reported before anything is written.
+#[test]
+fn bad_targa_bits_are_refused_before_writing() {
+    let dir = tmp("tga-bad");
+    let mut s = session(8, 8, 8);
+    for bad in [json!(16), json!(0), json!(-32), json!(32.5), json!("32"), json!(true), json!([32])] {
+        let out = join(&dir, "a.tga");
+        let r = s.execute("file.saveACopy", json!({"path": out, "tgaBits": bad}));
+        assert!(matches!(r, Err(EngineError::BadParams { .. })), "{bad}: {r:?}");
+        assert!(!std::path::Path::new(&out).exists(), "{bad}: nothing written");
+        let r = s.execute("file.export.layersToFiles", json!({"dir": dir, "format": "tga", "tgaBits": bad}));
+        assert!(matches!(r, Err(EngineError::BadParams { .. })), "{bad}: {r:?}");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "{bad}: no layer written");
+    }
+}
+
+/// Preferences › File Handling › Image Previews decides whether a PSD gets Photoshop's
+/// thumbnail resource (1036): Always and Ask When Saving write it, Never doesn't.
+#[test]
+fn image_previews_preference_controls_the_psd_thumbnail() {
+    use crate::prefs::Ask;
+    let dir = tmp("previews");
+    let mut s = session(300, 200, 16);
+    let has_thumbnail = |path: &str| {
+        let file = photosplice_psd::PsdFile::from_bytes(&std::fs::read(path).unwrap()).unwrap();
+        file.resources.iter().any(|r| r.id == photosplice_psd::resources::ids::THUMBNAIL)
+    };
+    for (ask, expect) in [(Ask::Always, true), (Ask::Never, false), (Ask::Ask, true)] {
+        s.edit_prefs(|p| p.file_handling.image_previews = ask);
+        let out = join(&dir, &format!("{ask:?}.psd"));
+        s.execute("file.saveACopy", json!({"path": out})).unwrap();
+        assert_eq!(has_thumbnail(&out), expect, "{ask:?}");
+        let png = join(&dir, &format!("{ask:?}.png"));
+        s.execute("file.saveACopy", json!({"path": png})).unwrap();
+    }
+}
+
+/// Preferences › File Handling › Maximize PSD and PSB File Compatibility decides whether a
+/// layered PSD keeps its real merged image: Always and Ask When Saving write it, Never writes
+/// Photoshop's placeholder and says so in resource 1057.
+#[test]
+fn maximize_compatibility_preference_controls_the_psd_merged_image() {
+    use crate::prefs::Ask;
+    let dir = tmp("maximize");
+    let mut s = session(300, 200, 16);
+    s.execute("layer.new.layer", json!({})).unwrap();
+    let real_merged = |path: &str| photosplice_psd::PsdFile::from_bytes(&std::fs::read(path).unwrap()).unwrap().has_real_merged_data();
+    for (ask, expect) in [(Ask::Always, true), (Ask::Never, false), (Ask::Ask, true)] {
+        s.edit_prefs(|p| p.file_handling.maximize_psd_compatibility = ask);
+        for ext in ["psd", "psb"] {
+            let out = join(&dir, &format!("{ask:?}.{ext}"));
+            s.execute("file.saveACopy", json!({"path": out})).unwrap();
+            assert_eq!(real_merged(&out), Some(expect), "{ask:?} {ext}");
+        }
+    }
 }
 
 #[test]
@@ -156,6 +281,45 @@ fn place_embedded_centres_fits_and_embeds() {
         assert!(s.undo() && s.undo());
         assert_eq!(doc(&s).layers.len(), 1);
     }
+}
+
+/// Preferences ▸ General ▸ Always Create Smart Objects When Placing: unchecked, an embedded place
+/// lands as a plain pixel layer; a linked place is always a smart object and `"smartObject"` wins.
+#[test]
+fn always_create_smart_objects_preference_places_a_pixel_layer() {
+    let dir = tmp("place-smart-pref");
+    let big = png(&dir, "big.png", 200, 100, "#ff0000");
+    let mut s = session(100, 100, 8);
+    s.execute("prefs.set", json!({"path": "general.alwaysCreateSmartObjectsWhenPlacing", "value": false})).unwrap();
+    let r = s.execute("file.placeEmbedded", json!({"path": big})).unwrap();
+    assert_eq!(r["smartObject"], json!(false));
+    let d = s.active().unwrap();
+    let l = d.doc.layer(d.active_layer.unwrap()).unwrap();
+    assert!(matches!(l.content, LayerContent::Raster(_)), "a pixel layer");
+    // Fitted to the canvas width, centred vertically, exactly like the smart-object place.
+    assert!(composite(&s, 50, 50)[0] > 0.99 && composite(&s, 50, 50)[2] < 0.01);
+    assert!(composite(&s, 50, 10)[1] > 0.99, "white background above");
+    // An explicit "smartObject": true overrides, and Place Linked with the preference off still
+    // creates a linked smart object.
+    assert_eq!(s.execute("file.placeEmbedded", json!({"path": big, "smartObject": true})).unwrap()["smartObject"], json!(true));
+    assert_eq!(s.execute("file.placeLinked", json!({"path": big})).unwrap()["smartObject"], json!(true));
+}
+
+/// Preferences ▸ General ▸ Resize Image During Place: off, a larger image keeps its natural size
+/// instead of being fitted to the canvas; an explicit `"fit"` still wins.
+#[test]
+fn resize_image_during_place_preference_controls_the_fit() {
+    let dir = tmp("place-fit-pref");
+    let big = png(&dir, "big.png", 200, 100, "#ff0000");
+    let mut s = session(100, 100, 8);
+    s.execute("prefs.set", json!({"path": "general.resizeImageDuringPlace", "value": false})).unwrap();
+    let r = s.execute("file.placeEmbedded", json!({"path": big})).unwrap();
+    assert!((r["scale"].as_f64().unwrap() - 100.0).abs() < 1e-9, "natural size: {r}");
+    let b = r["bounds"].as_array().unwrap();
+    assert!(b[2].as_f64().unwrap() > 100.0, "wider than the canvas: {b:?}");
+    // An explicit "fit": true overrides the preference.
+    let r = s.execute("file.placeEmbedded", json!({"path": big, "fit": true})).unwrap();
+    assert!((r["scale"].as_f64().unwrap() - 50.0).abs() < 1e-9, "fitted on request: {r}");
 }
 
 /// A 40×20 JPEG (left half red, right half blue) tagged EXIF Orientation = 6: shown upright it
@@ -221,6 +385,144 @@ fn file_info_round_trips_through_xmp_and_psd() {
     assert_eq!(read_file_info(Some(&out))["authorTitle"], "Artist");
 }
 
+fn camera_exif() -> Vec<u8> {
+    photosplice_algo::exif::build(&photosplice_algo::exif::CameraInfo {
+        make: Some("SONY".into()),
+        model: Some("ILCE-7RM5".into()),
+        lens: Some("24-70mm F2.8".into()),
+        exposure_time: Some(1.0 / 250.0),
+        f_number: Some(8.0),
+        iso: Some(400.0),
+        focal_length: Some(33.1),
+        focal_length_35mm: Some(50.0),
+        date_taken: Some("2024:02:17 12:40:19".into()),
+    })
+}
+
+#[test]
+fn file_info_reads_camera_data_from_jpeg_and_psd_exif() {
+    let mut s = session(8, 8, 8);
+    assert_eq!(s.execute("file.fileInfo", json!({})).unwrap()["camera"], json!({}));
+    s.edit("exif", |doc, _| {
+        doc.metadata.exif = Some(Arc::new(camera_exif()));
+        Ok(())
+    })
+    .unwrap();
+    let want = json!({
+        "make": "SONY", "model": "ILCE-7RM5", "dateTaken": "2024-02-17 12:40:19", "exposure": "1/250 s", "fNumber": "f/8",
+        "iso": "ISO 400", "focalLength": "33.1 mm", "focalLength35mm": "50 mm", "lens": "24-70mm F2.8"
+    });
+    for name in ["x.jpg", "x.psd"] {
+        let (bytes, _) = encode(doc(&s), name, None).unwrap();
+        let back = photosplice_io::import(name, &bytes).unwrap().document;
+        let mut t = Session::new();
+        t.add_document(back, None);
+        assert_eq!(t.execute("file.fileInfo", json!({})).unwrap()["camera"], want, "{name}");
+        // Editing the description fields leaves the read-only camera data alone.
+        let edited = t.execute("file.fileInfo", json!({"title": "Pier", "camera": {"make": "ignored"}})).unwrap();
+        assert_eq!(edited["camera"], want, "{name}");
+    }
+}
+
+#[test]
+fn camera_data_formats_like_photoshop_and_falls_back_to_xmp() {
+    let info = |t: Option<f64>, n: Option<f64>, f: Option<f64>| {
+        let exif = photosplice_algo::exif::build(&photosplice_algo::exif::CameraInfo { exposure_time: t, f_number: n, focal_length: f, ..Default::default() });
+        camera_data(Some(&exif), None)
+    };
+    assert_eq!(info(Some(2.0), Some(2.8), Some(35.0)), json!({"exposure": "2 s", "fNumber": "f/2.8", "focalLength": "35 mm"}));
+    assert_eq!(info(Some(0.5), Some(5.6), None), json!({"exposure": "1/2 s", "fNumber": "f/5.6"}));
+    assert_eq!(info(Some(0.4), None, None), json!({"exposure": "0.4 s"}));
+    assert_eq!(info(Some(1.0 / 2000.0), None, None), json!({"exposure": "1/2000 s"}));
+    assert_eq!(info(Some(0.0), Some(0.0), Some(0.0)), json!({}));
+    // No EXIF block (a raw import, XMP-only files): Photoshop's exif:/tiff:/aux: properties.
+    let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<rdf:Description rdf:about="" xmlns:tiff="http://ns.adobe.com/tiff/1.0/" xmlns:exif="http://ns.adobe.com/exif/1.0/" xmlns:aux="http://ns.adobe.com/exif/1.0/aux/"
+ tiff:Make="SONY" tiff:Model="ILCE-7RM5" exif:ExposureTime="1/250" exif:FNumber="8/1" exif:FocalLength="331/10"
+ exif:FocalLengthIn35mmFilm="50" exif:DateTimeOriginal="2024-02-17T12:40:19.00+01:00" aux:Lens="Lens &amp; Co">
+<exif:ISOSpeedRatings><rdf:Seq><rdf:li>400</rdf:li></rdf:Seq></exif:ISOSpeedRatings>
+</rdf:Description></rdf:RDF></x:xmpmeta>"#;
+    let want = json!({
+        "make": "SONY", "model": "ILCE-7RM5", "dateTaken": "2024-02-17 12:40:19", "exposure": "1/250 s", "fNumber": "f/8",
+        "iso": "ISO 400", "focalLength": "33.1 mm", "focalLength35mm": "50 mm", "lens": "Lens & Co"
+    });
+    assert_eq!(camera_data(None, Some(xmp)), want);
+    // EXIF wins; XMP only fills what EXIF lacks.
+    let exif = photosplice_algo::exif::build(&photosplice_algo::exif::CameraInfo { make: Some("Other".into()), ..Default::default() });
+    let both = camera_data(Some(&exif), Some(xmp));
+    assert_eq!(both["make"], "Other");
+    assert_eq!(both["exposure"], "1/250 s");
+    // Garbage in either block reads as no data, never a panic.
+    assert_eq!(camera_data(Some(b"II*\0\xff\xff\xff\xff"), Some("<exif:FNumber>0/0</exif:FNumber> exif:ExposureTime=\"-1/0\"")), json!({}));
+}
+
+const MULTILINGUAL_XMP: &str = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/">
+<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/"
+ xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:xmpRights="http://ns.adobe.com/xap/1.0/rights/"
+ xmp:CreatorTool="Other App" xmpRights:Marked="True" xmpRights:WebStatement="https://example.com/license">
+<dc:title><rdf:Alt><rdf:li xml:lang="x-default">Sun</rdf:li><rdf:li xml:lang="fr">Soleil</rdf:li><rdf:li xml:lang="ar">الشمس</rdf:li></rdf:Alt></dc:title>
+<dc:description><rdf:Alt><rdf:li xml:lang="x-default">Sunrise</rdf:li><rdf:li xml:lang="fr">Lever du soleil</rdf:li></rdf:Alt></dc:description>
+<dc:rights><rdf:Alt><rdf:li xml:lang="x-default">All rights reserved</rdf:li><rdf:li xml:lang="fr">Tous droits réservés</rdf:li></rdf:Alt></dc:rights>
+<dc:subject><rdf:Bag><rdf:li>sky</rdf:li></rdf:Bag></dc:subject>
+</rdf:Description></rdf:RDF></x:xmpmeta>"#;
+
+fn assert_translations_kept(xmp: &str) {
+    for prop in ["dc:title", "dc:description", "dc:rights"] {
+        assert_eq!(find_element(xmp, prop).unwrap().2, find_element(MULTILINGUAL_XMP, prop).unwrap().2, "{prop}");
+        assert_eq!(xmp.matches(&format!("<{prop}>")).count(), 1);
+    }
+    assert!(xmp.contains("xmp:CreatorTool=\"Other App\""));
+    assert!(xmp.contains("xmpRights:Marked=\"True\""));
+    assert!(xmp.contains("xmpRights:WebStatement=\"https://example.com/license\""));
+}
+
+#[test]
+fn file_info_keeps_translations_when_editing_keywords() {
+    let partial = json!({"keywords": ["sky", "sunrise"]});
+    let mut dialog = read_file_info(Some(MULTILINGUAL_XMP));
+    dialog["keywords"] = json!("sky; sunrise");
+    for params in [partial, dialog] {
+        let out = write_file_info(Some(MULTILINGUAL_XMP), &params);
+        assert_translations_kept(&out);
+        assert_eq!(read_file_info(Some(&out))["keywords"], json!(["sky", "sunrise"]));
+    }
+    let unchanged = read_file_info(Some(MULTILINGUAL_XMP));
+    assert_eq!(write_file_info(Some(MULTILINGUAL_XMP), &unchanged), MULTILINGUAL_XMP);
+    assert_eq!(write_file_info(Some(MULTILINGUAL_XMP), &json!({})), MULTILINGUAL_XMP);
+}
+
+#[test]
+fn file_info_clears_only_the_requested_field() {
+    let out = write_file_info(Some(MULTILINGUAL_XMP), &json!({"keywords": []}));
+    assert_translations_kept(&out);
+    assert!(find_element(&out, "dc:subject").is_none());
+    assert_eq!(read_file_info(Some(&out))["keywords"], json!([]));
+}
+
+#[test]
+fn file_info_translations_survive_undo_and_psd_round_trip() {
+    for depth in [8, 16, 32] {
+        let mut s = session(8, 8, depth);
+        s.edit("Set metadata", |doc, _| {
+            doc.metadata.xmp = Some(MULTILINGUAL_XMP.to_string());
+            Ok(())
+        })
+        .unwrap();
+        s.execute("file.fileInfo", json!({"keywords": ["sunrise"]})).unwrap();
+        let edited = doc(&s).metadata.xmp.clone().unwrap();
+        assert_translations_kept(&edited);
+        assert!(s.undo());
+        assert_eq!(doc(&s).metadata.xmp.as_deref(), Some(MULTILINGUAL_XMP));
+        assert!(s.redo());
+        assert_eq!(doc(&s).metadata.xmp.as_deref(), Some(edited.as_str()));
+        let (bytes, _) = encode(doc(&s), "x.psd", None).unwrap();
+        let back = photosplice_io::import("x.psd", &bytes).unwrap().document;
+        assert_translations_kept(back.metadata.xmp.as_deref().unwrap());
+        assert_eq!(read_file_info(back.metadata.xmp.as_deref())["keywords"], json!(["sunrise"]));
+    }
+}
+
 #[test]
 fn fit_image_and_conditional_mode_change() {
     let mut s = session(400, 200, 8);
@@ -284,7 +586,6 @@ fn flatten_all_layer_effects_and_masks() {
         s.execute("select.rect", json!({"x": 0, "y": 0, "width": 20, "height": 40})).unwrap();
         s.execute("select.inverse", json!({})).unwrap();
         s.execute("layer.layerMask.revealSelection", json!({})).unwrap();
-        s.execute("select.deselect", json!({})).unwrap();
         assert!(composite(&s, 15, 15)[1] > 0.99 && composite(&s, 15, 15)[0] > 0.99, "white shows through the mask");
         let r = s.execute("file.scripts.flattenAllMasks", json!({})).unwrap();
         assert_eq!(r["flattened"], 1);
@@ -295,6 +596,116 @@ fn flatten_all_layer_effects_and_masks() {
         // Each script is a single history step.
         assert!(s.undo());
         assert!(doc(&s).layer(id).unwrap().mask.is_some());
+    }
+}
+
+/// Flatten All Layer Effects must bake the effect visuals without destroying the layer's masks:
+/// an enabled raster mask and a vector mask on one layer, a disabled raster mask on another
+/// (#3804). The command is a visual no-op; the masks (pixels and state) survive, including a
+/// `.pcraft` round trip.
+#[test]
+fn flatten_all_layer_effects_keeps_masks() {
+    for depth in [8, 16, 32] {
+        let mut s = session(40, 40, depth);
+        // Layer 1: a red square with a green colour overlay, an enabled raster mask revealing
+        // x < 20 and a vector mask revealing x 15..30.
+        s.execute("layer.new.layer", json!({})).unwrap();
+        s.execute("select.rect", json!({"x": 10, "y": 10, "width": 20, "height": 20})).unwrap();
+        s.execute("edit.fill", json!({"color": "#ff0000"})).unwrap();
+        s.execute("select.deselect", json!({})).unwrap();
+        let id1 = s.active().unwrap().active_layer.unwrap();
+        s.edit("fx", |doc, _| {
+            let l = doc.layer_mut(id1).unwrap();
+            l.effects.enabled = true;
+            l.effects.items.push(photosplice_doc::Effect::ColorOverlay {
+                common: photosplice_doc::effects::FxCommon::new(photosplice_color::BlendMode::Normal, 1.0),
+                color: photosplice_color::Color::rgb(0.0, 1.0, 0.0),
+            });
+            l.vector_mask = Some(photosplice_doc::VectorMask::new(photosplice_doc::Path::new(vec![photosplice_doc::Subpath::polygon(&[
+                (15.0, 15.0),
+                (30.0, 15.0),
+                (30.0, 30.0),
+                (15.0, 30.0),
+            ])])));
+            Ok(())
+        })
+        .unwrap();
+        s.execute("select.rect", json!({"x": 0, "y": 0, "width": 20, "height": 40})).unwrap();
+        s.execute("layer.layerMask.revealSelection", json!({})).unwrap();
+        // Layer 2: a red square at the bottom-right with the same overlay and a *disabled* mask.
+        s.execute("layer.new.layer", json!({})).unwrap();
+        s.execute("select.rect", json!({"x": 30, "y": 30, "width": 8, "height": 8})).unwrap();
+        s.execute("edit.fill", json!({"color": "#ff0000"})).unwrap();
+        s.execute("select.deselect", json!({})).unwrap();
+        let id2 = s.active().unwrap().active_layer.unwrap();
+        s.edit("fx", |doc, _| {
+            let l = doc.layer_mut(id2).unwrap();
+            l.effects.enabled = true;
+            l.effects.items.push(photosplice_doc::Effect::ColorOverlay {
+                common: photosplice_doc::effects::FxCommon::new(photosplice_color::BlendMode::Normal, 1.0),
+                color: photosplice_color::Color::rgb(0.0, 1.0, 0.0),
+            });
+            Ok(())
+        })
+        .unwrap();
+        s.execute("select.rect", json!({"x": 34, "y": 34, "width": 2, "height": 2})).unwrap();
+        s.execute("layer.layerMask.revealSelection", json!({})).unwrap();
+        s.edit("disable", |doc, _| {
+            if let Some(m) = doc.layer_mut(id2).and_then(|l| l.mask.as_mut()) {
+                m.enabled = false;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let m1 = doc(&s).layer(id1).unwrap().mask.clone();
+        let v1 = doc(&s).layer(id1).unwrap().vector_mask.clone();
+        let m2 = doc(&s).layer(id2).unwrap().mask.clone();
+        assert_eq!(m1.as_ref().map(|m| m.enabled), Some(true), "layer 1 raster mask is enabled");
+        assert!(v1.as_ref().is_some_and(|v| v.enabled), "layer 1 vector mask is enabled");
+        assert_eq!(m2.as_ref().map(|m| m.enabled), Some(false), "layer 2 raster mask is disabled");
+        let before = [
+            composite(&s, 17, 15), // layer 1: inside both masks
+            composite(&s, 22, 15), // layer 1: raster mask hides
+            composite(&s, 12, 15), // layer 1: vector mask hides
+            composite(&s, 34, 34), // layer 2: the disabled mask does not hide
+        ];
+        assert!(before[0][1] > 0.99 && before[0][0] < 0.01, "overlay renders green: {:?}", before[0]);
+        // The white background shows where a mask hides the layer.
+        assert!(before[1][0] > 0.99 && before[1][1] > 0.99, "the raster mask hides: {:?}", before[1]);
+        assert!(before[2][0] > 0.99 && before[2][1] > 0.99, "the vector mask hides: {:?}", before[2]);
+        assert!(before[3][1] > 0.99, "the disabled mask does not hide");
+        let r = s.execute("file.scripts.flattenAllLayerEffects", json!({})).unwrap();
+        assert_eq!(r["flattened"], 2);
+        {
+            let d = doc(&s);
+            assert_eq!(d.layer(id1).unwrap().mask, m1, "layer 1 raster mask survives");
+            assert_eq!(d.layer(id1).unwrap().vector_mask, v1, "layer 1 vector mask survives");
+            assert_eq!(d.layer(id2).unwrap().mask, m2, "the disabled mask survives");
+        }
+        let after = [composite(&s, 17, 15), composite(&s, 22, 15), composite(&s, 12, 15), composite(&s, 34, 34)];
+        for (a, b) in after.iter().zip(&before) {
+            for k in 0..4 {
+                assert!((a[k] - b[k]).abs() < 0.01, "flattening is a visual no-op: {after:?} vs {before:?}");
+            }
+        }
+        // One history step: undo restores the effects, redo re-flattens, and the masks stay.
+        assert!(s.undo());
+        assert!(!doc(&s).layer(id1).unwrap().effects.items.is_empty());
+        assert_eq!(doc(&s).layer(id1).unwrap().mask, m1);
+        assert!(s.redo());
+        assert_eq!(doc(&s).layer(id1).unwrap().mask, m1);
+        assert_eq!(doc(&s).layer(id1).unwrap().vector_mask, v1);
+        assert_eq!(doc(&s).layer(id2).unwrap().mask, m2);
+        // The masks survive a `.pcraft` save and reopen.
+        let dir = tmp("flatten-effects-masks");
+        let path = join(&dir, "masks.pcraft");
+        save_doc(doc(&s), &path, None).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let mut s2 = Session::new();
+        open_bytes_as(&mut s2, "masks.pcraft", &bytes, None, None).unwrap();
+        let layers: Vec<_> = doc(&s2).walk().into_iter().map(|(_, _, l)| l).collect();
+        assert!(layers.iter().any(|l| l.mask == m1 && l.vector_mask == v1), "the raster and vector masks survive .pcraft");
+        assert!(layers.iter().any(|l| l.mask == m2), "the disabled mask survives .pcraft");
     }
 }
 
@@ -342,6 +753,18 @@ fn load_files_into_stack_and_image_processor_and_batch() {
     let inv = photosplice_io::import("a.png", &std::fs::read(join(&out, "a.png")).unwrap()).unwrap().document;
     let px = photosplice_compose::render(&inv, Rect::new(1, 1, 2, 2)).px[0];
     assert!(px[0] < 0.01 && px[1] > 0.99 && px[2] > 0.99, "red inverted to cyan: {px:?}");
+    // A recorded Quick Export writes to the current document path, but Batch owns
+    // the destination. Replaying it would fail for scratch documents with no save path.
+    let quick_out = join(&dir, "batch-with-quick-export");
+    let r = s
+        .execute(
+            "file.automate.batch",
+            json!({"steps": [["image.adjustments.invert", {}], ["file.export.quickExport", {}]], "input": input, "output": quick_out, "format": "png"}),
+        )
+        .unwrap();
+    assert_eq!(r["files"].as_array().unwrap().len(), 2, "{r}");
+    assert!(r["errors"].as_array().unwrap().is_empty(), "{r}");
+    assert!(std::path::Path::new(&join(&quick_out, "a.png")).is_file());
     assert!(s.execute("file.automate.batch", json!({"steps": [["no.such.command", {}]], "input": input, "output": out})).is_err());
 }
 
@@ -365,6 +788,87 @@ fn color_lookup_table_bakes_the_adjustment_stack() {
     let path = join(&dir, "invert.cube");
     s.execute("file.export.colorLookupTables", json!({"path": path, "size": 17})).unwrap();
     assert!(std::fs::read_to_string(&path).unwrap().contains("LUT_3D_SIZE 17"));
+}
+
+#[test]
+fn cube_export_uses_only_selected_adjustments_in_document_order() {
+    let mut s = session(8, 8, 8);
+    let first = s.execute("layer.newAdjustmentLayer.invert", json!({})).unwrap()["layer"].as_u64().unwrap();
+    let second = s.execute("layer.newAdjustmentLayer.invert", json!({})).unwrap()["layer"].as_u64().unwrap();
+    let both = s.execute("file.export.colorLookupTables", json!({"size": 3})).unwrap();
+    let all = photosplice_cms::lutfile::parse_cube(both["cube"].as_str().unwrap()).unwrap();
+    assert_eq!(both["layerCount"], 2);
+    assert!(all.data[0] < 0.001, "two Invert adjustments produce identity");
+
+    // Selection comes from the Layers panel rather than the active layer alone.
+    s.execute("layer.select", json!({"layer": first})).unwrap();
+    let selected = s.execute("file.export.colorLookupTables", json!({"size": 3, "scope": "selected"})).unwrap();
+    let one = photosplice_cms::lutfile::parse_cube(selected["cube"].as_str().unwrap()).unwrap();
+    assert_eq!(selected["layerCount"], 1);
+    assert!(one.data[0] > 0.999, "one invert maps black to white");
+    assert_eq!(all.size, one.size);
+    assert_eq!(s.execute("file.export.colorLookupTables", json!({"size": 3, "layers": [first]})).unwrap()["cube"], selected["cube"]);
+
+    // Reversing the caller's ID list must not reverse document stack order.
+    let normal = s.execute("file.export.colorLookupTables", json!({"size": 3, "layers": [first, second]})).unwrap();
+    let reversed = s.execute("file.export.colorLookupTables", json!({"size": 3, "layers": [second, first]})).unwrap();
+    assert_eq!(normal["cube"], reversed["cube"]);
+    assert_eq!(normal["cube"], both["cube"]);
+
+    // Additional non-adjustment layers must not affect the LUT export.
+    s.execute("layer.new.layer", json!({"name": "Raster"})).unwrap();
+    assert_eq!(s.execute("file.export.colorLookupTables", json!({"size": 3})).unwrap()["cube"], both["cube"]);
+}
+
+#[test]
+fn selected_cube_validation_is_explicit_and_never_mutates_the_document() {
+    let mut s = session(8, 8, 8);
+    let a = s.execute("layer.newAdjustmentLayer.invert", json!({})).unwrap()["layer"].as_u64().unwrap();
+    let raster = s.execute("layer.new.layer", json!({})).unwrap()["layer"].as_u64().unwrap();
+    let rev = s.active().unwrap().revision;
+    let history = s.active().unwrap().history.past_len();
+    let valid = s.execute("file.export.colorLookupTables", json!({"size": 3, "layers": [a]})).unwrap();
+    assert_eq!(valid["layerCount"], 1);
+    for params in [
+        json!({"size": 1}),
+        json!({"size": 130}),
+        json!({"size": 1.5}),
+        json!({"size": -3}),
+        json!({"scope": "unknown"}),
+        json!({"scope": 42}),
+        json!({"scope": "selected", "layers": [a]}),
+        json!({"layers": []}),
+        json!({"layers": 42}),
+        json!({"layers": [a, a]}),
+        json!({"layers": [a, "oops"]}),
+        json!({"layers": [u64::MAX]}),
+        json!({"layers": [raster]}),
+    ] {
+        assert!(s.execute("file.export.colorLookupTables", params.clone()).is_err(), "{params}");
+        assert_eq!(s.active().unwrap().revision, rev, "{params}: export must be read-only");
+        assert_eq!(s.active().unwrap().history.past_len(), history);
+    }
+    s.execute("layer.select", json!({"layer": raster})).unwrap();
+    assert!(s.execute("file.export.colorLookupTables", json!({"size": 3, "scope": "selected"})).is_err());
+}
+
+#[test]
+fn exported_selected_cube_round_trips_through_lookup_importer() {
+    let dir = tmp("selected_cube");
+    let mut s = session(8, 8, 8);
+    let a = s.execute("layer.newAdjustmentLayer.invert", json!({})).unwrap()["layer"].as_u64().unwrap();
+    let path = join(&dir, "chosen.cube");
+    let r = s.execute("file.export.colorLookupTables", json!({"size": 17, "title": "Chosen", "layers": [a], "path": path})).unwrap();
+    assert_eq!(r["size"], 17);
+    assert_eq!(r["layerCount"], 1);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let parsed = photosplice_cms::lutfile::parse_cube(&text).unwrap();
+    assert_eq!(parsed.size, 17);
+    assert_eq!(parsed.data.len(), 17 * 17 * 17 * 3);
+    assert!(parsed.data[..3].iter().all(|v| *v > 0.999));
+    assert!(parsed.data[parsed.data.len() - 3..].iter().all(|v| *v < 0.001));
+    s.execute("layer.newAdjustmentLayer.colorLookup", json!({"file": path})).unwrap();
+    assert_eq!(s.active().unwrap().doc.layers.len(), 3);
 }
 
 #[test]
@@ -441,15 +945,35 @@ fn import_pdf_opens_the_chosen_page_at_a_resolution() {
 
 #[test]
 fn only_layered_files_save_in_place() {
-    for path in ["a.psd", "dir/a.PSB", r"C:\w\a.pcraft", "my.dir/a.psd", "a.pdf"] {
+    for path in ["a.psd", "dir/a.PSB", r"C:\w\a.pcraft", "my.dir/a.psd", "a.pdf", "a.ora", "dir/A.ORA"] {
         assert!(saves_in_place(path), "{path}");
     }
     // Flat formats, no extension, a dotted folder with an extensionless file, a dot file.
-    for path in ["a.png", "a.jpg", "a", "my.psd/a", ".psd", "a.", ""] {
+    for path in ["a.png", "a.jpg", "a.pdn", "a.PDN", "a", "my.psd/a", ".psd", "a.", ""] {
         assert!(!saves_in_place(path), "{path}");
     }
     assert_eq!(extension("dir/Photo.JPEG").as_deref(), Some("jpeg"));
     assert_eq!(extension("my.dir/name"), None);
+}
+
+/// #3806: a layered format holds a document only if it keeps everything in it.
+#[test]
+fn openraster_holds_a_document_only_when_it_drops_nothing() {
+    let mut s = session(16, 16, 8);
+    s.execute("layer.new.layer", json!({})).unwrap();
+    let plain = doc(&s).clone();
+    for p in ["a.psd", "a.psb", "a.pcraft", "a.ora", "A.ORA"] {
+        assert!(holds_at(&plain, p), "{p}");
+    }
+    for p in ["a.png", "a.tif", "a", ""] {
+        assert!(!holds_at(&plain, p), "{p}");
+    }
+    assert!(losses_at(&plain, "a.ora").is_empty());
+    s.execute("layer.newAdjustmentLayer.invert", json!({})).unwrap();
+    let adjusted = doc(&s).clone();
+    assert!(holds_at(&adjusted, "a.psd") && !holds_at(&adjusted, "a.ora"));
+    assert!(losses_at(&adjusted, "a.ora").iter().any(|l| l.contains("adjustment layers")), "{:?}", losses_at(&adjusted, "a.ora"));
+    assert!(losses_at(&adjusted, "a.psd").is_empty());
 }
 
 #[test]
@@ -463,6 +987,34 @@ fn templates_open_untitled_without_their_path() {
     s.execute("file.openAs", json!({"path": path, "as": "psd"})).unwrap();
     let opened: Vec<_> = s.documents()[1..].iter().map(|d| (d.doc.name.as_str(), d.path.as_deref())).collect();
     assert_eq!(opened, [("Untitled-1", None), ("Untitled-2", None)]);
+}
+
+#[test]
+fn batch_naming_serial_keeps_same_named_inputs_and_their_pixels() {
+    let dir = tmp("naming-serial");
+    let first = join(&dir, "first");
+    let second = join(&dir, "second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let inputs = [png(&first, "photo.png", 8, 8, "#ff0000"), png(&second, "photo.png", 8, 8, "#0000ff")];
+    let out = join(&dir, "out");
+    let mut s = Session::new();
+    let result = s
+        .execute(
+            "file.automate.batch",
+            json!({
+                "input": inputs, "output": out, "steps": [], "format": "png",
+                "naming": "{name}_{serial}", "startingSerial": 7
+            }),
+        )
+        .unwrap();
+    assert_eq!(result["errors"], json!([]), "{result}");
+    assert_eq!(result["files"], json!([join(&out, "photo_007.png"), join(&out, "photo_008.png")]));
+    for (name, expected) in [("photo_007.png", [1.0, 0.0, 0.0, 1.0]), ("photo_008.png", [0.0, 0.0, 1.0, 1.0])] {
+        let saved = photosplice_io::import(name, &std::fs::read(join(&out, name)).unwrap()).unwrap().document;
+        let pixel = photosplice_compose::render(&saved, Rect::new(1, 1, 2, 2)).px[0];
+        assert_eq!(pixel, expected, "{name}");
+    }
 }
 
 /// Two inputs with one output name: the first result is kept and the second is an error, never
@@ -543,11 +1095,11 @@ fn psd_selection_survives_save_and_open() {
 #[test]
 fn pdf_save_params_parse_and_bad_ones_keep_the_defaults() {
     use photosplice_io::pdf::export::{Compatibility, PdfOptions};
-    let o = SaveOpts::from_params(&json!({"pdfCompatibility": "1.4", "pdfCompression": "jpeg", "pdfQuality": 12, "pdfDownsample": [300, 450]})).pdf;
+    let o = pdf_options(&json!({"pdfCompatibility": "1.4", "pdfCompression": "jpeg", "pdfQuality": 12, "pdfDownsample": [300, 450]}));
     assert_eq!(o, PdfOptions { compatibility: Compatibility::Pdf14, jpeg_quality: Some(100), downsample: Some((300.0, 450.0)), pdf_layers: true });
-    assert!(!SaveOpts::from_params(&json!({"pdfLayers": false})).pdf.pdf_layers);
-    assert!(SaveOpts::from_params(&json!({"pdfLayers": "no"})).pdf.pdf_layers, "unreadable: the default");
-    assert_eq!(SaveOpts::from_params(&json!({"pdfCompression": "jpeg"})).pdf.jpeg_quality, Some(84), "Maximum (10) by default");
+    assert!(!pdf_options(&json!({"pdfLayers": false})).pdf_layers);
+    assert!(pdf_options(&json!({"pdfLayers": "no"})).pdf_layers, "unreadable: the default");
+    assert_eq!(pdf_options(&json!({"pdfCompression": "jpeg"})).jpeg_quality, Some(84), "Maximum (10) by default");
     for bad in [
         json!({"pdfCompatibility": 7, "pdfCompression": ["jpeg"], "pdfDownsample": "x"}),
         json!({"pdfCompatibility": "3.0", "pdfQuality": "high", "pdfDownsample": [0, 450]}),
@@ -555,9 +1107,236 @@ fn pdf_save_params_parse_and_bad_ones_keep_the_defaults() {
         json!({"pdfDownsample": [f64::MAX, f64::MAX]}),
         json!({"pdfCompression": "jpeg", "pdfQuality": -1e300}),
     ] {
-        let o = SaveOpts::from_params(&bad).pdf;
+        let o = pdf_options(&bad);
         assert_eq!(o.compatibility, Compatibility::Pdf17, "{bad}");
         assert!(o.downsample.is_none_or(|(to, above)| to >= 1.0 && above >= to && to <= 2400.0), "{bad}: {o:?}");
         assert!(o.jpeg_quality.is_none_or(|q| (1..=100).contains(&q)), "{bad}");
     }
+}
+/// `file.revealInFinder` (the document tab's Reveal, UI-217-6) reveals the clicked document's
+/// saved path — the tab menu passes `document`, not just the active one.
+#[test]
+fn reveal_in_finder_reveals_the_documents_saved_path() {
+    let mut s = session(8, 8, 8);
+    assert!(s.is_enabled("file.revealInFinder"));
+    // A new document has no file yet.
+    let err = s.execute("file.revealInFinder", json!({"dryRun": true})).unwrap_err();
+    assert!(err.to_string().contains("no saved file"), "{err}");
+    let path = "/tmp/pics/a.psd";
+    s.active_mut().unwrap().path = Some(path.into());
+    let r = s.execute("file.revealInFinder", json!({"dryRun": true})).unwrap();
+    let (program, args) = crate::layer_menu_cmds::reveal_command(path);
+    assert_eq!(r["program"], json!(program));
+    assert_eq!(r["args"], json!(args));
+    // The tab menu names a background tab: the active document is not the one revealed.
+    s.execute("file.new", json!({"width": 8, "height": 8, "name": "other"})).unwrap();
+    let err = s.execute("file.revealInFinder", json!({"document": 1, "dryRun": true})).unwrap_err();
+    assert!(err.to_string().contains("no saved file"), "{err}");
+    let r = s.execute("file.revealInFinder", json!({"document": 0, "dryRun": true})).unwrap();
+    assert_eq!(r["program"], json!(program));
+    assert_eq!(r["args"], json!(args));
+}
+
+/// "Include All Subfolders" (AUTO-219-5, #3753): Batch and Image Processor take the images in
+/// subfolders too, each result keeping its subfolder under the output folder (so same-named files
+/// don't collide), and skip the output folder when it sits inside the input folder.
+#[test]
+fn batch_include_all_subfolders() {
+    let dir = tmp("batch-subfolders");
+    let input = join(&dir, "in");
+    for sub in ["sub/deeper", "z"] {
+        std::fs::create_dir_all(join(&input, sub)).unwrap();
+    }
+    png(&input, "a.png", 8, 8, "#ff0000");
+    png(&join(&input, "sub"), "b.png", 8, 8, "#00ff00");
+    png(&join(&input, "sub/deeper"), "a.png", 8, 8, "#0000ff");
+    png(&join(&input, "z"), "a.png", 8, 8, "#ffffff");
+    let mut s = Session::new();
+    // Default: the top level only, as before.
+    let out = join(&input, "batch");
+    let r = s.execute("file.automate.batch", json!({"steps": [], "input": input, "output": out, "format": "png"})).unwrap();
+    assert_eq!((r["files"].as_array().unwrap().len(), r["errors"].as_array().unwrap().len()), (1, 0), "{r}");
+    // With subfolders: every image, in folder order, results kept apart by subfolder; the output
+    // folder (inside the input folder, holding last run's a.png) is not an input.
+    let r = s
+        .execute(
+            "file.automate.batch",
+            json!({"steps": [["image.adjustments.invert", {}]], "input": input, "includeSubfolders": true, "output": out, "format": "png"}),
+        )
+        .unwrap();
+    assert!(r["errors"].as_array().unwrap().is_empty(), "{r}");
+    let files: Vec<String> = r["files"].as_array().unwrap().iter().map(|f| f.as_str().unwrap().replace('\\', "/")).collect();
+    let o = out.replace('\\', "/");
+    assert_eq!(files, vec![format!("{o}/a.png"), format!("{o}/sub/b.png"), format!("{o}/sub/deeper/a.png"), format!("{o}/z/a.png")]);
+    let deep = photosplice_io::import("a.png", &std::fs::read(join(&out, "sub/deeper/a.png")).unwrap()).unwrap().document;
+    let px = photosplice_compose::render(&deep, Rect::new(1, 1, 2, 2)).px[0];
+    assert!(px[0] > 0.99 && px[1] > 0.99 && px[2] < 0.01, "blue inverted to yellow: {px:?}");
+    std::fs::remove_dir_all(&out).unwrap();
+    // A naming template applies within each kept subfolder (output outside the input folder).
+    let named = join(&dir, "named");
+    let r = s
+        .execute("file.automate.batch", json!({"steps": [], "input": input, "includeSubfolders": true, "output": named, "format": "png", "naming": "{serial}"}))
+        .unwrap();
+    assert!(r["errors"].as_array().unwrap().is_empty(), "{r}");
+    let files: Vec<String> = r["files"].as_array().unwrap().iter().map(|f| f.as_str().unwrap().replace('\\', "/")).collect();
+    let n = named.replace('\\', "/");
+    assert_eq!(files, vec![format!("{n}/001.png"), format!("{n}/sub/002.png"), format!("{n}/sub/deeper/003.png"), format!("{n}/z/004.png")]);
+    // Image Processor shares the option (with its results out of the input folder).
+    let out = join(&dir, "jpg");
+    let r = s.execute("file.scripts.imageProcessor", json!({"input": input, "includeSubfolders": true, "output": out})).unwrap();
+    assert_eq!((r["files"].as_array().unwrap().len(), r["errors"].as_array().unwrap().len()), (4, 0), "{r}");
+    assert!(std::path::Path::new(&join(&out, "sub/deeper/a.jpg")).is_file());
+    // A wrong type is a parameter error, for both.
+    for bad in [json!("yes"), json!(1), json!([true])] {
+        for cmd in ["file.automate.batch", "file.scripts.imageProcessor"] {
+            let e = s.execute(cmd, json!({"steps": [], "input": input, "includeSubfolders": bad, "output": out})).unwrap_err();
+            assert!(matches!(e, EngineError::BadParams { .. }), "{cmd} {bad}: {e}");
+        }
+    }
+    // A missing input folder is an error, not a panic.
+    assert!(s.execute("file.automate.batch", json!({"steps": [], "input": join(&dir, "nope"), "includeSubfolders": true, "output": out})).is_err());
+}
+
+/// The subfolder walk stops at `MAX_SUBFOLDER_DEPTH` levels.
+#[test]
+fn batch_subfolder_walk_is_depth_limited() {
+    let dir = tmp("batch-subfolder-depth");
+    let mut deep = dir.clone();
+    for level in 1..=MAX_SUBFOLDER_DEPTH + 1 {
+        deep = join(&deep, "d");
+        std::fs::create_dir_all(&deep).unwrap();
+        if level >= MAX_SUBFOLDER_DEPTH {
+            std::fs::write(join(&deep, &format!("l{level}.png")), b"x").unwrap();
+        }
+    }
+    let found = list_images_tree(&dir, "", "test").unwrap();
+    let names: Vec<_> = found.iter().map(|i| file_name(&i.path)).collect();
+    assert_eq!(names, vec![format!("l{MAX_SUBFOLDER_DEPTH}.png")], "{found:?}");
+    assert_eq!(found[0].rel_dir.split('/').count(), MAX_SUBFOLDER_DEPTH);
+}
+
+/// A symlink back up the tree is walked once, not forever. Skipped where the platform doesn't
+/// let the test create directory symlinks (Windows without developer mode).
+#[test]
+fn batch_subfolder_walk_survives_symlink_loops() {
+    let dir = tmp("batch-subfolder-loop");
+    let sub = join(&dir, "sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(join(&dir, "a.png"), b"x").unwrap();
+    std::fs::write(join(&sub, "b.png"), b"x").unwrap();
+    let link = std::path::Path::new(&sub).join("loop");
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(&dir, &link);
+    #[cfg(windows)]
+    let made = std::os::windows::fs::symlink_dir(&dir, &link);
+    #[cfg(not(any(unix, windows)))]
+    let made: std::io::Result<()> = Err(std::io::Error::other("no symlinks"));
+    if made.is_err() {
+        eprintln!("skipped: cannot create a directory symlink here");
+        return;
+    }
+    let found = list_images_tree(&dir, "", "test").unwrap();
+    let names: Vec<_> = found.iter().map(|i| (i.rel_dir.as_str(), file_name(&i.path))).collect();
+    assert_eq!(names, vec![("", "a.png".to_string()), ("sub", "b.png".to_string())]);
+}
+
+#[test]
+fn batch_naming_validates_the_whole_plan_before_writing() {
+    let dir = tmp("naming-invalid");
+    let input = png(&dir, "source.png", 8, 8, "#ff0000");
+    let mut s = Session::new();
+    for (index, extra) in [
+        json!({"naming": "../{name}"}),
+        json!({"naming": "sub\\{name}"}),
+        json!({"naming": "C:{name}"}),
+        json!({"naming": "{unknown}"}),
+        json!({"naming": "{name"}),
+        json!({"naming": "name}"}),
+        json!({"naming": 42}),
+        json!({"naming": "{serial}", "startingSerial": 0}),
+        json!({"naming": "{serial}", "startingSerial": 1.5}),
+        json!({"naming": "{serial}", "startingSerial": "1"}),
+        json!({"naming": "{serial}", "startingSerial": 4294967295_u64}),
+        json!({"naming": "x".repeat(256)}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let out = join(&dir, &format!("out-{index}"));
+        let mut params = json!({"input": [input, input], "output": out, "steps": []});
+        params.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        let error = s.execute("file.automate.batch", params).unwrap_err();
+        assert!(matches!(error, EngineError::BadParams { .. }), "{error}");
+        assert!(!std::path::Path::new(&out).exists(), "invalid naming wrote outputs: {extra}");
+    }
+}
+
+#[test]
+fn batch_naming_keeps_serial_positions_after_errors_and_captures_the_utc_date() {
+    let dir = tmp("naming-errors");
+    let input = png(&dir, "good.png", 8, 8, "#0000ff");
+    let out = join(&dir, "out");
+    let before = crate::analysis_cmds::now_iso();
+    let mut s = Session::new();
+    let result = s
+        .execute(
+            "file.automate.batch",
+            json!({
+                "input": [join(&dir, "missing.png"), input], "output": out, "steps": [],
+                "naming": "{date}_{serial}_{name}", "startingSerial": 9
+            }),
+        )
+        .unwrap();
+    let after = crate::analysis_cmds::now_iso();
+    assert_eq!(result["errors"].as_array().unwrap().len(), 1, "{result}");
+    let files = result["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "{result}");
+    let name = file_name(files[0].as_str().unwrap());
+    assert!(
+        name == format!("{}_010_good.png", &before[..10]) || name == format!("{}_010_good.png", &after[..10]),
+        "the missing input still consumes its serial: {name}"
+    );
+}
+
+#[test]
+fn batch_naming_still_reports_collisions_instead_of_overwriting() {
+    let dir = tmp("naming-collision");
+    let red = png(&dir, "red.png", 8, 8, "#ff0000");
+    let blue = png(&dir, "blue.png", 8, 8, "#0000ff");
+    let out = join(&dir, "out");
+    let mut s = Session::new();
+    let result = s
+        .execute(
+            "file.automate.batch",
+            json!({
+                "input": [red, blue], "output": out, "steps": [], "naming": "constant"
+            }),
+        )
+        .unwrap();
+    assert_eq!(result["files"], json!([join(&out, "constant.png")]));
+    assert_eq!(result["errors"].as_array().unwrap().len(), 1, "{result}");
+    assert!(result["errors"][0]["error"].as_str().unwrap().contains("not written"));
+    let saved = photosplice_io::import("constant.png", &std::fs::read(join(&out, "constant.png")).unwrap()).unwrap().document;
+    assert_eq!(photosplice_compose::render(&saved, Rect::new(1, 1, 2, 2)).px[0], [1.0, 0.0, 0.0, 1.0]);
+}
+#[test]
+fn batch_naming_rejects_outputs_that_replace_inputs_before_processing() {
+    let dir = tmp("naming-input-alias");
+    let first = png(&dir, "002.png", 8, 8, "#ff0000");
+    let second = png(&dir, "001.png", 8, 8, "#0000ff");
+    let before = [std::fs::read(&first).unwrap(), std::fs::read(&second).unwrap()];
+    let mut s = Session::new();
+    // Without preflight, processing 002 first writes 001, so the next input's original pixels
+    // are lost before it is read. The full plan must be rejected without writing either file.
+    let error = s
+        .execute(
+            "file.automate.batch",
+            json!({
+                "input": [first, second], "output": join(&dir, "."), "steps": [], "naming": "{serial}"
+            }),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("input"), "{error}");
+    assert_eq!(std::fs::read(&first).unwrap(), before[0]);
+    assert_eq!(std::fs::read(&second).unwrap(), before[1]);
 }

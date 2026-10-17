@@ -71,36 +71,41 @@ pub fn apply_background_eraser(target: &mut Surface, stroke: &Stroke, bs: &BgEra
     let mut stroke = stroke.clone();
     stroke.brush.opacity = 1.0;
     stroke.brush.erase = false;
+    // The pixels before the stroke, taken at the first dab. Sampling and matching read these, so a
+    // dab landing on pixels earlier dabs already erased still samples and matches (#1280).
+    let mut orig: Option<Region> = None;
     apply_dab_stroke(target, &stroke, selection, false, 0, |work: &mut Region, fp| {
         let r = fp.rect.intersect(&work.rect);
         if r.is_empty() {
             return;
         }
+        let orig = &*orig.get_or_insert_with(|| work.clone());
         let (cx, cy) = (fp.dab.center.x.floor() as i32, fp.dab.center.y.floor() as i32);
-        // The hotspot's colour (None where it is already transparent or off the working area).
-        let hotspot = |work: &Region| -> Option<Vec<f32>> {
-            if !work.rect.contains(cx, cy) {
+        // The hotspot's colour (None where it was transparent before the stroke or is off the
+        // working area).
+        let hotspot = || -> Option<Vec<f32>> {
+            if !orig.rect.contains(cx, cy) {
                 return None;
             }
-            let p = work.px(cx, cy);
+            let p = orig.px(cx, cy);
             (p[a] > 0.0).then(|| p[..nc].to_vec())
         };
         let sampled = match bs.sampling {
-            Sampling::Continuous => hotspot(work),
-            Sampling::Once => once.get_or_insert_with(|| hotspot(work)).clone(),
+            Sampling::Continuous => hotspot(),
+            Sampling::Once => once.get_or_insert_with(hotspot).clone(),
             Sampling::BackgroundSwatch => Some(swatch.clone()),
         };
         let Some(sampled) = sampled else { return };
         let (w, h) = (r.width() as usize, r.height() as usize);
-        // Per-pixel match weight. Erasing only lowers alpha, so the working copy still holds the
-        // pre-stroke colours.
+        // Per-pixel match weight from the pre-stroke colours: the contiguous fill passes through
+        // pixels this stroke already erased.
         let mut weight = vec![0.0f32; w * h];
         for y in r.y0..r.y1 {
             for x in r.x0..r.x1 {
                 if fp.at(x, y) <= 0.0 {
                     continue;
                 }
-                let p = work.px(x, y);
+                let p = orig.px(x, y);
                 if p[a] <= 0.0 {
                     continue;
                 }
@@ -244,6 +249,27 @@ mod tests {
         let bs = BgEraseSettings { sampling: Sampling::Once, tolerance: 0.05, protect_foreground: true, foreground: GREEN, ..Default::default() };
         apply_background_eraser(&mut t, &stroke(&[(20.0, 20.0)]), &bs, None);
         assert_eq!(t, s);
+    }
+
+    #[test]
+    fn one_pass_clears_the_whole_stroke_when_dabs_overlap_erased_pixels() {
+        // #1280: later dabs land their hotspot on pixels earlier dabs already erased.
+        let fmt = PixelFormat::RGBA8;
+        let mut s = Surface::new(fmt);
+        s.fill_rect(Rect::new(0, 0, 60, 30), &from_rgba(&fmt, GREEN));
+        let mut st = stroke(&[(10.0, 15.0), (50.0, 15.0)]);
+        st.brush.size = 20.0;
+        for sampling in [Sampling::Continuous, Sampling::Once] {
+            let mut t = s.clone();
+            let bs = BgEraseSettings { sampling, limits: Limits::Contiguous, ..Default::default() };
+            apply_background_eraser(&mut t, &st, &bs, None);
+            // Everything within radius − 1 of the line.
+            for y in 6..24 {
+                for x in 10..51 {
+                    assert_eq!(alpha(&t, x, y), 0.0, "{sampling:?} ({x}, {y}) left behind");
+                }
+            }
+        }
     }
 
     #[test]

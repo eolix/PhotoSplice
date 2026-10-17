@@ -17,6 +17,9 @@ use crate::{DocState, EngineError, Result, Session};
 
 pub const ID: &str = "view.layerMask";
 
+/// `\` (#1765): show or hide the active layer's mask as a rubylith, Photoshop's key for it.
+pub const OVERLAY_ID: &str = "layer.toggleMaskOverlay";
+
 /// How a shown layer mask is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -109,6 +112,8 @@ fn set_view(s: &mut Session, p: &Value) -> Result<Value> {
     let applies = next.is_some() || st.channel_view.layer_mask.is_some_and(|v| v.layer == layer);
     if applies && st.channel_view.layer_mask != next {
         st.channel_view.layer_mask = next;
+        // Hiding the mask while every colour channel is off would leave a blank canvas.
+        crate::channel_cmds::fix_view(st);
         // A view change: redraw without recompositing, and keep a clean document clean.
         let clean = st.saved_revision == st.revision;
         st.revision += 1;
@@ -121,17 +126,46 @@ fn set_view(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"layer": layer.0, "mode": mode_name(v.filter(|v| v.layer == layer))}))
 }
 
+/// `\` needs a layer mask on the active layer; without one Photoshop's key does nothing.
+fn active_has_mask(s: &Session) -> std::result::Result<(), String> {
+    let st = s.active().ok_or("no document open")?;
+    let layer = st.active_layer.and_then(|id| st.doc.layer(id)).ok_or("no active layer")?;
+    if layer.mask.is_some() { Ok(()) } else { Err(format!("layer \"{}\" has no layer mask", layer.name)) }
+}
+
+/// `{"layer":id?}`: [`ID`] with mode `toggleOverlay` (a `mode` param is ignored).
+fn toggle_overlay(s: &mut Session, p: &Value) -> Result<Value> {
+    let layer = match p {
+        Value::Object(m) => m.get("layer").cloned().unwrap_or(Value::Null),
+        Value::Null => Value::Null,
+        _ => return Err(EngineError::BadParams { cmd: OVERLAY_ID.into(), msg: "expected an object".into() }),
+    };
+    set_view(s, &json!({"layer": layer, "mode": "toggleOverlay"}))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
-    vec![CommandSpec {
-        id: ID,
-        label: "View Layer Mask",
-        menu: &[],
-        shortcut: None,
-        params: r##"{"layer":id?,"mode":"off"|"gray"|"overlay"|"toggleGray"|"toggleOverlay"="toggleGray"} (gray: the mask alone, ⌥-click its thumbnail; overlay: red rubylith over the composite, ⇧⌥-click; view state, not an undo step; painting while shown paints the mask)"##,
-        enabled: has_doc,
-        run: set_view,
-        journal: false,
-    }]
+    vec![
+        CommandSpec {
+            id: ID,
+            label: "View Layer Mask",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"layer":id?,"mode":"off"|"gray"|"overlay"|"toggleGray"|"toggleOverlay"="toggleGray"} (gray: the mask alone, ⌥-click its thumbnail; overlay: red rubylith over the composite, ⇧⌥-click or `\`; view state, not an undo step; painting while shown paints the mask)"##,
+            enabled: has_doc,
+            run: set_view,
+            journal: false,
+        },
+        CommandSpec {
+            id: OVERLAY_ID,
+            label: "Toggle Layer Mask Overlay",
+            menu: &[],
+            shortcut: Some("\\"),
+            params: r##"{"layer":id?} (shows or hides the active layer's mask as a 50% red rubylith over the composite, the `\` key; view state, not an undo step; painting while shown paints the mask)"##,
+            enabled: active_has_mask,
+            run: toggle_overlay,
+            journal: false,
+        },
+    ]
 }
 
 #[cfg(test)]

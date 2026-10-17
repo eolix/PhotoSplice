@@ -165,6 +165,27 @@ fn colour_filters_use_and_record_tool_colours() {
 }
 
 #[test]
+fn fibers_fill_an_empty_layer() {
+    // #5241: Fibers renders from the colours, not the layer's pixels, so an empty layer fills
+    // like in Photoshop (and can be transformed afterwards).
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 48, "height": 32})).unwrap();
+    s.execute("layer.new.layer", json!({})).unwrap();
+    s.execute("filter.render.fibers", json!({"seed": 3})).unwrap();
+    let px = pixels(&s);
+    assert!(px.as_chunks::<4>().0.iter().all(|p| p[3] == 1.0), "every pixel is rendered opaque");
+    s.execute("edit.transform.flipHorizontal", json!({})).unwrap();
+
+    // With a selection only the selection fills.
+    s.execute("layer.new.layer", json!({})).unwrap();
+    s.execute("select.rect", json!({"x": 4, "y": 4, "width": 10, "height": 6})).unwrap();
+    s.execute("filter.render.fibers", json!({"seed": 3})).unwrap();
+    let d = s.active().unwrap();
+    let surf = d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap();
+    assert_eq!(surf.content_bounds(), Rect::new(4, 4, 14, 10));
+}
+
+#[test]
 fn displace_reads_another_document() {
     let mut s = session();
     // Map document: a flat colour that shifts 3 px right at 25 % (see the algo test).

@@ -2,11 +2,24 @@
 //!
 //! Usage: `photosplice [--control <port>] [--control-token <64-hex> |
 //! --control-token-file <path>] [--automation-read-root <dir>]
-//! [--automation-write-root <dir>] [--safe-gpu] [files…]`
+//! [--automation-write-root <dir>] [--safe-gpu] [--in-window-menus] [--present-mode <mode>]
+//! [--frame-latency <n>] [--stroke-trace <stderr|file.csv>] [--new-instance] [files…]`
+//!
+//! On Windows and Linux a launch hands its files to the PhotoSplice that is already running (new
+//! tabs in its window) and exits; `--new-instance` starts a separate copy instead, as does any
+//! `--control` launch (see `single_instance`).
+//!
+//! `--present-mode` (`fifo`, `autovsync`, `novsync`) and `--frame-latency` (1–3) override how
+//! frames reach the display for this launch (`PHOTOSPLICE_PRESENT_MODE` / `…_FRAME_LATENCY`;
+//! `presentation`); `--stroke-trace` times each brush stroke's frames (`PHOTOSPLICE_STROKE_TRACE`;
+//! `photosplice_ui_egui::stroke_trace`).
 //!
 //! `--safe-gpu` starts with the CPU renderer (no GPU canvas; a software adapter for the window
 //! where the platform has one) for this launch, e.g. after a graphics driver crash. A start that
 //! crashes inside the driver also falls back by itself next time (see `gpu_startup`).
+//!
+//! `--in-window-menus` (or `PHOTOSPLICE_IN_WINDOW_MENUS=1`) keeps the menus inside the window on
+//! macOS instead of the macOS menu bar (`native_menu`).
 //!
 //! `--control <port>` (or `PHOTOSPLICE_CONTROL_PORT`) starts a localhost JSON-lines control server.
 //! The first line must authenticate; subsequent request lines get reply lines.
@@ -19,19 +32,32 @@
 
 mod app_dirs;
 mod app_icon;
+mod appearance;
 #[cfg(target_os = "macos")]
 mod apple_events;
+mod caps_lock;
 mod control_server;
 mod crash_guard;
 mod cursor;
+mod file_dialog_probe;
 mod gpu_startup;
 // Pure logic is tested on every platform; only Linux runs the check.
 #[cfg(any(target_os = "linux", test))]
 mod linux_libs;
+mod logging;
+mod monitor_profile;
 #[cfg(target_os = "macos")]
 mod native_menu;
-mod monitor_profile;
+mod photoshop_settings;
+// Save As through the desktop portal, which reports the file type picked (#6121).
+#[cfg(target_os = "linux")]
+mod portal_save;
+mod presentation;
+mod screen_color;
 mod services;
+// macOS gets one instance from LaunchServices (open-documents Apple events).
+#[cfg(any(not(target_os = "macos"), test))]
+mod single_instance;
 // Windows gets pen pressure from winit (WM_POINTER); the web runner has its own listener.
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 mod tablet;
@@ -41,6 +67,71 @@ use photosplice_ui_egui::PhotospliceApp;
 
 /// Matches the `.desktop` file and hicolor icon name, so Wayland docks pick up the icon.
 const APP_ID: &str = "io.github.eolix.PhotoSplice";
+
+/// The main window: 1440 × 900 (shrunk to fit the monitor), with the system's title bar on
+/// Windows and Linux and the integrated transparent one on macOS. The first window is centred on
+/// the main monitor; without `centered`, Windows cascades each new window from the top-left
+/// corner, so it opened at a different offset every launch (#419). A later launch restores the
+/// saved geometry instead (`main` turns `centered` off, #4826). Wayland compositors place windows
+/// themselves.
+fn native_options() -> eframe::NativeOptions {
+    let viewport = egui::ViewportBuilder::default();
+    // Not inside a macOS app bundle: its Dock icon is the bundle's .icns (`app_icon`, #5849).
+    let viewport = if app_icon::sets_runtime_icon(std::env::current_exe().ok().as_deref()) { viewport.with_icon(app_icon::window_icon()) } else { viewport };
+    eframe::NativeOptions {
+        viewport: viewport
+            .with_app_id(APP_ID)
+            .with_title(photosplice_ui_egui::APP_NAME)
+            .with_inner_size([1440.0, 900.0])
+            .with_min_inner_size([760.0, 480.0])
+            .with_drag_and_drop(true)
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false),
+        centered: true,
+        // Window size and position, and egui's own state (resizable panel widths, scroll
+        // positions), survive restarts. eframe reads and writes this one RON file; keeping it in
+        // the preferences folder keeps everything in one place, portable mode included.
+        persist_window: true,
+        persistence_path: services::config_dir().map(|dir| dir.join(UI_STATE_FILE)),
+        window_builder: Some(Box::new(restored_window)),
+        ..Default::default()
+    }
+}
+
+/// eframe's saved window geometry and egui memory, in the preferences folder.
+const UI_STATE_FILE: &str = "app.ron";
+
+/// Whether an earlier session saved the window's geometry, which eframe restores. Then
+/// `NativeOptions::centered` must be off: eframe applies it after restoring the saved geometry,
+/// so it moved the window back to the centre of the main monitor on every launch (#4826).
+fn has_saved_layout(path: Option<&std::path::Path>) -> bool {
+    path.is_some_and(std::path::Path::is_file)
+}
+
+/// The window eframe restores from the saved layout, corrected before it is created: at least the
+/// minimum size, and never full screen. PhotoSplice always starts in Standard Screen Mode, but
+/// eframe also saves and restores full screen, and a window closed in a full-screen mode is
+/// saved full screen and maximized at once: the overlap `view_cmds::screen_mode_commands` keeps
+/// apart at run time. [OBSERVED 2026-10-12, Windows 11] Restored that way, View › Screen Mode ›
+/// Full Screen did nothing until `F` had cycled through Standard.
+fn restored_window(builder: egui::ViewportBuilder) -> egui::ViewportBuilder {
+    at_least_min_size(builder).with_fullscreen(false)
+}
+
+/// Grow a restored window that is smaller than the minimum size, keeping its centre. On
+/// Windows, eframe saves a minimized window's size (160 pt wide, 64 pt tall once eframe has
+/// clamped it), and the minimum size isn't applied to a restored one: PhotoSplice then reopened
+/// as a 160 × 64 strip on every launch.
+fn at_least_min_size(mut builder: egui::ViewportBuilder) -> egui::ViewportBuilder {
+    let (Some(size), Some(min)) = (builder.inner_size, builder.min_inner_size) else { return builder };
+    let grown = size.max(min);
+    if grown != size {
+        builder.position = builder.position.map(|pos| pos - (grown - size) / 2.0);
+        builder.inner_size = Some(grown);
+    }
+    builder
+}
 
 /// Parse a `--control` / `PHOTOSPLICE_CONTROL_PORT` value. An unparseable port is an error that
 /// names the value (issue #701): silently running with no control server leaves a launcher or
@@ -55,9 +146,12 @@ fn control_args_exit_code(errors: &[String]) -> Option<i32> {
     if errors.is_empty() { None } else { Some(2) }
 }
 
-
 fn main() -> eframe::Result {
+    // First, so the panic hook and every start-up warning are recorded (`logging`).
+    let logger = logging::install();
     crash_guard::install_hook();
+    // The system font scan can take seconds (minutes on some Macs): run it off the UI thread.
+    photosplice_ui_egui::type_tool::warm_fonts();
     let mut control_port: Option<u16> = None;
     let mut control_arg_errors: Vec<String> = Vec::new();
     if let Some(value) = std::env::var("PHOTOSPLICE_CONTROL_PORT").ok().filter(|v| !v.trim().is_empty()) {
@@ -71,29 +165,74 @@ fn main() -> eframe::Result {
     let mut automation_read_root = std::env::var_os("PHOTOSPLICE_AUTOMATION_READ_ROOT").map(std::path::PathBuf::from);
     let mut automation_write_root = std::env::var_os("PHOTOSPLICE_AUTOMATION_WRITE_ROOT").map(std::path::PathBuf::from);
     let mut files = Vec::new();
+    // Arguments that are not valid Unicode (issue #1108): a file manager can hand over a Latin-1
+    // file name on Linux, and `std::env::args()` would panic before any window opened. Paths are
+    // reported in a notice once the app is up; a control token is a usage error like a bad port.
+    let mut unreadable_paths: Vec<String> = Vec::new();
     let mut safe_gpu = false;
-    let mut args = std::env::args().skip(1);
+    let mut new_instance = false;
+    // Options that apply only to the process they're given to; a launch with any keeps its own.
+    let mut launch_options: Vec<&'static str> = Vec::new();
+    let (mut present_mode_arg, mut frame_latency_arg, mut stroke_trace_arg): (Option<String>, Option<String>, Option<String>) = (None, None, None);
+    let mut in_window_menus = std::env::var_os("PHOTOSPLICE_IN_WINDOW_MENUS").is_some_and(|v| !v.is_empty() && v != "0");
+    let mut args = std::env::args_os().skip(1);
     while let Some(a) = args.next() {
-        match a.as_str() {
-            "--control" => match args.next() {
-                Some(value) => match parse_control_port(&value, "--control") {
+        match a.to_str() {
+            Some("--control") => match args.next() {
+                Some(value) => match parse_control_port(&value.to_string_lossy(), "--control") {
                     Ok(port) => control_port = Some(port),
                     Err(error) => control_arg_errors.push(error),
                 },
                 None => control_arg_errors.push("--control: missing port value (expected `--control <port>`)".to_string()),
             },
-            "--control-token" => control_token = args.next(),
-            "--control-token-file" => control_token_file = args.next().map(std::path::PathBuf::from),
-            "--automation-read-root" => automation_read_root = args.next().map(std::path::PathBuf::from),
-            "--automation-write-root" => automation_write_root = args.next().map(std::path::PathBuf::from),
-            "--safe-gpu" => safe_gpu = true,
-            "--version" => {
+            Some("--control-token") => match args.next().map(std::ffi::OsString::into_string) {
+                Some(Ok(token)) => control_token = Some(token),
+                Some(Err(raw)) => control_arg_errors.push(format!("--control-token: value is not valid Unicode (`{}`)", raw.to_string_lossy())),
+                None => control_token = None,
+            },
+            Some("--control-token-file") => control_token_file = args.next().map(std::path::PathBuf::from),
+            Some("--automation-read-root") => {
+                launch_options.push("--automation-read-root");
+                automation_read_root = args.next().map(std::path::PathBuf::from);
+            }
+            Some("--automation-write-root") => {
+                launch_options.push("--automation-write-root");
+                automation_write_root = args.next().map(std::path::PathBuf::from);
+            }
+            Some("--safe-gpu") => {
+                launch_options.push("--safe-gpu");
+                safe_gpu = true;
+            }
+            Some(flag @ ("--present-mode" | "--frame-latency" | "--stroke-trace")) => {
+                launch_options.push(match flag {
+                    "--present-mode" => "--present-mode",
+                    "--frame-latency" => "--frame-latency",
+                    _ => "--stroke-trace",
+                });
+                let flag = flag.to_string();
+                match args.next().map(std::ffi::OsString::into_string) {
+                    Some(Ok(v)) => match flag.as_str() {
+                        "--present-mode" => present_mode_arg = Some(v),
+                        "--frame-latency" => frame_latency_arg = Some(v),
+                        _ => stroke_trace_arg = Some(v),
+                    },
+                    // A bad value is reported and ignored; it never fails the launch.
+                    _ => eprintln!("photosplice: {flag}: missing or unreadable value; ignored"),
+                }
+            }
+            Some("--in-window-menus") => {
+                launch_options.push("--in-window-menus");
+                in_window_menus = true;
+            }
+            Some("--new-instance") => new_instance = true,
+            Some("--version") => {
                 println!("photosplice {}", photosplice_engine::build_info::long_version());
                 return Ok(());
             }
             // Old macOS passes a process serial number when launched from Finder.
-            _ if a.starts_with("-psn_") => {}
-            _ => files.push(a),
+            Some(s) if s.starts_with("-psn_") => {}
+            Some(s) => files.push(s.to_owned()),
+            None => unreadable_paths.push(a.to_string_lossy().into_owned()),
         }
     }
 
@@ -107,10 +246,83 @@ fn main() -> eframe::Result {
         std::process::exit(code);
     }
 
+    // The log file lives under the settings directory; opened after the arguments, so `--version`
+    // and usage errors leave no file behind. Records logged until now are written to it first.
+    if let (Some(logger), Some(dir)) = (logger, services::config_dir()) {
+        match logger.attach_dir(&dir.join("logs")) {
+            Ok(path) => log::info!("PhotoSplice {}, log file {}", photosplice_engine::build_info::long_version(), path.display()),
+            // Standard error only by now (`attach_dir` gave up on the file); unlike `eprintln!`, never panics.
+            Err(e) => log::warn!("no log file: {e}"),
+        }
+    }
+
+    // One PhotoSplice per user (#3708): files opened from Explorer or a file manager while it runs
+    // become tabs in its window. Only with the per-user settings folder (a portable copy's may be
+    // shared between users), and not for automation, `--new-instance` or per-process options.
+    #[cfg(not(target_os = "macos"))]
+    let single_instance = {
+        let new_instance_env = std::env::var("PHOTOSPLICE_NEW_INSTANCE").ok();
+        let context = single_instance::LaunchContext {
+            per_user_settings: app_dirs::current().mode == app_dirs::Mode::Platform,
+            new_instance_flag: new_instance,
+            new_instance_env: new_instance_env.as_deref(),
+            control: control_port.is_some(),
+            unreadable_paths: !unreadable_paths.is_empty(),
+            launch_options: &launch_options,
+        };
+        match (single_instance::skip_reason(&context), services::config_dir()) {
+            (Some(reason), _) => {
+                log::info!("running as a separate PhotoSplice: {reason}");
+                None
+            }
+            (None, None) => None,
+            (None, Some(dir)) => {
+                let paths: Vec<String> = files.iter().map(|f| single_instance::absolute(f)).collect();
+                match single_instance::claim(&dir, &paths) {
+                    single_instance::Launch::Forwarded => {
+                        log::info!("handed {} file(s) to the running PhotoSplice", paths.len());
+                        return Ok(());
+                    }
+                    single_instance::Launch::Primary(primary) => Some(primary),
+                    single_instance::Launch::Standalone(reason) => {
+                        log::warn!("starting a separate PhotoSplice: {reason}");
+                        None
+                    }
+                }
+            }
+        }
+    };
+    // Lives until the event loop returns, then `shutdown` lets the next launch become the primary.
+    #[cfg(not(target_os = "macos"))]
+    let single_instance = &single_instance;
+    #[cfg(target_os = "macos")]
+    let _ = (new_instance, &launch_options);
+
+    // The display server to open the window on: Xwayland for a pen on Wayland, which gives this
+    // app no pen input (#639).
+    #[cfg(target_os = "linux")]
+    let native_session = linux_libs::session_from_env(|name| std::env::var(name).ok());
+    #[cfg(target_os = "linux")]
+    let session = tablet::display_session();
+    // Preferences › Performance › Linux display server = X11: Xwayland on a Wayland session too,
+    // where native file drops work (winit 0.30 has none on Wayland, #386). Only when Xwayland can
+    // run the window ($DISPLAY set, X11 libraries installed); otherwise the session's own.
+    #[cfg(target_os = "linux")]
+    let session = if session == linux_libs::DisplaySession::Wayland
+        && gpu_startup::read_display_server(services::prefs_file().as_deref()) == photosplice_engine::prefs::LinuxDisplayServer::X11
+        && std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty())
+        && linux_libs::available(linux_libs::DisplaySession::X11)
+    {
+        eprintln!("photosplice: opening the window through Xwayland (Preferences › Performance › Linux display server)");
+        linux_libs::DisplaySession::X11
+    } else {
+        session
+    };
+
     // winit and wgpu dlopen the windowing and GPU libraries, and some of those crates panic when
     // one is missing (issue #201). Name the package to install and exit instead.
     #[cfg(target_os = "linux")]
-    if let Err(message) = linux_libs::preflight() {
+    if let Err(message) = linux_libs::preflight(session) {
         eprint!("{message}");
         std::process::exit(1);
     }
@@ -121,7 +333,7 @@ fn main() -> eframe::Result {
             Ok(token) => token,
             Err(e) => {
                 eprintln!("photosplice: cannot configure control authentication: {e}");
-                return Ok(());
+                std::process::exit(2);
             }
         };
         if let Some(path) = token_file {
@@ -135,7 +347,7 @@ fn main() -> eframe::Result {
             Ok(workspace) => workspace,
             Err(error) => {
                 eprintln!("photosplice: cannot configure automation workspace: {error}");
-                return Ok(());
+                std::process::exit(2);
             }
         };
         Some((port, token, workspace))
@@ -149,37 +361,34 @@ fn main() -> eframe::Result {
     #[cfg(target_os = "macos")]
     let apple_events = &apple_events;
 
-    // Pen tablet samples on macOS (AppKit event monitor, before winit sees each event) and X11
-    // (started once eframe says which display server it is on). The monitor lives until the event
-    // loop returns.
-    let stylus_feed = photosplice_ui_egui::stylus::StylusFeed::default();
+    // The macOS pen tablet monitor (installed once eframe created the app, see below); it lives
+    // until the event loop returns.
     #[cfg(target_os = "macos")]
-    let _tablet = tablet::install_macos(&stylus_feed);
+    let tablet_monitor = std::cell::OnceCell::new();
+    #[cfg(target_os = "macos")]
+    let tablet_monitor = &tablet_monitor;
 
     // Read the displays' ICC profiles while the window opens (colour-managed canvas; `None`
     // where the platform has no reader).
+    #[cfg(target_os = "linux")]
+    let monitor = monitor_profile::detect_async_for_session(native_session);
+    #[cfg(not(target_os = "linux"))]
     let monitor = monitor_profile::detect_async();
     // Brush presets load in the background; the app attaches them when they arrive.
     let presets = services::presets_dir().map(photosplice_engine::preset_store::open_dir_async);
     services::register_lens_profiles();
-    let mut options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_icon(app_icon::window_icon())
-            .with_app_id(APP_ID)
-            .with_title(photosplice_ui_egui::APP_NAME)
-            .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([760.0, 480.0])
-            .with_drag_and_drop(true)
-            .with_fullsize_content_view(true)
-            .with_titlebar_shown(false)
-            .with_title_shown(false),
-        // Window size and position, and egui's own state (resizable panel widths, scroll
-        // positions), survive restarts. eframe writes `app.ron` into this folder; pointing it at
-        // the preferences folder keeps everything in one place instead of a folder of its own.
-        persist_window: true,
-        persistence_path: services::config_dir(),
-        ..Default::default()
-    };
+    let mut options = native_options();
+    // winit picks Wayland whenever `WAYLAND_DISPLAY` is set; open on X11 when that was chosen.
+    #[cfg(target_os = "linux")]
+    if session == linux_libs::DisplaySession::X11 {
+        use winit::platform::x11::EventLoopBuilderExtX11 as _;
+        options.event_loop_builder = Some(Box::new(|builder| {
+            builder.with_x11();
+        }));
+    }
+    // Centre only the first window: eframe centres after restoring the saved position, so a
+    // window closed on another monitor reopened in the middle of the main one (#4826).
+    options.centered = !has_saved_layout(options.persistence_path.as_deref());
     // Crash-safe GPU startup (#4): pick the backend (a marker left by a start that died in the
     // driver moves to a safer one), and lock this start's marker until the first frames render.
     let t_sentinel = std::time::Instant::now();
@@ -208,9 +417,25 @@ fn main() -> eframe::Result {
     let gpu_note: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
     // The adapter's real texture limits (egui asks for 8192 px), so big documents stay on the GPU.
     gpu_startup::configure(&mut options.wgpu_options.wgpu_setup, &plan, os, sentinel.clone(), gpu_note.clone());
+    // Preferences › Performance › Low-Latency Drawing (#1343): without vsync a stroke shows about
+    // 50 ms sooner; wgpu picks Immediate, else Mailbox, else Fifo by what the driver offers.
+    if gpu_startup::read_low_latency(services::prefs_file().as_deref()) {
+        options.wgpu_options.surface.present_mode = eframe::wgpu::PresentMode::AutoNoVsync;
+    }
+    // Testers' present mode and frame latency overrides (#1343), after the preference.
+    let present = presentation::Overrides::from_args_or_env(present_mode_arg.as_deref(), frame_latency_arg.as_deref());
+    options.wgpu_options.surface = present.apply(options.wgpu_options.surface);
+    let present_desc = presentation::describe(&options.wgpu_options.surface, &present);
+    // Without vsync, frames are capped at 240 fps (#4472) so repaint loops don't spin flat out.
+    let uncapped = !matches!(
+        options.wgpu_options.surface.present_mode,
+        eframe::wgpu::PresentMode::Fifo | eframe::wgpu::PresentMode::FifoRelaxed | eframe::wgpu::PresentMode::AutoVsync
+    );
+    log::info!("presentation: {present_desc}");
     let sentinel_ms = t_sentinel.elapsed().as_secs_f64() * 1000.0;
     log::info!("GPU startup: {:?} ({sentinel_ms:.2} ms)", plan);
     let retry_cpu = !safe_gpu && plan.backend != photosplice_engine::prefs::GpuBackend::Cpu;
+    let keep_marker = gpu_startup::keep_marker_after_error(&plan, os);
     let app_created = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let created_in_callback = app_created.clone();
     let started_sentinel = sentinel.clone();
@@ -222,8 +447,21 @@ fn main() -> eframe::Result {
             let automation = control.as_ref().map(|(_, _, workspace)| workspace.clone());
             let mut services = services::native(automation);
             services.preset_store = presets;
+            #[cfg(target_os = "linux")]
+            let display = tablet::DisplayKind::of(cc);
+            #[cfg(target_os = "linux")]
+            {
+                services.is_wayland = display == Some(tablet::DisplayKind::Wayland);
+                file_dialog_probe::start();
+                if services.is_wayland {
+                    let var = |name| std::env::var(name).ok();
+                    services.xwayland_command =
+                        services::xwayland_command(var("FLATPAK_ID").as_deref(), var("APPIMAGE").as_deref(), std::env::var_os("DISPLAY").is_some());
+                }
+            }
             let mut app = PhotospliceApp::new(Session::new(), services);
             app.bundled = photosplice_ui_egui::bundled::State::new(services::bundled_libraries());
+            app.min_frame_ms = uncapped.then_some(1000.0 / 240.0);
             app.integrated_titlebar = cfg!(target_os = "macos");
             // Windows and Linux keep the system title bar, which shows the window title.
             app.os_title_bar = !cfg!(target_os = "macos");
@@ -233,7 +471,14 @@ fn main() -> eframe::Result {
             // the right profile; a slower reading is applied when it arrives, and the shell reads
             // again when the displays may have changed.
             if let Some(rx) = monitor {
-                app.services.read_displays = Some(std::sync::Arc::new(monitor_profile::detect_async));
+                #[cfg(target_os = "linux")]
+                {
+                    app.services.read_displays = Some(std::sync::Arc::new(move || monitor_profile::detect_async_for_session(native_session)));
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    app.services.read_displays = Some(std::sync::Arc::new(monitor_profile::detect_async));
+                }
                 match rx.recv_timeout(std::time::Duration::from_secs(2)) {
                     Ok(r) => photosplice_ui_egui::monitor_status::apply(&mut app, r),
                     Err(std::sync::mpsc::RecvTimeoutError::Timeout) => photosplice_ui_egui::monitor_status::pending(&mut app, rx),
@@ -246,6 +491,10 @@ fn main() -> eframe::Result {
             // composites on the CPU).
             let info = &mut app.perf.gpu_info;
             info.preference = pref.name().to_string();
+            info.present = present_desc.clone();
+            if let Some(v) = &stroke_trace_arg {
+                app.stroke_trace.set(v);
+            }
             info.selected = if plan.env.is_some() { "env".into() } else { plan.backend.name().to_string() };
             info.fallback = match (plan.reason.clone(), gpu_note.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()) {
                 (Some(reason), Some(note)) => Some(format!("{reason}. {note}")),
@@ -278,23 +527,12 @@ fn main() -> eframe::Result {
                 photosplice_ui_egui::gpu_status::queue_fallback_notice(&mut app, &reason);
             }
             app.perf.span("gpuSentinel", sentinel_ms);
-            // Once the first frames rendered: clear the marker, and keep a crash fallback.
-            let remember_cpu =
-                std::env::var_os("PHOTOSPLICE_GPU_STARTUP_FAILURE").is_some() || (plan.remember && plan.backend == photosplice_engine::prefs::GpuBackend::Cpu);
-            let remember = plan.remember.then_some(plan.backend);
+            // CPU rendering after a failed GPU start is temporary. Only the
+            // recovery-dialog choice may persist it (#3483).
+            let remember = gpu_startup::backend_to_remember(&plan);
             app.on_started(move |app| {
                 if let Some(s) = started_sentinel.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
                     s.finish();
-                }
-                if remember_cpu
-                    && let Err(error) = app.run(
-                        "prefs.set",
-                        serde_json::json!({"values": {
-                            "performance.renderingMode": "cpu", "performance.useGpu": false
-                        }}),
-                    )
-                {
-                    log::warn!("couldn't remember CPU recovery: {error}");
                 }
                 if let Some(b) = remember
                     && app.session.prefs().performance.gpu_backend != b
@@ -311,21 +549,43 @@ fn main() -> eframe::Result {
             {
                 app.services.os_events = Some(apple_events.connect(&cc.egui_ctx));
             }
+            #[cfg(not(target_os = "macos"))]
+            let _ = in_window_menus;
+            // Files from later launches (Explorer, file managers) open here as new tabs.
+            #[cfg(not(target_os = "macos"))]
+            if let Some(primary) = single_instance {
+                app.services.os_events = Some(primary.connect(&cc.egui_ctx));
+            }
             // Where file drags and drops are (winit 0.30 doesn't say).
             app.services.cursor_pos = cursor::service(cc);
-            // Tablet pressure/tilt/eraser (winit drops them): the macOS monitor installed above
-            // and the X11 reader write into this feed.
-            app.stylus.feed = stylus_feed;
+            // Caps Lock state (X11/Windows/macOS; `None` on native Wayland): the canvas shows the
+            // precise crosshair for painting tools while it is toggled on (#1758).
+            app.services.caps_lock = caps_lock::service(cc);
+            app.services.screen_pick = screen_color::service(cc, app.services.is_wayland);
+            // Tablet pressure/tilt/eraser (winit drops them): the macOS monitor and the X11 reader
+            // write into the stylus feed. The monitor goes in here, not before the event loop:
+            // AppKit's shared application only exists once winit created it (#759).
+            #[cfg(target_os = "macos")]
+            if let Some(monitor) = tablet::install_macos(&app.stylus.feed) {
+                let _ = tablet_monitor.set(monitor);
+            }
             #[cfg(target_os = "linux")]
-            tablet::spawn_x11(&app.stylus.feed, tablet::DisplayKind::of(cc));
+            tablet::spawn_x11(&app.stylus.feed, display);
             // Paths on the command line (Linux/Windows file associations, `photosplice a.psd`).
             app.open_paths(&files);
+            if !unreadable_paths.is_empty() {
+                use photosplice_ui_egui::i18n;
+                let line = i18n::t("{path}: the path is not valid Unicode; rename the file and open it again.");
+                let lines = unreadable_paths.iter().map(|p| i18n::fmt(line, &[("path", p.as_str())])).collect();
+                photosplice_ui_egui::notices::post(&mut app, i18n::t("Could not open"), lines, true, None);
+            }
             // Portable marker found but its data folder isn't writable (#228): say where settings went.
             if let Some(w) = &app_dirs::current().warning {
-                photosplice_ui_egui::notices::post(&mut app, "Portable mode is off", vec![w.clone()], false);
+                photosplice_ui_egui::notices::post(&mut app, "Portable mode is off", vec![w.clone()], false, None);
             }
+            // The macOS menu bar, unless `--in-window-menus` keeps the menus in the window.
             #[cfg(target_os = "macos")]
-            {
+            if !in_window_menus {
                 // The NSApp exists by now, so the real menu bar can be installed. The in-window
                 // egui bar stands down (see `PhotospliceApp::native_menu_bar`).
                 if let Some(menu) = native_menu::NativeMenu::install(&app, &cc.egui_ctx) {
@@ -337,12 +597,32 @@ fn main() -> eframe::Result {
             Ok(Box::new(app))
         }),
     );
-    // Closed before the first frames rendered: not a driver crash. (A start that failed to
-    // create its device keeps the marker, so the next one tries a safer backend.)
-    if result.is_ok()
-        && let Some(s) = sentinel.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
+    // The window is gone: refuse further files and free the lock, so a launch that is waiting (or
+    // the CPU-compatibility relaunch below) becomes the primary instead of handing its files to a
+    // process that is exiting.
+    #[cfg(not(target_os = "macos"))]
+    if let Some(primary) = single_instance {
+        primary.shutdown();
+    }
+    // Closed or failed outside graphics initialization: not a driver crash. A renderer error
+    // keeps the marker, so the next start tries a safer backend, unless there is no safer one:
+    // a failed CPU start would otherwise pin every later start to CPU.
+    let renderer_error = gpu_startup::keep_marker_after_run(&result);
+    if !(renderer_error && keep_marker)
+        && let Some(mut s) = sentinel.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
     {
-        s.finish();
+        if result.is_err()
+            && !renderer_error
+            && let Some(marker) = previous.crashed()
+        {
+            // This failure supplies no new graphics-crash evidence: retain the previous
+            // marker, rather than recording this attempt's fallback backend.
+            if let Err(error) = s.write(marker.clone()) {
+                log::warn!("couldn't restore previous GPU startup marker: {error}");
+            }
+        } else {
+            s.finish();
+        }
     }
     // Retry in a fresh process: winit event loops cannot be recreated reliably in-process.
     // Only renderer initialization failures qualify; never restart after editing has begun.
@@ -393,5 +673,81 @@ mod control_port_tests {
         assert!(err.contains("78787"), "{err}");
         assert!(parse_control_port("--safe-gpu", "--control").is_err());
         assert!(parse_control_port("", "--control").is_err());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn window_geometry_survives_a_restart() {
+        let options = super::native_options();
+        assert!(options.persist_window);
+        // eframe takes this as the RON file itself, not a folder.
+        assert_eq!(options.persistence_path, super::services::config_dir().map(|dir| dir.join(super::UI_STATE_FILE)));
+    }
+
+    #[test]
+    fn the_window_opens_centred_at_its_default_size() {
+        let o = super::native_options();
+        assert!(o.centered, "#419: centred, not cascaded from the top-left corner");
+        assert_eq!(o.viewport.inner_size, Some(egui::vec2(1440.0, 900.0)));
+        // eframe shrinks the start size to the monitor, so the centred position is on-screen.
+        assert_ne!(o.viewport.clamp_size_to_monitor_size, Some(false));
+    }
+
+    #[test]
+    fn only_the_first_window_is_centred() {
+        let dir = std::env::temp_dir().join(format!("photosplice-ui-state-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(super::UI_STATE_FILE);
+        let _ = std::fs::remove_file(&file);
+        assert!(!super::has_saved_layout(None));
+        assert!(!super::has_saved_layout(Some(&file)), "first launch: nothing saved, centre");
+        std::fs::write(&file, "{}").unwrap();
+        assert!(super::has_saved_layout(Some(&file)), "#4826: a saved layout keeps its position");
+        assert!(!super::has_saved_layout(Some(&dir)), "a folder is not a saved layout");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_window_saved_while_minimized_reopens_at_the_minimum_size() {
+        let hook = super::native_options().window_builder.expect("a window builder hook");
+        // Saved minimized on Windows, then centred on a 1920 × 1080 monitor by eframe.
+        let saved = super::native_options().viewport.with_inner_size([160.0, 64.0]).with_position([880.0, 508.0]);
+        let opened = hook(saved);
+        assert_eq!(opened.inner_size, Some(egui::vec2(760.0, 480.0)));
+        assert_eq!(opened.position, Some(egui::pos2(580.0, 300.0)), "still centred");
+        // Too narrow only: only the width grows.
+        let opened = super::at_least_min_size(super::native_options().viewport.with_inner_size([500.0, 900.0]));
+        assert_eq!(opened.inner_size, Some(egui::vec2(760.0, 900.0)));
+        // A window at or above the minimum, or with no size, is left alone.
+        for size in [[760.0, 480.0], [1100.0, 760.0]] {
+            let builder = super::native_options().viewport.with_inner_size(size).with_position([10.0, 20.0]);
+            let opened = super::at_least_min_size(builder);
+            assert_eq!((opened.inner_size, opened.position), (Some(egui::Vec2::from(size)), Some(egui::pos2(10.0, 20.0))));
+        }
+        let mut builder = super::native_options().viewport;
+        builder.inner_size = None;
+        assert_eq!(super::at_least_min_size(builder).inner_size, None);
+    }
+
+    #[test]
+    fn a_window_saved_in_full_screen_reopens_maximized_not_full_screen() {
+        let hook = super::native_options().window_builder.expect("a window builder hook");
+        // What eframe restores from a layout saved in a full-screen mode on Windows.
+        let saved = super::native_options().viewport.with_inner_size([2560.0, 1392.0]).with_position([0.0, 0.0]).with_fullscreen(true).with_maximized(true);
+        let opened = hook(saved);
+        assert_eq!(opened.fullscreen, Some(false), "Standard Screen Mode is where PhotoSplice starts");
+        assert_eq!(opened.maximized, Some(true), "the rest of the saved geometry is kept");
+        assert_eq!(opened.inner_size, Some(egui::vec2(2560.0, 1392.0)));
+    }
+
+    /// X11 startup notification and docks match a window to its launcher by `StartupWMClass`,
+    /// so it has to be the class the window carries: the app id, on Wayland and X11 alike.
+    #[test]
+    fn the_desktop_entry_names_the_window_class() {
+        let entry = include_str!("../../../packaging/linux/io.github.eolix.PhotoSplice.desktop");
+        let class = entry.lines().find_map(|line| line.strip_prefix("StartupWMClass="));
+        assert_eq!(class, Some(super::APP_ID));
     }
 }

@@ -15,6 +15,110 @@ use crate::adjust_editors::{self, EditorCx};
 use crate::tone::{self, HistSource};
 
 const PREFIX: &str = "image.adjustments.";
+const CURVE_PICKER: &str = "__curvePicker";
+const CURVE_PICKER_BASE: &str = "__curvePickerBase";
+
+fn picker(value: Option<&Value>) -> Option<photosplice_engine::adjust_params::CurvesEyedropper> {
+    use photosplice_engine::adjust_params::CurvesEyedropper;
+    match value.and_then(Value::as_str) {
+        Some("black") => Some(CurvesEyedropper::Black),
+        Some("gray") => Some(CurvesEyedropper::NeutralGray),
+        Some("white") => Some(CurvesEyedropper::White),
+        _ => None,
+    }
+}
+
+pub(crate) fn picker_supported(mode: photosplice_doc::ColorMode, eyedropper: photosplice_engine::adjust_params::CurvesEyedropper) -> bool {
+    use photosplice_engine::adjust_params::CurvesEyedropper;
+    mode == photosplice_doc::ColorMode::Rgb || (mode == photosplice_doc::ColorMode::Grayscale && eyedropper != CurvesEyedropper::NeutralGray)
+}
+
+/// The kind of an adjustment dialog with Set Black/Neutral Gray/White Point eyedroppers (Levels,
+/// Curves), if `fields` are one.
+fn picker_kind(fields: &Map<String, Value>) -> Option<&str> {
+    fields.get("__adjust").and_then(Value::as_str).filter(|k| matches!(*k, "levels" | "curves"))
+}
+
+/// Whether the top modal has a supported Levels or Curves eyedropper armed.
+pub fn picker_armed(app: &PhotospliceApp) -> bool {
+    let Some(dialog) = app.ui.dialogs.last().filter(|d| picker_kind(&d.fields).is_some()) else { return false };
+    let Some(eyedropper) = picker(dialog.fields.get(CURVE_PICKER)) else { return false };
+    app.session.active().is_some_and(|s| picker_supported(s.doc.mode, eyedropper))
+}
+
+/// Sample the committed merged document through the regular canvas sampler and update only the
+/// open Levels or Curves dialog. Returns true when an armed picker consumed the pointer event,
+/// even if the point was outside the image or transparent.
+pub fn sample_at(app: &mut PhotospliceApp, x: f64, y: f64) -> bool {
+    let Some((id, kind, eyedropper, base)) = app.ui.dialogs.last().and_then(|dialog| {
+        let kind = picker_kind(&dialog.fields)?.to_string();
+        let eyedropper = picker(dialog.fields.get(CURVE_PICKER))?;
+        let base = dialog.fields.get(CURVE_PICKER_BASE).cloned().unwrap_or_else(|| crate::filter_dialog::params_of(&dialog.fields));
+        Some((dialog.id, kind, eyedropper, base))
+    }) else {
+        return false;
+    };
+    let Some(mode) = app.session.active().map(|s| s.doc.mode) else { return true };
+    if !picker_supported(mode, eyedropper) {
+        return true;
+    }
+    let Some(sample) = crate::canvas::composite_color(app, x, y) else { return true };
+    let params = match photosplice_engine::adjust_params::adjustment_eyedropper(&kind, &base, eyedropper, sample, mode) {
+        Ok(adjustment) => photosplice_engine::adjust_params::to_params(&adjustment),
+        Err(error) => {
+            app.ui.status = error.to_string();
+            return true;
+        }
+    };
+    let Some(dialog) = app.ui.dialog_mut(id) else { return true };
+    dialog.fields.insert(CURVE_PICKER_BASE.into(), base);
+    if let Value::Object(params) = params {
+        dialog.fields.retain(|key, _| key.starts_with("__"));
+        dialog.fields.extend(params);
+    }
+    true
+}
+
+pub(crate) fn picker_button(ui: &mut egui::Ui, selected: bool, enabled: bool, tooltip: &str, color: egui::Color32) -> egui::Response {
+    let response = ui.add_enabled_ui(enabled, |ui| crate::icons::button(ui, "pipette", 28.0, selected, tooltip)).inner;
+    let tokens = crate::theme::Tokens::get(ui.ctx());
+    ui.painter().circle_filled(response.rect.right_bottom() - egui::vec2(5.5, 5.5), 3.5, color);
+    ui.painter().circle_stroke(response.rect.right_bottom() - egui::vec2(5.5, 5.5), 3.5, egui::Stroke::new(1.0, tokens.field_border));
+    response.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, selected, tooltip));
+    response
+}
+
+fn picker_controls(ui: &mut egui::Ui, fields: &mut Map<String, Value>, mode: photosplice_doc::ColorMode) {
+    use photosplice_engine::adjust_params::CurvesEyedropper;
+    let current = picker(fields.get(CURVE_PICKER));
+    let mut chosen = None;
+    ui.horizontal(|ui| {
+        let tokens = crate::theme::Tokens::get(ui.ctx());
+        ui.label(egui::RichText::new(tl!("Eyedroppers:")).color(tokens.text_dim).size(12.0));
+        // The swatch is the tone the picker maps the sample to (image data, like the Curves
+        // gradient bars), not chrome, so it is the same in every theme; its ring is a token.
+        for (id, eyedropper, label, tone) in [
+            ("black", CurvesEyedropper::Black, tl!("Set Black Point"), 0),
+            ("gray", CurvesEyedropper::NeutralGray, tl!("Set Neutral Gray Point"), 128),
+            ("white", CurvesEyedropper::White, tl!("Set White Point"), 255),
+        ] {
+            let enabled = picker_supported(mode, eyedropper);
+            if picker_button(ui, current == Some(eyedropper), enabled, label, egui::Color32::from_gray(tone)).clicked() {
+                chosen = Some((id, eyedropper));
+            }
+        }
+        if !matches!(mode, photosplice_doc::ColorMode::Rgb | photosplice_doc::ColorMode::Grayscale) {
+            ui.label(egui::RichText::new(tl!("Unavailable in this color mode")).color(tokens.text_faint).size(11.0));
+        }
+    });
+    if let Some((id, selected)) = chosen
+        && current != Some(selected)
+    {
+        let base = crate::filter_dialog::params_of(fields);
+        fields.insert(CURVE_PICKER.into(), json!(id));
+        fields.insert(CURVE_PICKER_BASE.into(), base);
+    }
+}
 
 /// Whether `command` opens an adjustment dialog (when run without params).
 pub fn has_dialog(command: &str) -> bool {
@@ -25,11 +129,48 @@ pub fn owns(fields: &Map<String, Value>) -> bool {
     fields.contains_key("__adjust")
 }
 
+/// Root of the dialog editor's view state in egui memory.
+fn dialog_mem(kind: &str) -> egui::Id {
+    egui::Id::new(("adjust-dialog", kind))
+}
+
+/// Whether holding Alt turns Cancel into Reset for this adjustment dialog (every kind).
+pub fn resets(fields: &Map<String, Value>) -> bool {
+    owns(fields)
+}
+
+/// Alt+Cancel (Reset): engine defaults for the kind; Color Balance keeps Preserve Luminosity and
+/// shows Midtones (Photoshop 25.4). Dialog stays open.
+pub fn reset(app: &PhotospliceApp, ctx: &egui::Context, fields: &mut Map<String, Value>) {
+    if !owns(fields) {
+        return;
+    }
+    let kind = fields.get("__adjust").and_then(Value::as_str).unwrap_or_default().to_string();
+    let mode = curve_mode(app, &kind);
+    // Color Balance: Photoshop keeps the user's Preserve Luminosity across Reset.
+    let preserve = if kind == "colorBalance" { fields.get("preserveLuminosity").cloned() } else { None };
+    let Ok(defaults) = photosplice_engine::adjust_params::default_for(&kind, mode) else { return };
+    let values = photosplice_engine::adjust_params::to_params(&defaults);
+    // Replace parameter keys; keep private `__` chrome (preview, command, …).
+    fields.retain(|k, _| k.starts_with("__"));
+    if let Value::Object(v) = values {
+        fields.extend(v);
+    }
+    if let Some(p) = preserve {
+        fields.insert("preserveLuminosity".into(), p);
+    }
+    let mut values = crate::filter_dialog::params_of(fields);
+    adjust_editors::reset_adjustment_editor(ctx, &kind, dialog_mem(&kind), &mut values);
+    if let Value::Object(v) = values {
+        fields.extend(v);
+    }
+}
+
 /// Opens the dialog for `command` with the kind's neutral settings.
 pub fn open(app: &mut PhotospliceApp, command: &str) -> Option<u64> {
     let kind = command.strip_prefix(PREFIX).filter(|k| adjust_editors::has_editor(k))?;
     let spec = photosplice_engine::commands::find(command)?;
-    let mode = app.session.active().map_or(photosplice_doc::ColorMode::Rgb, |s| s.doc.mode);
+    let mode = curve_mode(app, kind);
     let defaults = photosplice_engine::adjust_params::default_for(kind, mode).ok()?;
     let mut fields = Map::new();
     fields.insert("__command".into(), json!(command));
@@ -43,24 +184,71 @@ pub fn open(app: &mut PhotospliceApp, command: &str) -> Option<u64> {
     Some(app.ui.open_dialog(crate::state::DialogKind::Command, fields))
 }
 
+/// The Curves dialog's single-channel target: the Channels panel's, plus the Layers panel's mask
+/// selection — both ways of selecting a mask must give the same dropdown (#5335).
+fn isolated(app: &PhotospliceApp) -> Option<photosplice_engine::channel_cmds::IsolatedCurveChannel> {
+    let mask = app.layer_mask_targeted();
+    app.session.active().and_then(|st| photosplice_engine::channel_cmds::isolated_curve_channel_for(st, mask))
+}
+
+/// The colour mode the Levels/Curves dialog seeds and parses in: a mask, saved channel or
+/// Quick Mask holds gray levels whatever the document's mode, so its curve is a neutral one
+/// and the fields carry no Lab or CMYK records (#5335).
+fn curve_mode(app: &PhotospliceApp, kind: &str) -> photosplice_doc::ColorMode {
+    let mode = app.session.active().map_or(photosplice_doc::ColorMode::Rgb, |s| s.doc.mode);
+    if kind == "curves" && isolated(app).is_some_and(|c| c.gray.is_some()) { photosplice_doc::ColorMode::Grayscale } else { mode }
+}
+
 /// Dialog body: the kind's editor over the fields, then the Preview checkbox.
 pub fn body(app: &mut PhotospliceApp, ui: &mut egui::Ui, fields: &mut Map<String, Value>) {
     let kind = fields.get("__adjust").and_then(Value::as_str).unwrap_or_default().to_string();
+    let mode = curve_mode(app, &kind);
+    if matches!(kind.as_str(), "levels" | "curves") {
+        picker_controls(ui, fields, mode);
+        ui.add_space(4.0);
+    }
     let mut values = crate::filter_dialog::params_of(fields);
     let active = app.session.active().and_then(|s| s.active_layer);
-    let gray = app.session.active().is_some_and(|s| adjust_editors::is_gray(s.doc.mode));
+    let isolated_curve = isolated(app);
+    // Only Curves gets an isolated single-channel target here; Levels keeps its usual fields.
+    let gray_plane = (kind == "curves").then(|| isolated_curve.as_ref().and_then(|c| c.gray)).flatten();
+    let gray = gray_plane.is_some() || app.session.active().is_some_and(|s| adjust_editors::is_gray(s.doc.mode));
     let hist = match active {
-        Some(id) if adjust_editors::needs_histogram(&kind) => Some(tone::histograms(app, HistSource::Layer(id), adjust_editors::space_of(&values))),
+        Some(id) if adjust_editors::needs_histogram(&kind) => {
+            // A mask or saved channel's curve edits that plane's own levels: the histogram
+            // describes it, not the colour layers beneath (#5335).
+            let source = match gray_plane {
+                Some(surface) => HistSource::Channel { layer: id, surface },
+                None => HistSource::Layer(id),
+            };
+            Some(tone::histograms(app, source, adjust_editors::space_of(&values)))
+        }
         _ => None,
     };
-    let cx = EditorCx { mem: egui::Id::new(("adjust-dialog", kind.as_str())), hist, gray, swatches: adjust_editors::swatches(app) };
+    let cx = EditorCx {
+        mem: dialog_mem(&kind),
+        hist,
+        gray,
+        swatches: adjust_editors::swatches(app),
+        gradients: adjust_editors::gradient_presets(app, &kind),
+        dialog: true,
+        dynamic_color_sliders: app.session.prefs().interface.dynamic_color_sliders,
+        isolated_curve,
+    };
     let e = adjust_editors::editor(ui, &kind, &mut values, &cx);
+    if e.import_gradients {
+        crate::preset_files_ui::import_gradients_dialog(app);
+    }
     if e.changed
         && let Value::Object(v) = values
     {
         // Replace the parameter keys (an editor may remove one), keep the private ones.
         fields.retain(|k, _| k.starts_with("__"));
         fields.extend(v);
+        if picker(fields.get(CURVE_PICKER)).is_some() {
+            let base = crate::filter_dialog::params_of(fields);
+            fields.insert(CURVE_PICKER_BASE.into(), base);
+        }
     }
     let mut preview = fields.get("__preview").and_then(Value::as_bool).unwrap_or(true);
     ui.add_space(6.0);
@@ -73,6 +261,7 @@ pub fn body(app: &mut PhotospliceApp, ui: &mut egui::Ui, fields: &mut Map<String
 mod tests {
     use super::*;
     use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
 
     fn app_with_image() -> PhotospliceApp {
         let mut s = photosplice_engine::Session::new();
@@ -81,6 +270,37 @@ mod tests {
         s.execute("edit.fill", json!({"color": "#b04020"})).unwrap();
         s.execute("select.deselect", json!({})).unwrap();
         PhotospliceApp::new(s, crate::Services::default())
+    }
+
+    fn app_in_mode(mode: &str) -> PhotospliceApp {
+        let mut session = photosplice_engine::Session::new();
+        session.execute("file.new", json!({"width": 32, "height": 24, "mode": mode})).unwrap();
+        PhotospliceApp::new(session, crate::Services::default())
+    }
+
+    fn arm(app: &mut PhotospliceApp, id: u64, picker: &str) {
+        let base = app.ui.dialog_mut(id).map(|dialog| crate::filter_dialog::params_of(&dialog.fields)).unwrap();
+        let dialog = app.ui.dialog_mut(id).unwrap();
+        dialog.fields.insert(CURVE_PICKER.into(), json!(picker));
+        dialog.fields.insert(CURVE_PICKER_BASE.into(), base);
+    }
+
+    fn channel_points(app: &PhotospliceApp, key: &str) -> Vec<[f64; 2]> {
+        app.ui
+            .dialogs
+            .last()
+            .and_then(|dialog| dialog.fields.get(key))
+            .and_then(Value::as_array)
+            .map(|points| {
+                points
+                    .iter()
+                    .filter_map(|point| {
+                        let point = point.as_array()?;
+                        Some([point.first()?.as_f64()?, point.get(1)?.as_f64()?])
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     #[test]
@@ -133,6 +353,112 @@ mod tests {
         }
     }
 
+    fn color_balance_dialog() -> (Harness<'static, PhotospliceApp>, u64) {
+        // Real frame times: a double-click's two clicks must land within the double-click time.
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1200.0, 900.0))
+            .with_step_dt(1.0 / 60.0)
+            .build_ui_state(|ui, app| crate::dialogs::show(app, ui.ctx()), app_with_image());
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        let id = open(h.state_mut(), "image.adjustments.colorBalance").unwrap();
+        let d = h.state_mut().ui.dialog_mut(id).unwrap();
+        for (k, v) in
+            [("shadows", json!([10, 0, 0])), ("midtones", json!([40, -30, 20])), ("highlights", json!([0, 0, -15])), ("preserveLuminosity", json!(false))]
+        {
+            d.fields.insert(k.into(), v);
+        }
+        h.run_steps(3);
+        (h, id)
+    }
+
+    fn field(h: &Harness<'static, PhotospliceApp>, id: u64, key: &str) -> Value {
+        h.state().ui.dialogs.iter().find(|d| d.id == id).map(|d| d.fields.get(key).cloned().unwrap_or(Value::Null)).unwrap_or(Value::Null)
+    }
+
+    fn input(h: &mut Harness<'static, PhotospliceApp>, mods: egui::Modifiers, events: &[egui::Event]) {
+        h.event(egui::Event::ModifiersChanged(mods));
+        h.run_steps(1);
+        for e in events {
+            h.event(e.clone());
+            h.run_steps(1);
+        }
+        h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+        h.run_steps(3);
+    }
+
+    /// Photoshop 25.4's Color Balance dialog (measured with the real application): a double-click
+    /// on a slider zeroes it whatever the modifiers; the wheel over a slider steps it by 1, with
+    /// Shift by 10 (Ctrl/Alt: 1); holding Alt turns Cancel into Reset, which zeroes every tone,
+    /// shows Midtones, keeps Preserve Luminosity and leaves the dialog open.
+    #[test]
+    fn color_balance_dialog_gestures_match_photoshop() {
+        use egui_kittest::kittest::Queryable;
+        let (mut h, id) = color_balance_dialog();
+        let label = h.query_all_by_label("Cyan  ·  Red").last().map(|n| n.rect()).expect("Cyan · Red row");
+        let at = egui::pos2(label.left() + 60.0, label.bottom() + 14.0);
+        let press = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::ALT };
+        input(&mut h, egui::Modifiers::ALT, &[egui::Event::PointerMoved(at), press(true), press(false), press(true), press(false)]);
+        assert_eq!(field(&h, id, "midtones"), json!([0.0, -30.0, 20.0]), "Alt+double-click zeroes the slider");
+        assert_eq!(field(&h, id, "shadows"), json!([10, 0, 0]), "other tones untouched");
+        let wheel =
+            |n: f32, m| egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: egui::vec2(0.0, n), phase: egui::TouchPhase::Move, modifiers: m };
+        input(&mut h, egui::Modifiers::NONE, &[egui::Event::PointerMoved(at), wheel(3.0, egui::Modifiers::NONE)]);
+        assert_eq!(field(&h, id, "midtones")[0], json!(3.0), "3 notches up");
+        input(&mut h, egui::Modifiers::SHIFT, &[egui::Event::PointerMoved(at), wheel(2.0, egui::Modifiers::SHIFT)]);
+        assert_eq!(field(&h, id, "midtones")[0], json!(23.0), "Shift: 10 per notch");
+        input(&mut h, egui::Modifiers::CTRL, &[egui::Event::PointerMoved(at), wheel(-1.0, egui::Modifiers::CTRL)]);
+        assert_eq!(field(&h, id, "midtones")[0], json!(22.0), "Ctrl: 1 per notch, down");
+        // Alt turns Cancel into Reset.
+        assert!(h.query_by_label("Cancel").is_some() && h.query_by_label("Reset").is_none());
+        h.state_mut().ui.dialog_mut(id).unwrap().fields.insert("highlights".into(), json!([5, 5, 5]));
+        let tone = egui::Id::new(("adjust-dialog", "colorBalance")).with("cb-tone");
+        h.ctx.data_mut(|d| d.insert_temp(tone, 2usize));
+        h.event(egui::Event::ModifiersChanged(egui::Modifiers::ALT));
+        h.run_steps(2);
+        let reset = h.get_by_label("Reset").rect();
+        assert!(h.query_by_label("Cancel").is_none());
+        let click =
+            |pressed| egui::Event::PointerButton { pos: reset.center(), button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::ALT };
+        input(&mut h, egui::Modifiers::ALT, &[egui::Event::PointerMoved(reset.center()), click(true), click(false)]);
+        assert!(h.state().ui.dialogs.iter().any(|d| d.id == id), "Reset keeps the dialog open");
+        for k in ["shadows", "midtones", "highlights"] {
+            assert_eq!(field(&h, id, k), json!([0.0, 0.0, 0.0]), "{k}");
+        }
+        assert_eq!(field(&h, id, "preserveLuminosity"), json!(false), "Reset keeps Preserve Luminosity");
+        assert_eq!(h.ctx.data(|d| d.get_temp::<usize>(tone)), Some(1), "Reset shows Midtones");
+        // Without Alt it is Cancel again, and it closes.
+        let cancel = h.get_by_label("Cancel").rect();
+        let click =
+            |pressed| egui::Event::PointerButton { pos: cancel.center(), button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        input(&mut h, egui::Modifiers::NONE, &[egui::Event::PointerMoved(cancel.center()), click(true), click(false)]);
+        assert!(h.state().ui.dialogs.is_empty(), "Cancel closes");
+    }
+
+    /// Every adjustment kind opts into Alt+Reset; Levels restores engine defaults and stays open.
+    #[test]
+    fn levels_alt_reset_restores_defaults() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_ui_state(|ui, app| crate::dialogs::show(app, ui.ctx()), app_with_image());
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        let id = open(h.state_mut(), "image.adjustments.levels").unwrap();
+        h.state_mut().ui.dialog_mut(id).unwrap().fields.insert("inBlack".into(), json!(30));
+        h.state_mut().ui.dialog_mut(id).unwrap().fields.insert("gamma".into(), json!(1.3));
+        h.run_steps(2);
+        assert!(h.query_by_label("Cancel").is_some() && h.query_by_label("Reset").is_none());
+        h.event(egui::Event::ModifiersChanged(egui::Modifiers::ALT));
+        h.run_steps(2);
+        let reset = h.get_by_label("Reset").rect();
+        assert!(h.query_by_label("Cancel").is_none());
+        let click =
+            |pressed| egui::Event::PointerButton { pos: reset.center(), button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::ALT };
+        input(&mut h, egui::Modifiers::ALT, &[egui::Event::PointerMoved(reset.center()), click(true), click(false)]);
+        assert!(h.state().ui.dialogs.iter().any(|d| d.id == id), "Reset keeps the dialog open");
+        let defaults =
+            photosplice_engine::adjust_params::to_params(&photosplice_engine::adjust_params::default_for("levels", photosplice_doc::ColorMode::Rgb).unwrap());
+        assert_eq!(field(&h, id, "inBlack"), defaults["inBlack"]);
+        assert_eq!(field(&h, id, "gamma"), defaults["gamma"]);
+    }
+
     fn sample_params(kind: &str) -> Value {
         match kind {
             "brightnessContrast" => json!({"brightness": 40}),
@@ -152,6 +478,30 @@ mod tests {
         }
     }
 
+    /// #5113: the dialog should fit its curve graph instead of reserving a blank right column.
+    #[test]
+    fn curves_dialog_fits_its_graph_and_controls() {
+        for language in ["en", "de"] {
+            let _language = crate::i18n::language_scope(crate::i18n::Lang::from_code(language).unwrap());
+            for theme in crate::theme::ThemeKind::ALL {
+                for size in [egui::vec2(1280.0, 900.0), egui::vec2(900.0, 720.0)] {
+                    let mut h = Harness::builder().with_size(size).build_ui_state(|ui, app| crate::dialogs::show(app, ui.ctx()), app_with_image());
+                    PhotospliceApp::setup_context(&h.ctx, theme);
+                    let id = open(h.state_mut(), "image.adjustments.curves").unwrap();
+                    h.run_steps(4);
+                    let window = h.ctx.memory(|m| m.area_rect(egui::Id::new(("dialog", id)))).unwrap();
+                    let graph = h.ctx.data(|d| d.get_temp::<egui::Rect>(dialog_mem("curves").with("curves-graph"))).unwrap();
+                    assert!(window.right() - graph.right() < 40.0, "blank right column: window {window:?}, graph {graph:?}");
+                    assert!(graph.width() > 270.0, "keep the graph usable: {graph:?}");
+                    assert!(window.contains_rect(graph));
+                    for label in ["Channel:", "Input:", "Output:", "Preview", "OK", "Cancel"] {
+                        assert!(window.contains_rect(h.get_by_label(crate::i18n::t(label)).rect()), "{label} inside the window");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn cancel_leaves_the_document_untouched() {
         let mut harness =
@@ -167,5 +517,321 @@ mod tests {
         let after = harness.state().session.active().unwrap().doc.clone();
         assert!(std::sync::Arc::ptr_eq(&before, &after));
         assert!(harness.state().ui.dialogs.is_empty());
+    }
+
+    #[test]
+    fn gradient_map_dialog_handles_preview_without_committing_until_ok() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_ui_state(|ui, app| crate::dialogs::show(app, ui.ctx()), app_with_image());
+        PhotospliceApp::setup_context(&h.ctx, Default::default());
+        let id = open(h.state_mut(), "image.adjustments.gradientMap").unwrap();
+        h.run_steps(4);
+        let doc = h.state().session.active().unwrap().doc.clone();
+        let steps = h.state().session.active().unwrap().history.past_len();
+        let strip = h.get_by_label("Gradient stops").rect();
+        let start = egui::pos2(strip.left() + 8.0, strip.top() + 36.0);
+        let to = start + egui::vec2((strip.width() - 16.0) * 0.3, 0.0);
+        h.hover_at(start);
+        h.run_steps(1);
+        h.drag_at(start);
+        h.run_steps(1);
+        h.hover_at(to);
+        h.run_steps(1);
+        h.drop_at(to);
+        h.run_steps(3);
+        let stops = h.state().ui.dialogs[0].fields["stops"].as_array().unwrap();
+        assert!((stops[0][0].as_f64().unwrap() - 0.3).abs() < 0.001);
+        assert!(std::sync::Arc::ptr_eq(&doc, &h.state().session.active().unwrap().doc), "dialog edits are previews");
+        assert_eq!(h.state().session.active().unwrap().history.past_len(), steps);
+        crate::dialogs::confirm(h.state_mut(), id).unwrap();
+        h.run_steps(2);
+        assert_eq!(h.state().session.active().unwrap().history.past_len(), steps + 1);
+        h.state_mut().run("edit.undo", json!({})).unwrap();
+        assert_eq!(*h.state().session.active().unwrap().doc, *doc);
+    }
+    #[test]
+    fn curves_pencil_drag_draws_the_map_and_confirm_applies_it() {
+        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_ui_state(|ui, app| crate::dialogs::show(app, ui.ctx()), app_with_image());
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        let steps = h.state().session.active().unwrap().history.past_len();
+        let id = open(h.state_mut(), "image.adjustments.curves").unwrap();
+        let fields = &mut h.state_mut().ui.dialog_mut(id).unwrap().fields;
+        fields.insert("pencil".into(), json!(true));
+        fields.insert("points".into(), json!((0..256).collect::<Vec<_>>()));
+        h.run_steps(4);
+        let graph = h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::new(("adjust-dialog", "curves")).with("curves-graph"))).unwrap();
+        let at = |i: f32, o: f32| egui::pos2(graph.left() + i / 255.0 * graph.width(), graph.bottom() - o / 255.0 * graph.height());
+        h.hover_at(at(64.0, 200.0));
+        h.run_steps(1);
+        h.drag_at(at(64.0, 200.0));
+        h.run_steps(1);
+        for i in [100.0, 150.0, 192.0] {
+            h.hover_at(at(i, 200.0));
+            h.run_steps(1);
+        }
+        h.drop_at(at(192.0, 200.0));
+        h.run_steps(3);
+        let map = h.state().ui.dialogs[0].fields["points"].as_array().unwrap().clone();
+        assert_eq!(map.len(), 256);
+        assert!((70..185).all(|k| (map[k].as_f64().unwrap() - 200.0).abs() < 3.0), "{map:?}");
+        assert_eq!(map[20].as_f64(), Some(20.0), "outside the stroke the map is untouched");
+        crate::dialogs::confirm(h.state_mut(), id).unwrap();
+        assert_eq!(h.state().session.active().unwrap().history.past_len(), steps + 1);
+    }
+
+    #[test]
+    fn curves_eyedroppers_sample_repeatedly_without_editing_the_document() {
+        let mut app = app_with_image();
+        let original = app.session.active().unwrap().doc.clone();
+        let revision = app.session.active().unwrap().revision;
+        let steps = app.session.active().unwrap().history.past_len();
+        let id = open(&mut app, "image.adjustments.curves").unwrap();
+        arm(&mut app, id, "black");
+        assert!(picker_armed(&app));
+        assert!(sample_at(&mut app, 8.0, 8.0));
+        let first = channel_points(&app, "red");
+        assert!((first[0][0] - 176.0).abs() < 0.6 && first[0][1] == 0.0, "{first:?}");
+        assert!(sample_at(&mut app, 8.0, 8.0));
+        assert_eq!(channel_points(&app, "red"), first, "the same repeated sample is deterministic");
+        assert!(sample_at(&mut app, 48.0, 8.0));
+        assert_ne!(channel_points(&app, "red"), first);
+        assert!(sample_at(&mut app, 8.0, 8.0));
+        assert_eq!(channel_points(&app, "red"), first, "repeated samples resolve from the armed baseline");
+        let st = app.session.active().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&st.doc, &original));
+        assert_eq!(st.revision, revision);
+        assert_eq!(st.history.past_len(), steps);
+    }
+
+    /// #3116: the Levels dialog's Set White Point moves each channel's input white to the sample
+    /// (#b04020) and leaves the document alone until OK.
+    #[test]
+    fn levels_white_point_eyedropper_sets_the_channel_input_whites() {
+        let mut app = app_with_image();
+        let original = app.session.active().unwrap().doc.clone();
+        let id = open(&mut app, "image.adjustments.levels").unwrap();
+        arm(&mut app, id, "white");
+        assert!(picker_armed(&app));
+        assert!(sample_at(&mut app, 8.0, 8.0));
+        let in_white = |key: &str| app.ui.dialogs.last().and_then(|d| d.fields.get(key)).and_then(|c| c.get("inWhite")).and_then(Value::as_f64);
+        assert_eq!([in_white("red"), in_white("green"), in_white("blue")], [Some(176.0), Some(64.0), Some(32.0)]);
+        assert!(std::sync::Arc::ptr_eq(&app.session.active().unwrap().doc, &original));
+    }
+
+    #[test]
+    fn curves_picker_controls_arm_and_disable_by_document_mode() {
+        let harness = |app| {
+            let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_ui_state(|ui, app| crate::dialogs::show(app, ui.ctx()), app);
+            PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+            open(h.state_mut(), "image.adjustments.curves").unwrap();
+            h.run_steps(3);
+            h
+        };
+        let mut rgb = harness(app_in_mode("rgb"));
+        for label in ["Set Black Point", "Set Neutral Gray Point", "Set White Point"] {
+            assert!(!rgb.get_by_label(label).accesskit_node().is_disabled(), "{label}");
+        }
+        rgb.get_by_label("Set Black Point").click();
+        rgb.run_steps(2);
+        assert!(picker_armed(rgb.state()));
+        assert_eq!(rgb.state().ui.dialogs.last().and_then(|d| d.fields.get(CURVE_PICKER)).and_then(Value::as_str), Some("black"));
+
+        let gray = harness(app_in_mode("gray"));
+        assert!(!gray.get_by_label("Set Black Point").accesskit_node().is_disabled());
+        assert!(gray.get_by_label("Set Neutral Gray Point").accesskit_node().is_disabled());
+        assert!(!gray.get_by_label("Set White Point").accesskit_node().is_disabled());
+
+        for mode in ["cmyk", "lab"] {
+            let h = harness(app_in_mode(mode));
+            for label in ["Set Black Point", "Set Neutral Gray Point", "Set White Point"] {
+                assert!(h.get_by_label(label).accesskit_node().is_disabled(), "{mode}: {label}");
+            }
+        }
+    }
+
+    #[test]
+    fn curves_picker_rejects_outside_and_transparent_samples() {
+        let mut s = photosplice_engine::Session::new();
+        s.execute("file.new", json!({"width": 32, "height": 24, "background": "transparent"})).unwrap();
+        let mut app = PhotospliceApp::new(s, crate::Services::default());
+        let id = open(&mut app, "image.adjustments.curves").unwrap();
+        arm(&mut app, id, "white");
+        let before = crate::filter_dialog::params_of(&app.ui.dialog_mut(id).unwrap().fields);
+        assert!(sample_at(&mut app, -1.0, 4.0));
+        assert_eq!(crate::filter_dialog::params_of(&app.ui.dialog_mut(id).unwrap().fields), before);
+        assert!(sample_at(&mut app, 4.0, 4.0));
+        assert_eq!(crate::filter_dialog::params_of(&app.ui.dialog_mut(id).unwrap().fields), before);
+        assert!(picker_armed(&app), "an invalid sample does not disarm the picker");
+    }
+
+    #[test]
+    fn curves_picker_cancel_and_confirm_keep_one_transaction() {
+        for confirm in [false, true] {
+            let mut app = app_with_image();
+            let original = app.session.active().unwrap().doc.clone();
+            let steps = app.session.active().unwrap().history.past_len();
+            let id = open(&mut app, "image.adjustments.curves").unwrap();
+            arm(&mut app, id, "white");
+            assert!(sample_at(&mut app, 8.0, 8.0));
+            assert!(std::sync::Arc::ptr_eq(&app.session.active().unwrap().doc, &original));
+            assert_eq!(app.session.active().unwrap().history.past_len(), steps);
+            if confirm {
+                crate::dialogs::confirm(&mut app, id).unwrap();
+                let committed = app.session.active().unwrap().doc.clone();
+                assert!(!std::sync::Arc::ptr_eq(&committed, &original));
+                assert_eq!(app.session.active().unwrap().history.past_len(), steps + 1);
+                app.run("edit.undo", json!({})).unwrap();
+                assert!(std::sync::Arc::ptr_eq(&app.session.active().unwrap().doc, &original));
+                app.run("edit.redo", json!({})).unwrap();
+                assert!(std::sync::Arc::ptr_eq(&app.session.active().unwrap().doc, &committed));
+            } else {
+                app.ui.close_dialog(id);
+                assert!(std::sync::Arc::ptr_eq(&app.session.active().unwrap().doc, &original));
+                assert_eq!(app.session.active().unwrap().history.past_len(), steps);
+            }
+        }
+    }
+
+    #[test]
+    fn curves_picker_modes_and_depths_are_explicit() {
+        use photosplice_engine::adjust_params::CurvesEyedropper;
+        assert!(picker_supported(photosplice_doc::ColorMode::Rgb, CurvesEyedropper::NeutralGray));
+        assert!(picker_supported(photosplice_doc::ColorMode::Grayscale, CurvesEyedropper::Black));
+        assert!(picker_supported(photosplice_doc::ColorMode::Grayscale, CurvesEyedropper::White));
+        assert!(!picker_supported(photosplice_doc::ColorMode::Grayscale, CurvesEyedropper::NeutralGray));
+        assert!(!picker_supported(photosplice_doc::ColorMode::Cmyk, CurvesEyedropper::Black));
+        assert!(!picker_supported(photosplice_doc::ColorMode::Lab, CurvesEyedropper::White));
+
+        for depth in [8, 16, 32] {
+            let mut s = photosplice_engine::Session::new();
+            s.execute("file.new", json!({"width": 16, "height": 16, "depth": depth})).unwrap();
+            s.execute("edit.fill", json!({"color": [0.3142, 0.4821, 0.7137]})).unwrap();
+            let mut app = PhotospliceApp::new(s, crate::Services::default());
+            let sampled = crate::canvas::composite_color(&mut app, 4.0, 4.0).unwrap();
+            let id = open(&mut app, "image.adjustments.curves").unwrap();
+            arm(&mut app, id, "gray");
+            assert!(sample_at(&mut app, 4.0, 4.0), "RGB @{depth}");
+            let red = channel_points(&app, "red");
+            let target_level = (f64::from(sampled[0]) * 0.2126 + f64::from(sampled[1]) * 0.7152 + f64::from(sampled[2]) * 0.0722) * 255.0;
+            let sample_level = f64::from(sampled[0]) * 255.0;
+            let serialized_sample_level = (sample_level * 100.0).round() / 100.0;
+            let neutral_anchor = red.iter().find(|point| (point[0] - serialized_sample_level).abs() < 1e-5).unwrap();
+            let serialized_target_level = (target_level * 100.0).round() / 100.0;
+            assert!((neutral_anchor[1] - serialized_target_level).abs() < 1e-5, "depth={depth} anchor={neutral_anchor:?} sampled={sampled:?}");
+            assert!((neutral_anchor[0] - sample_level).abs() <= 0.0051, "depth={depth} anchor={neutral_anchor:?} sampled={}", sampled[0]);
+            if depth == 16 || depth == 32 {
+                assert!(
+                    (sampled[0] * 255.0 - (sampled[0] * 255.0).round()).abs() > 0.01,
+                    "depth={depth} sample was quantized to an 8-bit level: {}",
+                    sampled[0]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ui_pointer_drives_an_armed_curves_picker() {
+        let mut app = app_with_image();
+        let id = open(&mut app, "image.adjustments.curves").unwrap();
+        arm(&mut app, id, "black");
+        let context = egui::Context::default();
+        let before = channel_points(&app, "red");
+        let (request, _receiver) = crate::control::ControlRequest::new("ui.pointer", json!({"events": [{"kind": "move", "x": 48, "y": 8}]}));
+        let _ = crate::control::handle(&mut app, &context, &request);
+        assert_eq!(channel_points(&app, "red"), before, "pointer move does not sample");
+
+        let (request, _receiver) = crate::control::ControlRequest::new("ui.pointer", json!({"events": [{"kind": "down", "x": 8, "y": 8}]}));
+        let _ = crate::control::handle(&mut app, &context, &request);
+        let red = channel_points(&app, "red");
+        assert!((red[0][0] - 176.0).abs() < 0.6 && red[0][1] == 0.0, "{red:?}");
+        assert_ne!(red, before, "pointer down samples");
+
+        let (request, _receiver) = crate::control::ControlRequest::new("ui.pointer", json!({"events": [{"kind": "up", "x": 48, "y": 8}]}));
+        let _ = crate::control::handle(&mut app, &context, &request);
+        assert_eq!(channel_points(&app, "red"), red, "pointer up does not sample again");
+        assert!(picker_armed(&app));
+    }
+
+    /// #5335: a targeted mask, saved channel or colour component is the only Channel popup entry.
+    #[test]
+    fn curves_channel_popup_lists_only_the_targeted_channel() {
+        let mut app = app_with_image();
+        app.run("layer.layerMask.revealAll", json!({})).unwrap();
+        app.run("channel.target", json!({"channel": "mask"})).unwrap();
+        let mut h = curves_harness(app);
+        let names = popup_channels(&mut h);
+        assert!(names.iter().any(|n| n.contains("Mask")), "{names:?}");
+        assert!(!names.iter().any(|n| n == "RGB" || n == "Red" || n == "Green" || n == "Blue"), "{names:?}");
+    }
+
+    /// #5335: selecting the mask in the Layers panel gives the same Curves dropdown as selecting
+    /// it in the Channels panel.
+    #[test]
+    fn curves_channel_popup_lists_only_the_mask_selected_in_the_layers_panel() {
+        let mut app = app_with_image();
+        app.run("layer.layerMask.revealAll", json!({})).unwrap();
+        app.ui.mask_target = true; // clicking the mask thumbnail in the Layers panel
+        assert!(app.layer_mask_targeted(), "the Layers panel mask thumbnail is targeted");
+        let mut h = curves_harness(app);
+        let names = popup_channels(&mut h);
+        assert_eq!(names.len(), 1, "only the mask: {names:?}");
+        assert!(names[0].contains("Mask"), "{names:?}");
+    }
+
+    /// #5335: in a Lab document, Curves over a gray target keeps neutral fields: no Lab records
+    /// to overwrite the mask's own curve or pick the wrong tone space.
+    #[test]
+    fn curves_on_a_gray_target_seeds_neutral_fields_in_a_lab_document() {
+        for via_layers_panel in [false, true] {
+            let mut app = app_in_mode("lab");
+            app.run("layer.layerMask.revealAll", json!({})).unwrap();
+            if via_layers_panel {
+                app.ui.mask_target = true;
+            } else {
+                app.run("channel.target", json!({"channel": "mask"})).unwrap();
+            }
+            let id = open(&mut app, "image.adjustments.curves").expect("opens");
+            let values = crate::filter_dialog::params_of(&app.ui.dialog_mut(id).unwrap().fields.clone());
+            assert!(values.get("points").is_some(), "{values:?}");
+            for key in ["lightness", "a", "b", "cyan", "magenta", "yellow", "black"] {
+                assert!(values.get(key).is_none(), "{key} in a gray target's curves: {values:?}");
+            }
+        }
+    }
+
+    /// #5335: in Italian the built-in labels translate, but a channel the user named "Green"
+    /// stays exactly "Green".
+    #[test]
+    fn curves_channel_popup_keeps_custom_names_verbatim_in_italian() {
+        let it = crate::i18n::Lang::from_code("it").expect("it registered");
+        assert_eq!(crate::i18n::tr(it, "Green"), "Verde", "the test relies on the built-in label");
+        let _lang = crate::i18n::language_scope(it);
+        let mut app = app_with_image();
+        app.run("channel.new", json!({"name": "Green", "fill": "white"})).unwrap();
+        app.run("channel.target", json!({"channel": 0})).unwrap();
+        let mut h = curves_harness(app);
+        let names = popup_channels(&mut h);
+        assert!(names.iter().any(|n| n == "Green"), "custom names stay as entered: {names:?}");
+        assert!(!names.iter().any(|n| n == "Verde"), "not translated: {names:?}");
+        // A targeted colour component keeps its translated built-in label.
+        let mut colour = app_with_image();
+        colour.run("channel.target", json!({"channel": {"color": 1}})).unwrap();
+        let mut h = curves_harness(colour);
+        let names = popup_channels(&mut h);
+        assert!(names.iter().any(|n| n == "Verde"), "built-in labels follow the language: {names:?}");
+    }
+
+    /// Curves open in a harness over `app`.
+    fn curves_harness(app: PhotospliceApp) -> Harness<'static, PhotospliceApp> {
+        let mut h = Harness::builder().with_size(egui::vec2(1200.0, 900.0)).build_ui_state(|ui, app| crate::dialogs::show(app, ui.ctx()), app);
+        PhotospliceApp::setup_context(&h.ctx, Default::default());
+        open(h.state_mut(), "image.adjustments.curves").unwrap();
+        h.run_steps(4);
+        h
+    }
+
+    /// The Channel popup's selected value (its option labels are what it shows).
+    fn popup_channels(h: &mut Harness<'static, PhotospliceApp>) -> Vec<String> {
+        h.query_all_by_role(egui::accesskit::Role::ComboBox).filter_map(|n| n.value().map(|s| s.to_string())).collect()
     }
 }

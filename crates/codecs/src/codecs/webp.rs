@@ -8,7 +8,7 @@ use crate::Format;
 use crate::error::CodecError;
 use crate::fidelity::Plan;
 use crate::image::{ChannelLayout, DecodeWarning, Image, Metadata, SampleType};
-use crate::options::{EncodeOptions, Limits};
+use crate::options::{EncodeOptions, Limits, alloc_zeroed};
 
 const F: Format = Format::WebP;
 
@@ -16,14 +16,25 @@ fn err(e: impl std::fmt::Display) -> CodecError {
     CodecError::malformed(F, e)
 }
 
-pub(crate) fn decode(bytes: &[u8], limits: &Limits) -> Result<Image, CodecError> {
+type Decoder<'a> = image_webp::WebPDecoder<Cursor<&'a [u8]>>;
+
+/// The decoder with its chunks read, the stored size and the output layout, the size checked.
+fn open<'a>(bytes: &'a [u8], limits: &Limits) -> Result<(Decoder<'a>, u32, u32, ChannelLayout), CodecError> {
     let mut dec = image_webp::WebPDecoder::new(Cursor::new(bytes)).map_err(err)?;
     dec.set_memory_limit(limits.alloc_usize());
     let (w, h) = dec.dimensions();
     let layout = if dec.has_alpha() { ChannelLayout::Rgba } else { ChannelLayout::Rgb };
     limits.check(w, h, layout, SampleType::U8)?;
+    // VP8L back-references and VP8 skipped macroblocks compress flat areas extremely well, so the
+    // ratio is generous; it still stops a header-only file from asking for a gigabyte.
+    Limits::check_plausible(u64::from(w) * u64::from(h) * layout.channels() as u64, bytes.len(), 1 << 16)?;
+    Ok((dec, w, h, layout))
+}
+
+pub(crate) fn decode(bytes: &[u8], limits: &Limits) -> Result<Image, CodecError> {
+    let (mut dec, w, h, layout) = open(bytes, limits)?;
     let size = dec.output_buffer_size().ok_or_else(|| err("image too large"))?;
-    let mut buf = vec![0u8; size];
+    let mut buf = alloc_zeroed::<u8>(size)?;
     dec.read_image(&mut buf).map_err(err)?;
     let icc = dec.icc_profile().ok().flatten();
     let exif = dec.exif_metadata().ok().flatten();
@@ -35,6 +46,13 @@ pub(crate) fn decode(bytes: &[u8], limits: &Limits) -> Result<Image, CodecError>
         img.warnings.push(DecodeWarning::MoreFrames { total: Some(dec.num_frames()) });
     }
     Ok(img)
+}
+
+/// The stored size and EXIF block [`decode`] would find, from the container's chunks alone: the
+/// same header reads and size checks, without decoding the bitstream.
+pub(crate) fn probe(bytes: &[u8], limits: &Limits) -> Result<(u32, u32, Option<Vec<u8>>), CodecError> {
+    let (mut dec, w, h, _) = open(bytes, limits)?;
+    Ok((w, h, dec.exif_metadata().ok().flatten()))
 }
 
 pub(crate) fn encode(src: &Image, plan: Plan, opts: &EncodeOptions) -> Result<Vec<u8>, CodecError> {
@@ -59,10 +77,10 @@ pub(crate) fn encode(src: &Image, plan: Plan, opts: &EncodeOptions) -> Result<Ve
     if opts.embed_metadata {
         if let Some(exif) = &img.meta.exif {
             // The pixels are written as they are shown: never let a viewer rotate them again.
-            enc.set_exif_metadata(crate::orientation::upright_exif(exif).into_owned());
+            enc.set_exif_metadata(crate::resolution::export_exif(exif, img.meta.dpi).into_owned());
         }
         if let Some(xmp) = &img.meta.xmp {
-            enc.set_xmp_metadata(crate::orientation::upright_xmp(xmp).as_bytes().to_vec());
+            enc.set_xmp_metadata(crate::resolution::export_xmp(xmp, img.meta.dpi).as_bytes().to_vec());
         }
     }
     enc.encode(img.data(), img.width(), img.height(), ct).map_err(|e| CodecError::encode(F, e))?;
@@ -76,12 +94,13 @@ fn encode_lossy(src: &Image, opts: &EncodeOptions) -> Result<Vec<u8>, CodecError
     let config = webp_rust::LossyEncodingConfig { quality: f32::from(opts.webp_quality.min(100)), ..Default::default() };
     let simple = webp_rust::encode_lossy_with_config(&buf, &config, None).map_err(|e| CodecError::encode(F, e))?;
     let icc = img.icc.as_deref().filter(|_| opts.embed_icc);
-    let exif = img.meta.exif.as_deref().filter(|_| opts.embed_metadata);
-    let xmp = img.meta.xmp.as_deref().map(str::as_bytes).filter(|_| opts.embed_metadata);
+    // The pixels are written as they are shown (Orientation reset), with the export resolution.
+    let exif = img.meta.exif.as_deref().filter(|_| opts.embed_metadata).map(|e| crate::resolution::export_exif(e, img.meta.dpi));
+    let xmp = img.meta.xmp.as_deref().filter(|_| opts.embed_metadata).map(|x| crate::resolution::export_xmp(x, img.meta.dpi));
     if icc.is_none() && exif.is_none() && xmp.is_none() {
         return Ok(simple);
     }
-    remux(&simple, w, h, icc, exif, xmp)
+    remux(&simple, w, h, icc, exif.as_deref(), xmp.as_deref().map(str::as_bytes))
 }
 
 /// Whether a still WebP is lossless (`VP8L`) or lossy (`VP8 `); `None` for anything else

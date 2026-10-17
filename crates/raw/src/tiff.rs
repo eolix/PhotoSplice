@@ -13,6 +13,7 @@ pub(crate) mod tag {
     pub const IMAGE_LENGTH: u16 = 257;
     pub const BITS_PER_SAMPLE: u16 = 258;
     pub const COMPRESSION: u16 = 259;
+    pub const PREDICTOR: u16 = 317;
     pub const PHOTOMETRIC: u16 = 262;
     pub const MAKE: u16 = 271;
     pub const MODEL: u16 = 272;
@@ -35,6 +36,10 @@ pub(crate) mod tag {
     pub const EXIF_IFD: u16 = 34665;
     pub const EXIF_CFA_PATTERN: u16 = 41730;
     pub const MAKER_NOTE: u16 = 37500;
+    pub const COLOR_SPACE: u16 = 40961;
+    pub const INTEROP_IFD: u16 = 40965;
+    /// In the Interoperability IFD.
+    pub const INTEROP_INDEX: u16 = 1;
     pub const DNG_VERSION: u16 = 50706;
     pub const UNIQUE_CAMERA_MODEL: u16 = 50708;
     pub const CFA_PLANE_COLOR: u16 = 50710;
@@ -65,6 +70,7 @@ pub(crate) mod tag {
     pub const OPCODE_LIST_2: u16 = 51009;
     pub const OPCODE_LIST_3: u16 = 51022;
     pub const BASELINE_EXPOSURE_OFFSET: u16 = 51109;
+    pub const PROFILE_GAIN_TABLE_MAP: u16 = 52525;
     // CR2 private tag in the raw IFD: slice count, slice width, last slice width.
     pub const CR2_SLICE: u16 = 50752;
 }
@@ -89,7 +95,7 @@ pub(crate) struct Entry {
 
 impl Entry {
     /// Size in bytes of one value of this entry's type (0 = unknown type).
-    fn unit(&self) -> usize {
+    pub(crate) fn unit(&self) -> usize {
         type_size(self.typ)
     }
 }
@@ -313,6 +319,12 @@ impl<'a> Tiff<'a> {
     }
 }
 
+/// The EXIF orientation (1..=8) of a raw tag value; anything else is the default 1. The range is
+/// checked on the `u32`: narrowing first let a LONG like 65538 pass as 2 (#1817).
+pub(crate) fn orientation(v: Option<u32>) -> u16 {
+    v.filter(|o| (1..=8).contains(o)).and_then(|o| u16::try_from(o).ok()).unwrap_or(1)
+}
+
 /// A human-readable listing of every IFD and entry (debugging aid).
 pub(crate) fn dump(data: &[u8]) -> String {
     use std::fmt::Write;
@@ -337,6 +349,17 @@ pub(crate) fn dump(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn orientation_is_range_checked_before_narrowing() {
+        // #1817: 65538 as u16 is 2, which passed the 1..=8 check.
+        for (v, want) in [(None, 1), (Some(0), 1), (Some(9), 1), (Some(65_538), 1), (Some(65_537), 1), (Some(u32::MAX), 1)] {
+            assert_eq!(orientation(v), want, "{v:?}");
+        }
+        for o in 1..=8u32 {
+            assert_eq!(orientation(Some(o)), o as u16);
+        }
+    }
 
     #[test]
     fn header_variants() {

@@ -18,6 +18,7 @@ use photosplice_raster::Surface;
 use serde_json::{Value, json};
 
 use crate::PhotospliceApp;
+use crate::edit_history::{EditHistory, Step};
 use crate::theme::Tokens;
 use crate::widgets;
 
@@ -41,6 +42,7 @@ pub struct WideAngleDialog {
     drag: Option<([f64; 2], [f64; 2])>,
     pub residual: f64,
     pub render_ms: f64,
+    history: EditHistory<WideAngle>,
 }
 
 fn tex_image(s: &Surface, w: usize, h: usize) -> egui::ColorImage {
@@ -85,6 +87,13 @@ impl WideAngleDialog {
         self.dirty = false;
     }
 
+    pub(crate) fn step(&mut self, step: Step) {
+        if self.history.step(&mut self.params, step) {
+            self.drag = None;
+            self.dirty = true;
+        }
+    }
+
     fn command_params(&self) -> Value {
         let mut v = serde_json::to_value(&self.params).unwrap_or(json!({}));
         v["layer"] = json!(self.layer.0);
@@ -122,6 +131,7 @@ pub fn open(app: &mut PhotospliceApp, ctx: &egui::Context) -> Result<(), String>
     let mut d = WideAngleDialog {
         layer,
         layer_name: name,
+        history: EditHistory::new(&params),
         params,
         frame,
         scale: 1.0 / k as f64,
@@ -188,6 +198,7 @@ pub fn menu(app: &mut PhotospliceApp, ctx: &egui::Context, id: &str, params: &Va
         d.params.constraints.remove(i as usize);
         d.dirty = true;
     }
+    d.history.settle(&d.params, false);
     if d.dirty {
         d.render(ctx);
     }
@@ -223,6 +234,7 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let size = crate::dialogs::FrameSize::Fixed(rect.size());
     crate::dialogs::frame(ctx, egui::Id::new("awa-dialog"), &heading, size, |ui, size| {
         let Some(d) = app.wide_angle.as_mut() else { return };
+        d.history.settle(&d.params, ctx.input(|i| i.pointer.any_down()));
         if d.dirty {
             d.render(ctx);
         }
@@ -447,5 +459,24 @@ mod tests {
         assert!(menu(&mut app, &ctx, "filter.adaptiveWideAngle", &json!({"ui": {"add": {"a": [1, 1]}}})).unwrap().is_err());
         menu(&mut app, &ctx, "filter.adaptiveWideAngle", &json!({"ui": {"cancel": true}})).unwrap().unwrap();
         assert!(app.wide_angle.is_none());
+    }
+
+    #[test]
+    fn command_z_steps_the_dialog_not_the_document() {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
+        let ctx = egui::Context::default();
+        app.run("file.new", json!({"width": 160, "height": 100})).unwrap();
+        app.run("layer.new.layer", json!({})).unwrap();
+        app.run("edit.fill", json!({"color": "#808080"})).unwrap();
+        let steps = app.session.active().unwrap().history.past_len();
+        menu(&mut app, &ctx, "filter.adaptiveWideAngle", &json!({})).unwrap().unwrap();
+        for y in [20, 60] {
+            menu(&mut app, &ctx, "filter.adaptiveWideAngle", &json!({"ui": {"add": {"a": [20, y], "b": [140, y]}}})).unwrap().unwrap();
+        }
+        crate::edit_history::tests::press_z(&mut app, &ctx, egui::Modifiers::COMMAND);
+        assert_eq!(app.wide_angle.as_ref().unwrap().params.constraints.len(), 1, "⌘Z removes the last constraint");
+        assert_eq!(app.session.active().unwrap().history.past_len(), steps, "the document beneath is untouched");
+        crate::edit_history::tests::press_z(&mut app, &ctx, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT);
+        assert_eq!(app.wide_angle.as_ref().unwrap().params.constraints.len(), 2, "⇧⌘Z puts it back");
     }
 }

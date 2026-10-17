@@ -3,6 +3,8 @@
 //! pixel count, so the dialog stays instant on 36 MP documents.
 
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Mutex;
 
 use photosplice_doc::Document;
 use serde_json::{Map, Value, json};
@@ -11,11 +13,67 @@ use crate::state::DialogKind;
 use crate::theme::Tokens;
 use crate::{ExportSettings, PhotospliceApp};
 
-const FORMATS: [(&str, &str); 6] = [("png", "PNG"), ("jpg", "JPG"), ("webp", "WebP"), ("webpLossless", "WebP (lossless)"), ("tif", "TIFF"), ("tga", "TGA")];
+const FORMATS: [(&str, &str); 7] =
+    [("png", "PNG"), ("jpg", "JPG"), ("webp", "WebP"), ("webpLossless", "WebP (lossless)"), ("tif", "TIFF"), ("tga", "TGA"), ("ico", "ICO")];
 
 /// The file extension a format choice writes.
 fn file_ext(fmt: &str) -> &str {
     if fmt == "webpLossless" { "webp" } else { fmt }
+}
+
+/// Preferences ▸ remembered dialog settings: Export As writes the settings it was used with
+/// last under its command id and seeds the next dialog from them, as Fill, Liquify and the
+/// filter dialogs do.
+pub(crate) const COMMAND: &str = "file.export.exportAs";
+
+/// The dialog is seeded from the settings it was used with last (see [`COMMAND`]); a value that
+/// no longer matches a control (a hand-edited preferences file) is left at its default.
+fn seed_remembered(app: &PhotospliceApp, f: &mut Map<String, Value>) {
+    let Some(Value::Object(saved)) = app.session.prefs().dialogs.get(COMMAND) else { return };
+    if let Some(v) = saved.get("format").and_then(Value::as_str).filter(|v| FORMATS.iter().any(|(k, _)| k == v)) {
+        f.insert("format".into(), json!(v));
+    }
+    if let Some(v) = saved.get("quality").and_then(Value::as_f64).filter(|v| (1.0..=100.0).contains(v)) {
+        f.insert("quality".into(), json!(v));
+    }
+    if let Some(v) = saved.get("scale").and_then(Value::as_f64).filter(|v| (1.0..=1000.0).contains(v)) {
+        f.insert("scale".into(), json!(v));
+    }
+    if let Some(v) = saved.get("transparency").and_then(Value::as_bool) {
+        f.insert("transparency".into(), json!(v));
+    }
+    if let Some(v) = saved.get("metadata").and_then(Value::as_str).filter(|v| ["none", "exif", "all"].contains(v)) {
+        f.insert("metadata".into(), json!(v));
+    }
+    if let Some(v) = saved.get("tgaBits").and_then(Value::as_str).filter(|v| ["auto", "24", "32"].contains(v)) {
+        f.insert("tgaBits".into(), json!(v));
+    }
+    if let Some(v) = saved.get("sizing").and_then(Value::as_str).filter(|v| ["scale", "pixels"].contains(v)) {
+        f.insert("sizing".into(), json!(v));
+    }
+    if let Some(v) = saved.get("lockAspect").and_then(Value::as_bool) {
+        f.insert("lockAspect".into(), json!(v));
+    }
+    if let Some(v) = saved.get("embedProfile").and_then(Value::as_bool) {
+        f.insert("embedProfile".into(), json!(v));
+    }
+    if let Some(v) = saved.get("profile").and_then(Value::as_str).filter(|v| ["document", "srgb"].contains(v)) {
+        f.insert("profile".into(), json!(v));
+    }
+    for key in ["width", "height"] {
+        if let Some(v) = saved.get(key).and_then(Value::as_f64).filter(|v| v.is_finite() && (1.0..=MAX_PX).contains(v)) {
+            f.insert(key.into(), json!(v.round()));
+        }
+    }
+}
+
+/// Record the settings for the next Export As (see [`seed_remembered`]).
+fn remember(app: &mut PhotospliceApp, f: &Map<String, Value>) {
+    const KEYS: [&str; 12] = ["format", "quality", "transparency", "scale", "metadata", "tgaBits", "sizing", "width", "height", "lockAspect", "profile", "embedProfile"];
+    let saved: Map<String, Value> = KEYS.iter().filter_map(|k| f.get(*k).map(|v| ((*k).to_string(), v.clone()))).collect();
+    app.session.prefs.edit(|p| {
+        p.dialogs.insert(COMMAND.into(), Value::Object(saved));
+    });
 }
 
 pub fn open(app: &mut PhotospliceApp) -> Result<u64, String> {
@@ -24,11 +82,28 @@ pub fn open(app: &mut PhotospliceApp) -> Result<u64, String> {
     f.insert("__export".into(), json!(true));
     f.insert("__label".into(), json!("Export As"));
     f.insert("format".into(), json!("png"));
-    f.insert("quality".into(), json!(85));
+    f.insert("quality".into(), json!(app.session.prefs().export.jpeg_quality));
     f.insert("transparency".into(), json!(true));
     f.insert("scale".into(), json!(100));
+    f.insert("tgaBits".into(), json!("auto"));
+    f.insert("sizing".into(), json!("scale"));
+    f.insert("lockAspect".into(), json!(true));
+    f.insert("profile".into(), json!("document"));
+    f.insert("embedProfile".into(), json!(true));
+    f.insert("width".into(), json!(st.doc.size.width));
+    f.insert("height".into(), json!(st.doc.size.height));
     f.insert("__w".into(), json!(st.doc.size.width));
     f.insert("__h".into(), json!(st.doc.size.height));
+    seed_remembered(app, &mut f);
+    let explicit = s(&f, "sizing") == "pixels" && f.contains_key("width") && f.contains_key("height");
+    if !explicit && let Ok(size) = resize_from_scale(f64::from(st.doc.size.width), f64::from(st.doc.size.height), n(&f, "scale", 100.0)) {
+        f.insert("width".into(), json!(size.width));
+        f.insert("height".into(), json!(size.height));
+        if (n(&f, "scale", 100.0) - size.scale).abs() > 1e-9 {
+            f.insert("scale".into(), json!(size.scale));
+        }
+        f.insert("sizing".into(), json!("scale"));
+    }
     Ok(app.ui.open_dialog(DialogKind::Command, f))
 }
 
@@ -39,9 +114,26 @@ pub fn open_layer(app: &mut PhotospliceApp, layer: photosplice_doc::LayerId) -> 
     let id = open(app)?;
     if let Some(d) = app.ui.dialogs.iter_mut().find(|d| d.id == id) {
         d.fields.insert("__layer".into(), json!(layer.0));
-        d.fields.insert("__label".into(), json!(format!("Export As: {}", ldoc.name)));
+        d.fields.insert("__label".into(), json!(crate::i18n::fmt(crate::i18n::t("Export As: {name}"), &[("name", &ldoc.name)])));
         d.fields.insert("__w".into(), json!(ldoc.size.width));
         d.fields.insert("__h".into(), json!(ldoc.size.height));
+    }
+    Ok(id)
+}
+
+/// Layer › Export As… with several layers (artboards, say) selected: the same dialog, then one
+/// file per layer with its settings (#3629). The preview shows the first layer.
+pub fn open_layers(app: &mut PhotospliceApp, layers: &[photosplice_doc::LayerId]) -> Result<u64, String> {
+    let (first, n) = match layers {
+        [] => return Err("no selected layers".into()),
+        [one] => return open_layer(app, *one),
+        [first, ..] => (*first, layers.len()),
+    };
+    let id = open_layer(app, first)?;
+    if let Some(d) = app.ui.dialogs.iter_mut().find(|d| d.id == id) {
+        d.fields.insert("__layers".into(), json!(layers.iter().map(|l| l.0).collect::<Vec<_>>()));
+        let template = "Export As: {n} layers";
+        d.fields.insert("__label".into(), json!(crate::i18n::fmt(tl!(template), &[("n", &n.to_string())])));
     }
     Ok(id)
 }
@@ -56,13 +148,90 @@ pub fn quick_export_layer_png(app: &mut PhotospliceApp, layer: photosplice_doc::
     confirm(app, &f)
 }
 
-/// The document a dialog exports: the whole image, or one layer (`__layer`).
-fn source_document(app: &PhotospliceApp, f: &Map<String, Value>) -> Result<Arc<Document>, String> {
+/// Export each selected layer separately, with one destination prompt for the batch.
+/// The chosen path names the first file; subsequent files have numbered sibling names.
+pub fn quick_export_selected_layers_png(app: &mut PhotospliceApp) -> Result<Value, String> {
     let st = app.session.active().ok_or("no document")?;
-    match f.get("__layer").and_then(Value::as_u64) {
-        Some(id) => photosplice_engine::layer_menu_cmds::layer_document(&st.doc, photosplice_doc::LayerId(id)).map(Arc::new).map_err(|e| e.to_string()),
-        None => Ok(st.doc.clone()),
+    let layers = st.selected_layers();
+    if layers.len() == 1 {
+        return quick_export_layer_png(app, layers[0]);
     }
+    if layers.is_empty() {
+        return Err("no selected layers".into());
+    }
+    // Capture all sources before showing the dialog: changing selection or document while it
+    // is open cannot change which layers get exported.
+    let docs: Vec<_> =
+        layers.into_iter().map(|id| photosplice_engine::layer_menu_cmds::layer_document(&st.doc, id).map_err(|e| e.to_string())).collect::<Result<_, _>>()?;
+    let suggested = format!("{}.png", export_name(&st.doc.name));
+    app.pick_save(&suggested, move |app, path| {
+        if !path.to_ascii_lowercase().ends_with(".png") {
+            return Err("Quick Export as PNG writes .png files".into());
+        }
+        let paths = batch_paths(&path, &docs);
+        let mut exported = Vec::new();
+        for (doc, path) in docs.iter().zip(paths) {
+            let export = app.services.export.as_ref().ok_or("no exporter configured")?;
+            let (bytes, warnings) = export(doc, &path, &ExportSettings::default())?;
+            let write = app.services.write.as_mut().ok_or("no writer configured")?;
+            write(&path, &bytes)?;
+            crate::notices::io_warnings(app, &format!("Exported {}", crate::file_open::display_name(&path)), &warnings);
+            exported.push(json!({"path": path, "bytes": bytes.len(), "warnings": warnings}));
+        }
+        app.ui.status = format!("Exported {} PNG files", exported.len());
+        app.ui.status_error = false;
+        Ok(json!({"files": exported}))
+    })
+}
+
+fn export_name(name: &str) -> String {
+    let name: String = name.chars().take(80).map(|c| if c.is_control() || "<>:\"/\\|?*".contains(c) { '_' } else { c }).collect();
+    let name = name.trim().trim_matches('.');
+    if name.is_empty() { "layer".into() } else { name.into() }
+}
+
+/// The files a multi-layer export writes: the chosen path, then numbered siblings named after
+/// each layer, in the chosen path's format.
+fn batch_paths(path: &str, docs: &[Document]) -> Vec<String> {
+    let first = std::path::Path::new(path);
+    let parent = first.parent().unwrap_or_else(|| std::path::Path::new(""));
+    let stem = first.file_stem().and_then(|s| s.to_str()).unwrap_or("layers");
+    let ext = first.extension().and_then(|e| e.to_str()).unwrap_or("png");
+    docs.iter()
+        .enumerate()
+        .map(|(i, doc)| {
+            if i == 0 {
+                return path.to_string();
+            }
+            let name = export_name(&doc.name);
+            let candidate = parent.join(format!("{stem}-{}-{name}.{ext}", i + 1));
+            // The first file's overwrite is handled by the Save dialog; never overwrite sibling
+            // files silently on desktop. Downloads on the web are named by the browser.
+            #[cfg(not(target_arch = "wasm32"))]
+            let candidate = {
+                let mut candidate = candidate;
+                let mut suffix = 1u64;
+                while candidate.exists() {
+                    candidate = parent.join(format!("{stem}-{}-{name}-{suffix}.{ext}", i + 1));
+                    suffix = suffix.saturating_add(1);
+                }
+                candidate
+            };
+            candidate.to_string_lossy().into_owned()
+        })
+        .collect()
+}
+
+/// The document a dialog exports: the whole image, or one layer (`__layer`).
+fn source_document_from(doc: Arc<Document>, f: &Map<String, Value>) -> Result<Arc<Document>, String> {
+    match f.get("__layer").and_then(Value::as_u64) {
+        Some(id) => photosplice_engine::layer_menu_cmds::layer_document(&doc, photosplice_doc::LayerId(id)).map(Arc::new).map_err(|e| e.to_string()),
+        None => Ok(doc),
+    }
+}
+
+fn source_document(app: &PhotospliceApp, f: &Map<String, Value>) -> Result<Arc<Document>, String> {
+    source_document_from(app.session.active().ok_or("no document")?.doc.clone(), f)
 }
 
 fn s(f: &Map<String, Value>, k: &str) -> String {
@@ -75,24 +244,124 @@ fn n(f: &Map<String, Value>, k: &str, d: f64) -> f64 {
 /// The document as exported: scaled (engine Image Size, bicubic) and flattened over white when
 /// transparency is off or the format has no alpha.
 fn export_document(doc: &Document, f: &Map<String, Value>, max_side: Option<u32>) -> Result<Document, String> {
-    let mut s = photosplice_engine::Session::new();
-    s.add_document(doc.clone(), None);
-    let scale = n(f, "scale", 100.0) / 100.0;
-    let mut w = (doc.size.width as f64 * scale).round().max(1.0);
-    if let Some(m) = max_side {
-        let long = doc.size.width.max(doc.size.height) as f64 * scale;
-        if long > m as f64 {
-            w = (w * m as f64 / long).round().max(1.0);
-        }
+    let mut session = photosplice_engine::Session::new();
+    session.add_document(doc.clone(), None);
+    if s(f, "profile") == "srgb" && doc.icc_profile.is_some() {
+        session.execute("edit.convertToProfile", json!({"profile": "srgb", "intent": "perceptual"})).map_err(|e| e.to_string())?;
     }
-    if (w - doc.size.width as f64).abs() >= 1.0 {
-        s.execute("image.imageSize", json!({"width": w, "resample": if max_side.is_some() { "bilinear" } else { "bicubic" }})).map_err(|e| e.to_string())?;
+    let (w, h) = export_pixels(f64::from(doc.size.width), f64::from(doc.size.height), f, max_side)?;
+    if s_fmt(f) == "ico" && (w > 256.0 || h > 256.0) && max_side.is_none() {
+        return Err("ICO export is limited to 256 × 256 pixels; reduce the export scale".into());
+    }
+    if (w - doc.size.width as f64).abs() >= 1.0 || (h - doc.size.height as f64).abs() >= 1.0 {
+        session
+            .execute("image.imageSize", json!({"width": w, "height": h, "resample": if max_side.is_some() { "bilinear" } else { "bicubic" }}))
+            .map_err(|e| e.to_string())?;
     }
     let fmt = s_fmt(f);
     if !f.get("transparency").and_then(Value::as_bool).unwrap_or(true) || fmt == "jpg" {
-        s.execute("layer.flattenImage", json!({})).map_err(|e| e.to_string())?;
+        session.execute("layer.flattenImage", json!({})).map_err(|e| e.to_string())?;
     }
-    s.active().map(|d| (*d.doc).clone()).ok_or_else(|| "export failed".into())
+    session.active().map(|d| (*d.doc).clone()).ok_or_else(|| "export failed".into())
+}
+
+/// The exported pixel size: each side scaled and rounded on its own, never below 1 px. The
+/// dialog's size label and `export_document` share it so the label names the file's real size.
+fn scaled_size(w: f64, h: f64, scale: f64) -> (f64, f64) {
+    ((w * scale).round().max(1.0), (h * scale).round().max(1.0))
+}
+
+/// Largest side Export As will ask Image Size for. The same cap `image.imageSize` enforces.
+const MAX_PX: f64 = 300_000.0;
+
+/// Pixel size, percent scale and whether the two sides stay linked.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ExportSize {
+    width: f64,
+    height: f64,
+    scale: f64,
+}
+
+fn finite_px(v: f64) -> Result<f64, String> {
+    if !v.is_finite() || !(1.0..=MAX_PX).contains(&v) {
+        return Err(format!("export size must be within 1..={MAX_PX} pixels"));
+    }
+    Ok(v.round())
+}
+
+/// Percent scale applied to both sides. `scale` is a percent in 1..=1000.
+fn resize_from_scale(src_w: f64, src_h: f64, scale: f64) -> Result<ExportSize, String> {
+    if !scale.is_finite() || !(1.0..=1000.0).contains(&scale) {
+        return Err("scale must be within 1..=1000 percent".into());
+    }
+    let (width, height) = scaled_size(src_w.max(1.0), src_h.max(1.0), scale / 100.0);
+    if width > MAX_PX || height > MAX_PX {
+        return Err(format!("export size must be within 1..={MAX_PX} pixels"));
+    }
+    Ok(ExportSize { width, height, scale })
+}
+
+/// An edited side. With `lock`, the other side keeps the source aspect; otherwise it stays.
+fn resize_from_side(src_w: f64, src_h: f64, width: f64, height: f64, lock: bool, edited_width: bool) -> Result<ExportSize, String> {
+    let src_w = src_w.max(1.0);
+    let src_h = src_h.max(1.0);
+    let (width, height) = if edited_width {
+        let width = finite_px(width)?;
+        let height = if lock { finite_px(src_h * width / src_w)? } else { finite_px(height)? };
+        (width, height)
+    } else {
+        let height = finite_px(height)?;
+        let width = if lock { finite_px(src_w * height / src_h)? } else { finite_px(width)? };
+        (width, height)
+    };
+    let scale = if edited_width { width / src_w * 100.0 } else { height / src_h * 100.0 };
+    Ok(ExportSize { width, height, scale })
+}
+
+/// The pixels `export_document` resizes to. Explicit width and height win; otherwise the percent
+/// scale does, and a preview limit shrinks the long side before rounding (the same reduction the
+/// scale path used before pixel fields existed).
+fn export_pixels(src_w: f64, src_h: f64, f: &Map<String, Value>, max_side: Option<u32>) -> Result<(f64, f64), String> {
+    // Exact pixels apply only in pixel mode. Scale mode keeps the percent, so each layer in a
+    // multi-layer export is scaled from its own size rather than forced to the preview's pixels.
+    let explicit = if s(f, "sizing") == "pixels" { f.get("width").and_then(Value::as_f64).zip(f.get("height").and_then(Value::as_f64)) } else { None };
+    let (mut w, mut h) = if let Some((w, h)) = explicit {
+        (finite_px(w)?, finite_px(h)?)
+    } else {
+        let mut scale = n(f, "scale", 100.0) / 100.0;
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err("export scale must be a positive number".into());
+        }
+        if let Some(m) = max_side {
+            let long = src_w.max(src_h) * scale;
+            if long > f64::from(m) {
+                scale *= f64::from(m) / long;
+            }
+        }
+        return Ok(scaled_size(src_w, src_h, scale));
+    };
+    if let Some(m) = max_side {
+        let long = w.max(h);
+        if long > f64::from(m) && long > 0.0 {
+            (w, h) = scaled_size(w, h, f64::from(m) / long);
+        }
+    }
+    Ok((w, h))
+}
+
+/// Reuse the Quick Export quality defaults when choosing a lossy format, so both flows start
+/// from the same quality (WebP (lossless) is a format of its own and has none).
+fn set_format_defaults(f: &mut Map<String, Value>, fmt: &str, prefs: &photosplice_engine::prefs::Export) {
+    f.insert("format".into(), json!(fmt));
+    match fmt {
+        "jpg" => {
+            f.insert("quality".into(), json!(prefs.jpeg_quality));
+        }
+        "webp" => {
+            f.insert("quality".into(), json!(prefs.webp_quality));
+        }
+        _ => {}
+    }
 }
 
 fn s_fmt(f: &Map<String, Value>) -> String {
@@ -100,21 +369,334 @@ fn s_fmt(f: &Map<String, Value>) -> String {
     if v.is_empty() { "png".into() } else { v }
 }
 
-fn settings(f: &Map<String, Value>) -> ExportSettings {
-    let fmt = s_fmt(f);
-    let q = n(f, "quality", 85.0).clamp(1.0, 100.0) as u8;
-    ExportSettings { jpeg_quality: (fmt == "jpg").then_some(q), webp_quality: (fmt == "webp").then_some(q), ..Default::default() }
+/// WebP (lossless) is a format choice of its own, as on the Save As screen.
+fn lossless(f: &Map<String, Value>) -> bool {
+    s_fmt(f) == "webpLossless"
 }
 
-/// Estimated size (bytes) from a ≤512 px proxy encode, scaled by pixel count.
-fn estimate(app: &PhotospliceApp, doc: &Document, f: &Map<String, Value>) -> Option<u64> {
-    let export = app.services.export.as_ref()?;
-    let proxy = export_document(doc, f, Some(512)).ok()?;
-    let (bytes, _) = export(&proxy, &format!("estimate.{}", file_ext(&s_fmt(f))), &settings(f)).ok()?;
-    let scale = n(f, "scale", 100.0) / 100.0;
-    let full = doc.size.width as f64 * scale * doc.size.height as f64 * scale;
+/// TGA bits per pixel: `"24"` or `"32"`; `"auto"` (the default) is 32 with an alpha channel or
+/// transparency, else 24, as Export As wrote before it offered the choice.
+fn tga_bits(f: &Map<String, Value>) -> Option<photosplice_io::TgaBits> {
+    s(f, "tgaBits").parse().ok().and_then(photosplice_io::TgaBits::from_bits)
+}
+
+fn settings(f: &Map<String, Value>) -> ExportSettings {
+    let fmt = s_fmt(f);
+    let quality = n(f, "quality", 85.0).clamp(1.0, 100.0) as u8;
+    ExportSettings {
+        jpeg_quality: (fmt == "jpg").then_some(quality),
+        // WebP takes the quality (lossy); WebP (lossless) none.
+        webp_quality: (fmt == "webp").then_some(quality),
+        tga_bits: if fmt == "tga" { tga_bits(f) } else { None },
+        embed_icc: f.get("embedProfile").and_then(Value::as_bool).unwrap_or(true),
+        ..Default::default()
+    }
+}
+
+/// The preview and size estimate share a single reduced document. Resizing every layer twice is
+/// especially expensive for layered PSDs, even when the canvas itself is small.
+fn preview_proxy(doc: &Document, f: &Map<String, Value>) -> Result<Document, String> {
+    export_document(doc, f, Some(if s_fmt(f) == "ico" { 256 } else { 512 }))
+}
+
+fn scaled_estimate(bytes: usize, doc: &Document, proxy: &Document, f: &Map<String, Value>) -> u64 {
+    let full = match (f.get("width").and_then(Value::as_f64), f.get("height").and_then(Value::as_f64)) {
+        (Some(w), Some(h)) if w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0 => w * h,
+        _ => {
+            let scale = n(f, "scale", 100.0) / 100.0;
+            doc.size.width as f64 * scale * doc.size.height as f64 * scale
+        }
+    };
     let small = (proxy.size.width as f64 * proxy.size.height as f64).max(1.0);
-    Some((bytes.len() as f64 * full / small) as u64)
+    (bytes as f64 * full / small) as u64
+}
+
+/// Estimated size (bytes) from the already prepared proxy encode, scaled by pixel count.
+fn estimate(app: &PhotospliceApp, doc: &Document, proxy: &Document, f: &Map<String, Value>) -> Option<u64> {
+    let export = app.services.export.as_ref()?;
+    let (bytes, _) = export(proxy, &format!("estimate.{}", file_ext(&s_fmt(f))), &settings(f)).ok()?;
+    Some(scaled_estimate(bytes.len(), doc, proxy, f))
+}
+
+struct PreviewPixels {
+    estimate: Option<u64>,
+    width: usize,
+    height: usize,
+    rgba: Vec<u8>,
+}
+
+fn preview_pixels(proxy: &Document, estimate: Option<u64>) -> PreviewPixels {
+    let img = photosplice_compose::thumbnail(proxy, 360);
+    PreviewPixels { estimate, width: img.width as usize, height: img.height as usize, rgba: img.pixels }
+}
+
+fn preview_sync(app: &PhotospliceApp, doc: &Document, f: &Map<String, Value>) -> Result<PreviewPixels, String> {
+    let proxy = preview_proxy(doc, f)?;
+    Ok(preview_pixels(&proxy, estimate(app, doc, &proxy, f)))
+}
+
+#[derive(Clone)]
+struct CachedPreview {
+    signature: String,
+    estimate: Option<u64>,
+    texture: Option<Arc<egui::TextureHandle>>,
+}
+
+fn cache_preview(ui: &mut egui::Ui, key: egui::Id, signature: String, result: Result<PreviewPixels, String>) -> CachedPreview {
+    let preview = match result {
+        Ok(pixels) => {
+            let image = egui::ColorImage::from_rgba_unmultiplied([pixels.width, pixels.height], &pixels.rgba);
+            let texture = Arc::new(ui.ctx().load_texture("export-preview", image, egui::TextureOptions::LINEAR));
+            CachedPreview { signature, estimate: pixels.estimate, texture: Some(texture) }
+        }
+        Err(error) => {
+            log::warn!("Export As preview failed: {error}");
+            CachedPreview { signature, estimate: None, texture: None }
+        }
+    };
+    ui.data_mut(|d| d.insert_temp(key, preview.clone()));
+    preview
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+struct PendingPreview {
+    key: egui::Id,
+    signature: String,
+    result: Arc<Mutex<Option<Result<PreviewPixels, String>>>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn background_preview_needed(doc: &Document) -> bool {
+    doc.walk().len() > 32 || doc.size.area() > 16_000_000
+}
+
+/// Native app: keep the UI responsive while a many-layer document is reduced and encoded.
+/// A single pending job per document also avoids starting a worker for every slider tick.
+#[cfg(not(target_arch = "wasm32"))]
+fn poll_or_start_preview(
+    ui: &mut egui::Ui,
+    key: egui::Id,
+    signature: &str,
+    doc: Arc<Document>,
+    fields: &Map<String, Value>,
+) -> Option<Result<PreviewPixels, String>> {
+    let pending_key = egui::Id::new(("export-preview-pending", doc.id.0));
+    let pending: Option<PendingPreview> = ui.data(|d| d.get_temp(pending_key));
+    if let Some(pending) = pending {
+        let result = pending.result.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()?;
+        ui.data_mut(|d| d.remove::<PendingPreview>(pending_key));
+        if pending.key == key && pending.signature == signature {
+            return Some(result);
+        }
+    }
+
+    let result = Arc::new(Mutex::new(None));
+    let shared = result.clone();
+    let ctx = ui.ctx().clone();
+    let fields = fields.clone();
+    let started = std::thread::Builder::new().name("export-preview".into()).spawn(move || {
+        let prepared = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let source = source_document_from(doc.clone(), &fields).unwrap_or(doc);
+            let proxy = preview_proxy(&source, &fields)?;
+            let estimate = estimate_native(&source, &proxy, &fields);
+            Ok::<_, String>(preview_pixels(&proxy, estimate))
+        }))
+        .unwrap_or_else(|_| Err("preview worker panicked".into()));
+        *shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(prepared);
+        ctx.request_repaint();
+    });
+    match started {
+        Ok(_) => {
+            ui.data_mut(|d| d.insert_temp(pending_key, PendingPreview { key, signature: signature.to_string(), result }));
+            None
+        }
+        Err(error) => Some(Err(format!("could not start preview worker: {error}"))),
+    }
+}
+
+/// The native exporter uses this same IO encoder. Keep the entire estimate off the UI thread.
+#[cfg(not(target_arch = "wasm32"))]
+fn estimate_native(doc: &Document, proxy: &Document, f: &Map<String, Value>) -> Option<u64> {
+    let bytes = photosplice_io::export(proxy, &format!("estimate.{}", file_ext(&s_fmt(f))), &settings(f).io_options()).ok()?.bytes;
+    Some(scaled_estimate(bytes.len(), doc, proxy, f))
+}
+
+fn write_size(f: &mut Map<String, Value>, size: ExportSize, sizing: &str) {
+    f.insert("width".into(), json!(size.width));
+    f.insert("height".into(), json!(size.height));
+    f.insert("scale".into(), json!(size.scale));
+    f.insert("sizing".into(), json!(sizing));
+}
+
+/// Scale, width and height. A scale edit sets both sides; a side edit sets exact pixels and, when
+/// the link is on, the other side. The widget is compared with the value it was given so a field
+/// that only clamps an out-of-range scale does not overwrite an exact pixel size.
+fn size_fields(ui: &mut egui::Ui, f: &mut Map<String, Value>, src_w: f64, src_h: f64) {
+    let t = Tokens::get(ui.ctx());
+    let stored = n(f, "scale", 100.0);
+    let passed = stored.clamp(1.0, 1000.0).round();
+    let mut sc = passed as f32;
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(tl!("Scale")).color(t.text_dim));
+        crate::widgets::value_field(ui, &mut sc, 1.0..=1000.0, "%", 70.0);
+    });
+    let sc_r = f64::from(sc).round().clamp(1.0, 1000.0);
+    if (sc_r - passed).abs() > 0.01
+        && let Ok(size) = resize_from_scale(src_w, src_h, sc_r)
+    {
+        write_size(f, size, "scale");
+    }
+    let lock = f.get("lockAspect").and_then(Value::as_bool).unwrap_or(true);
+    let stored_w = n(f, "width", src_w.max(1.0));
+    let mut width = stored_w.clamp(1.0, MAX_PX) as f32;
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(tl!("Width")).color(t.text_dim));
+        crate::widgets::value_field(ui, &mut width, 1.0..=MAX_PX as f32, "px", 70.0);
+    });
+    let width_r = f64::from(width).round();
+    if (width_r - stored_w.round()).abs() > 0.01
+        && let Ok(size) = resize_from_side(src_w, src_h, width_r, n(f, "height", src_h.max(1.0)), lock, true)
+    {
+        write_size(f, size, "pixels");
+    }
+    let stored_h = n(f, "height", src_h.max(1.0));
+    let mut height = stored_h.clamp(1.0, MAX_PX) as f32;
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(tl!("Height")).color(t.text_dim));
+        crate::widgets::value_field(ui, &mut height, 1.0..=MAX_PX as f32, "px", 70.0);
+    });
+    let height_r = f64::from(height).round();
+    if (height_r - stored_h.round()).abs() > 0.01
+        && let Ok(size) = resize_from_side(src_w, src_h, n(f, "width", src_w.max(1.0)), height_r, lock, false)
+    {
+        write_size(f, size, "pixels");
+    }
+    let mut linked = lock;
+    if crate::widgets::checkbox(ui, &mut linked, tl!("Constrain proportions")).changed() {
+        f.insert("lockAspect".into(), json!(linked));
+        if linked && let Ok(size) = resize_from_side(src_w, src_h, n(f, "width", src_w.max(1.0)), n(f, "height", src_h.max(1.0)), true, true) {
+            write_size(f, size, "pixels");
+        }
+    }
+}
+
+fn apply_preset(f: &mut Map<String, Value>, settings: &photosplice_engine::export_preset_cmds::ExportPresetSettings, src_w: f64, src_h: f64) {
+    // A lossless WebP preset is the WebP (lossless) format here.
+    let format = if settings.format == "webp" && settings.lossless { "webpLossless" } else { settings.format.as_str() };
+    f.insert("format".into(), json!(format));
+    f.insert("quality".into(), json!(settings.quality));
+    f.insert("transparency".into(), json!(settings.transparency));
+    f.insert("scale".into(), json!(settings.scale));
+    f.insert("lockAspect".into(), json!(settings.lock_aspect));
+    f.insert("sizing".into(), json!(settings.sizing));
+    f.insert("metadata".into(), json!(settings.metadata));
+    f.insert("profile".into(), json!(settings.profile));
+    f.insert("embedProfile".into(), json!(settings.embed_profile));
+    f.insert("tgaBits".into(), json!(settings.tga_bits));
+    if settings.sizing == "pixels" {
+        f.insert("width".into(), json!(settings.width));
+        f.insert("height".into(), json!(settings.height));
+    } else if let Ok(size) = resize_from_scale(src_w, src_h, settings.scale) {
+        f.insert("width".into(), json!(size.width));
+        f.insert("height".into(), json!(size.height));
+        f.insert("scale".into(), json!(size.scale));
+    }
+}
+
+fn preset_settings(f: &Map<String, Value>) -> Value {
+    let metadata = s(f, "metadata");
+    let metadata = if ["none", "exif", "all"].contains(&metadata.as_str()) { metadata } else { "none".into() };
+    let bits = s(f, "tgaBits");
+    let bits = if ["auto", "24", "32"].contains(&bits.as_str()) { bits } else { "auto".into() };
+    let scale = n(f, "scale", 100.0);
+    let scale = if scale.is_finite() { scale.clamp(1.0, 1000.0) } else { 100.0 };
+    json!({
+        "format": file_ext(&s_fmt(f)),
+        "quality": n(f, "quality", 85.0).clamp(1.0, 100.0).round(),
+        "lossless": lossless(f),
+        "transparency": f.get("transparency").and_then(Value::as_bool).unwrap_or(true),
+        "scale": scale,
+        "width": n(f, "width", 1.0).clamp(1.0, MAX_PX).round(),
+        "height": n(f, "height", 1.0).clamp(1.0, MAX_PX).round(),
+        "lockAspect": f.get("lockAspect").and_then(Value::as_bool).unwrap_or(true),
+        "sizing": if s(f, "sizing") == "pixels" { "pixels" } else { "scale" },
+        "metadata": metadata,
+        "profile": if s(f, "profile") == "srgb" { "srgb" } else { "document" },
+        "embedProfile": f.get("embedProfile").and_then(Value::as_bool).unwrap_or(true),
+        "tgaBits": bits,
+    })
+}
+
+fn preset_fields(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, Value>, src_w: f64, src_h: f64) {
+    let t = Tokens::get(ui.ctx());
+    ui.add_space(8.0);
+    let names: Vec<String> = app.session.presets.export_presets.iter().map(|p| p.name.clone()).collect();
+    if !names.is_empty() {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(tl!("Preset")).color(t.text_dim));
+            let mut selected = s(f, "__preset");
+            let mut opts = Vec::with_capacity(names.len() + 1);
+            opts.push(("".to_string(), "—"));
+            for name in &names {
+                opts.push((name.clone(), name.as_str()));
+            }
+            if crate::widgets::dropdown(ui, "export-preset", &mut selected, &opts, 130.0) {
+                f.insert("__preset".into(), json!(selected));
+                if let Some(preset) = app.session.presets.export_presets.iter().find(|p| p.name == s(f, "__preset")).cloned() {
+                    apply_preset(f, &preset.settings, src_w, src_h);
+                }
+            }
+        });
+        if !s(f, "__preset").is_empty() && crate::widgets::secondary_button(ui, tl!("Delete"), 84.0).clicked() {
+            let name = s(f, "__preset");
+            match app.run("file.export.presets.delete", json!({"name": name})) {
+                Ok(_) => {
+                    f.remove("__preset");
+                    f.remove("__presetError");
+                }
+                Err(e) => {
+                    f.insert("__presetError".into(), json!(e));
+                }
+            }
+        }
+    }
+    if f.get("__savingPreset").and_then(Value::as_bool) != Some(true) {
+        if crate::widgets::secondary_button(ui, tl!("Save Preset…"), 160.0).clicked() {
+            f.insert("__savingPreset".into(), json!(true));
+            f.remove("__presetError");
+        }
+    } else {
+        let enter = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        let label = ui.label(tl!("Preset Name"));
+        let mut name = s(f, "__presetName");
+        ui.add(egui::TextEdit::singleline(&mut name).id_salt("export-preset-name").desired_width(160.0).char_limit(255)).labelled_by(label.id);
+        f.insert("__presetName".into(), json!(name));
+        ui.horizontal(|ui| {
+            if crate::widgets::secondary_button(ui, tl!("Save"), 70.0).clicked() || enter {
+                match app.run("file.export.presets.save", json!({"name": name, "settings": preset_settings(f)})) {
+                    Ok(v) => {
+                        if let Some(saved) = v.get("preset").and_then(|p| p.get("name")).and_then(Value::as_str) {
+                            f.insert("__preset".into(), json!(saved));
+                        }
+                        f.remove("__savingPreset");
+                        f.remove("__presetName");
+                        f.remove("__presetError");
+                    }
+                    Err(e) => {
+                        f.insert("__presetError".into(), json!(e));
+                    }
+                }
+            }
+            if crate::widgets::secondary_button(ui, tl!("Cancel"), 70.0).clicked() {
+                f.remove("__savingPreset");
+                f.remove("__presetError");
+            }
+        });
+    }
+    if let Some(error) = f.get("__presetError").and_then(Value::as_str) {
+        ui.add(egui::Label::new(error).wrap());
+    }
 }
 
 pub fn body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
@@ -123,14 +705,14 @@ pub fn body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, Val
     ui.horizontal_top(|ui| {
         // Left: settings.
         ui.vertical(|ui| {
-            ui.set_width(220.0);
+            ui.set_width(248.0);
             ui.label(egui::RichText::new(tl!("File Settings")).font(crate::theme::semibold(12.0)).color(t.text));
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(tl!("Format")).color(t.text_dim));
                 let mut fmt = s_fmt(f);
                 let opts: Vec<(String, &str)> = FORMATS.iter().map(|(k, l)| (k.to_string(), *l)).collect();
                 if crate::widgets::dropdown(ui, "export-format", &mut fmt, &opts, 130.0) {
-                    f.insert("format".into(), json!(fmt));
+                    set_format_defaults(f, &fmt, &app.session.prefs().export);
                 }
             });
             let fmt = s_fmt(f);
@@ -139,52 +721,101 @@ pub fn body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, Val
                 crate::widgets::slider_row(ui, tl!("Quality"), &mut q, 1.0..=100.0, "%", None);
                 f.insert("quality".into(), json!(q.round()));
             }
+            if fmt == "tga" {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tl!("Resolution")).color(t.text_dim));
+                    let mut bits = s(f, "tgaBits");
+                    let opts: Vec<(String, &str)> =
+                        vec![("auto".into(), tl!("Auto")), ("24".into(), tl!("24 bits/pixel")), ("32".into(), tl!("32 bits/pixel"))];
+                    if crate::widgets::dropdown(ui, "export-tga-bits", &mut bits, &opts, 130.0) {
+                        f.insert("tgaBits".into(), json!(bits));
+                    }
+                });
+            }
             if fmt != "jpg" {
                 let mut tr = f.get("transparency").and_then(Value::as_bool).unwrap_or(true);
                 crate::widgets::checkbox(ui, &mut tr, tl!("Transparency"));
                 f.insert("transparency".into(), json!(tr));
             }
+            // No Metadata choice: PhotoSplice writes the document's metadata, as Save As does.
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(tl!("Color Profile")).color(t.text_dim));
+                let mut profile = s(f, "profile");
+                if profile != "srgb" {
+                    profile = "document".into();
+                }
+                let opts: Vec<(String, &str)> = vec![("document".into(), tl!("Document Profile")), ("srgb".into(), tl!("Convert to sRGB"))];
+                if crate::widgets::dropdown(ui, "export-profile", &mut profile, &opts, 130.0) {
+                    f.insert("profile".into(), json!(profile));
+                }
+            });
+            let mut embed = f.get("embedProfile").and_then(Value::as_bool).unwrap_or(true);
+            crate::widgets::checkbox(ui, &mut embed, tl!("Embed Color Profile"));
+            f.insert("embedProfile".into(), json!(embed));
             ui.add_space(8.0);
             ui.label(egui::RichText::new(tl!("Image Size")).font(crate::theme::semibold(12.0)).color(t.text));
-            let mut sc = n(f, "scale", 100.0) as f32;
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(tl!("Scale")).color(t.text_dim));
-                crate::widgets::value_field(ui, &mut sc, 1.0..=1000.0, "%", 70.0);
-            });
-            f.insert("scale".into(), json!(sc.round()));
-            let (bw, bh) = (n(f, "__w", f64::from(doc.size.width)) as f32, n(f, "__h", f64::from(doc.size.height)) as f32);
-            let (w, h) = ((bw * sc / 100.0).round(), (bh * sc / 100.0).round());
+            let (bw, bh) = (n(f, "__w", f64::from(doc.size.width)), n(f, "__h", f64::from(doc.size.height)));
+            size_fields(ui, f, bw, bh);
+            let (w, h) = (n(f, "width", bw), n(f, "height", bh));
             ui.label(egui::RichText::new(format!("{w} × {h} px")).color(t.text_dim).size(11.5));
+            if fmt == "ico" && (w > 256.0 || h > 256.0) {
+                ui.label(egui::RichText::new(tl!("ICO is limited to 256 × 256 pixels")).color(t.warning));
+            }
+            preset_fields(app, ui, f, bw, bh);
         });
         ui.add_space(12.0);
         // Right: preview + estimated size.
         ui.vertical(|ui| {
             let layer = f.get("__layer").and_then(Value::as_u64);
             let key = egui::Id::new(("export-preview", doc.id.0, app.session.active().map_or(0, |s| s.revision), layer));
-            let sig =
-                format!("{}{}{}{}", s_fmt(f), n(f, "quality", 85.0), f.get("transparency").map(|v| v.to_string()).unwrap_or_default(), n(f, "scale", 100.0));
-            let cached: Option<(String, Option<u64>, Arc<egui::TextureHandle>)> = ui.data(|d| d.get_temp(key));
-            let (size, tex) = match cached.filter(|c| c.0 == sig) {
-                Some((_, size, tex)) => (size, tex),
+            let sig = format!(
+                "{}{}{}{}{}{}{}{}{}{}{}",
+                s_fmt(f),
+                n(f, "quality", 85.0),
+                f.get("transparency").map(|v| v.to_string()).unwrap_or_default(),
+                n(f, "scale", 100.0),
+                n(f, "width", 0.0),
+                n(f, "height", 0.0),
+                s(f, "metadata"),
+                s(f, "tgaBits"),
+                s(f, "profile"),
+                f.get("embedProfile").and_then(Value::as_bool).unwrap_or(true),
+                s(f, "sizing")
+            );
+            let cached: Option<CachedPreview> = ui.data(|d| d.get_temp(key));
+            let preview = match cached.filter(|cached| cached.signature == sig) {
+                Some(cached) => Some(cached),
                 None => {
-                    let src = source_document(app, f).unwrap_or_else(|_| doc.clone());
-                    let size = estimate(app, &src, f);
-                    let img = photosplice_compose::thumbnail(&export_document(&src, f, Some(360)).unwrap_or_else(|_| (*src).clone()), 360);
-                    let color = egui::ColorImage::from_rgba_unmultiplied([img.width as usize, img.height as usize], &img.pixels);
-                    let tex = Arc::new(ui.ctx().load_texture("export-preview", color, egui::TextureOptions::LINEAR));
-                    ui.data_mut(|d| d.insert_temp(key, (sig, size, tex.clone())));
-                    (size, tex)
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let result = if background_preview_needed(&doc) {
+                        poll_or_start_preview(ui, key, &sig, doc.clone(), f)
+                    } else {
+                        let source = source_document(app, f).unwrap_or_else(|_| doc.clone());
+                        Some(preview_sync(app, &source, f))
+                    };
+                    #[cfg(target_arch = "wasm32")]
+                    let result = {
+                        let source = source_document(app, f).unwrap_or_else(|_| doc.clone());
+                        Some(preview_sync(app, &source, f))
+                    };
+                    result.map(|result| cache_preview(ui, key, sig, result))
                 }
             };
             let side = 300.0;
             let (r, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
             crate::widgets::checker(ui.painter(), r, 8.0);
-            let ts = tex.size_vec2();
-            let k = (side / ts.x.max(ts.y)).min(1.0e3);
-            let ir = egui::Rect::from_center_size(r.center(), ts * k);
-            ui.painter().image(tex.id(), ir, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+            if let Some(tex) = preview.as_ref().and_then(|preview| preview.texture.as_ref()) {
+                let ts = tex.size_vec2();
+                let k = (side / ts.x.max(ts.y)).min(1.0e3);
+                let ir = egui::Rect::from_center_size(r.center(), ts * k);
+                ui.painter().image(tex.id(), ir, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+            } else if preview.is_none() {
+                ui.put(egui::Rect::from_center_size(r.center(), egui::vec2(24.0, 24.0)), egui::Spinner::new());
+            } else {
+                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, tl!("Preview"), egui::FontId::proportional(12.0), t.text_dim);
+            }
             ui.painter().rect_stroke(r, 0.0, egui::Stroke::new(1.0, t.separator), egui::StrokeKind::Outside);
-            let est = size.map_or("—".to_string(), |b| crate::sizing::human_bytes(b as f64));
+            let est = preview.as_ref().and_then(|preview| preview.estimate).map_or("—".to_string(), |b| crate::sizing::human_bytes(b as f64));
             ui.label(egui::RichText::new(format!("{}  ≈ {est}", file_ext(&s_fmt(f)).to_uppercase())).color(t.text_dim).size(11.5));
         });
     });
@@ -192,20 +823,63 @@ pub fn body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, Val
 
 /// Export with the dialog's settings: choose a path, render, encode, write.
 pub fn confirm(app: &mut PhotospliceApp, f: &Map<String, Value>) -> Result<Value, String> {
+    remember(app, f);
+    if let Some(layers) = f.get("__layers").and_then(Value::as_array) {
+        let ids: Vec<_> = layers.iter().filter_map(Value::as_u64).map(photosplice_doc::LayerId).collect();
+        return confirm_layers(app, f, &ids);
+    }
     let doc = source_document(app, f)?;
     let stem = doc.name.rsplit_once('.').map_or(doc.name.as_str(), |(a, _)| a).to_string();
-    let fmt = s_fmt(f);
-    let suggested = format!("{stem}.{}", file_ext(&fmt));
-    let path = app.services.pick_save.as_mut().and_then(|p| p(&suggested)).ok_or("cancelled")?;
-    let out = export_document(&doc, f, None)?;
-    let export = app.services.export.as_ref().ok_or("no exporter configured")?;
-    let (bytes, warnings) = export(&out, &path, &settings(f))?;
-    let write = app.services.write.as_mut().ok_or("no writer configured")?;
-    write(&path, &bytes)?;
-    app.ui.status = format!("Exported {path} ({})", crate::sizing::human_bytes(bytes.len() as f64));
-    app.ui.status_error = false;
-    crate::notices::io_warnings(app, &format!("Exported {}", crate::file_open::display_name(&path)), &warnings);
-    Ok(json!({"path": path, "bytes": bytes.len(), "warnings": warnings}))
+    let ext = file_ext(&s_fmt(f)).to_string();
+    let suggested = format!("{stem}.{ext}");
+    let (f, settings) = (f.clone(), settings(f));
+    app.pick_save(&suggested, move |app, path| {
+        let out = export_document(&doc, &f, None)?;
+        let export = app.services.export.as_ref().ok_or("no exporter configured")?;
+        let (bytes, warnings) = export(&out, &path, &settings)?;
+        let write = app.services.write.as_mut().ok_or("no writer configured")?;
+        write(&path, &bytes)?;
+        let template = "Exported {path} ({size})";
+        app.ui.status = crate::i18n::fmt(tl!(template), &[("path", &path), ("size", &crate::sizing::human_bytes(bytes.len() as f64))]);
+        app.ui.status_error = false;
+        let template = "Exported {path}";
+        let what = crate::i18n::fmt(tl!(template), &[("path", &crate::file_open::display_name(&path))]);
+        crate::notices::io_warnings(app, &what, &warnings);
+        Ok(json!({"path": path, "bytes": bytes.len(), "warnings": warnings}))
+    })
+}
+
+/// [`confirm`] for several layers: one destination prompt, then each layer exported with the
+/// dialog's settings and named as Quick Export names a selection's files. The layers are captured
+/// when asked, so changing the selection or document meanwhile can't change what is exported.
+fn confirm_layers(app: &mut PhotospliceApp, f: &Map<String, Value>, ids: &[photosplice_doc::LayerId]) -> Result<Value, String> {
+    let st = app.session.active().ok_or("no document")?;
+    let docs: Vec<Document> =
+        ids.iter().map(|id| photosplice_engine::layer_menu_cmds::layer_document(&st.doc, *id).map_err(|e| e.to_string())).collect::<Result<_, _>>()?;
+    if docs.is_empty() {
+        return Err("no selected layers".into());
+    }
+    let stem = st.doc.name.rsplit_once('.').map_or(st.doc.name.as_str(), |(a, _)| a);
+    let suggested = format!("{}.{}", export_name(stem), file_ext(&s_fmt(f)));
+    let (f, settings) = (f.clone(), settings(f));
+    app.pick_save(&suggested, move |app, path| {
+        let mut exported = Vec::new();
+        for (doc, path) in docs.iter().zip(batch_paths(&path, &docs)) {
+            let out = export_document(doc, &f, None)?;
+            let export = app.services.export.as_ref().ok_or("no exporter configured")?;
+            let (bytes, warnings) = export(&out, &path, &settings)?;
+            let write = app.services.write.as_mut().ok_or("no writer configured")?;
+            write(&path, &bytes)?;
+            let template = "Exported {path}";
+            let what = crate::i18n::fmt(tl!(template), &[("path", &crate::file_open::display_name(&path))]);
+            crate::notices::io_warnings(app, &what, &warnings);
+            exported.push(json!({"path": path, "bytes": bytes.len(), "warnings": warnings}));
+        }
+        let template = "Exported {n} files";
+        app.ui.status = crate::i18n::fmt(tl!(template), &[("n", &exported.len().to_string())]);
+        app.ui.status_error = false;
+        Ok(json!({"files": exported}))
+    })
 }
 
 /// File › Export › Quick Export as PNG: the format, quality, metadata, colour space and location
@@ -217,17 +891,16 @@ pub fn quick_export_png(app: &mut PhotospliceApp) -> Result<Value, String> {
         let fmt = serde_json::to_value(prefs.quick_export_format).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_else(|| "png".into());
         let same = serde_json::to_value(prefs.quick_export_location).ok().is_some_and(|v| v == "sameFolder");
         let saved = app.session.active().is_some_and(|d| d.path.is_some());
-        let p = if same && saved {
-            json!({})
-        } else {
-            let st = app.session.active().ok_or("no document")?;
-            let stem = st.doc.name.rsplit_once('.').map_or(st.doc.name.as_str(), |(a, _)| a).to_string();
-            let path = app.services.pick_save.as_mut().and_then(|p| p(&format!("{stem}.{fmt}"))).ok_or("cancelled")?;
-            json!({"path": path})
-        };
-        let r = app.run("file.export.quickExport", p)?;
-        app.ui.status = format!("Exported {}", r["path"].as_str().unwrap_or_default());
-        return Ok(r);
+        if same && saved {
+            return quick_export(app, json!({}));
+        }
+        let st = app.session.active().ok_or("no document")?;
+        let stem = st.doc.name.rsplit_once('.').map_or(st.doc.name.as_str(), |(a, _)| a);
+        let (suggested, doc) = (format!("{stem}.{fmt}"), st.doc.id);
+        return app.pick_save(&suggested, move |app, path| {
+            app.refocus(doc)?;
+            quick_export(app, json!({"path": path}))
+        });
     }
     let mut f = Map::new();
     f.insert("format".into(), json!("png"));
@@ -236,9 +909,125 @@ pub fn quick_export_png(app: &mut PhotospliceApp) -> Result<Value, String> {
     confirm(app, &f)
 }
 
+/// Runs Quick Export with `p` (an explicit `path`, or none for the document's folder).
+fn quick_export(app: &mut PhotospliceApp, p: Value) -> Result<Value, String> {
+    let r = app.run("file.export.quickExport", p)?;
+    let template = "Exported {path}";
+    app.ui.status = crate::i18n::fmt(tl!(template), &[("path", r["path"].as_str().unwrap_or_default())]);
+    Ok(r)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ico_export_is_available_and_rejects_oversize_output() {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 300, "height": 200})).unwrap();
+        let mut f = Map::new();
+        f.insert("format".into(), json!("ico"));
+        f.insert("scale".into(), json!(100));
+        assert!(FORMATS.iter().any(|(ext, _)| *ext == "ico"));
+        assert!(export_document(&app.session.active().unwrap().doc, &f, None).err().is_some_and(|e| e.contains("256")));
+        f.insert("scale".into(), json!(50));
+        let resized = export_document(&app.session.active().unwrap().doc, &f, None).unwrap();
+        assert_eq!((resized.size.width, resized.size.height), (150, 100));
+    }
+
     use super::*;
+
+    /// Export As reopens with the settings it was used with last (Preferences ▸ remembered
+    /// dialog settings), and a value no control accepts keeps its default.
+    #[test]
+    fn export_as_opens_with_the_settings_used_last() {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 20, "height": 10})).unwrap();
+        app.session.prefs.edit(|p| {
+            p.dialogs.insert(
+                COMMAND.into(),
+                json!({"format": "jpg", "quality": 88, "scale": 37, "transparency": false, "metadata": "all", "tgaBits": "24"}),
+            );
+        });
+        let id = open(&mut app).unwrap();
+        let f = &app.ui.dialog_mut(id).unwrap().fields;
+        assert_eq!(f["format"], "jpg");
+        assert_eq!(f["quality"], json!(88.0));
+        assert_eq!(f["scale"], json!(37.0));
+        assert_eq!(f["transparency"], false);
+        assert_eq!(f["metadata"], "all");
+        assert_eq!(f["tgaBits"], "24");
+
+        app.session.prefs.edit(|p| {
+            p.dialogs.insert(COMMAND.into(), json!({"format": "nope", "scale": 0, "metadata": "sometimes"}));
+        });
+        let id = open(&mut app).unwrap();
+        let f = &app.ui.dialog_mut(id).unwrap().fields;
+        assert_eq!(f["format"], "png");
+        assert_eq!(f["scale"], 100);
+        assert!(f.get("metadata").is_none());
+    }
+
+    /// Only the dialog's own settings are remembered: not the destination, the document size or
+    /// the layer the dialog was opened with.
+    #[test]
+    fn remembering_keeps_only_the_dialog_settings() {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+        let mut f = Map::new();
+        f.insert("format".into(), json!("webp"));
+        f.insert("scale".into(), json!(50));
+        f.insert("path".into(), json!("/tmp/x.webp"));
+        f.insert("__w".into(), json!(1200));
+        f.insert("__layer".into(), json!(3));
+        remember(&mut app, &f);
+        let saved = app.session.prefs().dialogs.get(COMMAND).cloned().unwrap();
+        assert_eq!(saved["format"], "webp");
+        assert_eq!(saved["scale"], 50);
+        assert!(saved.get("path").is_none() && saved.get("__w").is_none() && saved.get("__layer").is_none());
+    }
+
+    #[test]
+    fn export_document_scales_height_when_rounded_width_is_unchanged() {
+        use photosplice_doc::{Color, ColorMode, SampleType, Size};
+
+        for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+            for (width, height, scale, expected) in [
+                (1, 100, 50, (1, 50)),
+                (1, 200, 50, (1, 100)),
+                (10, 100, 99, (10, 99)),
+                (10, 100, 101, (10, 101)),
+                (400, 300, 50, (200, 150)),
+                (400, 300, 100, (400, 300)),
+            ] {
+                let doc = Document::with_background("x", Size::new(width, height), ColorMode::Rgb, depth, Color::WHITE);
+                let before = doc.clone();
+                let mut f = Map::new();
+                f.insert("format".into(), json!("png"));
+                f.insert("scale".into(), json!(scale));
+                let out = export_document(&doc, &f, None).unwrap();
+                assert_eq!((out.size.width, out.size.height), expected, "{width} × {height} at {scale}%, {depth:?}");
+                assert_eq!(out.depth, depth, "export preserves the document's depth");
+                assert_eq!(doc, before, "export leaves the source document unchanged");
+            }
+        }
+    }
+
+    #[test]
+    fn export_document_proxy_limits_both_dimensions_before_rounding() {
+        use photosplice_doc::{Color, ColorMode, SampleType, Size};
+
+        for (width, height, scale, max_side, expected) in
+            [(1, 1000, 100, 360, (1, 360)), (1, 1000, 50, 360, (1, 360)), (1, 1000, 25, 360, (1, 250)), (13, 20, 50, 8, (5, 8)), (20, 13, 50, 8, (8, 5))]
+        {
+            let doc = Document::with_background("x", Size::new(width, height), ColorMode::Rgb, SampleType::U8, Color::WHITE);
+            let before = doc.clone();
+            let mut f = Map::new();
+            f.insert("format".into(), json!("png"));
+            f.insert("scale".into(), json!(scale));
+            let out = export_document(&doc, &f, Some(max_side)).unwrap();
+            assert_eq!((out.size.width, out.size.height), expected, "{width} × {height} at {scale}%, proxy limit {max_side}");
+            assert!(out.size.width.max(out.size.height) <= max_side, "proxy respects its longest-side limit");
+            assert_eq!(doc, before, "preview leaves the source document unchanged");
+        }
+    }
 
     #[test]
     fn export_document_scales_and_flattens() {
@@ -258,5 +1047,227 @@ mod tests {
         let proxy = export_document(&doc, &f, Some(40)).unwrap();
         assert_eq!(proxy.size.width, 40);
         assert_eq!(settings(&f).jpeg_quality, Some(85));
+    }
+
+    /// #1353: a scale that changes only the height (the width rounds back to the original)
+    /// used to be skipped, so the exported file kept the original size while the dialog
+    /// labelled it as scaled.
+    #[test]
+    fn export_document_scales_when_only_the_height_changes() {
+        let mut f = Map::new();
+        f.insert("format".into(), json!("png"));
+        f.insert("scale".into(), json!(50));
+        for (src_h, want_h) in [(100u32, 50u32), (200, 100)] {
+            let doc = Document::with_background(
+                "x",
+                photosplice_doc::Size::new(1, src_h),
+                photosplice_doc::ColorMode::Rgb,
+                photosplice_doc::SampleType::U8,
+                photosplice_doc::Color::WHITE,
+            );
+            let out = export_document(&doc, &f, None).unwrap();
+            assert_eq!((out.size.width, out.size.height), (1, want_h), "1 × {src_h} at 50%");
+            // The preview proxy takes the same path.
+            let proxy = export_document(&doc, &f, Some(40)).unwrap();
+            assert_eq!((proxy.size.width, proxy.size.height), (1, 40), "proxy of 1 × {src_h}");
+        }
+        // The label and the export agree, and neither side drops below 1 px.
+        assert_eq!(scaled_size(1.0, 100.0, 0.5), (1.0, 50.0));
+        assert_eq!(scaled_size(10.0, 300.0, 0.01), (1.0, 3.0));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn layered_preview_runs_outside_the_ui_frame() {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 32, "height": 16})).unwrap();
+        for _ in 0..33 {
+            app.run("layer.new.layer", json!({})).unwrap();
+        }
+        let doc = app.session.active().unwrap().doc.clone();
+        assert!(background_preview_needed(&doc));
+        let fields = Map::from_iter([("format".into(), json!("png")), ("scale".into(), json!(100))]);
+        let ctx = egui::Context::default();
+        let key = egui::Id::new("layered-preview-test");
+        let mut result = None;
+        let mut output = ctx.run_ui(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                result = poll_or_start_preview(ui, key, "png100", doc.clone(), &fields);
+            });
+        });
+        output.textures_delta.clear();
+        assert!(result.is_none(), "the first UI frame must only start the worker");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let mut output = ctx.run_ui(Default::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    result = poll_or_start_preview(ui, key, "png100", doc.clone(), &fields);
+                });
+            });
+            output.textures_delta.clear();
+            if let Some(preview) = result {
+                let preview = preview.unwrap();
+                assert_eq!((preview.width, preview.height), (32, 16));
+                assert_eq!(preview.rgba.len(), 32 * 16 * 4);
+                assert!(preview.estimate.is_some_and(|bytes| bytes > 0));
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "background preview did not complete");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let tiff_fields = Map::from_iter([("format".into(), json!("tif")), ("scale".into(), json!(100))]);
+        let proxy = preview_proxy(&doc, &tiff_fields).unwrap();
+        let actual_bytes = photosplice_io::export(&proxy, "estimate.tif", &settings(&tiff_fields).io_options()).unwrap().bytes.len();
+        assert_eq!(estimate_native(&doc, &proxy, &tiff_fields), Some(scaled_estimate(actual_bytes, &doc, &proxy, &tiff_fields)));
+    }
+
+    #[test]
+    fn switching_export_formats_uses_independent_quality_preferences() {
+        let prefs = photosplice_engine::prefs::Export { jpeg_quality: 43, webp_quality: 72, ..Default::default() };
+        let mut fields = Map::new();
+        set_format_defaults(&mut fields, "webp", &prefs);
+        assert_eq!(fields["quality"], 72);
+        let s = settings(&fields);
+        assert_eq!(s.webp_quality, Some(72));
+        assert_eq!(s.jpeg_quality, None);
+
+        set_format_defaults(&mut fields, "jpg", &prefs);
+        assert_eq!(fields["quality"], 43);
+        assert_eq!(settings(&fields).jpeg_quality, Some(43));
+        assert_eq!(settings(&fields).webp_quality, None);
+    }
+
+    /// WebP (lossless) is a format of its own: a .webp file with no quality.
+    #[test]
+    fn webp_lossless_is_a_format_of_its_own() {
+        let mut f = Map::new();
+        f.insert("format".into(), json!("webp"));
+        f.insert("quality".into(), json!(70));
+        let s = settings(&f);
+        assert_eq!(s.webp_quality, Some(70), "WebP is lossy, at the quality");
+        assert_eq!(s.jpeg_quality, None);
+        f.insert("format".into(), json!("webpLossless"));
+        assert!(lossless(&f));
+        assert_eq!(settings(&f).webp_quality, None);
+        assert_eq!(file_ext(&s_fmt(&f)), "webp");
+        assert_eq!(preset_settings(&f)["format"], "webp", "presets keep the file format");
+    }
+
+    /// TGA's Resolution (bits per pixel): Auto leaves the choice to the export; 24 and 32 force it, and only
+    /// for TGA.
+    #[test]
+    fn tga_settings_follow_the_bits_per_pixel() {
+        use photosplice_io::TgaBits;
+        let mut f = Map::new();
+        f.insert("format".into(), json!("tga"));
+        assert_eq!(settings(&f).tga_bits, None, "no choice made");
+        for (v, want) in [("auto", None), ("24", Some(TgaBits::Bits24)), ("32", Some(TgaBits::Bits32)), ("16", None)] {
+            f.insert("tgaBits".into(), json!(v));
+            assert_eq!(settings(&f).tga_bits, want, "{v}");
+        }
+        f.insert("format".into(), json!("png"));
+        assert_eq!(settings(&f).tga_bits, None, "only TGA has bits per pixel");
+    }
+
+    #[test]
+    fn exact_pixels_lock_aspect_and_leave_the_source() {
+        let linked = resize_from_scale(400.0, 200.0, 50.0).unwrap();
+        assert_eq!((linked.width, linked.height, linked.scale), (200.0, 100.0, 50.0));
+        let from_width = resize_from_side(400.0, 200.0, 100.0, 200.0, true, true).unwrap();
+        assert_eq!((from_width.width, from_width.height), (100.0, 50.0));
+        let from_height = resize_from_side(400.0, 200.0, 100.0, 40.0, true, false).unwrap();
+        assert_eq!((from_height.width, from_height.height), (80.0, 40.0));
+        let free = resize_from_side(400.0, 200.0, 100.0, 80.0, false, true).unwrap();
+        assert_eq!((free.width, free.height), (100.0, 80.0));
+        assert!(resize_from_scale(400.0, 200.0, 0.0).is_err());
+        assert!(resize_from_side(400.0, 200.0, 0.0, 10.0, false, true).is_err());
+        assert!(resize_from_side(10.0, 10.0, 400_000.0, 10.0, false, true).is_err());
+
+        let doc = Document::with_background(
+            "x",
+            photosplice_doc::Size::new(400, 200),
+            photosplice_doc::ColorMode::Rgb,
+            photosplice_doc::SampleType::U8,
+            photosplice_doc::Color::WHITE,
+        );
+        let before = doc.clone();
+        let mut f = Map::new();
+        f.insert("format".into(), json!("png"));
+        f.insert("scale".into(), json!(100));
+        f.insert("sizing".into(), json!("pixels"));
+        f.insert("width".into(), json!(120));
+        f.insert("height".into(), json!(40));
+        let out = export_document(&doc, &f, None).unwrap();
+        assert_eq!((out.size.width, out.size.height), (120, 40), "explicit pixels win over the percent scale");
+        let proxy = export_document(&doc, &f, Some(20)).unwrap();
+        assert_eq!((proxy.size.width, proxy.size.height), (20, 7));
+        assert_eq!(doc, before, "export leaves the source document unchanged");
+    }
+
+    #[test]
+    fn profile_follows_the_existing_exporter() {
+        use photosplice_cms::Builtin;
+
+        let mut f = Map::new();
+        f.insert("format".into(), json!("jpg"));
+        assert!(settings(&f).embed_icc);
+        f.insert("embedProfile".into(), json!(false));
+        assert!(!settings(&f).embed_icc);
+
+        let mut doc = Document::with_background(
+            "x",
+            photosplice_doc::Size::new(8, 8),
+            photosplice_doc::ColorMode::Rgb,
+            photosplice_doc::SampleType::U8,
+            photosplice_doc::Color::WHITE,
+        );
+        doc.icc_profile = Some(Builtin::DisplayP3.profile().to_bytes());
+        let before = doc.clone();
+        f.insert("profile".into(), json!("srgb"));
+        f.insert("width".into(), json!(8));
+        f.insert("height".into(), json!(8));
+        let converted = export_document(&doc, &f, None).unwrap();
+        let parsed = photosplice_cms::Profile::parse(converted.icc_profile.as_deref().unwrap()).unwrap();
+        assert!(parsed.same_colors(Builtin::Srgb.profile()), "Convert to sRGB replaces the document profile");
+        let stripped = photosplice_io::export(&converted, "out.jpg", &settings(&f).io_options()).unwrap().bytes;
+        assert!(!stripped.windows(b"ICC_PROFILE".len()).any(|w| w == b"ICC_PROFILE"));
+        f.insert("embedProfile".into(), json!(true));
+        let kept = photosplice_io::export(&converted, "out.jpg", &settings(&f).io_options()).unwrap().bytes;
+        assert!(kept.windows(b"ICC_PROFILE".len()).any(|w| w == b"ICC_PROFILE"));
+        assert_eq!(doc, before);
+    }
+
+    #[test]
+    fn applying_a_preset_restores_its_size_mode() {
+        use photosplice_engine::export_preset_cmds::ExportPresetSettings;
+
+        let pixels = ExportPresetSettings {
+            format: "png".into(),
+            quality: 80,
+            lossless: false,
+            transparency: true,
+            scale: 100.0,
+            width: 64,
+            height: 32,
+            lock_aspect: false,
+            sizing: "pixels".into(),
+            metadata: "exif".into(),
+            profile: "document".into(),
+            embed_profile: false,
+            tga_bits: "auto".into(),
+        };
+        let mut f = Map::new();
+        apply_preset(&mut f, &pixels, 400.0, 200.0);
+        assert_eq!(f.get("width"), Some(&json!(64)));
+        assert_eq!(f.get("height"), Some(&json!(32)));
+        assert_eq!(f.get("sizing"), Some(&json!("pixels")));
+        assert_eq!(f.get("embedProfile"), Some(&json!(false)));
+        let scale = ExportPresetSettings { sizing: "scale".into(), scale: 25.0, ..pixels };
+        apply_preset(&mut f, &scale, 400.0, 200.0);
+        assert_eq!(f.get("width"), Some(&json!(100.0)));
+        assert_eq!(f.get("height"), Some(&json!(50.0)));
+        assert_eq!(f.get("sizing"), Some(&json!("scale")));
     }
 }

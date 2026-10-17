@@ -126,7 +126,7 @@ fn lay_out(name: &str, bytes: &[u8], pages: &[usize], o: &OpenOptions) -> Result
     }
     warnings.sort();
     warnings.dedup();
-    Ok(ImportResult { document: doc, warnings, selected: Vec::new() })
+    Ok(ImportResult { document: doc, warnings, selected: Vec::new(), source_read_only: false, preview_only: false })
 }
 
 /// `s` with its pixels moved by (`dx`, `dy`).

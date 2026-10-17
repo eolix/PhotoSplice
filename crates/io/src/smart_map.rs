@@ -18,6 +18,9 @@
 //! to their command id and dialog parameters; any other filter becomes a
 //! [`UNSUPPORTED_FILTER`] entry that keeps its descriptor verbatim (hex in `params.psd`), so it is
 //! listed, can be hidden, reordered or deleted, and is written back unchanged.
+//!
+//! Camera Raw and Displace keep their whole item as a template next to the editable settings
+//! (Displace's carries the embedded displacement map, see `displace_map.rs`).
 
 use photosplice_color::{BlendMode, ColorMode, PixelFormat, SampleType};
 use photosplice_doc::{LayerMask, SmartFilter};
@@ -36,6 +39,10 @@ use crate::blocks::{enum_of, get_desc, num};
 mod camera_raw;
 #[path = "gallery_map.rs"]
 mod gallery;
+#[path = "displace_map.rs"]
+mod displace;
+
+pub use displace::embedded_map as displace_embedded_map;
 
 /// Command id of a Photoshop smart filter PhotoSplice does not implement. Its params hold the
 /// filter's name, Photoshop filter id and descriptor (`psd`, hex); it renders as a pass-through.
@@ -233,6 +240,13 @@ fn curves_params(f: &Descriptor) -> Option<J> {
     let mut out = Map::new();
     for a in adjustment_list(f)? {
         let key = channel_key(a)?;
+        // A pencil-drawn curve is a mapping of 256 output levels (`Mpng`) instead of points.
+        if let Some(Value::List(map)) = a.get("Mpng") {
+            let map: Option<Vec<J>> = map.iter().map(|v| int_value(v).map(|o| json!(o.clamp(0, 255)))).collect();
+            out.insert(if key.is_empty() { "points".into() } else { key.into() }, J::Array(map.filter(|m| m.len() == 256)?));
+            out.insert("pencil".into(), J::Bool(true));
+            continue;
+        }
         let Some(Value::List(pts)) = a.get("Crv ") else { return None };
         let pts: Option<Vec<J>> = pts
             .iter()
@@ -277,6 +291,84 @@ fn known_params(class: &str, f: Option<&Descriptor>) -> Option<(&'static str, J)
     Some((k.command, params))
 }
 
+// ---------- Filter Gallery ----------
+//
+// Filter › Filter Gallery stores its effects in a `GEfc` filter (filterID `GEfc`). The reference
+// writes a single effect inline, whose settings `gallery_map.rs` maps effect by effect; other
+// editors write a list (also for one effect), in application order, each with its visibility:
+//
+// ```text
+// Fltr = GEfc { GEfk = GEft enum (the effect), <settings> }                          (inline)
+// Fltr = GEfc { GEfs = [ GEfc { <settings>, GEfk = GEft enum, GELv = visible } ] }   (list)
+// ```
+//
+// A list maps through the same per-effect table. A list with any effect the table can't read
+// stays an [`UNSUPPORTED_FILTER`] with its descriptor kept verbatim.
+
+const GALLERY_COMMAND: &str = "filter.filterGallery";
+
+/// `filter.filterGallery` and its params for a `GEfc` filter, inline or a `GEfs` list; `None`
+/// when an effect is not modelled.
+fn gallery_import(item: &Descriptor, fltr: &Descriptor) -> Option<(&'static str, J)> {
+    let list = match fltr.get("GEfs") {
+        None => return gallery::import(item, fltr),
+        Some(Value::List(list)) => list,
+        Some(_) => return None,
+    };
+    let mut effects = Vec::with_capacity(list.len());
+    let mut first = None;
+    for v in list {
+        let Value::Descriptor(e) = v else { return None };
+        let (command, mut p) = gallery::import(item, e)?;
+        let mut effect = p.get_mut("effects").and_then(J::as_array_mut).and_then(Vec::pop)?;
+        effect.as_object_mut()?.insert("visible".into(), J::Bool(bool_or(e, "GELv", true)));
+        effects.push(effect);
+        first.get_or_insert((command, p));
+    }
+    let (command, mut p) = first?;
+    p.as_object_mut()?.insert("effects".into(), J::Array(effects));
+    Some((command, p))
+}
+
+/// The `filterFXList` item of a gallery smart filter, or `None` when `f` isn't one: one visible
+/// effect inline (`gallery_map.rs`), several effects or a hidden one as a `GEfs` list.
+fn gallery_export(f: &SmartFilter) -> Option<Result<Descriptor, String>> {
+    let list = (f.command == GALLERY_COMMAND).then(|| f.params.get("effects").and_then(J::as_array)).flatten();
+    match list {
+        Some(list) if list.len() > 1 || list.iter().any(|e| e.get("visible").and_then(J::as_bool) == Some(false)) => Some(gallery_stack(f, list)),
+        _ => gallery::export(f),
+    }
+}
+
+/// A gallery stack as a `GEfs` list: each effect written as its one-effect item, its settings
+/// object listed with `GELv`.
+fn gallery_stack(f: &SmartFilter, list: &[J]) -> Result<Descriptor, String> {
+    let mut first: Option<Descriptor> = None;
+    let mut items = Vec::with_capacity(list.len());
+    for e in list {
+        let visible = e.get("visible").and_then(J::as_bool).unwrap_or(true);
+        let mut one = e.clone();
+        if let Some(o) = one.as_object_mut() {
+            o.remove("visible");
+        }
+        let mut params = Map::new();
+        params.insert("effects".into(), J::Array(vec![one]));
+        for k in ["foreground", "background"] {
+            if let Some(c) = f.params.get(k) {
+                params.insert(k.into(), c.clone());
+            }
+        }
+        let single = SmartFilter { command: f.command.clone(), params: J::Object(params), ..f.clone() };
+        let item = gallery::export(&single).ok_or_else(|| "not a gallery effect".to_string())??;
+        let fltr = get_desc(&item, "Fltr").cloned().ok_or("a gallery effect has no settings")?;
+        items.push(Value::Descriptor(fltr.with("GELv", Value::Boolean(visible))));
+        first.get_or_insert(item);
+    }
+    let mut d = first.ok_or("it has no effects")?;
+    set(&mut d, "Fltr", Value::Descriptor(Descriptor::new(gallery::CLASS).with("GEfs", Value::List(items))));
+    Ok(d)
+}
+
 /// Lowercase hex of `bytes`.
 fn to_hex(bytes: &[u8]) -> String {
     const H: &[u8; 16] = b"0123456789abcdef";
@@ -307,12 +399,11 @@ pub fn filter_from_item(item: &Descriptor) -> SmartFilter {
     let class = fltr.map(|f| String::from_utf8_lossy(f.class_id.as_bytes()).into_owned());
     let filter_id = int(item, "filterID").unwrap_or(0);
     let class = class.or_else(|| KNOWN.iter().find(|k| k.filter_id == filter_id).map(|k| k.class.to_string()));
-    let known = if class.as_deref() == Some(camera_raw::CLASS) {
-        camera_raw::import_params(item).map(|p| (camera_raw::COMMAND, p))
-    } else if class.as_deref() == Some(gallery::CLASS) {
-        fltr.and_then(|f| gallery::import(item, f))
-    } else {
-        class.as_deref().and_then(|c| known_params(c, fltr))
+    let known = match class.as_deref() {
+        Some(camera_raw::CLASS) => camera_raw::import_params(item).map(|p| (camera_raw::COMMAND, p)),
+        Some(displace::CLASS) => displace::import_params(item).map(|p| (displace::COMMAND, p)),
+        Some(gallery::CLASS) => fltr.and_then(|f| gallery_import(item, f)),
+        c => c.and_then(|c| known_params(c, fltr)),
     };
     let (command, params) = match known {
         Some((c, p)) => (c.to_string(), p),
@@ -374,9 +465,9 @@ fn channel_ref(code: &[u8; 4]) -> Value {
 fn adjustments(p: &J, curves: bool) -> Result<Value, String> {
     let obj = p.as_object().ok_or("parameters are not an object")?;
     let allowed: &[&str] =
-        if curves { &["points", "red", "green", "blue"] } else { &["inBlack", "inWhite", "gamma", "outBlack", "outWhite", "red", "green", "blue"] };
+        if curves { &["points", "red", "green", "blue", "pencil"] } else { &["inBlack", "inWhite", "gamma", "outBlack", "outWhite", "red", "green", "blue"] };
     if let Some(k) = obj.keys().find(|k| !is_meta(k) && !allowed.contains(&k.as_str())) {
-        return Err(format!("setting `{k}` has no Photoshop equivalent"));
+        return Err(format!("setting `{k}` has no PSD equivalent"));
     }
     let mut list = Vec::new();
     for (code, key) in CHANNELS {
@@ -386,6 +477,13 @@ fn adjustments(p: &J, curves: bool) -> Result<Value, String> {
         if curves {
             let src = if key.is_empty() { p.get("points") } else { Some(o) };
             let Some(pts) = src.and_then(J::as_array) else { continue };
+            if p.get("pencil").and_then(J::as_bool) == Some(true) {
+                let map: Option<Vec<Value>> =
+                    pts.iter().map(|o| o.as_f64().filter(|o| o.is_finite()).map(|o| Value::Integer(o.round().clamp(0.0, 255.0) as i32))).collect();
+                a = a.with("Mpng", Value::List(map.filter(|m| m.len() == 256).ok_or("a pencil-drawn curve is not 256 output levels")?));
+                list.push(Value::Descriptor(a));
+                continue;
+            }
             let pts: Option<Vec<Value>> = pts
                 .iter()
                 .map(|q| {
@@ -415,7 +513,7 @@ fn fltr_for(k: &Known, p: &J) -> Result<Option<Descriptor>, String> {
     Ok(Some(match k.class {
         "GsnB" | "boxblur" | "Mdn " | "HghP" | "Mxm " | "Mnm " => {
             if p.get("preserve").and_then(J::as_str).is_some_and(|s| s == "roundness") {
-                return Err("“preserve roundness” has no Photoshop equivalent".into());
+                return Err("“preserve roundness” has no PSD equivalent".into());
             }
             d.with("Rds ", unit(b"#Pxl", pf(p, "radius", 1.0)))
         }
@@ -438,7 +536,7 @@ fn fltr_for(k: &Known, p: &J) -> Result<Option<Descriptor>, String> {
             }
             return Ok(None);
         }
-        _ => return Err("not a Photoshop filter".into()),
+        _ => return Err("not a recognized filter".into()),
     }))
 }
 
@@ -450,17 +548,23 @@ pub fn item_for_filter(f: &SmartFilter) -> Result<Descriptor, String> {
         set(&mut d, "enab", Value::Boolean(f.visible));
         return Ok(d);
     }
-    if let Some(d) = gallery::export(f) {
-        return d;
-    }
-    if f.command == UNSUPPORTED_FILTER {
-        let raw = f.params.get("psd").and_then(J::as_str).and_then(from_hex).ok_or("its Photoshop data is missing")?;
-        let mut d = Descriptor::from_bytes(&raw).map_err(|e| format!("its Photoshop data is unreadable ({e})"))?;
+    if f.command == displace::COMMAND {
+        let mut d = displace::export_item(&f.params)?;
         set(&mut d, "blendOptions", blend_options(f));
         set(&mut d, "enab", Value::Boolean(f.visible));
         return Ok(d);
     }
-    let k = known_by_command(&f.command).ok_or("Photoshop has no equivalent filter")?;
+    if let Some(d) = gallery_export(f) {
+        return d;
+    }
+    if f.command == UNSUPPORTED_FILTER {
+        let raw = f.params.get("psd").and_then(J::as_str).and_then(from_hex).ok_or("its filter data is missing")?;
+        let mut d = Descriptor::from_bytes(&raw).map_err(|e| format!("its filter data is unreadable ({e})"))?;
+        set(&mut d, "blendOptions", blend_options(f));
+        set(&mut d, "enab", Value::Boolean(f.visible));
+        return Ok(d);
+    }
+    let k = known_by_command(&f.command).ok_or("this filter has no PSD equivalent")?;
     let fltr = fltr_for(k, &f.params)?;
     let mut d = Descriptor::new("filterFX")
         .with("Nm  ", Value::Text(UnicodeString::new_nul(k.name)))
@@ -519,7 +623,9 @@ pub struct PlacedSpec<'a> {
     pub filter_fx: Option<Descriptor>,
 }
 
-/// Where the source corners land (top-left, top-right, bottom-right, bottom-left), as x, y pairs.
+/// Where the frame corners land (top-left, top-right, bottom-right, bottom-left), as x, y pairs.
+/// The frame is [`crate::blocks::placed_frame`] for an affine placement (the inverse of
+/// `parse_smart`), the source rect for a projective one (as `parse_smart_perspective` reads it).
 fn quad_points(s: &PlacedSpec<'_>) -> [f64; 8] {
     let (w, h) = s.size;
     let [a, b, c, d, e, f] = s.transform.m;
@@ -607,15 +713,16 @@ fn pad4(mut v: Vec<u8>) -> Vec<u8> {
 }
 
 /// `SoLd` block data. With `template` (the imported descriptor) every key it has is kept and only
-/// the transform (when it moved), warp and filter stack are rewritten; otherwise a fresh
-/// descriptor in Photoshop's key order.
+/// the placed id (for a duplicate), transform (when it moved), warp and filter stack are rewritten;
+/// otherwise a fresh descriptor in Photoshop's key order.
 pub fn sold_bytes(template: Option<&Descriptor>, s: &PlacedSpec<'_>, warnings: &mut Vec<String>) -> Vec<u8> {
     let warp = warp_desc(s.warp, s.size, warnings);
     let d = match template {
         Some(t) => {
             let mut d = t.clone();
-            // The instance id: a duplicated layer is written with one of its own.
-            set(&mut d, "placed", Value::Text(UnicodeString::new_nul(s.placed)));
+            if text_of(t, "placed").as_deref() != Some(s.placed) {
+                set(&mut d, "placed", Value::Text(UnicodeString::new_nul(s.placed)));
+            }
             if quad_moved(t, s) {
                 set(&mut d, "Trnf", quad(s));
                 set(&mut d, "nonAffineTransform", quad(s));
@@ -728,11 +835,6 @@ pub fn mask_from_item(item: &FilterEffectsItem, sample: SampleType, stack: &Filt
     Ok(Some(LayerMask { surface, enabled: stack.mask_enabled, linked: stack.mask_linked, density: 1.0, feather: 0.0 }))
 }
 
-/// An `FEid` item for a smart object with filters: the unfiltered placed pixels Photoshop
-/// filters from (colour channels from slot 0, transparency in the last slot; in the document's
-/// pixel format, CMYK inverted as in layer channels) and the filter mask over `bounds` (white
-/// when `mask` is `None`). Photoshop needs the planes: re-rendering the filters of an item
-/// without them crashes it. `None` when there are no unfiltered pixels.
 /// The unfiltered pixels an `FEid` item caches (the smart object's placed content before its
 /// filters; inverse of [`feid_item`]), in the document format `fmt`. `None` when the item holds
 /// no image, its depth isn't the document's, or a plane doesn't decode.
@@ -743,6 +845,7 @@ pub fn unfiltered_from_item(item: &FilterEffectsItem, fmt: PixelFormat) -> Optio
     if w == 0 || h == 0 || item.depth != u32::from(depth) {
         return None;
     }
+    let n = w.checked_mul(h)?;
     let plane = |slot: usize| item.slots.get(slot).and_then(Option::as_ref).and_then(|p| p.decode(w, h, depth).ok());
     let mut planes = Vec::with_capacity(cc + 1);
     for c in 0..cc {
@@ -754,7 +857,7 @@ pub fn unfiltered_from_item(item: &FilterEffectsItem, fmt: PixelFormat) -> Optio
     fill.push(crate::pixels::max_sample(fmt.sample));
     let mut invert = vec![fmt.mode == ColorMode::Cmyk; cc];
     invert.push(false);
-    let mut bytes = crate::pixels::interleave(&refs, &fill, w * h, fmt.sample, &invert);
+    let mut bytes = crate::pixels::interleave(&refs, &fill, n, fmt.sample, &invert);
     if fmt.mode == ColorMode::Lab && fmt.sample == SampleType::U16 {
         crate::pixels::lab16_chroma(&mut bytes, cc + 1, true);
     }
@@ -815,6 +918,11 @@ fn mask_combine(base: &Surface, other: &Surface, mask: &LayerMask, inverse: bool
     out
 }
 
+/// An `FEid` item for a smart object with filters: the unfiltered placed pixels Photoshop
+/// filters from (colour channels from slot 0, transparency in the last slot; in the document's
+/// pixel format, CMYK inverted as in layer channels) and the filter mask over `bounds` (white
+/// when `mask` is `None`). Photoshop needs the planes: re-rendering the filters of an item
+/// without them crashes it. `None` when there are no unfiltered pixels.
 pub fn feid_item(placed: &str, unfiltered: &Surface, mask: Option<&LayerMask>, bounds: GeomRect, doc_fmt: PixelFormat) -> Option<FilterEffectsItem> {
     let sample = doc_fmt.sample;
     let px = if unfiltered.format() == doc_fmt { unfiltered.clone() } else { unfiltered.convert(doc_fmt) };
@@ -897,8 +1005,7 @@ fn filter_mask_item(placed: &str, mask: Option<&LayerMask>, bounds: GeomRect, sa
     FilterEffectsItem { id: placed.to_string(), version: 1, rect, depth: u32::from(depth), max_channels: 24, slots: vec![None; 26], mask: Some((rect, plane)) }
 }
 
-/// A uuid-shaped id (8-4-4-4-12 hex digits) derived from `seed`: equal contents get equal ids, so
-/// identical smart objects share one embedded file, as Photoshop's instances do.
+/// A deterministic uuid-shaped id (8-4-4-4-12 hex digits) derived from `seed`.
 pub fn uuid_from(seed: &[u8]) -> String {
     let h = blake3::hash(seed);
     let x = to_hex(&h.as_bytes()[..16]);
@@ -931,6 +1038,28 @@ mod tests {
         assert!(!quad_moved(&p.descriptor, &spec));
     }
 
+    fn count(hay: &[u8], needle: &[u8]) -> usize {
+        hay.windows(needle.len()).filter(|w| *w == needle).count()
+    }
+
+    /// A freshly built placed layer writes `warp` (key and class) as a length-4 string, as
+    /// Photoshop does; the code form is a different key to Photoshop.
+    #[test]
+    fn fresh_placed_warp_is_a_string_id() {
+        let spec =
+            PlacedSpec { idnt: "id", placed: "id", transform: Affine::IDENTITY, perspective: None, size: (10.0, 10.0), dpi: 72.0, warp: None, filter_fx: None };
+        let mut warnings = Vec::new();
+        let sold = sold_bytes(None, &spec, &mut warnings);
+        let plld = plld_bytes(&spec, &sold, &mut warnings);
+        // `SoLd`: the `warp` key and the warp descriptor's class; `PlLd`: the descriptor's class.
+        for (bytes, n) in [(&sold, 2), (&plld, 1)] {
+            assert_eq!(count(bytes, b"\0\0\0\x04warp"), n);
+            assert_eq!(count(bytes, b"\0\0\0\0warp"), 0);
+        }
+        let d = sold_descriptor(&sold).unwrap();
+        assert!(matches!(d.get("warp"), Some(Value::Descriptor(w)) if w.class_id == Id::Str(b"warp".to_vec())));
+    }
+
     fn sf(command: &str, params: J) -> SmartFilter {
         SmartFilter { command: command.into(), params, blend: BlendMode::Normal, opacity: 1.0, visible: true }
     }
@@ -952,6 +1081,8 @@ mod tests {
             sf("image.adjustments.levels", json!({"inBlack": 20, "inWhite": 220, "gamma": 1.4, "red": {"inBlack": 0, "inWhite": 255, "gamma": 0.8}})),
             sf("image.adjustments.curves", json!({"points": [[0.0, 0.0], [64.0, 40.0], [255.0, 255.0]], "blue": [[0.0, 20.0], [255.0, 235.0]]})),
             sf("image.adjustments.shadowsHighlights", json!({})),
+            // A pencil-drawn curve: 256 output levels (`Mpng`).
+            sf("image.adjustments.curves", json!({"pencil": true, "points": (0..256).rev().collect::<Vec<i32>>()})),
         ];
         for mut f in filters {
             f.blend = BlendMode::Overlay;
@@ -985,6 +1116,144 @@ mod tests {
         // A known filter with a setting we don't model is kept verbatim too.
         let odd = Descriptor::new("filterFX").with("Fltr", Value::Descriptor(Descriptor::new("GsnB"))).with("filterID", Value::Integer(code(b"GsnB")));
         assert_eq!(filter_from_item(&odd).command, UNSUPPORTED_FILTER);
+    }
+
+    /// A Filter Gallery item in the list form other editors write (here Chrome effects).
+    fn gallery_item_with(effects: Vec<Descriptor>) -> Descriptor {
+        let rgb =
+            |v: f64| Value::Descriptor(Descriptor::new("RGBC").with("Rd  ", Value::Double(v)).with("Grn ", Value::Double(v)).with("Bl  ", Value::Double(v)));
+        Descriptor::new("filterFX")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("Filtergalerie")))
+            .with("blendOptions", Value::Descriptor(Descriptor::new("blendOptions").with("Opct", unit(b"#Prc", 100.0)).with("Md  ", enumv("BlnM", "normal"))))
+            .with("enab", Value::Boolean(true))
+            .with("hasoptions", Value::Boolean(true))
+            .with("FrgC", rgb(0.0))
+            .with("BckC", rgb(255.0))
+            .with("Fltr", Value::Descriptor(Descriptor::new("GEfc").with("GEfs", Value::List(effects.into_iter().map(Value::Descriptor).collect()))))
+            .with("filterID", Value::Integer(code(b"GEfc")))
+    }
+
+    fn chrome(detail: i32, smoothness: i32, visible: bool) -> Descriptor {
+        Descriptor::new("GEfc")
+            .with("Dtl ", Value::Integer(detail))
+            .with("Smth", Value::Integer(smoothness))
+            .with("GEfk", enumv("GEft", "Chrm"))
+            .with("GELv", Value::Boolean(visible))
+    }
+
+    /// A `GEfs` stack maps effect by effect through the gallery table, with each effect's
+    /// visibility, and is written back as a list.
+    #[test]
+    fn filter_gallery_stack_imports_as_editable_gallery() {
+        let f = filter_from_item(&gallery_item_with(vec![chrome(12, 4, true), chrome(3, 9, false)]));
+        assert_eq!(f.command, "filter.filterGallery");
+        assert_eq!(
+            f.params,
+            json!({
+                "effects": [
+                    {"filter": "chrome", "params": {"detail": 12.0, "smoothness": 4.0}, "visible": true},
+                    {"filter": "chrome", "params": {"detail": 3.0, "smoothness": 9.0}, "visible": false},
+                ],
+                "foreground": [0.0, 0.0, 0.0],
+                "background": [1.0, 1.0, 1.0],
+            })
+        );
+        // Written back and read again: unchanged, also when re-blended and hidden.
+        let mut g = f.clone();
+        g.blend = BlendMode::Multiply;
+        g.opacity = 0.5;
+        g.visible = false;
+        let d = item_for_filter(&g).unwrap();
+        assert_eq!(filter_from_item(&Descriptor::from_bytes(&d.to_bytes()).unwrap()), g);
+        let fltr = get_desc(&d, "Fltr").unwrap();
+        assert!(fltr.class_id.is("GEfc"));
+        assert!(matches!(fltr.get("GEfs"), Some(Value::List(l)) if l.len() == 2));
+        assert_eq!(int(&d, "filterID"), Some(code(b"GEfc")));
+    }
+
+    /// A single effect as the reference writes it: inline in `Fltr`, no `GEfs` list or `GELv`.
+    fn reference_chrome(detail: i32, smoothness: i32) -> Descriptor {
+        let rgb =
+            |v: f64| Value::Descriptor(Descriptor::new("RGBC").with("Rd  ", Value::Double(v)).with("Grn ", Value::Double(v)).with("Bl  ", Value::Double(v)));
+        let fltr = Descriptor::new("GEfc").with("GEfk", enumv("GEft", "Chrm")).with("Dtl ", Value::Integer(detail)).with("Smth", Value::Integer(smoothness));
+        Descriptor::new("filterFX")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("Filter Gallery...")))
+            .with("blendOptions", Value::Descriptor(Descriptor::new("blendOptions").with("Opct", unit(b"#Prc", 100.0)).with("Md  ", enumv("BlnM", "Nrml"))))
+            .with("enab", Value::Boolean(true))
+            .with("hasoptions", Value::Boolean(true))
+            .with("FrgC", rgb(255.0))
+            .with("BckC", rgb(0.0))
+            .with("Fltr", Value::Descriptor(fltr))
+            .with("filterID", Value::Integer(code(b"GEfc")))
+    }
+
+    #[test]
+    fn filter_gallery_inline_effect_imports_and_writes_back_inline() {
+        let item = reference_chrome(10, 4);
+        let f = filter_from_item(&item);
+        assert_eq!(f.command, "filter.filterGallery");
+        assert_eq!(
+            f.params,
+            json!({
+                "effects": [{"filter": "chrome", "params": {"detail": 10.0, "smoothness": 4.0}}],
+                "foreground": [1.0, 1.0, 1.0],
+                "background": [0.0, 0.0, 0.0],
+            })
+        );
+        // Written back in the reference's own layout.
+        let d = item_for_filter(&f).unwrap();
+        assert_eq!(get_desc(&d, "Fltr").map(|f| &f.items), get_desc(&item, "Fltr").map(|f| &f.items));
+        assert_eq!((get_desc(&d, "FrgC"), get_desc(&d, "BckC")), (get_desc(&item, "FrgC"), get_desc(&item, "BckC")));
+        assert_eq!(filter_from_item(&Descriptor::from_bytes(&d.to_bytes()).unwrap()), f);
+        // A hidden single effect needs the list (only it has a visibility flag).
+        let mut hidden = f.clone();
+        hidden.params["effects"][0]["visible"] = json!(false);
+        let d = item_for_filter(&hidden).unwrap();
+        assert!(get_desc(&d, "Fltr").unwrap().get("GEfs").is_some());
+        assert_eq!(filter_from_item(&d), hidden);
+        // Inline effects we don't model stay verbatim.
+        let mut odd = reference_chrome(10, 4);
+        set(&mut odd, "Fltr", Value::Descriptor(Descriptor::new("GEfc").with("GEfk", enumv("GEft", "Ctot")).with("Dtl ", Value::Integer(1))));
+        assert_eq!(filter_from_item(&odd).command, UNSUPPORTED_FILTER);
+    }
+
+    #[test]
+    fn filter_gallery_written_with_defaults_and_colours() {
+        let f = sf("filter.filterGallery", json!({"effects": [{"filter": "chrome"}], "foreground": [1.0, 0.0, 0.0], "background": [0.0, 0.0, 1.0]}));
+        let back = filter_from_item(&item_for_filter(&f).unwrap());
+        assert_eq!(back.params["effects"][0]["params"], json!({"detail": 4.0, "smoothness": 7.0}));
+        assert_eq!(back.params["foreground"], json!([1.0, 0.0, 0.0]));
+        assert_eq!(back.params["background"], json!([0.0, 0.0, 1.0]));
+    }
+
+    #[test]
+    fn filter_gallery_we_dont_model_is_kept_verbatim() {
+        // A list with an effect the table doesn't know, an empty list, a non-list.
+        let other = Descriptor::new("GEfc").with("GEfk", enumv("GEft", "Ctot")).with("GELv", Value::Boolean(true));
+        for effects in [vec![chrome(4, 7, true), other], vec![]] {
+            let item = gallery_item_with(effects);
+            let f = filter_from_item(&item);
+            assert_eq!(f.command, UNSUPPORTED_FILTER);
+            assert_eq!(item_for_filter(&f).unwrap(), item);
+        }
+        let odd = Descriptor::new("filterFX").with("Fltr", Value::Descriptor(Descriptor::new("GEfc").with("GEfs", Value::Integer(3))));
+        assert_eq!(filter_from_item(&odd).command, UNSUPPORTED_FILTER);
+        let bare = Descriptor::new("filterFX").with("filterID", Value::Integer(code(b"GEfc")));
+        assert_eq!(filter_from_item(&bare).command, UNSUPPORTED_FILTER);
+    }
+
+    #[test]
+    fn filter_gallery_without_psd_equivalent_is_reported() {
+        for p in [
+            json!({"effects": [{"params": {}}]}),
+            json!({"effects": [{"filter": "chrome"}, {"params": {}}]}),
+            json!({"effects": [{"filter": "chrome"}, {"filter": "noSuchEffect"}]}),
+            json!({"effects": []}),
+            json!({}),
+            json!(null),
+        ] {
+            assert!(item_for_filter(&sf("filter.filterGallery", p.clone())).is_err(), "{p}");
+        }
     }
 
     #[test]
@@ -1139,7 +1408,7 @@ mod tests {
         }
     }
 
-        /// `PlLd` carries the warp its `SoLd` carries: a warp kept from the file because the model
+    /// `PlLd` carries the warp its `SoLd` carries: a warp kept from the file because the model
     /// reads it as none (here an identity custom mesh) is not written as `warpNone` in `PlLd`
     /// (Photoshop then showed no warp).
     #[test]

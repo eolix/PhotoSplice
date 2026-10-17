@@ -40,12 +40,20 @@ pub enum HistSource {
     BelowLayer(LayerId),
     /// One layer on its own (the target of a destructive Image › Adjustments command).
     Layer(LayerId),
+    /// The gray plane a Curves target edits: a layer mask, a saved channel or the Quick Mask.
+    /// The dialog shows this plane's own levels, not the colour layers beneath (#5335).
+    Channel { layer: LayerId, surface: photosplice_engine::channel_cmds::GraySurface },
 }
 
 fn tag(source: HistSource, space: ToneSpace) -> u64 {
     let (k, id) = match source {
         HistSource::BelowLayer(l) => (1u64, l.0),
         HistSource::Layer(l) => (2, l.0),
+        HistSource::Channel { layer, surface } => match surface {
+            photosplice_engine::channel_cmds::GraySurface::LayerMask => (3, layer.0),
+            photosplice_engine::channel_cmds::GraySurface::Alpha(i) => (4, i as u64),
+            photosplice_engine::channel_cmds::GraySurface::QuickMask => (5, layer.0),
+        },
     };
     let s = match space {
         ToneSpace::Rgb => 0u64,
@@ -68,6 +76,38 @@ fn isolate(layers: &mut [Layer], id: LayerId) -> bool {
 
 /// Histograms of `doc` as seen by `source`, in the channels of `space`.
 pub fn compute_histograms(doc: &Document, source: HistSource, space: ToneSpace) -> Histograms {
+    let mut h = vec![
+        [0u32; 256];
+        match space {
+            ToneSpace::Rgb => 4,
+            ToneSpace::Cmyk => 5,
+            ToneSpace::Lab => 3,
+        }
+    ];
+    match source {
+        // The gray plane itself: its levels are what the curve edits, whatever the document's
+        // colour mode (#5335).
+        HistSource::Channel { layer, surface } => {
+            let surf = match surface {
+                photosplice_engine::channel_cmds::GraySurface::LayerMask => doc.layer(layer).and_then(|l| l.mask.as_ref()).map(|m| &m.surface),
+                photosplice_engine::channel_cmds::GraySurface::Alpha(i) => doc.channels.get(i).map(|c| &c.surface),
+                photosplice_engine::channel_cmds::GraySurface::QuickMask => doc.quick_mask.as_ref().map(|c| &c.surface),
+            };
+            if let Some(s) = surf
+                && let Some(bin) = h.first_mut()
+            {
+                *bin = gray_bins(s, doc.bounds());
+            }
+        }
+        HistSource::BelowLayer(_) | HistSource::Layer(_) => {
+            composite_bins(doc, source, space, &mut h);
+        }
+    }
+    Histograms { tag: tag(source, space), ch: h }
+}
+
+/// Bins of the composited image below (`BelowLayer`) or of one layer alone (`Layer`), in `space`.
+fn composite_bins(doc: &Document, source: HistSource, space: ToneSpace, h: &mut [[u32; 256]]) {
     let mut d = doc.clone();
     match source {
         HistSource::BelowLayer(hide) => {
@@ -78,14 +118,9 @@ pub fn compute_histograms(doc: &Document, source: HistSource, space: ToneSpace) 
         HistSource::Layer(id) => {
             isolate(&mut d.layers, id);
         }
+        HistSource::Channel { .. } => {}
     }
     let img = photosplice_compose::thumbnail(&d, 384);
-    let n = match space {
-        ToneSpace::Rgb => 4,
-        ToneSpace::Cmyk => 5,
-        ToneSpace::Lab => 3,
-    };
-    let mut h = vec![[0u32; 256]; n];
     let bin = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as usize;
     for p in img.pixels.as_chunks::<4>().0 {
         if p[3] == 0 {
@@ -115,7 +150,26 @@ pub fn compute_histograms(doc: &Document, source: HistSource, space: ToneSpace) 
             }
         }
     }
-    Histograms { tag: tag(source, space), ch: h }
+}
+
+/// 256-bin histogram of a gray plane: its levels in 0–255, sampled like the engine's auto-tone
+/// histograms so a big canvas costs no more than about a megapixel here (#5335).
+fn gray_bins(surf: &photosplice_raster::Surface, area: photosplice_geom::Rect) -> [u32; 256] {
+    let mut h = [0u32; 256];
+    let step = ((u64::from(area.width()) * u64::from(area.height())) / 1_000_000).max(1).isqrt().max(1) as i32;
+    let mut y = area.y0;
+    while y < area.y1 {
+        let mut x = area.x0;
+        while x < area.x1 {
+            let v = (surf.sample_channel(x, y, 0).clamp(0.0, 1.0) * 255.0).round() as usize;
+            if let Some(bin) = h.get_mut(v) {
+                *bin += 1;
+            }
+            x += step;
+        }
+        y += step;
+    }
+    h
 }
 
 /// Cached histograms for a tone editor; recomputed only when something other than the editor's
@@ -126,6 +180,7 @@ pub fn histograms(app: &mut PhotospliceApp, source: HistSource, space: ToneSpace
     let want = tag(source, space);
     let layer = match source {
         HistSource::BelowLayer(l) | HistSource::Layer(l) => l,
+        HistSource::Channel { layer, .. } => layer,
     };
     let pixels_kept = view_only(st);
     if let Some((d, l, r, h)) = app.tone_hist.as_mut()
@@ -238,12 +293,56 @@ pub fn histogram_panel(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
     let stale = !matches!(&app.doc_hist, Some((d, r, _, _)) if *d == doc_id && *r == rev);
     let due = app.doc_hist.as_ref().is_none_or(|(d, _, at, _)| *d != doc_id || now - at > 250.0);
     if stale && due {
-        let t0 = now;
-        let h = Arc::new(compute_histograms(&st.doc, HistSource::BelowLayer(LayerId(u64::MAX)), ToneSpace::Rgb));
-        app.perf.span("histogram", crate::gpu_canvas::now_ms() - t0);
-        app.doc_hist = Some((doc_id, rev, now, h));
+        // Computed off the UI thread (doc clone + proxy + pixel counts cost tens of ms on
+        // large documents): the panel keeps showing the previous histogram with the existing
+        // "cached data" warning until the worker delivers.
+        let pending = app.hist_job.as_ref().is_some_and(|(d, r, _)| *d == doc_id && *r == rev);
+        if !pending {
+            let (tx, rx) = std::sync::mpsc::channel();
+            // No threads on the web (and a spawn can fail natively): compute inline then, and
+            // deliver through the same channel so one receive path lands both.
+            #[cfg(not(target_arch = "wasm32"))]
+            let spawned = {
+                let doc = st.doc.clone();
+                let tx = tx.clone();
+                let ctx = ui.ctx().clone();
+                std::thread::Builder::new()
+                    .name("histogram".into())
+                    .spawn(move || {
+                        let t0 = crate::gpu_canvas::now_ms();
+                        let h = Arc::new(compute_histograms(&doc, HistSource::BelowLayer(LayerId(u64::MAX)), ToneSpace::Rgb));
+                        let _ = tx.send((doc.id, crate::gpu_canvas::now_ms() - t0, h));
+                        ctx.request_repaint();
+                    })
+                    .is_ok()
+            };
+            #[cfg(target_arch = "wasm32")]
+            let spawned = false;
+            if !spawned {
+                let t0 = crate::gpu_canvas::now_ms();
+                let h = Arc::new(compute_histograms(&st.doc, HistSource::BelowLayer(LayerId(u64::MAX)), ToneSpace::Rgb));
+                let _ = tx.send((doc_id, crate::gpu_canvas::now_ms() - t0, h));
+            }
+            app.hist_job = Some((doc_id, rev, rx));
+        }
     } else if stale {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(260));
+    }
+    // A finished worker lands its histogram; the revision check keeps a stale result from
+    // overwriting a newer one. A worker that died without sending clears the job so the next
+    // frame schedules a new one.
+    if let Some((jd, jr, rx)) = &app.hist_job {
+        match rx.try_recv() {
+            Ok((_, ms, h)) => {
+                app.perf.span("histogram", ms);
+                if *jd == doc_id {
+                    app.doc_hist = Some((doc_id, *jr, crate::gpu_canvas::now_ms(), h));
+                }
+                app.hist_job = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => app.hist_job = None,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
     }
     let Some((_, _, _, h)) = app.doc_hist.clone() else { return };
     let size = app.session.active().map_or(photosplice_doc::Size::new(0, 0), |s| s.doc.size);
@@ -317,5 +416,114 @@ mod tests {
         assert!(h[0][255] > 0 && h[0][0] == 0, "the black layer above is hidden");
         assert_eq!(compute_histograms(&st.doc, HistSource::Layer(bg), ToneSpace::Cmyk).ch.len(), 5);
         assert_eq!(compute_histograms(&st.doc, HistSource::Layer(bg), ToneSpace::Lab).ch.len(), 3);
+    }
+
+    /// #5335: the Curves histogram of a targeted gray plane describes that plane, not the
+    /// colour layers beneath it: a channel filled with 25% grey over a black layer shows a
+    /// spike at 25% grey, not at black.
+    #[test]
+    fn channel_histogram_describes_the_gray_plane() {
+        use photosplice_engine::channel_cmds::GraySurface;
+        let mut s = photosplice_engine::Session::new();
+        s.execute("file.new", json!({"width": 32, "height": 32})).unwrap(); // white background
+        s.execute("layer.new.layer", json!({})).unwrap();
+        s.execute("select.rect", json!({"x": 0, "y": 0, "width": 32, "height": 32})).unwrap();
+        s.execute("edit.fill", json!({"color": "#000000"})).unwrap();
+        s.execute("channel.new", json!({"name": "Sky sel", "fill": "white"})).unwrap();
+        s.execute("layer.layerMask.revealAll", json!({})).unwrap();
+        let b = photosplice_geom::Rect::from_xywh(0, 0, 32, 32);
+        s.edit("fill-planes", |doc, active| {
+            doc.channels[0].surface.fill_rect(b, &[0.25]);
+            doc.layer_mut(active.unwrap()).unwrap().mask.as_mut().unwrap().surface.fill_rect(b, &[0.0]);
+            Ok(())
+        })
+        .unwrap();
+        let st = s.active().unwrap();
+        let layer = st.active_layer.unwrap();
+        let h = compute_histograms(&st.doc, HistSource::Channel { layer, surface: GraySurface::Alpha(0) }, ToneSpace::Rgb);
+        assert!(h[0][64] > 0, "a spike at 25% grey, got {:?}", &h[0][0..80]);
+        assert_eq!(h[0][0], 0, "not the black layer beneath");
+        let m = compute_histograms(&st.doc, HistSource::Channel { layer, surface: GraySurface::LayerMask }, ToneSpace::Rgb);
+        assert!(m[0][0] > 0, "the hidden mask is black");
+        // Each plane keeps its own cache entry: switching targets recomputes.
+        assert_ne!(
+            tag(HistSource::Channel { layer, surface: GraySurface::Alpha(0) }, ToneSpace::Rgb),
+            tag(HistSource::Channel { layer, surface: GraySurface::LayerMask }, ToneSpace::Rgb)
+        );
+        assert_ne!(tag(HistSource::Channel { layer, surface: GraySurface::LayerMask }, ToneSpace::Rgb), tag(HistSource::Layer(layer), ToneSpace::Rgb));
+    }
+}
+
+#[cfg(test)]
+mod hist_async_tests {
+    use super::*;
+    use crate::PhotospliceApp;
+    use serde_json::json;
+
+    /// The panel schedules the histogram on a worker and keeps showing the previous data
+    /// until it lands: right after the trigger the job exists (nothing computed in this
+    /// frame), the receiver delivers, and a stale result cannot overwrite a newer revision.
+    #[test]
+    fn panel_histogram_is_computed_off_the_ui_thread() {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+        let ctx = egui::Context::default();
+        let _ = &ctx;
+        app.run("file.new", json!({"width": 640, "height": 480})).unwrap();
+        let (doc_id, rev) = {
+            let st = app.session.active().unwrap();
+            (st.doc.id, st.revision)
+        };
+        // Drive one panel frame through a minimal egui pass.
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        let panel_ui = egui::Ui::new(
+            ctx.clone(),
+            egui::Id::new("hist-test"),
+            egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 200.0))),
+        );
+        let mut panel_ui = panel_ui;
+        histogram_panel(&mut app, &mut panel_ui);
+        // A fast worker (or the inline fallback) may already have landed the result this frame.
+        if let Some(job) = app.hist_job.take() {
+            assert_eq!(job.0, doc_id);
+            assert_eq!(job.1, rev);
+            // The worker delivers (its repaint request is a no-op outside a frame).
+            let (did, _, h) = job.2.recv().expect("the worker delivers the histogram");
+            assert_eq!(did, doc_id);
+            assert!(!h.ch.is_empty(), "the histogram has data");
+            // Delivering it for the revision it was computed from lands in the cache.
+            app.doc_hist = Some((doc_id, rev, crate::gpu_canvas::now_ms(), h.clone()));
+        }
+        assert_eq!(app.doc_hist.as_ref().map(|h| (h.0, h.1)), Some((doc_id, rev)));
+        // …and a newer revision keeps the old entry stale instead of being overwritten by it.
+        app.run("layer.new.layer", json!({})).unwrap();
+        let rev2 = app.session.active().unwrap().revision;
+        assert_ne!(rev, rev2);
+        assert_ne!(app.doc_hist.as_ref().unwrap().1, rev2, "stale after an edit");
+    }
+
+    /// A worker that died without sending (its sender dropped) clears the job, so the next
+    /// frame schedules a new one instead of waiting forever.
+    #[test]
+    fn a_dead_histogram_worker_clears_the_job() {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+        let (doc_id, rev) = {
+            let st = app.session.active().unwrap();
+            (st.doc.id, st.revision)
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        drop(tx);
+        app.hist_job = Some((doc_id, rev, rx));
+        let ctx = egui::Context::default();
+        ctx.begin_pass(Default::default());
+        let mut ui = egui::Ui::new(
+            ctx.clone(),
+            egui::Id::new("hist-dead"),
+            egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(300.0, 200.0))),
+        );
+        histogram_panel(&mut app, &mut ui);
+        assert!(app.hist_job.is_none(), "a disconnected job is dropped");
+        assert!(app.doc_hist.is_none(), "nothing landed from the dead worker");
     }
 }

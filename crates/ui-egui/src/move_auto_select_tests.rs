@@ -51,10 +51,10 @@ fn drag(app: &mut PhotospliceApp, from: [f64; 2], by: [f64; 2], mods: egui::Modi
 }
 
 #[test]
-fn auto_select_is_on_by_default_with_the_layer_target() {
+fn auto_select_is_on_by_default_with_the_group_target() {
     let o = ToolOptions::default();
     assert!(o.move_auto_select, "Photoshop ships with Auto-Select checked");
-    assert_eq!(o.move_target, "layer");
+    assert_eq!(o.move_target, "group", "Photoshop defaults Auto-Select to Group (#4056)");
     // A saved tool preset that predates the option gets the default too.
     let mut v = serde_json::to_value(&o).unwrap();
     v.as_object_mut().unwrap().remove("move_auto_select");
@@ -124,4 +124,136 @@ fn shift_click_adds_the_layer_under_the_pointer() {
     let st = app.session.active().unwrap();
     assert!(st.is_layer_selected(a) && st.is_layer_selected(b));
     assert_eq!(bounds(&app, a), Rect::new(8, 8, 24, 24));
+}
+
+#[test]
+fn every_theme_shows_the_auto_select_toggle() {
+    // #1275: the Studio themes' options bar had only a hint for the Move tool, so Auto-Select
+    // could not be turned off there.
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+    for theme in [crate::theme::ThemeKind::Slate, crate::theme::ThemeKind::Anthracite] {
+        let (app, _, _) = app();
+        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 60.0)).build_ui_state(
+            |ui, app: &mut PhotospliceApp| {
+                if !ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
+                    return;
+                }
+                crate::panels::options_bar(app, ui);
+            },
+            app,
+        );
+        PhotospliceApp::setup_context(&h.ctx, theme);
+        h.run_steps(4);
+        assert!(h.state().ui.tool_options.move_auto_select);
+        h.get_by_label("Auto-Select:").click();
+        h.run_steps(2);
+        assert!(!h.state().ui.tool_options.move_auto_select, "{theme:?}: the toggle turns Auto-Select off");
+    }
+}
+
+#[test]
+fn every_theme_shows_the_transform_controls_toggle() {
+    // #5740: outside the Pro themes the Move tool's options bar had no Show Transform Controls, so
+    // a click on a layer never showed its box and handles there.
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+    for theme in crate::theme::ThemeKind::ALL {
+        let (app, _, _) = app();
+        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 60.0)).build_ui_state(
+            |ui, app: &mut PhotospliceApp| {
+                if !ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
+                    return;
+                }
+                crate::panels::options_bar(app, ui);
+            },
+            app,
+        );
+        PhotospliceApp::setup_context(&h.ctx, theme);
+        h.run_steps(4);
+        let before = h.state().ui.tool_options.move_show_transform;
+        h.get_by_label("Show Transform Controls").click();
+        h.run_steps(2);
+        assert_ne!(h.state().ui.tool_options.move_show_transform, before, "{theme:?}: the toggle flips Show Transform Controls");
+    }
+}
+
+#[test]
+fn every_theme_shows_the_type_options() {
+    // #1387: outside the Pro themes the Type tool's options bar was only the hint "Click to add
+    // text", so there was no font, style or size control while typing.
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
+    // The font menus show "Loading fonts…" until the font scan is done (#3021): wait for it.
+    let _ = photosplice_text::shared();
+    for theme in crate::theme::ThemeKind::ALL {
+        let (mut app, _, _) = app();
+        app.ui.tool = Tool::Type;
+        let mut h = Harness::builder().with_size(egui::vec2(1600.0, 60.0)).build_ui_state(
+            |ui, app: &mut PhotospliceApp| {
+                if !ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
+                    return;
+                }
+                crate::panels::options_bar(app, ui);
+            },
+            app,
+        );
+        PhotospliceApp::setup_context(&h.ctx, theme);
+        h.run_steps(4);
+        let combos: Vec<String> = h
+            .query_all_by_role(egui::accesskit::Role::ComboBox)
+            .map(|n| format!("{:?} {:?}", n.accesskit_node().label(), n.accesskit_node().value()))
+            .collect();
+        let font = h.state().ui.tool_options.type_font.clone();
+        assert!(combos.iter().any(|c| c.contains(&font)), "{theme:?}: the font picker shows {font:?}; combo boxes: {combos:?}");
+    }
+}
+
+#[test]
+fn every_theme_shows_the_gradient_options() {
+    // #3601: the Studio themes' options bar was only the hint "Drag to draw a gradient", with no
+    // mode, style, blend mode or opacity control.
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::{NodeT, Queryable};
+    for theme in crate::theme::ThemeKind::ALL {
+        let (mut app, _, _) = app();
+        app.ui.tool = Tool::Gradient;
+        let mut h = Harness::builder().with_size(egui::vec2(1600.0, 60.0)).build_ui_state(
+            |ui, app: &mut PhotospliceApp| {
+                if !ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
+                    return;
+                }
+                crate::panels::options_bar(app, ui);
+            },
+            app,
+        );
+        PhotospliceApp::setup_context(&h.ctx, theme);
+        h.run_steps(4);
+        let combos: Vec<String> = h
+            .query_all_by_role(egui::accesskit::Role::ComboBox)
+            .map(|n| format!("{:?} {:?}", n.accesskit_node().label(), n.accesskit_node().value()))
+            .collect();
+        assert!(combos.iter().any(|c| c.contains("Normal")), "{theme:?}: the blend mode picker shows; combo boxes: {combos:?}");
+    }
+}
+
+#[test]
+fn shift_click_adds_shape_layers_one_after_another() {
+    // Shapes, as in Photoshop: a click selects one, each ⇧-click adds the one under it.
+    let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+    app.session.execute("file.new", json!({"width": 200, "height": 200})).unwrap();
+    for rect in [[10, 10, 40, 40], [80, 10, 40, 40], [10, 100, 40, 40]] {
+        app.session.execute("shape.create", json!({"kind": "rect", "rect": rect, "fill": "#ff0000"})).unwrap();
+    }
+    app.sync_views();
+    app.ui.tool = Tool::Move;
+    app.ui.extras.snap = false;
+    app.ui.view.show.smart_guides = false;
+    let ids: Vec<LayerId> = app.session.active().unwrap().doc.layers.iter().skip(1).map(|l| l.id).collect();
+    drag(&mut app, [30.0, 30.0], [0.0, 0.0], egui::Modifiers::NONE);
+    drag(&mut app, [100.0, 30.0], [0.0, 0.0], egui::Modifiers::SHIFT);
+    drag(&mut app, [30.0, 120.0], [0.0, 0.0], egui::Modifiers::SHIFT);
+    let mut selected = app.session.active().unwrap().selected_layers();
+    selected.sort_by_key(|l| l.0);
+    assert_eq!(selected, ids);
 }

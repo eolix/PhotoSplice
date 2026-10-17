@@ -138,7 +138,9 @@ pub(crate) fn decode(t: &Tiff, limits: &Limits) -> Result<Sensor> {
     if is_cfa && samples != 1 {
         return Err(RawError::unsupported(format!("CFA data with {samples} samples per pixel")));
     }
-    if !is_cfa && samples != 3 {
+    // LinearRaw: three colour samples, or one for a monochrome camera or scanner (DNG 1.7,
+    // ColorPlanes 1: Leica Monochrom, VueScan film scans).
+    if !is_cfa && samples != 1 && samples != 3 {
         return Err(RawError::unsupported(format!("LinearRaw data with {samples} samples per pixel")));
     }
     let active = rect_from(t, &raw, plane.width, plane.height);
@@ -147,17 +149,28 @@ pub(crate) fn decode(t: &Tiff, limits: &Limits) -> Result<Sensor> {
     }
     let cfa = if is_cfa { Some(cfa(t, &raw, &active)?) } else { None };
 
-    // Default crop, relative to the active area.
+    // Default crop, relative to the active area. Each tag has its own default (DNG 1.7.1.0,
+    // DefaultCropOrigin and DefaultCropSize): the origin (0, 0), the size the whole image.
     let mut crop = active;
-    let origin = t.tag_floats(&raw, tag::DEFAULT_CROP_ORIGIN);
-    let size = t.tag_floats(&raw, tag::DEFAULT_CROP_SIZE);
     if raw.has(tag::DEFAULT_CROP_ORIGIN) || raw.has(tag::DEFAULT_CROP_SIZE) {
-        if let ([ox, oy], [cw, ch]) = (origin.as_slice(), size.as_slice()) {
+        // A present tag must hold two values; an absent one takes its default.
+        let pair = |tg: u16, default: [f64; 2]| -> Option<[f64; 2]> {
+            if !raw.has(tg) {
+                return Some(default);
+            }
+            match t.tag_floats(&raw, tg).as_slice() {
+                [a, b] => Some([*a, *b]),
+                _ => None,
+            }
+        };
+        let origin = pair(tag::DEFAULT_CROP_ORIGIN, [0.0, 0.0]);
+        let size = pair(tag::DEFAULT_CROP_SIZE, [plane.width as f64, plane.height as f64]);
+        if let (Some([ox, oy]), Some([cw, ch])) = (origin, size) {
             let (ox, oy, cw, ch) = (
-                crop_value(*ox, "DefaultCropOrigin"),
-                crop_value(*oy, "DefaultCropOrigin"),
-                crop_value(*cw, "DefaultCropSize"),
-                crop_value(*ch, "DefaultCropSize"),
+                crop_value(ox, "DefaultCropOrigin"),
+                crop_value(oy, "DefaultCropOrigin"),
+                crop_value(cw, "DefaultCropSize"),
+                crop_value(ch, "DefaultCropSize"),
             );
             let (ox, oy, cw, ch) = (ox?, oy?, cw?, ch?);
             let active_right = active.x.checked_add(active.width).ok_or_else(|| RawError::malformed("DNG active-area right edge overflow"))?;
@@ -195,6 +208,12 @@ pub(crate) fn decode(t: &Tiff, limits: &Limits) -> Result<Sensor> {
         }
     }
 
+    // DNG 1.6 ProfileGainTableMap: the local tone mapping that phones (Samsung Expert RAW) rely on
+    // for their default look. Without it the rendering is darker in the shadows.
+    if ifd0.has(tag::PROFILE_GAIN_TABLE_MAP) || raw.has(tag::PROFILE_GAIN_TABLE_MAP) {
+        warnings.push("DNG ProfileGainTableMap (local tone mapping) is not applied".to_string());
+    }
+
     let max = ((1u32 << plane.bits) - 1) as f32;
     let linearization = raw.get(tag::LINEARIZATION_TABLE).map(|e| t.uints(e)).filter(|v| !v.is_empty() && v.len() <= 65536);
     let linearization: Option<Vec<u16>> = linearization.map(|v| v.into_iter().map(|x| x.min(65535) as u16).collect());
@@ -225,7 +244,8 @@ pub(crate) fn decode(t: &Tiff, limits: &Limits) -> Result<Sensor> {
     }
 
     let color = color_info(t, &ifd0);
-    if color.calibrations.is_empty() {
+    // A monochrome image has no colour to calibrate: it develops as neutral grey.
+    if color.calibrations.is_empty() && (is_cfa || samples != 1) {
         warnings.push("the DNG has no colour matrix; colours are approximate".to_string());
     }
     let baseline_exposure = t.tag_floats(&ifd0, tag::BASELINE_EXPOSURE).first().copied().unwrap_or(0.0)
@@ -247,9 +267,11 @@ pub(crate) fn decode(t: &Tiff, limits: &Limits) -> Result<Sensor> {
         crop,
         color,
         camera_wb: None,
-        orientation: t.tag_uint(&ifd0, tag::ORIENTATION).map(|o| o as u16).filter(|o| (1..=8).contains(o)).unwrap_or(1),
+        orientation: crate::tiff::orientation(t.tag_uint(&ifd0, tag::ORIENTATION)),
         baseline_exposure: if baseline_exposure.is_finite() { baseline_exposure.clamp(-10.0, 10.0) } else { 0.0 },
         gain_maps,
+        tone_curve: Vec::new(),
+        black_point: 0.0,
         warnings,
     })
 }

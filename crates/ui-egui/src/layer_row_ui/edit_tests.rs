@@ -95,6 +95,7 @@ fn text_name_still_renames_and_mask_double_click_does_not_edit_text() {
     let mut s = session();
     let id = s.execute("type.create", json!({"text": "Hello", "name": "Title"})).unwrap()["layer"].as_u64().unwrap();
     s.execute("layer.layerMask.revealAll", json!({})).unwrap();
+    s.execute("prefs.set", json!({"values": {"tools.doubleClickLayerMaskLaunchesSelectAndMask": false}})).unwrap();
     let mut h = harness(s, 1.0);
     let at = row(&h, id).name.unwrap().center();
     double_click(&mut h, at);
@@ -107,6 +108,53 @@ fn text_name_still_renames_and_mask_double_click_does_not_edit_text() {
     double_click(&mut h, at);
     assert!(h.state().ui.text_edit.is_none());
     assert!(h.state().ui.dialogs.is_empty());
+}
+
+/// With the preference off, double-clicking a pixel mask targets it and opens its settings.
+/// The default preference on launches Select and Mask instead (the test above).
+#[test]
+fn pixel_mask_double_click_with_preference_off_opens_properties() {
+    let mut s = session();
+    let id = s.execute("layer.new.layer", json!({"name": "Ink"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.layerMask.revealAll", json!({})).unwrap();
+    s.execute("prefs.set", json!({"values": {"tools.doubleClickLayerMaskLaunchesSelectAndMask": false}})).unwrap();
+    let mut h = harness(s, 1.0);
+    let masks = crate::mask_thumbs_ui::recorded(&h.ctx, id).unwrap().0;
+    let at = masks.iter().find(|(kind, _)| *kind == crate::mask_thumbs_ui::MaskKind::Pixel).unwrap().1.center();
+    double_click(&mut h, at);
+    assert!(h.state().ui.mask_target, "the mask is targeted");
+    assert!(h.state().ui.panels.properties, "Properties opened");
+    assert!(!h.state().ui.dock.collapsed.contains(&crate::dock::Group::Properties), "Properties un-collapsed");
+    assert!(h.state().ui.dialogs.is_empty(), "no Select and Mask dialog with the preference off");
+}
+
+#[test]
+fn vector_mask_double_click_opens_its_properties() {
+    let mut s = session();
+    let id = s.execute("layer.new.layer", json!({"name": "Vector"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.vectorMask.revealAll", json!({})).unwrap();
+    let mut h = harness(s, 1.0);
+    let masks = crate::mask_thumbs_ui::recorded(&h.ctx, id).unwrap().0;
+    let at = masks.iter().find(|(kind, _)| *kind == crate::mask_thumbs_ui::MaskKind::Vector).unwrap().1.center();
+    double_click(&mut h, at);
+    assert!(h.state().ui.vector_mask_target, "the vector mask is targeted");
+    assert!(h.state().ui.panels.properties, "Properties opened");
+    assert!(!h.state().ui.dock.collapsed.contains(&crate::dock::Group::Properties), "Properties un-collapsed");
+}
+
+#[test]
+fn mask_double_click_launches_select_and_mask_with_preference() {
+    let mut s = session();
+    let id = s.execute("layer.new.layer", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.layerMask.revealAll", json!({})).unwrap();
+    s.execute("prefs.set", json!({"values": {"tools.doubleClickLayerMaskLaunchesSelectAndMask": true}})).unwrap();
+    let mut h = harness(s, 1.0);
+    let masks = crate::mask_thumbs_ui::recorded(&h.ctx, id).unwrap().0;
+    let at = masks.iter().find(|(kind, _)| *kind == crate::mask_thumbs_ui::MaskKind::Pixel).unwrap().1.center();
+    double_click(&mut h, at);
+    assert!(h.state().ui.mask_target);
+    let dialog = h.state().ui.dialogs.last().expect("select and mask dialog should be opened");
+    assert_eq!(dialog.fields.get("__command").and_then(|v| v.as_str()), Some("select.refineEdge"));
 }
 
 #[test]
@@ -126,7 +174,7 @@ fn edit_type_command_rejects_missing_or_non_type_layers_without_changes() {
 }
 
 #[test]
-fn reentering_type_edit_keeps_the_session_and_cancel_restores_cached_pixels() {
+fn layer_reselection_commits_type_edit_and_cancel_preserves_committed_text() {
     let mut s = session();
     let id = s.execute("type.create", json!({"text": "Hello", "size": 48, "x": 100, "y": 180})).unwrap()["layer"].as_u64().unwrap();
     // Stand-in for a PSD's retained Photoshop rendering, displaced from our glyph layout.
@@ -149,10 +197,13 @@ fn reentering_type_edit_keeps_the_session_and_cancel_restores_cached_pixels() {
     let key = h.state().ui.text_edit.as_ref().expect("inline text editor").session.clone();
     h.event(Event::Text("Changed".into()));
     h.run_steps(2);
+    // The first row click commits the edit; the second opens a new session (#5584).
     double_click(&mut h, at);
-    assert_eq!(h.state().ui.text_edit.as_ref().unwrap().session, key);
+    assert_ne!(h.state().ui.text_edit.as_ref().unwrap().session, key);
     assert_eq!(h.state().session.active().unwrap().history.entries().len(), steps + 1);
     crate::type_tool::cancel(h.state_mut());
+    assert_eq!(text(&h, id), "Changed");
+    assert!(h.state_mut().session.undo());
     assert_eq!(text(&h, id), "Hello");
     let st = h.state().session.active().unwrap();
     let LayerContent::Text(t) = &st.doc.layer(LayerId(id)).unwrap().content else { panic!("text") };

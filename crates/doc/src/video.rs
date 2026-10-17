@@ -18,11 +18,14 @@ pub enum VideoSource {
 /// A video layer's frame stack (Layer › Video Layers). The layer's displayed content surface is a
 /// cache of `frames[timeline.current]`, which the engine keeps in sync as the playhead moves.
 ///
-/// Frames are full raster surfaces held in memory. (`.pcraft` persistence of the stack is a
-/// follow-up; a saved document keeps the current frame as the layer's raster content.)
+/// Frames are full raster surfaces held in memory and saved in native documents. The
+/// optional original footage is kept separately from painted frames for comparison/restore.
 #[derive(Clone, Debug)]
 pub struct VideoData {
     pub frames: Vec<Surface>,
+    /// Immutable original footage of a file-backed sequence. COW surfaces share unchanged
+    /// pixel tiles with edited frames; blank video layers have no original source.
+    pub original_frames: Option<Vec<Surface>>,
     pub source: VideoSource,
     pub fps: f32,
     /// Show the altered (painted) frames rather than the original footage.
@@ -31,7 +34,7 @@ pub struct VideoData {
 
 impl VideoData {
     pub fn new(frames: Vec<Surface>, fps: f32) -> Self {
-        VideoData { frames: if frames.is_empty() { Vec::new() } else { frames }, source: VideoSource::Blank, fps, show_altered: true }
+        VideoData { frames, original_frames: None, source: VideoSource::Blank, fps, show_altered: true }
     }
     pub fn len(&self) -> usize {
         self.frames.len()
@@ -45,7 +48,11 @@ impl VideoData {
 // by shape, not contents — enough for change detection.
 impl PartialEq for VideoData {
     fn eq(&self, o: &Self) -> bool {
-        self.frames.len() == o.frames.len() && self.source == o.source && self.fps == o.fps && self.show_altered == o.show_altered
+        self.frames.len() == o.frames.len()
+            && self.original_frames.as_ref().map(Vec::len) == o.original_frames.as_ref().map(Vec::len)
+            && self.source == o.source
+            && self.fps == o.fps
+            && self.show_altered == o.show_altered
     }
 }
 
@@ -68,22 +75,35 @@ pub struct Timeline {
 impl Timeline {
     pub fn new(duration: usize, fps: f32) -> Self {
         let d = duration.max(1);
-        Timeline { fps: if fps > 0.0 { fps } else { 30.0 }, duration: d, current: 0, work_start: 0, work_end: d }
+        Timeline { fps: valid_fps(fps), duration: d, current: 0, work_start: 0, work_end: d }
     }
 
     /// Keep every index inside `0..duration` and the work area non-empty.
     pub fn clamp(&mut self) {
         self.duration = self.duration.max(1);
-        self.fps = if self.fps > 0.0 { self.fps } else { 30.0 };
+        self.fps = valid_fps(self.fps);
         self.current = self.current.min(self.duration - 1);
         self.work_start = self.work_start.min(self.duration - 1);
         self.work_end = self.work_end.clamp(self.work_start + 1, self.duration);
+    }
+
+    /// Move the playhead `delta` frames, stopping at the first and last frame. Saturating, so it's
+    /// safe on any stored timeline, even one loaded with `duration` 0 or `usize::MAX` (#1009).
+    pub fn step(&mut self, delta: i64) {
+        let n = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
+        let moved = if delta < 0 { self.current.saturating_sub(n) } else { self.current.saturating_add(n) };
+        self.current = moved.min(self.duration.saturating_sub(1));
     }
 
     /// Playhead time in seconds.
     pub fn time(&self) -> f32 {
         self.current as f32 / self.fps.max(1e-3)
     }
+}
+
+/// A usable frame rate: positive and finite, else the 30 fps default.
+fn valid_fps(fps: f32) -> f32 {
+    if fps.is_finite() && fps > 0.0 { fps } else { 30.0 }
 }
 
 #[cfg(test)]
@@ -102,6 +122,27 @@ mod tests {
         assert_eq!(t.current, 23);
         assert_eq!(t.work_end, 24);
         assert!((t.time() - 23.0 / 24.0).abs() < 1e-6);
+    }
+
+    /// #1009: stepping never panics or leaves the timeline, whatever was stored.
+    #[test]
+    fn step_saturates_at_both_ends() {
+        let mut t = Timeline::new(3, 24.0);
+        t.step(-1);
+        assert_eq!(t.current, 0);
+        t.step(1);
+        t.step(i64::MAX);
+        assert_eq!(t.current, 2);
+        t.step(i64::MIN);
+        assert_eq!(t.current, 0);
+        for duration in [0, usize::MAX] {
+            let mut t = Timeline { fps: f32::INFINITY, duration, current: usize::MAX, work_start: 0, work_end: 0 };
+            t.step(1);
+            assert_eq!(t.current, duration.saturating_sub(1));
+            t.clamp();
+            assert_eq!(t.fps, 30.0);
+            assert!(t.current < t.duration);
+        }
     }
 
     #[test]

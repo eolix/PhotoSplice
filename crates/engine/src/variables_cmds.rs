@@ -7,6 +7,7 @@
 use std::sync::Arc;
 
 use photosplice_algo::resample::{Resample, resize_surface, translate_surface};
+use photosplice_doc::text::{ParagraphRun, TextRun};
 use photosplice_doc::variables::Value as VarValue;
 use photosplice_doc::{DataSet, DataValue, Document, LayerContent, LayerId, PixelAlign, PixelMethod, VarKind, VariableDef, Variables};
 use serde_json::{Value, json};
@@ -62,7 +63,7 @@ fn kind_json(k: &VarKind) -> Value {
             let align = a[..1].to_lowercase() + &a[1..];
             json!({
                 "type": "pixelReplacement",
-                "method": format!("{method:?}").to_lowercase(),
+                "method": method,
                 "align": align,
                 "clip": clip,
             })
@@ -164,13 +165,22 @@ fn apply_to_doc(doc: &mut Document, vars: &Variables, set: &DataSet) -> Result<(
                 }
             }
             (VarKind::TextReplacement, VarValue::Text(text)) => {
+                let snapshot = doc.clone();
                 if let Some(l) = doc.layer_mut(def.layer)
                     && let LayerContent::Text(t) = &mut l.content
                 {
+                    // As in Photoshop, the new text takes the style of the first character it
+                    // replaces (and its paragraph's settings): clearing the runs fell back to the
+                    // summary style and lost weight, italic, tracking, caps… (#2742).
+                    let style = t.char_runs().into_iter().next().map(|r| r.style).unwrap_or_default();
+                    let para = t.paragraph_runs().into_iter().next().map(|r| r.style).unwrap_or_default();
                     t.text = text.clone();
-                    t.cache = None; // force re-render
-                    t.runs.clear(); // re-flow as one run from the summary style
-                    t.paragraphs.clear();
+                    t.runs = vec![TextRun { len: t.text.len(), style }];
+                    t.paragraphs = vec![ParagraphRun { len: t.text.len(), style: para }];
+                    t.sync_summary();
+                    // The compositor draws a type layer from its cache: clearing it left the
+                    // layer blank until some other edit re-rendered it (#990).
+                    crate::type_cmds::refresh(&snapshot, t);
                 }
             }
             (VarKind::PixelReplacement { method, align, clip }, VarValue::Pixels(path)) => {
@@ -190,7 +200,7 @@ fn replace_pixels(doc: &mut Document, layer: LayerId, path: &str, method: PixelM
     }
     let fmt = doc.pixel_format();
     let bytes = std::fs::read(path).map_err(|e| EngineError::Other(format!("read `{path}`: {e}")))?;
-    let src = photosplice_io::import(path, &bytes).map_err(|e| EngineError::Other(format!("`{path}`: {e}")))?.document;
+    let src = crate::file_cmds::import(path, &bytes)?;
     let img = crate::file_cmds::flattened(&src, fmt);
     let (iw, ih) = (src.size.width.max(1) as f64, src.size.height.max(1) as f64);
     let (tw, th) = (target.width() as f64, target.height() as f64);
@@ -266,18 +276,24 @@ fn resolve_set(s: &Session, p: &Value, cmd: &str) -> Result<(DataSet, usize)> {
 /// variable, else text. The first column may be a data-set name (header empty or `DataSet`).
 fn import_data_sets(s: &mut Session, p: &Value) -> Result<Value> {
     let path = p.get("path").and_then(Value::as_str).ok_or_else(|| bad("file.import.variableDataSets", "need `path`"))?;
-    let delim = p.get("delimiter").and_then(Value::as_str).and_then(|d| d.bytes().next()).unwrap_or(b',');
     let text = std::fs::read_to_string(path).map_err(|e| EngineError::Other(format!("read `{path}`: {e}")))?;
+    import_data_sets_text(s, &text, p)
+}
+
+/// The body of `file.import.variableDataSets` over CSV text already read: automation reads the
+/// file beneath its read root and hands the text over (#3216).
+pub fn import_data_sets_text(s: &mut Session, text: &str, p: &Value) -> Result<Value> {
+    let delim = p.get("delimiter").and_then(Value::as_str).and_then(|d| d.bytes().next()).unwrap_or(b',');
     let vars = s.active().ok_or(EngineError::NoDocument)?.doc.variables.clone();
-    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
-    let header: Vec<String> = lines.next().map(|h| split_csv(h, delim)).unwrap_or_default();
+    let mut records = csv_records(text).filter(|r| !r.trim().is_empty());
+    let header: Vec<String> = records.next().map(|h| split_csv(h, delim)).unwrap_or_default();
     if header.is_empty() {
         return Err(bad("file.import.variableDataSets", "empty CSV"));
     }
     let named = header[0].trim().is_empty() || header[0].eq_ignore_ascii_case("dataset");
     let mut sets = Vec::new();
-    for (row, line) in lines.enumerate() {
-        let cells = split_csv(line, delim);
+    for (row, record) in records.enumerate() {
+        let cells = split_csv(record, delim);
         let name = if named {
             cells.first().cloned().filter(|c| !c.trim().is_empty()).unwrap_or_else(|| format!("Data Set {}", row + 1))
         } else {
@@ -302,45 +318,85 @@ fn import_data_sets(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"imported": n}))
 }
 
+/// Split logical CSV records without changing line endings inside quoted fields.
+fn csv_records(text: &str) -> impl Iterator<Item = &str> {
+    let mut chars = text.char_indices();
+    let mut start = 0;
+    std::iter::from_fn(move || {
+        let mut quoted = false;
+        for (end, c) in chars.by_ref() {
+            if c == '"' {
+                // An escaped quote pair toggles twice, leaving the surrounding state intact.
+                quoted = !quoted;
+            } else if c == '\n' && !quoted {
+                let record = text.get(start..end)?;
+                start = end.saturating_add(1);
+                return Some(record.strip_suffix('\r').unwrap_or(record));
+            }
+        }
+        let record = text.get(start..)?;
+        start = text.len();
+        (!record.is_empty()).then_some(record)
+    })
+}
+
 /// Minimal CSV field splitter with double-quote support.
 fn split_csv(line: &str, delim: u8) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut in_q = false;
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
+    let delim = char::from(delim);
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
         if in_q {
-            if c == b'"' {
-                if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+            if c == '"' {
+                if chars.peek() == Some(&'"') {
                     cur.push('"');
-                    i += 1;
+                    let _ = chars.next();
                 } else {
                     in_q = false;
                 }
             } else {
-                cur.push(c as char);
+                cur.push(c);
             }
-        } else if c == b'"' {
+        } else if c == '"' {
             in_q = true;
         } else if c == delim {
             out.push(std::mem::take(&mut cur));
         } else {
-            cur.push(c as char);
+            cur.push(c);
         }
-        i += 1;
     }
     out.push(cur);
     out
 }
 
 /// Apply each data set in turn and export the flattened document, restoring the original after.
-/// `{dir, format?("png"), dataSets?[names]}` → `{files:[…]}`.
+/// `{dir, format?("png"), dataSets?[names]}` → `{files:[…],count}`.
 fn export_as_files(s: &mut Session, p: &Value) -> Result<Value> {
-    let dir = p.get("dir").and_then(Value::as_str).ok_or_else(|| bad("file.export.dataSetsAsFiles", "need `dir`"))?;
+    let dir = p.get("dir").and_then(Value::as_str).ok_or_else(|| bad("file.export.dataSetsAsFiles", "need `dir`"))?.to_string();
+    // The directory appears only once the batch has been planned, as it always did, so a batch
+    // rejected for colliding names still leaves no directory behind.
+    let mut made_dir = false;
+    let names = export_data_sets_with(s, p, |name, bytes| {
+        if !made_dir {
+            std::fs::create_dir_all(&dir).map_err(|e| EngineError::Other(format!("mkdir `{dir}`: {e}")))?;
+            made_dir = true;
+        }
+        crate::file_cmds::write_file(&format!("{dir}/{name}"), bytes)
+    })?;
+    let files: Vec<String> = names.iter().map(|name| format!("{dir}/{name}")).collect();
+    let count = files.len();
+    Ok(json!({"files": files, "count": count}))
+}
+
+/// The bodies of `file.export.dataSetsAsFiles`, streamed to `write` as a single-component
+/// filename plus its bytes: one flattened file per data set. The whole batch is planned first,
+/// so colliding names are rejected before any file is written, and automation writes exactly
+/// these bytes beneath its write root (#3216) — the two paths cannot drift. Returns the
+/// filenames written, in order.
+pub fn export_data_sets_with(s: &Session, p: &Value, mut write: impl FnMut(&str, &[u8]) -> Result<()>) -> Result<Vec<String>> {
     let format = p.get("format").and_then(Value::as_str).unwrap_or("png");
-    std::fs::create_dir_all(dir).map_err(|e| EngineError::Other(format!("mkdir `{dir}`: {e}")))?;
     let st = s.active().ok_or(EngineError::NoDocument)?;
     let original = st.doc.clone();
     let vars = original.variables.clone();
@@ -352,19 +408,32 @@ fn export_as_files(s: &mut Session, p: &Value) -> Result<Value> {
     // Filename template: `{name}` (sanitised data-set name), `{index}` (1-based). Default `{name}`.
     let template = p.get("naming").and_then(Value::as_str).unwrap_or("{name}");
     let doc_stem = original.name.rsplit_once('.').map_or(original.name.as_str(), |(a, _)| a).to_string();
-    let mut files = Vec::new();
+    // Plan the whole batch before writing: sanitised names or a constant template may collide.
+    // Match the case-insensitive comparison used by the other batch exporters.
+    let mut claimed = std::collections::HashMap::new();
+    let mut names = Vec::new();
     for (n, set) in sets.iter().enumerate() {
-        let mut doc = (*original).clone();
-        apply_to_doc(&mut doc, &vars, set)?;
         let safe: String = set.name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
         let stem = template.replace("{name}", &safe).replace("{index}", &format!("{:03}", n + 1)).replace("{document}", &doc_stem);
-        let path = format!("{dir}/{stem}.{format}");
+        let name = format!("{stem}.{format}");
+        if let Some(first) = claimed.insert(name.to_lowercase(), &set.name) {
+            return Err(bad(
+                "file.export.dataSetsAsFiles",
+                format!("data sets `{first}` and `{}` resolve to the same output `{name}`; include {{index}} in `naming` to use distinct filenames", set.name),
+            ));
+        }
+        names.push(name);
+    }
+    let mut written = Vec::new();
+    for (set, name) in sets.iter().zip(&names) {
+        let mut doc = (*original).clone();
+        apply_to_doc(&mut doc, &vars, set)?;
         let opts = photosplice_io::ExportOptions::default();
         let bytes = photosplice_io::export(&doc, format, &opts).map(|r| r.bytes).map_err(|e| EngineError::Other(format!("export `{}`: {e}", set.name)))?;
-        crate::file_cmds::write_file(&path, &bytes)?;
-        files.push(path);
+        write(name, &bytes)?;
+        written.push(name.clone());
     }
-    Ok(json!({"files": files, "count": files.len()}))
+    Ok(written)
 }
 
 fn list(s: &mut Session) -> Result<Value> {
@@ -423,7 +492,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "file.export.dataSetsAsFiles",
             "Data Sets as Files…",
             &["File", "Export"],
-            "{dir, format?:png, dataSets?[names], naming?:\"{name}|{index}|{document}\"} → {files,count}: apply each data set and export the flattened document",
+            "{dir, format?:png, dataSets?[names], naming?:\"{name}|{index}|{document}\"} → {files,count}: apply each data set and export the flattened document; colliding filenames are rejected before writing (include {index} to disambiguate)",
             |s, p| export_as_files(s, p)
         ),
         CommandSpec {

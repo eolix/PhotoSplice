@@ -73,6 +73,10 @@ impl ThemeKind {
             ThemeKind::Ocean => "ocean",
         }
     }
+    /// Photoshop-grammar layout (tab strips, flat panels): every PhotoSplice palette has it.
+    pub fn is_pro(self) -> bool {
+        Tokens::for_kind(self).pro
+    }
     pub fn next(self) -> Self {
         let i = Self::ALL.iter().position(|k| *k == self).unwrap_or(0);
         Self::ALL[(i + 1) % Self::ALL.len()]
@@ -215,13 +219,22 @@ pub struct Tokens {
     pub bevel: bool,
     /// Pro (Photoshop-grammar) layout: tab strips, flat panels, checkboxes, pill buttons.
     pub pro: bool,
+    /// Toolbar colour chips are large and round, stacked, with the colour buttons below (Studio).
+    pub round_chips: bool,
     /// Panel tab-strip background (Pro).
     pub tab_strip: Color32,
     /// Selected list row (layers, history).
     pub row_selected: Color32,
+    /// Dims the main window behind a modal that takes all input (Camera Raw).
+    pub scrim: Color32,
 }
 
 impl Tokens {
+    /// Tool outlines need contrast on arbitrary document pixels, independently of UI theme.
+    pub(crate) fn cursor_outline() -> [Color32; 2] {
+        [Color32::from_black_alpha(160), Color32::from_white_alpha(235)]
+    }
+
     /// Derive every token from the palette's bases, the way PhotoSplice does: hover and active
     /// fills mix toward the text colour so they lift on dark palettes and deepen on light ones,
     /// and muted text mixes back toward the panel.
@@ -264,6 +277,9 @@ impl Tokens {
             pro: true,
             tab_strip: mix(b.panel, 0x000000, 0.18),
             row_selected: mix(b.panel, b.text, 0.16),
+            // One square chip pair in the single tool column (see `panels::toolbar`).
+            round_chips: false,
+            scrim: Color32::from_black_alpha(110),
         }
     }
 
@@ -293,16 +309,71 @@ impl Tokens {
             L::Blue => 0x3b6699,
             L::Violet => 0x6f4c99,
             L::Gray => 0x6b6b6b,
+            L::Seafoam => 0x2f7f7a,
+            L::Indigo => 0x4a46a0,
+            L::Magenta => 0x9c2f6a,
+            L::Fuchsia => 0x8a2f94,
         };
         Some(if self.dark() { mix(rgb, rgb, 0.0) } else { mix(rgb, 0xffffff, 0.55) })
+    }
+
+    /// A colour label's menu swatch (a recognisable hue on every palette) and its Layers-panel
+    /// eye-column tint ([`Self::label_color`], palette-aware). `None` keeps the normal row surface.
+    pub fn layer_label_colors(&self, label: photosplice_doc::LabelColor) -> Option<(Color32, Color32)> {
+        use photosplice_doc::LabelColor as L;
+        let swatch: u32 = match label {
+            L::None => return None,
+            L::Red => 0xFC5D5B,
+            L::Orange => 0xF79744,
+            L::Yellow => 0xDCD64B,
+            L::Green => 0x85DC6A,
+            L::Seafoam => 0x1C8488,
+            L::Blue => 0x78ADF6,
+            L::Indigo => 0x544BE7,
+            L::Magenta => 0xCC1A7E,
+            L::Fuchsia => 0xB014C0,
+            L::Violet => 0x9176D5,
+            L::Gray => 0x9C9C9C,
+        };
+        Some((rgb(swatch), self.label_color(label)?))
+    }
+
+    /// The eye icon's colour over a labelled eye cell: light on the dark tints, the text colour on
+    /// the light ones.
+    pub fn layer_label_icon(&self, label: photosplice_doc::LabelColor) -> Color32 {
+        if label == photosplice_doc::LabelColor::None {
+            self.icon
+        } else if self.dark() {
+            Color32::from_gray(226)
+        } else {
+            self.text
+        }
+    }
+
+    /// The background behind selected text in a text field: the palette's soft accent rather than
+    /// egui's default blue. Scoped to text fields by [`crate::widgets::text_field`], because
+    /// `Visuals::selection` also fills selected list rows and slider trails, which keep the theme's.
+    pub fn field_selection(&self) -> Color32 {
+        self.accent_soft
     }
 }
 
 /// Register Inter (UI) and JetBrains Mono (numbers) plus named weights.
 pub fn install_fonts(ctx: &egui::Context) {
-    set_fonts(ctx, 1.0);
+    set_fonts(ctx, font_scale_now(ctx));
     // Japanese / Chinese / Korean system fonts are registered on demand (cjk_fonts.rs).
     crate::cjk_fonts::install(ctx);
+}
+
+/// [`install_fonts`] with the CJK and other-script fallback fonts taken from `cjk` (tests swap the sources).
+pub fn install_fonts_with(ctx: &egui::Context, cjk: crate::cjk_fonts::Sources) {
+    set_fonts(ctx, font_scale_now(ctx));
+    crate::cjk_fonts::install_with(ctx, cjk);
+}
+
+/// The UI Font Size scale in effect, so a re-install (a language change) keeps it.
+fn font_scale_now(ctx: &egui::Context) -> f32 {
+    ctx.data(|d| d.get_temp::<f32>(egui::Id::new("ui-font-scale"))).unwrap_or(1.0)
 }
 
 /// Preferences › Interface › UI Font Size: every glyph drawn `scale` times its nominal size
@@ -323,19 +394,30 @@ fn set_fonts(ctx: &egui::Context, scale: f32) {
     for f in fonts.font_data.values_mut() {
         Arc::make_mut(f).tweak.scale = scale;
     }
-    let add = |fonts: &mut FontDefinitions, name: &str, bytes: &'static [u8]| {
+    // The bundled fonts are inflated on first use (photosplice_text::fonts). Should one ever fail
+    // to inflate (empty bytes), it is left out and egui's default fonts draw that text.
+    let add = |fonts: &mut FontDefinitions, name: &str, bytes: &'static [u8]| -> Option<String> {
+        if bytes.is_empty() {
+            log::error!("bundled font {name} is unavailable; using the default UI font");
+            return None;
+        }
         fonts.font_data.insert(name.to_owned(), Arc::new(FontData::from_static(bytes).tweak(tweak.clone())));
+        Some(name.to_owned())
     };
-    add(&mut fonts, "Inter", photosplice_text::fonts::INTER_REGULAR);
-    add(&mut fonts, "Inter-Medium", photosplice_text::fonts::INTER_MEDIUM);
-    add(&mut fonts, "Inter-SemiBold", photosplice_text::fonts::INTER_SEMIBOLD);
-    add(&mut fonts, "JetBrainsMono", photosplice_text::fonts::JETBRAINS_MONO_REGULAR);
-    fonts.families.entry(FontFamily::Proportional).or_default().insert(0, "Inter".to_owned());
-    fonts.families.entry(FontFamily::Monospace).or_default().insert(0, "JetBrainsMono".to_owned());
+    let inter = add(&mut fonts, "Inter", photosplice_text::fonts::INTER_REGULAR.as_slice());
+    let medium = add(&mut fonts, "Inter-Medium", photosplice_text::fonts::INTER_MEDIUM.as_slice());
+    let semibold = add(&mut fonts, "Inter-SemiBold", photosplice_text::fonts::INTER_SEMIBOLD.as_slice());
+    let mono = add(&mut fonts, "JetBrainsMono", photosplice_text::fonts::JETBRAINS_MONO_REGULAR.as_slice());
+    if let Some(inter) = inter {
+        fonts.families.entry(FontFamily::Proportional).or_default().insert(0, inter);
+    }
+    if let Some(mono) = mono {
+        fonts.families.entry(FontFamily::Monospace).or_default().insert(0, mono);
+    }
     // Named weights fall back to the default stack for missing glyphs.
-    let fallback: Vec<String> = fonts.families[&FontFamily::Proportional].clone();
-    for (fam, primary) in [("medium", "Inter-Medium"), ("semibold", "Inter-SemiBold")] {
-        let mut stack = vec![primary.to_owned()];
+    let fallback: Vec<String> = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    for (fam, primary) in [("medium", medium), ("semibold", semibold)] {
+        let mut stack: Vec<String> = primary.into_iter().collect();
         stack.extend(fallback.iter().cloned());
         fonts.families.insert(FontFamily::Name(fam.into()), stack);
     }
@@ -354,6 +436,9 @@ pub fn mono(size: f32) -> FontId {
 
 /// Apply a theme to egui's global style and publish its tokens.
 pub fn apply(ctx: &egui::Context, kind: ThemeKind) {
+    // Keep native windows at SystemDefault so macOS continues reporting OS appearance changes,
+    // including when an integration or restored egui state pinned its own theme preference.
+    ctx.set_theme(egui::ThemePreference::System);
     let t = Tokens::for_kind(kind);
     ctx.data_mut(|d| d.insert_temp(egui::Id::new("photosplice-theme"), t));
     // The system title bar follows: dark under the dark themes on Windows, and the Adwaita frame
@@ -424,9 +509,22 @@ pub fn apply(ctx: &egui::Context, kind: ThemeKind) {
         s.visuals.indent_has_left_vline = false;
         s.interaction.tooltip_delay = TOOLTIP_DELAY;
         // Thin overlay scrollbars that appear on hover (Photoshop/macOS style).
-        s.spacing.scroll = if t.bevel { egui::style::ScrollStyle::solid() } else { egui::style::ScrollStyle::thin() };
+        // Thin bars stay visible, including while the pointer is on them. The stock thin
+        // style fades the handle to the same opacity as the track, so the thumb disappears (#4611).
+        let mut scroll = if t.bevel { egui::style::ScrollStyle::solid() } else { egui::style::ScrollStyle::thin() };
+        if scroll.floating {
+            scroll.interact_handle_opacity = 1.0;
+            scroll.interact_background_opacity = 0.4;
+            scroll.floating_width = 4.0;
+        }
+        s.spacing.scroll = scroll;
         s.spacing.tooltip_width = 280.0;
     });
+    // egui selects its style branch using OS appearance, independently of PhotoSplice's fixed
+    // Dark/Light mode or platform appearance service. Both branches need the selected palette.
+    let style = ctx.global_style();
+    ctx.set_style_of(egui::Theme::Light, Arc::clone(&style));
+    ctx.set_style_of(egui::Theme::Dark, style);
 }
 
 /// Seconds the pointer rests on a control before its tooltip shows.
@@ -455,6 +553,56 @@ mod tests {
             let cmds = out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.commands.clone()).unwrap_or_default();
             let sent = cmds.iter().any(|c| *c == egui::ViewportCommand::SetTheme(want));
             assert_eq!(sent, !cfg!(target_os = "macos"), "{kind:?}: {cmds:?}");
+        }
+    }
+
+    #[test]
+    fn field_selection_is_the_soft_accent() {
+        // A text field's selection is a subtle shade, not a second full-strength accent.
+        for kind in ThemeKind::ALL {
+            let t = Tokens::for_kind(kind);
+            assert_eq!(t.field_selection(), t.accent_soft, "{kind:?}");
+            assert_ne!(t.field_selection(), t.accent, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn every_palette_keeps_complete_egui_styles_when_the_os_changes() {
+        for kind in ThemeKind::ALL {
+            let ctx = egui::Context::default();
+            ctx.run_ui(egui::RawInput { system_theme: Some(egui::Theme::Dark), ..Default::default() }, |ui| apply(ui.ctx(), kind)).textures_delta.clear();
+            let expected = ctx.global_style();
+            for appearance in [Some(egui::Theme::Light), Some(egui::Theme::Dark), None] {
+                ctx.run_ui(egui::RawInput { system_theme: appearance, ..Default::default() }, |_| {}).textures_delta.clear();
+                assert_eq!(Tokens::get(&ctx), Tokens::for_kind(kind));
+                assert_eq!(ctx.global_style(), expected, "{kind:?} changed with {appearance:?}");
+                assert_eq!(ctx.style_of(egui::Theme::Light), expected);
+                assert_eq!(ctx.style_of(egui::Theme::Dark), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn applying_a_palette_clears_a_pinned_native_appearance_preference() {
+        for pinned in [egui::Theme::Light, egui::Theme::Dark] {
+            let ctx = egui::Context::default();
+            ctx.set_theme(pinned);
+            apply(&ctx, ThemeKind::Slate);
+            assert_eq!(ctx.options(|o| o.theme_preference), egui::ThemePreference::System);
+        }
+    }
+
+    #[test]
+    fn layer_labels_tint_the_eye_column_and_keep_the_icon_readable() {
+        use photosplice_doc::LabelColor;
+        for kind in ThemeKind::ALL {
+            let t = Tokens::for_kind(kind);
+            assert_eq!(t.layer_label_colors(LabelColor::None), None);
+            assert_eq!(t.layer_label_icon(LabelColor::None), t.icon);
+            for label in LabelColor::ALL.into_iter().filter(|l| *l != LabelColor::None) {
+                let (_, eye) = t.layer_label_colors(label).expect("a labelled layer has colours");
+                assert_eq!(Some(eye), t.label_color(label), "{kind:?} {label:?}");
+            }
         }
     }
 
@@ -602,7 +750,8 @@ pub mod live {
                 danger,
                 warning,
                 tab_strip,
-                row_selected
+                row_selected,
+                scrim
             );
         }
         unknown

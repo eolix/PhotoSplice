@@ -52,6 +52,23 @@ pub(crate) fn clip(buf: &mut Buffer) {
     }
 }
 
+/// Rounds `buf` (screen RGB, unclipped) to the document's `q` levels on its stored L, a, b,
+/// where Reference rounds a Lab document after each adjustment layer: rounding the screen colour
+/// instead moved out-of-gamut colours by a level of L (an inverted L 153 came out 103, not 102).
+/// Alpha is rounded as is.
+pub(crate) fn quantize(buf: &mut Buffer, q: f32) {
+    let step = |v: f32| (v * q + 0.5).floor() / q;
+    for p in &mut buf.px {
+        p[3] = step(p[3]);
+        if p[3] <= 0.0 {
+            continue;
+        }
+        let lab = srgb_to_lab([p[0], p[1], p[2]]);
+        let n = [lab[0] / 100.0, (lab[1] + 128.0) / 255.0, (lab[2] + 128.0) / 255.0].map(step);
+        p[..3].copy_from_slice(&lab_to_srgb_unclamped([n[0] * 100.0, n[1] * 255.0 - 128.0, n[2] * 255.0 - 128.0]));
+    }
+}
+
 /// Applies a [`native`] adjustment to `buf` (screen RGB) on its L, a, b.
 pub(crate) fn apply(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth: photosplice_color::SampleType) {
     let ident: Vec<f32> = (0..LUT_SIZE).map(|k| k as f32 / (LUT_SIZE - 1) as f32).collect();

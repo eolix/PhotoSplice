@@ -54,6 +54,20 @@ pub fn parse_tysh(data: &[u8]) -> Option<TySh> {
     Some(TySh { transform: Affine { m }, text: text.descriptor, warp, bounds })
 }
 
+/// `tysh` moved by (`dx`, `dy`): only the transform's translation changes. The text, its styles,
+/// the warp and the trailing bounds (which are in text space) stay byte for byte, so a moved
+/// Photoshop type layer keeps everything Photoshop wrote. `None` when the block is too short.
+pub fn translate_tysh(tysh: &[u8], dx: f64, dy: f64) -> Option<Vec<u8>> {
+    let mut out = tysh.to_vec();
+    // Version (2 bytes), then xx, xy, yx, yy, tx, ty as big-endian f64: tx at 34, ty at 42.
+    for (at, d) in [(34, dx), (42, dy)] {
+        let b = out.get_mut(at..at + 8)?;
+        let v = f64::from_be_bytes(b.try_into().ok()?) + d;
+        b.copy_from_slice(&v.to_be_bytes());
+    }
+    Some(out)
+}
+
 /// Serializes a `TySh` block.
 pub fn write_tysh(t: &TySh) -> Vec<u8> {
     let mut v = 1u16.to_be_bytes().to_vec();
@@ -92,8 +106,8 @@ fn enum_value(d: &Descriptor, key: &str) -> Option<String> {
 
 fn dnum(v: Option<&D>) -> Option<f64> {
     match v {
-        Some(D::Double(x)) => Some(*x),
-        Some(D::UnitFloat { value, .. }) => Some(*value),
+        Some(D::Double(x)) if x.is_finite() => Some(*x),
+        Some(D::UnitFloat { value, .. }) if value.is_finite() => Some(*value),
         Some(D::Integer(i)) => Some(f64::from(*i)),
         _ => None,
     }
@@ -134,18 +148,21 @@ pub fn txt2_object_count(data: &[u8]) -> Option<usize> {
     parse_txt2(data)?.path(&["1", "1"]).and_then(E::as_array).map(<[E]>::len)
 }
 
-/// A `TySh` block's `TextIndex`: its text object in the document's `Txt2`.
+/// A `TySh` block's `TextIndex`: its text object in the document's `Txt2`, when within
+/// `0..=`[`MAX_TEXT_INDEX`] (a crafted file can name object `i32::MAX`; such a layer is
+/// numbered afresh on export).
 pub fn text_index(tysh: &[u8]) -> Option<i64> {
     match parse_tysh(tysh)?.text.get("TextIndex") {
-        Some(D::Integer(i)) => Some(i64::from(*i)),
+        Some(D::Integer(i)) if (0..=MAX_TEXT_INDEX).contains(i) => Some(i64::from(*i)),
         _ => None,
     }
 }
 
 /// `tysh` with its `TextIndex` set to `index`: the integer patched in place (the block keeps
-/// every other byte), else the block rewritten. `None` when it doesn't parse.
-pub fn set_text_index(tysh: &[u8], index: i64) -> Option<Vec<u8>> {
-    let value = i32::try_from(index).ok()?;
+/// every other byte), else the block rewritten. `None` when it doesn't parse or `index` is not
+/// an `i32` (any integer type converts, so callers pass `usize`-derived `i64`s or `i32`s alike).
+pub fn set_text_index(tysh: &[u8], index: impl Into<i64>) -> Option<Vec<u8>> {
+    let value = i32::try_from(index.into()).ok()?;
     const KEY: &[u8] = b"\0\0\0\x09TextIndexlong";
     let mut hits = tysh.windows(KEY.len()).enumerate().filter(|(_, w)| *w == KEY).map(|(i, _)| i);
     if let (Some(at), None) = (hits.next(), hits.next()) {
@@ -383,7 +400,7 @@ pub fn apply_txt2_frame(layer: &mut TextLayer, tysh: &[u8], txt2: &E) {
     let m = arr_f(frame.path(&["2", "2"]));
     let matrix = if m.len() == 6 && m.iter().all(|v| v.is_finite()) { Affine { m: [m[0], m[1], m[2], m[3], m[4], m[5]] } } else { Affine::IDENTITY };
     let at = match layer.shape {
-        TextShape::Point => {
+        TextShape::Point | TextShape::Path { .. } => {
             let p = arr_f(frame.get("0"));
             if p.len() == 2 && p.iter().all(|v| v.is_finite()) { Affine::translate(p[0], p[1]) } else { Affine::IDENTITY }
         }
@@ -396,7 +413,7 @@ pub fn apply_txt2_frame(layer: &mut TextLayer, tysh: &[u8], txt2: &E) {
     // The frame's origin (point text: the anchor; box text: the box's top left) must land in the
     // text-space `bounds` beside it, and not already be there without the frame.
     let origin = match layer.shape {
-        TextShape::Point => Point::new(0.0, 0.0),
+        TextShape::Point | TextShape::Path { .. } => Point::new(0.0, 0.0),
         TextShape::Box { .. } => {
             let b = engine_data(&t.text)
                 .map(|e| {
@@ -855,9 +872,11 @@ fn txt2_runs(txt2: &E, entries: &[E], kind: RunKind, original: &[u8], written: &
     (sum == total).then_some(out)
 }
 
-/// Applies the automatic kerning modes that Photoshop keeps only in `Txt2` (EngineData writes
-/// Optical and "0" alike as `AutoKerning true`) to `layer`, read from `tysh`. Only when the
-/// layer's `TextIndex` entry still holds the layer's text (an edit elsewhere leaves `Txt2`
+/// Applies what Photoshop keeps only in `Txt2` to `layer`, read from `tysh`: the automatic
+/// kerning modes (EngineData writes Optical and "0" alike as `AutoKerning true`) and the
+/// OpenType settings besides (discretionary) ligatures: stylistic sets, contextual alternates,
+/// swashes and the rest ([`TXT2_FEATURES`]), which Photoshop leaves out of EngineData. Only when
+/// the layer's `TextIndex` entry still holds the layer's text (an edit elsewhere leaves `Txt2`
 /// stale).
 ///
 /// Observed layout: `Txt2 /1` is the list of text objects; an object's `/0` is its text model
@@ -980,7 +999,11 @@ pub fn text_layer_from_tysh(data: &[u8], dpi: f32) -> Option<TextLayer> {
         Some("AnSt" | "antiAliasStrong") => AntiAlias::Strong,
         Some("antiAliasPlatformGray") => AntiAlias::Windows,
         Some("antiAliasPlatformLCD") => AntiAlias::WindowsLcd,
-        _ => AntiAlias::Smooth,
+        Some(_) => AntiAlias::Smooth,
+        // No `AntA`: the engine data's mode says it.
+        None => {
+            engine_data(&t.text).and_then(|e| e.path(&["EngineDict", "AntiAlias"]).and_then(E::as_f64)).and_then(engine_antialias).unwrap_or(AntiAlias::Smooth)
+        }
     };
     if let Some(w) = &t.warp {
         let style = enum_value(w, "warpStyle").unwrap_or_else(|| "warpNone".into());
@@ -994,7 +1017,7 @@ pub fn text_layer_from_tysh(data: &[u8], dpi: f32) -> Option<TextLayer> {
             });
         }
     }
-    let k = 72.0 / if dpi > 0.0 { dpi } else { 72.0 };
+    let k = 72.0 / if dpi.is_finite() && dpi > 0.0 { dpi } else { 72.0 };
     if let Some(e) = engine_data(&t.text) {
         // Without an `Ornt` key, the engine data's writing direction says it (2 = vertical).
         if enum_value(&t.text, "Ornt").is_none() && e.path(&["EngineDict", "Rendered", "Shapes", "WritingDirection"]).and_then(E::as_f64) == Some(2.0) {
@@ -1046,7 +1069,6 @@ fn legacy_point_origin(t: &TySh) -> Option<[f64; 2]> {
     (bounds[0].abs().max(bounds[1].abs()) > 1024.0 && origin_distance > 4096.0 && shifted_distance < origin_distance).then_some([bounds[0], bounds[1]])
 }
 
-/// The `[left, top, right, bottom]` of a `TySh` text-descriptor rectangle (`bounds`).
 /// The text-space box (`bounds`: left, top, right, bottom) a `TySh` records for its text, while
 /// that text is still `text` (`None` once the layer's text differs, or without a box). Reference
 /// warps type over this box: the advance width across, and down from a font-wide ascent to the
@@ -1062,6 +1084,8 @@ pub fn tysh_text_box(tysh: &[u8], text: &str) -> Option<[f32; 4]> {
     descriptor_rect(&t.text, "bounds").map(|b| b.map(|v| v as f32))
 }
 
+/// The `[left, top, right, bottom]` of a `TySh` text-descriptor rectangle (`key`: `bounds`,
+/// `boundingBox`).
 fn descriptor_rect(text: &Descriptor, key: &str) -> Option<[f64; 4]> {
     let D::Descriptor(rect) = text.get(key)? else { return None };
     let b = [dnum(rect.get("Left"))?, dnum(rect.get("Top "))?, dnum(rect.get("Rght"))?, dnum(rect.get("Btom"))?];
@@ -1230,6 +1254,8 @@ fn lookup<'a>(run: &'a E, base: Option<&'a E>, key: &str) -> Option<&'a E> {
 pub(crate) fn char_style(base: Option<&E>, d: &E, fonts: &[String], k: f32) -> CharStyle {
     let g = |key: &str| lookup(d, base, key);
     let num = |key: &str| g(key).and_then(E::as_f64);
+    // An f32 that a huge finite f64 overflowed to infinity is dropped too.
+    let numk = |key: &str, k: f32| num(key).map(|v| v as f32 * k).filter(|v| v.is_finite());
     let flag = |key: &str| g(key).and_then(E::as_bool);
     let mut s = CharStyle::default();
     if let Some(ps) = g("Font").and_then(E::as_i64).and_then(|i| usize::try_from(i).ok()).and_then(|i| fonts.get(i)) {
@@ -1239,18 +1265,18 @@ pub(crate) fn char_style(base: Option<&E>, d: &E, fonts: &[String], k: f32) -> C
         s.italic = r.italic;
         s.postscript_name = Some(ps.clone());
     }
-    if let Some(v) = num("FontSize") {
-        s.size_pt = v as f32 * k;
+    if let Some(v) = numk("FontSize", k) {
+        s.size_pt = v;
     }
     if flag("AutoLeading") == Some(false)
-        && let Some(v) = num("Leading")
+        && let Some(v) = numk("Leading", k)
     {
-        s.leading_pt = Some(v as f32 * k);
+        s.leading_pt = Some(v);
     }
-    s.tracking = num("Tracking").unwrap_or(0.0) as f32;
-    s.baseline_shift_pt = num("BaselineShift").unwrap_or(0.0) as f32 * k;
-    s.horizontal_scale = num("HorizontalScale").unwrap_or(1.0) as f32;
-    s.vertical_scale = num("VerticalScale").unwrap_or(1.0) as f32;
+    s.tracking = numk("Tracking", 1.0).unwrap_or(0.0);
+    s.baseline_shift_pt = numk("BaselineShift", k).unwrap_or(0.0);
+    s.horizontal_scale = numk("HorizontalScale", 1.0).unwrap_or(1.0);
+    s.vertical_scale = numk("VerticalScale", 1.0).unwrap_or(1.0);
     s.faux_bold = flag("FauxBold").unwrap_or(false);
     s.faux_italic = flag("FauxItalic").unwrap_or(false);
     s.underline = flag("Underline").unwrap_or(false);
@@ -1263,7 +1289,7 @@ pub(crate) fn char_style(base: Option<&E>, d: &E, fonts: &[String], k: f32) -> C
         }
     }
     s.kerning = if flag("AutoKerning") == Some(false) { Kerning::Off } else { Kerning::Metrics };
-    s.kern = num("Kerning").filter(|v| v.is_finite()).unwrap_or(0.0) as f32;
+    s.kern = numk("Kerning", 1.0).unwrap_or(0.0);
     s.caps = match g("FontCaps").and_then(E::as_i64) {
         Some(1) => Caps::SmallCaps,
         Some(2) => Caps::AllCaps,
@@ -1276,7 +1302,10 @@ pub(crate) fn char_style(base: Option<&E>, d: &E, fonts: &[String], k: f32) -> C
         _ => photosplice_doc::text::BaselinePosition::Normal,
     };
     if let Some(c) = g("FillColor") {
-        let v = arr_f(c.get("Values"));
+        // Positions matter (alpha, then the channels): a non-finite entry voids the colour.
+        let v: Vec<f64> = c.get("Values").and_then(E::as_array).map(|a| a.iter().filter_map(E::as_f64).collect()).unwrap_or_default();
+        let n_raw = c.get("Values").and_then(E::as_array).map_or(0, <[E]>::len);
+        let v = if v.len() == n_raw && v.iter().all(|x| (*x as f32).is_finite()) { v } else { Vec::new() };
         let a = v.first().copied().unwrap_or(1.0) as f32;
         s.color = match v.len() {
             5 => Color { mode: ColorMode::Cmyk, c: [v[1] as f32, v[2] as f32, v[3] as f32, v[4] as f32], alpha: a },
@@ -1290,6 +1319,7 @@ pub(crate) fn char_style(base: Option<&E>, d: &E, fonts: &[String], k: f32) -> C
 
 pub(crate) fn para_style(base: Option<&E>, d: &E, k: f32) -> ParagraphStyle {
     let num = |key: &str| lookup(d, base, key).and_then(E::as_f64);
+    let numk = |key: &str, k: f32| num(key).map(|v| v as f32 * k).filter(|v| v.is_finite());
     ParagraphStyle {
         align: match num("Justification").map(|v| v as i64) {
             Some(1) => TextAlign::Right,
@@ -1300,12 +1330,12 @@ pub(crate) fn para_style(base: Option<&E>, d: &E, k: f32) -> ParagraphStyle {
             Some(6) => TextAlign::JustifyAll,
             _ => TextAlign::Left,
         },
-        first_line_indent_pt: num("FirstLineIndent").unwrap_or(0.0) as f32 * k,
-        start_indent_pt: num("StartIndent").unwrap_or(0.0) as f32 * k,
-        end_indent_pt: num("EndIndent").unwrap_or(0.0) as f32 * k,
-        space_before_pt: num("SpaceBefore").unwrap_or(0.0) as f32 * k,
-        space_after_pt: num("SpaceAfter").unwrap_or(0.0) as f32 * k,
-        auto_leading: num("AutoLeading").unwrap_or(1.2) as f32,
+        first_line_indent_pt: numk("FirstLineIndent", k).unwrap_or(0.0),
+        start_indent_pt: numk("StartIndent", k).unwrap_or(0.0),
+        end_indent_pt: numk("EndIndent", k).unwrap_or(0.0),
+        space_before_pt: numk("SpaceBefore", k).unwrap_or(0.0),
+        space_after_pt: numk("SpaceAfter", k).unwrap_or(0.0),
+        auto_leading: numk("AutoLeading", 1.0).unwrap_or(1.2),
         hyphenate: lookup(d, base, "AutoHyphenate").and_then(E::as_bool).unwrap_or(false),
         every_line_composer: lookup(d, base, "EveryLineComposer").and_then(E::as_bool).unwrap_or(true),
         ..Default::default()
@@ -1520,6 +1550,8 @@ pub(crate) fn style_sheet_data(s: &CharStyle, font: usize, k: f32) -> E {
         ("Strikethrough".into(), E::Bool(s.strikethrough)),
         ("Ligatures".into(), E::Bool(s.ligatures)),
         ("DLigatures".into(), E::Bool(s.discretionary_ligatures)),
+        // Some readers lay out edited text without painting it unless its fill is enabled.
+        ("FillFlag".into(), E::Bool(true)),
         ("FillColor".into(), E::Dict(vec![("Type".into(), E::Int(color_type)), ("Values".into(), E::Array(values))])),
         // Some readers lay edited text out without painting it unless its fill is on
         // (storytold/photocraft@7bb971f7).
@@ -1564,9 +1596,178 @@ pub(crate) fn font_entry(name: &str) -> E {
     E::Dict(vec![("Name".into(), E::String(name.into())), ("Script".into(), E::Int(0)), ("FontType".into(), E::Int(1)), ("Synthetic".into(), E::Int(0))])
 }
 
+/// The `Txt2` auto-kern mode of a style: 0 manual, 1 metrics, 2 optical — the values
+/// [`apply_txt2`] maps back to [`Kerning`]. EngineData's `AutoKerning` can't say Metrics from
+/// Optical, so the mode only lives in `Txt2`.
+fn txt2_mode(s: &CharStyle) -> i64 {
+    if manual(s) {
+        0
+    } else if s.kerning == Kerning::Optical {
+        2
+    } else {
+        1
+    }
+}
+
+/// `Txt2` style runs for `layer`: `(mode, UTF-16 length)` over the engine text (`\r` breaks and
+/// the trailing `\r`, which takes the last run's mode), split where the auto-kern mode changes.
+fn txt2_mode_runs(layer: &TextLayer) -> Vec<(i64, usize)> {
+    let runs = layer.char_runs();
+    let ed_text = format!("{}\r", layer.text.replace('\n', "\r"));
+    let mut out: Vec<(i64, usize)> = Vec::new();
+    let (mut ri, mut run_end) = (0usize, runs.first().map_or(0, |r| r.len));
+    for (b, ch) in ed_text.char_indices() {
+        while b >= run_end && ri + 1 < runs.len() {
+            ri += 1;
+            run_end = run_end.saturating_add(runs.get(ri).map_or(0, |r| r.len));
+        }
+        let mode = runs.get(ri).map_or(1, |r| txt2_mode(&r.style));
+        match out.last_mut() {
+            Some(last) if last.0 == mode => last.1 += ch.len_utf16(),
+            _ => out.push((mode, ch.len_utf16())),
+        }
+    }
+    out
+}
+
+/// The highest text-object number honoured here (`TextIndex`, and the slot array [`build_txt2`]
+/// sizes). PSD text objects are numbered densely from 0; a crafted file can name object
+/// `i32::MAX`, and sizing the array by it would make every save allocate gigabytes.
+pub const MAX_TEXT_INDEX: i32 = 0xFFFF;
+
+/// Whether the document `Txt2` block is needed for `objects`: only a non-Metrics auto-kern mode
+/// (`Optical`) is exclusive to `Txt2` — EngineData's `AutoKerning` cannot distinguish Metrics from
+/// Optical — so a fresh document of ordinary Metrics text has nothing to put in the block.
+/// Writing Photoshop's empty `<< /0 << >> >>` stub anyway makes some readers fail
+/// (#3514); the export omits the block for such a document.
+pub fn needs_txt2(objects: &[(i32, &TextLayer)]) -> bool {
+    objects.iter().any(|(_, l)| l.char_runs().iter().any(|r| r.style.kerning == Kerning::Optical))
+}
+
+/// The document's `Txt2` block for `objects`: `(TextIndex, layer)` pairs, one text object each
+/// at the slot its `TextIndex` names (see [`set_text_index`] and [`text_index`]; unused slots are
+/// empty dictionaries), carrying the automatic kerning mode of every pair (`/11`: 0 manual,
+/// 1 metrics, 2 optical) — the one thing EngineData can't say (`AutoKerning true` covers Metrics
+/// and Optical alike). PSD export writes this block for the type layers it writes `TySh` data
+/// for; [`apply_txt2`] reads it back. Numbers outside `0..=`[`MAX_TEXT_INDEX`] are skipped: the
+/// slot array is sized by real text objects, never by a file's numbers.
+///
+/// `previous` is the block this replaces (the file's own). A kept object — one whose text is
+/// unchanged — keeps everything the file held beyond the two regenerated keys (its model's text
+/// and style runs): Photoshop stores glyph pen positions under `/21 /1` there, and a save with
+/// no text edit must not drop them. Its own style runs keep every style key too: only their
+/// auto-kern mode is set (split where a mode changes inside a run). A changed text invalidates
+/// those extras along with the old runs, so they are dropped rather than left stale. Everything
+/// else the file's block held — the other keys beside the text objects, objects no layer names —
+/// is kept, and a block whose content comes out unchanged is returned byte for byte (#2374:
+/// Photoshop refused files whose `Txt2` an unedited save had stripped).
+pub fn build_txt2(objects: &[(i32, &TextLayer)], previous: Option<&[u8]>) -> Vec<u8> {
+    let prev = previous.and_then(parse_txt2);
+    let prev_objects: &[E] = prev.as_ref().and_then(|p| p.path(&["1", "1"]).and_then(E::as_array)).unwrap_or(&[]);
+    let mut slots: Vec<E> = prev_objects.to_vec();
+    for (index, layer) in objects {
+        if !(0..=MAX_TEXT_INDEX).contains(index) {
+            continue;
+        }
+        let text = format!("{}\r", layer.text.replace('\n', "\r"));
+        let modes = txt2_mode_runs(layer);
+        let at = *index as usize;
+        let kept = prev_objects.get(at).filter(|o| o.get("0").and_then(|m| m.get("0")).and_then(E::as_str) == Some(text.as_str()));
+        let mut object = kept.cloned().unwrap_or_else(E::dict);
+        let mut model = object.get("0").cloned().filter(|m| matches!(m, E::Dict(_))).unwrap_or_else(E::dict);
+        let file_runs = kept.and_then(|_| model.path(&["6", "0"]).and_then(E::as_array)).and_then(|runs| with_modes(runs, &modes));
+        let runs = file_runs.unwrap_or_else(|| {
+            modes
+                .iter()
+                .map(|&(mode, len)| {
+                    // `<< /0 << /0 << /0 () /6 << /0 0 /11 mode >> >> >> /1 len >>`.
+                    let style = E::Dict(vec![("0".into(), E::Int(0)), ("11".into(), E::Int(mode))]);
+                    let data = E::Dict(vec![("0".into(), E::String(String::new())), ("6".into(), style)]);
+                    E::Dict(vec![("0".into(), E::Dict(vec![("0".into(), data)])), ("1".into(), E::Int(len as i64))])
+                })
+                .collect()
+        });
+        model.set("0", E::String(text));
+        match model.get_mut("6") {
+            Some(style_run @ E::Dict(_)) => style_run.set("0", E::Array(runs)),
+            _ => model.set("6", E::Dict(vec![("0".into(), E::Array(runs))])),
+        }
+        object.set("0", model);
+        if slots.len() <= at {
+            slots.resize(at + 1, E::dict());
+        }
+        if let Some(slot) = slots.get_mut(at) {
+            *slot = object;
+        }
+    }
+    // The outer dictionary keeps whatever the block held (`/98` version, block extras, …), and
+    // `/1` whatever it holds beside the text objects.
+    let mut outer = prev.clone().unwrap_or_else(|| E::Dict(vec![("98".into(), E::Dict(vec![("0".into(), E::Int(14))])), ("0".into(), E::dict())]));
+    match outer.get_mut("1") {
+        Some(objs @ E::Dict(_)) => objs.set("1", E::Array(slots)),
+        _ => outer.set("1", E::Dict(vec![("1".into(), E::Array(slots))])),
+    }
+    // Nothing changed: the file's own bytes (writing them back would re-encode strings and numbers).
+    if let (Some(bytes), Some(p)) = (previous, &prev)
+        && *p == outer
+    {
+        return bytes.to_vec();
+    }
+    match outer {
+        E::Dict(items) => ed::write_bare(&items),
+        // Unreachable: `parse_txt2` and the fallback above both yield a dictionary.
+        _ => ed::write_bare(&[]),
+    }
+}
+
+/// The file's own `Txt2` style runs `runs` with the auto-kern modes `modes` (`(mode, UTF-16
+/// length)`, see [`txt2_mode_runs`]) set at `/0 /0 /6 /11`, keeping every other style key. A
+/// run a mode change falls inside is split there. `None` when the runs don't cover the text or
+/// lack a style dictionary: the caller writes its own runs instead.
+fn with_modes(runs: &[E], modes: &[(i64, usize)]) -> Option<Vec<E>> {
+    let lens: Vec<usize> = runs.iter().map(|r| r.get("1").and_then(E::as_i64).and_then(|l| usize::try_from(l).ok())).collect::<Option<_>>()?;
+    let total = modes.iter().try_fold(0usize, |a, m| a.checked_add(m.1))?;
+    if lens.iter().try_fold(0usize, |a, l| a.checked_add(*l))? != total {
+        return None;
+    }
+    let mut out = Vec::with_capacity(runs.len());
+    let (mut mi, mut mode_end) = (0usize, modes.first()?.1);
+    let mut at = 0usize;
+    for (run, len) in runs.iter().zip(lens) {
+        if len == 0 {
+            out.push(run.clone());
+            continue;
+        }
+        let end = at + len;
+        while at < end {
+            while at >= mode_end && mi + 1 < modes.len() {
+                mi += 1;
+                mode_end = mode_end.saturating_add(modes.get(mi)?.1);
+            }
+            let piece_end = end.min(mode_end);
+            if piece_end <= at {
+                return None;
+            }
+            let mut piece = run.clone();
+            if piece_end - at != len {
+                piece.set("1", E::Int(i64::try_from(piece_end - at).ok()?));
+            }
+            let style = piece.get_mut("0").and_then(|v| v.get_mut("0")).and_then(|v| v.get_mut("6")).filter(|v| matches!(v, E::Dict(_)))?;
+            let mode = modes.get(mi)?.0;
+            // Keep the file's value (and its number type) when the mode is the same.
+            if style.get("11").and_then(E::as_i64) != Some(mode) {
+                style.set("11", E::Int(mode));
+            }
+            out.push(piece);
+            at = piece_end;
+        }
+    }
+    Some(out)
+}
+
 /// Updates (or creates) an EngineData tree for `layer`.
 pub fn build_engine_data(layer: &TextLayer, template: Option<E>, dpi: f32) -> E {
-    let k = 72.0 / if dpi > 0.0 { dpi } else { 72.0 };
+    let k = 72.0 / if dpi.is_finite() && dpi > 0.0 { dpi } else { 72.0 };
     let fresh = || E::Dict(vec![("EngineDict".into(), E::dict()), ("ResourceDict".into(), E::dict())]);
     // The template comes from the PSD: it may not be a dictionary or may lack `EngineDict`.
     let mut e = match template {
@@ -1709,7 +1910,8 @@ pub fn build_engine_data(layer: &TextLayer, template: Option<E>, dpi: f32) -> E 
         dict.set("UseFractionalGlyphWidths", E::Bool(true));
     }
     let (shape_type, box_bounds) = match layer.shape {
-        TextShape::Point => (0, None),
+        // PSD path type is not written yet: the layer saves as point text.
+        TextShape::Point | TextShape::Path { .. } => (0, None),
         TextShape::Box { x, y, width, height } => (1, Some([x, y, x + width, y + height])),
     };
     let mut photoshop = E::Dict(vec![("ShapeType".into(), E::Int(shape_type))]);
@@ -1793,6 +1995,19 @@ pub fn build_engine_data(layer: &TextLayer, template: Option<E>, dpi: f32) -> E 
     e
 }
 
+/// The anti-aliasing mode for EngineData's `AntiAlias` number, as Photoshop writes it: 0 None,
+/// 1 Crisp, 2 Strong, 3 Smooth, 4 Sharp. Other numbers (platform modes) are left to `AntA`.
+fn engine_antialias(n: f64) -> Option<AntiAlias> {
+    Some(match n as i64 {
+        0 => AntiAlias::None,
+        1 => AntiAlias::Crisp,
+        2 => AntiAlias::Strong,
+        3 => AntiAlias::Smooth,
+        4 => AntiAlias::Sharp,
+        _ => return None,
+    })
+}
+
 /// Builds the `TySh` block for `layer`, patching its current `psd_raw` when present.
 /// `ink` is the layer's rendered bounds in text space (for `bounds`/`boundingBox`).
 pub fn build_tysh(layer: &TextLayer, dpi: f32, ink: Option<[f32; 4]>) -> Vec<u8> {
@@ -1839,8 +2054,8 @@ pub fn build_tysh(layer: &TextLayer, dpi: f32, ink: Option<[f32; 4]>) -> Vec<u8>
         Some([v("Left")?, v("Top ")?, v("Rght")?, v("Btom")?]).filter(|r| r.iter().any(|x| *x != 0.0))
     };
     let kept = |key: &str| if ink.is_none() && matches!(layer.shape, TextShape::Point) { old_rect(key) } else { None };
-    let [l, t, r, b] = match (layer.shape, ink) {
-        (TextShape::Box { x, y, width, height }, _) => [x, y, x + width, y + height],
+    let [l, t, r, b] = match (&layer.shape, ink) {
+        (&TextShape::Box { x, y, width, height }, _) => [x, y, x + width, y + height],
         (_, Some(i)) => i,
         _ => kept("bounds").unwrap_or([0.0; 4]),
     };
@@ -1882,4 +2097,34 @@ pub fn build_tysh(layer: &TextLayer, dpi: f32, ink: Option<[f32; 4]>) -> Vec<u8>
         _ => None,
     };
     write_tysh(&TySh { transform: layer.transform, text, warp, bounds: [l, t, r, b] })
+}
+
+#[cfg(test)]
+mod nonfinite_tests {
+    use super::*;
+    use crate::engine_data::parse;
+
+    #[test]
+    fn non_finite_style_numbers_fall_back_to_defaults() {
+        let d = parse(b"<< /FontSize 1e999 /Tracking nan /HorizontalScale inf /Kerning -inf /FillColor << /Values [1.0 nan 0.0 0.0] >> >>").unwrap();
+        let s = char_style(None, &d, &[], 1.0);
+        let dflt = CharStyle::default();
+        assert_eq!(s.size_pt, dflt.size_pt);
+        assert_eq!((s.tracking, s.horizontal_scale, s.kern), (0.0, 1.0, 0.0));
+        assert_eq!(s.color, Color::BLACK);
+        // A finite f64 too big for f32 is dropped as well.
+        let d = parse(b"<< /FontSize 1e300 /StartIndent inf >> ").unwrap();
+        assert_eq!(char_style(None, &d, &[], 1.0).size_pt, dflt.size_pt);
+        assert_eq!(para_style(None, &d, 1.0).start_indent_pt, 0.0);
+        let d = parse(b"<< /FontSize 24.0 >>").unwrap();
+        assert_eq!(char_style(None, &d, &[], 1.0).size_pt, 24.0);
+    }
+
+    #[test]
+    fn infinite_dpi_does_not_write_a_zero_size() {
+        let layer =
+            TextLayer { text: "x".into(), runs: vec![TextRun { len: 1, style: CharStyle { size_pt: 12.0, ..Default::default() } }], ..Default::default() };
+        let out = String::from_utf8_lossy(&crate::engine_data::write(&build_engine_data(&layer, None, f32::INFINITY))).into_owned();
+        assert!(out.contains("/FontSize 12.0"), "{out}");
+    }
 }

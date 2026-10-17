@@ -35,6 +35,35 @@ fn maxflow_clrs_network() {
     assert_eq!(g.residual_out_of_source_side(), 0.0);
 }
 
+#[test]
+fn maxflow_can_be_cancelled_and_otherwise_cuts_the_same() {
+    // A 120 × 100 grid with terminal links both ways (push/relabel) and a small one (BK).
+    for (w, h) in [(120usize, 100usize), (20, 15)] {
+        let mut g = Graph::with_capacity(w * h, w * h * 2);
+        let mut z = 7u64;
+        let mut next = || {
+            z = z.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (z >> 40) as f32 / (1u64 << 24) as f32
+        };
+        for i in 0..w * h {
+            g.add_tweights(i, next() * 2.0, next() * 2.0);
+            if i % w + 1 < w {
+                g.add_edge(i, i + 1, next(), next());
+            }
+            if i + w < w * h {
+                g.add_edge(i, i + w, next(), next());
+            }
+        }
+        let (mut plain, mut asked) = (g.clone(), g.clone());
+        let flow = plain.maxflow();
+        assert_eq!(asked.maxflow_with(&|| false), Some(flow));
+        assert!((0..w * h).all(|i| plain.in_source(i) == asked.in_source(i)));
+        if w * h > 4096 {
+            assert_eq!(g.maxflow_with(&|| true), None);
+        }
+    }
+}
+
 /// Reference max flow (Edmonds–Karp on a dense matrix; node 0 = s, n−1 = t).
 fn edmonds_karp(cap: &mut [Vec<f64>]) -> f64 {
     let n = cap.len();
@@ -305,11 +334,61 @@ fn two_regions(w: usize, h: usize) -> RgbImage {
 }
 
 #[test]
+fn quick_select_with_points_far_off_canvas_selects_nothing() {
+    // A cast saturates to i32::MAX; adding one to it once overflowed.
+    let img = two_regions(140, 100);
+    let s = ImageSampler { img: &img, origin: (0, 0) };
+    let canvas = Rect::new(0, 0, 140, 100);
+    for p in [(3e9, 0.0), (0.0, 3e9), (f32::MAX, f32::MAX)] {
+        assert!(quick::quick_select(&s, canvas, &[p], 8.0).is_none(), "{p:?}");
+    }
+}
+
+#[test]
+fn quick_select_cuts_window_sizes_in_parallel_with_the_same_result() {
+    // Soft gradients and faint blobs let a selection spread, so most strokes need more than one
+    // window size; cutting several at once must keep exactly what one-after-another keeps.
+    let (w, h) = (1200usize, 900usize);
+    let img = RgbImage::from_fn(w, h, |x, y| {
+        let (fx, fy) = (x as f32 / w as f32, y as f32 / h as f32);
+        let blob = (((fx * 9.0).sin() * (fy * 7.0).cos()) * 0.5 + 0.5) * 0.06;
+        [0.3 + 0.4 * fx + blob, 0.5 + 0.2 * fy, 0.7 - 0.3 * fx + blob]
+    });
+    let s = ImageSampler { img: &img, origin: (0, 0) };
+    let canvas = Rect::new(0, 0, w as i32, h as i32);
+    let t = quick::Tuning::default();
+    let strokes: [(&[(f32, f32)], f32); 4] = [
+        (&[(300.0, 300.0)], 30.0),
+        (&[(500.0, 400.0), (580.0, 400.0), (660.0, 420.0)], 60.0),
+        (&[(200.0, 700.0), (260.0, 650.0), (320.0, 700.0), (380.0, 650.0)], 30.0),
+        (&[(900.0, 200.0)], 120.0),
+    ];
+    let mut most = 0;
+    for (pts, size) in strokes {
+        let one = quick::quick_select_batched::<true>(&s, canvas, pts, size, &t, 1);
+        let many = quick::quick_select_batched::<true>(&s, canvas, pts, size, &t, 4);
+        assert_eq!(one.as_ref().map(|(r, n)| (r.bbox, &r.mask, n)), many.as_ref().map(|(r, n)| (r.bbox, &r.mask, n)), "{pts:?} size {size}");
+        most = most.max(one.map_or(0, |(_, n)| n));
+    }
+    assert!(most > 1, "no stroke needed a larger window, so the test exercises nothing");
+}
+
+#[test]
+fn quick_select_window_sizes_stop_at_the_canvas() {
+    let canvas = Rect::new(0, 0, 1000, 800);
+    let bbox = Rect::new(400, 300, 460, 360);
+    assert_eq!(quick::margins_to_try(96, bbox, canvas, 4), vec![96, 192, 384, 768]);
+    // 768 already covers the canvas: no larger (identical) window is cut.
+    assert_eq!(quick::margins_to_try(384, bbox, canvas, 4), vec![384, 768]);
+    assert_eq!(quick::margins_to_try(96, bbox, canvas, 0), vec![96]);
+}
+
+#[test]
 fn quick_select_grows_without_leaking() {
     let img = two_regions(140, 100);
     let s = ImageSampler { img: &img, origin: (0, 0) };
     let canvas = Rect::new(0, 0, 140, 100);
-    let reg = quick::quick_select(&s, canvas, &[(20.0, 50.0), (35.0, 50.0)], 8.0, quick::WORK_PX).unwrap();
+    let reg = quick::quick_select(&s, canvas, &[(20.0, 50.0), (35.0, 50.0)], 8.0).unwrap();
     let mut inside = 0;
     for y in 0..100 {
         for x in 0..140 {
@@ -335,7 +414,7 @@ fn quick_select_stops_at_thin_line() {
         if x == 60 || x == 61 { [0.05, 0.05, 0.05] } else { [0.6 + n, 0.6 + n, 0.55 + n] }
     });
     let s = ImageSampler { img: &img, origin: (0, 0) };
-    let reg = quick::quick_select(&s, Rect::new(0, 0, 120, 80), &[(30.0, 40.0)], 6.0, quick::WORK_PX).unwrap();
+    let reg = quick::quick_select(&s, Rect::new(0, 0, 120, 80), &[(30.0, 40.0)], 6.0).unwrap();
     assert!(reg.at(10, 10) >= 0.5 && reg.at(50, 70) >= 0.5);
     for y in 0..80 {
         for x in 63..120 {
@@ -345,13 +424,134 @@ fn quick_select_stops_at_thin_line() {
 }
 
 #[test]
-fn quick_select_downsampled_window() {
-    // A larger image with a small working budget: step > 1 plus band refinement.
+fn quick_select_a_drag_selects_around_itself_not_a_big_object() {
+    // Photoshop 25.4 on this very scene: an 80 px drag inside a 180 px radius disc selects about
+    // the stroke (5285 px), not the disc (~100,000 px): the disc is far too big for the stroke.
     let (img, truth) = disc_scene(600, 500, 300.0, 250.0, 180.0, 4);
     let s = ImageSampler { img: &img, origin: (0, 0) };
-    let reg = quick::quick_select(&s, Rect::new(0, 0, 600, 500), &[(260.0, 250.0), (340.0, 250.0)], 30.0, 15_000).unwrap();
-    let v = iou(&reg, &truth, 600, 500);
-    assert!(v > 0.93, "IoU {v}");
+    let reg = quick::quick_select(&s, Rect::new(0, 0, 600, 500), &[(260.0, 250.0), (340.0, 250.0)], 30.0).unwrap();
+    let n = count(&reg);
+    assert!((3000..9000).contains(&n), "{n} px");
+    assert!(reg.at(300, 250) >= 0.5 && reg.at(262, 250) >= 0.5);
+    assert!(iou(&reg, &truth, 600, 500) < 0.2);
+}
+
+// ---------- Quick selection: Photoshop's measured behaviour ----------
+//
+// Each case below was run in Photoshop 25.4 (the same image and stroke, the mouse held 1 s so
+// its solver settles); the numbers in the comments are Photoshop's.
+
+const QS_RED: [f32; 3] = [200.0 / 255.0, 60.0 / 255.0, 60.0 / 255.0];
+const QS_BLUE: [f32; 3] = [60.0 / 255.0, 60.0 / 255.0, 200.0 / 255.0];
+
+/// A `w` x `h` image of `bg` with `fg` over `[x0, x1) x [y0, y1)`.
+fn qs_scene(w: usize, h: usize, bg: [f32; 3], fg: [f32; 3], rect: (usize, usize, usize, usize)) -> RgbImage {
+    let (x0, y0, x1, y1) = rect;
+    RgbImage::from_fn(w, h, |x, y| if x >= x0 && x < x1 && y >= y0 && y < y1 { fg } else { bg })
+}
+
+/// A centred `side` square of `fg` on `bg` in a `w` x `w` image.
+fn qs_square(w: usize, side: usize, fg: [f32; 3], bg: [f32; 3]) -> RgbImage {
+    let x0 = (w - side) / 2;
+    qs_scene(w, w, bg, fg, (x0, x0, x0 + side, x0 + side))
+}
+
+fn qs(img: &RgbImage, pts: &[(f32, f32)], size: f32) -> Region {
+    let s = ImageSampler { img, origin: (0, 0) };
+    quick::quick_select(&s, Rect::new(0, 0, img.w as i32, img.h as i32), pts, size).expect("a selection")
+}
+
+fn count(r: &Region) -> usize {
+    r.mask.iter().filter(|v| **v >= 128).count()
+}
+
+/// Selected pixels inside and outside `[x0, x1) x [y0, y1)`.
+fn inside_outside(r: &Region, rect: (i32, i32, i32, i32)) -> (usize, usize) {
+    let (mut i, mut o) = (0, 0);
+    for y in r.bbox.y0..r.bbox.y1 {
+        for x in r.bbox.x0..r.bbox.x1 {
+            if r.at(x, y) >= 0.5 {
+                if x >= rect.0 && x < rect.2 && y >= rect.1 && y < rect.3 { i += 1 } else { o += 1 }
+            }
+        }
+    }
+    (i, o)
+}
+
+#[test]
+fn quick_select_works_at_full_or_exactly_half_resolution() {
+    // Up to 512 x 512 pixels Photoshop works on the whole document, above at half resolution,
+    // whatever the document's shape or the brush.
+    assert_eq!(quick::working_step(512, 512), 1);
+    assert_eq!(quick::working_step(513, 512), 2);
+    assert_eq!(quick::working_step(520, 300), 1);
+    assert_eq!(quick::working_step(900, 300), 2);
+    assert_eq!(quick::working_step(5000, 3500), 2);
+    // Half resolution: the mask is scaled up bilinearly, so a selected square's edge steps
+    // 64, 191, 255 (Photoshop's own values on a 640 px document).
+    let img = qs_square(640, 200, QS_RED, QS_BLUE);
+    let r = qs(&img, &[(320.0, 320.0)], 30.0);
+    let row: Vec<u8> = (216..223).map(|x| (r.at(x, 320) * 255.0).round() as u8).collect();
+    assert_eq!(row, [0, 0, 0, 64, 191, 255, 255]);
+}
+
+#[test]
+fn quick_select_click_in_a_flat_area_selects_about_the_brush() {
+    // Photoshop: 1025-1120 px for a 30 px brush (the disc grows a little while the button is held).
+    let img = qs_scene(400, 400, QS_RED, QS_RED, (0, 0, 0, 0));
+    let n = count(&qs(&img, &[(200.0, 200.0)], 30.0));
+    assert!((700..1600).contains(&n), "{n} px");
+}
+
+#[test]
+fn quick_select_click_takes_an_object_only_while_it_is_small_enough() {
+    // 30 px brush, red on blue: Photoshop selects a 220 px square whole, not a 240 px one.
+    let img = qs_square(500, 220, QS_RED, QS_BLUE);
+    let (i, o) = inside_outside(&qs(&img, &[(250.0, 250.0)], 30.0), (140, 140, 360, 360));
+    assert!(i >= 220 * 220 - 10 && o == 0, "220: {i} in, {o} out");
+    let img = qs_square(500, 240, QS_RED, QS_BLUE);
+    let n = count(&qs(&img, &[(250.0, 250.0)], 30.0));
+    assert!(n < 2000, "240: {n} px");
+    // A weak edge (15 levels) holds only a small square: 94 px yes, 120 px no.
+    let (lo, hi) = ([125.0 / 255.0, 110.0 / 255.0, 110.0 / 255.0], [110.0 / 255.0, 110.0 / 255.0, 125.0 / 255.0]);
+    let img = qs_square(500, 94, lo, hi);
+    let (i, o) = inside_outside(&qs(&img, &[(250.0, 250.0)], 30.0), (203, 203, 297, 297));
+    assert!(i >= 94 * 94 - 10 && o == 0, "94: {i} in, {o} out");
+    let img = qs_square(500, 120, lo, hi);
+    let n = count(&qs(&img, &[(250.0, 250.0)], 30.0));
+    assert!(n < 2000, "120: {n} px");
+}
+
+#[test]
+fn quick_select_takes_a_narrow_bar_end_to_end_but_only_the_end_near_it() {
+    // An 80 x 400 bar: a click in the middle selects all of it; a click 30 px from its end only
+    // the end (Photoshop: 3762 px, cut just above the brush).
+    let img = qs_scene(500, 500, QS_BLUE, QS_RED, (100, 50, 180, 450));
+    let (i, o) = inside_outside(&qs(&img, &[(140.0, 250.0)], 30.0), (100, 50, 180, 450));
+    assert!(i >= 80 * 400 - 10 && o == 0, "middle: {i} in, {o} out");
+    let r = qs(&img, &[(140.0, 420.0)], 30.0);
+    let (i, o) = inside_outside(&r, (100, 380, 180, 450));
+    assert!(i > 2500 && o == 0, "near the end: {i} in the end, {o} elsewhere");
+}
+
+#[test]
+fn quick_select_a_short_drag_takes_what_a_click_does_not() {
+    // A 300 px square: a click selects about the brush; a 60 px drag the whole square.
+    let img = qs_square(500, 300, QS_RED, QS_BLUE);
+    assert!(count(&qs(&img, &[(250.0, 250.0)], 30.0)) < 2000);
+    let (i, o) = inside_outside(&qs(&img, &[(220.0, 250.0), (280.0, 250.0)], 30.0), (100, 100, 400, 400));
+    assert!(i >= 300 * 300 - 10 && o == 0, "{i} in, {o} out");
+}
+
+#[test]
+fn quick_select_on_a_large_document_grows_its_window_to_the_object() {
+    // A 1000 x 600 document (half resolution) with an 80 x 960 bar: Photoshop selects all of it
+    // from a click in the middle (76800 px). The working window starts around the stroke and grows
+    // until the selection no longer runs into it.
+    let img = qs_scene(1000, 600, QS_BLUE, QS_RED, (20, 260, 980, 340));
+    // The mouse on pixel (500, 300), as in Photoshop: its centre.
+    let (i, o) = inside_outside(&qs(&img, &[(500.5, 300.5)], 30.0), (20, 260, 980, 340));
+    assert!(i >= 960 * 80 * 98 / 100 && o < 2000, "{i} in, {o} out");
 }
 
 // ---------- Select subject ----------
@@ -363,6 +563,87 @@ fn select_subject_finds_centred_object() {
     let reg = subject::select_subject(&s, Rect::new(0, 0, 200, 150)).unwrap();
     let v = iou(&reg, &truth, 200, 150);
     assert!(v > 0.9, "IoU {v}");
+}
+
+/// Counts full-resolution reads; the working copy goes through `rgb_scaled` uncounted, so each
+/// read is one band tile of the full-resolution re-cut.
+struct TileReads<'a>(ImageSampler<'a>, std::sync::atomic::AtomicUsize);
+
+impl Sampler for TileReads<'_> {
+    fn rgba(&self, r: Rect) -> Vec<[f32; 4]> {
+        self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.0.rgba(r)
+    }
+    fn rgb_scaled(&self, r: Rect, step: usize) -> RgbImage {
+        self.0.rgb_scaled(r, step)
+    }
+}
+
+#[test]
+fn finish_region_cancel_stops_inside_the_band_cut() {
+    use photosplice_raster::{Cancelled, Interrupt};
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    // One 180-pixel window is one band tile, and nothing asks after the band re-cut, so a cancel
+    // seen after the tile's own check can only have been seen inside its min cut.
+    let (n, step) = (180, 3);
+    let (img, truth) = disc_scene(n, n, 90.0, 90.0, 55.0, 4);
+    let s = ImageSampler { img: &img, origin: (0, 0) };
+    let ln = n / step;
+    let low: Vec<bool> = (0..ln * ln).map(|i| truth[((i / ln) * step + 1) * n + (i % ln) * step + 1]).collect();
+    let (fs, bs): (Vec<_>, Vec<_>) = img.px.iter().zip(&truth).partition(|(_, t)| **t);
+    let fit = |v: Vec<(&[f32; 3], &bool)>| Gmm::fit(&v.iter().map(|(p, _)| **p).collect::<Vec<_>>(), 5, gmm::DEFAULT_REG).unwrap();
+    let (fg, bg) = (fit(fs), fit(bs));
+    let window = Rect::new(0, 0, n as i32, n as i32);
+    let polls = AtomicUsize::new(0);
+    let finish = |cancel_from: usize| {
+        polls.store(0, SeqCst);
+        let cancel = || polls.fetch_add(1, SeqCst) + 1 >= cancel_from;
+        finish_region_with(&s, window, step, &low, ln, ln, Some((&fg, &bg)), &Interrupt::cancel_only(&cancel))
+    };
+    let reg = finish(usize::MAX).unwrap().unwrap();
+    assert!(polls.load(SeqCst) >= 2, "the cut polls too ({} polls)", polls.load(SeqCst));
+    assert!(iou(&reg, &truth, n, n) > 0.95);
+    assert_eq!(finish_region(&s, window, step, &low, ln, ln, Some((&fg, &bg))), Some(reg));
+    // Cancelled at the cut's first poll (the second in all): no region.
+    assert_eq!(finish(2), Err(Cancelled));
+    assert_eq!(polls.load(SeqCst), 2);
+    assert_eq!(finish(1), Err(Cancelled), "cancelled before the tile");
+}
+
+#[test]
+fn select_subject_cancelled_in_the_band_recut_reads_no_more_tiles() {
+    use photosplice_raster::{Cancelled, Interrupt};
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let (w, h) = (3000, 2000);
+    let (img, truth) = disc_scene(w, h, 1500.0, 1000.0, 700.0, 6);
+    let canvas = Rect::new(0, 0, w as i32, h as i32);
+    let sampler = || TileReads(ImageSampler { img: &img, origin: (0, 0) }, AtomicUsize::new(0));
+
+    // Not cancelled: the same region as `select_subject`, and the band cuts themselves ask
+    // (more polls once tiles are read than the one check before each tile).
+    let s = sampler();
+    let band_polls = AtomicUsize::new(0);
+    let count = || {
+        if s.1.load(SeqCst) > 0 {
+            band_polls.fetch_add(1, SeqCst);
+        }
+        false
+    };
+    let reg = subject::select_subject_with(&s, canvas, &Interrupt::cancel_only(&count)).unwrap().unwrap();
+    let tiles = s.1.load(SeqCst);
+    assert!(tiles > 4, "{tiles} band tiles");
+    assert!(band_polls.load(SeqCst) > tiles, "{} polls over {tiles} tiles", band_polls.load(SeqCst));
+    assert!(iou(&reg, &truth, w, h) > 0.9);
+    assert_eq!(subject::select_subject(&sampler(), canvas), Some(reg));
+
+    // Cancelled once the first tile is read: the run stops there instead of re-cutting every
+    // tile. One thread, so no other tile is already in flight.
+    let s = sampler();
+    let cancel = || s.1.load(SeqCst) > 0;
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+    let r = pool.install(|| subject::select_subject_with(&s, canvas, &Interrupt::cancel_only(&cancel)));
+    assert_eq!(r, Err(Cancelled));
+    assert_eq!(s.1.load(SeqCst), 1, "tiles read after the cancel");
 }
 
 #[test]
@@ -441,25 +722,193 @@ fn clean_mask_drops_islands_and_fills_holes() {
     assert!(!c[36 * w + 36]);
 }
 
+/// Writes the quick-selection test scenes as raw RGB8 (for measuring them in Photoshop).
 #[test]
-fn geodesic_distance_jumps_across_edges() {
-    let img = two_regions(140, 100);
-    let seeds = quick::stroke_mask(&[(20.0, 50.0)], 4.0, 140, 100);
-    let d = quick::geodesic(&img, &seeds);
-    assert!(d[50 * 140 + 40] < 0.02, "same region {}", d[50 * 140 + 40]);
-    assert!(d[50 * 140 + 100] > 0.1, "across the edge {}", d[50 * 140 + 100]);
+#[ignore]
+fn dump_quick_scenes() {
+    let Ok(dir) = std::env::var("QS_DUMP") else { return };
+    let save = |name: &str, img: &RgbImage| {
+        let bytes: Vec<u8> = img.px.iter().flat_map(|p| p.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)).collect();
+        std::fs::write(format!("{dir}/{name}_{}x{}.rgb", img.w, img.h), bytes).unwrap();
+    };
+    save("two_regions", &two_regions(140, 100));
+    let mut rng = Rng::new(9);
+    let line = RgbImage::from_fn(120, 80, |x, _| {
+        let n = 0.03 * rng.normal();
+        if x == 60 || x == 61 { [0.05, 0.05, 0.05] } else { [0.6 + n, 0.6 + n, 0.55 + n] }
+    });
+    save("thin_line", &line);
+    save("disc_scene", &disc_scene(600, 500, 300.0, 250.0, 180.0, 4).0);
 }
 
 #[test]
-fn geodesic_barrier_blocks_oblique_crossings() {
-    // A large disc whose slightly tilted edge crosses the image: paths running along the soft
-    // edge must not sneak across it.
-    let (img, truth) = disc_scene(352, 372, -470.0, 186.0, 668.0, 4);
-    let seeds = quick::stroke_mask(&[(175.0, 176.0), (175.0, 196.0)], 5.0, 352, 372);
-    assert!(seeds.iter().zip(&truth).all(|(s, t)| !*s || *t));
-    let d = quick::geodesic(&img, &seeds);
-    assert!(d[186 * 352 + 100] < 0.02);
-    for y in (0..372).step_by(31) {
-        assert!(d[y * 352 + 291] > 0.1, "row {y}: {}", d[y * 352 + 291]);
+fn object_at_finds_the_disc_under_the_cursor() {
+    let (img, truth) = disc_scene(320, 240, 160.0, 120.0, 70.0, 7);
+    let s = ImageSampler { img: &img, origin: (0, 0) };
+    let canvas = Rect::new(0, 0, 320, 240);
+    let reg = grabcut::object_at(&s, canvas, 165.0, 118.0, 20_000).unwrap();
+    let v = iou(&reg, &truth, 320, 240);
+    assert!(v > 0.9, "IoU {v}");
+}
+
+#[test]
+fn object_at_on_the_background_or_off_canvas_finds_nothing() {
+    let (img, _) = disc_scene(320, 240, 160.0, 120.0, 70.0, 7);
+    let s = ImageSampler { img: &img, origin: (0, 0) };
+    let canvas = Rect::new(0, 0, 320, 240);
+    assert!(grabcut::object_at(&s, canvas, 10.0, 10.0, 20_000).is_none());
+    assert!(grabcut::object_at(&s, canvas, -5.0, 10.0, 20_000).is_none());
+    assert!(grabcut::object_at(&s, canvas, f32::NAN, 10.0, 20_000).is_none());
+    assert!(grabcut::object_at(&s, canvas, 400.0, 10.0, 0).is_none());
+}
+
+// ---------- Select Subject on the cases reported in #2788 ----------
+
+/// A figure whose upper part is close to the background colour (a cream shirt on a near-white
+/// backdrop): the whole figure is the subject. Returns (image, truth, the low-contrast part).
+pub(crate) fn low_contrast_figure(seed: u64) -> (RgbImage, Vec<bool>, Vec<bool>) {
+    let (w, h) = (240usize, 200usize);
+    let mut rng = Rng::new(seed);
+    let mut img = RgbImage::new(w, h);
+    let mut truth = vec![false; w * h];
+    let mut cream = vec![false; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let body = (90..150).contains(&x) && (70..190).contains(&y);
+            let shoulders = (80..160).contains(&x) && (40..70).contains(&y);
+            let print = (105..135).contains(&x) && (100..130).contains(&y);
+            let n = 0.012 * rng.normal();
+            let i = y * w + x;
+            truth[i] = body || shoulders;
+            cream[i] = shoulders;
+            img.px[i] = if print {
+                [0.9 + n, 0.15 + n, 0.1 + n]
+            } else if body {
+                [0.12 + n, 0.2 + n, 0.45 + n]
+            } else if shoulders {
+                // Cream, a few levels off the backdrop.
+                [0.90 + n, 0.88 + n, 0.80 + n]
+            } else {
+                [0.96 + n, 0.96 + n, 0.95 + n]
+            }
+            .map(|v| v.clamp(0.0, 1.0));
+        }
     }
+    (img, truth, cream)
+}
+
+fn coverage(region: &Region, part: &[bool], w: usize, h: usize) -> f32 {
+    let (mut hit, mut n) = (0usize, 0usize);
+    for y in 0..h {
+        for x in 0..w {
+            if part[y * w + x] {
+                n += 1;
+                hit += (region.at(x as i32, y as i32) >= 0.5) as usize;
+            }
+        }
+    }
+    hit as f32 / n.max(1) as f32
+}
+
+#[test]
+fn select_subject_keeps_parts_close_to_the_background_colour() {
+    let (img, truth, cream) = low_contrast_figure(7);
+    let s = ImageSampler { img: &img, origin: (0, 0) };
+    let reg = subject::select_subject(&s, Rect::new(0, 0, 240, 200)).unwrap();
+    let v = iou(&reg, &truth, 240, 200);
+    let c = coverage(&reg, &cream, 240, 200);
+    assert!(c > 0.85, "the cream shoulders are part of the subject: covered {c}");
+    assert!(v > 0.9, "IoU {v}");
+}
+
+#[test]
+fn select_subject_leaves_a_background_coloured_gap_open() {
+    // A dark ring (arms on hips) around a patch of plain backdrop: the patch is not the subject.
+    let (w, h) = (220usize, 200usize);
+    let mut rng = Rng::new(11);
+    let mut img = RgbImage::new(w, h);
+    let mut truth = vec![false; w * h];
+    let mut gap = vec![false; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let d = (x as f32 - 110.0).hypot(y as f32 - 100.0);
+            let ring = (17.0..80.0).contains(&d);
+            let hole = d < 17.0;
+            let n = 0.012 * rng.normal();
+            let i = y * w + x;
+            truth[i] = ring;
+            gap[i] = hole;
+            img.px[i] = if ring { [0.2 + n, 0.15 + n, 0.35 + n] } else { [0.95 + n, 0.94 + n, 0.92 + n] }.map(|v| v.clamp(0.0, 1.0));
+        }
+    }
+    let s = ImageSampler { img: &img, origin: (0, 0) };
+    let reg = subject::select_subject(&s, Rect::new(0, 0, w as i32, h as i32)).unwrap();
+    let g = coverage(&reg, &gap, w, h);
+    assert!(g < 0.1, "the backdrop inside the ring stays unselected: covered {g}");
+    let v = iou(&reg, &truth, w, h);
+    assert!(v > 0.9, "IoU {v}");
+}
+
+/// Timing on a 6 MP figure, for before/after numbers (`cargo test --release -- --ignored select_subject_timing --nocapture`).
+#[test]
+#[ignore = "timing only"]
+fn select_subject_timing() {
+    let (w, h) = (3000usize, 2000usize);
+    let img = RgbImage::from_fn(w, h, |x, y| {
+        let body = (1100..1900).contains(&x) && (700..1900).contains(&y);
+        let shoulders = (1000..2000).contains(&x) && (400..700).contains(&y);
+        let t = ((x * 7 + y * 13) % 17) as f32 / 1700.0;
+        if body {
+            [0.12 + t, 0.2, 0.45]
+        } else if shoulders {
+            [0.90, 0.88 + t, 0.80]
+        } else {
+            [0.96, 0.96 + t, 0.95]
+        }
+    });
+    let s = ImageSampler { img: &img, origin: (0, 0) };
+    for _ in 0..2 {
+        let t0 = std::time::Instant::now();
+        let reg = subject::select_subject(&s, Rect::new(0, 0, w as i32, h as i32)).unwrap();
+        eprintln!("select_subject 6 MP: {:?} bbox {:?}", t0.elapsed(), reg.bbox);
+    }
+}
+
+/// Writes the #2788 scenes and the Select Subject mask over them as PPM files into
+/// `$SUBJECT_DUMP` (for the PR's before/after pictures).
+#[test]
+#[ignore = "writes pictures"]
+fn select_subject_dump_pictures() {
+    let Ok(dir) = std::env::var("SUBJECT_DUMP") else { return };
+    let write = |name: &str, img: &RgbImage, reg: Option<&Region>| {
+        let mut out = format!("P6\n{} {}\n255\n", img.w, img.h).into_bytes();
+        for y in 0..img.h {
+            for x in 0..img.w {
+                let mut c = img.at(x, y);
+                if let Some(r) = reg
+                    && r.at(x as i32, y as i32) >= 0.5
+                {
+                    c = [c[0] * 0.5 + 0.5, c[1] * 0.5, c[2] * 0.5 + 0.5];
+                }
+                out.extend(c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8));
+            }
+        }
+        std::fs::write(format!("{dir}/{name}.ppm"), out).unwrap();
+    };
+    let (img, _, _) = low_contrast_figure(7);
+    let s = ImageSampler { img: &img, origin: (0, 0) };
+    let reg = subject::select_subject(&s, Rect::new(0, 0, 240, 200));
+    write("figure", &img, None);
+    write("figure-selected", &img, reg.as_ref());
+    let (w, h) = (220usize, 200usize);
+    let mut rng = Rng::new(11);
+    let img = RgbImage::from_fn(w, h, |x, y| {
+        let d = (x as f32 - 110.0).hypot(y as f32 - 100.0);
+        let n = 0.012 * rng.normal();
+        if (17.0..80.0).contains(&d) { [0.2 + n, 0.15 + n, 0.35 + n] } else { [0.95 + n, 0.94 + n, 0.92 + n] }.map(|v| v.clamp(0.0, 1.0))
+    });
+    let s = ImageSampler { img: &img, origin: (0, 0) };
+    let reg = subject::select_subject(&s, Rect::new(0, 0, w as i32, h as i32));
+    write("ring", &img, None);
+    write("ring-selected", &img, reg.as_ref());
 }

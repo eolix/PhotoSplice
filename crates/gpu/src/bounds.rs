@@ -14,11 +14,17 @@ pub fn layer_bounds(layer: &Layer, canvas: Rect) -> Rect {
     photosplice_compose::layer_bounds(layer, canvas)
 }
 
-/// The region a layer's effect maps cover: its bounds grown by the effect reach, within the
-/// canvas grown likewise (`photosplice_compose::effect_maps`).
+/// The region a layer's effect maps cover: its effect source bounds (for a group, its children
+/// with their effects: `photosplice_compose::effect_source_bounds`) grown by the effect reach, within the
+/// canvas grown likewise (`photosplice_compose::effect_maps`) when the layer reaches far beyond
+/// it. A layer about the canvas's size keeps its whole region even where it overhangs the edge:
+/// then the region keeps its size while the layer moves (a Move tool drag), so its maps move with
+/// it instead of being rebuilt every frame (#761). The maps are exact either way.
 pub fn effect_region(layer: &Layer, canvas: Rect) -> Rect {
     let m = photosplice_compose::effects::margin(layer);
-    layer_bounds(layer, canvas).inflate(m).intersect(&canvas.inflate(m))
+    let (whole, window) = (photosplice_compose::effect_source_bounds(layer, canvas).inflate(m), canvas.inflate(m));
+    let area = |r: Rect| u64::from(r.width()) * u64::from(r.height());
+    if area(whole) <= area(window).saturating_add(area(window) / 4) { whole } else { whole.intersect(&window) }
 }
 
 /// `photosplice_compose::transparent_outside`.

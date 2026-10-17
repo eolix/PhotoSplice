@@ -11,7 +11,9 @@ use photosplice_algo::GalleryFilter;
 use photosplice_color::PixelFormat;
 use photosplice_geom::Rect;
 use photosplice_raster::Surface;
-use serde_json::{Value, json};
+#[cfg(not(target_arch = "wasm32"))]
+use serde_json::Value;
+use serde_json::json;
 
 /// The picture every thumbnail shows.
 const SAMPLE_JPG: &[u8] = include_bytes!("../../../assets/img/beach.jpg");
@@ -138,6 +140,7 @@ pub fn store(set: &mut ThumbSet, file: Option<&std::path::Path>) {
 }
 
 /// `{"signature", "thumbnails": {filterKey: base64 PNG}}`.
+#[cfg(not(target_arch = "wasm32"))]
 fn to_json(set: &ThumbSet) -> Option<Vec<u8>> {
     use base64::Engine;
     let mut thumbs = serde_json::Map::new();
@@ -152,6 +155,7 @@ fn to_json(set: &ThumbSet) -> Option<Vec<u8>> {
 }
 
 /// The stored images when the file is for `signature` and has every filter at the right size.
+#[cfg(not(target_arch = "wasm32"))]
 fn from_json(bytes: &[u8], signature: &str) -> Option<Vec<egui::ColorImage>> {
     use base64::Engine;
     let v: Value = serde_json::from_slice(bytes).ok()?;

@@ -49,7 +49,8 @@ impl Value {
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Value::Int(i) => Some(*i as f64),
-            Value::Real(r) => Some(*r),
+            // `inf`, `nan` and `1e999` parse as reals but are never a valid style number.
+            Value::Real(r) if r.is_finite() => Some(*r),
             _ => None,
         }
     }
@@ -283,6 +284,26 @@ pub fn write_txt2(v: &Value) -> Vec<u8> {
     out
 }
 
+/// Serializes `/key value` pairs without an enclosing dictionary, in the multi-line EngineData
+/// layout: a `Txt2`-shaped block that `parse_txt2` wraps in `<< >>` to parse (tests build
+/// fixtures with it; the one-line layout Photoshop accepts is [`write_txt2`]).
+pub fn write_bare(items: &[(String, Value)]) -> Vec<u8> {
+    let mut out = b"\n\n".to_vec();
+    for (k, v) in items {
+        out.push(b'/');
+        out.extend_from_slice(k.as_bytes());
+        if is_container(v) {
+            out.push(b'\n');
+            indent(&mut out, 1);
+        } else {
+            out.push(b' ');
+        }
+        write_value(v, 1, &mut out);
+        out.push(b'\n');
+    }
+    out
+}
+
 fn write_compact(v: &Value, out: &mut Vec<u8>) {
     match v {
         Value::Dict(items) => {
@@ -436,16 +457,6 @@ mod tests {
     }
 
     #[test]
-    fn tiny_reals_round_trip_as_numbers() {
-        for value in [0.000004, -0.000004] {
-            assert_eq!(format_real(value), "0.0");
-            let source = Value::Dict(vec![("A".into(), Value::Array(vec![Value::Real(value)]))]);
-            let parsed = parse(&write(&source)).expect("a tiny real parses");
-            assert_eq!(parsed.get("A").and_then(Value::as_array).and_then(|a| a.first()).and_then(Value::as_f64), Some(0.0));
-        }
-    }
-
-    #[test]
     fn parses_sample() {
         let v = parse(SAMPLE).unwrap();
         assert_eq!(v.path(&["EngineDict", "Editor", "Text"]).and_then(Value::as_str), Some("Hi)\r"));
@@ -471,6 +482,26 @@ mod tests {
         assert_eq!(format_real(0.5), ".5");
         assert_eq!(format_real(-0.25), "-.25");
         assert_eq!(format_real(12.125), "12.125");
+    }
+
+    #[test]
+    fn tiny_reals_round_trip_as_numbers() {
+        for value in [0.000004, -0.000004] {
+            assert_eq!(format_real(value), "0.0");
+            let source = Value::Dict(vec![(
+                "EngineDict".into(),
+                Value::Dict(vec![("StyleRun".into(), Value::Array(vec![Value::Dict(vec![("BaselineShift".into(), Value::Real(value))])]))]),
+            )]);
+            let encoded = write(&source);
+            let parsed = parse(&encoded).expect("formatted tiny real should parse");
+            let baseline_shift = parsed
+                .path(&["EngineDict", "StyleRun"])
+                .and_then(Value::as_array)
+                .and_then(|runs| runs.first())
+                .and_then(|run| run.get("BaselineShift"))
+                .and_then(Value::as_f64);
+            assert_eq!(baseline_shift, Some(0.0));
+        }
     }
 
     #[test]

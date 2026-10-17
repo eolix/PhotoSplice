@@ -265,7 +265,7 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) -> Option<String> {
     let mut tab = f.get("__tab").and_then(Value::as_u64).map_or(0, |v| v.min(1) as usize);
     let (strip, _) = ui.allocate_exact_size(vec2(WIDTH, 28.0), Sense::hover());
     ui.painter().rect_filled(strip, egui::CornerRadius { nw: 3, ne: 3, sw: 0, se: 0 }, t.tab_strip);
-    crate::tab_strip::pro_tabs(ui, ui.id().with("notices-tabs"), strip, strip.right(), &names, &mut tab, false);
+    crate::tab_strip::pro_tabs(ui, ui.id().with("notices-tabs"), strip, strip.right(), &names, &mut tab, false, false);
     f.insert("__tab".into(), json!(tab));
     let doc = docs().get(tab)?;
     let mut clicked = None;

@@ -29,9 +29,9 @@ note = "smart_cmds.rs:382 mask only from the selection"
 [[item]]
 id = "FILE-215-4"
 target = "Adjustments (Hue/Sat + Colorize, Curves, Levels, Shadows/Highlights) apply as Smart Filters"
-status = "partial"
+status = "done"
 issue = 215
-note = "PSD Levels/Curves/Shadows-Highlights smart filters render (adjust_cmds.rs adjust_as_filter); Image › Adjustments on a smart object doesn't add one yet"
+note = "Image › Adjustments on a smart object records image.adjustments.<kind> as a smart filter (adjust_cmds.rs adjust_as_smart_filter; the selection becomes the filter mask), re-rendered from the source by adjust_as_filter and re-editable with layer.smartFilter.setParams; PSD maps Levels/Curves/Shadows-Highlights both ways (smart_map.rs). Opening the editor from the smart-filter row is FILE-215-5's row work"
 
 [[item]]
 id = "FILE-215-5"
@@ -43,16 +43,16 @@ note = "smart_ui.rs:31 rows + visibility + editor; no collapse, drag or context 
 [[item]]
 id = "FILE-215-6"
 target = "Smart Object corner skew and perspective (quad or homography transform)"
-status = "missing"
+status = "done"
 issue = 215
-note = "doc lib.rs:312 SmartObject.transform is an Affine"
+note = "#426: SmartObject.perspective holds the projective map (transform keeps its affine approximation); Distort / Perspective on a smart object set it (transform_cmds.rs, smart_cmds::set_placement), it re-renders from the source through the homography, Warp composes with it, and the PSD placement reads and writes nonAffineTransform / Trnf (io/blocks.rs placed_projective, smart_map.rs); tests distort_survives_edit_contents, warp_on_a_distorted_smart_object_follows_the_corners, placement survives the save"
 
 [[item]]
 id = "FILE-215-7"
 target = "Layered TIFF read and write (tag 37724), honouring the ask-before-saving pref"
-status = "done"
+status = "partial"
 issue = 215
-note = "psd tiff.rs (ImageSourceData, both byte orders), io tiff_layers.rs, ui tiff_options_ui.rs (Discard Layers and Save a Copy); extra alpha channels are not written (one transparency sample)"
+note = "psd tiff.rs (ImageSourceData, both byte orders), io tiff_layers.rs, ui tiff_options_ui.rs (Discard Layers and Save a Copy); extra alpha channels and a Quick Mask are not written (the TIFF codec holds one transparency sample)"
 
 [[item]]
 id = "FILE-215-8"
@@ -64,9 +64,9 @@ note = "codecs tiff_ifd.rs (bounds-checked IFD chain + SubIFD walk, classic and 
 [[item]]
 id = "FILE-215-9"
 target = "SVG opens and places as shape layers or a vector Smart Object"
-status = "missing"
+status = "done"
 issue = 215
-note = "No SVG codec or import"
+note = "io svg.rs: paths, groups, text outlines as shape layers (gradients approximated; clip/mask/filter/pattern/image subtrees rasterised); smart_cmds.rs renders an SVG source at its placement scale"
 
 [[item]]
 id = "FILE-215-10"
@@ -99,23 +99,23 @@ note = "format convert.rs:89 + tests/roundtrip.rs:282 persist frames; no PSD vid
 [[item]]
 id = "FILE-215-14"
 target = "User swatch model with ACO/ASE import and export"
-status = "missing"
+status = "done"
 issue = 215
-note = "panels.rs:954 const SWATCHES: [[u8; 3]; 40]"
+note = "engine presets/swatches.rs (RGB/HSB/CMYK/Lab/Gray + verbatim colour books, persisted in prefs) + swatch_cmds.rs (swatches.*); psd aco.rs (v1/v2) and ase.rs (groups, spot/global) read+write; ui swatches_ui.rs, Color Picker Add to Swatches"
 
 [[item]]
 id = "FILE-215-15"
 target = "Layer Style contour picker, curve editor, presets, .shc import/export"
-status = "missing"
-issue = 215
-note = "doc effects.rs:57 Contour model only"
+status = "partial"
+issue = 2912
+note = "Layer Style dialog: contour thumbnail + preset picker (12 standard shapes, own control points) and Anti-aliased on Drop/Inner Shadow, Outer/Inner Glow, Satin, Bevel Gloss Contour and Contour element; Contour Editor (add/drag/delete, Corner, Input/Output, Preset, Load…/Save… .shc per Adobe's public spec, psd shc.rs); corner points render (compose contour_curve_lut) and map to PSD Cnty. Missing: a user contour library (New…, picker Load/Save/Replace Contours), Anti-aliased doesn't change the render yet, .shc not yet checked against a Photoshop-written file"
 
 [[item]]
 id = "FILE-215-16"
 target = "Advanced Blending (knockout, blend as group, mask hides effects) end to end"
-status = "missing"
+status = "partial"
 issue = 215
-note = "No knockout / blend_interior / transparency_shapes in doc, compose or io"
+note = "doc advanced.rs + .pcraft + PSD/layered TIFF (knko infx clbl tsly lmgm vmgm), CPU compose advanced.rs (GPU falls back), blendingOptions command + dialog; 7 psd-tools knockout oracles now pass; knockout-isolated-groups (0.45 % AA edges), advanced-blending, blend-and-clipping still differ"
 
 [[item]]
 id = "FILE-215-17"
@@ -129,7 +129,7 @@ id = "FILE-215-18"
 target = "Save for Web per-slice settings remembered; Export As remembers and offers nearest scaling"
 status = "partial"
 issue = 215
-note = "file_ui.rs:188 last_web in-session only; export_dialog.rs:16 fixed defaults"
+note = "Save for Web settings survive a restart through the remembered dialog settings in prefs.dialogs (web_cmds::remember_web_settings stores them on a complete export, never the destination; file_ui.rs open_web seeds from the session's last export, else the preferences). export_dialog seeds Export As the same way (seed_remembered: format, quality, transparency, scale, metadata, TGA bits) and confirm remembers them as used. Missing: Export As nearest-neighbour scaling"
 
 [[item]]
 id = "FILE-215-19"
@@ -143,7 +143,7 @@ id = "FILE-215-20"
 target = "Artboard tool with handles and + buttons, Duplicate Artboard beside, vector PDF pages"
 status = "partial"
 issue = 215
-note = "artboard_ui.rs:1 names/properties only; no tool, + buttons or duplicate"
+note = "artboard_tool.rs: Artboard tool draws, selects, moves and resizes boards by their handles (⇧ keeps proportions), its + buttons add a board or (⌥) a copy beside the selected one (#3033); Duplicate Artboard places the copy beside (#1584); raster PDF pages only"
 
 [[item]]
 id = "FILE-215-21"
@@ -155,9 +155,9 @@ note = "Only preset libraries (preset_store.rs)"
 [[item]]
 id = "FILE-216-1"
 target = "Every corpus fetched and enforced in CI, cached by pin"
-status = "missing"
+status = "done"
 issue = 216
-note = "No corpus step in ci.yml; in progress in #190"
+note = "ci.yml has a corpus job (name: corpus tests) on every PR and on main: the corpora are pinned in xtask/src/corpus_pins.rs, sha256-verified after both a cache restore and a download, and a missing corpus fails the tests. The cache key follows the pins, so it is cached by pin as this row asks (#190)"
 
 [[item]]
 id = "FILE-216-2"
@@ -169,9 +169,9 @@ note = "4-5 GB PSB fixtures: psd example big_psb writes them (raw and RLE, plane
 [[item]]
 id = "FILE-216-3"
 target = "TIFF, RAW and EXR corpora read by tests; per-camera RAW coverage reported"
-status = "missing"
+status = "partial"
 issue = 216
-note = "corpus/tiff, raw and exr only listed by xtask corpus; no test reads them"
+note = "EXR: corpus/exr (the OpenEXR deep test images, pinned) is read by codecs tests/deep_exr.rs in the CI corpus job, against the ID manifests of the upstream sidecars. corpus/tiff and corpus/raw are still copied in by hand and no test reads them; no per-camera RAW report"
 
 [[item]]
 id = "FILE-216-4"
@@ -183,9 +183,9 @@ note = "The round trip is our export -> our import"
 [[item]]
 id = "FILE-216-5"
 target = "Save-path tests: layered TIFF, PDF, SVG, ACO/ASE, .shc, Smart Filters, atomic-save failure"
-status = "missing"
+status = "partial"
 issue = 216
-note = "Features absent; no atomic-save failure-injection test"
+note = "Every save path that exists is tested by saving and reading back: layered TIFF io tests/tiff_layers.rs (every_compression_keeps_the_layers, advanced_blending_survives_layered_tiff_in_both_byte_orders), print PDF engine print_cmds/tests.rs (print_dry_run_renders_a_pdf_and_reports_the_platform_backend decodes the image back), ACO/ASE engine swatch_cmds/tests.rs (aco_round_trip_keeps_16_bit_values_and_books, ase_round_trip_keeps_groups_floats_and_kinds), .shc psd shc.rs shc_round_trips_and_rejects_hostile_input and engine layer_style.rs contour_presets_and_custom_curves_apply_in_one_undo_step, Smart Filters engine tests/smart_psd.rs (smart_filters_survive_psd_in_every_colour_model), atomic-save failure format/src/atomic/tests.rs (BUG-203-6). There is no SVG writer (SVG opens only), so that has nothing to test yet; the row stays partial until it exists"
 
 [[item]]
 id = "FILE-216-6"

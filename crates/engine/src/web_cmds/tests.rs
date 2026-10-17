@@ -35,6 +35,155 @@ fn decode(path: &str) -> photosplice_codecs::Image {
 }
 
 #[test]
+fn estimates_preserve_last_successful_export_settings() {
+    let dir = tmp("estimate_settings");
+    let mut s = session(8);
+    let saved = json!({"format": "png24", "path": format!("{dir}/saved.png"), "width": 32, "height": 24});
+    s.execute("file.export.saveForWebLegacy", saved.clone()).unwrap();
+    assert_eq!(s.file_menu.last_web.as_ref(), Some(&saved));
+
+    let estimate = s.execute("file.export.saveForWebLegacy", json!({"format": "jpeg", "quality": 10, "width": 16, "height": 12})).unwrap();
+    assert_eq!((estimate["width"].as_u64(), estimate["height"].as_u64()), (Some(16), Some(12)));
+    assert_eq!(s.file_menu.last_web.as_ref(), Some(&saved), "preview estimates must not replace the settings from the last successful export");
+}
+
+/// The next launch's dialog seeds from the preferences: `file_menu` is not saved, so a complete
+/// export remembers its settings in `prefs.dialogs` too, as Fill and the filter dialogs do.
+#[test]
+fn a_complete_export_remembers_its_settings_in_the_preferences() {
+    let dir = tmp("remember_settings");
+    let mut s = session(8);
+    s.execute("file.export.saveForWebLegacy", json!({"format": "jpeg", "quality": 42, "path": format!("{dir}/out.jpg")})).unwrap();
+    let saved = s.prefs().dialogs.get("file.export.saveForWebLegacy").cloned().expect("remembered");
+    assert_eq!(saved["format"], "jpeg");
+    assert_eq!(saved["quality"], 42);
+    assert!(saved.get("path").is_none(), "the destination is per export, not remembered");
+
+    // Preview estimates remember nothing, like they don't replace `file_menu`.
+    s.execute("file.export.saveForWebLegacy", json!({"format": "png24", "width": 16, "height": 12})).unwrap();
+    assert_eq!(s.prefs().dialogs.get("file.export.saveForWebLegacy").unwrap()["format"], "jpeg");
+}
+
+#[test]
+fn platform_writer_receives_resized_image_at_every_depth() {
+    for depth in [8, 16, 32] {
+        let mut s = session(depth);
+        let params = json!({"format": "png24", "path": "download.png", "width": 32, "height": 24});
+        let mut files = Vec::new();
+        let r = save_for_web_with_writer(&mut s, &params, &mut |path, bytes| {
+            files.push((path.to_string(), bytes.to_vec()));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].0, "download.png");
+        assert_eq!(r["files"], json!(["download.png"]));
+        assert_eq!(r["bytes"].as_u64(), Some(files[0].1.len() as u64));
+        let img = photosplice_codecs::decode(&files[0].1).unwrap().convert(photosplice_codecs::ChannelLayout::Rgba, photosplice_codecs::SampleType::U8);
+        assert_eq!(img.dimensions(), (32, 24), "{depth}-bit document");
+        let i = (8 * 32 + 8) * 4;
+        assert_eq!(&img.data()[i..i + 4], &[255, 0, 0, 255]);
+        assert_eq!(s.file_menu.last_web.as_ref(), Some(&params));
+    }
+}
+
+#[test]
+fn platform_writer_checks_authorization_before_dropping_floating_pixels() {
+    let mut s = session(8);
+    s.execute("select.rect", json!({"x": 8, "y": 8, "width": 4, "height": 4})).unwrap();
+    s.execute("select.float", json!({"dx": 32})).unwrap();
+    assert!(crate::float_cmds::floating(s.active().unwrap()).is_some());
+    s.authorize = Some(|cmd, params| {
+        assert_eq!(cmd, "file.export.saveForWebLegacy");
+        assert_eq!(params["path"], "moved.png");
+        Err(other("export denied"))
+    });
+    let params = json!({"format": "png24", "path": "moved.png"});
+    let mut output = Vec::new();
+    let denied = save_for_web_with_writer(&mut s, &params, &mut |_, bytes| {
+        output.extend_from_slice(bytes);
+        Ok(())
+    });
+    assert!(denied.unwrap_err().to_string().contains("export denied"));
+    assert!(output.is_empty());
+    assert!(s.file_menu.last_web.is_none());
+    assert!(crate::float_cmds::floating(s.active().unwrap()).is_some(), "denied export must not commit a floating move");
+
+    s.authorize = None;
+    save_for_web_with_writer(&mut s, &params, &mut |_, bytes| {
+        output.extend_from_slice(bytes);
+        Ok(())
+    })
+    .unwrap();
+    assert!(crate::float_cmds::floating(s.active().unwrap()).is_none());
+    let img = photosplice_codecs::decode(&output).unwrap().convert(photosplice_codecs::ChannelLayout::Rgba, photosplice_codecs::SampleType::U8);
+    let old = (10 * 64 + 10) * 4;
+    let moved = (10 * 64 + 42) * 4;
+    assert_eq!(img.data()[old + 3], 0, "the selected pixels left their original position");
+    assert_eq!(&img.data()[moved..moved + 4], &[255, 0, 0, 255], "the download contains the moved pixels");
+}
+
+#[test]
+fn platform_writer_receives_slices_spacer_and_html_with_sibling_references() {
+    let mut s = session(8);
+    s.execute("slice.new", json!({"rect": [8, 8, 24, 24], "name": "logo", "alt": "Logo"})).unwrap();
+    s.execute("slice.new", json!({"rect": [40, 0, 24, 20], "kind": "noImage", "cellText": "Hello & bye"})).unwrap();
+    let params = json!({"format": "png24", "dir": "downloads", "imagesFolder": "", "html": true});
+    let mut files = std::collections::BTreeMap::new();
+    let r = save_for_web_with_writer(&mut s, &params, &mut |path, bytes| {
+        assert!(files.insert(path.to_string(), bytes.to_vec()).is_none(), "each file is written once");
+        Ok(())
+    })
+    .unwrap();
+    let page = std::str::from_utf8(files.get(r["html"].as_str().unwrap()).unwrap()).unwrap();
+    let images = r["files"].as_array().unwrap();
+    assert_eq!(files.len(), images.len() + 2, "image slices, spacer and HTML all reach the writer");
+    for path in images {
+        let path = path.as_str().unwrap();
+        let filename = path.strip_prefix("downloads/").unwrap();
+        assert!(page.contains(&format!("src=\"{filename}\"")), "the HTML refers to its sibling {filename}");
+        assert!(photosplice_codecs::decode(files.get(path).unwrap()).is_ok());
+    }
+    assert!(page.contains("src=\"spacer.gif\""));
+    assert!(page.contains("Hello &amp; bye"));
+    assert_eq!(photosplice_codecs::decode(files.get("downloads/spacer.gif").unwrap()).unwrap().dimensions(), (1, 1));
+    assert_eq!(photosplice_codecs::decode(files.get("downloads/logo.png").unwrap()).unwrap().dimensions(), (24, 24));
+    assert_eq!(s.file_menu.last_web.as_ref(), Some(&params));
+}
+
+#[test]
+fn reserved_document_and_slice_names_export_with_portable_names() {
+    let dir = tmp("reserved-slice-names");
+    let mut s = session(8);
+    s.edit("rename", |doc, _| {
+        doc.name = "aux.psd".into();
+        Ok(())
+    })
+    .unwrap();
+    s.execute("slice.new", json!({"rect": [0, 0, 16, 16], "name": "con"})).unwrap();
+    let result = s.execute("file.export.saveForWebLegacy", json!({"dir": dir, "format": "png24", "html": true})).unwrap();
+    assert!(result["html"].as_str().unwrap().ends_with("/aux_.html"));
+    assert!(result["files"].as_array().unwrap().iter().any(|f| f.as_str().unwrap().ends_with("/con_.png")));
+    assert!(std::path::Path::new(result["html"].as_str().unwrap()).is_file());
+}
+
+#[test]
+fn platform_writer_failure_stops_export_and_preserves_saved_settings() {
+    let mut s = session(8);
+    let saved = json!({"format": "png24", "path": "saved.png"});
+    save_for_web_with_writer(&mut s, &saved, &mut |_, _| Ok(())).unwrap();
+    s.execute("slice.new", json!({"rect": [8, 8, 24, 24], "name": "logo"})).unwrap();
+    let mut attempts = 0;
+    let failed = save_for_web_with_writer(&mut s, &json!({"format": "gif", "dir": "downloads", "html": true}), &mut |_, _| {
+        attempts += 1;
+        if attempts == 2 { Err(other("download failed")) } else { Ok(()) }
+    });
+    assert!(failed.unwrap_err().to_string().contains("download failed"));
+    assert_eq!(attempts, 2, "no later slice, spacer or HTML should be written after failure");
+    assert_eq!(s.file_menu.last_web.as_ref(), Some(&saved));
+}
+
+#[test]
 fn estimates_every_format_at_every_depth() {
     for depth in [8, 16, 32] {
         let mut s = session(depth);
@@ -79,6 +228,44 @@ fn gif_and_png8_keep_transparency_and_palette() {
     s.execute("file.export.saveForWebLegacy", json!({"format": "png8", "transparency": false, "matte": "#00ff00", "path": png8})).unwrap();
     let img = decode(&png8).convert(photosplice_codecs::ChannelLayout::Rgba, photosplice_codecs::SampleType::U8);
     assert_eq!(&img.data()[..4], &[0, 255, 0, 255]);
+}
+
+/// #4115: Photoshop's scripted Save for Web has no matte unless one is asked for, so a soft black
+/// shadow exported to PNG-8 stays black (alpha only 0 or 255) instead of turning grey. A preset
+/// keeps its white matte, and a matte asked for still applies.
+#[test]
+fn png8_has_no_matte_by_default() {
+    let dir = tmp("matte");
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 256, "height": 8, "background": "transparent"})).unwrap();
+    s.edit("paint", |doc, active| {
+        let fmt = doc.pixel_format();
+        let mut l = Layer::raster("Shadow", fmt);
+        let surf = l.surface_mut().unwrap();
+        for x in 0..256 {
+            surf.fill_rect(Rect::new(x, 0, x + 1, 8), &photosplice_raster::from_rgba(&fmt, [0.0, 0.0, 0.0, 1.0 - x as f32 / 255.0]));
+        }
+        *active = Some(doc.insert_above(None, l));
+        Ok(())
+    })
+    .unwrap();
+    let export = |s: &mut Session, extra: Value| {
+        let path = format!("{dir}/{}.png", s.journal.len());
+        let mut p = json!({"format": "png8", "path": path});
+        p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        s.execute("file.export.saveForWebLegacy", p).unwrap();
+        let img = decode(&path).convert(photosplice_codecs::ChannelLayout::Rgba, photosplice_codecs::SampleType::U8);
+        (0..256).map(|x| img.data()[x * 4..x * 4 + 4].to_vec()).collect::<Vec<_>>()
+    };
+    let plain = export(&mut s, json!({}));
+    assert!(plain.iter().all(|p| p == &[0, 0, 0, 255] || p[3] == 0), "black or transparent: {:?}", &plain[60..70]);
+    assert_eq!(plain[64], [0, 0, 0, 255], "alpha 191 stays black");
+    assert_eq!(plain[200][3], 0);
+    // A matte asked for, or a preset's, lightens the soft pixels as before.
+    let white = export(&mut s, json!({"matte": "#ffffff"}));
+    assert!(white[64][0] > 40 && white[64][3] == 255, "{:?}", white[64]);
+    let preset = WebSettings::from_params(&json!({"preset": "PNG-8 128 Dithered"}), "x").unwrap();
+    assert_eq!(preset.matte, Some([1.0, 1.0, 1.0]));
 }
 
 #[test]
@@ -134,6 +321,103 @@ fn slices_export_with_html_table() {
 }
 
 #[test]
+fn slice_html_escapes_imported_markup_by_default_and_requires_trusted_opt_in() {
+    let dir = tmp("slice-html-safety");
+    let mut s = session(8);
+    let slice = s
+        .execute(
+            "slice.new",
+            json!({"rect": [0, 0, 24, 20], "kind": "noImage", "name": "text", "cellTextIsHtml": true,
+            "cellText": "<script>alert(1)</script><b>Trusted label</b>"}),
+        )
+        .unwrap();
+    let default = s.execute("file.export.saveForWebLegacy", json!({"format": "png24", "dir": dir, "html": true})).unwrap();
+    let page = std::fs::read_to_string(default["html"].as_str().unwrap()).unwrap();
+    assert!(page.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    assert!(!page.contains("<script>"));
+    assert!(page.contains("&lt;b&gt;Trusted label&lt;/b&gt;"));
+
+    let trusted_dir = tmp("slice-html-trusted");
+    let trusted = s.execute("file.export.saveForWebLegacy", json!({"format": "png24", "dir": trusted_dir, "html": true, "trustedSliceHtml": true})).unwrap();
+    let page = std::fs::read_to_string(trusted["html"].as_str().unwrap()).unwrap();
+    assert!(page.contains("<script>alert(1)</script><b>Trusted label</b>"));
+    assert!(s.file_menu.last_web.as_ref().unwrap().get("trustedSliceHtml").is_none());
+
+    let plain_dir = tmp("slice-html-plain");
+    s.execute("slice.set", json!({"slice": slice["slice"], "cellTextIsHtml": false})).unwrap();
+    let plain = s.execute("file.export.saveForWebLegacy", json!({"format": "png24", "dir": plain_dir, "html": true, "trustedSliceHtml": true})).unwrap();
+    let page = std::fs::read_to_string(plain["html"].as_str().unwrap()).unwrap();
+    assert!(page.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+}
+
+#[test]
+fn slice_links_allow_normal_urls_and_drop_active_schemes() {
+    let dir = tmp("slice-link-safety");
+    let mut s = session(8);
+    for (x, url) in [
+        (0, "javascript:alert(1)"),
+        (10, "data:text/html,<script>alert(1)</script>"),
+        (20, "https://example.org/page?a=1&b=2"),
+        (30, "../relative/page.html#part"),
+        (40, "mailto:hello@example.org"),
+        (50, "JaVa\tscript:alert(1)"),
+    ] {
+        s.execute("slice.new", json!({"rect": [x, 0, 10, 10], "name": format!("link{x}"), "url": url})).unwrap();
+    }
+    let r = s.execute("file.export.saveForWebLegacy", json!({"format": "png24", "dir": dir, "html": true, "slices": "user"})).unwrap();
+    let page = std::fs::read_to_string(r["html"].as_str().unwrap()).unwrap();
+    assert!(!page.contains("href=\"javascript:"));
+    assert!(!page.contains("href=\"data:"));
+    assert!(!page.contains("href=\"JaVa"));
+    assert!(page.contains("href=\"https://example.org/page?a=1&amp;b=2\""));
+    assert!(page.contains("href=\"../relative/page.html#part\""));
+    assert!(page.contains("href=\"mailto:hello@example.org\""));
+    assert_eq!(page.matches("<a href=").count(), 3);
+}
+
+#[test]
+fn images_folder_stays_inside_export_directory_and_is_escaped_in_html() {
+    let root = tmp("slice-image-folder");
+    let dir = format!("{root}/output");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = session(8);
+    s.execute(
+        "slice.new",
+        json!({"rect": [0, 0, 20, 20], "name": "logo", "url": "https://example.org", "target": "x\" onclick=\"alert(1)", "alt": "x\" onerror=\"alert(1)"}),
+    )
+    .unwrap();
+    for images in ["../escaped", "..\\escaped", "/absolute", "C:\\absolute", "nested/../../escaped", "/"] {
+        assert!(s.execute("file.export.saveForWebLegacy", json!({"format": "gif", "dir": dir, "html": true, "imagesFolder": images})).is_err(), "{images}");
+    }
+    assert!(!std::path::Path::new(&format!("{root}/escaped")).exists());
+    // Windows forbids quotes in path components; an ampersand still exercises HTML escaping.
+    #[cfg(windows)]
+    let (folder, escaped_folder) = ("nested/im&files", "nested/im&amp;files");
+    #[cfg(not(windows))]
+    let (folder, escaped_folder) = ("nested/im\" onerror=\"alert(1)&", "nested/im&quot; onerror=&quot;alert(1)&amp;");
+    let r = s.execute("file.export.saveForWebLegacy", json!({"format": "gif", "dir": dir, "html": true, "imagesFolder": folder})).unwrap();
+    let page = std::fs::read_to_string(r["html"].as_str().unwrap()).unwrap();
+    assert!(page.contains(&format!("src=\"{escaped_folder}/logo.gif\"")));
+    assert!(page.contains(&format!("src=\"{escaped_folder}/spacer.gif\"")));
+    assert!(page.contains("alt=\"x&quot; onerror=&quot;alert(1)\""));
+    assert!(!page.contains("onerror=\"alert(1)\""));
+    assert!(!page.contains("onclick=\"alert(1)\""));
+    assert!(std::path::Path::new(&dir).join(folder).join("spacer.gif").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn images_folder_rejects_existing_symlink_outside_export_directory() {
+    let dir = tmp("slice-image-symlink");
+    let outside = tmp("slice-image-outside");
+    std::os::unix::fs::symlink(&outside, format!("{dir}/linked")).unwrap();
+    let mut s = session(8);
+    s.execute("slice.new", json!({"rect": [0, 0, 20, 20], "name": "logo"})).unwrap();
+    assert!(s.execute("file.export.saveForWebLegacy", json!({"format": "gif", "dir": dir, "html": true, "imagesFolder": "linked"})).is_err());
+    assert!(std::fs::read_dir(&outside).unwrap().next().is_none());
+}
+
+#[test]
 fn export_preferences_drive_quick_export() {
     let dir = tmp("quick");
     let mut s = session(8);
@@ -151,6 +435,54 @@ fn export_preferences_drive_quick_export() {
     assert_eq!(r["format"], "gif");
     assert!(std::fs::read(format!("{dir}/x.gif")).unwrap().starts_with(b"GIF89a"));
     s.execute("prefs.reset", json!({"path": "export"})).unwrap();
+}
+
+#[test]
+fn webp_export_preferences_select_lossless_or_lossy_output() {
+    let dir = tmp("quick_webp_quality");
+    let mut s = session(8);
+    let defaults = s.prefs().export.clone();
+    assert!(defaults.webp_lossless, "existing Quick Export defaults to lossless WebP");
+    assert_eq!(defaults.webp_quality, 85);
+
+    // Simulate an older stored preference section without the newly added WebP keys.
+    let mut old = s.prefs().to_json();
+    old["export"].as_object_mut().unwrap().remove("webpLossless");
+    old["export"].as_object_mut().unwrap().remove("webpQuality");
+    let restored: crate::prefs::Preferences = serde_json::from_value(old).unwrap();
+    assert!(restored.export.webp_lossless);
+    assert_eq!(restored.export.webp_quality, 85);
+
+    let r = s.execute("file.export.exportPreferences", json!({"quickExportFormat": "webp", "webpLossless": true, "webpQuality": 40})).unwrap();
+    assert_eq!(r["values"]["webpLossless"], true);
+    assert_eq!(r["values"]["webpQuality"], 40);
+    let lossless_path = format!("{dir}/lossless.webp");
+    s.execute("file.export.quickExport", json!({"path": lossless_path})).unwrap();
+    let lossless = std::fs::read(&lossless_path).unwrap();
+    assert!(lossless.starts_with(b"RIFF") && &lossless[8..12] == b"WEBP");
+    assert!(lossless.windows(4).any(|w| w == b"VP8L"), "lossless WebP should use VP8L");
+    assert_eq!(decode(&lossless_path).dimensions(), (64, 48));
+
+    s.execute("file.export.exportPreferences", json!({"webpLossless": false})).unwrap();
+    let low_path = format!("{dir}/lossy40.webp");
+    s.execute("file.export.quickExport", json!({"path": low_path})).unwrap();
+    let low = std::fs::read(&low_path).unwrap();
+    assert!(low.windows(4).any(|w| w == b"VP8 "), "lossy WebP should contain a VP8 frame");
+    assert_eq!(decode(&low_path).dimensions(), (64, 48));
+
+    s.execute("file.export.exportPreferences", json!({"webpQuality": 90})).unwrap();
+    let high_path = format!("{dir}/lossy90.webp");
+    s.execute("file.export.quickExport", json!({"path": high_path})).unwrap();
+    let high = std::fs::read(&high_path).unwrap();
+    assert!(high.windows(4).any(|w| w == b"VP8 "));
+    assert_eq!(decode(&high_path).dimensions(), (64, 48));
+    assert_ne!(low, high, "changing WebP quality should change the encoded image");
+
+    let before = s.prefs().export.webp_quality;
+    for quality in [0, 101] {
+        assert!(s.execute("file.export.exportPreferences", json!({"webpQuality": quality})).is_err());
+        assert_eq!(s.prefs().export.webp_quality, before);
+    }
 }
 
 #[test]
@@ -210,8 +542,76 @@ fn image_assets_are_generated_now_and_on_save() {
     d.layer_mut(lid).unwrap().name = "icon.png".into();
     let (files, errors) = generate_assets(&d, &dir);
     assert!(errors.is_empty(), "{errors:?}");
-    assert_eq!(files, vec![format!("{dir}/icon@2x.png")]);
+    assert_eq!(files.iter().map(|p| std::path::PathBuf::from(p.as_str())).collect::<Vec<_>>(), vec![std::path::Path::new(&dir).join("icon@2x.png")]);
     assert_eq!(decode(&files[0]).dimensions(), (128, 80));
+}
+
+#[test]
+fn image_assets_reject_traversal_from_names_and_defaults() {
+    let base = tmp("asset-path-guard");
+    let dir = format!("{base}/output");
+    std::fs::create_dir_all(&dir).unwrap();
+    let outside = tmp("asset-path-outside");
+    let mut d = (*session(8).active().unwrap().doc).clone();
+    let id = d.layers[1].id;
+    d.layer_mut(id).unwrap().name =
+        format!("nested/ok.png, ../escaped.png, ..\\backslash.png, {outside}/absolute.png, C:\\drive\\escape.png, CON.png, aux/escape.png, foo./trailing.png");
+    let (files, errors) = generate_assets(&d, &dir);
+    assert_eq!(files.iter().map(|p| std::path::PathBuf::from(p.as_str())).collect::<Vec<_>>(), vec![std::path::Path::new(&dir).join("nested").join("ok.png")]);
+    assert_eq!(errors.len(), 7, "{errors:?}");
+    assert!(errors.iter().all(|e| e["error"].as_str().unwrap().contains("unsafe component")), "{errors:?}");
+    assert!(!std::path::Path::new(&format!("{base}/escaped.png")).exists());
+    assert!(!std::path::Path::new(&format!("{outside}/absolute.png")).exists());
+
+    d.layer_mut(id).unwrap().name = "safe.png".into();
+    d.layers.push(Layer::new(
+        "default ../ + /outside/ + ..\\bad/ + C:\\drive/ + 50% nested/",
+        LayerContent::Group(photosplice_doc::Group { children: vec![], expanded: false, artboard: None, divider_blocks: Vec::new() }),
+    ));
+    let (files, errors) = generate_assets(&d, &dir);
+    assert_eq!(
+        files.iter().map(|p| std::path::PathBuf::from(p.as_str())).collect::<Vec<_>>(),
+        vec![std::path::Path::new(&dir).join("nested").join("safe.png")]
+    );
+    assert_eq!(errors.len(), 4, "{errors:?}");
+    assert!(errors.iter().all(|e| e["error"].as_str().unwrap().contains("unsafe component")), "{errors:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn image_assets_reject_existing_symlinks_in_folders_and_files() {
+    let dir = tmp("asset-symlink-guard");
+    let outside = tmp("asset-symlink-outside");
+    let sentinel = format!("{outside}/sentinel.png");
+    std::fs::write(&sentinel, b"unchanged").unwrap();
+    let webp_sentinel = format!("{outside}/sentinel.webp");
+    std::fs::write(&webp_sentinel, b"also unchanged").unwrap();
+    std::os::unix::fs::symlink(&outside, format!("{dir}/linked")).unwrap();
+    std::os::unix::fs::symlink(&sentinel, format!("{dir}/leaf.png")).unwrap();
+    std::os::unix::fs::symlink(&webp_sentinel, format!("{dir}/leaf.webp")).unwrap();
+    let mut d = (*session(8).active().unwrap().doc).clone();
+    let id = d.layers[1].id;
+    d.layer_mut(id).unwrap().name = "linked/new/sub.png, leaf.png, leaf.webp, good/safe.png".into();
+    let (files, errors) = generate_assets(&d, &dir);
+    assert_eq!(files, vec![format!("{dir}/good/safe.png")]);
+    assert_eq!(errors.len(), 3, "{errors:?}");
+    assert!(errors.iter().all(|e| e["error"].as_str().unwrap().contains("symlink")), "{errors:?}");
+    assert!(!std::path::Path::new(&format!("{outside}/new")).exists());
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"unchanged");
+    assert_eq!(std::fs::read(&webp_sentinel).unwrap(), b"also unchanged");
+
+    let linked_root = format!("{dir}/rootlink");
+    std::os::unix::fs::symlink(&outside, &linked_root).unwrap();
+    d.layer_mut(id).unwrap().name = "root.png".into();
+    let (files, errors) = generate_assets(&d, &format!("{linked_root}/"));
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(files, vec![format!("{linked_root}/root.png")]);
+    assert!(std::path::Path::new(&format!("{outside}/root.png")).is_file());
+
+    let mut s = session(8);
+    let exported = s.execute("file.export.saveForWebLegacy", json!({"dir": linked_root, "format": "png24", "html": true})).unwrap();
+    assert!(exported["html"].as_str().unwrap().ends_with("/rootlink/web.html"));
+    assert!(std::path::Path::new(&format!("{outside}/web.html")).is_file());
 }
 
 #[test]
@@ -330,3 +730,6 @@ fn overlapping_slices_keep_the_later_slice_in_html() {
     assert_eq!(area, 64 * 48);
     assert!(files.iter().any(|f| f.ends_with("images/under_01.png")), "the covered slice is cut into pieces: {files:?}");
 }
+
+#[path = "color_table_tests.rs"]
+mod color_table_tests;

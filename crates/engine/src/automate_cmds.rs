@@ -23,6 +23,22 @@ fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
     EngineError::BadParams { cmd: cmd.into(), msg: msg.into() }
 }
 
+/// Photoshop ExtendScript / UXP script suffixes — not PhotoSplice JSON or command lists.
+fn extendscript_ext(path: &str) -> Option<&str> {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let dot = name.rfind('.')?;
+    let ext = &name[dot + 1..];
+    let lower = ext.to_ascii_lowercase();
+    matches!(lower.as_str(), "js" | "jsx" | "jsxbin" | "psjs" | "ccjs").then_some(ext)
+}
+
+fn reject_extendscript(cmd: &str, path: &str) -> Result<()> {
+    match extendscript_ext(path) {
+        Some(_) => Err(bad(cmd, "PhotoSplice scripts are JSON or command lists (one command.id {json} per line), not Photoshop ExtendScript (.js/.jsx)")),
+        None => Ok(()),
+    }
+}
+
 /// Session state of the File-menu commands (not saved, not history).
 #[derive(Clone, Debug, Default)]
 pub struct FileMenuState {
@@ -106,7 +122,14 @@ fn run_steps(s: &mut Session, steps: &[(String, Value)]) -> Vec<Value> {
     let mut results = Vec::new();
     for (id, params) in steps {
         match s.execute(id, params.clone()) {
-            Ok(r) => results.push(json!({"command": id, "result": r})),
+            // A called action reports a failed step inside an `Ok`; it stops the script too.
+            Ok(r) => match crate::actions_cmds::nested_failure(id, &r) {
+                Some(error) => {
+                    results.push(json!({"command": id, "result": r, "error": error}));
+                    break;
+                }
+                None => results.push(json!({"command": id, "result": r})),
+            },
             Err(e) => {
                 results.push(json!({"command": id, "error": e.to_string()}));
                 break;
@@ -119,6 +142,12 @@ fn run_steps(s: &mut Session, steps: &[(String, Value)]) -> Vec<Value> {
 /// File › Scripts › Browse…: run a script file on the session.
 fn browse(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "file.scripts.browse";
+    if let Some(path) = p.get("path").and_then(Value::as_str) {
+        reject_extendscript(cmd, path)?;
+    }
+    if let Some(name) = p.get("name").and_then(Value::as_str) {
+        reject_extendscript(cmd, name)?;
+    }
     let steps = match (p.get("path").and_then(Value::as_str), p.get("script").and_then(Value::as_str), p.get("steps")) {
         (Some(path), _, _) => parse_script(&String::from_utf8_lossy(&read_file(path)?))?,
         (_, Some(text), _) => parse_script(text)?,
@@ -283,8 +312,13 @@ fn create_droplet(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "file.automate.createDroplet";
     let path = p.get("path").and_then(Value::as_str).filter(|v| !v.is_empty()).ok_or_else(|| bad(cmd, "missing \"path\" (where to save the droplet)"))?;
     let steps_v = p.get("steps").or_else(|| p.get("action")).ok_or_else(|| bad(cmd, "missing \"steps\" (the action to run)"))?;
-    let steps = parse_steps(steps_v, cmd)?;
+    let mut steps = parse_steps(steps_v, cmd)?;
+    // The droplet's output folder replaces recorded saves, and view steps don't apply, as in batch.
+    steps.retain(|(id, _)| !crate::actions_cmds::shell_save_command(id) && !crate::actions_cmds::shell_view_command(id));
     check_known(&steps, cmd)?;
+    // Play Action steps need their actions when the droplet runs on its own (#2794). Not under
+    // `actions`: that key holds an action set.
+    let called = crate::actions_cmds::called_actions(&s.actions.list, &mut steps);
     let path = if path.ends_with(".pcdroplet") || path.ends_with(".json") { path.to_string() } else { format!("{path}.pcdroplet") };
     let name = p.get("name").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| stem(&path));
     let steps_json: Vec<Value> = steps.iter().map(|(id, pr)| json!([id, pr])).collect();
@@ -294,10 +328,12 @@ fn create_droplet(s: &mut Session, p: &Value) -> Result<Value> {
             options.insert(k.into(), v.clone());
         }
     }
-    let droplet = json!({"photospliceDroplet": 1, "name": name, "action": {"name": name, "steps": steps_json}, "options": options});
+    let mut droplet = json!({"photospliceDroplet": 1, "name": name, "action": {"name": name, "steps": steps_json}, "options": options});
+    if !called.is_empty() {
+        droplet["calledActions"] = json!(called);
+    }
     let text = serde_json::to_string_pretty(&droplet).unwrap_or_default();
     write_file(&path, text.as_bytes())?;
-    let _ = s;
     Ok(json!({"path": path, "steps": steps.len()}))
 }
 
@@ -331,6 +367,9 @@ fn run_droplet(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(q) = opts.get("quality") {
         bp["quality"] = q.clone();
     }
+    if let Some(called) = v.get("calledActions") {
+        bp["calledActions"] = called.clone();
+    }
     let r = s.execute("file.automate.batch", bp)?;
     Ok(json!({"droplet": path, "output": output, "files": r["files"], "errors": r["errors"]}))
 }
@@ -346,24 +385,8 @@ fn statistics(s: &mut Session, p: &Value) -> Result<Value> {
         .ok_or_else(|| bad(cmd, format!("unknown stack mode `{mode}`")))?;
     let input = p.get("input").or_else(|| p.get("paths")).cloned().ok_or_else(|| bad(cmd, "missing \"input\" (files or a folder)"))?;
     let align = p.get("align").and_then(Value::as_bool).unwrap_or(false);
-    let r = s.execute("file.scripts.loadFilesIntoStack", json!({"paths": input, "createSmartObject": !align}))?;
+    let r = s.execute("file.scripts.loadFilesIntoStack", json!({"paths": input, "align": align, "createSmartObject": true}))?;
     let n = r["layers"].as_u64().unwrap_or(0);
-    if align && n > 1 {
-        s.execute("select.allLayers", json!({}))?;
-        s.execute("edit.autoAlignLayers", json!({"projection": "auto"}))?;
-        let name = s.active().map(|d| d.doc.name.clone()).unwrap_or_default();
-        s.edit("Convert to Smart Object", |doc, active| {
-            let children = std::mem::take(&mut doc.layers);
-            let group = Layer::new(name.clone(), LayerContent::Group(photosplice_doc::Group { children, expanded: true, artboard: None, divider_blocks: Vec::new() }));
-            let smart = crate::smart_cmds::layer_to_smart(doc, &group)?;
-            *active = Some(smart.id);
-            doc.layers = vec![smart];
-            Ok(())
-        })?;
-        if let Some(st) = s.active_mut() {
-            st.selected_layers = st.active_layer.into_iter().collect();
-        }
-    }
     let id = s.active().and_then(|d| d.doc.layers.first().map(|l| l.id)).ok_or(EngineError::NoDocument)?;
     s.select_layer(id)?;
     s.execute(&format!("layer.smartObjects.stackMode.{}", sm.id()), json!({"layer": id.0}))?;
@@ -507,7 +530,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "file.automate.createDroplet",
             "Create Droplet…",
             &["File", "Automate"],
-            r##"{"path":str (.pcdroplet),"steps":[[id,params]…] (the action),"name":str?,"output":folder?,"format":"same|png|jpg|…"?,"quality":0..12?} → {path, steps}"##,
+            r##"{"path":str (.pcdroplet),"steps":[[id,params]…] (the action),"name":str?,"output":folder?,"format":"same|png|jpg|…"?,"quality":0..12?} → {path, steps} (the actions its Play Action steps call are saved in the droplet)"##,
             native,
             create_droplet
         ),

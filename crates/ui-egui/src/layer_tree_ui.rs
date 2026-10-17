@@ -10,6 +10,7 @@ use egui::{Rect, Sense, Shape, Stroke, pos2, vec2};
 use photosplice_doc::{Document, Layer, LayerContent};
 use serde_json::{Value, json};
 
+use crate::PhotospliceApp;
 use crate::theme::Tokens;
 
 /// Width the disclosure triangle takes in a group row.
@@ -32,6 +33,17 @@ pub fn display_rows(doc: &Document, show_all: bool) -> Vec<(usize, &Layer)> {
     let mut out = Vec::new();
     rec(&doc.layers, 0, show_all, &mut out);
     out
+}
+
+/// The Layers panel's rows for `app`: [`display_rows`] (every row while filtered) without a Type
+/// Mask session's working text, which is no layer to the user: Photoshop shows only the mask
+/// overlay while you type (#3036).
+pub fn panel_rows<'a>(app: &PhotospliceApp, doc: &'a Document) -> Vec<(usize, &'a Layer)> {
+    let mut rows = display_rows(doc, crate::layer_filter_ui::Filter::of(&app.ui).active());
+    if let Some(working) = app.ui.text_edit.as_ref().filter(|ed| ed.mask).map(|ed| ed.layer) {
+        rows.retain(|(_, l)| l.id.0 != working);
+    }
+    rows
 }
 
 /// The hit area of a group row's triangle starting at `x`.

@@ -3,7 +3,7 @@
 
 use egui::{Rect, vec2};
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use photosplice_doc::{Layer, LayerContent};
 use serde_json::json;
 
@@ -175,8 +175,12 @@ fn type_controls_fill_the_panel_at_every_width_and_scale() {
                 .map(|r| r.right())
                 .fold(f32::MIN, f32::max);
             // (Both rows have a unit suffix: compare with the size/leading row.)
-            let top = fields.iter().map(|r| r.top()).fold(f32::MAX, f32::min);
-            let lead = fields.iter().filter(|r| (r.top() - top).abs() < 0.5).map(|r| r.right()).fold(f32::MIN, f32::max);
+            // Variable-font axes can precede the size/leading row and have no unit suffix.
+            // Compare the intended point-valued controls, retaining the same edge tolerance.
+            let lead = ["Font size", "Leading (set to the font size × auto-leading when Auto)"]
+                .into_iter()
+                .map(|label| h.get_by_role_and_label(egui::accesskit::Role::SpinButton, label).rect().right())
+                .fold(f32::MIN, f32::max);
             assert!((t_right - lead).abs() < 0.5, "{what}: Transform fields end at {t_right}, Character at {lead}");
             // Quick Actions buttons span the panel too.
             let qa = h.get_by_label("Rasterize Type").rect();
@@ -231,4 +235,117 @@ fn character_and_paragraph_dock_panels_share_the_headers_without_type_options() 
     select(&mut h, px);
     assert!(headers(&h).is_empty());
     assert!(h.query_by_value("Select a type layer to edit its character and paragraph settings.").is_some());
+}
+
+/// #2085: like Photoshop, Opacity and Fill stack in one right-aligned column: both fields end at
+/// the same edge, and both labels end the same gap before them (Fill's label used to touch its field).
+#[test]
+fn layers_opacity_and_fill_share_one_right_column() {
+    // PhotoSplice's dark and light themes.
+    for theme in [crate::theme::ThemeKind::Midnight.id(), crate::theme::ThemeKind::Pearl.id()] {
+        let (s, layers) = kinds();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 1000.0)).with_max_steps(64).build_eframe(move |cc| {
+            PhotospliceApp::setup_context(&cc.egui_ctx, Default::default());
+            PhotospliceApp::new(s, crate::Services::default())
+        });
+        set(&mut h, json!({"theme": theme}));
+        select(&mut h, layers[0].1);
+        // The popup-slider arrow is named after the field; its label is the text left of it on its
+        // row (with Reference's colon in the Pro themes, which all of PhotoSplice's are).
+        let pro = crate::theme::Tokens::get(&h.ctx).pro;
+        let row = |name: &str| {
+            let arrow = h.query_all_by_label(name).find(|n| n.accesskit_node().role() == egui::accesskit::Role::Button).unwrap().rect();
+            let text = if pro { format!("{name}:") } else { name.to_string() };
+            let label = h
+                .query_all_by_label(&text)
+                .filter(|n| n.accesskit_node().role() == egui::accesskit::Role::Label)
+                .map(|n| n.rect())
+                .find(|r| (r.center().y - arrow.center().y).abs() < 12.0 && r.right() <= arrow.left())
+                .unwrap();
+            (label, arrow)
+        };
+        let (ol, oa) = row("Opacity");
+        let (fl, fa) = row("Fill");
+        assert!((oa.right() - fa.right()).abs() < 0.5, "{theme}: fields end at {} and {}", oa.right(), fa.right());
+        assert!((ol.right() - fl.right()).abs() < 0.5, "{theme}: Opacity label ends at {}, Fill label at {}", ol.right(), fl.right());
+    }
+}
+
+#[test]
+fn properties_distribute_buttons_move_selected_layers_and_undo_in_both_axes() {
+    use photosplice_doc::LayerId;
+    for horizontal in [true, false] {
+        let mut s = photosplice_engine::Session::new();
+        s.execute("file.new", json!({"width": 300, "height": 300, "background": "transparent"})).unwrap();
+        let mut ids = Vec::new();
+        for (i, at) in [10, 40, 160].into_iter().enumerate() {
+            let id = s.execute("layer.new.layer", json!({"name": format!("Block {i}")})).unwrap()["layer"].as_u64().unwrap();
+            let (x, y) = if horizontal { (at, 10) } else { (10, at) };
+            s.execute("select.rect", json!({"x": x, "y": y, "width": 10, "height": 10})).unwrap();
+            s.execute("edit.fill", json!({"contents": "color", "color": "#336699"})).unwrap();
+            s.execute("select.deselect", json!({})).unwrap();
+            ids.push(id);
+        }
+        for (i, id) in ids.iter().copied().enumerate() {
+            s.execute("layer.select", json!({"layer": id, "mode": if i == 0 { "replace" } else { "add" }})).unwrap();
+        }
+        let mut h = harness(s, 1.0, 320.0);
+        let button = if horizontal { "Horizontally" } else { "Vertically" };
+        // An enabled Properties button invokes the existing command (not a UI-only gesture).
+        let before = {
+            let st = h.state().session.active().unwrap();
+            let b = st.doc.layer(LayerId(ids[1])).unwrap().surface().unwrap().content_bounds();
+            if horizontal { b.x0 } else { b.y0 }
+        };
+        let history = h.state().session.active().unwrap().history.entries().len();
+        h.get_by_label(button).click();
+        h.run_steps(4);
+        let after = {
+            let st = h.state().session.active().unwrap();
+            let b = st.doc.layer(LayerId(ids[1])).unwrap().surface().unwrap().content_bounds();
+            if horizontal { b.x0 } else { b.y0 }
+        };
+        assert_ne!(after, before, "{button} moved the middle layer");
+        assert_eq!(h.state().session.active().unwrap().history.entries().len(), history + 1);
+        h.state_mut().session.undo();
+        let restored = {
+            let st = h.state().session.active().unwrap();
+            let b = st.doc.layer(LayerId(ids[1])).unwrap().surface().unwrap().content_bounds();
+            if horizontal { b.x0 } else { b.y0 }
+        };
+        assert_eq!(restored, before, "{button}: undo restores its location");
+    }
+}
+
+/// #4608: with the Background one of several selected layers (and the active one), Properties
+/// shows the Document properties as before, with Align and Distribute above them, and its buttons
+/// align the selection: the Background stays, the other layer lines up with it.
+#[test]
+fn background_in_a_multiple_selection_keeps_align_and_distribute() {
+    use photosplice_doc::LayerId;
+    let mut s = photosplice_engine::Session::new();
+    s.execute("file.new", json!({"width": 300, "height": 200})).unwrap();
+    let bg = s.active().unwrap().doc.layers[0].id.0;
+    let block = s.execute("layer.new.layer", json!({"name": "Block"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("select.rect", json!({"x": 20, "y": 30, "width": 40, "height": 20})).unwrap();
+    s.execute("edit.fill", json!({"contents": "color", "color": "#336699"})).unwrap();
+    s.execute("select.deselect", json!({})).unwrap();
+    // Background alone: the Document properties only.
+    s.execute("layer.select", json!({"layer": bg})).unwrap();
+    let mut h = harness(s, 1.0, 320.0);
+    assert!(h.query_by_label("Align Horizontal Centers").is_none(), "one layer: Document properties only");
+    // The Background is still the active layer once Block joins the selection.
+    h.state_mut().run("layer.select", json!({"layer": block, "mode": "add"})).unwrap();
+    h.state_mut().run("layer.select", json!({"layer": bg, "mode": "add"})).unwrap();
+    h.run_steps(8);
+    assert_eq!(h.state().session.active().unwrap().active_layer, Some(LayerId(bg)));
+    assert_eq!(h.state().session.active().unwrap().selected_layers().len(), 2);
+    let names: Vec<String> = headers(&h).into_iter().map(|(n, _)| n).collect();
+    assert!(names.iter().any(|n| n == "Align and Distribute"), "{names:?}");
+    h.get_by_label("Align Horizontal Centers").click();
+    h.run_steps(4);
+    let st = h.state().session.active().unwrap();
+    let b = st.doc.layer(LayerId(block)).unwrap().surface().unwrap().content_bounds();
+    assert_eq!((b.x0 + b.x1) / 2, 150, "centred on the Background, which spans the canvas: {b:?}");
+    assert_eq!(b.y0, 30, "only horizontally");
 }

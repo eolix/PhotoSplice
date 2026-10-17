@@ -87,6 +87,24 @@ fn replaces_and_creates() {
     assert_no_temp(&d.0);
 }
 
+/// #3389: a large write reports how far it has got, chunk by chunk, up to 1.0, and writes the
+/// same bytes as a plain atomic write.
+#[test]
+fn reports_write_progress() {
+    let d = TempDir::new("progress");
+    let p = d.0.join("big.psd");
+    let bytes: Vec<u8> = (0..WRITE_CHUNK * 2 + 123).map(|i| (i % 251) as u8).collect();
+    let seen = std::sync::Mutex::new(Vec::new());
+    atomic_write_progress(&p, &bytes, &|f| seen.lock().unwrap().push(f)).unwrap();
+    let seen = seen.into_inner().unwrap();
+    assert_eq!(seen.len(), 3, "one report per chunk: {seen:?}");
+    assert!(seen.windows(2).all(|w| w[0] < w[1]), "monotonic: {seen:?}");
+    assert!(seen[0] > 0.0 && seen[0] < 0.6, "{seen:?}");
+    assert_eq!(seen.last().copied(), Some(1.0));
+    assert!(std::fs::read(&p).unwrap() == bytes, "the file holds the bytes");
+    assert_no_temp(&d.0);
+}
+
 #[test]
 fn creates_missing_parent_folders() {
     let d = TempDir::new("parent");
@@ -209,4 +227,41 @@ fn directory_target_or_bare_root_is_an_error_not_a_panic() {
     assert!(atomic_write(&d.0, b"x").is_err());
     assert!(atomic_write(Path::new("/"), b"x").is_err());
     assert!(atomic_write(Path::new(""), b"x").is_err());
+}
+
+/// A share that refuses the full flush (`F_FULLFSYNC`, #1336) still saves through a plain fsync on
+/// Apple platforms; every other sync error still fails the save.
+#[test]
+fn a_refused_full_flush_falls_back_to_a_plain_fsync_on_apple_only() {
+    let refused = |errno| Err(io::Error::from_raw_os_error(errno));
+    for (errno, name) in [(45, "ENOTSUP, SMB"), (25, "ENOTTY")] {
+        let fsynced = Cell::new(false);
+        let r = or_plain_fsync(refused(errno), || {
+            fsynced.set(true);
+            Ok(())
+        });
+        let apple = cfg!(target_vendor = "apple");
+        assert_eq!(r.is_ok(), apple, "{name}");
+        assert_eq!(fsynced.get(), apple, "{name}: the plain fsync runs only on Apple platforms");
+    }
+    // The plain fsync's own failure is reported.
+    if cfg!(target_vendor = "apple") {
+        let r = or_plain_fsync(refused(45), || Err(io::Error::from_raw_os_error(5)));
+        assert_eq!(r.map_err(|e| e.raw_os_error()), Err(Some(5)));
+    }
+    // Real errors (EIO, ENOSPC, EACCES) never fall back, and success needs no fallback.
+    for errno in [5, 28, 13] {
+        let r = or_plain_fsync(refused(errno), || panic!("no fallback for errno {errno}"));
+        assert_eq!(r.map_err(|e| e.raw_os_error()), Err(Some(errno)));
+    }
+    assert!(or_plain_fsync(Ok(()), || panic!("no fallback after a full flush")).is_ok());
+}
+
+#[test]
+fn sync_file_flushes_a_local_file() {
+    let dir = TempDir::new("sync");
+    let path = dir.0.join("f.bin");
+    // Opened for writing, as the saves do: Windows can't flush a read-only handle.
+    let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path).unwrap();
+    sync_file(&file).unwrap();
 }

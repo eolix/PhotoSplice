@@ -257,6 +257,14 @@ mod tests {
     use photosplice_doc::text_styles::{CharacterStyleDef, ParagraphStyleDef, diff_attrs};
 
     #[test]
+    fn a_negative_sheet_index_is_not_a_slot_and_infinite_dpi_uses_72() {
+        assert_eq!(sheet_index(-1), None);
+        assert_eq!(sheet_index(2), Some(2));
+        assert_eq!(k_of(f32::INFINITY), 1.0);
+        assert_eq!(k_of(144.0), 0.5);
+    }
+
+    #[test]
     fn named_sheets_round_trip() {
         let mut styles = TextStyles::default();
         styles.character.push(CharacterStyleDef {

@@ -34,7 +34,7 @@ fn text(doc: &Document) -> &TextLayer {
 #[test]
 fn vertical_orientation_round_trips_through_psd() {
     for shape in [TextShape::Point, TextShape::Box { x: -200.0, y: 0.0, width: 220.0, height: 300.0 }] {
-        let doc = doc_with(shape);
+        let doc = doc_with(shape.clone());
         let ink = text(&doc).cache.as_ref().unwrap().content_bounds();
         assert!(ink.height() > ink.width(), "{shape:?}: {ink:?}");
         let out = photosplice_io::export(&doc, "v.psd", &Default::default()).unwrap();

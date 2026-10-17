@@ -78,6 +78,8 @@ pub fn apply_comp(doc: &mut Document, comp: &LayerComp, all: bool) {
             && let Some((x, y)) = st.position
             && let Some((cx, cy)) = doc.layer(id).and_then(layer_position)
             && (x, y) != (cx, cy)
+            // Recorded positions can come from files; a move that does not fit an `i32` is
+            // skipped rather than wrapped onto some other position (#1017).
             && let (Some(dx), Some(dy)) = (x.checked_sub(cx), y.checked_sub(cy))
         {
             let snapshot = doc.clone();
@@ -159,11 +161,28 @@ fn update_comp(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"updated": ids}))
 }
 
+/// Whether the live layout still matches the properties the last applied comp restores.
+/// Compare only on comp application: ordinary edits must not scan pixel bounds each frame.
+fn matches_last_comp(doc: &Document, now: &[CompLayerState]) -> bool {
+    let Some(comp) = doc.last_applied_comp.and_then(|id| doc.comp(id)) else { return false };
+    let saved: std::collections::HashMap<_, _> = comp.states.iter().map(|st| (st.layer, st)).collect();
+    now.len() == saved.len()
+        && now.iter().all(|live| {
+            saved.get(&live.layer).is_some_and(|saved| {
+                (!comp.apply_visibility || saved.visible.is_none() || saved.visible == live.visible)
+                    && (!comp.apply_position || saved.position.is_none() || saved.position == live.position)
+                    && (!comp.apply_appearance || saved.appearance.is_none() || saved.appearance == live.appearance)
+            })
+        })
+}
+
 fn apply(s: &mut Session, id: u32, label: &str) -> Result<Value> {
     s.edit(label, |doc, _| {
         let comp = doc.comp(id).cloned().ok_or_else(|| EngineError::Other(format!("no layer comp with id {id}")))?;
-        // Applying over the document's own state first remembers it as the Last Document State.
-        if doc.last_applied_comp.is_none_or(|c| doc.comp(c).is_none()) {
+        // Ordinary edits can leave last_applied_comp pointing at an outdated layout (#919).
+        // Preserve the edited layout, but keep the original backup while cycling unedited comps.
+        let states = capture_states(doc);
+        if !matches_last_comp(doc, &states) {
             doc.last_document_state = Some(LayerComp {
                 id: 0,
                 name: "Last Document State".into(),
@@ -171,7 +190,7 @@ fn apply(s: &mut Session, id: u32, label: &str) -> Result<Value> {
                 apply_visibility: true,
                 apply_position: true,
                 apply_appearance: true,
-                states: capture_states(doc),
+                states,
             });
         }
         apply_comp(doc, &comp, false);
@@ -300,13 +319,21 @@ fn restore_last(s: &mut Session) -> Result<Value> {
 }
 
 /// Comps that refer to deleted layers (Photoshop's warning triangle). `"clear": true` drops
-/// those stale states (Clear Layer Comp Warning) as one history step.
+/// those stale states as one history step: from `"comp"` only when given (Clear Layer Comp
+/// Warning), else from every comp (Clear All Layer Comp Warnings). `"comp"` also limits the
+/// report to that comp; an unknown comp is an error and changes nothing.
 fn update_warnings(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "layerComp.updateWarnings";
     let d = s.active().ok_or(EngineError::NoDocument)?;
+    let only = match p.get("comp") {
+        None | Some(Value::Null) => None,
+        Some(_) => Some(comp_param(&d.doc, p, cmd)?),
+    };
     let warnings: Vec<Value> = d
         .doc
         .layer_comps
         .iter()
+        .filter(|c| only.is_none_or(|id| c.id == id))
         .filter_map(|c| {
             let missing = c.missing_layers(&d.doc);
             (!missing.is_empty()).then(|| json!({"comp": c.id, "name": c.name, "missingLayers": missing.iter().map(|l| l.0).collect::<Vec<_>>()}))
@@ -314,9 +341,10 @@ fn update_warnings(s: &mut Session, p: &Value) -> Result<Value> {
         .collect();
     let n = warnings.len();
     if flag(p, "clear", false) && n > 0 {
-        s.edit("Clear Layer Comp Warnings", |doc, _| {
+        let label = if only.is_some() { "Clear Layer Comp Warning" } else { "Clear All Layer Comp Warnings" };
+        s.edit(label, |doc, _| {
             let live: std::collections::HashSet<LayerId> = doc.walk().into_iter().map(|(_, _, l)| l.id).collect();
-            for c in &mut doc.layer_comps {
+            for c in doc.layer_comps.iter_mut().filter(|c| only.is_none_or(|id| c.id == id)) {
                 c.states.retain(|st| live.contains(&st.layer));
             }
             Ok(())
@@ -348,6 +376,7 @@ fn comps_to_files(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "file.export.layerCompsToFiles";
     let dir = str_param(p, "dir", cmd).or_else(|_| str_param(p, "output", cmd))?.to_string();
     let format = p.get("format").and_then(Value::as_str).unwrap_or("png").trim_start_matches('.').to_ascii_lowercase();
+    let save = SaveOpts::from_params(s, p, cmd)?;
     let d = s.active().ok_or(EngineError::NoDocument)?;
     let prefix = p.get("prefix").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| stem(&d.doc.name));
     let doc = d.doc.clone();
@@ -362,7 +391,7 @@ fn comps_to_files(s: &mut Session, p: &Value) -> Result<Value> {
         apply_comp(&mut one, c, false);
         one.last_applied_comp = Some(c.id);
         let path = join(&dir, &format!("{}_{:04}_{}.{format}", sanitize(&prefix), i, sanitize(&c.name)));
-        save_doc(&one, &path, SaveOpts::from_params(p))?;
+        save_doc(&one, &path, save)?;
         files.push(path);
     }
     if files.is_empty() {
@@ -414,7 +443,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "layerComp.updateWarnings",
             "Layer Comp Warnings",
             &[],
-            r##"{"clear":bool=false (drop states of deleted layers)} → {warnings:[{comp,name,missingLayers}],count}"##,
+            r##"{"comp":id|name? (default: every comp; limits the report and the clear to that comp),"clear":bool=false (drop states of deleted layers)} → {warnings:[{comp,name,missingLayers}],count}"##,
             has_doc,
             update_warnings
         ),

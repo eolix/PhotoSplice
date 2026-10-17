@@ -13,10 +13,12 @@
 
 use std::sync::Arc;
 
+use egui::emath::GuiRounding;
 use egui::{Color32, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use photosplice_compose::gradient_fill as gf;
 use photosplice_doc::{Document, Fill, GradientStyle, Layer, LayerContent, LayerId};
 use photosplice_engine::gradient_fill_cmds as cmds;
+use photosplice_engine::presets::gradients as gradient_presets;
 use serde_json::{Value, json};
 
 use crate::PhotospliceApp;
@@ -24,6 +26,10 @@ use crate::canvas::{ToolEvent, ViewXform};
 use crate::state::Tool;
 use crate::theme::Tokens;
 use crate::widgets;
+
+#[cfg(test)]
+mod editor_tests;
+mod properties_panel;
 
 /// Id of the temporary layer previewing a new gradient while it is drawn.
 pub const PREVIEW_LAYER: LayerId = LayerId(u64::MAX - 78);
@@ -64,6 +70,9 @@ pub struct LiveGradient {
     last_click: Option<(Grab, f64)>,
     /// Pending edit from the Properties panel's stops editor (previewed like a canvas drag).
     panel: Option<(LayerId, &'static str, Value)>,
+    /// Pending edit from the Gradient Editor window's current-gradient strip
+    /// (`gradient.presets.stop`, previewed the same way).
+    preset_stop: Option<Value>,
     /// Cached preview document by key.
     preview: Option<(u64, Arc<Document>)>,
 }
@@ -72,7 +81,7 @@ pub struct LiveGradient {
 /// Painting into a layer mask, an alpha channel or the Quick Mask stays classic (pixels), except
 /// that a selected gradient fill layer is always edited live (selecting it targets its mask).
 pub fn live_mode(app: &PhotospliceApp) -> bool {
-    if app.ui.tool != Tool::Gradient || app.ui.tool_options.gradient_classic {
+    if app.active_tool() != Tool::Gradient || app.ui.tool_options.gradient_classic {
         return false;
     }
     match crate::canvas::paint_target(app).as_str() {
@@ -106,11 +115,16 @@ fn fill_of(l: &Layer) -> Option<&Fill> {
 fn edited_fill(app: &PhotospliceApp, layer: &Layer, canvas: Rect32, cmd: &str, p: &Value) -> Option<Fill> {
     let f = fill_of(layer)?;
     let (fg, bg) = (app.session.tools.foreground, app.session.tools.background);
-    match cmd {
+    let edited = match cmd {
         cmds::SET => cmds::apply_set(layer, f, canvas, p, fg, bg).ok(),
         cmds::STOP => cmds::apply_stop(f, p, fg, bg).ok(),
         _ => None,
-    }
+    }?;
+    // As the command commits it: colours in the document's mode.
+    Some(match app.session.active() {
+        Some(st) => edited.in_mode(st.doc.mode),
+        None => edited,
+    })
 }
 
 /// Options-bar params of a new live gradient.
@@ -219,7 +233,7 @@ pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers) -
         app.gradient.drag = None;
         return false;
     }
-    let zoom = app.current_zoom().max(0.01);
+    let zoom = app.point_zoom().max(0.01);
     match ev {
         ToolEvent::Down { x, y, .. } => {
             let p = [x as f32, y as f32];
@@ -240,7 +254,7 @@ pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers) -
 }
 
 fn drag_to(app: &mut PhotospliceApp, p: [f32; 2], mods: egui::Modifiers) {
-    let zoom = app.current_zoom().max(0.01);
+    let zoom = app.point_zoom().max(0.01);
     let active = active_gradient(app);
     let Some(drag) = app.gradient.drag.as_mut() else { return };
     // ⇧: 45° gradient angles, the same snap as the classic drag (stroke_constraint.rs).
@@ -293,7 +307,7 @@ fn drag_to(app: &mut PhotospliceApp, p: [f32; 2], mods: egui::Modifiers) {
 
 fn finish(app: &mut PhotospliceApp) {
     let Some(drag) = app.gradient.drag.take() else { return };
-    let zoom = app.current_zoom().max(0.01);
+    let zoom = app.point_zoom().max(0.01);
     match drag {
         Drag::Draw { from, to, redraw } => {
             if dist(from, to) * zoom < 2.0 {
@@ -510,6 +524,9 @@ pub fn draw_overlay(app: &PhotospliceApp, painter: &egui::Painter, xf: &ViewXfor
 
 /// A ramp of RGBA stops over a checkerboard in `r`.
 fn paint_ramp(p: &egui::Painter, r: Rect, sample: impl Fn(f32) -> [f32; 4]) {
+    // The tessellator snaps the checker's rects to pixels but not the mesh: snap both alike, or a
+    // half-pixel offset leaves a row of checker showing under the ramp (#4577).
+    let r = r.round_to_pixels(p.pixels_per_point());
     widgets::checker(p, r, 5.0);
     let n = 64;
     let mut mesh = egui::Mesh::default();
@@ -551,8 +568,8 @@ pub fn thumbnail_image(f: &Fill) -> Option<egui::ColorImage> {
     Some(egui::ColorImage::new([THUMB_PX as usize; 2], rgba))
 }
 
-/// Paints a gradient fill layer's thumbnail into `rect` over a checkerboard (opacity stops show
-/// through), cached per layer until its fill changes. Returns `false` for other fills.
+/// Paints a gradient fill layer's inset thumbnail and fill marker into `rect`, over a
+/// checkerboard (opacity stops show through). Cached until its fill changes; `false` for other fills.
 pub fn paint_thumbnail(ui: &egui::Ui, layer: LayerId, f: &Fill, rect: Rect) -> bool {
     if !matches!(f, Fill::Gradient { .. }) {
         return false;
@@ -571,8 +588,10 @@ pub fn paint_thumbnail(ui: &egui::Ui, layer: LayerId, f: &Fill, rect: Rect) -> b
     };
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
-        widgets::checker(p, rect, 5.0);
-        p.image(tex.id(), rect, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
+        crate::solid_fill_ui::thumbnail_frame(ui, rect, |swatch| {
+            widgets::checker(p, swatch, 3.0);
+            p.image(tex.id(), swatch, Rect::from_min_max(Pos2::ZERO, pos2(1.0, 1.0)), Color32::WHITE);
+        });
     }
     true
 }
@@ -597,6 +616,76 @@ pub fn picker(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
         ui.set_max_width(280.0);
         crate::preset_panels::gradients_browser(app, ui, 260.0);
     });
+}
+
+/// Options-bar swatch of the current gradient. Both live and classic modes use the same
+/// engine-owned preset (#1651). Clicking it opens the Gradient Editor window, as Photoshop's
+/// swatch does. Returns whether it was clicked.
+pub fn preset_swatch(app: &mut PhotospliceApp, ui: &mut egui::Ui) -> bool {
+    let t = Tokens::get(ui.ctx());
+    let stops = app.session.presets.gradient.resolve(app.session.tools.foreground, app.session.tools.background);
+    let (r, resp) = ui.allocate_exact_size(vec2(96.0, 20.0), Sense::click());
+    paint_ramp(ui.painter(), r, |u| photosplice_algo::paint::sample_stops(&stops, u));
+    ui.painter().rect_stroke(r, 0.0, Stroke::new(1.0, t.field_border), StrokeKind::Outside);
+    // Name the control for accessibility (and so tests and agents can find it).
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tl!("Gradient picker")));
+    resp.on_hover_text(tl!("Click to edit the gradient")).clicked()
+}
+
+/// The selected layer when it is a gradient fill layer. Unlike [`active_gradient`] it does not
+/// require the layer to be visible: the editor edits it either way.
+fn selected_gradient(app: &PhotospliceApp) -> Option<Layer> {
+    let st = app.session.active()?;
+    let l = st.doc.layer(st.active_layer?)?;
+    fill_of(l)?;
+    Some(l.clone())
+}
+
+/// The Gradient Editor window the options-bar swatch opens, standing in for Photoshop's Gradient
+/// Editor. A selected gradient fill layer gets a combined ramp, with opacity above and colour
+/// below, selected-stop fields and Gradient Options. Without a gradient fill layer, the same
+/// stop controls edit the tool's current gradient and offer saving it as a preset.
+pub fn editor_window(app: &mut PhotospliceApp, ctx: &egui::Context) {
+    if !app.ui.panels.gradient_editor {
+        return;
+    }
+    let mut open = true;
+    let mut show_panel = false;
+    // Resolved before the closure so `app` is borrowed only once inside it.
+    let layer = selected_gradient(app);
+    egui::Window::new(tl!("Gradient Editor"))
+        .id(egui::Id::new("gradient-editor"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(330.0)
+        .show(ctx, |ui| match &layer {
+            Some(l) => properties_panel::editor(app, ui, l),
+            None => {
+                // Photoshop's editor edits the gradient the tool paints with, so with no gradient
+                // fill layer around the strip edits the current gradient in place.
+                let t = Tokens::get(ui.ctx());
+                ui.label(egui::RichText::new(tl!("The gradient the Gradient tool paints with")).color(t.text_dim));
+                ui.add_space(6.0);
+                preset_stops_editor(app, ui);
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if widgets::secondary_button(ui, tl!("Save As Preset"), 0.0)
+                        .on_hover_text(tl!("Adds the current gradient to the Gradients panel"))
+                        .clicked()
+                    {
+                        let _ = app.run("gradient.presets.new", json!({}));
+                    }
+                    show_panel = widgets::secondary_button(ui, tl!("Gradients"), 0.0).clicked();
+                });
+            }
+        });
+    if show_panel {
+        let _ = crate::preset_panels::menu(app, "window.panel.gradients", &Value::Null);
+    }
+    if !open {
+        app.ui.panels.gradient_editor = false;
+    }
 }
 
 /// Live mode: style, reverse, dither and blend mode changes in the options bar also edit the selected
@@ -626,98 +715,30 @@ pub fn options_changed(app: &mut PhotospliceApp, before: &crate::state::ToolOpti
     let _ = app.run(cmds::SET, p);
 }
 
+/// Live mode: the options bar's Opacity sets a selected gradient fill layer's opacity, as a
+/// drag's `opacity` does, live while it is scrubbed; `drag` numbers the scrub so it is one undo
+/// step, as in the Layers panel (#5012).
+pub fn opacity_changed(app: &mut PhotospliceApp, drag: Option<u64>) {
+    let o = &app.ui.tool_options;
+    if app.ui.tool != Tool::Gradient || o.gradient_classic {
+        return;
+    }
+    let opacity = o.fill_opacity / 100.0;
+    let Some((l, ..)) = active_gradient(app) else { return };
+    if (l.opacity - opacity).abs() > 1e-6 {
+        let mut p = json!({"layer": l.id.0, "opacity": opacity});
+        if let Some(n) = drag {
+            p["coalesce"] = json!(format!("gradient-tool-opacity:{n}"));
+        }
+        let _ = app.run("layer.setProps", p);
+    }
+}
+
 // ---------------------------------------------------------------- Properties panel
 
-/// Width of the Properties label column ("Style", "Angle", "Scale").
-const PROP_LABEL_W: f32 = 38.0;
-
-/// Commits a numeric field once (drag released, Enter, focus lost); `None` while editing.
-fn field(ui: &mut egui::Ui, id: &str, current: f32, range: std::ops::RangeInclusive<f32>, suffix: &str, width: f32) -> Option<f32> {
-    let key = egui::Id::new(("gradient-fill-field", id));
-    let mut v = ui.data(|d| d.get_temp::<f32>(key)).unwrap_or(current);
-    let resp = widgets::value_field(ui, &mut v, range, suffix, width);
-    if resp.dragged() || resp.has_focus() {
-        ui.data_mut(|d| d.insert_temp(key, v));
-        return None;
-    }
-    ui.data_mut(|d| d.remove::<f32>(key));
-    (resp.drag_stopped() || resp.lost_focus() || resp.changed()).then_some(v).filter(|v| (*v - current).abs() > 1e-3)
-}
-
-fn label(ui: &mut egui::Ui, text: &str) {
-    let t = Tokens::get(ui.ctx());
-    let (r, _) = ui.allocate_exact_size(vec2(PROP_LABEL_W, 22.0), Sense::hover());
-    ui.painter().text(pos2(r.left(), r.center().y), egui::Align2::LEFT_CENTER, tl!(text), egui::FontId::proportional(12.0), t.text_dim);
-}
-
-/// Properties panel sections for a gradient fill layer (`props_layout::section` headers):
-/// "Gradient" (the stops editor) and "Gradient Options" (style, angle, scale, reverse, dither,
-/// "Align with layer", Reset Alignment). Every change is one `gradient.fill.*` command.
+/// Properties panel for a live gradient. Every change uses the existing gradient commands.
 pub fn properties(app: &mut PhotospliceApp, ui: &mut egui::Ui, layer: &Layer) {
-    use crate::props_layout::{COL_GAP, LABEL_GAP, field_width, section};
-    let Some(Fill::Gradient { angle, scale, style, reverse, dither, align, .. }) = fill_of(layer).cloned() else { return };
-    let id = layer.id.0;
-    let mut runs: Vec<Value> = Vec::new();
-    if section(ui, "gradient-fill", "Gradient") {
-        stops_editor(app, ui, layer);
-        ui.add_space(crate::theme::ROW_GAP);
-    }
-    if section(ui, "gradient-fill-options", "Gradient Options") {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = LABEL_GAP;
-            label(ui, "Style");
-            let mut s = cmds::style_name(style).to_string();
-            let opts: Vec<(String, &str)> =
-                [("linear", "Linear"), ("radial", "Radial"), ("angle", "Angle"), ("reflected", "Reflected"), ("diamond", "Diamond")]
-                    .iter()
-                    .map(|(k, l)| (k.to_string(), *l))
-                    .collect();
-            // Full width, lined up with the fields and Reset Alignment below.
-            let w = ui.available_width().max(60.0);
-            if widgets::dropdown(ui, "gradient-fill-style", &mut s, &opts, w) {
-                runs.push(json!({"style": s}));
-            }
-        });
-        ui.add_space(crate::theme::ROW_GAP);
-        // Two label+field columns filling the panel.
-        let w = field_width(ui.available_width(), 2, PROP_LABEL_W);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = LABEL_GAP;
-            label(ui, "Angle");
-            if let Some(v) = field(ui, &format!("angle{id}"), angle, -180.0..=180.0, "°", w) {
-                runs.push(json!({"angle": v}));
-            }
-            ui.add_space(COL_GAP - LABEL_GAP);
-            label(ui, "Scale");
-            if let Some(v) = field(ui, &format!("scale{id}"), scale * 100.0, 10.0..=150.0, "%", w) {
-                runs.push(json!({"scale": v}));
-            }
-        });
-        ui.add_space(crate::theme::ROW_GAP);
-        ui.horizontal_wrapped(|ui| {
-            let mut r = reverse;
-            if widgets::checkbox(ui, &mut r, "Reverse").changed() {
-                runs.push(json!({"reverse": r}));
-            }
-            let mut d = dither;
-            if widgets::checkbox(ui, &mut d, "Dither").changed() {
-                runs.push(json!({"dither": d}));
-            }
-            let mut a = align;
-            if widgets::checkbox(ui, &mut a, "Align with layer").changed() {
-                runs.push(json!({"align": a}));
-            }
-        });
-        ui.add_space(crate::theme::ROW_GAP);
-        if widgets::secondary_button(ui, "Reset Alignment", ui.available_width()).on_hover_text(tl!("Centre the gradient (offset 0, 0)")).clicked() {
-            runs.push(json!({"offset": [0, 0]}));
-        }
-        ui.add_space(crate::theme::ROW_GAP);
-    }
-    for mut p in runs {
-        p["layer"] = json!(id);
-        let _ = app.run(cmds::SET, p);
-    }
+    properties_panel::show(app, ui, layer);
 }
 
 /// Which marker of the stops editor is being dragged.
@@ -728,23 +749,158 @@ enum Marker {
     Mid(usize),
 }
 
-/// Photoshop's Gradient Editor strip: opacity stops above the ramp, colour stops and midpoints
-/// below. Drag a stop to move it (off the strip to delete it), click above / below to add one,
-/// double-click a colour stop for the Color Picker.
-fn stops_editor(app: &mut PhotospliceApp, ui: &mut egui::Ui, layer: &Layer) {
-    let Some(f) = fill_of(layer).cloned() else { return };
+fn strip_key(app: &PhotospliceApp, sink: Sink) -> egui::Id {
+    // Layer IDs can repeat in different documents. Tool presets belong to the session.
+    let document = match sink {
+        Sink::Layer(_) => app.session.active().map(|s| s.doc.id),
+        Sink::Preset => None,
+    };
+    sink.key().with(document)
+}
+
+/// What a stops editor instance edits: a Gradient Fill layer (`gradient.fill.stop`) or the
+/// Gradient tool's current gradient (`gradient.presets.stop`, the Gradient Editor window's
+/// no-layer mode). Presets keep midpoints centred, so midpoint markers are layer-only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Sink {
+    Layer(LayerId),
+    Preset,
+}
+
+impl Sink {
+    fn fill(self, app: &PhotospliceApp) -> Option<Fill> {
+        match self {
+            Sink::Layer(id) => fill_of(app.session.active()?.doc.layer(id)?).cloned(),
+            Sink::Preset => preset_fill(app),
+        }
+    }
+    /// Uniqueness for the drag state.
+    fn key(self) -> egui::Id {
+        match self {
+            Sink::Layer(id) => egui::Id::new(("gradient-stops-drag", id.0)),
+            Sink::Preset => egui::Id::new(("gradient-stops-drag", "preset")),
+        }
+    }
+    fn cmd(self) -> &'static str {
+        match self {
+            Sink::Layer(_) => cmds::STOP,
+            Sink::Preset => gradient_presets::STOP,
+        }
+    }
+    /// Preset gradients keep midpoints at the centre (they are not stored), so only a layer's
+    /// editor shows draggable midpoint diamonds.
+    fn midpoints(self) -> bool {
+        matches!(self, Sink::Layer(_))
+    }
+    /// The edit params with the layer added (the preset grammar has no `layer`).
+    fn params(self, mut p: Value) -> Value {
+        if let Sink::Layer(id) = self {
+            p["layer"] = json!(id.0);
+        }
+        p
+    }
+}
+
+/// The Gradient Editor window's no-layer mode: the strip edits the Gradient tool's current
+/// gradient in place (`gradient.presets.stop`), as Photoshop's editor edits the tool gradient.
+fn preset_stops_editor(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
+    if let Some(f) = preset_fill(app) {
+        stops_editor_for(app, ui, Sink::Preset, f);
+    }
+}
+
+/// The current gradient as a fill for the strip (foreground/background resolved now, the preset's
+/// own opacity stops, empty = opaque, midpoints centred).
+fn preset_fill(app: &PhotospliceApp) -> Option<Fill> {
+    let (fg, bg) = (app.session.tools.foreground, app.session.tools.background);
+    let (cs, os) = app.session.presets.gradient.fill_stops(fg, bg);
+    Some(Fill::Gradient {
+        stops: cs,
+        angle: 0.0,
+        scale: 1.0,
+        style: GradientStyle::Linear,
+        reverse: false,
+        opacity_stops: os,
+        midpoints: Vec::new(),
+        offset: (0.0, 0.0),
+        dither: false,
+        align: true,
+    })
+}
+
+/// Opens the Color Picker on the current gradient's colour stop `i`; OK runs
+/// `gradient.presets.stop` (one journal step).
+fn preset_stop_color(app: &mut PhotospliceApp, i: usize) {
+    let Some(f) = preset_fill(app) else { return };
+    let Fill::Gradient { stops, .. } = &f else { return };
+    let mut sorted = stops.clone();
+    sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let Some((_, c)) = sorted.get(i) else { return };
+    let r = c.to_rgb();
+    app.gradient.preset_stop = None;
+    crate::color_picker_ui::open_for_command(app, "Color Picker (Stop Color)", r, gradient_presets::STOP, json!({"action": "color", "index": i}));
+}
+
+fn stops_editor_for(app: &mut PhotospliceApp, ui: &mut egui::Ui, sink: Sink, f: Fill) {
+    let key = strip_key(app, sink).with("selection");
+    if ui.data(|d| d.get_temp::<Marker>(key)).is_none() {
+        ui.data_mut(|d| d.insert_temp(key, Marker::Color(0)));
+    }
+    stop_strip(app, ui, sink, f);
+    properties_panel::stop_fields(app, ui, sink);
+}
+
+/// Keep selection on a stop after the engine sorts its new position.
+fn selection_after_edit(f: &Fill, p: &Value, previous: Option<Marker>) -> Option<Marker> {
+    let Fill::Gradient { stops, opacity_stops, .. } = f else { return previous };
+    let opacity = p.get("kind").and_then(Value::as_str) == Some("opacity");
+    let mut locations: Vec<f32> = if opacity {
+        if opacity_stops.is_empty() { vec![0.0, 1.0] } else { opacity_stops.iter().map(|s| s.0).collect() }
+    } else {
+        stops.iter().map(|s| s.0).collect()
+    };
+    locations.sort_by(f32::total_cmp);
+    let action = p.get("action").and_then(Value::as_str);
+    let index = p.get("index").and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok());
+    let at = match action {
+        Some("move" | "add") => {
+            let location = p.get("location").and_then(Value::as_f64)? as f32;
+            locations
+                .iter()
+                .enumerate()
+                .filter(|(i, value)| Some(*i) != index && (**value < location || (**value == location && index.is_none_or(|old| *i < old))))
+                .count()
+        }
+        Some("delete") => 0,
+        _ => return previous,
+    };
+    Some(if opacity { Marker::Opacity(at) } else { Marker::Color(at) })
+}
+
+fn stop_strip(app: &mut PhotospliceApp, ui: &mut egui::Ui, sink: Sink, f: Fill) {
     let Fill::Gradient { stops, .. } = &f else { return };
     let t = Tokens::get(ui.ctx());
-    let id = layer.id;
     let w = ui.available_width().max(120.0);
     let (outer, resp) = ui.allocate_exact_size(vec2(w, 58.0), Sense::click_and_drag());
-    let bar = Rect::from_min_max(pos2(outer.left() + 8.0, outer.top() + 16.0), pos2(outer.right() - 8.0, outer.top() + 40.0));
+    // Name the strip for accessibility (and so tests and agents can find it).
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), tl!("Gradient stops")));
+    let top = outer.top() + 16.0;
+    let bar = Rect::from_min_max(pos2(outer.left() + 8.0, top), pos2(outer.right() - 8.0, top + 24.0));
     let x_of = |loc: f32| bar.left() + loc.clamp(0.0, 1.0) * bar.width();
     let loc_of = |x: f32| ((x - bar.left()) / bar.width().max(1.0)).clamp(0.0, 1.0);
     // The ramp being shown (with a pending drag's edit applied).
-    let pending = app.gradient.panel.clone().filter(|(l, ..)| *l == id);
-    let shown = pending.as_ref().and_then(|(_, cmd, p)| edited_fill(app, layer, Rect32::new(0, 0, 1, 1), cmd, p)).unwrap_or_else(|| f.clone());
-    if let Some(ramp) = gf::Ramp::new(&shown) {
+    let pending: Option<Value> = match sink {
+        Sink::Layer(id) => app.gradient.panel.clone().filter(|(l, ..)| *l == id).map(|(_, _, p)| p),
+        Sink::Preset => app.gradient.preset_stop.clone(),
+    };
+    let (fg, bg) = (app.session.tools.foreground, app.session.tools.background);
+    let shown = pending.as_ref().and_then(|p| cmds::apply_stop(&f, p, fg, bg).ok()).unwrap_or_else(|| f.clone());
+    let mut track_fill = shown.clone();
+    if let Fill::Gradient { reverse, .. } = &mut track_fill {
+        // All markers address un-reversed positions; Reverse applies to the canvas output.
+        *reverse = false;
+    }
+    if let Some(ramp) = gf::Ramp::new(&track_fill) {
         paint_ramp(ui.painter(), bar, |u| ramp.sample(u));
     }
     ui.painter().rect_stroke(bar, 0.0, Stroke::new(1.0, t.field_border), StrokeKind::Outside);
@@ -754,49 +910,51 @@ fn stops_editor(app: &mut PhotospliceApp, ui: &mut egui::Ui, layer: &Layer) {
     };
     let mut sorted = ss.clone();
     sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let ops: Vec<(f32, f32)> = if os.is_empty() { vec![(0.0, 1.0), (1.0, 1.0)] } else { os.clone() };
-    let key = egui::Id::new(("gradient-stops-drag", id.0));
+    let mut ops: Vec<(f32, f32)> = if os.is_empty() { vec![(0.0, 1.0), (1.0, 1.0)] } else { os.clone() };
+    ops.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let key = strip_key(app, sink);
+    let selection_key = key.with("selection");
+    let selected: Option<Marker> = ui.data(|d| d.get_temp(selection_key));
     let dragging: Option<Marker> = ui.data(|d| d.get_temp(key));
     // Markers.
     let p = ui.painter();
     for (i, (loc, c)) in sorted.iter().enumerate() {
         let x = x_of(*loc);
-        let sel = dragging == Some(Marker::Color(i));
+        let sel = dragging.or(selected) == Some(Marker::Color(i));
         let tip = pos2(x, bar.bottom() + 1.0);
         let body = Rect::from_center_size(pos2(x, bar.bottom() + 10.0), vec2(10.0, 10.0));
+        let rgb = c.to_rgb();
+        let color = c32([rgb[0], rgb[1], rgb[2], 1.0]);
         p.add(egui::Shape::convex_polygon(
             vec![tip, pos2(x + 5.0, body.top()), pos2(x - 5.0, body.top())],
             if sel { t.accent } else { t.text_dim },
             Stroke::NONE,
         ));
-        p.rect_filled(
-            body,
-            1.0,
-            c32({
-                let r = c.to_rgb();
-                [r[0], r[1], r[2], 1.0]
-            }),
-        );
+        p.rect_filled(body, 1.0, color);
         p.rect_stroke(body, 1.0, Stroke::new(1.0, if sel { t.accent } else { t.text_dim }), StrokeKind::Outside);
     }
-    for i in 0..sorted.len().saturating_sub(1) {
-        let (a, b) = (sorted[i].0, sorted[i + 1].0);
-        if b - a > 1e-3 {
-            let m = mids.get(i).copied().unwrap_or(0.5);
-            let sel = dragging == Some(Marker::Mid(i));
-            diamond(p, pos2(x_of(a + (b - a) * m), bar.bottom() + 6.0), 3.0, if sel { t.accent } else { t.text_faint }, t.text_faint);
+    if sink.midpoints() {
+        for i in 0..sorted.len().saturating_sub(1) {
+            let (a, b) = (sorted[i].0, sorted[i + 1].0);
+            if b - a > 1e-3 {
+                let m = mids.get(i).copied().unwrap_or(0.5);
+                let sel = dragging.or(selected) == Some(Marker::Mid(i));
+                diamond(p, pos2(x_of(a + (b - a) * m), bar.bottom() + 6.0), 3.0, if sel { t.accent } else { t.text_faint }, t.text_faint);
+            }
         }
     }
     for (i, (loc, a)) in ops.iter().enumerate() {
         let x = x_of(*loc);
-        let sel = dragging == Some(Marker::Opacity(i));
-        let body = Rect::from_center_size(pos2(x, bar.top() - 10.0), vec2(10.0, 10.0));
+        let sel = dragging.or(selected) == Some(Marker::Opacity(i));
+        let y = bar.top() - 10.0;
+        let body = Rect::from_center_size(pos2(x, y), vec2(10.0, 10.0));
+        let color = Color32::from_gray((a.clamp(0.0, 1.0) * 255.0) as u8);
         p.add(egui::Shape::convex_polygon(
             vec![pos2(x, bar.top() - 1.0), pos2(x + 5.0, body.bottom()), pos2(x - 5.0, body.bottom())],
             if sel { t.accent } else { t.text_dim },
             Stroke::NONE,
         ));
-        p.rect_filled(body, 1.0, Color32::from_gray((a.clamp(0.0, 1.0) * 255.0) as u8));
+        p.rect_filled(body, 1.0, color);
         p.rect_stroke(body, 1.0, Stroke::new(1.0, if sel { t.accent } else { t.text_dim }), StrokeKind::Outside);
     }
     // Interaction.
@@ -804,6 +962,9 @@ fn stops_editor(app: &mut PhotospliceApp, ui: &mut egui::Ui, layer: &Layer) {
         if pos.y > bar.bottom() {
             if let Some(i) = sorted.iter().position(|(l, _)| (x_of(*l) - pos.x).abs() <= 6.0 && pos.y >= bar.bottom() + 3.0) {
                 return Some(Marker::Color(i));
+            }
+            if !sink.midpoints() {
+                return None;
             }
             return (0..sorted.len().saturating_sub(1))
                 .find(|i| {
@@ -818,10 +979,11 @@ fn stops_editor(app: &mut PhotospliceApp, ui: &mut egui::Ui, layer: &Layer) {
         None
     };
     if resp.drag_started()
-        && let Some(pos) = resp.interact_pointer_pos()
+        && let Some(pos) = ui.input(|i| i.pointer.press_origin())
         && let Some(m) = hit(pos)
     {
         ui.data_mut(|d| d.insert_temp(key, m));
+        ui.data_mut(|d| d.insert_temp(selection_key, m));
     }
     let dragging: Option<Marker> = ui.data(|d| d.get_temp(key));
     if let (Some(m), Some(pos)) = (dragging, resp.interact_pointer_pos()) {
@@ -837,16 +999,36 @@ fn stops_editor(app: &mut PhotospliceApp, ui: &mut egui::Ui, layer: &Layer) {
                 json!({"action": "midpoint", "index": i, "location": ((loc - a) / (b - a).max(1e-4)).clamp(0.05, 0.95)})
             }
         };
-        let mut edit = edit;
-        edit["layer"] = json!(id.0);
         if resp.dragged() {
-            app.gradient.panel = Some((id, cmds::STOP, edit));
+            match sink {
+                Sink::Layer(id) => app.gradient.panel = Some((id, cmds::STOP, sink.params(edit))),
+                Sink::Preset => app.gradient.preset_stop = Some(edit),
+            }
         }
     }
     if resp.drag_stopped() {
         ui.data_mut(|d| d.remove::<Marker>(key));
-        if let Some((_, cmd, p)) = app.gradient.panel.take() {
-            let _ = app.run(cmd, p);
+        match sink {
+            Sink::Layer(_) => {
+                if let Some((_, cmd, p)) = app.gradient.panel.take() {
+                    let selection = selection_after_edit(&f, &p, selected);
+                    if app.run(cmd, p).is_ok()
+                        && let Some(marker) = selection
+                    {
+                        ui.data_mut(|d| d.insert_temp(selection_key, marker));
+                    }
+                }
+            }
+            Sink::Preset => {
+                if let Some(p) = app.gradient.preset_stop.take() {
+                    let selection = selection_after_edit(&f, &p, selected);
+                    if app.run(sink.cmd(), p).is_ok()
+                        && let Some(marker) = selection
+                    {
+                        ui.data_mut(|d| d.insert_temp(selection_key, marker));
+                    }
+                }
+            }
         }
         return;
     }
@@ -854,20 +1036,33 @@ fn stops_editor(app: &mut PhotospliceApp, ui: &mut egui::Ui, layer: &Layer) {
         && let Some(pos) = resp.interact_pointer_pos()
         && let Some(Marker::Color(i)) = hit(pos)
     {
-        edit_stop_color(app, id, i);
+        ui.data_mut(|d| d.insert_temp(selection_key, Marker::Color(i)));
+        match sink {
+            Sink::Layer(id) => edit_stop_color(app, id, i),
+            Sink::Preset => preset_stop_color(app, i),
+        }
         return;
     }
     if resp.clicked()
         && let Some(pos) = resp.interact_pointer_pos()
-        && hit(pos).is_none()
     {
+        if let Some(marker) = hit(pos) {
+            ui.data_mut(|d| d.insert_temp(selection_key, marker));
+            return;
+        }
         let loc = loc_of(pos.x);
-        let p = if pos.y < bar.center().y {
-            json!({"layer": id.0, "action": "add", "kind": "opacity", "location": loc})
+        let opacity = pos.y < bar.center().y;
+        let p = if opacity {
+            sink.params(json!({"action": "add", "kind": "opacity", "location": loc}))
         } else {
-            json!({"layer": id.0, "action": "add", "location": loc})
+            sink.params(json!({"action": "add", "location": loc}))
         };
-        let _ = app.run(cmds::STOP, p);
+        let selection = selection_after_edit(&f, &p, selected);
+        if app.run(sink.cmd(), p).is_ok()
+            && let Some(marker) = selection
+        {
+            ui.data_mut(|d| d.insert_temp(selection_key, marker));
+        }
     }
 }
 
@@ -941,6 +1136,34 @@ mod tests {
     }
 
     #[test]
+    fn options_bar_swatch_opens_the_editor_and_reaches_the_gradients_panel() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        let app = app_with_gradient("linear");
+        let mut h = Harness::builder().with_size(vec2(440.0, 560.0)).build_ui_state(
+            |ui, app: &mut PhotospliceApp| {
+                if preset_swatch(app, ui) {
+                    app.ui.panels.gradient_editor = true;
+                }
+                let ctx = ui.ctx().clone();
+                editor_window(app, &ctx);
+            },
+            app,
+        );
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::Midnight);
+        h.run_steps(2);
+        // The swatch opens the Gradient Editor window (Photoshop's behaviour), not a popup.
+        h.get_by_label("Gradient picker").click();
+        h.run_steps(2);
+        assert!(h.state().ui.panels.gradient_editor, "the swatch opened the editor window");
+        // Quick preset picking lives in the editor: its Gradients button shows the Gradients panel.
+        h.get_by_label("Gradients").click();
+        h.run_steps(2);
+        assert!(h.state().ui.panels.color, "the Gradients panel opened");
+        assert_eq!(h.state().ui.dock_tabs.color, 2, "on the Gradients tab");
+        assert_eq!(h.state().session.active().unwrap().doc.layers.len(), 1, "no document layers edited");
+    }
+
+    #[test]
     fn live_drag_creates_a_fill_layer_and_handles_edit_it() {
         let mut app = app_with_gradient("linear");
         drag(&mut app, [20.0, 60.0], [180.0, 60.0]);
@@ -966,6 +1189,18 @@ mod tests {
         drag(&mut app, [100.0, 10.0], [100.0, 110.0]);
         assert_eq!(app.session.active().unwrap().doc.layers.len(), 2);
         assert!((get(&mut app)["from"][1].as_f64().unwrap() - 10.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn dragging_the_midpoint_diamond_moves_it() {
+        let mut app = app_with_gradient("linear");
+        drag(&mut app, [20.0, 60.0], [180.0, 60.0]);
+        // The untouched midpoint sits at the segment centre (doc x = 100). Drag it to a quarter.
+        drag(&mut app, [100.0, 60.0], [60.0, 60.0]);
+        let g = get(&mut app);
+        assert_eq!(g["stops"].as_array().map(Vec::len), Some(2), "a midpoint drag must not add a stop: {g}");
+        let m = g["midpoints"][0].as_f64().unwrap_or(f64::NAN);
+        assert!((m - 0.25).abs() < 1e-3, "the midpoint did not move: {g}");
     }
 
     #[test]
@@ -1004,6 +1239,65 @@ mod tests {
         let px = st.doc.layer(st.active_layer.unwrap()).unwrap().surface().unwrap().rgba(2, 60);
         // Blue 01 starts at #0b3d91.
         assert!((px[2] - 0x91 as f32 / 255.0).abs() < 0.05 && px[0] < 0.15, "{px:?}");
+    }
+
+    #[test]
+    fn classic_drag_preserves_preset_transparency_at_all_depths() {
+        for depth in [8, 16, 32] {
+            for reverse in [false, true] {
+                let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+                app.run("file.new", json!({"width": 200, "height": 120, "depth": depth, "background": "transparent"})).unwrap();
+                app.ui.tool = Tool::Gradient;
+                app.ui.tool_options.gradient_classic = true;
+                app.ui.tool_options.gradient_reverse = reverse;
+                app.ui.tool_options.gradient_dither = false;
+                app.ui.tool_options.fill_opacity = 50.0;
+                app.session.tools.foreground = [1.0, 0.0, 0.0, 1.0];
+                app.run("gradient.presets.select", json!({"preset": "Foreground to Transparent"})).unwrap();
+                let before = app.session.active().unwrap().history.past_len();
+                drag(&mut app, [20.0, 60.0], [180.0, 60.0]);
+                let st = app.session.active().unwrap();
+                let surface = st.doc.layers[0].surface().unwrap();
+                for x in [0, 100, 199] {
+                    let u = ((x as f32 - 20.0) / 160.0).clamp(0.0, 1.0);
+                    let expected = 0.5 * if reverse { u } else { 1.0 - u };
+                    let px = surface.pixel(x, 60);
+                    assert!((px[3] - expected).abs() < 0.01, "depth {depth}, reverse {reverse}, x {x}: {px:?}");
+                    if expected > 0.01 {
+                        assert!(px[0] > 0.99 && px[1] < 0.01 && px[2] < 0.01, "preset colour: {px:?}");
+                    }
+                }
+                assert_eq!(st.history.past_len(), before + 1);
+                app.run("edit.undo", json!({})).unwrap();
+                assert_eq!(app.session.active().unwrap().doc.layers[0].surface().unwrap().pixel(100, 60)[3], 0.0);
+                app.run("gradient.presets.select", json!({"stops": [[0, "#00ff00"], [1, "#00ff00"]], "transparency": [[0, 60], [1, 20]]})).unwrap();
+                drag(&mut app, [20.0, 60.0], [180.0, 60.0]);
+                let px = app.session.active().unwrap().doc.layers[0].surface().unwrap().pixel(100, 60);
+                assert!((px[3] - 0.2).abs() < 0.01 && px[1] > 0.99 && px[0] < 0.01, "custom semi-transparent colour: {px:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn sidebar_transparent_preset_reaches_classic_canvas_over_existing_art() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        let mut app = app_with_gradient("linear");
+        app.run("paint.gradient", json!({"from": [0, 0], "to": [199, 0], "colors": ["#ff0000", "#ff0000"]})).unwrap();
+        app.run("layer.new.layer", json!({})).unwrap();
+        app.ui.tool_options.gradient_classic = true;
+        app.ui.tool_options.gradient_dither = false;
+        let mut h = Harness::builder().with_size(vec2(420.0, 600.0)).build_ui_state(|ui, app| crate::preset_panels::gradients_panel(app, ui), app);
+        h.get_by_label("Foreground to Transparent").click();
+        h.run();
+        assert_eq!(h.state().session.presets.gradient.name, "Foreground to Transparent");
+        drag(h.state_mut(), [20.0, 60.0], [180.0, 60.0]);
+        let st = h.state().session.active().unwrap();
+        assert_eq!(st.doc.layers.len(), 2);
+        let surface = st.doc.layers[1].surface().unwrap();
+        assert!(surface.pixel(0, 60)[3] > 0.99);
+        assert!((surface.pixel(100, 60)[3] - 0.5).abs() < 0.01);
+        assert!(surface.pixel(199, 60)[3] < 0.01, "transparent end reveals existing art");
+        assert_eq!(st.doc.layers[0].surface().unwrap().pixel(100, 60), vec![1.0, 0.0, 0.0, 1.0], "existing art is unchanged");
     }
 
     #[test]
@@ -1049,6 +1343,27 @@ mod tests {
     }
 
     #[test]
+    fn changing_live_gradient_opacity_updates_selected_fill_layer() {
+        let mut app = app_with_gradient("linear");
+        drag(&mut app, [20.0, 60.0], [180.0, 60.0]);
+        let past = app.session.active().unwrap().history.past_len();
+        // A scrub is live on every frame and one undo step.
+        for pct in [70.0, 55.0, 40.0] {
+            app.ui.tool_options.fill_opacity = pct;
+            opacity_changed(&mut app, Some(7));
+        }
+        opacity_changed(&mut app, None);
+        let st = app.session.active().unwrap();
+        assert!((st.doc.layers.last().unwrap().opacity - 0.4).abs() < 1e-6);
+        assert_eq!(st.history.past_len(), past + 1, "one undo step, none for an unchanged value");
+        // Classic mode paints pixels: the options bar leaves the layer alone.
+        app.ui.tool_options.gradient_classic = true;
+        app.ui.tool_options.fill_opacity = 80.0;
+        opacity_changed(&mut app, None);
+        assert!((app.session.active().unwrap().doc.layers.last().unwrap().opacity - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
     fn preview_shows_the_drag_before_commit() {
         let mut app = app_with_gradient("radial");
         crate::canvas::tool_event(&mut app, ToolEvent::Down { x: 100.0, y: 60.0, pressure: 1.0 }, mods());
@@ -1059,5 +1374,166 @@ mod tests {
         assert_eq!(app.session.active().unwrap().doc.layers.len(), 1, "nothing committed yet");
         crate::canvas::tool_event(&mut app, ToolEvent::Up { x: 140.0, y: 60.0 }, mods());
         assert!(display_doc(&mut app, 0).is_none());
+    }
+
+    /// The options bar's gradient swatch opens PhotoSplice's gradient picker (the Gradients
+    /// panel's presets) in both modes.
+    #[test]
+    fn the_options_bar_swatch_opens_the_gradient_picker_in_both_modes() {
+        use egui_kittest::kittest::Queryable;
+
+        for classic in [false, true] {
+            let mut app = app_with_gradient("linear");
+            app.ui.tool_options.gradient_classic = classic;
+            let mut h = egui_kittest::Harness::builder().with_size(vec2(1400.0, 900.0)).build_ui_state(
+                |ui, app: &mut PhotospliceApp| {
+                    crate::panels::options_bar(app, ui);
+                    let ctx = ui.ctx().clone();
+                    editor_window(app, &ctx);
+                },
+                app,
+            );
+            PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+            h.run_steps(4);
+            assert!(!egui::Popup::is_any_open(&h.ctx), "classic={classic}: starts closed");
+            h.get_by_label("Gradient picker").click();
+            h.run_steps(3);
+            assert!(egui::Popup::is_any_open(&h.ctx), "classic={classic}: the swatch opened the picker");
+        }
+    }
+
+    /// The editor itself renders in both states: with a gradient fill layer selected it shows the
+    /// full stops editor, and with none selected it must still draw (and say what to do) instead of
+    /// opening an empty window or panicking.
+    #[test]
+    fn the_editor_window_renders_with_and_without_a_gradient_layer() {
+        let ctx = egui::Context::default();
+        PhotospliceApp::setup_context(&ctx, crate::theme::ThemeKind::ALL[0]);
+        // `run_ui` hands back a `FullOutput` whose texture deltas the caller has to consume.
+        let run = |app: &mut PhotospliceApp| {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| editor_window(app, ui.ctx()));
+            out.textures_delta.clear();
+        };
+
+        // Nothing selected.
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+        app.ui.panels.gradient_editor = true;
+        run(&mut app);
+        assert!(app.ui.panels.gradient_editor, "the window stays open");
+
+        // A committed live gradient fill layer: `selected_gradient` finds it, so the full editor
+        // (combined stops and Gradient Options) is what gets built.
+        let mut app = app_with_gradient("linear");
+        drag(&mut app, [10.0, 10.0], [150.0, 90.0]);
+        assert!(selected_gradient(&app).is_some(), "the drag left a gradient fill layer selected");
+        app.ui.panels.gradient_editor = true;
+        run(&mut app);
+        assert!(app.ui.panels.gradient_editor);
+
+        // Closed: the window draws nothing and leaves the flag alone.
+        app.ui.panels.gradient_editor = false;
+        run(&mut app);
+        assert!(!app.ui.panels.gradient_editor);
+    }
+
+    /// With no gradient fill layer selected the editor edits the Gradient tool's current gradient
+    /// in place (Photoshop's editor edits the tool gradient): a click on the strip adds a stop to
+    /// it instead of only pointing at the Gradients panel's presets.
+    #[test]
+    fn the_editor_edits_the_current_gradient_without_a_layer() {
+        use egui_kittest::kittest::Queryable;
+
+        let app = app_with_gradient("linear");
+        let before = app.session.presets.gradient.stops.len();
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1400.0, 900.0)).build_ui_state(
+            |ui, app: &mut PhotospliceApp| {
+                let ctx = ui.ctx().clone();
+                editor_window(app, &ctx);
+            },
+            app,
+        );
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        // Open the window once the fonts are bound (the build's first frame runs without them).
+        h.run_steps(2);
+        h.state_mut().ui.panels.gradient_editor = true;
+        h.run_steps(4);
+        h.get_by_label("Gradient stops").click();
+        h.run_steps(3);
+        assert_eq!(h.state().session.presets.gradient.stops.len(), before + 1, "the click added a stop to the current gradient");
+    }
+
+    /// The editor's Save As Preset button files the current gradient into the Gradients panel
+    /// under a fresh "Custom" name.
+    #[test]
+    fn the_editor_saves_the_current_gradient_as_a_preset() {
+        use egui_kittest::kittest::Queryable;
+
+        let app = app_with_gradient("linear");
+        let has_custom = |s: &PhotospliceApp| s.session.presets.gradients.iter().any(|g| g.items.iter().any(|p| p.name == "Custom"));
+        let mut h = egui_kittest::Harness::builder().with_size(vec2(1400.0, 900.0)).build_ui_state(
+            |ui, app: &mut PhotospliceApp| {
+                let ctx = ui.ctx().clone();
+                editor_window(app, &ctx);
+            },
+            app,
+        );
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+        h.run_steps(2);
+        h.state_mut().ui.panels.gradient_editor = true;
+        h.run_steps(4);
+        assert!(!has_custom(h.state()), "no Custom preset yet");
+        h.get_by_label("Save As Preset").click();
+        h.run_steps(3);
+        assert!(has_custom(h.state()), "the button saved the current gradient as a preset");
+    }
+
+    /// A hidden gradient fill layer is still editable from the editor (the Properties panel edits
+    /// it whether or not it is drawn), so the window must not require visibility.
+    #[test]
+    fn the_editor_finds_a_hidden_gradient_layer() {
+        let mut app = app_with_gradient("linear");
+        drag(&mut app, [10.0, 10.0], [150.0, 90.0]);
+        let id = app.session.active().unwrap().active_layer.unwrap();
+        app.run("layer.setProps", json!({"layer": id.0, "visible": false})).unwrap();
+        assert!(active_gradient(&app).is_none(), "the canvas widget skips a hidden layer");
+        assert!(selected_gradient(&app).is_some(), "the editor still edits it");
+    }
+
+    /// #4577: the tessellator snaps the checkerboard's rects to whole pixels but leaves the ramp's
+    /// mesh where it was laid out, so at a half-pixel offset the ramp stopped a pixel short of the
+    /// checker and a row of it showed under the gradient. The ramp must cover the checker exactly.
+    #[test]
+    fn the_ramp_covers_its_checkerboard_at_half_pixel_offsets() {
+        let ctx = egui::Context::default();
+        for ppp in [1.0, 2.0] {
+            ctx.set_pixels_per_point(ppp);
+            let r = Rect::from_min_size(pos2(10.0 + 0.5 / ppp, 7.0 + 0.5 / ppp), vec2(96.0, 20.0));
+            // The new scale applies from the next frame.
+            ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
+            let mut painted_at = 0.0;
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                painted_at = ui.ctx().pixels_per_point();
+                paint_ramp(ui.painter(), r, |u| [u, u, u, 1.0]);
+            });
+            out.textures_delta.clear();
+            assert_eq!(painted_at, ppp);
+            let checker = out
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Rect(rs) if rs.fill == Color32::from_gray(250) => Some(rs.rect),
+                    _ => None,
+                })
+                .expect("the checkerboard's base rect");
+            let ramp = out
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Mesh(m) => Some(m.calc_bounds()),
+                    _ => None,
+                })
+                .expect("the ramp mesh");
+            assert_eq!(ramp, checker.round_to_pixels(ppp), "{ppp}x: the ramp covers every pixel of the checker");
+        }
     }
 }

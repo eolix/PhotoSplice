@@ -87,6 +87,7 @@ fn file_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn is_lut(path: &std::path::Path) -> bool {
     let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("").to_ascii_lowercase();
     ["cube", "3dl", "look", "icc", "icm"].contains(&ext.as_str())

@@ -14,7 +14,9 @@ use photosplice_text::render::PathEl;
 use serde_json::{Value, json};
 
 use crate::commands::{CommandSpec, layer_param};
-use crate::type_cmds::{is_auto_named, layer_name, refresh, replace_text, style_paragraphs, style_range};
+use crate::type_cmds::{
+    check_text_unlocked, format_targets, has_format_target, is_auto_named, layer_name, refresh, replace_text, style_paragraphs, style_range, with_text_targets,
+};
 use crate::{EngineError, Result, Session};
 
 /// Photoshop's Paste Lorem Ipsum filler.
@@ -49,6 +51,7 @@ fn has_point_text(s: &Session) -> std::result::Result<(), String> {
     match t.shape {
         TextShape::Point => Ok(()),
         TextShape::Box { .. } => Err("the type layer is already paragraph text".into()),
+        TextShape::Path { .. } => Err("detach the type layer from its path first".into()),
     }
 }
 
@@ -60,6 +63,7 @@ fn has_box_text(s: &Session) -> std::result::Result<(), String> {
     match t.shape {
         TextShape::Box { .. } => Ok(()),
         TextShape::Point => Err("the type layer is already point text".into()),
+        TextShape::Path { .. } => Err("the type layer is path text".into()),
     }
 }
 
@@ -69,7 +73,7 @@ fn any_text(s: &Session) -> std::result::Result<(), String> {
 }
 
 fn has_defaults(s: &Session) -> std::result::Result<(), String> {
-    has_text(s)?;
+    has_format_target(s)?;
     s.type_defaults.as_ref().map(|_| ()).ok_or_else(|| "no default type styles have been saved".into())
 }
 
@@ -78,12 +82,13 @@ fn has_defaults(s: &Session) -> std::result::Result<(), String> {
 /// Edits a type layer as one history step and re-renders it.
 fn with_text<R>(s: &mut Session, p: &Value, label: &str, f: impl FnOnce(&mut TextLayer, &Document) -> Result<R>) -> Result<R> {
     let id = layer_param(s, p)?;
+    check_text_unlocked(&s.active().ok_or(EngineError::NoDocument)?.doc, id)?;
     s.edit(label, |doc, _| {
         let snapshot = doc.clone();
         let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
         let auto_named = is_auto_named(l);
         let LayerContent::Text(t) = &mut l.content else {
-            return Err(EngineError::Other(format!("layer {} is a {} layer, not a type layer", id.0, l.content.kind_name())));
+            return Err(EngineError::Other(format!("layer {} is {} {} layer, not a type layer", id.0, l.content.article(), l.content.kind_name())));
         };
         let r = f(t, &snapshot)?;
         refresh(&snapshot, t);
@@ -132,7 +137,7 @@ pub fn aa_name(a: AntiAlias) -> &'static str {
 }
 
 fn set_aa(s: &mut Session, p: &Value, aa: AntiAlias) -> Result<Value> {
-    with_text(s, p, "Anti-Alias", |t, _| {
+    with_text_targets(s, p, "Anti-Alias", |t, _| {
         t.antialias = aa;
         Ok(())
     })?;
@@ -140,7 +145,7 @@ fn set_aa(s: &mut Session, p: &Value, aa: AntiAlias) -> Result<Value> {
 }
 
 fn set_orientation(s: &mut Session, p: &Value, o: Orientation) -> Result<Value> {
-    with_text(s, p, "Change Text Orientation", |t, _| {
+    with_text_targets(s, p, "Change Text Orientation", |t, _| {
         t.orientation = o;
         Ok(())
     })?;
@@ -335,6 +340,95 @@ fn convert_to_shape(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"layer": id.0, "subpaths": n}))
 }
 
+// ---------- type on a path ----------
+
+/// Largest anchor count of a path that type can follow (a hostile document cannot make the
+/// layout walk millions of segments).
+const MAX_TYPE_PATH_KNOTS: usize = 100_000;
+
+/// The subpath `type.attachToPath` follows, in document space: the work path (default) or a
+/// shape layer's path (`"shape":id`), subpath `"subpath"` (default 0).
+fn path_source(doc: &Document, p: &Value) -> Result<Subpath> {
+    let bad = |m: &str| EngineError::BadParams { cmd: "type.attachToPath".into(), msg: m.into() };
+    let path = match p.get("shape") {
+        None | Some(Value::Null) => doc.work_path.as_ref().ok_or_else(|| bad("the document has no work path; draw a path or pass \"shape\":layerId"))?,
+        Some(v) => {
+            let id = v.as_u64().ok_or_else(|| bad("\"shape\" must be a layer id"))?;
+            match doc.layer(LayerId(id)).map(|l| &l.content) {
+                Some(LayerContent::Shape(sh)) => &sh.path,
+                Some(_) => return Err(bad("\"shape\" is not a shape layer")),
+                None => return Err(EngineError::NoLayer(LayerId(id))),
+            }
+        }
+    };
+    let index = match p.get("subpath") {
+        None | Some(Value::Null) => 0,
+        Some(v) => v.as_u64().and_then(|n| usize::try_from(n).ok()).ok_or_else(|| bad("\"subpath\" must be a non-negative index"))?,
+    };
+    let sub = path.subpaths.get(index).ok_or_else(|| bad("the path has no such subpath"))?;
+    if sub.knots.len() < 2 {
+        return Err(bad("the subpath needs at least two anchor points"));
+    }
+    if sub.knots.len() > MAX_TYPE_PATH_KNOTS {
+        return Err(bad("the subpath has too many anchor points"));
+    }
+    Ok(sub.clone())
+}
+
+fn attach_to_path(s: &mut Session, p: &Value) -> Result<Value> {
+    let bad = |m: &str| EngineError::BadParams { cmd: "type.attachToPath".into(), msg: m.into() };
+    let start = match p.get("start") {
+        None | Some(Value::Null) => 0.0,
+        Some(v) => v.as_f64().filter(|n| n.is_finite()).ok_or_else(|| bad("\"start\" must be a finite number of pixels"))? as f32,
+    };
+    let flip = match p.get("flip") {
+        None | Some(Value::Null) => false,
+        Some(v) => v.as_bool().ok_or_else(|| bad("\"flip\" must be true or false"))?,
+    };
+    let id = layer_param(s, p)?;
+    let doc = &s.active().ok_or(EngineError::NoDocument)?.doc;
+    if doc.effective_locks(id).all {
+        return Err(EngineError::Other("the type layer is locked".into()));
+    }
+    let sub = path_source(doc, p)?;
+    with_text(s, p, "Type on a Path", |t, _| {
+        // The path lives in document space; the type layer keeps it in its own text space, so
+        // the type lands on the path where it is drawn.
+        let inv = t.transform.inverse().ok_or_else(|| EngineError::Other("the type layer's transform cannot be inverted".into()))?;
+        let map = |q: Point| inv.apply(q);
+        let knots = sub.knots.iter().map(|k| Knot { anchor: map(k.anchor), in_ctrl: map(k.in_ctrl), out_ctrl: map(k.out_ctrl), smooth: k.smooth }).collect();
+        let path = Subpath { closed: sub.closed, knots, op: PathOp::Combine };
+        if !path.knots.iter().all(|k| [k.anchor, k.in_ctrl, k.out_ctrl].iter().all(|q| q.x.is_finite() && q.y.is_finite())) {
+            return Err(EngineError::Other("the path cannot be mapped into the type layer".into()));
+        }
+        t.shape = TextShape::Path { path, start, flip };
+        Ok(())
+    })?;
+    Ok(json!({"layer": id.0, "start": start, "flip": flip}))
+}
+
+fn is_path_text(s: &Session) -> std::result::Result<(), String> {
+    match active_text(s)?.shape {
+        TextShape::Path { .. } => Ok(()),
+        _ => Err("the type layer is not on a path".into()),
+    }
+}
+
+fn detach_from_path(s: &mut Session, p: &Value) -> Result<Value> {
+    let id = layer_param(s, p)?;
+    with_text(s, p, "Release Type from Path", |t, _| {
+        if !matches!(t.shape, TextShape::Path { .. }) {
+            return Err(EngineError::Other("the type layer is not on a path".into()));
+        }
+        // Point text starts where the type started on the path.
+        let origin = photosplice_text::warp::Warp::on_path(&t.shape).map_or((0.0, 0.0), |w| w.apply(0.0, 0.0));
+        t.shape = TextShape::Point;
+        t.transform = then_translate(&t.transform, origin.0, origin.1);
+        Ok(())
+    })?;
+    Ok(json!({"layer": id.0}))
+}
+
 // ---------- warp ----------
 
 fn warp_text(s: &mut Session, p: &Value) -> Result<Value> {
@@ -351,8 +445,8 @@ fn warp_text(s: &mut Session, p: &Value) -> Result<Value> {
         horizontal: p.get("orientation").and_then(Value::as_str) != Some("vertical"),
     });
     let out = json!({"warp": warp});
-    with_text(s, p, "Warp Text", |t, _| {
-        t.warp = warp;
+    with_text_targets(s, p, "Warp Text", |t, _| {
+        t.warp = warp.clone();
         Ok(())
     })?;
     Ok(out)
@@ -383,13 +477,14 @@ fn set_feature(st: &mut photosplice_doc::text::CharStyle, tag: &str, on: bool) {
 }
 
 fn toggle_opentype(s: &mut Session, p: &Value, tag: &'static str) -> Result<Value> {
-    let cur = active_text(s).ok().and_then(|t| t.char_runs().first().map(|r| feature_on(&r.style, tag))).unwrap_or(false);
+    let ids = format_targets(s, p)?;
+    let st = s.active().ok_or(EngineError::NoDocument)?;
+    let representative = st.active_layer.filter(|id| ids.contains(id)).or_else(|| ids.first().copied());
+    let cur = representative
+        .and_then(|id| st.doc.layer(id))
+        .is_some_and(|l| matches!(&l.content, LayerContent::Text(t) if t.char_runs().first().is_some_and(|r| feature_on(&r.style, tag))));
     let on = p.get("on").and_then(Value::as_bool).unwrap_or(!cur);
-    with_text(s, p, "Change OpenType Feature", |t, _| {
-        let (a, b) = match p.get("range").and_then(Value::as_array) {
-            Some(r) if r.len() == 2 => (byte_index(&t.text, r[0].as_u64().unwrap_or(0) as usize), byte_index(&t.text, r[1].as_u64().unwrap_or(0) as usize)),
-            _ => (0, t.text.len()),
-        };
+    with_text_targets(s, p, "Change OpenType Feature", |t, (a, b)| {
         style_range(t, a.min(b), a.max(b), &|st| set_feature(st, tag, on));
         Ok(())
     })?;
@@ -431,31 +526,69 @@ fn update_all(s: &mut Session) -> Result<Value> {
     Ok(json!({"updated": n}))
 }
 
-fn installed_families() -> Vec<String> {
-    photosplice_text::shared().lock().unwrap_or_else(|e| e.into_inner()).fonts.families().into_iter().map(|f| f.to_lowercase()).collect()
+fn style_font_missing(fonts: &mut photosplice_text::FontDb, style: &photosplice_doc::text::CharStyle) -> bool {
+    if style.font_family.is_empty() || fonts.has_family(&style.font_family) {
+        return false;
+    }
+    // Match layout's choice: an exact PostScript face wins over the import-time family guess;
+    // a heuristic family is usable only when the stored family is unavailable.
+    if let Some(ps) = &style.postscript_name {
+        let resolved = fonts.resolve_postscript(ps);
+        if resolved.exact || fonts.has_family(&resolved.family) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Font families used by type layers that the font database cannot supply (neither by family
 /// nor by the PostScript name a PSD stored).
 pub fn missing_fonts(doc: &Document) -> Vec<String> {
-    let have = installed_families();
+    let mut engine = photosplice_text::shared().lock().unwrap_or_else(|e| e.into_inner());
     let mut out: Vec<String> = Vec::new();
-    let mut eng = photosplice_text::shared().lock().unwrap_or_else(|e| e.into_inner());
     for (_, _, l) in doc.walk() {
         if let LayerContent::Text(t) = &l.content {
             for r in t.char_runs() {
-                let f = r.style.font_family;
-                if !f.is_empty()
-                    && !have.contains(&f.to_lowercase())
-                    && !out.contains(&f)
-                    && !eng.fonts.renders_as_named(&f, r.style.postscript_name.as_deref())
+                // Missing unless the database can render it under its own name either way.
+                if style_font_missing(&mut engine.fonts, &r.style)
+                    && !engine.fonts.renders_as_named(&r.style.font_family, r.style.postscript_name.as_deref())
+                    && !out.contains(&r.style.font_family)
                 {
-                    out.push(f);
+                    out.push(r.style.font_family);
                 }
             }
         }
     }
     out
+}
+
+/// Font families used by a type layer that the font database cannot supply.
+pub fn missing_fonts_in_layer(t: &TextLayer) -> Vec<String> {
+    let mut engine = photosplice_text::shared().lock().unwrap_or_else(|e| e.into_inner());
+    let mut out: Vec<String> = Vec::new();
+    for r in t.char_runs() {
+        if style_font_missing(&mut engine.fonts, &r.style)
+            && !engine.fonts.renders_as_named(&r.style.font_family, r.style.postscript_name.as_deref())
+            && !out.contains(&r.style.font_family)
+        {
+            out.push(r.style.font_family);
+        }
+    }
+    out
+}
+
+/// Warnings for missing font families in `doc`.
+pub fn missing_font_warnings(doc: &Document) -> Vec<String> {
+    fonts_to_warnings(missing_fonts(doc))
+}
+
+/// Warnings for missing font families in `layer`.
+pub fn missing_font_warnings_for_layer(t: &TextLayer) -> Vec<String> {
+    fonts_to_warnings(missing_fonts_in_layer(t))
+}
+
+fn fonts_to_warnings(fonts: Vec<String>) -> Vec<String> {
+    fonts.into_iter().map(|font| format!("font '{font}' is not installed; text may render using a fallback face")).collect()
 }
 
 /// Replace missing families per `map` (missing → installed; unmapped ones → the default family).
@@ -481,7 +614,11 @@ fn replace_fonts(s: &mut Session, map: &serde_json::Map<String, Value>, all: boo
                 let runs = t.char_runs();
                 let mut at = 0;
                 for r in runs {
-                    if let Some(to) = pick(&r.style.font_family) {
+                    let missing_run = {
+                        let mut engine = photosplice_text::shared().lock().unwrap_or_else(|e| e.into_inner());
+                        style_font_missing(&mut engine.fonts, &r.style)
+                    };
+                    if missing_run && let Some(to) = pick(&r.style.font_family) {
                         style_range(t, at, at + r.len, &|st| {
                             st.font_family = to.clone();
                             st.postscript_name = None;
@@ -519,7 +656,7 @@ fn save_defaults(s: &mut Session) -> Result<Value> {
 
 fn load_defaults(s: &mut Session, p: &Value) -> Result<Value> {
     let (c, pp) = s.type_defaults.clone().ok_or(EngineError::Other("no default type styles have been saved".into()))?;
-    with_text(s, p, "Load Default Type Styles", |t, _| {
+    with_text_targets(s, p, "Load Default Type Styles", |t, _| {
         let n = t.text.len();
         style_range(t, 0, n, &|st| *st = c.clone());
         style_paragraphs(t, 0, n, &|st| *st = pp.clone());
@@ -537,27 +674,36 @@ pub fn specs() -> Vec<CommandSpec> {
         };
     }
     const LP: &str = r##"{"layer":id?}"##;
-    const OT: &str = r##"{"layer":id?,"on":bool? (default: toggle),"range":[startChar,endChar]? (default all)}"##;
+    const FP: &str = r##"{"layer":id? or "layers":[id,…]? (default selected Type layers)}"##;
+    const OT: &str = r##"{"layer":id? or "layers":[id,…]? (default selected Type layers),"on":bool? (default: toggle representative),"range":[startChar,endChar]? (single layer; default all)}"##;
     vec![
-        spec!("type.antiAlias.none", "None", &["Type", "Anti-Alias"], LP, has_text, |s, p| set_aa(s, p, AntiAlias::None)),
-        spec!("type.antiAlias.sharp", "Sharp", &["Type", "Anti-Alias"], LP, has_text, |s, p| set_aa(s, p, AntiAlias::Sharp)),
-        spec!("type.antiAlias.crisp", "Crisp", &["Type", "Anti-Alias"], LP, has_text, |s, p| set_aa(s, p, AntiAlias::Crisp)),
-        spec!("type.antiAlias.strong", "Strong", &["Type", "Anti-Alias"], LP, has_text, |s, p| set_aa(s, p, AntiAlias::Strong)),
-        spec!("type.antiAlias.smooth", "Smooth", &["Type", "Anti-Alias"], LP, has_text, |s, p| set_aa(s, p, AntiAlias::Smooth)),
-        spec!("type.antiAlias.windowsLcd", "Windows LCD", &["Type", "Anti-Alias"], LP, has_text, |s, p| set_aa(s, p, AntiAlias::WindowsLcd)),
-        spec!("type.antiAlias.windows", "Windows", &["Type", "Anti-Alias"], LP, has_text, |s, p| set_aa(s, p, AntiAlias::Windows)),
-        spec!("type.orientation.horizontal", "Horizontal", &["Type", "Orientation"], LP, has_text, |s, p| set_orientation(s, p, Orientation::Horizontal)),
-        spec!("type.orientation.vertical", "Vertical", &["Type", "Orientation"], LP, has_text, |s, p| set_orientation(s, p, Orientation::Vertical)),
-        spec!("type.openType.standardLigatures", "Standard Ligatures", &["Type", "OpenType"], OT, has_text, |s, p| toggle_opentype(s, p, "liga")),
-        spec!("type.openType.contextualAlternates", "Contextual Alternates", &["Type", "OpenType"], OT, has_text, |s, p| toggle_opentype(s, p, "calt")),
-        spec!("type.openType.discretionaryLigatures", "Discretionary Ligatures", &["Type", "OpenType"], OT, has_text, |s, p| toggle_opentype(s, p, "dlig")),
-        spec!("type.openType.swash", "Swash", &["Type", "OpenType"], OT, has_text, |s, p| toggle_opentype(s, p, "swsh")),
-        spec!("type.openType.oldstyle", "Oldstyle", &["Type", "OpenType"], OT, has_text, |s, p| toggle_opentype(s, p, "onum")),
-        spec!("type.openType.stylisticAlternates", "Stylistic Alternates", &["Type", "OpenType"], OT, has_text, |s, p| toggle_opentype(s, p, "salt")),
-        spec!("type.openType.titlingAlternates", "Titling Alternates", &["Type", "OpenType"], OT, has_text, |s, p| toggle_opentype(s, p, "titl")),
-        spec!("type.openType.ornaments", "Ornaments", &["Type", "OpenType"], OT, has_text, |s, p| toggle_opentype(s, p, "ornm")),
-        spec!("type.openType.ordinals", "Ordinals", &["Type", "OpenType"], OT, has_text, |s, p| toggle_opentype(s, p, "ordn")),
-        spec!("type.openType.fractions", "Fractions", &["Type", "OpenType"], OT, has_text, |s, p| toggle_opentype(s, p, "frac")),
+        spec!("type.antiAlias.none", "None", &["Type", "Anti-Alias"], FP, has_format_target, |s, p| set_aa(s, p, AntiAlias::None)),
+        spec!("type.antiAlias.sharp", "Sharp", &["Type", "Anti-Alias"], FP, has_format_target, |s, p| set_aa(s, p, AntiAlias::Sharp)),
+        spec!("type.antiAlias.crisp", "Crisp", &["Type", "Anti-Alias"], FP, has_format_target, |s, p| set_aa(s, p, AntiAlias::Crisp)),
+        spec!("type.antiAlias.strong", "Strong", &["Type", "Anti-Alias"], FP, has_format_target, |s, p| set_aa(s, p, AntiAlias::Strong)),
+        spec!("type.antiAlias.smooth", "Smooth", &["Type", "Anti-Alias"], FP, has_format_target, |s, p| set_aa(s, p, AntiAlias::Smooth)),
+        spec!("type.antiAlias.windowsLcd", "Windows LCD", &["Type", "Anti-Alias"], FP, has_format_target, |s, p| set_aa(s, p, AntiAlias::WindowsLcd)),
+        spec!("type.antiAlias.windows", "Windows", &["Type", "Anti-Alias"], FP, has_format_target, |s, p| set_aa(s, p, AntiAlias::Windows)),
+        spec!("type.orientation.horizontal", "Horizontal", &["Type", "Orientation"], FP, has_format_target, |s, p| set_orientation(
+            s,
+            p,
+            Orientation::Horizontal
+        )),
+        spec!("type.orientation.vertical", "Vertical", &["Type", "Orientation"], FP, has_format_target, |s, p| set_orientation(s, p, Orientation::Vertical)),
+        spec!("type.openType.standardLigatures", "Standard Ligatures", &["Type", "OpenType"], OT, has_format_target, |s, p| toggle_opentype(s, p, "liga")),
+        spec!("type.openType.contextualAlternates", "Contextual Alternates", &["Type", "OpenType"], OT, has_format_target, |s, p| toggle_opentype(
+            s, p, "calt"
+        )),
+        spec!("type.openType.discretionaryLigatures", "Discretionary Ligatures", &["Type", "OpenType"], OT, has_format_target, |s, p| toggle_opentype(
+            s, p, "dlig"
+        )),
+        spec!("type.openType.swash", "Swash", &["Type", "OpenType"], OT, has_format_target, |s, p| toggle_opentype(s, p, "swsh")),
+        spec!("type.openType.oldstyle", "Oldstyle", &["Type", "OpenType"], OT, has_format_target, |s, p| toggle_opentype(s, p, "onum")),
+        spec!("type.openType.stylisticAlternates", "Stylistic Alternates", &["Type", "OpenType"], OT, has_format_target, |s, p| toggle_opentype(s, p, "salt")),
+        spec!("type.openType.titlingAlternates", "Titling Alternates", &["Type", "OpenType"], OT, has_format_target, |s, p| toggle_opentype(s, p, "titl")),
+        spec!("type.openType.ornaments", "Ornaments", &["Type", "OpenType"], OT, has_format_target, |s, p| toggle_opentype(s, p, "ornm")),
+        spec!("type.openType.ordinals", "Ordinals", &["Type", "OpenType"], OT, has_format_target, |s, p| toggle_opentype(s, p, "ordn")),
+        spec!("type.openType.fractions", "Fractions", &["Type", "OpenType"], OT, has_format_target, |s, p| toggle_opentype(s, p, "frac")),
         spec!("type.createWorkPath", "Create Work Path", &["Type"], LP, has_text, create_work_path),
         spec!("type.convertToShape", "Convert to Shape", &["Type"], LP, has_text, convert_to_shape),
         spec!("type.rasterizeTypeLayer", "Rasterize Type Layer", &["Type"], LP, has_text, |s, p| s.execute("type.rasterize", p.clone())),
@@ -567,10 +713,19 @@ pub fn specs() -> Vec<CommandSpec> {
             "type.warpText",
             "Warp Text…",
             &["Type"],
-            r##"{"layer":id?,"style":"none|arc|arcLower|arcUpper|arch|bulge|shellLower|shellUpper|flag|wave|fish|rise|fisheye|inflate|squeeze|twist"="arc","bend":-100..100=50,"horizontalDistortion":-100..100=0,"verticalDistortion":-100..100=0,"orientation":"horizontal|vertical"="horizontal"}"##,
-            has_text,
+            r##"{"layer":id? or "layers":[id,…]? (default selected Type layers),"style":"none|arc|arcLower|arcUpper|arch|bulge|shellLower|shellUpper|flag|wave|fish|rise|fisheye|inflate|squeeze|twist"="arc","orientation":"horizontal|vertical"="horizontal","bend":-100..100=50,"horizontalDistortion":-100..100=0,"verticalDistortion":-100..100=0}"##,
+            has_format_target,
             warp_text
         ),
+        spec!(
+            "type.attachToPath",
+            "Type on a Path",
+            &[],
+            r##"{"layer":id? (default active Type layer),"shape":layerId? (a shape layer; default the work path),"subpath":index=0,"start":px=0 (offset along the path),"flip":bool=false (run along the path the other way, on its other side)}"##,
+            has_text,
+            attach_to_path
+        ),
+        spec!("type.detachFromPath", "Release Type from Path", &[], LP, is_path_text, detach_from_path),
         spec!("type.updateAllTextLayers", "Update All Text Layers", &["Type"], "{}", any_text, |s, _| update_all(s)),
         spec!("type.replaceAllMissingFonts", "Replace All Missing Fonts", &["Type"], "{} (with the default family)", any_text, |s, _| replace_fonts(
             s,
@@ -601,7 +756,7 @@ pub fn specs() -> Vec<CommandSpec> {
             has_text,
             |s, _| save_defaults(s)
         ),
-        spec!("type.loadDefaultTypeStyles", "Load Default Type Styles", &["Type"], LP, has_defaults, load_defaults),
+        spec!("type.loadDefaultTypeStyles", "Load Default Type Styles", &["Type"], FP, has_defaults, load_defaults),
     ]
 }
 

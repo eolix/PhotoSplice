@@ -29,7 +29,8 @@ const SIZE: std::ops::RangeInclusive<f32> = 1.0..=MAX_BRUSH_SIZE;
 pub struct Resize {
     /// Where the drag began, in document pixels: the circle stays there.
     pub anchor: [f64; 2],
-    /// The brush's diameter and hardness when it began.
+    /// The brush's diameter and vertical value when it began (its hardness, or its opacity with
+    /// "Vary Round Brush Hardness on HUD" off).
     pub start: (f32, f32),
     /// The `coalesce` key of this drag's `tools.setBrush` calls.
     key: u64,
@@ -76,8 +77,12 @@ pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers, a
             if app.drag.is_some() || !applies(app.ui.tool) || !(armed || is_gesture(mods)) {
                 return false;
             }
-            let b = &app.session.tools.brush;
-            app.brush_resize = Some(Resize { anchor: [x, y], start: (b.size, b.hardness), key: KEY.fetch_add(1, Ordering::Relaxed), secondary: armed });
+            let vary = app.session.prefs().tools.vary_round_brush_hardness_on_hud;
+            let (size, v) = {
+                let b = &app.session.tools.brush;
+                (b.size, if vary { b.hardness } else { b.opacity })
+            };
+            app.brush_resize = Some(Resize { anchor: [x, y], start: (size, v), key: KEY.fetch_add(1, Ordering::Relaxed), secondary: armed });
             true
         }
         ToolEvent::Move { x, y, .. } => match app.brush_resize {
@@ -106,41 +111,61 @@ pub fn release_stale(app: &mut PhotospliceApp, secondary_down: bool) {
 }
 
 fn update(app: &mut PhotospliceApp, r: Resize, x: f64, y: f64) {
-    // Right is bigger on screen, also in a flipped view (View › Flip Horizontal).
-    let dx = (x - r.anchor[0]) * if app.ui.view.flip_horizontal { -1.0 } else { 1.0 };
-    let (size, hardness) = resized(r.start, dx, y - r.anchor[1], app.current_zoom());
+    // Screen-relative, as in Photoshop (#4228): right is bigger and down harder on screen, however
+    // the view is rotated or flipped. The screen delta over the zoom is in document pixels at 0°.
+    let (dx, dy, zoom) = match ViewXform::active(app) {
+        Some(xf) if xf.zoom.is_finite() && xf.zoom > 0.0 => {
+            let d = xf.to_screen(x as f32, y as f32) - xf.to_screen(r.anchor[0] as f32, r.anchor[1] as f32);
+            (f64::from(d.x / xf.zoom), f64::from(d.y / xf.zoom), xf.zoom)
+        }
+        // No view: document axes, mirrored by View › Flip Horizontal.
+        _ => ((x - r.anchor[0]) * if app.ui.view.flip_horizontal { -1.0 } else { 1.0 }, y - r.anchor[1], app.point_zoom()),
+    };
+    let (size, v) = resized(r.start, dx, dy, zoom);
+    // "Vary Round Brush Hardness on HUD" (Preferences ▸ Tools, on by default): off, the vertical
+    // movement takes the opacity instead of the hardness, as in Photoshop.
+    let vary = app.session.prefs().tools.vary_round_brush_hardness_on_hud;
     let b = &app.session.tools.brush;
-    if b.size == size && b.hardness == hardness {
+    if b.size == size && if vary { b.hardness == v } else { b.opacity == v } {
         return;
     }
-    let p = json!({ "brush": { "size": size, "hardness": hardness }, "coalesce": format!("brush-resize:{}", r.key) });
+    let brush = if vary { json!({ "size": size, "hardness": v }) } else { json!({ "size": size, "opacity": v }) };
+    let p = json!({ "brush": brush, "coalesce": format!("brush-resize:{}", r.key) });
     if let Err(e) = app.run("tools.setBrush", p) {
         app.ui.status = e;
     }
 }
 
-/// Draw the resize feedback: the brush circle at the anchor, filled with a red tip preview whose
-/// solid core shows the hardness (Photoshop's), and the readout beside the pointer. Returns true
-/// while a resize is in progress (the canvas then hides its cursor).
+/// Draw the resize feedback: the brush circle at the anchor, filled with the brush preview
+/// colour whose solid core shows the hardness (Photoshop's), and the readout beside the pointer.
+/// Returns true while a resize is in progress (the canvas then hides its cursor).
 pub fn draw(app: &PhotospliceApp, painter: &egui::Painter, xf: &ViewXform) -> bool {
     let Some(r) = app.brush_resize else { return false };
     let b = &app.session.tools.brush;
     let c = xf.to_screen(r.anchor[0] as f32, r.anchor[1] as f32);
     let radius = (b.size / 2.0 * xf.zoom).max(1.0);
-    tip_preview(painter, c, radius, b.hardness, Color32::from_rgba_unmultiplied(255, 0, 0, 110));
+    tip_preview(painter, c, radius, b.hardness, preview_tint(app));
     painter.circle_stroke(c, radius + 0.5, Stroke::new(1.0, Color32::from_black_alpha(140)));
     painter.circle_stroke(c, radius, Stroke::new(1.0, Color32::from_white_alpha(220)));
     // Photoshop hides the pointer while the circle stays put.
     painter.ctx().set_cursor_icon(egui::CursorIcon::None);
     let at = painter.ctx().pointer_latest_pos().unwrap_or(c);
-    crate::canvas::draw_readout(
-        painter.ctx(),
-        "brush-resize-readout",
-        at,
-        [tl!("Diameter:"), tl!("Hardness:")],
-        [format!("{} px", b.size.round() as i64), format!("{}%", (b.hardness * 100.0).round() as i64)],
-    );
+    let (label, value) = if app.session.prefs().tools.vary_round_brush_hardness_on_hud {
+        (tl!("Hardness:"), format!("{}%", (b.hardness * 100.0).round() as i64))
+    } else {
+        (tl!("Opacity:"), format!("{}%", (b.opacity * 100.0).round() as i64))
+    };
+    crate::canvas::draw_readout(painter.ctx(), "brush-resize-readout", at, [tl!("Diameter:"), label], [format!("{} px", b.size.round() as i64), value]);
     true
+}
+
+/// The tip preview's tint: Preferences ▸ Cursors ▸ Brush Preview colour (red by default, as in
+/// Photoshop), at the overlay's alpha. Unreadable values keep the red.
+fn preview_tint(app: &PhotospliceApp) -> Color32 {
+    let alpha = 110;
+    crate::color_picker_ui::parse_hex(&app.session.prefs().cursors.brush_preview_color).map_or(Color32::from_rgba_unmultiplied(255, 0, 0, alpha), |c| {
+        Color32::from_rgba_unmultiplied((c[0] * 255.0).round() as u8, (c[1] * 255.0).round() as u8, (c[2] * 255.0).round() as u8, alpha)
+    })
 }
 
 /// A round tip of `radius` screen points: solid out to `hardness` of the radius, fading to clear
@@ -440,5 +465,74 @@ mod tests {
         let _ = crate::control::handle(&mut a, &ctx, &req);
         assert_eq!(a.session.tools.brush.size, 100.0);
         assert!(a.ui.brush_picker.is_some());
+    }
+
+    /// Preferences ▸ Tools ▸ Vary Round Brush Hardness on HUD (on by default): off, the HUD's
+    /// vertical movement takes the brush opacity instead of its hardness.
+    #[test]
+    fn vary_round_brush_hardness_on_hud_switches_the_vertical_target() {
+        for vary in [true, false] {
+            let mut app = app(Tool::Brush);
+            app.run("tools.setBrush", json!({"brush": {"opacity": 0.5}})).unwrap();
+            if !vary {
+                app.run("prefs.set", json!({"path": "tools.varyRoundBrushHardnessOnHud", "value": false})).unwrap();
+            }
+            let (h0, o0) = (app.session.tools.brush.hardness, app.session.tools.brush.opacity);
+            tool_event(&mut app, ToolEvent::Down { x: 100.0, y: 100.0, pressure: 1.0 }, CTRL_ALT);
+            tool_event(&mut app, ToolEvent::Move { x: 100.0, y: 140.0, pressure: 1.0 }, CTRL_ALT);
+            tool_event(&mut app, ToolEvent::Up { x: 100.0, y: 140.0 }, CTRL_ALT);
+            let b = &app.session.tools.brush;
+            if vary {
+                assert_eq!((b.hardness, b.opacity), (h0 + 0.2, o0), "hardness moves with the drag");
+                assert_eq!(app.session.journal.last().unwrap().1["brush"], json!({"size": 40.0f32, "hardness": 0.4f32}));
+            } else {
+                assert_eq!((b.hardness, b.opacity), (h0, o0 + 0.2), "opacity moves instead");
+                assert_eq!(app.session.journal.last().unwrap().1["brush"], json!({"size": 40.0f32, "opacity": 0.7f32}));
+            }
+        }
+    }
+
+    /// One Control+Alt drag by `(dx, dy)` document pixels from (100, 100) in a view turned by
+    /// `rotation` degrees (flipped with `flip`): the resulting (size, hardness).
+    fn drag_in_view(rotation: f32, flip: bool, dx: f64, dy: f64) -> (f32, f32) {
+        let mut app = app(Tool::Brush);
+        app.sync_views();
+        app.ui.views[0].rotation = rotation;
+        app.ui.view.flip_horizontal = flip;
+        tool_event(&mut app, ToolEvent::Down { x: 100.0, y: 100.0, pressure: 1.0 }, CTRL_ALT);
+        tool_event(&mut app, ToolEvent::Up { x: 100.0 + dx, y: 100.0 + dy }, CTRL_ALT);
+        let b = &app.session.tools.brush;
+        (b.size, b.hardness)
+    }
+
+    /// #4228: the HUD is screen-relative, as in Photoshop: horizontal on screen is the size and
+    /// vertical the hardness however the view is rotated or flipped.
+    #[test]
+    fn a_rotated_view_keeps_horizontal_for_size_and_vertical_for_hardness() {
+        // Unrotated, with and without View › Flip Horizontal: unchanged.
+        assert_eq!(drag_in_view(0.0, false, 30.0, 0.0), (100.0, 0.2), "right grows");
+        assert_eq!(drag_in_view(0.0, false, 0.0, 40.0), (40.0, 0.4), "down hardens");
+        assert_eq!(drag_in_view(0.0, true, -30.0, 0.0), (100.0, 0.2), "flipped: screen right grows");
+        assert_eq!(drag_in_view(0.0, true, 0.0, 40.0), (40.0, 0.4), "flipped: down hardens");
+        // 90° clockwise: document +y points screen-left and document +x screen-down.
+        assert_eq!(drag_in_view(90.0, false, 0.0, 10.0), (20.0, 0.2), "screen-left shrinks, the hardness stays");
+        assert_eq!(drag_in_view(90.0, false, 0.0, -30.0), (100.0, 0.2), "screen-right grows");
+        assert_eq!(drag_in_view(90.0, false, 40.0, 0.0), (40.0, 0.4), "screen-down hardens, the size stays");
+        // 180°: document -x is screen right.
+        assert_eq!(drag_in_view(180.0, false, -30.0, 0.0), (100.0, 0.2), "screen right still grows");
+        assert_eq!(drag_in_view(180.0, false, 0.0, -40.0), (40.0, 0.4), "screen down still hardens");
+        // 90° and flipped: document +y points screen-right.
+        assert_eq!(drag_in_view(90.0, true, 0.0, 30.0), (100.0, 0.2), "rotated and flipped: screen right grows");
+    }
+
+    /// Preferences ▸ Cursors ▸ Brush Preview colour tints the HUD's tip preview (red by default).
+    #[test]
+    fn the_tip_preview_uses_the_brush_preview_colour() {
+        let mut app = app(Tool::Brush);
+        assert_eq!(preview_tint(&app), Color32::from_rgba_unmultiplied(255, 0, 0, 110));
+        app.run("prefs.set", json!({"path": "cursors.brushPreviewColor", "value": "#00ff80"})).unwrap();
+        assert_eq!(preview_tint(&app), Color32::from_rgba_unmultiplied(0, 255, 128, 110));
+        app.session.prefs.edit(|p| p.cursors.brush_preview_color = "nonsense".into());
+        assert_eq!(preview_tint(&app), Color32::from_rgba_unmultiplied(255, 0, 0, 110), "unreadable values keep the red");
     }
 }

@@ -3,6 +3,7 @@
 //! unzipped and re-zipped by another tool still loads). No ZIP64, no
 //! encryption, no multi-disk archives.
 
+use std::collections::HashMap;
 use std::io::Read;
 
 use crate::FormatError;
@@ -11,25 +12,9 @@ const LOCAL_SIG: u32 = 0x0403_4b50;
 const CENTRAL_SIG: u32 = 0x0201_4b50;
 const EOCD_SIG: u32 = 0x0605_4b50;
 
-/// CRC-32 (IEEE), table-driven.
+/// CRC-32 (IEEE), as stored in ZIP headers.
 pub fn crc32(data: &[u8]) -> u32 {
-    static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
-    let t = TABLE.get_or_init(|| {
-        let mut t = [0u32; 256];
-        for (i, e) in t.iter_mut().enumerate() {
-            let mut c = i as u32;
-            for _ in 0..8 {
-                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
-            }
-            *e = c;
-        }
-        t
-    });
-    let mut c = 0xFFFF_FFFFu32;
-    for &b in data {
-        c = t[((c ^ b as u32) & 0xFF) as usize] ^ (c >> 8);
-    }
-    !c
+    crc32fast::hash(data)
 }
 
 /// Streaming writer for STORE entries.
@@ -122,7 +107,12 @@ pub struct Entry {
 /// Read-only view of an archive in memory.
 pub struct ZipReader<'a> {
     bytes: &'a [u8],
+    /// All entries, in central-directory order. Treat as read-only: `find`
+    /// looks names up through an index built from this list in `new`.
     pub entries: Vec<Entry>,
+    /// Name -> index of the first entry with that name, so `find` is O(1)
+    /// instead of a scan per lookup (a bundle reads one entry per tile).
+    by_name: HashMap<String, usize>,
 }
 
 fn u16_at(b: &[u8], o: usize) -> Result<u16, FormatError> {
@@ -194,11 +184,16 @@ impl<'a> ZipReader<'a> {
             entries.push(Entry { name, method, crc, compressed, uncompressed, data_offset });
             p = entry_end;
         }
-        Ok(ZipReader { bytes, entries })
+        let mut by_name = HashMap::with_capacity(entries.len());
+        for (i, e) in entries.iter().enumerate() {
+            // Duplicate names: the first entry wins, as with a front-to-back scan.
+            by_name.entry(e.name.clone()).or_insert(i);
+        }
+        Ok(ZipReader { bytes, entries, by_name })
     }
 
     pub fn find(&self, name: &str) -> Option<&Entry> {
-        self.entries.iter().find(|e| e.name == name)
+        self.by_name.get(name).and_then(|&i| self.entries.get(i))
     }
 
     /// Entry payload (decompressed), at most `max` bytes, CRC-checked.
@@ -206,13 +201,21 @@ impl<'a> ZipReader<'a> {
         if e.uncompressed > max {
             return Err(FormatError::LimitExceeded(format!("zip entry `{}` is {} bytes (max {max})", e.name, e.uncompressed)));
         }
-        let raw = &self.bytes[e.data_offset..e.data_offset + e.compressed];
+        // `Entry` is public and cloneable: one from another archive must not index out of range.
+        let raw = e
+            .data_offset
+            .checked_add(e.compressed)
+            .and_then(|end| self.bytes.get(e.data_offset..end))
+            .ok_or_else(|| FormatError::corrupt(format!("zip entry `{}` out of range", e.name)))?;
         let data = match e.method {
             0 => raw.to_vec(),
             8 => {
-                let mut out = Vec::with_capacity(e.uncompressed);
+                // The uncompressed length comes from an untrusted ZIP header: a
+                // small forged archive must not reserve gigabytes up front, so the
+                // preallocation is capped (DEFLATE expands at most ~1032x).
+                let mut out = Vec::with_capacity(e.uncompressed.min(raw.len().saturating_mul(1032)).min(64 << 20));
                 flate2::read::DeflateDecoder::new(raw)
-                    .take(max as u64 + 1)
+                    .take((max as u64).saturating_add(1))
                     .read_to_end(&mut out)
                     .map_err(|err| FormatError::corrupt(format!("zip entry `{}`: {err}", e.name)))?;
                 out
@@ -261,6 +264,59 @@ mod tests {
     }
 
     #[test]
+    fn crc_matches_bitwise_reference() {
+        // Bit-at-a-time IEEE CRC-32 as the oracle, over lengths that cross
+        // any SIMD / slicing block size.
+        fn reference(data: &[u8]) -> u32 {
+            let mut c = 0xFFFF_FFFFu32;
+            for &b in data {
+                c ^= u32::from(b);
+                for _ in 0..8 {
+                    c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+                }
+            }
+            !c
+        }
+        let data: Vec<u8> = (0..1000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+        for len in [0, 1, 7, 15, 16, 17, 63, 64, 65, 255, 256, 1000] {
+            assert_eq!(crc32(&data[..len]), reference(&data[..len]), "len {len}");
+        }
+    }
+
+    #[test]
+    fn find_locates_every_entry_in_a_large_archive() {
+        let mut w = ZipWriter::new();
+        let n = 3000u32;
+        for i in 0..n {
+            w.add(&format!("tiles/{i:05}.zst"), &i.to_le_bytes()).unwrap();
+        }
+        let bytes = w.finish().unwrap();
+        let r = ZipReader::new(&bytes).unwrap();
+        assert_eq!(r.entries.len(), n as usize);
+        for i in (0..n).rev() {
+            let name = format!("tiles/{i:05}.zst");
+            let e = r.find(&name).unwrap();
+            assert_eq!(e.name, name);
+            assert_eq!(r.read(e, 4).unwrap(), i.to_le_bytes());
+        }
+        assert!(r.find("tiles/missing.zst").is_none());
+        assert!(r.find("").is_none());
+    }
+
+    #[test]
+    fn duplicate_names_resolve_to_the_first_entry() {
+        let mut w = ZipWriter::new();
+        w.add("a", b"first").unwrap();
+        w.add("b", b"other").unwrap();
+        w.add("a", b"second").unwrap();
+        let bytes = w.finish().unwrap();
+        let r = ZipReader::new(&bytes).unwrap();
+        assert_eq!(r.entries.len(), 3);
+        assert_eq!(r.read_by_name("a", 100).unwrap(), b"first");
+        assert_eq!(r.read_by_name("b", 100).unwrap(), b"other");
+    }
+
+    #[test]
     fn crc_mismatch_detected() {
         let mut w = ZipWriter::new();
         w.add("a", b"hello").unwrap();
@@ -269,6 +325,63 @@ mod tests {
         bytes[pos] = b'j';
         let r = ZipReader::new(&bytes).unwrap();
         assert!(r.read_by_name("a", 100).is_err());
+    }
+
+    /// A valid DEFLATE-compressed bundle may be read with an effectively
+    /// unlimited caller budget (e.g. corruption/round-trip checks). On 64-bit
+    /// targets `usize::MAX as u64 + 1` overflows, so the decoder must saturate.
+    #[test]
+    fn deflated_entry_with_unbounded_limit_round_trips() {
+        use std::io::Write as _;
+
+        let content = b"DEFLATE-compressed PhotoSplice project content, with a valid CRC.";
+        let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(content).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        // Construct a standards-conforming DEFLATE entry from the store-only
+        // writer: keep its actual compressed bytes, but set the ZIP method,
+        // original length and CRC in *both* the local and central headers.
+        let mut writer = ZipWriter::new();
+        writer.add("manifest.json", &compressed).unwrap();
+        let mut bytes = writer.finish().unwrap();
+        let eocd = bytes.len() - 22;
+        let central = u32_at(&bytes, eocd + 16).unwrap() as usize;
+        let crc = crc32(content).to_le_bytes();
+        let length = (content.len() as u32).to_le_bytes();
+
+        bytes[8..10].copy_from_slice(&8u16.to_le_bytes());
+        bytes[14..18].copy_from_slice(&crc);
+        bytes[22..26].copy_from_slice(&length);
+        bytes[central + 10..central + 12].copy_from_slice(&8u16.to_le_bytes());
+        bytes[central + 16..central + 20].copy_from_slice(&crc);
+        bytes[central + 24..central + 28].copy_from_slice(&length);
+
+        let archive = ZipReader::new(&bytes).unwrap();
+        assert_eq!(archive.read_by_name("manifest.json", usize::MAX).unwrap(), content);
+        assert_eq!(archive.read_by_name("manifest.json", content.len()).unwrap(), content);
+        assert!(matches!(archive.read_by_name("manifest.json", content.len() - 1), Err(FormatError::LimitExceeded(_))));
+
+        // A tiny archive with a forged 4 GiB size must be rejected without
+        // trying to allocate its claimed output capacity in advance.
+        let mut forged = bytes;
+        forged[22..26].copy_from_slice(&u32::MAX.to_le_bytes());
+        forged[central + 24..central + 28].copy_from_slice(&u32::MAX.to_le_bytes());
+        let archive = ZipReader::new(&forged).unwrap();
+        assert!(matches!(archive.read_by_name("manifest.json", usize::MAX), Err(FormatError::Corrupt(_))));
+    }
+
+    #[test]
+    fn an_entry_from_another_archive_is_an_error_not_a_panic() {
+        let mut big = ZipWriter::new();
+        big.add("a", &[7; 4096]).unwrap();
+        let big = big.finish().unwrap();
+        let foreign = ZipReader::new(&big).unwrap().entries[0].clone();
+        let mut small = ZipWriter::new();
+        small.add("a", b"x").unwrap();
+        let small = small.finish().unwrap();
+        let r = ZipReader::new(&small).unwrap();
+        assert!(matches!(r.read(&foreign, usize::MAX), Err(FormatError::Corrupt(_))));
     }
 
     #[test]

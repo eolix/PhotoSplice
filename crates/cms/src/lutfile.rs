@@ -14,6 +14,12 @@ pub struct LutFile {
     pub size: usize,
     /// `size`³ × 3 values, red fastest.
     pub data: Vec<f32>,
+    /// The input domain the table expects (`.cube` `DOMAIN_MIN`/`DOMAIN_MAX`,
+    /// `LUT_3D_INPUT_RANGE`): an input `c` samples the table at `(c - min) / (max - min)`,
+    /// saturating outside. `[0, 1]` is the identity default; applying a table with any other
+    /// domain is rejected upstream until Color Lookup carries it through.
+    pub domain_min: [f32; 3],
+    pub domain_max: [f32; 3],
 }
 
 /// Largest edge length accepted (64³ is Photoshop's practical maximum; 129 leaves headroom while
@@ -62,7 +68,12 @@ impl LutFile {
                 }
             }
         }
-        LutFile { title: title.to_string(), size, data }
+        LutFile { title: title.to_string(), size, data, domain_min: [0.0; 3], domain_max: [1.0; 3] }
+    }
+
+    /// Whether the table expects plain 0..1 inputs (the common case; Photoshop's default).
+    pub fn domain_is_default(&self) -> bool {
+        self.domain_min == [0.0, 0.0, 0.0] && self.domain_max == [1.0, 1.0, 1.0]
     }
 
     fn check(self) -> Result<Self, LutError> {
@@ -163,7 +174,8 @@ pub(crate) fn from_profile(p: &crate::Profile, size: usize) -> Result<LutFile, L
     t.convert_f32(&grid, 3, &mut data, 3, false);
     data.iter_mut().for_each(|v| *v = if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 });
     let title = if p.description.is_empty() { "ICC profile".to_string() } else { p.description.clone() };
-    LutFile { title, size, data }.check()
+    // An ICC-derived table samples the profile over 0..1: the identity domain.
+    LutFile { title, size, data, domain_min: [0.0; 3], domain_max: [1.0; 3] }.check()
 }
 
 /// Adobe / Resolve `.cube`. 1D LUTs (`LUT_1D_SIZE`) are expanded to a 33³ table.
@@ -208,17 +220,24 @@ pub fn parse_cube(text: &str) -> Result<LutFile, LutError> {
             _ => {}
         }
     }
-    let _ = (dmin, dmax); // Domain other than 0..1 only shifts input sampling; we assume 0..1 inputs.
+    let domain_ok = (0..3).all(|k| dmin[k] < dmax[k] && dmin[k].is_finite() && dmax[k].is_finite());
+    if (size3 > 0 || size1 >= 2) && !domain_ok {
+        return err(format!("DOMAIN_MIN {:?} must lie below DOMAIN_MAX {:?}", dmin, dmax));
+    }
     if size3 > 0 {
-        return LutFile { title, size: size3, data: rows }.check();
+        return LutFile { title, size: size3, data: rows, domain_min: dmin, domain_max: dmax }.check();
     }
     if size1 >= 2 {
         let expected_rows = size1.checked_mul(3).ok_or_else(|| LutError(format!("unsupported 1D LUT size {size1}")))?;
         if rows.len() != expected_rows {
             return err("no LUT_3D_SIZE in .cube file");
         }
+        // The 1D table is resampled onto a 0..1 cube anyway, so its input domain
+        // (`DOMAIN_MIN`/`MAX`, `LUT_1D_INPUT_RANGE`) is baked into the resample: an input `v`
+        // reads the table at `(v - min) / (max - min)`, saturating outside.
         let curve = |ch: usize, v: f32| {
-            let x = v.clamp(0.0, 1.0) * (size1 - 1) as f32;
+            let t = (v - dmin[ch]) / (dmax[ch] - dmin[ch]);
+            let x = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 } * (size1 - 1) as f32;
             let i = (x.floor() as usize).min(size1 - 2);
             let f = x - i as f32;
             rows[i * 3 + ch] * (1.0 - f) + rows[(i + 1) * 3 + ch] * f
@@ -259,7 +278,7 @@ pub fn parse_3dl(text: &str) -> Result<LutFile, LutError> {
             data[at + k] = (row[k] / scale) as f32;
         }
     }
-    LutFile { title: String::new(), size: n, data }.check()
+    LutFile { title: String::new(), size: n, data, domain_min: [0.0; 3], domain_max: [1.0; 3] }.check()
 }
 
 /// SpeedGrade `.look`: `<size>` and a hex `<data>` string of little-endian float32 RGB triplets
@@ -279,7 +298,7 @@ pub fn parse_look(text: &str) -> Result<LutFile, LutError> {
     let floats: Vec<f32> = bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
     let rgba_entries = entries.checked_mul(4).ok_or_else(|| LutError(format!("unsupported LUT size {size}")))?;
     let data = if floats.len() == rgba_entries { floats.as_chunks::<4>().0.iter().flat_map(|c| [c[0], c[1], c[2]]).collect() } else { floats };
-    LutFile { title: tag("title").unwrap_or_default(), size, data }.check()
+    LutFile { title: tag("title").unwrap_or_default(), size, data, domain_min: [0.0; 3], domain_max: [1.0; 3] }.check()
 }
 
 /// Writes a `.cube` file (what Photoshop embeds in a Color Lookup layer).
@@ -397,6 +416,65 @@ mod tests {
         assert!(from_profile(display, 9).unwrap_err().0.contains("abstract or device-link"));
         assert!(parse("look.icc", b"not a profile").is_err());
         assert!(from_icc(&display.to_bytes(), 9).is_err());
+    }
+
+    #[test]
+    fn cube_domain_is_kept_and_validated() {
+        let base = "TITLE \"t\"
+LUT_3D_SIZE 2
+";
+        let rows = "0 0 0
+0 0 1
+0 1 0
+0 1 1
+1 0 0
+1 0 1
+1 1 0
+1 1 1
+";
+        // The default domain parses as default.
+        let d = parse_cube(&format!("{base}{rows}")).expect("default domain");
+        assert!(d.domain_is_default());
+        // DOMAIN_MIN/MAX are kept for the caller to act on.
+        let d = parse_cube(&format!(
+            "DOMAIN_MIN 0.1 0.2 0.3
+DOMAIN_MAX 0.9 0.8 0.7
+{base}{rows}"
+        ))
+        .expect("custom domain");
+        assert_eq!(d.domain_min, [0.1, 0.2, 0.3]);
+        assert_eq!(d.domain_max, [0.9, 0.8, 0.7]);
+        assert!(!d.domain_is_default());
+        // A degenerate domain is a parse error, not a division by zero later.
+        let e = parse_cube(&format!(
+            "DOMAIN_MIN 0.5 0.5 0.5
+DOMAIN_MAX 0.5 1 1
+{base}{rows}"
+        ))
+        .unwrap_err();
+        assert!(e.0.contains("below DOMAIN_MAX"), "{e}");
+    }
+
+    #[test]
+    fn cube_1d_domain_is_baked_into_the_resample() {
+        // An identity ramp over the domain 0.25..0.75: 0.25 maps to 0, 0.5 to 0.5, 0.75 to 1.
+        let table = "LUT_1D_SIZE 2\nLUT_1D_INPUT_RANGE 0.25 0.75\n0 0 0\n1 1 1\n";
+        let l = parse_cube(table).expect("1D with input range");
+        assert!(l.domain_is_default(), "the domain is baked in, so the cube is plain 0..1");
+        let at = |r: usize| l.data[r * 3];
+        // 33-point grid, red fastest: entry r on the red axis is input r / 32.
+        assert!(at(0).abs() < 1e-6, "below the domain saturates to 0");
+        assert!((at(16) - 0.5).abs() < 1e-5, "0.5 is the middle of 0.25..0.75: {}", at(16));
+        assert!((at(8) - 0.0).abs() < 1e-5, "0.25 maps to 0: {}", at(8));
+        assert!((at(24) - 1.0).abs() < 1e-5, "0.75 maps to 1: {}", at(24));
+        assert!((at(32) - 1.0).abs() < 1e-6, "above the domain saturates to 1");
+        // Per-channel DOMAIN_MIN/MAX work the same way.
+        let l = parse_cube("LUT_1D_SIZE 2\nDOMAIN_MIN 0 0 0.5\nDOMAIN_MAX 1 1 1\n0 0 0\n1 1 1\n").expect("1D domain");
+        let blue_mid = l.data[(16 * 33 * 33) * 3 + 2];
+        assert!(blue_mid.abs() < 1e-5, "blue 0.5 is the bottom of its domain: {blue_mid}");
+        // A degenerate 1D domain is rejected like the 3D one.
+        let e = parse_cube("LUT_1D_SIZE 2\nLUT_1D_INPUT_RANGE 1 1\n0 0 0\n1 1 1\n").unwrap_err();
+        assert!(e.0.contains("below DOMAIN_MAX"), "{e}");
     }
 
     #[test]

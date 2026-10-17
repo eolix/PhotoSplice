@@ -3,12 +3,15 @@
 //! selected effect's filter and settings, and the effect-layer stack (new, delete, reorder,
 //! show/hide). The stack is applied bottom to top.
 //!
-//! The preview runs the same algorithm as the command, at full size: on the visible part of the
-//! layer, or on the whole layer for an effect that works on the whole image (Cutout). Only the
-//! result is scaled down for display, never the image filtered: size-dependent effects (Cutout's
-//! regions, brush and cell sizes) would otherwise look different from what OK applies. OK runs `filter.filterGallery {effects:[...]}`, one history
-//! step (a smart filter on smart objects). Everything is drivable over the control channel with
-//! `filter.filterGallery {"ui": {...}}` while the dialog is open.
+//! The preview runs the same algorithm as the command, at full size, like Photoshop's: the stack
+//! runs at full resolution on the visible part of the layer (plus the filters' reach), or on the
+//! whole layer for a stack that works on the whole image (Cutout), and only the result is
+//! averaged down to the zoom, never the image filtered: size-dependent effects (Cutout's regions,
+//! brush and cell sizes) would otherwise look different from what OK applies. On the desktop it
+//! renders off the UI thread with a progress bar, so a large layer never freezes the window. OK
+//! runs `filter.filterGallery {effects:[...]}`, one history step (a smart filter on smart objects).
+//! Everything is drivable over the control channel with `filter.filterGallery {"ui": {...}}`
+//! while the dialog is open.
 
 use std::hash::{Hash, Hasher};
 
@@ -16,10 +19,11 @@ use egui::{Align2, Color32, FontId, Rect as ERect, Sense, Stroke, TextureHandle,
 use photosplice_algo::{FilterParams, GALLERY_CATEGORIES, GalleryFilter};
 use photosplice_doc::LayerId;
 use photosplice_geom::Rect;
-use photosplice_raster::Surface;
+use photosplice_raster::{Interrupt, Surface};
 use serde_json::{Map, Value, json};
 
 use crate::PhotospliceApp;
+use crate::edit_history::{EditHistory, Step};
 use crate::filter_dialog::{Kind, parse_spec};
 use crate::theme::Tokens;
 use crate::widgets;
@@ -51,7 +55,10 @@ fn default_params(f: GalleryFilter) -> Map<String, Value> {
     for p in parse_spec(f.params_doc()) {
         let v = match p.kind {
             Kind::Range { default, .. } => json!(default),
-            Kind::Choice(c) => json!(c[0]),
+            Kind::Choice { options, default } => {
+                let initial = default.as_deref().or_else(|| options.first().map(String::as_str)).unwrap_or("");
+                json!(initial)
+            }
             Kind::Bool(b) => json!(b),
             _ => continue,
         };
@@ -75,15 +82,25 @@ pub struct GalleryDialog {
     pub zoom: f32,
     center: [f32; 2],
     tex: Option<TextureHandle>,
-    shown: Option<(u64, ERect)>,
-    /// The whole layer filtered (gallery effects work on the whole image), keyed by the stack.
+    /// The key of the preview in `tex` and the document rect it covers.
+    shown: Option<(u64, Rect)>,
+    /// The preview rendering off the UI thread (desktop), and the latest wanted key with when it
+    /// was first wanted (ms), to cancel a stale render once the settings settle.
+    #[cfg(not(target_arch = "wasm32"))]
+    job: Option<PreviewJob>,
+    latest: Option<(u64, f64)>,
+    /// A key whose render failed: not retried until the settings or view change.
+    failed: Option<u64>,
+    /// The whole layer filtered by a stack that works on the whole image, keyed by the stack:
+    /// panning and zooming cut the view from it without filtering again.
     full: Option<(u64, Surface)>,
-    /// A whole-layer render running in the background, keyed by its stack.
-    job: Option<(u64, std::sync::mpsc::Receiver<Surface>)>,
     /// Textures of the shared thumbnail set ([`crate::gallery_thumbs`]) and the set's signature.
     thumbs: Vec<Option<TextureHandle>>,
     thumb_sig: String,
     pub preview_ms: f64,
+    /// Editing smart filter `index` of the layer: OK updates it instead of adding a filter.
+    pub smart_filter: Option<usize>,
+    history: EditHistory<Vec<EffectLayer>>,
 }
 
 impl GalleryDialog {
@@ -94,12 +111,23 @@ impl GalleryDialog {
             "selected": self.selected,
             "zoom": if self.zoom > 0.0 { json!(self.zoom) } else { json!("fit") },
             "previewMs": self.preview_ms,
+            "rendering": self.rendering().is_some(),
+            "smartFilter": self.smart_filter,
         })
     }
 
     /// The command params for the current stack.
     pub fn params(&self) -> Value {
         json!({"effects": self.effects.iter().map(EffectLayer::to_json).collect::<Vec<_>>(), "foreground": self.foreground, "background": self.background})
+    }
+
+    /// The progress (`0.0..=1.0`) of a preview still rendering.
+    fn rendering(&self) -> Option<f32> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(j) = &self.job {
+            return Some(j.ctl.fraction());
+        }
+        None
     }
 
     fn cur(&mut self) -> &mut EffectLayer {
@@ -128,6 +156,12 @@ impl GalleryDialog {
         }
     }
 
+    pub(crate) fn step(&mut self, step: Step) {
+        if self.history.step(&mut self.effects, step) {
+            self.selected = self.selected.min(self.effects.len().saturating_sub(1));
+        }
+    }
+
     fn move_to(&mut self, from: usize, to: usize) {
         if from < self.effects.len() && to < self.effects.len() && from != to {
             let e = self.effects.remove(from);
@@ -137,7 +171,9 @@ impl GalleryDialog {
     }
 }
 
-/// A nearest-neighbour copy of `r` of `surf`, every `k`-th pixel, placed at the origin.
+/// A nearest-neighbour copy of `r` of `surf`, every `k`-th pixel, placed at the origin (what the
+/// preview used to filter when zoomed out; the tests compare against it).
+#[cfg(test)]
 fn sample(surf: &Surface, r: Rect, k: u32) -> Surface {
     let k = k.max(1) as i32;
     let (w, h) = ((r.width() as i32 + k - 1) / k, (r.height() as i32 + k - 1) / k);
@@ -167,6 +203,96 @@ pub(crate) fn render(src: &Surface, params: &Value) -> Surface {
     photosplice_algo::apply_in(src, &FilterParams::FilterGallery { effects }, b, b, None, b)
 }
 
+/// The preview of `vis` at 1/`k` (#2502): the stack runs at full resolution exactly as OK runs it
+/// (same bounds, same canvas-edge handling, textures and noise seeded by document position), so
+/// the pixels equal the same crop of the applied result; then `k`×`k` blocks are averaged.
+/// `None` when cancelled.
+/// A stack that works on the whole image (Cutout's regions) runs on the whole layer first.
+fn preview_pixels(src: &Surface, canvas: Rect, params: &Value, vis: Rect, k: u32, ctl: &Interrupt) -> Option<Surface> {
+    let effects = photosplice_engine::gallery_cmds::effects_from_json(params).unwrap_or_default();
+    let fp = FilterParams::FilterGallery { effects };
+    if fp.one_piece() {
+        return Some(reduce(&whole_pixels(src, canvas, &fp, ctl)?, vis, k));
+    }
+    let content = src.content_bounds();
+    let area = photosplice_algo::output_area(&fp, content, canvas, None).intersect(&vis);
+    let full = if area.is_empty() { src.clone() } else { photosplice_algo::apply_in_with(src, &fp, area, canvas, None, canvas.union(&content), ctl)? };
+    Some(reduce(&full, vis, k))
+}
+
+/// Whether the stack works on the whole image at once (Cutout's regions): it is then filtered on
+/// the whole layer, never on the visible part alone.
+fn one_piece(params: &Value) -> bool {
+    let effects = photosplice_engine::gallery_cmds::effects_from_json(params).unwrap_or_default();
+    FilterParams::FilterGallery { effects }.one_piece()
+}
+
+/// The whole layer as OK leaves it: the stack applied over the command's area, with the same
+/// canvas-edge handling. `None` when cancelled.
+fn whole_pixels(src: &Surface, canvas: Rect, fp: &FilterParams, ctl: &Interrupt) -> Option<Surface> {
+    let content = src.content_bounds();
+    let area = photosplice_algo::output_area(fp, content, canvas, None);
+    if area.is_empty() {
+        return Some(src.clone());
+    }
+    photosplice_algo::apply_in_with(src, fp, area, canvas, None, canvas.union(&content), ctl)
+}
+
+/// `r` of `surf` scaled down by `k`, each pixel the average of a `k`×`k` block (colour weighted by
+/// alpha), placed at the origin.
+fn reduce(surf: &Surface, r: Rect, k: u32) -> Surface {
+    let k = k.clamp(1, 1 << 16) as usize;
+    let (bw, bh) = (r.width() as usize, r.height() as usize);
+    let (w, h) = (bw.div_ceil(k), bh.div_ceil(k));
+    let mut out = Surface::new(surf.format());
+    if w == 0 || h == 0 {
+        return out;
+    }
+    let n = surf.channels().max(1);
+    let alpha = surf.format().alpha;
+    let colours = if alpha { n - 1 } else { n };
+    // One output row from a band of `k` source rows.
+    let row = |j: usize, out: &mut [f32]| {
+        let y0 = r.y0.saturating_add((j * k) as i32);
+        let band = surf.read_region(Rect::new(r.x0, y0, r.x1, y0.saturating_add(k as i32).min(r.y1)));
+        let mut acc = vec![0.0f64; w * n];
+        let mut count = vec![0u32; w];
+        for (i, px) in band.chunks_exact(n).enumerate() {
+            let x = (i % bw) / k;
+            let (Some(sum), Some(c)) = (acc.get_mut(x * n..x * n + n), count.get_mut(x)) else { continue };
+            let a = if alpha { px[n - 1] as f64 } else { 1.0 };
+            for (s, v) in sum.iter_mut().zip(&px[..colours]) {
+                *s += *v as f64 * a;
+            }
+            if alpha {
+                sum[n - 1] += a;
+            }
+            *c += 1;
+        }
+        for ((sum, c), o) in acc.chunks_exact(n).zip(&count).zip(out.chunks_exact_mut(n)) {
+            let a = if alpha { sum[n - 1] } else { *c as f64 };
+            for (o, v) in o.iter_mut().zip(&sum[..colours]) {
+                *o = if a > 0.0 { (v / a) as f32 } else { 0.0 };
+            }
+            if alpha {
+                o[n - 1] = (a / (*c).max(1) as f64) as f32;
+            }
+        }
+    };
+    let mut data = vec![0.0f32; w * h * n];
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use rayon::prelude::*;
+        data.par_chunks_mut(w * n).enumerate().for_each(|(j, out)| row(j, out));
+    }
+    #[cfg(target_arch = "wasm32")]
+    for (j, out) in data.chunks_mut(w * n).enumerate() {
+        row(j, out);
+    }
+    out.write_region(Rect::new(0, 0, w as i32, h as i32), &data);
+    out
+}
+
 pub(crate) fn image(surf: &Surface, w: usize, h: usize) -> egui::ColorImage {
     let mut px = vec![[0u8; 4]; w * h];
     for y in 0..h {
@@ -176,112 +302,12 @@ pub(crate) fn image(surf: &Surface, w: usize, h: usize) -> egui::ColorImage {
     egui::ColorImage::new([w, h], px.iter().map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], if alpha { p[3] } else { 255 })).collect())
 }
 
-/// The preview of `vis` shown at 1 / `k`: filtered at full size, only the result scaled down.
-/// A stack that works on the whole image is run on the whole layer, once per stack, in the
-/// background on native targets: `None` while that render runs (the last preview stays up).
-fn preview_image(d: &mut GalleryDialog, params: &Value, vis: Rect, k: u32) -> Option<egui::ColorImage> {
-    let effects = photosplice_engine::gallery_cmds::effects_from_json(params).unwrap_or_default();
-    if (FilterParams::FilterGallery { effects }).one_piece() {
-        let mut ph = std::collections::hash_map::DefaultHasher::new();
-        params.to_string().hash(&mut ph);
-        let key = ph.finish();
-        if d.full.as_ref().is_none_or(|(k0, _)| *k0 != key) {
-            full_render(d, params, key)?;
-        }
-        return d.full.as_ref().map(|(_, full)| shrink(full, vis, k));
-    }
-    let crop = sample(&d.src, vis, 1);
-    let out = render(&crop, params);
-    Some(shrink(&out, Rect::new(0, 0, vis.width() as i32, vis.height() as i32), k))
-}
-
-/// Brings `d.full` to the stack `key`, rendering the whole layer on a worker thread: `None` while
-/// a render is still running. A render for an older stack is let finish first, so dragging a
-/// slider never queues more than one.
-#[cfg(not(any(test, target_arch = "wasm32")))]
-fn full_render(d: &mut GalleryDialog, params: &Value, key: u64) -> Option<()> {
-    if let Some((jk, rx)) = &d.job {
-        match rx.try_recv() {
-            Ok(done) => {
-                let jk = *jk;
-                d.job = None;
-                d.full = Some((jk, done));
-                if jk == key {
-                    return Some(());
-                }
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => return None,
-            // The worker died (it never should): render here instead.
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                d.job = None;
-                d.full = Some((key, render(&d.src, params)));
-                return Some(());
-            }
-        }
-    }
-    let (tx, rx) = std::sync::mpsc::channel();
-    let (src, p) = (d.src.clone(), params.clone());
-    let spawned = std::thread::Builder::new().name("gallery-preview".into()).spawn(move || {
-        let _ = tx.send(render(&src, &p));
-    });
-    if spawned.is_err() {
-        d.full = Some((key, render(&d.src, params)));
-        return Some(());
-    }
-    d.job = Some((key, rx));
-    None
-}
-
-/// Brings `d.full` to the stack `key` (single-threaded builds and tests: synchronously).
-#[cfg(any(test, target_arch = "wasm32"))]
-fn full_render(d: &mut GalleryDialog, params: &Value, key: u64) -> Option<()> {
-    d.job = None;
-    d.full = Some((key, render(&d.src, params)));
-    Some(())
-}
-
-/// `r` of `surf` scaled down by `k` for display, each displayed pixel the mean of its k × k block.
-fn shrink(surf: &Surface, r: Rect, k: u32) -> egui::ColorImage {
-    let k = k.max(1) as usize;
-    let (sw, sh) = (r.width() as usize, r.height() as usize);
-    let (w, h) = (sw.div_ceil(k).max(1), sh.div_ceil(k).max(1));
-    let mut acc = vec![[0u32; 5]; w * h];
-    let mut row = vec![[0u8; 4]; sw];
-    for y in 0..sh {
-        surf.read_rgba8_into(Rect::new(r.x0, r.y0 + y as i32, r.x1, r.y0 + y as i32 + 1), &mut row);
-        let line = &mut acc[(y / k) * w..(y / k + 1) * w];
-        for (x, p) in row.iter().enumerate() {
-            let a = &mut line[x / k];
-            for c in 0..4 {
-                a[c] += u32::from(p[c]);
-            }
-            a[4] += 1;
-        }
-    }
-    let alpha = surf.format().alpha;
-    let px = acc
-        .iter()
-        .map(|a| {
-            let n = a[4].max(1);
-            let v = |c: usize| (a[c] / n) as u8;
-            Color32::from_rgba_unmultiplied(v(0), v(1), v(2), if alpha { v(3) } else { 255 })
-        })
-        .collect();
-    egui::ColorImage::new([w, h], px)
-}
-
-/// Opens the dialog on the active layer, starting from the last gallery stack used.
-pub fn open(app: &mut PhotospliceApp) -> Result<(), String> {
-    let (layer, src, _) = crate::distort_ui::active_pixels(app)?;
-    let st = app.session.active().ok_or("no document")?;
-    let canvas = st.doc.bounds();
-    let layer_name = st.doc.layer(layer).map(|l| l.name.clone()).unwrap_or_default();
-    let last = app.session.journal.iter().rev().find(|(id, _)| id == "filter.filterGallery").map(|(_, p)| p.clone());
-    let mut effects: Vec<EffectLayer> = last
-        .as_ref()
-        .and_then(|p| p.get("effects").and_then(Value::as_array).cloned())
-        .unwrap_or_default()
-        .iter()
+/// The effect layers of a `filter.filterGallery` params object (unknown filters are skipped).
+fn effects_from(p: &Value) -> Vec<EffectLayer> {
+    p.get("effects")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
         .filter_map(|e| {
             let f = GalleryFilter::from_key(e.get("filter")?.as_str()?)?;
             let mut l = EffectLayer::new(f);
@@ -291,12 +317,62 @@ pub fn open(app: &mut PhotospliceApp) -> Result<(), String> {
             l.visible = e.get("visible").and_then(Value::as_bool).unwrap_or(true);
             Some(l)
         })
-        .collect();
+        .collect()
+}
+
+/// A recorded `[r, g, b, a]` colour param.
+fn colour_param(p: &Value, key: &str) -> Option<[f32; 4]> {
+    let a = p.get(key)?.as_array()?;
+    let c = |j: usize, d: f32| a.get(j).and_then(Value::as_f64).map_or(Some(d), |v| Some(v as f32).filter(|v| v.is_finite()));
+    Some([c(0, 0.0)?, c(1, 0.0)?, c(2, 0.0)?, c(3, 1.0)?])
+}
+
+/// Opens the dialog on the active layer, starting from the last gallery stack used.
+pub fn open(app: &mut PhotospliceApp) -> Result<(), String> {
+    let (layer, src, _) = crate::distort_ui::active_pixels(app)?;
+    let last = app.session.journal.iter().rev().find(|(id, _)| id == "filter.filterGallery").map(|(_, p)| p.clone());
+    let effects = last.as_ref().map(effects_from).unwrap_or_default();
+    let (fg, bg) = (app.session.tools.foreground, app.session.tools.background);
+    open_on(app, layer, src, effects, [fg, bg], None)
+}
+
+/// Re-opens Filter Gallery smart filter `index` of smart object `layer` with its recorded stack,
+/// previewing on the pixels below it; OK updates that filter (`layer.smartFilter.setParams`).
+pub fn open_smart_filter(app: &mut PhotospliceApp, layer: LayerId, index: usize) -> Result<(), String> {
+    let st = app.session.active().ok_or("no document")?;
+    let Some(photosplice_doc::LayerContent::Smart(sm)) = st.doc.layer(layer).map(|l| &l.content) else {
+        return Err("the layer is not a smart object".into());
+    };
+    let filter = sm.smart_filters.get(index).ok_or("no such smart filter")?;
+    if filter.command != "filter.filterGallery" {
+        return Err("the smart filter is not a Filter Gallery filter".into());
+    }
+    let p = filter.params.clone();
+    let src = photosplice_engine::smart_cmds::render_below_filter(&st.doc, sm, index)
+        .map_err(|e| e.to_string())?
+        .ok_or("the smart object's contents are unavailable (missing linked file?)")?;
+    let fg = colour_param(&p, "foreground").unwrap_or(app.session.tools.foreground);
+    let bg = colour_param(&p, "background").unwrap_or(app.session.tools.background);
+    open_on(app, layer, src, effects_from(&p), [fg, bg], Some(index))
+}
+
+fn open_on(
+    app: &mut PhotospliceApp,
+    layer: LayerId,
+    src: Surface,
+    mut effects: Vec<EffectLayer>,
+    colours: [[f32; 4]; 2],
+    smart_filter: Option<usize>,
+) -> Result<(), String> {
+    let st = app.session.active().ok_or("no document")?;
+    let canvas = st.doc.bounds();
+    let layer_name = st.doc.layer(layer).map(|l| l.name.clone()).unwrap_or_default();
     if effects.is_empty() {
         effects.push(EffectLayer::new(GalleryFilter::ColoredPencil));
     }
     let sel = effects.len() - 1;
     let open_cats = std::array::from_fn(|i| effects[sel].filter.category() == GALLERY_CATEGORIES[i]);
+    let history = EditHistory::new(&effects);
     app.distort.gallery = Some(GalleryDialog {
         layer,
         layer_name,
@@ -305,17 +381,22 @@ pub fn open(app: &mut PhotospliceApp) -> Result<(), String> {
         effects,
         selected: sel,
         open: open_cats,
-        foreground: app.session.tools.foreground,
-        background: app.session.tools.background,
+        foreground: colours[0],
+        background: colours[1],
         zoom: 0.0,
         center: [(canvas.x0 + canvas.x1) as f32 / 2.0, (canvas.y0 + canvas.y1) as f32 / 2.0],
         tex: None,
         shown: None,
-        full: None,
+        #[cfg(not(target_arch = "wasm32"))]
         job: None,
+        latest: None,
+        failed: None,
+        full: None,
         thumbs: vec![None; GalleryFilter::ALL.len()],
         thumb_sig: String::new(),
         preview_ms: 0.0,
+        smart_filter,
+        history,
     });
     Ok(())
 }
@@ -325,6 +406,9 @@ pub fn commit(app: &mut PhotospliceApp) -> Result<Value, String> {
     let Some(d) = app.distort.gallery.take() else { return Err("the Filter Gallery is not open".into()) };
     if !d.effects.iter().any(|e| e.visible) {
         return Ok(json!({"committed": false}));
+    }
+    if let Some(index) = d.smart_filter {
+        return app.run("layer.smartFilter.setParams", json!({"layer": d.layer.0, "index": index, "params": d.params()}));
     }
     let mut p = d.params();
     p["layer"] = json!(d.layer.0);
@@ -370,17 +454,45 @@ pub fn control(app: &mut PhotospliceApp, ui: &Value) -> Result<Value, String> {
     if let Some(Value::Object(m)) = ui.get("params") {
         d.cur().params.extend(m.clone());
     }
+    d.history.settle(&d.effects, false);
     match ui.get("zoom") {
         Some(Value::String(s)) if s == "fit" => d.zoom = 0.0,
+        // The gallery's own preview zoom, not the canvas (`zoom_levels` doesn't apply): its − / +
+        // buttons and menu stop at 400 %, an agent may set up to 3200 %.
         Some(v) if v.is_number() => d.zoom = (v.as_f64().unwrap_or(1.0) as f32).clamp(0.01, 32.0),
         _ => {}
     }
     Ok(d.describe())
 }
 
-/// Recomputes the preview texture when the stack or the view changed.
-fn update_preview(d: &mut GalleryDialog, ctx: &egui::Context, area: ERect) {
-    let (cw, ch) = (d.canvas.width() as f32, d.canvas.height() as f32);
+/// A preview rendering on a worker thread: what it shows, its result and its cancellation.
+#[cfg(not(target_arch = "wasm32"))]
+struct PreviewJob {
+    key: u64,
+    vis: Rect,
+    /// The stack, when it works on the whole image: the job also returns the whole filtered layer.
+    stack: Option<u64>,
+    rx: std::sync::mpsc::Receiver<Result<Option<PreviewResult>, String>>,
+    ctl: photosplice_engine::jobs::JobCtx,
+}
+
+/// A finished preview: the image, how long it took (ms) and, for a whole-image stack, the whole
+/// filtered layer.
+#[cfg(not(target_arch = "wasm32"))]
+type PreviewResult = (egui::ColorImage, f64, Option<Surface>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for PreviewJob {
+    /// A closed dialog or a superseded render stops at its next tile.
+    fn drop(&mut self) {
+        self.ctl.cancel();
+    }
+}
+
+/// The preview's zoom (screen px per document px), the visible document rect and the factor the
+/// texture is reduced by. Fit in View also recentres the view.
+fn view(d: &mut GalleryDialog, area: ERect) -> (f32, Rect, u32) {
+    let (cw, ch) = (d.canvas.width().max(1) as f32, d.canvas.height().max(1) as f32);
     let zoom = if d.zoom > 0.0 { d.zoom } else { ((area.width() - 24.0) / cw).min((area.height() - 24.0) / ch).clamp(0.005, 1.0) };
     if d.zoom <= 0.0 {
         d.center = [d.canvas.x0 as f32 + cw / 2.0, d.canvas.y0 as f32 + ch / 2.0];
@@ -389,36 +501,152 @@ fn update_preview(d: &mut GalleryDialog, ctx: &egui::Context, area: ERect) {
     let vis =
         Rect::new((d.center[0] - hw).floor() as i32, (d.center[1] - hh).floor() as i32, (d.center[0] + hw).ceil() as i32, (d.center[1] + hh).ceil() as i32)
             .intersect(&d.canvas);
-    let k = (1.0 / zoom).ceil().max(1.0) as u32;
+    // At least one texture pixel per screen pixel; the GPU's linear filter does the rest.
+    let k = (1.0 / zoom + 1e-3).floor().clamp(1.0, 4096.0) as u32;
+    (zoom, vis, k)
+}
+
+/// Keeps the preview texture current with the stack and the view; returns where it is drawn.
+/// With `background` the render runs off the UI thread and the last preview stays up (moving
+/// with the view) until it is done; otherwise it renders inline (web, tests, inline sessions).
+fn update_preview(d: &mut GalleryDialog, ctx: &egui::Context, area: ERect, background: bool) -> Option<ERect> {
+    let (zoom, vis, k) = view(d, area);
     let params = d.params();
+    let mut sh = std::collections::hash_map::DefaultHasher::new();
+    params.to_string().hash(&mut sh);
+    let stack = sh.finish();
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    params.to_string().hash(&mut h);
+    stack.hash(&mut h);
     (vis.x0, vis.y0, vis.x1, vis.y1, k).hash(&mut h);
     let key = h.finish();
-    let screen = ERect::from_min_max(
-        area.center() + vec2((vis.x0 as f32 - d.center[0]) * zoom, (vis.y0 as f32 - d.center[1]) * zoom),
-        area.center() + vec2((vis.x1 as f32 - d.center[0]) * zoom, (vis.y1 as f32 - d.center[1]) * zoom),
-    );
-    if d.shown.is_some_and(|(k0, _)| k0 == key) {
-        d.shown = Some((key, screen));
-        return;
+    let whole = one_piece(&params);
+    let now = crate::gpu_canvas::now_ms();
+    if d.latest.is_none_or(|(k0, _)| k0 != key) {
+        d.latest = Some((key, now));
     }
-    if vis.is_empty() {
-        return;
-    }
-    let t0 = crate::gpu_canvas::now_ms();
-    let Some(img) = preview_image(d, &params, vis, k) else {
-        if d.job.is_some() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(30));
+    #[cfg(not(target_arch = "wasm32"))]
+    poll_job(d, ctx);
+    let mut wanted = d.shown.is_none_or(|(k0, _)| k0 != key) && !vis.is_empty() && d.failed != Some(key);
+    // A whole-image stack already filtered: the new view is cut from that, nothing runs again.
+    let cut = match &d.full {
+        Some((s, full)) if wanted && whole && *s == stack => {
+            let t0 = crate::gpu_canvas::now_ms();
+            Some((image(&reduce(full, vis, k), reduced(vis.width(), k), reduced(vis.height(), k)), crate::gpu_canvas::now_ms() - t0))
         }
-        return;
+        _ => None,
     };
+    if let Some((img, ms)) = cut {
+        show_image(d, ctx, img, key, vis, ms);
+        wanted = false;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if wanted && background {
+        start_job(d, ctx, key, vis, k, &params, now, whole.then_some(stack));
+    } else if d.job.as_ref().is_some_and(|j| j.key != key) {
+        // Back to what is already shown: the render for other settings is no longer needed.
+        d.job = None;
+    }
+    if wanted && !background {
+        let t0 = crate::gpu_canvas::now_ms();
+        let (w, h) = (reduced(vis.width(), k), reduced(vis.height(), k));
+        let shown = if whole {
+            let fp = FilterParams::FilterGallery { effects: photosplice_engine::gallery_cmds::effects_from_json(&params).unwrap_or_default() };
+            whole_pixels(&d.src, d.canvas, &fp, &Interrupt::NONE).map(|full| {
+                let img = image(&reduce(&full, vis, k), w, h);
+                d.full = Some((stack, full));
+                img
+            })
+        } else {
+            preview_pixels(&d.src, d.canvas, &params, vis, k, &Interrupt::NONE).map(|out| image(&out, w, h))
+        };
+        match shown {
+            Some(img) => show_image(d, ctx, img, key, vis, crate::gpu_canvas::now_ms() - t0),
+            None => d.failed = Some(key),
+        }
+    }
+    let (_, r) = d.shown?;
+    let at = |x: i32, y: i32| area.center() + vec2((x as f32 - d.center[0]) * zoom, (y as f32 - d.center[1]) * zoom);
+    Some(ERect::from_min_max(at(r.x0, r.y0), at(r.x1, r.y1)))
+}
+
+/// A length of `n` document pixels reduced by `k` (partial blocks count).
+fn reduced(n: u32, k: u32) -> usize {
+    (n as usize).div_ceil(k.max(1) as usize)
+}
+
+fn show_image(d: &mut GalleryDialog, ctx: &egui::Context, img: egui::ColorImage, key: u64, vis: Rect, ms: f64) {
     match &mut d.tex {
         Some(t) => t.set(img, egui::TextureOptions::LINEAR),
         None => d.tex = Some(ctx.load_texture("gallery-preview", img, egui::TextureOptions::LINEAR)),
     }
-    d.preview_ms = crate::gpu_canvas::now_ms() - t0;
-    d.shown = Some((key, screen));
+    d.preview_ms = ms;
+    d.shown = Some((key, vis));
+}
+
+/// Takes a finished render: shown when it completed, dropped when cancelled, remembered when it
+/// failed (so a failing stack isn't retried every frame).
+#[cfg(not(target_arch = "wasm32"))]
+fn poll_job(d: &mut GalleryDialog, ctx: &egui::Context) {
+    let Some(job) = &d.job else { return };
+    let result = match job.rx.try_recv() {
+        Ok(r) => r,
+        Err(std::sync::mpsc::TryRecvError::Empty) => return,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("the Filter Gallery preview stopped".into()),
+    };
+    let Some(job) = d.job.take() else { return };
+    match result {
+        Ok(Some((img, ms, full))) => {
+            if let (Some(stack), Some(full)) = (job.stack, full) {
+                d.full = Some((stack, full));
+            }
+            show_image(d, ctx, img, job.key, job.vis, ms);
+        }
+        Ok(None) => {}
+        Err(_) => d.failed = Some(job.key),
+    }
+}
+
+/// One render at a time: a running render for older settings finishes (so a slider drag keeps
+/// updating) unless the settings have been unchanged for a moment, then it is cancelled.
+/// `stack` (a whole-image stack): the whole layer is filtered, and kept for the next views.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn start_job(d: &mut GalleryDialog, ctx: &egui::Context, key: u64, vis: Rect, k: u32, params: &Value, now: f64, stack: Option<u64>) {
+    if let Some(job) = &d.job {
+        let settled = d.latest.is_some_and(|(k0, t)| k0 == key && now - t >= crate::filter_preview_worker::SETTLE_MS);
+        if job.key != key && settled {
+            job.ctl.cancel();
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        return;
+    }
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let ctl = photosplice_engine::jobs::JobCtx::new();
+    let (work, src, canvas, params, repaint) = (ctl.clone(), d.src.clone(), d.canvas, params.clone(), ctx.clone());
+    let spawned = std::thread::Builder::new().name("gallery-preview".into()).spawn(move || {
+        let run = || {
+            let t0 = crate::gpu_canvas::now_ms();
+            let (out, full) = if stack.is_some() {
+                let fp = FilterParams::FilterGallery { effects: photosplice_engine::gallery_cmds::effects_from_json(&params).unwrap_or_default() };
+                let full = work.stage(0.0, 1.0, "", |ctl| whole_pixels(&src, canvas, &fp, ctl))?;
+                (reduce(&full, vis, k), Some(full))
+            } else {
+                (work.stage(0.0, 1.0, "", |ctl| preview_pixels(&src, canvas, &params, vis, k, ctl))?, None)
+            };
+            let img = image(&out, reduced(vis.width(), k), reduced(vis.height(), k));
+            Some((img, crate::gpu_canvas::now_ms() - t0, full))
+        };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).map_err(|_| "the Filter Gallery preview failed".to_string());
+        let _ = tx.send(result);
+        repaint.request_repaint();
+    });
+    match spawned {
+        Ok(_) => {
+            d.job = Some(PreviewJob { key, vis, stack, rx, ctl });
+            ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        }
+        Err(_) => d.failed = Some(key),
+    }
 }
 
 /// Brings the thumbnails up to date: the shared set for this display density (from memory or
@@ -460,10 +688,10 @@ fn update_thumbs(
     *cache = Some(set);
 }
 
-/// Draws the dialog (a full-window layer over the app).
 /// The dialog's largest size; smaller windows get a smaller one ([`widgets::tool_dialog_rect`]).
 const DIALOG_MAX: egui::Vec2 = vec2(1500.0, 950.0);
 
+/// Draws the dialog: a large modal over the document, in the dialogs' own frame.
 pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
     let mut action: Option<&str> = None;
@@ -472,9 +700,11 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let name = d.effects.get(d.selected).map_or("", |e| e.filter.name());
     let heading = format!("{name} ({}, {pct})", d.layer_name);
     let rect = widgets::tool_dialog_rect(ctx, DIALOG_MAX);
+    let background = app.background_jobs;
     // The dialogs' own frame (title bar, dragging, kept below the app's title bar), at a fixed size.
     crate::dialogs::frame(ctx, egui::Id::new("gallery-dialog"), &heading, crate::dialogs::FrameSize::Fixed(rect.size()), |ui, size| {
         let Some(d) = app.distort.gallery.as_mut() else { return };
+        d.history.settle(&d.effects, ctx.input(|i| i.pointer.any_down()));
         let (body, _) = ui.allocate_exact_size(size.unwrap_or(rect.size()), Sense::hover());
         let painter = ui.painter().clone();
         let right = ERect::from_min_size(pos2(body.right() - RIGHT_W, body.top()), vec2(RIGHT_W, body.height()));
@@ -484,9 +714,9 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
 
         // ---- Preview ----
         painter.rect_filled(area, 0.0, t.canvas);
-        update_preview(d, ctx, area);
+        let shown = update_preview(d, ctx, area, background);
         let clip = painter.with_clip_rect(area);
-        if let (Some(tex), Some((_, r))) = (&d.tex, d.shown) {
+        if let (Some(tex), Some(r)) = (&d.tex, shown) {
             widgets::checker(&clip, r.intersect(area), 8.0);
             clip.image(tex.id(), r, ERect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
             clip.rect_stroke(r, 0.0, Stroke::new(1.0, t.separator), egui::StrokeKind::Outside);
@@ -512,7 +742,13 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
         if widgets::dropdown(&mut zb, "gallery-zoom", &mut z, &opts, 110.0) {
             d.zoom = z;
         }
-        zb.label(egui::RichText::new(format!("preview {:.0} ms", d.preview_ms)).color(t.text_faint).size(11.0));
+        if let Some(p) = d.rendering() {
+            // Like Photoshop's: a progress bar while the preview renders (the last one stays up).
+            let (br, _) = zb.allocate_exact_size(vec2(90.0, 6.0), Sense::hover());
+            crate::jobs_ui::bar(&zb, br, (p > 0.0).then_some(p), &t);
+        } else {
+            zb.label(egui::RichText::new(format!("preview {:.0} ms", d.preview_ms)).color(t.text_faint).size(11.0));
+        }
 
         // ---- Category folders with thumbnails ----
         painter.rect_filled(mid, 0.0, t.dock);
@@ -525,7 +761,8 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
                 let r = ui.horizontal(|ui| {
                     let (ir, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
                     crate::icons::paint(ui, ir, icon, 14.0, t.icon);
-                    ui.add(egui::Label::new(egui::RichText::new(*cat).color(t.text)).sense(Sense::click()))
+                    ui.add(egui::Label::new(egui::RichText::new(*cat).color(t.text)).selectable(false).sense(Sense::click()))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
                 });
                 if r.inner.clicked() {
                     d.open[ci] = !d.open[ci];
@@ -604,8 +841,9 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
                         widgets::slider_row(ui, &label, &mut v, min..=max, "", None);
                         e.params.insert(p.key, json!(v.round()));
                     }
-                    Kind::Choice(options) => {
-                        let mut c = e.params.get(&p.key).and_then(Value::as_str).unwrap_or(&options[0]).to_string();
+                    Kind::Choice { options, default } => {
+                        let initial = default.as_deref().or_else(|| options.first().map(String::as_str)).unwrap_or("");
+                        let mut c = e.params.get(&p.key).and_then(Value::as_str).unwrap_or(initial).to_string();
                         let labels: Vec<String> = options.iter().map(|o| crate::filter_dialog::label(o)).collect();
                         let opts: Vec<(String, &str)> = options.iter().cloned().zip(labels.iter().map(String::as_str)).collect();
                         ui.horizontal(|ui| {
@@ -630,7 +868,7 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
                         let mut rgb = c.map_or([neon[0], neon[1], neon[2]], |v| [v[0], v[1], v[2]]);
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new(tl!("Glow Color")).color(t.text_dim));
-                            ui.color_edit_button_rgb(&mut rgb);
+                            crate::widgets::color_edit_button_rgb(ui, &mut rgb);
                         });
                         e.params.insert("glowColor".into(), json!([rgb[0], rgb[1], rgb[2], 1.0]));
                     }
@@ -785,18 +1023,72 @@ mod tests {
         app.sync_views();
         open(&mut app).unwrap();
         control(&mut app, &json!({"filter": "cutout", "params": {"numberOfLevels": 4, "edgeSimplicity": 0, "edgeFidelity": 3}})).unwrap();
-        let d = app.distort.gallery.as_mut().unwrap();
-        let params = d.params();
-        let vis = d.canvas;
-        let k = 4;
-        let preview = preview_image(d, &params, vis, k).unwrap();
-        let expected = shrink(&render(&d.src, &params), vis, k);
+        let d = app.distort.gallery.as_ref().unwrap();
+        let (params, vis, k) = (d.params(), d.canvas, 4);
+        let (w, h) = (reduced(vis.width(), k), reduced(vis.height(), k));
+        let preview = image(&preview_pixels(&d.src, d.canvas, &params, vis, k, &Interrupt::NONE).unwrap(), w, h);
+        let expected = image(&reduce(&applied(&app, d), vis, k), w, h);
         assert_eq!(preview.size, expected.size);
         assert_eq!(preview.pixels, expected.pixels, "the preview is the full-size result, scaled");
         // Filtering a shrunk copy instead loses the cells.
         let shrunk_first = render(&sample(&d.src, vis, k), &params);
-        let lost = image(&shrunk_first, expected.size[0], expected.size[1]);
+        let lost = image(&shrunk_first, w, h);
         assert_ne!(lost.pixels, expected.pixels);
+        // The dialog keeps the whole filtered layer for the stack: another zoom is cut from it.
+        let ctx = egui::Context::default();
+        let area = ERect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0));
+        let d = app.distort.gallery.as_mut().unwrap();
+        assert!(update_preview(d, &ctx, area, false).is_some());
+        let kept = d.full.as_ref().map(|(s, _)| *s);
+        assert!(kept.is_some(), "the whole layer is kept for this stack");
+        d.zoom = 1.0;
+        assert!(update_preview(d, &ctx, area, false).is_some());
+        assert_eq!(d.full.as_ref().map(|(s, _)| *s), kept);
+    }
+
+    #[test]
+    fn smart_filter_double_click_edits_the_stored_gallery_stack() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.run("layer.smartObjects.convertToSmartObject", json!({})).unwrap();
+        let stack = json!({"effects": [{"filter": "chrome", "params": {"detail": 2, "smoothness": 9}, "visible": true}], "foreground": [1.0, 0.0, 0.0, 1.0], "background": [0.0, 0.0, 1.0, 1.0]});
+        app.run("filter.filterGallery", stack).unwrap();
+        app.run("filter.blur.gaussianBlur", json!({"radius": 2.0})).unwrap();
+        let layer = app.session.active().unwrap().active_layer.unwrap();
+        let smart = |app: &PhotospliceApp| match &app.session.active().unwrap().doc.layer(layer).unwrap().content {
+            photosplice_doc::LayerContent::Smart(sm) => sm.clone(),
+            _ => panic!("not a smart object"),
+        };
+        let steps = app.session.active().unwrap().history.past_len();
+
+        let sm = smart(&app);
+        crate::smart_ui::open_editor(&mut app, &ctx, layer.0, &sm, 0);
+        assert!(app.ui.dialogs.is_empty(), "no generic parameter form");
+        let d = app.distort.gallery.as_ref().expect("the gallery dialog opens");
+        assert_eq!((d.smart_filter, d.foreground, d.background), (Some(0), [1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]));
+        assert_eq!(d.effects.len(), 1);
+        assert_eq!((d.effects[0].filter, &d.effects[0].params["detail"]), (GalleryFilter::Chrome, &json!(2)));
+        // The preview starts from the pixels below the filter (no blur, no chrome).
+        let below = photosplice_engine::smart_cmds::render_below_filter(&app.session.active().unwrap().doc, &sm, 0).unwrap().unwrap();
+        let d = app.distort.gallery.as_ref().unwrap();
+        assert_eq!(d.src.read_region(d.canvas), below.read_region(d.canvas));
+
+        control(&mut app, &json!({"params": {"detail": 7}})).unwrap();
+        control(&mut app, &json!({"commit": true})).unwrap();
+        assert!(app.distort.gallery.is_none());
+        let sm = smart(&app);
+        assert_eq!(sm.smart_filters.len(), 2, "edited in place, not added");
+        assert_eq!(sm.smart_filters[0].command, "filter.filterGallery");
+        assert_eq!(sm.smart_filters[0].params["effects"][0]["params"]["detail"], json!(7));
+        assert_eq!(sm.smart_filters[0].params["foreground"], json!([1.0, 0.0, 0.0, 1.0]));
+        assert_eq!(app.session.active().unwrap().history.past_len(), steps + 1);
+        app.run("edit.undo", json!({})).unwrap();
+        assert_eq!(smart(&app).smart_filters[0].params["effects"][0]["params"]["detail"], json!(2));
+
+        // Not a gallery filter / no such filter: an error, no dialog.
+        assert!(open_smart_filter(&mut app, layer, 1).is_err());
+        assert!(open_smart_filter(&mut app, layer, 9).is_err());
+        assert!(app.distort.gallery.is_none());
     }
 
     #[test]
@@ -805,7 +1097,7 @@ mod tests {
         let mut app = app();
         open(&mut app).unwrap();
         let d = app.distort.gallery.as_mut().unwrap();
-        update_preview(d, &ctx, ERect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0)));
+        update_preview(d, &ctx, ERect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0)), false);
         assert!(d.tex.is_some() && d.shown.is_some());
         d.open = [true; 6];
         let mut cache = None;
@@ -823,5 +1115,186 @@ mod tests {
         let b = st.doc.layer(d.layer).unwrap().surface().unwrap().read_region(d.canvas);
         let worst = a.read_region(d.canvas).iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0, f32::max);
         assert!(worst < 2e-3, "preview differs from the result by {worst}");
+    }
+
+    /// A 240×160 layer with gradients, edges and fine detail, so every gallery filter has
+    /// something to draw.
+    fn photo_app() -> PhotospliceApp {
+        let (w, h) = (240, 160);
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), Default::default());
+        app.session.execute("file.new", json!({"width": w, "height": h, "depth": 16})).unwrap();
+        app.session.execute("layer.new.layer", json!({})).unwrap();
+        app.session
+            .edit("paint", |doc, active| {
+                let s = doc.layer_mut(active.unwrap()).unwrap().surface_mut().unwrap();
+                for y in 0..h {
+                    for x in 0..w {
+                        let (u, v) = (x as f32 / w as f32, y as f32 / h as f32);
+                        let disc = (((x - 150) * (x - 150) + (y - 70) * (y - 70)) < 45 * 45) as i32 as f32;
+                        let stripes = ((x + y) / 11 % 2) as f32;
+                        s.write_pixel(x, y, &[u * 0.8 + disc * 0.2, 0.25 + 0.5 * stripes * (1.0 - disc), v * (1.0 - disc) + disc * 0.9, 1.0]);
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+        app.sync_views();
+        app
+    }
+
+    /// What OK applies: `filter.filterGallery` with the dialog's stack on a copy of the document.
+    fn applied(app: &PhotospliceApp, d: &GalleryDialog) -> Surface {
+        let mut s2 = photosplice_engine::Session::new();
+        s2.add_document(app.session.active().unwrap().doc.as_ref().clone(), None);
+        s2.select_layer(d.layer).unwrap();
+        s2.execute("filter.filterGallery", d.params()).unwrap();
+        s2.active().unwrap().doc.layer(d.layer).unwrap().surface().unwrap().clone()
+    }
+
+    /// Mean of `k`×`k` blocks (opaque layers), written independently of [`reduce`].
+    fn box_mean(surf: &Surface, r: Rect, k: i32) -> Vec<f32> {
+        let mut out = Vec::new();
+        let mut px = [0.0f32; 4];
+        for by in (r.y0..r.y1).step_by(k as usize) {
+            for bx in (r.x0..r.x1).step_by(k as usize) {
+                let mut sum = [0.0f32; 4];
+                let mut n = 0.0;
+                for y in by..(by + k).min(r.y1) {
+                    for x in bx..(bx + k).min(r.x1) {
+                        surf.read_pixel(x, y, &mut px);
+                        sum.iter_mut().zip(px).for_each(|(s, v)| *s += v);
+                        n += 1.0;
+                    }
+                }
+                out.extend(sum.map(|s| s / n));
+            }
+        }
+        out
+    }
+
+    /// Mean absolute RGB difference.
+    fn mean_diff(a: &[f32], b: &[f32]) -> f32 {
+        assert_eq!(a.len(), b.len());
+        let (sum, n) = a.chunks(4).zip(b.chunks(4)).fold((0.0, 0.0), |(s, n), (p, q)| (s + (0..3).map(|c| (p[c] - q[c]).abs()).sum::<f32>(), n + 3.0));
+        sum / n
+    }
+
+    #[test]
+    fn zoomed_out_preview_matches_the_applied_result_scaled_down() {
+        // #2502: below 100 % the preview filtered every k-th pixel with the same params, so
+        // strokes, grain and textures showed several times too large.
+        let ctx = egui::Context::default();
+        let mut app = photo_app();
+        open(&mut app).unwrap();
+        let area = ERect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0));
+        for f in ["graphicPen", "charcoal", "reticulation", "stainedGlass", "spatter", "chalkCharcoal"] {
+            control(&mut app, &json!({"filter": f, "zoom": 0.25})).unwrap();
+            let reference = {
+                let d = app.distort.gallery.as_ref().unwrap();
+                box_mean(&applied(&app, d), d.canvas, 4)
+            };
+            let d = app.distort.gallery.as_mut().unwrap();
+            let (_, vis, k) = view(d, area);
+            assert_eq!((vis, k), (d.canvas, 4), "{f}: at 25 % the whole layer shows, averaged 4×4");
+            assert!(update_preview(d, &ctx, area, false).is_some());
+            let shown = preview_pixels(&d.src, d.canvas, &d.params(), vis, k, &Interrupt::NONE).unwrap();
+            let (w, h) = (reduced(vis.width(), k) as i32, reduced(vis.height(), k) as i32);
+            let diff = mean_diff(&shown.read_region(Rect::new(0, 0, w, h)), &reference);
+            // The old preview (every 4th pixel, filtered at that size) for comparison.
+            let old = mean_diff(&render(&sample(&d.src, vis, k), &d.params()).read_region(Rect::new(0, 0, w, h)), &reference);
+            assert!(diff < 1e-3, "{f}: preview differs from the applied result by {diff}");
+            assert!(old > 20.0 * diff.max(1e-3), "{f}: the old preview differed by only {old}");
+        }
+    }
+
+    #[test]
+    fn a_region_renders_the_same_pixels_as_the_full_result() {
+        // Zoomed in, only the visible part renders: noise, cells and textures are seeded by
+        // document position, and the filters read their reach around the region.
+        let mut app = photo_app();
+        open(&mut app).unwrap();
+        let region = Rect::new(37, 21, 151, 117);
+        for f in GalleryFilter::ALL {
+            control(&mut app, &json!({"filter": f.key()})).unwrap();
+            let d = app.distort.gallery.as_ref().unwrap();
+            let full = applied(&app, d).read_region(region);
+            let part = preview_pixels(&d.src, d.canvas, &d.params(), region, 1, &Interrupt::NONE).unwrap();
+            let part = part.read_region(Rect::new(0, 0, region.width() as i32, region.height() as i32));
+            let worst = full.iter().zip(&part).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+            assert!(worst < 1e-3, "{}: region differs from the full result by {worst}", f.key());
+        }
+    }
+
+    #[test]
+    fn reduce_averages_blocks_weighted_by_alpha() {
+        let mut s = Surface::new(photosplice_color::PixelFormat::new(photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::F32, true));
+        s.write_pixel(0, 0, &[1.0, 0.0, 0.0, 1.0]);
+        s.write_pixel(1, 0, &[0.0, 1.0, 0.0, 0.0]); // transparent: its colour doesn't count
+        s.write_pixel(2, 0, &[0.2, 0.4, 0.6, 1.0]); // a partial block at the edge
+        let r = reduce(&s, Rect::new(0, 0, 3, 2), 2).read_region(Rect::new(0, 0, 2, 1));
+        assert_eq!(r, [1.0, 0.0, 0.0, 0.25, 0.2, 0.4, 0.6, 0.5]);
+        assert_eq!(reduce(&s, Rect::EMPTY, 2).content_bounds(), Rect::EMPTY);
+    }
+
+    #[test]
+    fn background_preview_renders_off_the_ui_thread() {
+        let ctx = egui::Context::default();
+        let mut app = photo_app();
+        open(&mut app).unwrap();
+        control(&mut app, &json!({"filter": "graphicPen"})).unwrap();
+        let d = app.distort.gallery.as_mut().unwrap();
+        let area = ERect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0));
+        assert!(update_preview(d, &ctx, area, true).is_none(), "nothing to show until the first render is done");
+        assert!(d.describe()["rendering"].as_bool().unwrap());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while d.rendering().is_some() {
+            assert!(std::time::Instant::now() < deadline, "the preview never finished");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            update_preview(d, &ctx, area, true);
+        }
+        assert!(d.tex.is_some() && update_preview(d, &ctx, area, true).is_some());
+        // A new setting starts a new render; the last preview stays up meanwhile.
+        let before = d.cur().params.get("strokeLength").cloned().unwrap();
+        d.cur().params.insert("strokeLength".into(), json!(5));
+        assert!(update_preview(d, &ctx, area, true).is_some());
+        assert!(d.rendering().is_some());
+        // Back to the settings on screen: that render is dropped (and cancelled).
+        d.cur().params.insert("strokeLength".into(), before);
+        assert!(update_preview(d, &ctx, area, true).is_some());
+        assert!(d.rendering().is_none());
+        d.cur().params.insert("strokeLength".into(), json!(5));
+        update_preview(d, &ctx, area, true);
+        // Closing the dialog cancels it.
+        app.distort.gallery = None;
+    }
+
+    /// Preview cost on 24 MP: `cargo test -p photosplice-ui-egui --lib bench_gallery_preview -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn bench_gallery_preview() {
+        let (w, h) = (6000, 4000);
+        let canvas = Rect::new(0, 0, w, h);
+        let mut s = Surface::new(photosplice_color::PixelFormat::new(photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8, true));
+        s.fill_rect(canvas, &[0.5, 0.4, 0.3, 1.0]);
+        for y in (0..h).step_by(9) {
+            s.fill_rect(Rect::new(0, y, w, y + 3), &[0.9, 0.8, 0.2, 1.0]);
+        }
+        let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+        let t = std::time::Instant::now();
+        std::hint::black_box(reduce(&s, canvas, 8));
+        println!("{:>14}: {:>7.0} ms", "reduce 1/8", ms(t));
+        for f in ["graphicPen", "charcoal", "reticulation", "stainedGlass", "spatter", "roughPastels"] {
+            let p = json!({"effects": [{"filter": f}]});
+            let t = std::time::Instant::now();
+            std::hint::black_box(render(&sample(&s, canvas, 8), &p));
+            let old = ms(t);
+            let t = std::time::Instant::now();
+            std::hint::black_box(preview_pixels(&s, canvas, &p, canvas, 8, &Interrupt::NONE));
+            let fit = ms(t);
+            let t = std::time::Instant::now();
+            std::hint::black_box(preview_pixels(&s, canvas, &p, Rect::new(2400, 1600, 3500, 2400), 1, &Interrupt::NONE));
+            let screen = ms(t);
+            println!("{f:>14}: old fit {old:>5.0} ms, new fit {fit:>6.0} ms, new 100 % (1100x800) {screen:>5.0} ms");
+        }
     }
 }

@@ -21,6 +21,60 @@ pub fn gradient_units(angle: f32, w: f32, h: f32) -> (f32, f32) {
     (chord, len)
 }
 
+/// Effective `(angle, scale, centre offset)` of a Linear or Reflected gradient with `style`,
+/// `angle` (degrees), `scale` and `offset` (a fraction of the frame) laid out in `frame`:
+/// Reference lays them out between whole-pixel end points, the chord through the (offset)
+/// centre along the angle ending at points truncated to the pixel grid. On large frames that is
+/// invisible, on small ones it changes the effective angle (psd-tools `colormodes`: a 30°
+/// Reflected fill on a 4 × 4 canvas renders as a 45° one). Fill layers, layer-effect gradients
+/// (`photosplice-compose` `fill_layout`, the GPU compositor) and shape layers (here) share it.
+/// Other styles and non-finite input pass through unchanged.
+pub fn gradient_layout(style: GradientStyle, angle: f32, scale: f32, offset: (f32, f32), frame: Rect) -> (f32, f32, (f32, f32)) {
+    let unchanged = (angle, scale, offset);
+    if !matches!(style, GradientStyle::Linear | GradientStyle::Reflected)
+        || !angle.is_finite()
+        || !scale.is_finite()
+        || !offset.0.is_finite()
+        || !offset.1.is_finite()
+    {
+        return unchanged;
+    }
+    let w = f64::from(frame.width().max(1));
+    let h = f64::from(frame.height().max(1));
+    let (cx, cy) = (f64::from(frame.x0) + w / 2.0 + f64::from(offset.0) * w, f64::from(frame.y0) + h / 2.0 + f64::from(offset.1) * h);
+    // Unscaled chord length along `a` (radians), as [`gradient_units`].
+    let chord_of = |a: f64| {
+        let (s, c) = a.sin_cos();
+        (w / c.abs().max(1e-6)).min(h / s.abs().max(1e-6)).max(1.0)
+    };
+    let a = f64::from(angle).to_radians();
+    let scale64 = f64::from(scale.max(1e-3));
+    let half = chord_of(a) * scale64 / 2.0;
+    let (s, c) = a.sin_cos();
+    let (dx, dy) = (c * half, -s * half);
+    // Truncate to the pixel grid (with a little slack for rounding error in exact cases).
+    let snap = |v: f64| (v + 1e-4).floor();
+    let end = (snap(cx + dx), snap(cy + dy));
+    let (start, mid) = match style {
+        GradientStyle::Reflected => ((cx, cy), (cx, cy)),
+        _ => {
+            let s0 = (snap(cx - dx), snap(cy - dy));
+            (s0, ((s0.0 + end.0) / 2.0, (s0.1 + end.1) / 2.0))
+        }
+    };
+    let v = (end.0 - start.0, end.1 - start.1);
+    let len = v.0.hypot(v.1);
+    if len < 0.5 {
+        return unchanged;
+    }
+    let a2 = (-v.1).atan2(v.0);
+    // Reflected spans half the chord from the centre; Linear the whole chord.
+    let span = if style == GradientStyle::Reflected { 2.0 * len } else { len };
+    let scale2 = span / chord_of(a2);
+    let shift = (((mid.0 - cx) / w) as f32, ((mid.1 - cy) / h) as f32);
+    (a2.to_degrees() as f32, scale2 as f32, (offset.0 + shift.0, offset.1 + shift.1))
+}
+
 /// Gradient parameter `t` in `0..=1` for pixel centre `(x, y)` inside `bounds`.
 #[allow(clippy::too_many_arguments)]
 pub fn gradient_t(style: GradientStyle, angle: f32, scale: f32, reverse: bool, offset: (f32, f32), bounds: Rect, x: f32, y: f32) -> f32 {

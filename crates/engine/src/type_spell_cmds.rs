@@ -16,7 +16,7 @@ use photosplice_text::spell::Dictionary;
 use serde_json::{Value, json};
 
 use crate::commands::{CommandSpec, layer_param};
-use crate::type_cmds::{refresh, replace_text};
+use crate::type_cmds::{check_text_unlocked, norm_text, refresh, replace_text};
 use crate::{EngineError, Result, Session};
 
 fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
@@ -94,6 +94,7 @@ fn change(s: &mut Session, p: &Value) -> Result<Value> {
     let to = p.get("replace").and_then(Value::as_str).ok_or_else(|| bad(cmd, "`change` needs `replace`"))?.to_string();
     let doc = s.active().ok_or(EngineError::NoDocument)?.doc.clone();
     let t = text(&doc, id).ok_or_else(|| bad(cmd, format!("layer {} is not a type layer", id.0)))?;
+    check_text_unlocked(&doc, id)?;
     let (a, b) = (byte_at(t, start), byte_at(t, end.max(start)));
     if let Some(w) = p.get("word").and_then(Value::as_str)
         && &t[a..b] != w
@@ -196,8 +197,10 @@ fn insert_text(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "type.insertText";
     let id = layer_param(s, p)?;
     let new = p.get("text").and_then(Value::as_str).filter(|t| !t.is_empty()).ok_or_else(|| bad(cmd, "missing `text`"))?.to_string();
+    let new = norm_text(&new);
     let doc = s.active().ok_or(EngineError::NoDocument)?.doc.clone();
     let t = text(&doc, id).ok_or_else(|| bad(cmd, format!("layer {} is not a type layer", id.0)))?;
+    check_text_unlocked(&doc, id)?;
     let n = t.chars().count();
     let (a, b) = match (p.get("range").and_then(Value::as_array), p.get("at").and_then(Value::as_u64)) {
         (Some(r), _) if r.len() == 2 => {
@@ -272,6 +275,28 @@ mod tests {
     }
 
     #[test]
+    fn all_locked_layer_rejects_insert_text_and_spelling_change_without_history() {
+        // #4188: Lock All stopped type.edit (#3132) but not these two text edits.
+        let (mut s, id) = session("Teh");
+        // A second, unlocked type layer keeps Check Spelling enabled.
+        s.execute("type.create", json!({"x": 10, "y": 90, "text": "zzz", "size": 12})).unwrap();
+        s.execute("layer.setProps", json!({"layer": id, "locked": true})).unwrap();
+        let history = s.active().unwrap().history.past_len();
+        for (cmd, params) in [
+            ("type.insertText", json!({"layer": id, "text": "b"})),
+            ("edit.checkSpelling", json!({"action": "change", "layer": id, "start": 0, "end": 3, "word": "Teh", "replace": "The"})),
+        ] {
+            let result = s.execute(cmd, params);
+            assert!(matches!(&result, Err(EngineError::Other(message)) if message.contains("locked")), "{cmd}: {result:?}");
+            assert_eq!(text_of(&s, id), "Teh", "{cmd}");
+            assert_eq!(s.active().unwrap().history.past_len(), history, "{cmd}");
+        }
+        s.execute("layer.setProps", json!({"layer": id, "locked": false})).unwrap();
+        s.execute("type.insertText", json!({"layer": id, "text": "b"})).unwrap();
+        assert_eq!(text_of(&s, id), "Tehb");
+    }
+
+    #[test]
     fn lists_changes_and_learns_words() {
         let (mut s, id) = session("Teh quick brwon fox, teh end. Photosplice");
         let r = s.execute("edit.checkSpelling", json!({})).unwrap();
@@ -323,5 +348,15 @@ mod tests {
         s.execute("type.insertText", json!({"text": "!"})).unwrap();
         assert_eq!(text_of(&s, id), "€b!");
         assert!(s.execute("type.insertText", json!({"text": ""})).is_err());
+    }
+
+    #[test]
+    fn insert_crlf_reports_caret_in_normalized_text() {
+        let (mut s, id) = session("");
+        let inserted = s.execute("type.insertText", json!({"layer": id, "text": "x\r\ny"})).unwrap();
+
+        assert_eq!(inserted["caret"], 3);
+        assert_eq!(s.execute("type.info", json!({"layer": id})).unwrap()["text"], "x\ny");
+        assert_eq!(s.execute("type.caret", json!({"layer": id, "index": inserted["caret"]})).unwrap()["index"], inserted["caret"]);
     }
 }

@@ -40,6 +40,10 @@ pub enum ChannelTarget {
     Color(usize),
     /// An alpha or spot channel (index into [`Document::channels`]).
     Alpha(usize),
+    /// The active layer's layer mask.
+    LayerMask,
+    /// The active layer's vector mask.
+    VectorMask,
 }
 
 /// Per-document Channels panel state: the target and the eye toggles. Not part of history.
@@ -113,25 +117,42 @@ impl Default for QuickMaskOptions {
 pub(crate) fn fix_view(st: &mut DocState) {
     let n = st.doc.channels.len();
     let colors = color_count(&st.doc);
-    let v = &mut st.channel_view;
-    v.alpha_visible.truncate(n);
-    v.color_hidden.truncate(colors);
-    match v.target {
-        ChannelTarget::Alpha(i) if i >= n => v.target = ChannelTarget::Composite,
-        ChannelTarget::Color(k) if k >= colors || colors < 2 => v.target = ChannelTarget::Composite,
-        _ => {}
-    }
-    // Never leave the canvas showing nothing at all.
-    if v.visible_colors(colors) == 0 && !(0..n).any(|i| v.alpha_shown(i)) {
-        v.color_hidden.clear();
+    let quick = st.doc.quick_mask.is_some();
+    {
+        let v = &mut st.channel_view;
+        v.alpha_visible.truncate(n);
+        v.color_hidden.truncate(colors);
+        match v.target {
+            ChannelTarget::Alpha(i) if i >= n => v.target = ChannelTarget::Composite,
+            ChannelTarget::Color(k) if k >= colors || colors < 2 => v.target = ChannelTarget::Composite,
+            ChannelTarget::LayerMask if st.active_layer.and_then(|id| st.doc.layer(id)).is_none_or(|l| l.mask.is_none()) => {
+                v.target = ChannelTarget::Composite;
+            }
+            ChannelTarget::VectorMask if st.active_layer.and_then(|id| st.doc.layer(id)).is_none_or(|l| l.vector_mask.is_none()) => {
+                v.target = ChannelTarget::Composite;
+            }
+            _ => {}
+        }
     }
     crate::mask_view_cmds::fix(st);
+    // An alpha/spot eye, Quick Mask, or the active layer's mask can be the only thing on the
+    // canvas (so R, G and B can all be off). Otherwise the colour channels come back.
+    let active = st.active_layer;
+    let shown = {
+        let doc = &st.doc;
+        let v = &st.channel_view;
+        (0..n).any(|i| v.alpha_shown(i)) || (quick && !v.quick_mask_hidden) || active.is_some_and(|id| doc.layer(id).is_some_and(|l| l.mask.is_some()))
+    };
+    if st.channel_view.visible_colors(colors) == 0 && !shown {
+        st.channel_view.color_hidden.clear();
+    }
 }
 
 /// Bump the revision for a view-only change without dirtying a clean document.
 fn touch(st: &mut DocState) {
     let clean = st.saved_revision == st.revision;
     st.revision += 1;
+    st.view_revision += 1;
     if clean {
         st.saved_revision = st.revision;
     }
@@ -161,6 +182,82 @@ pub fn composite_name(mode: ColorMode) -> &'static str {
     }
 }
 
+/// The Curves dialog's Channel popup lists only this channel when the Channels panel has a
+/// single non-composite target (a colour component, layer mask, saved channel or Quick Mask).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IsolatedCurveChannel {
+    /// Channels-panel name, including a custom alpha name or "{layer} Mask".
+    pub name: String,
+    /// Curves param key: empty = composite `points`; otherwise `red`/`green`/…
+    pub key: &'static str,
+    /// Index into the tone-space histograms (composite = 0 for RGB/CMYK).
+    pub hist: usize,
+    /// Colour components keep their curve tint; masks and alphas do not.
+    pub tint: bool,
+    /// Built-in labels (colour channels, Quick Mask) follow the interface language; a custom
+    /// alpha name or a "{layer} Mask" keeps the layer name, so it stays exactly as entered (#5335).
+    pub translate: bool,
+    /// The gray plane this target edits, whatever the document's colour mode; its surface is
+    /// what the dialog's histogram must describe (#5335). None for colour components.
+    pub gray: Option<GraySurface>,
+}
+
+/// A grayscale plane Curves can target: the dialog parses and previews its curves in gray levels
+/// even in Lab and CMYK documents (#5335).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GraySurface {
+    /// The active layer's layer mask.
+    LayerMask,
+    /// A saved channel, as an index into [`Document::channels`].
+    Alpha(usize),
+    /// The Quick Mask.
+    QuickMask,
+}
+
+/// Isolated Curves channel for the active document, matching [`inject_target`].
+pub fn isolated_curve_channel(st: &DocState) -> Option<IsolatedCurveChannel> {
+    isolated_curve_channel_for(st, false)
+}
+
+/// [`isolated_curve_channel`] with the Layers panel's mask target added: clicking a mask
+/// thumbnail targets it without touching the Channels panel, and both ways of selecting the mask
+/// must give the same Curves dropdown (#5335).
+pub fn isolated_curve_channel_for(st: &DocState, layers_panel_mask: bool) -> Option<IsolatedCurveChannel> {
+    let doc = &st.doc;
+    let mode = edit_mode(doc);
+    match st.channel_view.target {
+        ChannelTarget::Color(k) => {
+            let names = color_names(mode);
+            let keys = crate::adjust_params::channel_keys(crate::adjust_params::default_space(mode));
+            let name = names.get(k)?.to_string();
+            let key = *keys.get(k)?;
+            let hist = if matches!(mode, ColorMode::Lab) { k } else { k.saturating_add(1) };
+            Some(IsolatedCurveChannel { name, key, hist, tint: true, translate: true, gray: None })
+        }
+        ChannelTarget::Alpha(i) => doc.channels.get(i).map(|c| IsolatedCurveChannel {
+            name: c.name.clone(),
+            key: "",
+            hist: 0,
+            tint: false,
+            translate: false,
+            gray: Some(GraySurface::Alpha(i)),
+        }),
+        ChannelTarget::Composite if doc.quick_mask.is_some() => {
+            Some(IsolatedCurveChannel { name: "Quick Mask".into(), key: "", hist: 0, tint: false, translate: true, gray: Some(GraySurface::QuickMask) })
+        }
+        ChannelTarget::LayerMask => layer_mask_curve_channel(st),
+        ChannelTarget::Composite if crate::mask_view_cmds::current(st).is_some() || layers_panel_mask => layer_mask_curve_channel(st),
+        _ => None,
+    }
+}
+
+fn layer_mask_curve_channel(st: &DocState) -> Option<IsolatedCurveChannel> {
+    let layer = st.active_layer.and_then(|id| st.doc.layer(id))?;
+    layer.mask.as_ref()?;
+    let name = format!("{} Mask", layer.name);
+    Some(IsolatedCurveChannel { name, key: "", hist: 0, tint: false, translate: false, gray: Some(GraySurface::LayerMask) })
+}
+
 fn edit_mode(doc: &Document) -> ColorMode {
     doc.pixel_format().mode
 }
@@ -174,8 +271,8 @@ pub fn channel_format(doc: &Document) -> PixelFormat {
     PixelFormat::new(ColorMode::Grayscale, doc.depth, false)
 }
 
-/// Next free "Alpha N" name.
-fn next_alpha_name(doc: &Document, base: &str) -> String {
+/// Next free "`base` N" name (Alpha 1, Spot Color 2, …).
+pub fn next_alpha_name(doc: &Document, base: &str) -> String {
     // `channels.len() + 1` candidates always include a free one.
     (1..=doc.channels.len() + 1).map(|n| format!("{base} {n}")).find(|n| !doc.channels.iter().any(|c| &c.name == n)).unwrap_or_else(|| base.to_string())
 }
@@ -308,9 +405,20 @@ fn native_pixels(doc: &Document, layer: Option<LayerId>) -> Result<(Vec<f32>, us
     }
 }
 
-/// `"layer"` param of a source: a layer id, or `"merged"` (default).
-fn source_layer(p: &Value) -> Option<LayerId> {
-    p.get("layer").and_then(Value::as_u64).map(LayerId)
+/// `"layer"` param of a source: a layer id, a layer name (the topmost of that name, as a loaded
+/// Photoshop action refers to it), or `"merged"` (default). An unknown name is an error.
+fn source_layer(doc: &Document, p: &Value, cmd: &str) -> Result<Option<LayerId>> {
+    match p.get("layer") {
+        Some(Value::Number(n)) => Ok(n.as_u64().map(LayerId)),
+        Some(Value::String(name)) if !name.is_empty() && name != "merged" => doc
+            .walk()
+            .into_iter()
+            .rev()
+            .find(|(_, _, l)| l.name == *name)
+            .map(|(_, _, l)| Some(l.id))
+            .ok_or_else(|| bad(cmd, format!("no source layer named \"{name}\""))),
+        _ => Ok(None),
+    }
 }
 
 /// Planes of channel `r` from document `doc` (`layer` = None: merged). A composite gives one
@@ -339,8 +447,19 @@ fn ref_planes(doc: &Document, layer: Option<LayerId>, active: Option<LayerId>, r
                     s.read_rgba_into(area, &mut px);
                     vec![px.iter().map(|p| p[3]).collect()]
                 }
-                // Adjustment and fill layers cover the whole canvas.
-                None => vec![vec![1.0; area.width() as usize * area.height() as usize]],
+                // A shape can have no pixel cache yet (for example after loading a document).
+                // Use its existing renderer rather than treating it as a canvas-wide fill.
+                None => match &l.content {
+                    LayerContent::Shape(shape) => vec![
+                        photosplice_vector::CompiledShape::new(shape, photosplice_vector::DEFAULT_TOLERANCE, area)
+                            .render_rgba(area)
+                            .into_iter()
+                            .map(|p| p[3])
+                            .collect(),
+                    ],
+                    // Adjustment and fill layers cover the whole canvas.
+                    _ => vec![vec![1.0; area.width() as usize * area.height() as usize]],
+                },
             }
         }
         ChanRef::LayerMask => {
@@ -394,7 +513,7 @@ fn source(s: &Session, p: &Value, cmd: &str, gray: bool) -> Result<Vec<Vec<f32>>
         return Err(bad(cmd, format!("source document \"{}\" is {}×{}; it must match the target size", st.doc.name, st.doc.size.width, st.doc.size.height)));
     }
     let r = p.get("channel").map_or(Some(ChanRef::Composite), |v| parse_ref(v, &st.doc)).ok_or_else(|| bad(cmd, "unknown `channel`"))?;
-    let layer = source_layer(p);
+    let layer = source_layer(&st.doc, p, cmd)?;
     let mut planes = if gray { vec![gray_plane(&st.doc, layer, st.active_layer, r)?] } else { ref_planes(&st.doc, layer, st.active_layer, r)? };
     // Guard every caller (`.remove(0)` / `src[0]`) against an empty source.
     if planes.is_empty() {
@@ -520,6 +639,24 @@ pub(crate) fn target_surface<'a>(doc: &'a mut Document, layer: Option<LayerId>, 
     }
 }
 
+pub(crate) fn read_target_surface<'a>(doc: &'a Document, layer: Option<LayerId>, p: &Value) -> Result<&'a Surface> {
+    match target_of(p) {
+        Target::Alpha(i) => {
+            let n = doc.channels.len();
+            doc.channels.get(i).map(|c| &c.surface).ok_or_else(|| EngineError::Other(format!("no alpha channel {i} (document has {n})")))
+        }
+        Target::QuickMask => doc.quick_mask.as_ref().map(|c| &c.surface).ok_or_else(|| EngineError::Other("not in Quick Mask mode".into())),
+        Target::Pixels => {
+            let id = layer.ok_or_else(|| EngineError::Other("no active layer".into()))?;
+            doc.layer(id).and_then(Layer::surface).ok_or(EngineError::NoLayer(id))
+        }
+        Target::Mask => {
+            let id = layer.ok_or_else(|| EngineError::Other("no active layer".into()))?;
+            doc.layer(id).and_then(|l| l.mask.as_ref()).map(|m| &m.surface).ok_or(EngineError::NoLayer(id))
+        }
+    }
+}
+
 /// The grayscale surface filters and adjustments edit instead of the layer's pixels (made explicit
 /// over the canvas), if the params target one: an alpha channel, the Quick Mask, or the mask of
 /// `layer`.
@@ -533,12 +670,17 @@ pub(crate) fn channel_surface_for_filter<'a>(doc: &'a mut Document, layer: Optio
     Ok(Some(surf))
 }
 
-/// Commands that edit a targeted layer mask in place of the layer: the Image › Adjustments table
-/// and the filters. A mask target enables them on any layer with a mask, so ⌘I inverts an
-/// adjustment layer's mask as in Photoshop (#780).
+/// Commands that edit a targeted layer mask in place of the layer: the Image › Adjustments table,
+/// the filters and the fills (Edit › Fill and its keys). A mask target enables them on any layer
+/// with a mask, so ⌘I inverts an adjustment layer's mask (#780) and Fill fills it (#2456) as in
+/// Photoshop.
 fn edits_mask(id: &str) -> bool {
     id.strip_prefix("image.adjustments.").is_some_and(|kind| crate::adjust_params::default_for(kind, ColorMode::Rgb).is_ok())
         || crate::filters::params_for(id, &Value::Null).is_some()
+        || id == "edit.fill"
+        // Copying a targeted mask (#2928).
+        || id == "edit.copy"
+        || crate::fill_key_cmds::IDS.contains(&id)
 }
 
 /// The precondition of `id` when `p` targets the active layer's mask (`"target":"mask"`): the
@@ -553,7 +695,9 @@ pub(crate) fn mask_target_enabled(s: &Session, id: &str, p: &Value) -> Option<st
 /// Whether command `id` edits the targeted channel or mask when its params name no `"target"`
 /// (filters, adjustments, paint and fill commands); the shell adds its mask target to these.
 pub fn follows_target(id: &str) -> bool {
-    routed(id)
+    // Moving the selected pixels (⌘-drag, Move tool) moves the targeted mask's, not the layer's.
+    // Moving a layer with its unlinked mask targeted moves the mask alone (`layer.translate`).
+    routed(id) || id == "select.float" || id == "layer.translate"
 }
 
 /// Commands whose target follows the Channels panel.
@@ -563,9 +707,21 @@ fn routed(id: &str) -> bool {
         || id.starts_with("image.adjustments.")
         || matches!(id, "paint.stroke" | "paint.pencil" | "paint.bucket" | "paint.gradient" | "paint.mixerBrush" | "edit.fill" | "image.applyImage")
         || crate::fill_key_cmds::IDS.contains(&id)
+        // Pasting into a targeted mask or channel (#1035); Copy takes a targeted mask (#2928).
+        || matches!(id, "edit.copy" | "edit.paste" | "edit.pasteSpecial.pasteInPlace" | "edit.pasteSpecial.pasteInto" | "edit.pasteSpecial.pasteOutside")
+        // Edit › Transform › Rotate/Flip turn a targeted mask or channel (#2835).
+        || matches!(
+            id,
+            "edit.transform.rotate180"
+                | "edit.transform.rotate90Cw"
+                | "edit.transform.rotate90Ccw"
+                | "edit.transform.flipHorizontal"
+                | "edit.transform.flipVertical"
+        )
         || matches!(
             id,
             "paint.cloneStamp"
+                | "paint.patternStamp"
                 | "paint.healingBrush"
                 | "paint.spotHealing"
                 | "paint.dodge"
@@ -575,6 +731,8 @@ fn routed(id: &str) -> bool {
                 | "paint.sharpen"
                 | "paint.smudge"
                 | "paint.historyBrush"
+                | "paint.redEye"
+                | "paint.remove"
         )
 }
 
@@ -587,6 +745,7 @@ pub(crate) fn inject_target(s: &Session, id: &str, params: Value) -> Value {
     let t = match st.channel_view.target {
         ChannelTarget::Alpha(i) if i < st.doc.channels.len() => json!({ "channel": i }),
         ChannelTarget::Composite if st.doc.quick_mask.is_some() => json!("quickMask"),
+        ChannelTarget::LayerMask => json!("mask"),
         // Viewing the active layer's mask (⌥-click): pixel commands edit the mask.
         ChannelTarget::Composite if crate::mask_view_cmds::current(st).is_some() => json!("mask"),
         _ => return params,
@@ -636,6 +795,72 @@ pub(crate) fn restrict_to_color(before: &Document, after: &mut Document, id: Lay
         new.write_region(r, &v);
     }
     new.prune();
+}
+
+/// The colour channel Clear is limited to: the Channels panel targets a single one.
+pub(crate) fn targeted_color(s: &Session) -> Option<usize> {
+    match s.active()?.channel_view.target {
+        ChannelTarget::Color(k) => Some(k),
+        _ => None,
+    }
+}
+
+/// Clear (Delete) with colour channel `k` of layer `id` targeted (#2720): fill the selected area
+/// (or the canvas) of that channel only with the background colour's value for it, as Photoshop
+/// does. A channel has no transparency of its own, so the other channels and the layer's alpha
+/// stay; partly selected pixels blend.
+pub(crate) fn clear_color_channel(doc: &mut Document, id: LayerId, k: usize, background: [f32; 4]) -> Result<()> {
+    let canvas = doc.bounds();
+    let sel = doc.selection.clone();
+    let area = sel.as_ref().map_or(canvas, |m| m.content_bounds().intersect(&canvas));
+    let surf = crate::commands::paint_surface(doc, id, &Value::Null)?;
+    let fmt = surf.format();
+    let n = fmt.channels();
+    // The background colour in the layer's colour model, so `k` picks the right component.
+    let Some(v) = from_rgba(&fmt, [background[0], background[1], background[2], 1.0]).get(k).copied().filter(|_| k < n) else {
+        return Err(EngineError::Other(format!("no colour channel {k} in this layer")));
+    };
+    if area.is_empty() {
+        return Ok(());
+    }
+    let cover =
+        sel.as_ref().map(|m| crate::allocation::read_region(m, area, "clearing a channel selection").map(|v| (v, m.format().channels().max(1)))).transpose()?;
+    let mut px = crate::allocation::read_region(surf, area, "clearing a channel")?;
+    for (i, p) in px.chunks_exact_mut(n).enumerate() {
+        let w = cover.as_ref().map_or(1.0, |(m, mk)| m.get(i * mk).copied().unwrap_or(0.0));
+        if let Some(c) = p.get_mut(k) {
+            *c += (v - *c) * w.clamp(0.0, 1.0);
+        }
+    }
+    surf.try_write_region(area, &px)?;
+    surf.prune();
+    Ok(())
+}
+
+/// The alpha channel or Quick Mask the Channels panel targets, as `"target"` params: Clear
+/// (Delete) fills it instead of the layer (#2734).
+pub(crate) fn targeted_channel(s: &Session) -> Option<Value> {
+    let st = s.active()?;
+    let t = match st.channel_view.target {
+        ChannelTarget::Alpha(i) if i < st.doc.channels.len() => json!({ "channel": i }),
+        ChannelTarget::Composite if st.doc.quick_mask.is_some() => json!("quickMask"),
+        _ => return None,
+    };
+    Some(json!({ "target": t }))
+}
+
+/// Clear (Delete) with an alpha channel or the Quick Mask targeted (`target` from
+/// [`targeted_channel`]): fill the selected area (or the canvas) of it with the background colour,
+/// as gray, as Photoshop does. Partly selected pixels blend.
+pub(crate) fn clear_channel(doc: &mut Document, target: &Value, background: [f32; 4]) -> Result<()> {
+    let canvas = doc.bounds();
+    let sel = doc.selection.clone();
+    let area = sel.as_ref().map_or(canvas, |m| m.content_bounds().intersect(&canvas));
+    if area.is_empty() {
+        return Ok(());
+    }
+    let (surf, _) = target_surface(doc, None, target)?;
+    crate::fill_cmds::fill_color(surf, area, [background[0], background[1], background[2], 1.0], sel.as_ref())
 }
 
 /// The active document targets an alpha channel or is in Quick Mask mode, so pixel commands
@@ -750,6 +975,20 @@ fn load_selection(s: &mut Session, p: &Value) -> Result<Value> {
     if p.get("channel").is_none() {
         return Err(bad(cmd, "missing `channel`"));
     }
+    // `"targeted"`: the Channels panel's target, as a Photoshop action's "load the target
+    // channel" step records it.
+    let mut targeted = p.clone();
+    if p.get("channel").and_then(Value::as_str) == Some("targeted") {
+        let st = s.active().ok_or(EngineError::NoDocument)?;
+        targeted["channel"] = match st.channel_view.target {
+            ChannelTarget::Composite => json!("composite"),
+            ChannelTarget::Color(k) => json!({ "color": k }),
+            ChannelTarget::Alpha(i) => json!(i),
+            ChannelTarget::LayerMask => json!("mask"),
+            ChannelTarget::VectorMask => json!("vectorMask"),
+        };
+    }
+    let p = &targeted;
     // Composite and colour channels load their luminosity / values, as ⌘-clicking them does.
     let plane = source(s, p, cmd, true)?.into_iter().next().ok_or_else(|| bad(cmd, "the channel has no pixels"))?;
     let doc = &s.active().ok_or(EngineError::NoDocument)?.doc;
@@ -768,27 +1007,40 @@ fn load_selection(s: &mut Session, p: &Value) -> Result<Value> {
 // ---------------------------------------------------------------------------------------------
 // Quick Mask
 
-/// Quick Mask channel for the current selection: white where selected; no selection = an empty
-/// mask (nothing masked), as in Photoshop.
+/// Quick Mask channel for the current selection: white where selected. No selection is an empty
+/// mask that shows no colour: white (nothing masked, as in Photoshop) when the colour indicates
+/// masked areas, black (nothing selected) when it indicates selected areas. White and "no
+/// selection" are told apart by [`Document::quick_mask_unselected`].
 fn quick_mask_from(doc: &Document, o: &QuickMaskOptions) -> AlphaChannel {
     let area = doc.bounds();
     let fmt = channel_format(doc);
     let surface = match &doc.selection {
         Some(s) => plane_surface(&sel::mask_from_surface(Some(s), area), area, fmt),
-        None => {
-            let mut s = Surface::new(fmt);
-            s.fill_rect(area, &[1.0]);
-            s
-        }
+        None => unselected_surface(area, fmt, o.indicates),
     };
     AlphaChannel { color: o.color, opacity: o.opacity, indicates: o.indicates, ..AlphaChannel::new("Quick Mask", surface) }
 }
 
-/// The selection a Quick Mask channel turns back into (an untouched or all-white mask = none).
+/// The colourless, nothing-selected Quick Mask for `indicates`.
+fn unselected_surface(area: Rect, fmt: PixelFormat, indicates: ColorIndicates) -> Surface {
+    let mut s = Surface::new(fmt);
+    if indicates != ColorIndicates::SelectedAreas {
+        s.fill_rect(area, &[1.0]);
+    }
+    s
+}
+
+/// Every pixel of `vals` reads as `target` on the 8-bit grid.
+fn uniform(vals: &[f32], target: f32) -> bool {
+    vals.iter().all(|v| (v - target).abs() <= 0.5 / 255.0)
+}
+
+/// The selection a Quick Mask channel turns back into. All white is Select All, unless Quick
+/// Mask was entered with no selection and the white is its untouched masked-areas start.
 fn selection_from(doc: &Document, ch: &AlphaChannel) -> Option<Surface> {
     let area = doc.bounds();
     let vals = read_plane(&ch.surface, area);
-    if vals.iter().all(|v| *v >= 1.0 - 0.5 / 255.0) {
+    if doc.quick_mask_unselected && ch.indicates != ColorIndicates::SelectedAreas && uniform(&vals, 1.0) {
         return None;
     }
     sel::combine(None, &vals, area, SelectionMode::Replace)
@@ -804,6 +1056,7 @@ fn quick_mask(s: &mut Session, p: &Value) -> Result<Value> {
     if want {
         s.edit("Edit in Quick Mask", |doc, _| {
             doc.quick_mask = Some(quick_mask_from(doc, &opts));
+            doc.quick_mask_unselected = doc.selection.is_none();
             doc.selection = None;
             Ok(())
         })?;
@@ -976,11 +1229,15 @@ fn delete_channel(s: &mut Session, p: &Value) -> Result<Value> {
             _ => return Err(bad(cmd, "missing `channel`")),
         },
     };
+    // `edit` validates the view against the shorter channel list before we can remap it.
+    // Keep the original indices and eyes so a surviving final channel is not discarded.
+    let view = s.active().ok_or(EngineError::NoDocument)?.channel_view.clone();
     s.edit("Delete Channel", |doc, _| {
         doc.channels.remove(i);
         Ok(())
     })?;
     if let Some(st) = s.active_mut() {
+        st.channel_view = view;
         let v = &mut st.channel_view;
         if i < v.alpha_visible.len() {
             v.alpha_visible.remove(i);
@@ -1055,23 +1312,30 @@ fn move_channel(s: &mut Session, p: &Value) -> Result<Value> {
 
 /// Make `t` the edit target and show it the way Photoshop does when its row is clicked.
 fn target(s: &mut Session, t: ChannelTarget) {
-    let Some(st) = s.active_mut() else { return };
-    let colors = color_count(&st.doc);
-    let n = st.doc.channels.len();
-    let v = &mut st.channel_view;
-    v.target = t;
-    match t {
-        ChannelTarget::Composite => v.color_hidden.clear(),
-        ChannelTarget::Color(k) => {
-            v.color_hidden = (0..colors).map(|c| c != k).collect();
-            v.alpha_visible.clear();
+    if let Some(st) = s.active_mut() {
+        let colors = color_count(&st.doc);
+        let n = st.doc.channels.len();
+        let v = &mut st.channel_view;
+        v.target = t;
+        match t {
+            // Like clicking RGB in Photoshop: the alpha overlays go away with their eyes.
+            ChannelTarget::Composite => {
+                v.color_hidden.clear();
+                v.alpha_visible.clear();
+            }
+            ChannelTarget::LayerMask | ChannelTarget::VectorMask => v.color_hidden.clear(),
+            ChannelTarget::Color(k) => {
+                v.color_hidden = (0..colors).map(|c| c != k).collect();
+                v.alpha_visible.clear();
+            }
+            ChannelTarget::Alpha(i) => {
+                v.color_hidden = vec![true; colors];
+                v.alpha_visible = (0..n).map(|c| c == i).collect();
+            }
         }
-        ChannelTarget::Alpha(i) => {
-            v.color_hidden = vec![true; colors];
-            v.alpha_visible = (0..n).map(|c| c == i).collect();
-        }
+        fix_view_now(st);
     }
-    fix_view_now(st);
+    s.tools.target_mask(t == ChannelTarget::LayerMask);
 }
 
 fn parse_target(s: &Session, p: &Value, cmd: &str) -> Result<ChannelTarget> {
@@ -1080,7 +1344,21 @@ fn parse_target(s: &Session, p: &Value, cmd: &str) -> Result<ChannelTarget> {
         Some(ChanRef::Composite) => Ok(ChannelTarget::Composite),
         Some(ChanRef::Color(k)) if k < color_count(doc) && color_count(doc) > 1 => Ok(ChannelTarget::Color(k)),
         Some(ChanRef::Alpha(i)) if i < doc.channels.len() => Ok(ChannelTarget::Alpha(i)),
-        _ => Err(bad(cmd, "`channel` must be \"composite\", a colour channel name or an alpha channel")),
+        Some(ChanRef::LayerMask) => {
+            let active = crate::active_layer_of(s).map_err(|e| bad(cmd, e))?;
+            if active.mask.is_none() {
+                return Err(bad(cmd, "the active layer has no layer mask"));
+            }
+            Ok(ChannelTarget::LayerMask)
+        }
+        Some(ChanRef::VectorMask) => {
+            let active = crate::active_layer_of(s).map_err(|e| bad(cmd, e))?;
+            if active.vector_mask.is_none() {
+                return Err(bad(cmd, "the active layer has no vector mask"));
+            }
+            Ok(ChannelTarget::VectorMask)
+        }
+        _ => Err(bad(cmd, "`channel` must be \"composite\", \"mask\", \"vectorMask\", a colour channel name or an alpha channel")),
     }
 }
 
@@ -1195,7 +1473,18 @@ fn options(s: &mut Session, p: &Value) -> Result<Value> {
             if s.active().is_some_and(|d| d.doc.quick_mask.is_some()) {
                 let o = s.quick_mask_options;
                 s.edit("Quick Mask Options", |doc, _| {
+                    let area = doc.bounds();
+                    let fmt = channel_format(doc);
+                    let unselected = doc.quick_mask_unselected;
                     if let Some(q) = &mut doc.quick_mask {
+                        // An untouched no-selection mask stays colourless (nothing selected)
+                        // when the colour switches between masked and selected areas.
+                        if unselected && q.indicates != o.indicates {
+                            let empty = if q.indicates == ColorIndicates::SelectedAreas { 0.0 } else { 1.0 };
+                            if uniform(&read_plane(&q.surface, area), empty) {
+                                q.surface = unselected_surface(area, fmt, o.indicates);
+                            }
+                        }
                         q.color = o.color;
                         q.opacity = o.opacity;
                         q.indicates = o.indicates;
@@ -1313,7 +1602,15 @@ fn merge(s: &mut Session, p: &Value) -> Result<Value> {
     if srcs.len() < mode.color_channels() {
         return Err(bad(cmd, format!("{mode:?} needs {} grayscale documents, got {}", mode.color_channels(), srcs.len())));
     }
-    let first = s.documents()[srcs[0]].doc.clone();
+    // Each source closes by its *current* index, so a repeated index would shift the later
+    // removals onto a document that was never named (#934). Refuse it rather than guess.
+    let mut seen = std::collections::HashSet::new();
+    if let Some(dup) = srcs.iter().find(|i| !seen.insert(**i)) {
+        return Err(bad(cmd, format!("document {dup} is listed more than once")));
+    }
+    let Some(first) = srcs.first().and_then(|&i| s.documents().get(i)).map(|d| d.doc.clone()) else {
+        return Err(bad(cmd, "bad document index"));
+    };
     let mut planes = Vec::new();
     for &i in &srcs {
         let d = &s.documents()[i].doc;
@@ -1517,7 +1814,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Load Selection…",
             ["Select"],
             None,
-            r##"{"channel":index|name|"composite"|"red|green|blue|…"|"transparency"|"mask"|"vectorMask"|"quickMask"|"selection","layer":id?,"document":index?,"invert":bool=false,"operation":"new|add|subtract|intersect"="new"}"##,
+            r##"{"channel":index|name|"composite"|"red|green|blue|…"|"transparency"|"mask"|"vectorMask"|"quickMask"|"selection"|"targeted" (the Channels panel's target),"layer":id?,"document":index?,"invert":bool=false,"operation":"new|add|subtract|intersect"="new"}"##,
             has_doc,
             load_selection
         ),
@@ -1527,7 +1824,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Apply Image…",
             ["Image"],
             None,
-            r##"{"source":{"document":index?,"layer":id|"merged"="merged","channel":"composite"|"red|…"|index|"selection"|"transparency"|"mask"="composite","invert":bool=false},"blending":"normal|multiply|screen|overlay|softLight|hardLight|colorDodge|colorBurn|darken|lighten|difference|exclusion|linearBurn|linearDodge|add|subtract|…"="multiply","opacity":0..100=100,"scale":1..2=1,"offset":-255..255=0,"preserveTransparency":bool=false,"mask":{"document","layer","channel","invert"}?,"sourceChannel|sourceDocument|sourceLayer|sourceInvert|maskChannel|…":flat form of source/mask?}"##,
+            r##"{"source":{"document":index?,"layer":id|name|"merged"="merged","channel":"composite"|"red|…"|index|"selection"|"transparency"|"mask"="composite","invert":bool=false},"blending":"normal|multiply|screen|overlay|softLight|hardLight|colorDodge|colorBurn|darken|lighten|difference|exclusion|linearBurn|linearDodge|add|subtract|…"="multiply","opacity":0..100=100,"scale":1..2=1,"offset":-255..255=0,"preserveTransparency":bool=false,"mask":{"document","layer","channel","invert"}?,"sourceChannel|sourceDocument|sourceLayer|sourceInvert|maskChannel|…":flat form of source/mask?}"##,
             has_apply_target,
             apply_image
         ),
@@ -1570,7 +1867,15 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!("channel.delete", "Delete Channel", [], None, r##"{"channel":index|name?=targeted}"##, has_channels, delete_channel),
         spec!("channel.rename", "Rename Channel", [], None, r##"{"channel":index|name,"name":str}"##, has_channels, rename_channel),
         spec!("channel.move", "Reorder Channel", [], None, r##"{"channel":index|name,"to":index}"##, has_channels, move_channel),
-        spec!("channel.target", "Target Channel", [], None, r##"{"channel":"composite"|"red|green|blue|…"|index|name="composite"}"##, has_doc, target_cmd),
+        spec!(
+            "channel.target",
+            "Target Channel",
+            [],
+            None,
+            r##"{"channel":"composite"|"mask"|"vectorMask"|"red|green|blue|…"|index|name="composite"}"##,
+            has_doc,
+            target_cmd
+        ),
         spec!(
             "channel.setVisible",
             "Channel Visibility",
@@ -1611,6 +1916,16 @@ pub fn specs() -> Vec<CommandSpec> {
             journal: false,
         },
         spec!("channel.target.composite", "Target Composite Channel", [], Some("Cmd+2"), "{}", has_doc, |s, _| target_slot(s, 2)),
+        // ⌘\ targets the active layer's mask, as clicking its thumbnail does.
+        spec!("channel.target.layerMask", "Target Layer Mask", [], Some("Cmd+\\"), "{}", has_layer_mask, |s, _| target_cmd(
+            s,
+            &serde_json::json!({"channel": "mask"})
+        )),
+        // ⌘⌥2 loads the image's luminosity as a selection (⌘-click on the composite channel).
+        spec!("select.loadLuminosity", "Load Luminosity", [], Some("Cmd+Alt+2"), "{}", has_doc, |s, _| load_selection(
+            s,
+            &serde_json::json!({"channel": "composite"})
+        )),
         spec!("channel.target.slot3", "Target Channel 3", [], Some("Cmd+3"), "{}", slot_ok::<3>, |s, _| target_slot(s, 3)),
         spec!("channel.target.slot4", "Target Channel 4", [], Some("Cmd+4"), "{}", slot_ok::<4>, |s, _| target_slot(s, 4)),
         spec!("channel.target.slot5", "Target Channel 5", [], Some("Cmd+5"), "{}", slot_ok::<5>, |s, _| target_slot(s, 5)),
@@ -1619,6 +1934,13 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!("channel.target.slot8", "Target Channel 8", [], Some("Cmd+8"), "{}", slot_ok::<8>, |s, _| target_slot(s, 8)),
         spec!("channel.target.slot9", "Target Channel 9", [], Some("Cmd+9"), "{}", slot_ok::<9>, |s, _| target_slot(s, 9)),
     ]
+}
+
+/// Target Layer Mask: the active layer has a mask.
+fn has_layer_mask(s: &Session) -> std::result::Result<(), String> {
+    let st = s.active().ok_or("no document open")?;
+    let layer = st.active_layer.and_then(|id| st.doc.layer(id)).ok_or("no active layer")?;
+    layer.mask.as_ref().map(|_| ()).ok_or_else(|| "the active layer has no layer mask".to_string())
 }
 
 fn slot_ok<const N: usize>(s: &Session) -> std::result::Result<(), String> {
@@ -1637,6 +1959,6 @@ fn has_apply_target(s: &Session) -> std::result::Result<(), String> {
     if matches!(l.content, LayerContent::Raster(_)) {
         Ok(())
     } else {
-        Err(format!("Apply Image needs a pixel layer (active layer is a {} layer)", l.content.kind_name()))
+        Err(format!("Apply Image needs a pixel layer (active layer is {} {} layer)", l.content.article(), l.content.kind_name()))
     }
 }

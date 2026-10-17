@@ -1,10 +1,11 @@
-//! Interactive Liquify (full-window dialog), Puppet Warp and Perspective Warp (on-canvas modes).
+//! Interactive Liquify (full-window dialog), Puppet Warp, Perspective Warp and Vanishing Point
+//! (on-canvas modes).
 //!
 //! All three are previews over plain data (strokes, pins, planes); committing runs the engine
-//! command with that data (`filter.liquify`, `edit.puppetWarp`, `edit.perspectiveWarp`, or the
-//! smart-object twins), so the result is one history step and exactly replayable. This module
+//! command with that data (`filter.liquify`, `edit.puppetWarp`, `edit.perspectiveWarp`,
+//! `filter.vanishingPoint`, or the smart-object twins), so the result is one history step and exactly replayable. This module
 //! holds the shared runtime state and the hooks the shell calls (menus, pointer, keys, overlay,
-//! options bar); the modes live in `liquify_ui`, `puppet_ui` and `perspective_ui`.
+//! options bar); the modes live in `liquify_ui`, `puppet_ui`, `perspective_ui` and `vp_ui`.
 
 use std::sync::Arc;
 
@@ -23,13 +24,16 @@ pub struct Distort {
     pub liquify: Option<crate::liquify_ui::LiquifyDialog>,
     pub puppet: Option<crate::puppet_ui::PuppetSession>,
     pub perspective: Option<crate::perspective_ui::PerspSession>,
+    pub vanishing: Option<crate::vp_ui::VpSession>,
     /// Filter Gallery dialog (gallery_ui).
     pub gallery: Option<crate::gallery_ui::GalleryDialog>,
+    /// The document the open sessions belong to, noted by [`drop_foreign`] on the first frame they are open.
+    owner: Option<photosplice_doc::DocId>,
 }
 
 impl Distort {
     pub fn active(&self) -> bool {
-        self.liquify.is_some() || self.puppet.is_some() || self.perspective.is_some()
+        self.liquify.is_some() || self.puppet.is_some() || self.perspective.is_some() || self.vanishing.is_some()
     }
 
     /// Short description for `ui.inspect`.
@@ -38,6 +42,7 @@ impl Distort {
             "liquify": self.liquify.as_ref().map(|d| d.describe()),
             "puppet": self.puppet.as_ref().map(|p| p.describe()),
             "perspective": self.perspective.as_ref().map(|p| p.describe()),
+            "vanishingPoint": self.vanishing.as_ref().map(|v| v.describe()),
             "gallery": self.gallery.as_ref().map(|g| g.describe()),
         })
     }
@@ -51,7 +56,7 @@ pub(crate) fn active_pixels(app: &PhotospliceApp) -> Result<(LayerId, Surface, b
     match &l.content {
         LayerContent::Raster(s) => Ok((id, s.clone(), false)),
         LayerContent::Smart(sm) => sm.cache.clone().map(|c| (id, c, true)).ok_or_else(|| "the smart object has no pixels".to_string()),
-        other => Err(format!("needs a pixel layer or smart object (active layer is a {} layer)", other.kind_name())),
+        other => Err(format!("needs a pixel layer or smart object (active layer is {} {} layer)", other.article(), other.kind_name())),
     }
 }
 
@@ -118,6 +123,8 @@ pub fn menu(app: &mut PhotospliceApp, ctx: &egui::Context, id: &str, params: &Va
         "edit.perspectiveWarp" | "layer.smartObjects.perspectiveWarp" if ui.is_some() && app.distort.perspective.is_some() => {
             Some(crate::perspective_ui::control(app, ui.unwrap_or(&Value::Null)))
         }
+        "filter.vanishingPoint" if empty => Some(crate::vp_ui::begin(app, ctx).map(|_| json!({"vanishingPoint": app.distort.describe()["vanishingPoint"]}))),
+        "filter.vanishingPoint" if ui.is_some() && app.distort.vanishing.is_some() => Some(crate::vp_ui::control(app, ui.unwrap_or(&Value::Null))),
         _ => None,
     }
 }
@@ -134,6 +141,10 @@ pub fn pointer(app: &mut PhotospliceApp, ev: ToolEvent, mods: egui::Modifiers) -
     }
     if app.distort.perspective.is_some() {
         crate::perspective_ui::pointer(app, ev, mods);
+        return true;
+    }
+    if app.distort.vanishing.is_some() {
+        crate::vp_ui::pointer(app, ev, mods);
         return true;
     }
     false
@@ -163,11 +174,16 @@ pub fn keys(app: &mut PhotospliceApp, ctx: &egui::Context) -> bool {
         }
         return true;
     }
-    if app.distort.puppet.is_some() {
+    if let Some(p) = app.distort.puppet.as_mut() {
+        let cmd_shift = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
         if enter(ctx) {
             crate::puppet_ui::commit(app);
         } else if esc(ctx) {
             app.distort.puppet = None;
+        } else if ctx.input_mut(|i| i.consume_key(cmd_shift, egui::Key::Z)) {
+            p.redo();
+        } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)) {
+            p.undo();
         }
         return true;
     }
@@ -176,6 +192,16 @@ pub fn keys(app: &mut PhotospliceApp, ctx: &egui::Context) -> bool {
             crate::perspective_ui::commit(app);
         } else if esc(ctx) {
             app.distort.perspective = None;
+        }
+        return true;
+    }
+    if app.distort.vanishing.is_some() {
+        if enter(ctx) {
+            let _ = crate::vp_ui::commit(app);
+        } else if esc(ctx) {
+            crate::vp_ui::escape(app);
+        } else {
+            crate::vp_ui::keys(app, ctx);
         }
         return true;
     }
@@ -190,6 +216,9 @@ pub fn draw_overlay(app: &PhotospliceApp, painter: &egui::Painter, xf: &ViewXfor
     if let Some(p) = &app.distort.perspective {
         crate::perspective_ui::draw(p, painter, xf);
     }
+    if let Some(v) = &app.distort.vanishing {
+        crate::vp_ui::draw(v, painter, xf);
+    }
 }
 
 /// Options bar for the on-canvas modes. True when drawn.
@@ -202,11 +231,34 @@ pub fn options_bar(app: &mut PhotospliceApp, ui: &mut egui::Ui) -> bool {
         crate::perspective_ui::options_bar(app, ui);
         return true;
     }
+    if app.distort.vanishing.is_some() {
+        crate::vp_ui::options_bar(app, ui);
+        return true;
+    }
     false
+}
+
+/// Drops the open sessions once the active document is not the one they were started on (closed, or another one
+/// opened or switched to). Without this, Puppet Warp's preview of the old document replaced the new document's canvas (#5092).
+pub fn drop_foreign(app: &mut PhotospliceApp) {
+    let current = app.session.active().map(|s| s.doc.id);
+    if !app.distort.active() && app.distort.gallery.is_none() {
+        app.distort.owner = None;
+    } else if app.distort.owner.is_none() {
+        app.distort.owner = current;
+    } else if app.distort.owner != current {
+        app.distort.liquify = None;
+        app.distort.puppet = None;
+        app.distort.perspective = None;
+        app.distort.vanishing = None;
+        app.distort.gallery = None;
+        app.distort.owner = None;
+    }
 }
 
 /// Full-window dialogs (Liquify, Filter Gallery).
 pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
+    drop_foreign(app);
     if app.distort.gallery.is_some() {
         crate::gallery_ui::show(app, ctx);
     }
@@ -217,6 +269,6 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
 
 /// Screen distance (document px) that counts as "on" a handle at the current zoom.
 pub(crate) fn tolerance(app: &PhotospliceApp) -> f64 {
-    let z = app.session.active_index().and_then(|i| app.ui.views.get(i)).map_or(1.0, |v| v.zoom.max(0.01));
+    let z = app.point_zoom().max(0.01);
     8.0 / f64::from(z)
 }

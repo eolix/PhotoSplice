@@ -18,7 +18,7 @@ struct Op {
     opacity: f32,
     mask_density: f32,
     mask_default: f32,
-    _pad1: f32,
+    fill: f32,       // layer Fill for fs_blend (psblend::composite_fill); 1 elsewhere
     tex_origin: vec2<i32>,
     tex_size: vec2<i32>,
     mask_origin: vec2<i32>,
@@ -48,8 +48,10 @@ const F_STROKE_OUT: u32 = 1024u; // effect paint: outside stroke band
 const F_FIRST: u32 = 2048u;      // outside strokes: nothing accumulated yet
 const F_CHANNELS: u32 = 4096u;   // lerp: per-channel weights in p0 (channel restrictions)
 const F_LAB: u32 = 65536u;      // Lab document: Normal mixes in CIELAB
+const F_HDR: u32 = 262144u;     // 32-bit float document: HDR blends and Exposure retain values above 1
 const F_QUANT: u32 = 32768u;    // lerp: A rounded to p0.x steps (adjustment results, integer docs)
 const F_ADD_DIFF: u32 = 16384u;  // lerp: A + (B - C) premultiplied (clips on pass-through groups)
+const F_BLEND_IF: u32 = 524288u; // lerp: B back towards A by the Blend If ranges in p0..p3
 const F_TEXT_GAMMA: u32 = 8192u; // blend / atop / fx merge: type layer, mix coverage at gamma p4.w
 
 @group(0) @binding(0) var<uniform> chunk: Chunk;
@@ -152,7 +154,13 @@ fn vivid_light_generic(cb: f32, cs: f32) -> f32 {
     return min(cb / (2.0 * (1.0 - cs)), 1.0);
 }
 
+// f32::MAX exactly. The decimal 3.40282347e38 is just above it: naga rounds it down, but browsers'
+// WebGPU compiler rejects it, which left the web app without a GPU compositor.
+const F32_MAX: f32 = 0x1.fffffep+127f;
+
 fn blend_channel(mode: i32, cb: f32, cs: f32) -> f32 {
+    // Linear Dodge / Divide clip at 1 at integer depths, at f32::MAX in 32-bit documents.
+    let hi = select(1.0, F32_MAX, (op.flags & F_HDR) != 0u);
     switch mode {
         case 3: { return min(cb, cs); }                         // Darken
         case 4: { return cb * cs; }                             // Multiply
@@ -161,7 +169,7 @@ fn blend_channel(mode: i32, cb: f32, cs: f32) -> f32 {
         case 8: { return max(cb, cs); }                         // Lighten
         case 9: { return cb + cs - cb * cs; }                   // Screen
         case 10: { return color_dodge(cb, cs); }                // ColorDodge
-        case 11: { return min(cb + cs, 1.0); }                  // LinearDodge
+        case 11: { return min(cb + cs, hi); }                   // LinearDodge
         case 13: { return hard_light(cs, cb); }                 // Overlay
         case 14: { return soft_light_ps(cb, cs); }              // SoftLight
         case 15: { return hard_light(cb, cs); }                 // HardLight
@@ -179,7 +187,29 @@ fn blend_channel(mode: i32, cb: f32, cs: f32) -> f32 {
         case 22: { return max(cb - cs, 0.0); }                  // Subtract
         case 23: {                                              // Divide
             if (cs <= 0.0) { return select(1.0, 0.0, cb <= 0.0); }
-            return min(cb / cs, 1.0);
+            return min(cb / cs, hi);
+        }
+        case 28: {                                             // Reflect
+            if (cs >= 1.0) { return 1.0; }
+            return min(cb * cb / (1.0 - cs), 1.0);
+        }
+        case 29: {                                             // Glow
+            if (cb >= 1.0) { return 1.0; }
+            return min(cs * cs / (1.0 - cb), 1.0);
+        }
+        case 30: { return 1.0 - abs(1.0 - cb - cs); }            // Negation
+        case 31: {                                             // XOR (8-bit channel operation)
+            let b = u32(floor(clamp(cb, 0.0, 1.0) * 255.0 + 0.5));
+            let s = u32(floor(clamp(cs, 0.0, 1.0) * 255.0 + 0.5));
+            return f32(b ^ s) / 255.0;
+        }
+        case 32: {                                             // Paint.NET Color Burn
+            if (cs <= 0.0) { return 0.0; }
+            return max(1.0 - (1.0 - cb) / cs, 0.0);
+        }
+        case 33: {                                             // Paint.NET Color Dodge
+            if (cs >= 1.0) { return 1.0; }
+            return min(cb / (1.0 - cs), 1.0);
         }
         default: { return cs; }                                 // Normal, Dissolve, PassThrough
     }
@@ -198,22 +228,24 @@ fn range_hue(h: f32) -> f32 {
 
 fn lum(c: vec3<f32>) -> f32 { return 0.3 * c.r + 0.59 * c.g + 0.11 * c.b; }
 
-fn clip_color(c: vec3<f32>) -> vec3<f32> {
+// photosplice_color::blend::clip_color: towards grey until within 0..top; a luminosity outside
+// that range has no in-gamut colour (and max − lum is rounding noise), so it gives its grey.
+fn clip_color(c: vec3<f32>, top: f32) -> vec3<f32> {
     let l = lum(c);
     let n = min(min(c.r, c.g), c.b);
     let x = max(max(c.r, c.g), c.b);
     var out = c;
     if (n < 0.0) {
         let d = l - n;
-        if (abs(d) < 1e-12) { out = vec3(l); } else { out = l + (out - l) * l / d; }
+        if (l > 0.0 && d > 0.0) { out = l + (out - l) * l / d; } else { out = vec3(l); }
     }
-    if (x > 1.0) {
+    if (x > top) {
         let d = x - l;
-        if (abs(d) < 1e-12) { out = vec3(l); } else { out = l + (out - l) * (1.0 - l) / d; }
+        if (l < top && d > 0.0) { out = l + (out - l) * (top - l) / d; } else { out = vec3(l); }
     }
     return out;
 }
-fn set_lum(c: vec3<f32>, l: f32) -> vec3<f32> { return clip_color(c + (l - lum(c))); }
+fn set_lum(c: vec3<f32>, l: f32, top: f32) -> vec3<f32> { return clip_color(c + (l - lum(c)), top); }
 fn sat(c: vec3<f32>) -> f32 { return max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b); }
 fn set_sat(c: vec3<f32>, s: f32) -> vec3<f32> {
     let mx = max(max(c.r, c.g), c.b);
@@ -223,11 +255,13 @@ fn set_sat(c: vec3<f32>, s: f32) -> vec3<f32> {
 }
 
 fn blend_rgb(mode: i32, cb: vec3<f32>, cs: vec3<f32>) -> vec3<f32> {
+    // blend_rgb_within: 32-bit documents keep values above 1 (f32::MAX).
+    let top = select(1.0, F32_MAX, (op.flags & F_HDR) != 0u);
     switch mode {
-        case 24: { return set_lum(set_sat(cs, sat(cb)), lum(cb)); } // Hue
-        case 25: { return set_lum(set_sat(cb, sat(cs)), lum(cb)); } // Saturation
-        case 26: { return set_lum(cs, lum(cb)); }                  // Color
-        case 27: { return set_lum(cb, lum(cs)); }                  // Luminosity
+        case 24: { return set_lum(set_sat(cs, sat(cb)), lum(cb), top); } // Hue
+        case 25: { return set_lum(set_sat(cb, sat(cs)), lum(cb), top); } // Saturation
+        case 26: { return set_lum(cs, lum(cb), top); }                  // Color
+        case 27: { return set_lum(cb, lum(cs), top); }                  // Luminosity
         case 7: { return select(cb, cs, lum(cs) < lum(cb)); }      // DarkerColor
         case 12: { return select(cb, cs, lum(cs) > lum(cb)); }     // LighterColor
         default: {
@@ -282,6 +316,54 @@ fn composite_g(mode: i32, b: vec4<f32>, s: vec4<f32>, opacity: f32, gamma_on: bo
     let g = op.p4.w; // psblend::text_gamma
     let pw = (1.0 - as_) * ab * text_enc(b.rgb, g) + (1.0 - ab) * as_ * text_enc(s.rgb, g) + as_ * ab * text_enc(bl, g);
     return vec4(text_dec(pw / ao, g), ao);
+}
+
+// psblend::fill_is_special: Color Burn, Linear Burn, Color Dodge, Linear Dodge, Vivid Light,
+// Linear Light, Hard Mix, Difference (mode_index 5, 6, 10, 11, 16, 17, 19, 20).
+fn fill_is_special(mode: i32) -> bool {
+    return mode == 5 || mode == 6 || mode == 10 || mode == 11 || mode == 16 || mode == 17 || mode == 19 || mode == 20;
+}
+
+// psblend::composite_fill, with a single blend_rgb call (fs_blend's only composite: every
+// inlined blend_rgb copy grows the shader, and WARP compiles it slowly). Normal modes take Fill
+// as coverage; below 100% Fill the special eight blend a source pulled toward the mode's neutral
+// colour (Hard Mix: (cb - f(1 - cs)) / (1 - f)) at `opacity`, Fill staying coverage over
+// transparency. Lab documents mix Normal in CIELAB; type layers mix in the text gamma space.
+fn composite_fill(mode: i32, b: vec4<f32>, s: vec4<f32>, opacity: f32, fill: f32, gamma_on: bool) -> vec4<f32> {
+    let f = clamp(fill, 0.0, 1.0);
+    let special = f < 1.0 && fill_is_special(mode);
+    let ab = b.a;
+    var over = s.a * opacity;
+    var alone = over * f;
+    if (!special) { over = alone; }
+    if (over <= 0.0) { return b; }
+    let ao = ab + (1.0 - ab) * alone;
+    if (ao <= 0.0) { return vec4(0.0); }
+    if (!special && !gamma_on && (op.flags & F_LAB) != 0u && mode == M_NORMAL && ab > 0.0) {
+        let m = srgb_to_lab(b.rgb) * (ab * (1.0 - over) / ao) + srgb_to_lab(s.rgb) * (over / ao);
+        return vec4(lab_to_srgb(m), ao);
+    }
+    var cb = b.rgb;
+    var sr = s.rgb;
+    if (!special && !gamma_on && (op.flags & F_LAB) != 0u && mode != M_NORMAL) {
+        // A Lab document keeps colours outside sRGB; the other modes blend the screen colour
+        // (psblend::composite).
+        cb = clamp(cb, vec3(0.0), vec3(1.0));
+        sr = clamp(sr, vec3(0.0), vec3(1.0));
+    }
+    var neutral = 0.0;
+    if (mode == 5 || mode == 6) { neutral = 1.0; }
+    if (mode == 16 || mode == 17) { neutral = 0.5; }
+    var cs = sr;
+    if (special) { cs = vec3(neutral) + (sr - vec3(neutral)) * f; }
+    var bl = blend_rgb(mode, cb, cs);
+    if (special && mode == 19) { bl = clamp((cb - f * (vec3(1.0) - sr)) / (1.0 - f), vec3(0.0), vec3(1.0)); }
+    let wb = ab * (1.0 - over) / ao;
+    let wbs = ab * over / ao;
+    let ws = (1.0 - ab) * alone / ao;
+    if (!gamma_on) { return vec4(wb * cb + wbs * bl + ws * sr, ao); }
+    let g = op.p4.w;
+    return vec4(text_dec(wb * text_enc(cb, g) + wbs * text_enc(bl, g) + ws * text_enc(sr, g), g), ao);
 }
 
 // photosplice_color::convert::{srgb_to_lab, lab_to_srgb_unclamped} (D50, Bradford to sRGB).
@@ -343,6 +425,42 @@ fn t_encode(v: f32, g: f32) -> f32 {
     return pow(max(v, 0.0), 1.0 / g);
 }
 
+// compose::adjust::vibrance_lin: Photoshop's Vibrance slider (v in [-1, 1]) as an HSV change in
+// linear light that keeps the hue; b0 = boost fit (c0, c1, p, q), b1 = (r0, ra, rt).
+fn vibrance_lin(c: vec3<f32>, v: f32, b0: vec4<f32>, b1: vec3<f32>) -> vec3<f32> {
+    let mx = max(max(c.r, c.g), c.b);
+    let mn = min(min(c.r, c.g), c.b);
+    if (mx <= 0.0 || mx - mn <= 1e-9) { return c; }
+    let t = 1.0 - mn / mx;
+    let shape = t * (1.0 - t) * (2.0 - t + t * t) * mx * max(1.0 - mx, 0.0);
+    var t2: f32;
+    var v2: f32;
+    if (v < 0.0) {
+        let a = -v;
+        t2 = t * (1.0 - a / 4.0) * (1.0 - a + a * t * (1.0 + t) / 2.0);
+        v2 = mx - a * shape;
+    } else {
+        let d = mx - mn;
+        var h: f32;
+        if (mx == c.r) { h = rem_euclid((c.g - c.b) / d, 6.0); }
+        else if (mx == c.g) { h = (c.b - c.r) / d + 2.0; }
+        else { h = (c.r - c.g) / d + 4.0; }
+        h = h * 60.0;
+        var w = 0.0;
+        if (h <= 30.0) { w = 1.0; }
+        else if (h < 45.0) { w = (45.0 - h) / 15.0; }
+        else if (h >= 300.0) { w = (h - 300.0) / 60.0; }
+        let a = v * (1.0 - w) + 0.64 * pow(v, 1.6) * w;
+        let boost = (b0.x * a + b0.y * a * a) * pow(t, b0.z) * pow(1.0 - t, b0.w)
+            * exp((b1.x + b1.y * a + b1.z * (1.0 - t)) * max(1.0 - mx, 0.0));
+        t2 = min(t * (1.0 + boost), 1.0);
+        v2 = mx + v / 4.0 * shape;
+    }
+    let m2 = v2 * (1.0 - t2);
+    let k = (v2 - m2) / (mx - mn);
+    return vec3(m2) + (c - vec3(mn)) * k;
+}
+
 fn rgb_to_hsl(c: vec3<f32>) -> vec3<f32> {
     let mx = max(max(c.r, c.g), c.b);
     let mn = min(min(c.r, c.g), c.b);
@@ -380,6 +498,17 @@ fn posterize(v: f32, n: f32) -> f32 {
     let x = round_half_up(clamp(v, 0.0, 1.0) * 255.0);
     let bin = min(floor(x * n / 256.0), n - 1.0);
     return floor(bin * 255.0 / (n - 1.0)) / 255.0;
+}
+
+// compose::adjust::posterize_in at 16 bits: bins of the 16-bit sample, landing on 8-bit levels
+// through a 16-bit step. Every product and sum here is a whole number below 2^24, exact in f32;
+// 16-bit layers reach the GPU as half floats, though, so a sample within their precision of a
+// bin's edge can land in the neighbouring bin (the CPU, which exports, is exact).
+fn posterize16(v: f32, n: f32) -> f32 {
+    let x = floor(clamp(v, 0.0, 1.0) * 32768.0 + 0.5);
+    let bin = min(floor(x * n / 32768.0), n - 1.0);
+    let step = floor(bin * 32768.0 / (n - 1.0));
+    return floor((step * 255.0 + 16384.0) / 32768.0) / 255.0;
 }
 
 // Document pixel being adjusted (for ordered dither).
@@ -438,10 +567,15 @@ fn color_lookup(c: vec3<f32>, n: i32, tetra: bool) -> vec3<f32> {
 fn selective_row(r: i32, w: f32, c: vec3<f32>, relative: bool) -> vec3<f32> {
     let k = lut_at(r * 4 + 3) / 100.0;
     let a = vec3(lut_at(r * 4), lut_at(r * 4 + 1), lut_at(r * 4 + 2)) / 100.0;
-    let ink = 1.0 - c;
-    var t = ink + a + k;
-    if (relative) { t = ink * (1.0 + a) * (1.0 + k); }
-    return select(vec3(0.0), (clamp(t, vec3(0.0), vec3(1.0)) - ink) * w, w > 0.0);
+    if (relative) {
+        let ink = 1.0 - c;
+        let t = ink * (1.0 + a) * (1.0 + k);
+        return select(vec3(0.0), (clamp(t, vec3(0.0), vec3(1.0)) - ink) * w, w > 0.0);
+    }
+    // Absolute: scaled by the room the ink has (adding: 2 × (1 − ink), removing: 2 × ink, capped at 1).
+    var d = a + k;
+    d = d * select(min(2.0 * (1.0 - c), vec3(1.0)), min(2.0 * c, vec3(1.0)), d > vec3(0.0));
+    return select(vec3(0.0), d * w, w > 0.0);
 }
 
 // compose::adjust::selective_color (ranges × CMYK percentages in LUT row 0). Written without
@@ -465,38 +599,75 @@ fn selective_color(c: vec3<f32>, relative: bool) -> vec3<f32> {
 // Exposure on one channel (p = exposure scale, offset, gamma, transfer gamma). Per channel, not a
 // loop over `c[i]`: FXC aborts on that inside `adjust`'s switch.
 fn exposure(v: f32, p: vec4<f32>) -> f32 {
+    if ((op.flags & F_HDR) != 0u) {
+        let lin = v * p.x + p.y;
+        if (p.z == 1.0) { return lin; }
+        return sign(lin) * pow(abs(lin), 1.0 / p.z);
+    }
     let lin = pow(max(t_decode(v, p.w) * p.x + p.y, 0.0), 1.0 / p.z);
     return clamp(t_encode(lin, p.w), 0.0, 1.0);
 }
 
+// Mirrors compose::adjust::levels_float; coefficients are master, R, G, B in LUT row 0.
+fn levels_float(record: i32, v: f32) -> f32 {
+    let base = record * 5;
+    let t = (v - lut_at(base)) / max(lut_at(base + 1) - lut_at(base), 0.000001);
+    let mapped = sign(t) * pow(abs(t), 1.0 / lut_at(base + 2));
+    return lut_at(base + 3) + mapped * (lut_at(base + 4) - lut_at(base + 3));
+}
+
+fn tone_channel(row: i32, v: f32, identity: f32) -> f32 {
+    if (identity > 0.5) { return v; }
+    return lut(row, v);
+}
+
 fn adjust(c: vec3<f32>) -> vec3<f32> {
+    let hdr = (op.flags & F_HDR) != 0u;
     let p0 = op.p0;
     let p1 = op.p1;
     let p2 = op.p2;
     let p3 = op.p3;
     switch op.kind {
         case 1: { return 1.0 - c; }                                            // Invert
-        case 2: {                                                              // Threshold (p0.x = 8-bit level)
-            return vec3(select(0.0, 1.0, round_half_up(gray(c) * 255.0) >= p0.x));
+        case 2: {                                                              // Threshold (compose::adjust::threshold_white)
+            // p0.x = 8-bit level; p0.y = 1: 8-bit levels, 2: 16-bit samples against p0.z, 0: float.
+            // Sums of 30 R + 59 G + 11 B over whole samples are exact in f32.
+            var white = lum(c) * 255.0 >= p0.x;
+            if p0.y > 0.5 {
+                let q = select(32768.0, 255.0, p0.y < 1.5);
+                let v = floor(clamp(c, vec3(0.0), vec3(1.0)) * q + 0.5);
+                let s = 30.0 * v.r + 59.0 * v.g + 11.0 * v.b;
+                white = select(s >= 100.0 * p0.z, s > 100.0 * p0.x - 50.0, p0.y < 1.5);
+            }
+            return vec3(select(0.0, 1.0, white));
         }
-        case 3: { return vec3(posterize(c.r, p0.x), posterize(c.g, p0.x), posterize(c.b, p0.x)); }
+        case 3: {                                                              // Posterize (p0.x levels; p0.y = 1: 16-bit)
+            if p0.y > 0.5 { return vec3(posterize16(c.r, p0.x), posterize16(c.g, p0.x), posterize16(c.b, p0.x)); }
+            return vec3(posterize(c.r, p0.x), posterize(c.g, p0.x), posterize(c.b, p0.x));
+        }
+        case 4: {                                                              // B/C legacy: brightness before (p0.x) or after (p0.w) contrast around the pivot (p0.z); 32-bit unclipped
+            let v = (c + p0.x - p0.z) * p0.y + p0.z + p0.w;
+            if (hdr) { return v; }
+            return clamp(v, vec3(0.0), vec3(1.0));
+        }
         case 6: { return vec3(exposure(c.r, p0), exposure(c.g, p0), exposure(c.b, p0)); }  // Exposure
-        case 7: { return vec3(lut(0, c.r), lut(1, c.g), lut(2, c.b)); }        // Levels / Curves / B/C / Color balance
+        case 7: { return vec3(tone_channel(0, c.r, p0.x), tone_channel(1, c.g, p0.y), tone_channel(2, c.b, p0.z)); } // Levels / Curves / B/C / Color balance
+        case 17: { return vec3(levels_float(0, levels_float(1, c.r)), levels_float(0, levels_float(2, c.g)), levels_float(0, levels_float(3, c.b))); }
         case 8: {                                                              // Hue/Saturation
             let hsl = rgb_to_hsl(c);
             var hh: f32;
             var ss: f32;
-            // Range edits (LUT rows indexed by the original hue, faded out towards grey).
+            // Range edits (LUT rows indexed by the original hue), in full however dull the
+            // colour (adjust.rs, Hue/Saturation).
             var dh = 0.0;
             var ds = 0.0;
             var dl = 0.0;
             if (p1.x > 0.5) {
-                let chroma = min((max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b))) * 4.0, 1.0);
                 let rh = range_hue(hsl.x);
-                dh = lut(0, rh) * chroma;
+                dh = lut(0, rh);
                 // Row 1 holds the ranges' saturation factor excess.
-                ds = lut(1, rh) * chroma;
-                dl = lut(2, rh) * chroma;
+                ds = lut(1, rh);
+                dl = lut(2, rh);
             }
             // adjust::master_and_range_saturation: the master's factor times the ranges'.
             let ms = clamp(p0.y, -1.0, 0.999);
@@ -564,17 +735,21 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
             l = y + (l - y) * p0.x;
             return clamp(vec3(t_encode(l.r, g), t_encode(l.g, g), t_encode(l.b, g)), vec3(0.0), vec3(1.0));
         }
-        case 10: {                                                             // Channel mixer
-            let r = clamp(dot(p0.xyz, c) + p0.w, 0.0, 1.0);
+        case 10: {                                                             // Channel mixer (32-bit unclipped)
+            let lo = select(0.0, -F32_MAX, hdr);
+            let hi = select(1.0, F32_MAX, hdr);
+            let r = clamp(dot(p0.xyz, c) + p0.w, lo, hi);
             if (p3.x > 0.5) { return vec3(r); }
-            return vec3(r, clamp(dot(p1.xyz, c) + p1.w, 0.0, 1.0), clamp(dot(p2.xyz, c) + p2.w, 0.0, 1.0));
+            return vec3(r, clamp(dot(p1.xyz, c) + p1.w, lo, hi), clamp(dot(p2.xyz, c) + p2.w, lo, hi));
         }
         case 11: {                                                             // Photo filter
             // compose::adjust::photo_filter_matrix (rows p0..p2) in linear light, then SetLum.
+            // 32-bit samples are linear already and stay unclipped.
+            if (hdr) { return vec3(dot(p0.xyz, c), dot(p1.xyz, c), dot(p2.xyz, c)); }
             let g = p3.y;
             let lin = vec3(t_decode(c.r, g), t_decode(c.g, g), t_decode(c.b, g));
             var f = vec3(t_encode(dot(p0.xyz, lin), g), t_encode(dot(p1.xyz, lin), g), t_encode(dot(p2.xyz, lin), g));
-            if (p3.x > 0.5) { f = set_lum(f, lum(c)); }
+            if (p3.x > 0.5) { f = set_lum(f, lum(c), 1.0); }
             return clamp(f, vec3(0.0), vec3(1.0));
         }
         case 12: {                                                             // Black & White
@@ -589,13 +764,13 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
             if (c.b <= c.r && c.b <= c.g) { secondary = 1; } else if (c.r <= c.g) { secondary = 3; }
             let g = clamp(mn + (mid - mn) * w[secondary] / 100.0 + (mx - mid) * w[primary] / 100.0, 0.0, 1.0);
             if (p1.z > 0.5) {
-                // The tint at the grey's luminosity (Color blend), as compose::adjust.
-                return clamp(set_lum(p2.rgb, g), vec3(0.0), vec3(1.0));
+                if (hdr) { return set_lum(p2.rgb, g, F32_MAX); }                // 32-bit: nothing clips at 1
+                return clamp(set_lum(p2.rgb, g, 1.0), vec3(0.0), vec3(1.0));   // Color blend of the tint
             }
             return vec3(g);
         }
-        case 13: {                                                             // Gradient map
-            var t = dot(c, vec3(0.30, 0.59, 0.11));                            // adjust::gradient_map_level
+        case 13: {                                                             // Gradient map (driven by the W3C luminosity)
+            var t = lum(c);
             if (p0.x > 0.5) { t = 1.0 - t; }
             var o = vec3(lut(0, t), lut(1, t), lut(2, t));
             if (p0.y > 0.5) { o = clamp(o + bayer4(adj_px) / 255.0, vec3(0.0), vec3(1.0)); }
@@ -658,9 +833,11 @@ fn layer_texel(d: vec2<i32>) -> vec4<f32> {
     if ((op.flags & F_GRADIENT) != 0u) {
         let t = gradient_t(d);
         var c = vec4(lut(0, t), lut(1, t), lut(2, t), lut(3, t));
-        // p2.w: dither (gradient fills).
+        // p2.w: dither (gradient fills), rounded to p2.z levels on integer documents.
         if (op.p2.w > 0.5) {
-            c = vec4(clamp(c.rgb + (dither_noise(d) - 0.5) / 255.0, vec3(0.0), vec3(1.0)), c.a);
+            var rgb = clamp(c.rgb + (dither_noise(d) - 0.5) / 255.0, vec3(0.0), vec3(1.0));
+            if (op.p2.z > 0.0) { rgb = floor(rgb * op.p2.z + 0.5) / op.p2.z; }
+            c = vec4(rgb, c.a);
         }
         return c;
     }
@@ -701,10 +878,10 @@ fn fs_blend(in: VOut) -> @location(0) vec4<f32> {
     var s = textureLoad(tex_b, p, 0);
     if (s.a <= 0.0) { return b; }
     if (op.mode == M_DISSOLVE) {
-        s.a = select(0.0, 1.0, dissolve_noise(doc_px(p)) < s.a * op.opacity);
+        s.a = select(0.0, 1.0, dissolve_noise(doc_px(p)) < s.a * op.opacity * op.fill);
         return composite(M_NORMAL, b, s, 1.0);
     }
-    return composite_g(op.mode, b, s, op.opacity, (op.flags & F_TEXT_GAMMA) != 0u);
+    return composite_fill(op.mode, b, s, op.opacity, op.fill, (op.flags & F_TEXT_GAMMA) != 0u);
 }
 
 // composite_atop(base = A, src = B): blend as if the base were opaque, keep its alpha.
@@ -760,12 +937,78 @@ fn fs_lerp(in: VOut) -> @location(0) vec4<f32> {
         if (al <= 0.0) { return vec4(0.0); }
         return vec4(clamp(pm.rgb / al, vec3(0.0), vec3(1.0)), al);
     }
+    if ((op.flags & F_BLEND_IF) != 0u) {
+        // compose::apply_blend_if: "This Layer" is C (the layer's own content with its masks),
+        // or B itself for an adjustment layer; "Underlying Layer" is A.
+        var this_px = b;
+        if (op.p4.y < 0.5) {
+            this_px = textureLoad(tex_c, p, 0);
+        }
+        let k = blend_if_weight(this_px, a);
+        if (k >= 1.0) {
+            return b;
+        }
+        let alpha = a.a + (b.a - a.a) * k;
+        if (alpha <= 0.0) { return vec4(0.0); }
+        return vec4(clamp((a.rgb * a.a + (b.rgb * b.a - a.rgb * a.a) * k) / alpha, vec3(0.0), vec3(1.0)), alpha);
+    }
     let k = op.opacity * mask_value(doc_px(p));
     let wa = a.a * (1.0 - k);
     let wb = b.a * k;
     let alpha = wa + wb;
     if (alpha <= 0.0) { return vec4(0.0); }
     return vec4((a.rgb * wa + b.rgb * wb) / alpha, alpha);
+}
+
+// ---- Blend If (photosplice_doc::BlendRange, compose::blend_if_weight) ---------------------------
+
+// 0 at or below `lo`, 1 at or above `hi`; a hard step at `lo` when unsplit.
+fn bi_ramp(lo: f32, hi: f32, x: f32) -> f32 {
+    if (hi <= lo) {
+        return select(0.0, 1.0, x >= lo);
+    }
+    return clamp((x - lo) / (hi - lo), 0.0, 1.0);
+}
+
+// How much of value `v` (0..255) shows through range `e` (0 = Gray, then the channels) on side
+// `s` (0 = this layer, 1 = underlying). The ranges are packed by `plan::blend_if_params`.
+fn bi_weight(e: u32, s: u32, v: f32) -> f32 {
+    var f = array<vec4<f32>, 4>(op.p0, op.p1, op.p2, op.p3);
+    let i = (e * 2u + s) * 2u;
+    let black = f[i / 4u][i % 4u];
+    let white = f[(i + 1u) / 4u][(i + 1u) % 4u];
+    let b_lo = floor(black / 256.0);
+    let b_hi = black - b_lo * 256.0;
+    let w_lo = floor(white / 256.0);
+    let w_hi = white - w_lo * 256.0;
+    return bi_ramp(b_lo, b_hi, v) * bi_ramp(255.0 - w_hi, 255.0 - w_lo, 255.0 - v);
+}
+
+// The product of every range over the layer's own colour and the colour beneath it (a side
+// without content, alpha 0, doesn't count). `p4.x` marks a one-channel document.
+fn blend_if_weight(this_px: vec4<f32>, under: vec4<f32>) -> f32 {
+    var k = 1.0;
+    for (var s = 0u; s < 2u; s = s + 1u) {
+        let px = select(this_px, under, s == 1u);
+        if (px.a <= 0.0) {
+            continue;
+        }
+        // The CPU gets 8- and 16-bit levels exactly (k / 255 × 255 = k), but GPU arithmetic can
+        // land a few millionths below, which flips a hard threshold at that level: values that
+        // close to a level are that level. Real 8/16-bit values off a level are ≥ 1/257 away.
+        let raw = clamp(px.rgb, vec3(0.0), vec3(1.0)) * 255.0;
+        let v = select(raw, round(raw), abs(raw - round(raw)) < vec3(1e-4));
+        if (op.p4.x > 0.5) {
+            k = k * bi_weight(0u, s, v.r) * bi_weight(1u, s, v.r);
+        } else {
+            let gray = 0.299 * v.r + 0.587 * v.g + 0.114 * v.b;
+            k = k * bi_weight(0u, s, gray) * bi_weight(1u, s, v.r) * bi_weight(2u, s, v.g) * bi_weight(3u, s, v.b);
+        }
+        if (k <= 0.0) {
+            return 0.0;
+        }
+    }
+    return k;
 }
 
 // ---- layer effects (compose::effects::composite_with_effects) -------------------------------
@@ -921,7 +1164,8 @@ fn fs_fxstroke(in: VOut) -> @location(0) vec4<f32> {
     let first = (op.flags & F_FIRST) != 0u;
     var cover = 0.0;
     var lay_a = 0.0;
-    if (!first || outline) {
+    let vector = (op.flags & F_VECTOR) != 0u;
+    if (!first || outline || !vector) {
         let cv = textureLoad(tex_c, p, 0);
         cover = cv.r;
         lay_a = cv.g;
@@ -930,7 +1174,15 @@ fn fs_fxstroke(in: VOut) -> @location(0) vec4<f32> {
     if (outline) {
         k = k * outline_share(a, lay_a);
     } else if (a > INSIDE_EPS) {
-        k = select(1.0, 0.0, (op.flags & F_VECTOR) != 0u);
+        // Pixel layers: the stroke shows beneath only through the part the shape leaves
+        // (`effects.rs`): (1 - a) / (1 - layer alpha), 1 under an opaque layer.
+        if (vector) {
+            k = 0.0;
+        } else if (lay_a >= 1.0) {
+            k = 1.0;
+        } else {
+            k = clamp((1.0 - clamp(a, 0.0, 1.0)) / (1.0 - lay_a), 0.0, 1.0);
+        }
     }
     let share = k * op.opacity * (1.0 - cover);
     if (op.kind == 1) { return vec4(cover + share, lay_a, 0.0, 0.0); }
@@ -1046,25 +1298,25 @@ fn fs_mblur(in: VOut) -> @location(0) vec4<f32> {
     return mout(acc);
 }
 
-// Precise glow from a distance map: p0 = (solid, soft, invert, distance offset).
+// Precise glow from a distance map (`effects::glow_map`): p0 = (solid, soft, -, distance offset).
 @fragment
 fn fs_mglow(in: VOut) -> @location(0) vec4<f32> {
     let d = textureLoad(tex_a, local(in.pos), 0).r + op.p0.w;
     var m = clamp(1.0 - (d - op.p0.x) / op.p0.y, 0.0, 1.0);
     if (d <= op.p0.x) { m = 1.0; }
-    if (op.p0.z > 0.5) { m = 1.0 - m; }
     return mout(m);
 }
 
-// Last step of a coverage map: p0 = (|A - B| (satin), 1 - v, contour (LUT row 0), × shape
-// (`layer_tex`)).
+// Last step of a coverage map: p0 = (|A - B| (satin), 1 - v (1: before the contour, 2: after it,
+// as a centre-source inner glow), contour (LUT row 0), × shape (`layer_tex`)).
 @fragment
 fn fs_mfinish(in: VOut) -> @location(0) vec4<f32> {
     let p = local(in.pos);
     var v = textureLoad(tex_a, p, 0).r;
     if (op.p0.x > 0.5) { v = abs(v - textureLoad(tex_b, p, 0).r); }
-    if (op.p0.y > 0.5) { v = 1.0 - v; }
+    if (op.p0.y > 0.5 && op.p0.y < 1.5) { v = 1.0 - v; }
     if (op.p0.z > 0.5) { v = lut(0, v); }
+    if (op.p0.y > 1.5) { v = 1.0 - v; }
     if (op.p0.w > 0.5) { v = v * textureLoad(layer_tex, p, 0).r; }
     return mout(v);
 }
@@ -1108,7 +1360,8 @@ fn fs_mbevelshade(in: VOut) -> @location(0) vec4<f32> {
     // effects::bevel_maps' on_bevel: the height above BEVEL_H_EPS (emboss styles: or a
     // 4-neighbour's).
     var hmax = ra(p);
-    if (op.p1.y > 1.5) {
+    // p3.x: an outer chisel bevel, which also reaches one pixel past its ramp.
+    if (op.p1.y > 1.5 || op.p3.x > 0.5) {
         hmax = max(max(hmax, max(ra(p + vec2(1, 0)), ra(p - vec2(1, 0)))), max(ra(p + vec2(0, 1)), ra(p - vec2(0, 1))));
     }
     let outside = select(0.0, 1.0, s < 1.0 - INSIDE_EPS && hmax > 1e-5);

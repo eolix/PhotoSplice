@@ -70,8 +70,77 @@ fn eval(seg: &[Point; 4], t: f64) -> (f64, f64) {
     (a * p0.x + b * c1.x + c * c2.x + d * p1.x, a * p0.y + b * c1.y + c * c2.y + d * p1.y)
 }
 
-/// Flattens one subpath. Closed subpaths do not repeat the first point at the end.
+/// Validate before interactive rendering: finite coordinates and a bounded tessellation and
+/// dash workload. Arc length is bounded by the cubic control polygon, without allocating pixels.
+pub fn validate_shape(path: &Path, stroke: Option<&photosplice_doc::ShapeStroke>) -> Result<(), &'static str> {
+    let knots = path.subpaths.iter().try_fold(0usize, |n, s| n.checked_add(s.knots.len())).ok_or("too many path knots")?;
+    if knots > 4096 || path.subpaths.len() > 4096 {
+        return Err("shape path exceeds 4096 knots/subpaths");
+    }
+    let mut points = 0usize;
+    let mut length = 0.0;
+    for sub in &path.subpaths {
+        for k in &sub.knots {
+            for p in [k.anchor, k.in_ctrl, k.out_ctrl] {
+                if !p.x.is_finite() || !p.y.is_finite() || p.x.abs() > 1_000_000.0 || p.y.abs() > 1_000_000.0 {
+                    return Err("shape coordinates must be finite and within ±1000000 px");
+                }
+            }
+        }
+        points = points.saturating_add(1);
+        for seg in sub.segments() {
+            points = points.saturating_add(if is_line(&seg) { 1 } else { pieces(&seg, crate::DEFAULT_TOLERANCE) });
+            length += seg.windows(2).map(|w| (w[1].x - w[0].x).hypot(w[1].y - w[0].y)).sum::<f64>();
+        }
+    }
+    if points > 100_000 {
+        return Err("shape tessellation exceeds 100000 points");
+    }
+    if let Some(s) = stroke {
+        s.validate()?;
+        if s.width > 0.0 && !s.dashes.is_empty() {
+            let period = s.dashes.iter().map(|d| f64::from(*d)).sum::<f64>() * f64::from(s.width);
+            let transitions = (length / period + 2.0) * s.dashes.len() as f64 + points as f64;
+            if !transitions.is_finite() || transitions > 100_000.0 {
+                return Err("dash pattern is too dense for this path (100000 step budget)");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Points one flattened path may hold. Paths that never pass [`validate_shape`] (vector masks
+/// from files, imported SVG, effect outlines) are flattened more coarsely past it, so hostile
+/// curves cannot exhaust memory.
+pub(crate) const MAX_PATH_POINTS: usize = 1 << 20;
+
+/// How much to coarsen the curves of `subpaths` at `tol` so the whole path stays within
+/// [`MAX_PATH_POINTS`]: the share of each curve's pieces to keep (1 = all of them).
+fn piece_scale<'a>(subpaths: impl IntoIterator<Item = &'a Subpath>, tol: f64) -> f64 {
+    // Subpath starts and straight segments take one point each and cannot be coarsened.
+    let (mut fixed, mut curves) = (0usize, 0usize);
+    for s in subpaths {
+        fixed = fixed.saturating_add(1);
+        for seg in s.segments() {
+            if is_line(&seg) {
+                fixed = fixed.saturating_add(1);
+            } else {
+                curves = curves.saturating_add(pieces(&seg, tol));
+            }
+        }
+    }
+    let total = fixed.saturating_add(curves);
+    if total <= MAX_PATH_POINTS { 1.0 } else { MAX_PATH_POINTS as f64 / total as f64 }
+}
+
+/// Flattens one subpath. Closed subpaths do not repeat the first point at the end. A hostile
+/// subpath is flattened more coarsely so it stays within a bounded number of points.
 pub fn flatten_subpath(s: &Subpath, tol: f64) -> Polyline {
+    flatten_scaled(s, tol, piece_scale([s], tol))
+}
+
+/// [`flatten_subpath`] keeping the share `scale` of each curve's pieces (at least one).
+fn flatten_scaled(s: &Subpath, tol: f64, scale: f64) -> Polyline {
     let mut out = Polyline { closed: s.closed, ..Default::default() };
     if let Some(k) = s.knots.first() {
         out.push((k.anchor.x, k.anchor.y), true);
@@ -82,6 +151,7 @@ pub fn flatten_subpath(s: &Subpath, tol: f64) -> Polyline {
             continue;
         }
         let n = pieces(seg, tol);
+        let n = if scale < 1.0 { ((n as f64 * scale) as usize).max(1) } else { n };
         for j in 1..=n {
             out.push(eval(seg, j as f64 / n as f64), j == n);
         }
@@ -97,15 +167,18 @@ pub fn flatten_subpath(s: &Subpath, tol: f64) -> Polyline {
     out
 }
 
-/// Flattens every subpath (see [`flatten_subpath`]).
+/// Flattens every subpath (see [`flatten_subpath`]); a hostile path is flattened more coarsely
+/// so the whole path stays within a bounded number of points.
 pub fn flatten_path(p: &Path, tol: f64) -> Vec<Polyline> {
-    p.subpaths.iter().map(|s| flatten_subpath(s, tol)).collect()
+    let scale = piece_scale(&p.subpaths, tol);
+    p.subpaths.iter().map(|s| flatten_scaled(s, tol, scale)).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::shapes;
+    use photosplice_doc::Knot;
 
     #[test]
     fn lines_are_not_subdivided() {
@@ -128,5 +201,27 @@ mod tests {
             }
             assert!(p.pts.len() < 4 * (1 + (0.75 * 100.0 / tol.min(0.15)).sqrt() as usize + 1));
         }
+    }
+
+    #[test]
+    fn hostile_curves_flatten_within_the_point_budget() {
+        // Unvalidated paths (a vector mask from a file, an imported SVG) can carry handles far
+        // outside the canvas: each of these segments alone asks for the 65536-piece cap, so the
+        // path would flatten to ~1.3M points (#5195).
+        let segments = 20;
+        let knots = (0..=segments)
+            .map(|i| {
+                let a = Point::new(f64::from(i) * 50.0, f64::from(i % 2) * 1000.0);
+                Knot::smooth(a, Point::new(a.x - 3e7, a.y + 3e7), Point::new(a.x + 3e7, a.y - 3e7))
+            })
+            .collect();
+        let path = Path::new(vec![Subpath { closed: false, knots, op: Default::default() }]);
+        let lines = flatten_path(&path, 0.01);
+        let points: usize = lines.iter().map(|l| l.pts.len()).sum();
+        assert!(points > 1000 && points <= MAX_PATH_POINTS + segments as usize + 1, "{points} points");
+        assert_eq!(flatten_subpath(&path.subpaths[0], 0.01).pts.len(), points);
+        // Ordinary paths are flattened exactly as before.
+        let circle = shapes::ellipse(0.0, 0.0, 200.0, 200.0);
+        assert_eq!(flatten_path(&circle, 0.01)[0], flatten_scaled(&circle.subpaths[0], 0.01, 1.0));
     }
 }

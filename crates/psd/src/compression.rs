@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 
 use crate::error::{PsdError, Result};
 use crate::header::{Version, row_bytes};
-use crate::io::{Reader, WriteExt};
+use crate::io::Reader;
 
 /// Maximum number of decoded bytes a single decode call may produce: 8 GiB on
 /// 64-bit targets, 2 GiB elsewhere (the same budget as `photosplice-codecs`'
@@ -214,9 +214,9 @@ pub fn decode_planes(compression: Compression, data: &[u8], layout: &PlaneLayout
             Ok(out)
         }
         Compression::Rle => decode_rle(data, layout, total),
-        Compression::Zip => zip_decompress(data, total),
+        Compression::Zip => inflate_checked(data, total as u64, true),
         Compression::ZipPrediction => {
-            let mut v = zip_decompress(data, total)?;
+            let mut v = inflate_checked(data, total as u64, true)?;
             unpredict(&mut v, layout)?;
             Ok(v)
         }
@@ -243,10 +243,14 @@ pub fn encode_planes(compression: Compression, decoded: &[u8], layout: &PlaneLay
     }
 }
 
-/// Returns the number of leading bytes of `data` that a decoder would consume
-/// (validating structure). For RLE this is the count table plus the counted
-/// bytes; for Raw it is the decoded size; for ZIP the zlib stream is
-/// decompressed (without keeping output) and the whole input is consumed.
+/// Validates encoded sizes and, for ZIP, the complete stream and checksum.
+///
+/// A ZIP stream whose declared size is over [`MAX_DECODED_BYTES`] is not
+/// decompressed at all (#2926): [`decode_planes`] refuses that layout with
+/// `LimitExceeded` anyway, so inflating it here would only be work on an
+/// untrusted file before the same error. The bytes are kept verbatim, like an
+/// unknown compression method, so a layered file whose merged composite is
+/// too large still opens.
 pub(crate) fn validate_planes(compression: Compression, data: &[u8], layout: &PlaneLayout) -> Result<()> {
     let total = layout.total_bytes()?;
     match compression {
@@ -269,32 +273,52 @@ pub(crate) fn validate_planes(compression: Compression, data: &[u8], layout: &Pl
             }
             Ok(())
         }
-        // Over the decode budget: decoding refuses it later, so it isn't inflated here just to be
-        // checked (storytold/photocraft@0fb4bbf1).
         Compression::Zip | Compression::ZipPrediction if total > MAX_DECODED_BYTES => Ok(()),
-        Compression::Zip | Compression::ZipPrediction => {
-            // Decompress without keeping the output, through the end of the
-            // stream so the Adler-32 checksum is verified too.
-            let mut dec = flate2::read::ZlibDecoder::new(data);
-            let mut buf = [0u8; 8192];
-            let mut got: u64 = 0;
-            loop {
-                let n = dec.read(&mut buf).map_err(|e| PsdError::Decompress(e.to_string()))?;
-                if n == 0 {
-                    break;
-                }
-                got += n as u64;
-                if got > total.saturating_add(1 << 20) {
-                    // Far more output than needed; stop (bomb guard).
-                    break;
-                }
-            }
-            if got < total {
-                return Err(PsdError::Decompress(format!("zlib stream produced {got} of {total} bytes")));
-            }
-            Ok(())
-        }
+        Compression::Zip | Compression::ZipPrediction => inflate_checked(data, total, false).map(|_| ()),
         Compression::Unknown(_) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// ZIP streams inflated on this thread (tests count passes over the merged image).
+    pub(crate) static INFLATES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+// Keep only the requested pixels, but consume the trailer to verify Adler-32.
+// A bounded surplus tolerates padding without unbounded decompression work.
+fn inflate_checked(data: &[u8], expected: u64, keep: bool) -> Result<Vec<u8>> {
+    const OOM: PsdError = PsdError::LimitExceeded("not enough memory for the decoded channel data");
+    #[cfg(test)]
+    INFLATES.with(|n| n.set(n.get() + 1));
+    let mut decoder = flate2::Decompress::new(true);
+    let mut out = Vec::new();
+    if keep {
+        out.try_reserve_exact(expected.min(data.len().saturating_mul(1032) as u64) as usize).map_err(|_| OOM)?;
+    }
+    let mut buf = vec![0; expected.saturating_add(1).clamp(8192, 1 << 20) as usize];
+    loop {
+        let before = (decoder.total_in(), decoder.total_out());
+        let input = data.get(before.0 as usize..).ok_or_else(|| PsdError::Decompress("zlib input overflow".into()))?;
+        let status = decoder.decompress(input, &mut buf, flate2::FlushDecompress::None).map_err(|e| PsdError::Decompress(e.to_string()))?;
+        let got = decoder.total_out();
+        if got > expected.saturating_add(1 << 20) {
+            return Err(PsdError::LimitExceeded("zlib output exceeds the declared size and padding allowance"));
+        }
+        if keep {
+            let n = (got - before.1).min(expected.saturating_sub(out.len() as u64)) as usize;
+            out.try_reserve(n).map_err(|_| OOM)?;
+            out.extend_from_slice(buf.get(..n).ok_or_else(|| PsdError::Decompress("zlib output overflow".into()))?);
+        }
+        if status == flate2::Status::StreamEnd {
+            if got < expected {
+                return Err(PsdError::Decompress(format!("zlib stream produced {got} of {expected} bytes")));
+            }
+            return Ok(out);
+        }
+        if before == (decoder.total_in(), got) {
+            return Err(PsdError::Decompress("incomplete zlib stream".into()));
+        }
     }
 }
 
@@ -329,21 +353,62 @@ fn encode_rle(decoded: &[u8], layout: &PlaneLayout) -> Result<Vec<u8>> {
     let rows = layout.rows()?;
     let rb = layout.row_bytes();
     let cs = layout.count_size();
-    let mut out = vec![0u8; rows * cs];
-    let mut enc = Vec::new();
-    for row in 0..rows {
-        let start = enc.len();
-        packbits::encode(&decoded[row * rb..(row + 1) * rb], &mut enc);
-        let n = enc.len() - start;
-        if cs == 2 {
-            let n = u16::try_from(n).map_err(|_| PsdError::LimitExceeded("RLE row exceeds 65535 bytes (use PSB)"))?;
-            out[row * 2..row * 2 + 2].copy_from_slice(&n.to_be_bytes());
-        } else {
-            let n = u32::try_from(n).map_err(|_| PsdError::LimitExceeded("RLE row too large"))?;
-            out[row * 4..row * 4 + 4].copy_from_slice(&n.to_be_bytes());
-        }
+    if rows == 0 {
+        return Ok(Vec::new());
     }
-    out.put(&enc);
+    // Rows are independent, so they pack in parallel chunks and concatenate in order.
+    let threads = if cfg!(target_arch = "wasm32") { 1 } else { std::thread::available_parallelism().map_or(1, |v| v.get()).clamp(1, 32) };
+    let chunk_rows = rows.div_ceil(threads).max(1);
+    struct Chunk {
+        counts: Vec<u8>,
+        packed: Vec<u8>,
+    }
+    let pack_chunk = |first: usize, count: usize| -> Result<Chunk> {
+        let mut chunk = Chunk { counts: vec![0u8; count * cs], packed: Vec::new() };
+        for row in first..first + count {
+            let start = chunk.packed.len();
+            packbits::encode(&decoded[row * rb..(row + 1) * rb], &mut chunk.packed);
+            let n = chunk.packed.len() - start;
+            if cs == 2 {
+                let n = u16::try_from(n).map_err(|_| PsdError::LimitExceeded("RLE row exceeds 65535 bytes (use PSB)"))?;
+                chunk.counts[(row - first) * 2..(row - first) * 2 + 2].copy_from_slice(&n.to_be_bytes());
+            } else {
+                let n = u32::try_from(n).map_err(|_| PsdError::LimitExceeded("RLE row too large"))?;
+                chunk.counts[(row - first) * 4..(row - first) * 4 + 4].copy_from_slice(&n.to_be_bytes());
+            }
+        }
+        Ok(chunk)
+    };
+    let chunk_list: Vec<Chunk> = if threads == 1 {
+        vec![pack_chunk(0, rows)?]
+    } else {
+        std::thread::scope(|scope| -> Result<Vec<Chunk>> {
+            let handles: Vec<_> = (0..threads)
+                .map(|t| {
+                    let first = t * chunk_rows;
+                    let count = chunk_rows.min(rows.saturating_sub(first));
+                    scope.spawn(move || pack_chunk(first, count))
+                })
+                .collect();
+            // Join every worker first, then surface the first error like the sequential
+            // path would instead of aborting the scope with a thread panic.
+            let mut all = Vec::with_capacity(threads);
+            for h in handles {
+                all.push(h.join().map_err(|_| PsdError::LimitExceeded("an RLE worker panicked"))??);
+            }
+            Ok(all)
+        })?
+    };
+    let packed_total: usize = chunk_list.iter().map(|c| c.packed.len()).sum();
+    let mut out = vec![0u8; rows * cs + packed_total];
+    let mut counts_at = 0usize;
+    let mut packed_at = rows * cs;
+    for chunk in &chunk_list {
+        out[counts_at..counts_at + chunk.counts.len()].copy_from_slice(&chunk.counts);
+        counts_at += chunk.counts.len();
+        out[packed_at..packed_at + chunk.packed.len()].copy_from_slice(&chunk.packed);
+        packed_at += chunk.packed.len();
+    }
     Ok(out)
 }
 
@@ -474,22 +539,28 @@ pub fn unpredict(buf: &mut [u8], layout: &PlaneLayout) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    /// A ZIP stream past the decode budget isn't inflated while parsing; decoding it refuses
-    /// (storytold/photocraft@0fb4bbf1).
-    #[test]
-    fn zip_over_budget_is_not_decompressed_at_parse() {
-        let l = PlaneLayout { planes: 4, width: 300_000, height: 300_000, depth: 8, version: Version::Psb };
-        assert!(l.total_bytes().unwrap() > MAX_DECODED_BYTES);
-        let garbage = [0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03];
-        for c in [Compression::Zip, Compression::ZipPrediction] {
-            validate_planes(c, &garbage, &l).unwrap();
-            assert!(matches!(decode_planes(c, &garbage, &l), Err(PsdError::LimitExceeded(_))), "{c:?}");
-        }
-        let small = PlaneLayout { planes: 1, width: 4, height: 4, depth: 8, version: Version::Psd };
-        assert!(validate_planes(Compression::Zip, &garbage, &small).is_err());
-    }
-
     use super::*;
+
+    #[test]
+    fn checked_zip_validates_trailer_size_and_padding_budget() {
+        let layout = PlaneLayout { planes: 1, width: 3, height: 1, depth: 8, version: Version::Psd };
+        for compression in [Compression::Zip, Compression::ZipPrediction] {
+            let data = encode_planes(compression, &[1, 2, 3], &layout).unwrap();
+            for cut in 0..data.len() {
+                assert!(decode_planes(compression, &data[..cut], &layout).is_err(), "cut {cut}");
+                assert!(validate_planes(compression, &data[..cut], &layout).is_err());
+            }
+            let mut corrupt = data;
+            *corrupt.last_mut().unwrap() ^= 1;
+            assert!(decode_planes(compression, &corrupt, &layout).is_err());
+            assert!(validate_planes(compression, &corrupt, &layout).is_err());
+        }
+        let padded = zip_compress(&[1, 2, 3, 0]);
+        assert_eq!(decode_planes(Compression::Zip, &padded, &layout).unwrap(), [1, 2, 3]);
+        let bomb = zip_compress(&vec![0; (1 << 20) + 4]);
+        assert!(decode_planes(Compression::Zip, &bomb, &layout).is_err());
+        assert!(validate_planes(Compression::Zip, &bomb, &layout).is_err());
+    }
 
     fn layout(planes: usize, width: usize, height: usize, depth: u16, version: Version) -> PlaneLayout {
         PlaneLayout { planes, width, height, depth, version }
@@ -694,6 +765,23 @@ mod tests {
         }
     }
 
+    /// #2926: a ZIP stream declaring more than `MAX_DECODED_BYTES` is not inflated at parse
+    /// time. Garbage zlib data proves it: decompressing it would fail, skipping it passes, and
+    /// decoding the layout still reports the size limit.
+    #[test]
+    fn zip_over_budget_is_not_decompressed_at_parse() {
+        let l = layout(4, 300_000, 300_000, 8, Version::Psb);
+        assert!(l.total_bytes().unwrap() > MAX_DECODED_BYTES);
+        let garbage = [0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03];
+        for c in [Compression::Zip, Compression::ZipPrediction] {
+            validate_planes(c, &garbage, &l).unwrap();
+            assert!(matches!(decode_planes(c, &garbage, &l), Err(PsdError::LimitExceeded(_))), "{c:?}");
+        }
+        // Within the budget the stream is still checked.
+        let small = layout(1, 4, 4, 8, Version::Psd);
+        assert!(validate_planes(Compression::Zip, &garbage, &small).is_err());
+    }
+
     #[test]
     fn raw_short_fails() {
         let l = layout(2, 3, 3, 8, Version::Psd);
@@ -789,5 +877,81 @@ mod tests {
     #[test]
     fn zip_garbage_errors() {
         assert!(zip_decompress(&[1, 2, 3, 4], 4).is_err());
+    }
+}
+
+#[cfg(test)]
+mod parallel_rle_equivalence {
+    use super::*;
+
+    /// The parallel row packer's output must be byte-equal to a straightforward sequential
+    /// encoding of the same plane, across depths, row counts around the chunking and data
+    /// shapes (runs, noise, all-default).
+    #[test]
+    fn parallel_rle_matches_sequential() {
+        let mut data: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            data ^= data << 13;
+            data ^= data >> 7;
+            data ^= data << 17;
+            data
+        };
+        let layout_for = |rows: usize, rb: usize, version: Version| PlaneLayout { planes: 1, width: rb, height: rows, depth: 8, version };
+        for (rows, rb, version) in [
+            (0usize, 4usize, Version::Psd),
+            (1, 4, Version::Psd),
+            (7, 4, Version::Psb),
+            (64, 4, Version::Psd),
+            (65, 4, Version::Psb),  // chunk boundary
+            (513, 4, Version::Psd), // more rows than threads on most runners
+            (2049, 4, Version::Psb),
+            (2, 4, Version::Psd), // fewer rows than threads
+            (33, 3000, Version::Psd),
+            (31, 20000, Version::Psb),
+        ] {
+            let pattern: Vec<u8> = match rows % 3 {
+                0 => vec![7u8; rows * rb],                                   // long runs
+                1 => (0..rows * rb).map(|i| (i * 31 % 251) as u8).collect(), // noise-ish
+                _ => vec![0u8; rows * rb],                                   // all default
+            };
+            let pattern = if pattern.len() != rows * rb { vec![7u8; rows * rb] } else { pattern };
+            let mut data = pattern.clone();
+            if rows % 4 == 0 {
+                // sprinkle runs into the noise
+                for chunk in data.chunks_mut(97) {
+                    if let Some(f) = chunk.first_mut() {
+                        *f = 200;
+                    }
+                }
+            }
+            let _ = next();
+            let layout = layout_for(rows, rb, version);
+            let parallel = encode_rle(&data, &layout).expect("parallel encode");
+            let sequential = encode_rle_sequential(&data, &layout).expect("sequential encode");
+            assert_eq!(parallel, sequential, "rows {rows} rb {rb}");
+        }
+    }
+
+    /// The pre-parallel encoder, kept as the oracle.
+    fn encode_rle_sequential(decoded: &[u8], layout: &PlaneLayout) -> Result<Vec<u8>> {
+        let rows = layout.rows()?;
+        let rb = layout.row_bytes();
+        let cs = layout.count_size();
+        let mut out = vec![0u8; rows * cs];
+        let mut enc = Vec::new();
+        for row in 0..rows {
+            let start = enc.len();
+            packbits::encode(&decoded[row * rb..(row + 1) * rb], &mut enc);
+            let n = enc.len() - start;
+            if cs == 2 {
+                let n = u16::try_from(n).map_err(|_| PsdError::LimitExceeded("RLE row exceeds 65535 bytes (use PSB)"))?;
+                out[row * 2..row * 2 + 2].copy_from_slice(&n.to_be_bytes());
+            } else {
+                let n = u32::try_from(n).map_err(|_| PsdError::LimitExceeded("RLE row too large"))?;
+                out[row * 4..row * 4 + 4].copy_from_slice(&n.to_be_bytes());
+            }
+        }
+        out.extend_from_slice(&enc);
+        Ok(out)
     }
 }

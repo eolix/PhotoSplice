@@ -4,20 +4,22 @@
 //! drop shadows, outer glows, outer bevel, then the layer itself (content at
 //! fill opacity) with pattern/gradient/colour overlays, satin, inner glows,
 //! inner shadows, strokes and the inner bevel on top. Exterior effects blend
-//! straight into the backdrop with their own modes; the layer and its
-//! interior effects blend with the layer's mode. Emboss and pillow emboss then
+//! straight into the backdrop with their own modes; the layer blends with its
+//! mode and the interior effects paint over the result, or blend with it as a
+//! group (Blend Interior Effects as Group, [`premerges_layer`]). Emboss and pillow emboss then
 //! shade the composited result (inside and outside halves). Layer opacity
 //! applies to the whole stack; fill opacity only to the layer's own pixels.
 //!
 //! Interior effects are painted relative to the layer's shape and then take the shape's alpha
 //! (an overlay recolours a half-transparent edge without adding coverage). The outside parts
 //! of strokes blend onto the backdrop with their own modes, an upper stroke covering the
-//! lower ones. Drop shadows are knocked out only through see-through fill.
+//! lower ones. Drop shadows are knocked out through see-through fill, and beneath the whole shape
+//! when the layer's mode lets what's under it show through (see [`shadow_see_through`]).
 //!
-//! Shapes come from the layer's alpha (after its mask). Strokes and spread / choke measure
-//! distances with a 5 × 5 chamfer metric seeded at sub-pixel edge offsets (as Photoshop does);
-//! precise glows and chiselled bevels use an exact Euclidean distance transform. Soft falloffs
-//! are two box blurs (a tent).
+//! Shapes come from the layer's alpha (after its mask). A stroke's outer edge, and precise glows /
+//! chiselled bevels, use an exact Euclidean transform: a 5 × 5 chamfer's level sets are polygons,
+//! which a wide stroke shows as flat facets (#3646). Inside stroke edges and spread / choke keep the
+//! cheaper chamfer. Soft falloffs are two box blurs (a tent).
 
 use photosplice_color::blend::BlendMode;
 use photosplice_doc::Pattern;
@@ -43,7 +45,7 @@ pub fn margin(layer: &Layer) -> i32 {
             Effect::DropShadow(s) | Effect::InnerShadow(s) => s.distance + s.size,
             Effect::OuterGlow(g) | Effect::InnerGlow(g) => g.size,
             Effect::Stroke(s) => s.size,
-            Effect::Satin(s) => s.distance + s.size,
+            Effect::Satin(s) => satin_distance(s) + s.size,
             Effect::BevelEmboss(b) => b.size + b.soften,
             _ => 0.0,
         };
@@ -58,6 +60,23 @@ pub fn margin(layer: &Layer) -> i32 {
 
 /// Maximum distance (px) an effect is rendered from the layer's shape.
 pub const MAX_REACH: f32 = 512.0;
+
+/// Whether every enabled effect's maps are local: each map pixel depends only on the shape
+/// within [`margin`] of it (shifts, chamfer distances compared with a size, tent blurs), so
+/// maps built over a part of the layer's region padded by twice the margin equal the
+/// whole-region maps over that part (#1909). Not local: gradient strokes (laid out over the whole
+/// shape's extent), Precise glows and chiselled bevels (exact Euclidean distances, whose f32
+/// arithmetic depends on where the region starts) and noise (it speckles any coverage above
+/// zero, so it would pick up the blur's float noise, which depends on where the region starts).
+pub(crate) fn maps_are_local(layer: &Layer) -> bool {
+    layer.effects.items.iter().filter(|e| e.enabled()).all(|e| match e {
+        Effect::Stroke(s) => !matches!(s.paint, FxPaint::Gradient(_)),
+        Effect::DropShadow(s) | Effect::InnerShadow(s) => s.noise <= 0.0,
+        Effect::OuterGlow(g) | Effect::InnerGlow(g) => g.technique != GlowTechnique::Precise && g.noise <= 0.0,
+        Effect::BevelEmboss(b) => b.technique == BevelTechnique::Smooth,
+        _ => true,
+    })
+}
 
 /// A single-channel map over a rectangle.
 #[derive(Clone)]
@@ -77,6 +96,10 @@ impl Map {
     /// Shifted copy (bilinear), outside reads `outside`.
     fn shifted(&self, dx: f32, dy: f32, outside: f32) -> Map {
         let mut out = Map::new(self.w, self.h, 0.0);
+        // A hostile distance (±1e30, inf, NaN) would overflow the i64 offsets below; no shift beyond
+        // 2^30 px can land inside a map, so clamp (non-finite shifts read as none).
+        let reach = |d: f32| if d.is_finite() { d.clamp(-1.0e9, 1.0e9) } else { 0.0 };
+        let (dx, dy) = (reach(dx), reach(dy));
         let (fx, fy) = (dx.floor(), dy.floor());
         let (ax, ay) = (dx - fx, dy - fy);
         let s = |x: i64, y: i64| if x < 0 || y < 0 || x >= self.w as i64 || y >= self.h as i64 { outside } else { self.v[y as usize * self.w + x as usize] };
@@ -150,33 +173,161 @@ fn edt(inside: &[bool], w: usize, h: usize) -> Vec<f32> {
     edt_nearest(inside, w, h).0
 }
 
-/// [`edt`] plus the index of the nearest `inside` pixel.
-fn edt_nearest(inside: &[bool], w: usize, h: usize) -> (Vec<f32>, Vec<usize>) {
+/// Maps with fewer pixels (or other units of work) than this are not worth spawning threads for.
+const PAR_MIN: usize = 1 << 16;
+
+/// Most threads one pass uses (as for the blurs, [`rows_par`]).
+const PAR_THREADS: usize = 16;
+
+#[cfg(test)]
+thread_local! {
+    /// Test hook: the thread count [`par_threads`] gives on this thread, whatever the work.
+    static THREADS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// How many threads a pass over `work` pixels (or similar units) uses.
+fn par_threads(work: usize) -> usize {
+    #[cfg(test)]
+    if let Some(n) = THREADS.with(std::cell::Cell::get) {
+        return n;
+    }
+    if cfg!(target_arch = "wasm32") || work < PAR_MIN { 1 } else { std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, PAR_THREADS) }
+}
+
+/// Runs `f(scratch, u, a_u, b_u)` for every unit `u` of two slices: unit `u` of `a` is
+/// `a[u * unit_a..][..unit_a]` (the last may be shorter), the same of `b` with `unit_b`, which is 0
+/// when there is no second slice. `work` says how big the whole pass is ([`par_threads`]). Groups of
+/// units go to scoped OS threads, each with a scratch value from `init`; not to rayon, as for
+/// [`rows_par`]: maps are built from inside rayon tiles, where a waiting worker steals other tiles.
+/// A unit is computed from its own arguments alone, so the result does not depend on the threads.
+fn par_units<S, A: Send, B: Send>(
+    work: usize,
+    a: &mut [A],
+    unit_a: usize,
+    b: &mut [B],
+    unit_b: usize,
+    init: impl Fn() -> S + Sync,
+    f: impl Fn(&mut S, usize, &mut [A], &mut [B]) + Sync,
+) {
+    if unit_a == 0 {
+        return;
+    }
+    let units = a.len().div_ceil(unit_a);
+    let threads = par_threads(work).min(units);
+    if threads <= 1 {
+        run_units(&mut init(), 0, a, unit_a, b, unit_b, &f);
+        return;
+    }
+    // Many more groups than threads, so that a heavy one (an edge-rich stretch) does not hold the rest up.
+    let group = units.div_ceil(threads * 8).max(1);
+    let mut groups = Vec::new();
+    let (mut rest_a, mut rest_b, mut first) = (a, b, 0usize);
+    while !rest_a.is_empty() {
+        let (ga, na) = rest_a.split_at_mut((group * unit_a).min(rest_a.len()));
+        let (gb, nb) = rest_b.split_at_mut((group * unit_b).min(rest_b.len()));
+        groups.push((first, ga, gb));
+        (rest_a, rest_b, first) = (na, nb, first + group);
+    }
+    let queue = std::sync::Mutex::new(groups.into_iter());
+    let worker = || {
+        let mut scratch = init();
+        loop {
+            let next = queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner).next();
+            let Some((first, ga, gb)) = next else { break };
+            run_units(&mut scratch, first, ga, unit_a, gb, unit_b, &f);
+        }
+    };
+    std::thread::scope(|sc| {
+        // A thread that cannot be spawned leaves its share to the others.
+        for _ in 1..threads {
+            let _ = std::thread::Builder::new().spawn_scoped(sc, worker);
+        }
+        worker();
+    });
+}
+
+fn run_units<S, A, B>(scratch: &mut S, first: usize, a: &mut [A], unit_a: usize, b: &mut [B], unit_b: usize, f: &impl Fn(&mut S, usize, &mut [A], &mut [B])) {
+    for (k, ua) in a.chunks_mut(unit_a).enumerate() {
+        let ub = b.get_mut(k * unit_b..((k + 1) * unit_b).min(b.len())).unwrap_or(&mut []);
+        f(scratch, first + k, ua, ub);
+    }
+}
+
+/// A `w × h` buffer of `fill`, then filled row by row through `f(y, row)`.
+fn par_fill<T: Clone + Send>(w: usize, h: usize, fill: T, f: impl Fn(usize, &mut [T]) + Sync) -> Vec<T> {
+    let mut out = vec![fill; w.saturating_mul(h)];
+    par_units(out.len(), &mut out, w.max(1), &mut [] as &mut [()], 0, || (), |_, y, row, _| f(y, row));
+    out
+}
+
+/// Working buffers of the 1D distance transform, for lines of up to `n` pixels.
+struct Dt1Scratch {
+    f: Vec<f32>,
+    o: Vec<f32>,
+    v: Vec<usize>,
+    z: Vec<f32>,
+    near: Vec<usize>,
+}
+
+impl Dt1Scratch {
+    fn new(n: usize) -> Self {
+        Dt1Scratch { f: vec![0.0; n], o: vec![0.0; n], v: vec![0; n], z: vec![0.0; n + 1], near: vec![0; n] }
+    }
+}
+
+/// [`edt`] plus the index of the nearest `inside` pixel (as `u32`: a map past 2³² pixels has no
+/// nearest pixel to give, and every distance is then "far").
+///
+/// Both passes run line by line in parallel: the columns, then the rows. The columns' results are
+/// kept column by column (`gc[x * h + y]`) so that each thread writes its own stretch of them.
+fn edt_nearest(inside: &[bool], w: usize, h: usize) -> (Vec<f32>, Vec<u32>) {
     const INF: f32 = 1e20;
-    let mut g: Vec<f32> = inside.iter().map(|&b| if b { 0.0 } else { INF }).collect();
-    let mut near_row = vec![0usize; w * h];
-    let mut nearest = vec![0usize; w * h];
+    let total = w.saturating_mul(h);
+    if total != inside.len() || total > u32::MAX as usize {
+        return (vec![INF; inside.len()], vec![0; inside.len()]);
+    }
     let n = w.max(h);
-    let (mut f, mut o, mut v, mut z, mut nr) = (vec![0.0; n], vec![0.0; n], vec![0usize; n], vec![0.0f32; n + 1], vec![0usize; n]);
-    for x in 0..w {
-        for y in 0..h {
-            f[y] = g[y * w + x];
-        }
-        dt1(&f[..h], &mut o[..h], &mut v, &mut z, &mut nr[..h]);
-        for y in 0..h {
-            g[y * w + x] = o[y];
-            near_row[y * w + x] = nr[y];
-        }
-    }
-    for y in 0..h {
-        f[..w].copy_from_slice(&g[y * w..(y + 1) * w]);
-        dt1(&f[..w], &mut o[..w], &mut v, &mut z, &mut nr[..w]);
-        for x in 0..w {
-            g[y * w + x] = o[x].sqrt();
-            let px = nr[x];
-            nearest[y * w + x] = near_row[y * w + px] * w + px;
-        }
-    }
+    let mut gc = vec![0.0f32; total];
+    let mut nc = vec![0u32; total];
+    par_units(
+        total,
+        &mut gc,
+        h.max(1),
+        &mut nc,
+        h.max(1),
+        || Dt1Scratch::new(n),
+        |t, x, g, near| {
+            for (y, f) in t.f[..h].iter_mut().enumerate() {
+                *f = if inside[y * w + x] { 0.0 } else { INF };
+            }
+            dt1(&t.f[..h], &mut t.o[..h], &mut t.v, &mut t.z, &mut t.near[..h]);
+            g.copy_from_slice(&t.o[..h]);
+            for (d, &p) in near.iter_mut().zip(&t.near[..h]) {
+                *d = p as u32;
+            }
+        },
+    );
+    let mut g = vec![0.0f32; total];
+    let mut nearest = vec![0u32; total];
+    par_units(
+        total,
+        &mut g,
+        w.max(1),
+        &mut nearest,
+        w.max(1),
+        || Dt1Scratch::new(n),
+        |t, y, out, near| {
+            for (x, f) in t.f[..w].iter_mut().enumerate() {
+                *f = gc[x * h + y];
+            }
+            dt1(&t.f[..w], &mut t.o[..w], &mut t.v, &mut t.z, &mut t.near[..w]);
+            for (x, (d, ne)) in out.iter_mut().zip(near.iter_mut()).enumerate() {
+                *d = t.o[x].sqrt();
+                let px = t.near[x];
+                *ne = (nc[px * h + y] as usize * w + px) as u32;
+            }
+        },
+    );
     (g, nearest)
 }
 
@@ -244,10 +395,28 @@ fn dist_outside(s: &Map) -> Vec<f32> {
 /// Distance metric for effect distance fields.
 #[derive(Clone, Copy, PartialEq)]
 enum Metric {
-    /// Exact Euclidean (precise glows, bevels).
+    /// Exact Euclidean (effect edges).
     Euclidean,
-    /// 5 × 5 chamfer (strokes, spread / choke; see [`chamfer_nearest`]).
+    /// 5 × 5 chamfer (inside strokes, spread / choke; see [`chamfer_nearest`]).
     Chamfer,
+}
+
+/// Outside width from which a stroke's outer edge uses the exact Euclidean transform instead of
+/// the fitted 5 × 5 chamfer.
+///
+/// The chamfer's level sets are octagons: measured against a point source, its distance exceeds
+/// the Euclidean radius by up to `0.027 · r` px — 0.48 px at r = 18 (the widest outside stroke any
+/// Photoshop oracle matches with the chamfer) and 1.6 px at r = 60, where a wide stroke's boundary
+/// visibly facets (#3646). Half a pixel of deviation is reached at r ≈ 19, so strokes narrower
+/// than 20 px keep the chamfer, whose sub-pixel edge seeding Photoshop matches at small offsets,
+/// and wider ones stay round.
+pub const STROKE_CHAMFER_MAX: f32 = 20.0;
+
+/// Whether a stroke whose outside edge is `out_w` px wide uses the exact Euclidean transform (round)
+/// rather than the 5 × 5 chamfer's octagon ([`STROKE_CHAMFER_MAX`]). The CPU compositor and the GPU
+/// compositor's `program_with` both call this, so a stroke picks the same field in each.
+pub fn stroke_outside_exact(out_w: f32) -> bool {
+    out_w >= STROKE_CHAMFER_MAX
 }
 
 fn dist_outside_by(s: &Map, m: Metric) -> Vec<f32> {
@@ -257,9 +426,23 @@ fn dist_outside_by(s: &Map, m: Metric) -> Vec<f32> {
         let (d, _) = chamfer_from(start, s.w, s.h);
         return d.iter().zip(&s.v).map(|(d, &a)| if a > INSIDE_EPS { -0.5 } else { d - 0.5 }).collect();
     }
-    let inside: Vec<bool> = s.v.iter().map(|&a| a > INSIDE_EPS).collect();
+    let inside = covered(s, |a| a > INSIDE_EPS);
     let (d, near) = edt_nearest(&inside, s.w, s.h);
-    (0..d.len()).map(|i| if inside[i] { -0.5 } else { d[i] - 0.5 + (1.0 - s.v[near[i]].min(1.0)) }).collect()
+    par_fill(s.w, s.h, 0.0f32, |y, row| {
+        for (x, out) in row.iter_mut().enumerate() {
+            let i = y * s.w + x;
+            *out = if inside[i] { -0.5 } else { d[i] - 0.5 + (1.0 - s.v[near[i] as usize].min(1.0)) };
+        }
+    })
+}
+
+/// Which pixels of `s` satisfy `test`, row by row in parallel.
+fn covered(s: &Map, test: impl Fn(f32) -> bool + Sync) -> Vec<bool> {
+    par_fill(s.w, s.h, false, |y, row| {
+        for (e, &a) in row.iter_mut().zip(s.v.get(y * s.w..).unwrap_or_default()) {
+            *e = test(a);
+        }
+    })
 }
 
 /// Distance from inside pixel `i` to the shape's edge as seen from its nearest not fully covered
@@ -322,7 +505,12 @@ fn edge_normal(s: &Map, x: i64, y: i64) -> Option<(f32, f32, f32)> {
 fn dist_outside_smooth(s: &Map) -> Vec<f32> {
     let inside: Vec<bool> = s.v.iter().map(|&a| a > INSIDE_EPS).collect();
     let (d, near) = edt_nearest(&inside, s.w, s.h);
-    (0..d.len()).map(|i| if inside[i] { -0.5 } else { edge_distance_dir(s, i, near[i], d[i], -1.0, s.v[near[i]].min(1.0) - 0.5) }).collect()
+    (0..d.len())
+        .map(|i| {
+            let q = near.get(i).map_or(i, |&q| q as usize);
+            if inside[i] { -0.5 } else { edge_distance_dir(s, i, q, d[i], -1.0, s.v.get(q).map_or(1.0, |a| a.min(1.0)) - 0.5) }
+        })
+        .collect()
 }
 
 /// Distance from each pixel centre inside the shape to the shape's edge
@@ -352,24 +540,26 @@ fn dist_inside_by(s: &Map, m: Metric) -> Vec<f32> {
         let (d, _) = chamfer_from(start, s.w, s.h);
         return d.iter().zip(&s.v).map(|(d, &a)| if a <= INSIDE_EPS { -0.5 } else { d - 0.5 }).collect();
     }
-    let outside: Vec<bool> = s.v.iter().map(|&a| a <= INSIDE_EPS).collect();
+    let outside = covered(s, |a| a <= INSIDE_EPS);
     let (d, _) = edt_nearest(&outside, s.w, s.h);
     // Fully covered pixels measure to the anti-aliased edge: seeds are the pixels not fully
     // covered, the edge `½ − coverage` beyond their centre (see `edge_distance`). Edge pixels
     // keep the distance to the nearest uncovered pixel.
     let seeds: Vec<bool> = s.v.iter().map(|&a| a < 1.0 - INSIDE_EPS).collect();
     let (ds, near) = edt_nearest(&seeds, s.w, s.h);
-    (0..d.len())
-        .map(|i| {
-            if outside[i] {
+    par_fill(s.w, s.h, 0.0f32, |y, row| {
+        for (x, out) in row.iter_mut().enumerate() {
+            let i = y * s.w + x;
+            *out = if outside[i] {
                 -0.5
             } else if seeds[i] {
                 d[i] - 0.5
             } else {
-                edge_distance(s, i, near[i], ds[i], 0.5 - s.v[near[i]].min(1.0)).max(0.0)
-            }
-        })
-        .collect()
+                let q = near.get(i).map_or(i, |&q| q as usize);
+                edge_distance(s, i, q, ds[i], 0.5 - s.v.get(q).map_or(1.0, |a| a.min(1.0))).max(0.0)
+            };
+        }
+    })
 }
 
 /// Alpha relative to the 3×3 neighbourhood maximum: separates edge coverage
@@ -428,8 +618,18 @@ fn dilate(s: &Map, r: f32) -> Map {
 fn contour_lut(c: &Contour) -> Option<Vec<f32>> {
     match c {
         Contour::Linear => None,
-        Contour::Custom { points, .. } => Some(crate::adjust::curve_lut(points)),
+        Contour::Custom { points, corners, .. } => Some(crate::adjust::contour_curve_lut(points, corners)),
     }
+}
+
+/// Satin's coverage transfer: the contour read from its far end, `|c(1 − v) − c(1)|`. Measured in
+/// Photoshop 27.11: Cone and Cone − Inverted Satins are identical, and a Gaussian Satin runs under
+/// the diagonal (0.36 at 0.5) while the same Gaussian on a glow or gloss runs over it (0.65).
+/// `None` = identity.
+pub fn satin_lut(c: &Contour) -> Option<Vec<f32>> {
+    let lut = contour_lut(c)?;
+    let end = lut.last().copied().unwrap_or(1.0);
+    Some(lut.iter().rev().map(|v| (v - end).abs()).collect())
 }
 
 /// Interpolated lookup in a 0..=1 table (as the GPU's `lut()`).
@@ -634,19 +834,14 @@ fn shadow_map(shape: &Map, s: &Shadow, light: &GlobalLight, inner: bool, origin:
 }
 
 fn glow_map(shape: &Map, g: &Glow, inner: bool, origin: (i32, i32)) -> Map {
-    let src = if inner {
-        match g.source {
-            GlowSource::Edge => shape.clone().map(|a| 1.0 - a),
-            GlowSource::Center => shape.clone(),
-        }
-    } else {
-        shape.clone()
-    };
+    // An inner glow is built from the edge inwards; a centre-source glow is its inverse, taken
+    // after the contour and Range (Photoshop 27.11, measured: the centre glow is exactly
+    // 1 − the edge glow, for both techniques; brightest deep inside: Photoshop corpus
+    // inner-glow-center-precise-choke30.psd).
+    let src = if inner { shape.clone().map(|a| 1.0 - a) } else { shape.clone() };
     let mut m = match g.technique {
         GlowTechnique::Precise => {
-            // Inner glows measure from the edge inwards, for either source; Center is the Edge
-            // ramp inverted (brightest deep inside: Photoshop corpus
-            // inner-glow-center-precise-choke30.psd).
+            // Inner glows measure from the edge inwards, for either source.
             // Reference measures from pixel centre to pixel centre (half a pixel past the edge
             // distance), holds full strength over the whole pixels of the Spread and fades to
             // nothing one pixel past the Size (corpus outer-glow-precise-spread40.psd, size 16,
@@ -658,25 +853,19 @@ fn glow_map(shape: &Map, g: &Glow, inner: bool, origin: (i32, i32)) -> Map {
             for (o, d) in m.v.iter_mut().zip(d) {
                 *o = if d <= solid { 1.0 } else { (1.0 - (d - solid) / soft).clamp(0.0, 1.0) };
             }
-            if inner && g.source == GlowSource::Center {
-                m = m.map(|v| 1.0 - v);
-            }
             m
         }
         GlowTechnique::Softer => {
             let (r, bw) = spread_split(g.size, g.spread);
             let mut m = dilate(&src, r);
             blur(&mut m, bw);
-            if inner && g.source == GlowSource::Center {
-                // Brightest in the middle: coverage from the distance to the edge.
-                let mut e = dilate(&shape.clone().map(|a| 1.0 - a), r);
-                blur(&mut e, bw);
-                m = e.map(|v| 1.0 - v);
-            }
             m
         }
     };
     m = apply_lut(m, glow_lut(g));
+    if inner && g.source == GlowSource::Center {
+        m = m.map(|v| 1.0 - v);
+    }
     noise(&mut m, g.noise, origin.0, origin.1);
     if inner {
         for (v, a) in m.v.iter_mut().zip(&shape.v) {
@@ -776,10 +965,17 @@ fn paint_glow(dst: &mut Buffer, m: &Map, g: &Glow, shape_bounds: Rect, anchor: (
     paint(dst, &strength, |i| prepared.sample(1.0 - m.v.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0)), g.common.blend, g.common.opacity);
 }
 
+/// A box width as the blurs use it: at least 1, at most [`MAX_REACH`] (an effect never reaches
+/// further, see [`margin`]), and 1 for NaN. A size or softness from a command or a file can be
+/// anything, and an unbounded width sizes the kernel and its buffers (#1543).
+fn box_width(w: f32) -> f32 {
+    if w.is_nan() { 1.0 } else { w.clamp(1.0, MAX_REACH) }
+}
+
 /// Normalised weights of a centred box of (fractional) width `w`: tap `i` gets the overlap of
 /// `[i - 0.5, i + 0.5]` with `[-w/2, w/2]`.
 fn box_weights(w: f32) -> Vec<f32> {
-    let w = w.max(1.0);
+    let w = box_width(w);
     let half = w / 2.0;
     let r = (half - 0.5).ceil().max(0.0) as i64;
     let v: Vec<f32> = (-r..=r).map(|i| ((i as f32 + 0.5).min(half) - (i as f32 - 0.5).max(-half)).max(0.0)).collect();
@@ -805,10 +1001,11 @@ pub fn tent_kernel(w: f32) -> (i32, Vec<f32>) {
 /// Box geometry for a (fractional) width: (`r`, end-tap weight `f`, 1 / width) — the
 /// [`box_weights`] taps are `r - 1` full ones each side of the centre plus the two end taps at `f`.
 fn box_geom(bw: f32) -> (i64, f64, f64) {
-    let half = bw.max(1.0) / 2.0;
+    let bw = box_width(bw);
+    let half = bw / 2.0;
     let r = (half - 0.5).ceil().max(0.0) as i64;
     let f = f64::from((half - (r as f32 - 0.5)).clamp(0.0, 1.0));
-    (r, f, 1.0 / f64::from(bw.max(1.0)))
+    (r, f, 1.0 / f64::from(bw))
 }
 
 /// One box pass over `src` (zero outside it) evaluated at `x0 .. x0 + dst.len()`, as a running
@@ -1171,9 +1368,14 @@ pub struct FxMaps {
     per: Vec<Vec<Map>>,
     bevel_paint: Vec<BevelPaint>,
     din: Option<Vec<f32>>,
+    /// Stroke outside distance below [`STROKE_CHAMFER_MAX`]: the fitted 5 × 5 chamfer.
     dout: Option<Vec<f32>>,
-    /// Shape layers: distance outside the vector outline (from local coverage).
+    /// Stroke outside distance at or above [`STROKE_CHAMFER_MAX`]: the exact Euclidean transform.
+    dout_exact: Option<Vec<f32>>,
+    /// Shape layers: chamfer distance outside the vector outline (from local coverage).
     vdout: Option<Vec<f32>>,
+    /// Shape layers: exact Euclidean distance outside the vector outline (from local coverage).
+    vdout_exact: Option<Vec<f32>>,
     /// `shape` joins the alpha with a filled shape's outline (`crate::effect_outline`).
     outline: bool,
     /// Frames of gradient strokes by outside width (bits): see [`stroke_frame`].
@@ -1192,7 +1394,14 @@ impl FxMaps {
     pub fn bytes(&self) -> usize {
         let n = self.shape.v.len();
         let maps: usize = self.per.iter().map(Vec::len).sum();
-        (1 + maps + usize::from(self.din.is_some()) + usize::from(self.dout.is_some()) + usize::from(self.vdout.is_some())) * n * 4
+        (1 + maps
+            + usize::from(self.din.is_some())
+            + usize::from(self.dout.is_some())
+            + usize::from(self.dout_exact.is_some())
+            + usize::from(self.vdout.is_some())
+            + usize::from(self.vdout_exact.is_some()))
+            * n
+            * 4
     }
 
     fn crop_vec(&self, v: &[f32], to: Rect, fill: f32) -> Vec<f32> {
@@ -1218,8 +1427,14 @@ impl FxMaps {
     }
 }
 
+/// The distance the two satin copies are offset by. Photoshop draws Distance 0 as 1 px (an
+/// edge band of 2/size, measured in Photoshop 27.11), not as two copies cancelling out.
+pub fn satin_distance(s: &photosplice_doc::effects::Satin) -> f32 {
+    s.distance.max(1.0)
+}
+
 fn satin_map(shape: &Map, s: &photosplice_doc::effects::Satin) -> Map {
-    let (dx, dy) = offset(s.angle, s.distance);
+    let (dx, dy) = offset(s.angle, satin_distance(s));
     let mut a = shape.shifted(dx, dy, 0.0);
     let mut b = shape.shifted(-dx, -dy, 0.0);
     // Two box passes of the satin size (fitted: 0.2 % mean error on psd-tools layer_effects).
@@ -1257,7 +1472,25 @@ pub(crate) fn build_maps_prepared(
     let shape = Map { w, h, v: shape };
     let items: Vec<&Effect> = layer.effects.items.iter().filter(|e| e.enabled()).collect();
     let has_stroke = items.iter().any(|e| matches!(e, Effect::Stroke(_)));
-    let (din, dout) = if has_stroke { (Some(dist_inside_by(&shape, Metric::Chamfer)), Some(dist_outside_by(&shape, Metric::Chamfer))) } else { (None, None) };
+    // A stroke's outer edge keeps the 5 × 5 chamfer while its outside width is under
+    // `STROKE_CHAMFER_MAX` — Photoshop matches the chamfer's sub-pixel edge seeding at small
+    // offsets — and uses the exact Euclidean transform at or above it, where the chamfer's octagon
+    // facets a wide stroke (#3646). Inside stroke distances always keep the chamfer. Each outer
+    // field is built only when a stroke of that width is present; the compositor picks per stroke,
+    // so one layer may hold both a narrow and a wide stroke.
+    let out_widths: Vec<f32> =
+        items.iter().filter_map(|e| if let Effect::Stroke(st) = e { Some(stroke_widths(st).1) } else { None }).filter(|w| *w > 0.0).collect();
+    let chamfer_out = out_widths.iter().any(|&w| !stroke_outside_exact(w));
+    let exact_out = out_widths.iter().any(|&w| stroke_outside_exact(w));
+    let (din, dout, dout_exact) = if has_stroke {
+        (
+            Some(dist_inside_by(&shape, Metric::Chamfer)),
+            chamfer_out.then(|| dist_outside_by(&shape, Metric::Chamfer)),
+            exact_out.then(|| dist_outside_by(&shape, Metric::Euclidean)),
+        )
+    } else {
+        (None, None, None)
+    };
     let mut bevel_paint = vec![BevelPaint::Inner; items.len()];
     let per: Vec<Vec<Map>> = items
         .iter()
@@ -1278,7 +1511,7 @@ pub(crate) fn build_maps_prepared(
             {
                 bevel_paint[i] = BevelPaint::Stroke;
                 let stroke = items.iter().find_map(|e| if let Effect::Stroke(st) = e { Some(st) } else { None });
-                match (stroke, &din, &dout) {
+                match (stroke, &din, dout.as_ref().or(dout_exact.as_ref())) {
                     (Some(st), Some(di), Some(dou)) => {
                         let (in_w, out_w) = stroke_widths(st);
                         let ring = Map {
@@ -1329,9 +1562,15 @@ pub(crate) fn build_maps_prepared(
         })
         .collect();
     let vector_shape = matches!(layer.content, photosplice_doc::LayerContent::Shape(_));
-    // Without an outline (unfilled shapes), estimate the vector outline from local coverage.
+    // Without an outline (unfilled shapes), estimate the vector outline from local coverage; it
+    // picks the chamfer or the exact transform the same way.
     let outline = crate::effect_outline(layer).is_some();
-    let vdout = (has_stroke && vector_shape && !outline).then(|| dist_outside_by(&local_coverage(&shape), Metric::Chamfer));
+    let (vdout, vdout_exact) = if has_stroke && vector_shape && !outline {
+        let lc = local_coverage(&shape);
+        (chamfer_out.then(|| dist_outside_by(&lc, Metric::Chamfer)), exact_out.then(|| dist_outside_by(&lc, Metric::Euclidean)))
+    } else {
+        (None, None)
+    };
     let mut frames: Vec<(u32, Rect)> = Vec::new();
     for e in &items {
         if let Effect::Stroke(st) = e
@@ -1343,11 +1582,39 @@ pub(crate) fn build_maps_prepared(
             }
         }
     }
-    FxMaps { rect, shape, per, bevel_paint, din, dout, vdout, outline, frames }
+    FxMaps { rect, shape, per, bevel_paint, din, dout, dout_exact, vdout, vdout_exact, outline, frames }
 }
 
 /// Far outside any shape (distance fill for cropped distance fields).
 const FAR: f32 = 1.0e9;
+
+/// Keep an exterior effect behind the layer's shape when Fill is partly or wholly
+/// transparent. The visible part beneath a fully opaque fill is already covered by the
+/// layer, so avoid attenuating anti-aliased edges twice in that case.
+fn knock_out_exterior(map: &mut Map, shape: &Map, fill_opacity: f32) {
+    let see_through = 1.0 - fill_opacity.clamp(0.0, 1.0);
+    for (coverage, alpha) in map.v.iter_mut().zip(&shape.v) {
+        *coverage *= 1.0 - alpha * see_through;
+    }
+}
+
+/// How far the layer lets a knocked-out drop shadow show beneath its own shape (Layer Knocks Out
+/// Drop Shadow), 0 = covered, 1 = knocked out wholly. In a normal mode an opaque layer covers the
+/// shadow anyway, so only see-through fill knocks it out (and anti-aliased edges are not
+/// attenuated twice). In any other mode the layer blends with what's beneath it, shadow and all:
+/// an Exclusion or Difference layer would invert it, Multiply darken by it, Screen show it as
+/// grey. Photoshop keeps it out from under the shape, so here it's knocked out wholly.
+pub fn shadow_see_through(layer: &Layer) -> f32 {
+    if matches!(layer.blend, BlendMode::Normal | BlendMode::Dissolve | BlendMode::PassThrough) { 1.0 - layer.fill_opacity.clamp(0.0, 1.0) } else { 1.0 }
+}
+
+/// Blend Interior Effects as Group off (Photoshop's default): the layer's mode applies to its
+/// own pixels only, and the interior effects paint over the blended result. The layer is merged
+/// into the backdrop before they paint, so an Overlay colour overlay on a black Color-mode layer
+/// tints the grey beneath it (#3996). Normal-like modes give the same result either way.
+pub fn premerges_layer(layer: &Layer) -> bool {
+    !layer.blend_interior && !matches!(layer.blend, BlendMode::Normal | BlendMode::PassThrough | BlendMode::Dissolve)
+}
 
 /// Composites `content` (the layer's own pixels over `big`, alpha already
 /// masked, clipped layers applied) plus its effects into `backdrop`.
@@ -1374,13 +1641,18 @@ pub(crate) fn composite_with_effects_prepared(
     // unmasked fill and the mask applies to fill ∪ stroke), joined with a filled shape's outline.
     let kmask = |i: usize| vstroke.as_ref().and_then(|v| v.mask).and_then(|m| m.get(i)).copied().unwrap_or(1.0);
     let union = |i: usize, a: f32| vstroke.as_ref().and_then(|v| v.stroke.px.get(i)).map_or(a, |s| kmask(i) * (a + s[3] * (1.0 - a)));
-    let shape = if maps.outline {
+    // Transparency Shapes Layer off: the shape is the whole layer (its masks, as the maps were
+    // built), and the content's own transparency acts like fill opacity within it.
+    let shapeless = !layer.transparency_shapes;
+    let shape = if shapeless {
+        maps.crop(&maps.shape, big, 0.0)
+    } else if maps.outline {
         let o = maps.crop(&maps.shape, big, 0.0);
         Map { w, h, v: o.v.iter().zip(&content.px).enumerate().map(|(i, (o, p))| o.max(union(i, p[3]))).collect() }
     } else {
         Map { w, h, v: content.px.iter().enumerate().map(|(i, p)| union(i, p[3])).collect() }
     };
-    let relative = maps.outline || vstroke.is_some();
+    let relative = shapeless || maps.outline || vstroke.is_some();
     let fx = |i: usize, k: usize| maps.crop(&maps.per[i][k], big, 0.0);
     // Layer bounds (gradients aligned with the layer use the whole layer,
     // independent of the render rect).
@@ -1405,20 +1677,21 @@ pub(crate) fn composite_with_effects_prepared(
         if let Effect::DropShadow(s) = e {
             let mut m = fx(i, 0);
             if s.knocks_out {
-                // The layer hides the shadow beneath it only where its fill is see-through: at
-                // 100 % fill the layer covers it anyway (and anti-aliased edges are not
-                // attenuated twice), at 0 % the shape shows the bare backdrop.
-                let see_through = 1.0 - layer.fill_opacity.clamp(0.0, 1.0);
-                for (v, a) in m.v.iter_mut().zip(&shape.v) {
-                    *v *= 1.0 - a * see_through;
-                }
+                // The layer hides the shadow beneath it where its fill is see-through (at 100 %
+                // fill in a normal mode it covers it anyway; at 0 % the shape shows the bare
+                // backdrop), and wholly in a mode that blends with it ([`shadow_see_through`]).
+                knock_out_exterior(&mut m, &shape, 1.0 - shadow_see_through(layer));
             }
             paint_color(&mut work, &m, rgb(&s.color), s.common.blend, s.common.opacity);
         }
     }
     for (i, e) in rev() {
         if let Effect::OuterGlow(g) = e {
-            paint_glow(&mut work, &fx(i, 0), g, sb, anchor, big, patterns);
+            let mut m = fx(i, 0);
+            // The glow is behind the shape, not painted across its interior when Fill is 0 %.
+            // Preserve the existing anti-aliased edge when the fill is fully opaque.
+            knock_out_exterior(&mut m, &shape, layer.fill_opacity);
+            paint_glow(&mut work, &m, g, sb, anchor, big, patterns);
         }
     }
 
@@ -1444,6 +1717,13 @@ pub(crate) fn composite_with_effects_prepared(
         }
     };
     let mut lay = Buffer { rect: big, px: content.px.iter().zip(&shape.v).enumerate().map(|(i, (p, a))| [p[0], p[1], p[2], lay_alpha(i, p, *a)]).collect() };
+    let gamma = crate::text_gamma(layer);
+    let premerge = premerges_layer(layer);
+    if premerge {
+        for (lp, wp) in lay.px.iter_mut().zip(&work.px) {
+            *lp = psblend::composite_gamma(layer.blend, *wp, *lp, 1.0, gamma);
+        }
+    }
     let rel = |m: Map| -> Map {
         let v = m.v.iter().zip(&shape.v).map(|(m, a)| if inside(*a) { (m / a).min(1.0) } else { 0.0 }).collect();
         Map { w: m.w, h: m.h, v }
@@ -1498,10 +1778,13 @@ pub(crate) fn composite_with_effects_prepared(
     // Strokes. Inside parts are painted over the layer (bottom instance first); outside parts
     // are slid beneath it, so the first listed (top) instance is processed first.
     let strokes: Vec<&photosplice_doc::StrokeFx> = items.iter().filter_map(|e| if let Effect::Stroke(s) = e { Some(s) } else { None }).collect();
-    let (din, dout) = match (&maps.din, &maps.dout) {
-        (Some(a), Some(b)) if !strokes.is_empty() => (maps.crop_vec(a, big, 0.0), maps.crop_vec(b, big, FAR)),
-        _ => (Vec::new(), Vec::new()),
-    };
+    let ready = !strokes.is_empty();
+    let din = if ready { maps.din.as_ref().map(|a| maps.crop_vec(a, big, 0.0)).unwrap_or_default() } else { Vec::new() };
+    // A stroke's outer edge picks the chamfer or the exact field by its width
+    // ([`stroke_outside_exact`]); both are cropped here, and only the ones a stroke needs exist.
+    let crop_out = |v: &Option<Vec<f32>>| v.as_ref().map(|b| maps.crop_vec(b, big, FAR));
+    let (dout, dout_exact, vdout, vdout_exact) =
+        if ready { (crop_out(&maps.dout), crop_out(&maps.dout_exact), crop_out(&maps.vdout), crop_out(&maps.vdout_exact)) } else { (None, None, None, None) };
     let widths = stroke_widths;
     // A gradient stroke aligned with the layer spans the stroke's own extent.
     let frame = |st: &photosplice_doc::StrokeFx| maps.stroke_frame(st).unwrap_or(sb);
@@ -1554,7 +1837,9 @@ pub(crate) fn composite_with_effects_prepared(
     for (p, a) in lay.px.iter_mut().zip(&shape.v) {
         p[3] *= a.min(1.0);
     }
-    let vdout = maps.vdout.as_ref().filter(|_| vector_shape && !strokes.is_empty()).map(|v| maps.crop_vec(v, big, FAR));
+    // Shape layers without a filled outline stroke their vector outline, estimated from local
+    // coverage; every other layer strokes its shape. The width then picks the field.
+    let vector_outline = vector_shape && !maps.outline;
     // Outside parts lie beneath the layer and blend onto the backdrop with their own mode. A
     // higher stroke covers the ones below it (Photoshop: a Multiply stroke listed above a wider
     // Normal stroke multiplies the backdrop, not the lower stroke). Each stroke's share is its
@@ -1572,14 +1857,31 @@ pub(crate) fn composite_with_effects_prepared(
             // Shape layers: Photoshop strokes the vector outline (estimated from local coverage
             // for unfilled shapes); the stroke never shows through the shape's pixels. Along a
             // filled shape's outline it covers the part of each edge pixel outside the path.
-            let d = vdout.as_ref().unwrap_or(&dout);
+            let exact = stroke_outside_exact(out_w);
+            let d: &[f32] = if vector_outline {
+                (if exact { vdout_exact.as_deref() } else { vdout.as_deref() }).unwrap_or_default()
+            } else if exact {
+                dout_exact.as_deref().unwrap_or_default()
+            } else {
+                dout.as_deref().unwrap_or_default()
+            };
             let mut share = vec![0.0f32; w * h];
             for (i, sh) in share.iter_mut().enumerate() {
                 let band = (out_w + 0.5 - d[i]).clamp(0.0, 1.0);
                 let k = if maps.outline {
                     band * outline_share(shape.v[i], lay.px[i][3])
                 } else if inside(shape.v[i]) {
-                    if vector_shape { 0.0 } else { 1.0 }
+                    if vector_shape {
+                        0.0
+                    } else {
+                        // The stroke lies outside the layer's pixels. Beneath the layer it may show
+                        // only through the part of the pixel the shape doesn't cover (1 - a); the
+                        // layer composited on top covers c = a × fill, so the share beneath is
+                        // (1 - a) / (1 - c). At 100 % fill that is 1 (the layer hides the rest, as
+                        // before); at 0 % fill the interior stays clear (Fill 0 % + Outside stroke).
+                        let c = lay.px[i][3].clamp(0.0, 1.0);
+                        if c >= 1.0 { 1.0 } else { ((1.0 - shape.v[i].clamp(0.0, 1.0)) / (1.0 - c)).clamp(0.0, 1.0) }
+                    }
                 } else {
                     band
                 };
@@ -1635,8 +1937,7 @@ pub(crate) fn composite_with_effects_prepared(
     }
 
     // Layer (with interior effects) onto the exterior result, in the layer's mode.
-    let mode = if layer.blend == BlendMode::PassThrough { BlendMode::Normal } else { layer.blend };
-    let gamma = crate::text_gamma(layer);
+    let mode = if premerge || layer.blend == BlendMode::PassThrough { BlendMode::Normal } else { layer.blend };
     for (wp, lp) in work.px.iter_mut().zip(&lay.px) {
         if lp[3] > 0.0 {
             *wp = psblend::composite_gamma(mode, *wp, *lp, 1.0, gamma);
@@ -1749,12 +2050,20 @@ pub enum FieldKind {
     ChokeInside,
     /// Stroke distance inside the shape: inside strokes, precise inner glows.
     StrokeInside,
-    /// Stroke distance outside a shape layer's outline (from its local coverage).
+    /// Exact Euclidean distance outside the shape: a wide raster stroke's outer edge (see
+    /// [`stroke_outside_exact`]). The chamfer's level sets are polygons (an ~8-fold octagon), so a
+    /// wide stroke's outer boundary facets; the shadow / glow spread above keeps the chamfer (#3646).
+    StrokeOutsideExact,
+    /// Stroke distance outside a shape layer's outline (from its local coverage), exact Euclidean.
     StrokeOutsideVector,
+    /// Chamfer distance outside a shape layer's outline (from its local coverage): a narrow vector
+    /// stroke's outer edge, where the chamfer matches Photoshop (see [`STROKE_CHAMFER_MAX`]).
+    StrokeOutsideVectorChamfer,
 }
 
-/// The `kind` distance field of the shape `alpha` (row-major `w × h`).
-pub fn distance_field(kind: FieldKind, alpha: Vec<f32>, w: usize, h: usize) -> Vec<f32> {
+/// The `kind` distance field of the shape `alpha` (row-major `w × h`). Values past `_reach` pixels
+/// from the shape's edge are only meant to be large (every field here is computed in full).
+pub fn distance_field(kind: FieldKind, alpha: Vec<f32>, w: usize, h: usize, _reach: f32) -> Vec<f32> {
     let s = Map { w, h, v: alpha };
     match kind {
         FieldKind::Outside => dist_outside(&s),
@@ -1763,7 +2072,9 @@ pub fn distance_field(kind: FieldKind, alpha: Vec<f32>, w: usize, h: usize) -> V
         FieldKind::StrokeOutside => dist_outside_by(&s, Metric::Chamfer),
         FieldKind::ChokeInside => dist_outside_by(&s.map(|a| 1.0 - a), Metric::Chamfer),
         FieldKind::StrokeInside => dist_inside_by(&s, Metric::Chamfer),
-        FieldKind::StrokeOutsideVector => dist_outside_by(&local_coverage(&s), Metric::Chamfer),
+        FieldKind::StrokeOutsideExact => dist_outside_by(&s, Metric::Euclidean),
+        FieldKind::StrokeOutsideVector => dist_outside_by(&local_coverage(&s), Metric::Euclidean),
+        FieldKind::StrokeOutsideVectorChamfer => dist_outside_by(&local_coverage(&s), Metric::Chamfer),
     }
 }
 
@@ -1771,6 +2082,22 @@ pub fn distance_field(kind: FieldKind, alpha: Vec<f32>, w: usize, h: usize) -> V
 mod tests {
     use super::*;
     use photosplice_doc::GradientStyle;
+
+    /// Runs `f` with every parallel pass on this thread using `n` threads (1 = in order), whatever its size.
+    fn with_threads<R>(n: usize, f: impl FnOnce() -> R) -> R {
+        struct Restore(Option<usize>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                THREADS.with(|t| t.set(self.0));
+            }
+        }
+        let _restore = Restore(THREADS.with(|t| t.replace(Some(n))));
+        f()
+    }
+
+    fn bits(v: &[f32]) -> Vec<u32> {
+        v.iter().map(|x| x.to_bits()).collect()
+    }
 
     #[test]
     fn edt_is_exact() {
@@ -1890,6 +2217,11 @@ mod tests {
         assert_eq!(r, 4);
         assert!(k[0] > 0.0 && k[0] < 1.0 / 25.0);
         assert_eq!(tent_kernel(1.0), (0, vec![1.0]));
+        // #1543: a huge, infinite or NaN width is capped, not turned into a kernel of 2^62 taps.
+        for w in [1e30, f32::INFINITY, f32::MAX] {
+            assert_eq!(tent_kernel(w), tent_kernel(MAX_REACH), "{w}");
+        }
+        assert_eq!(tent_kernel(f32::NAN), (0, vec![1.0]));
     }
 
     fn no_tex() -> TextureCtx<'static> {
@@ -1982,6 +2314,83 @@ mod tests {
         let row = 39 + reach + 1; // last shape row + reach + 1: height 0, neighbour above raised
         assert!(m[1].v[row * 60 + 30] > 0.0, "{}", m[1].v[row * 60 + 30]);
         assert_eq!(m[1].v[(row + 1) * 60 + 30], 0.0);
+    }
+
+    #[test]
+    fn par_units_visits_every_unit_once_with_its_own_slices() {
+        // Lengths that leave a short last unit, no second slice, units of different sizes, and nothing at all.
+        let cases: [(usize, usize, usize, usize); 8] =
+            [(0, 3, 0, 0), (1, 1, 1, 1), (10, 3, 0, 0), (64, 8, 64, 8), (65, 8, 13, 1), (200, 1, 200, 1), (7, 7, 14, 2), (9, 4, 0, 5)];
+        for (la, ua, lb, ub) in cases {
+            for threads in [1, 2, 3, 8, 64] {
+                let (mut a, mut b) = (vec![0u32; la], vec![0u32; lb]);
+                let calls = std::sync::atomic::AtomicUsize::new(0);
+                with_threads(threads, || {
+                    par_units(
+                        la,
+                        &mut a,
+                        ua,
+                        &mut b,
+                        ub,
+                        || (),
+                        |_, u, sa, sb| {
+                            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            assert!(sa.len() <= ua && sb.len() <= ub);
+                            for (k, v) in sa.iter_mut().enumerate() {
+                                *v = (u * ua + k) as u32 + 1;
+                            }
+                            for (k, v) in sb.iter_mut().enumerate() {
+                                *v = (u * ub + k) as u32 + 1;
+                            }
+                        },
+                    );
+                });
+                assert_eq!(calls.into_inner(), la.div_ceil(ua), "{la} {ua} {lb} {ub} on {threads}");
+                assert!(a.iter().enumerate().all(|(i, &v)| v == i as u32 + 1), "a: {la} {ua} {lb} {ub} on {threads}");
+                // `b` is written for the units that exist in `a` and no further.
+                let written = (la.div_ceil(ua) * ub).min(lb);
+                assert!(b.iter().enumerate().all(|(i, &v)| v == if i < written { i as u32 + 1 } else { 0 }), "b: {la} {ua} {lb} {ub} on {threads}");
+            }
+        }
+        // A unit size of 0 does nothing.
+        let mut a = vec![1u8; 4];
+        par_units(4, &mut a, 0, &mut [] as &mut [()], 0, || (), |_, _, _, _| panic!("no units"));
+    }
+
+    #[test]
+    fn nearest_distances_do_not_depend_on_the_threads() {
+        // Sizes that do not divide into the thread groups, lines of 1 pixel, and a noisy map where
+        // many pixels are equally far from two seeds (the nearest one must resolve the same way).
+        for (w, h) in [(37usize, 23usize), (1, 40), (40, 1), (2, 2), (101, 3), (64, 64)] {
+            let mut seed = 7u32;
+            let inside: Vec<bool> = (0..w * h)
+                .map(|_| {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (seed >> 24).is_multiple_of(11)
+                })
+                .collect();
+            let (d1, n1) = with_threads(1, || edt_nearest(&inside, w, h));
+            for threads in [2, 3, 8] {
+                let (d, n) = with_threads(threads, || edt_nearest(&inside, w, h));
+                assert_eq!((bits(&d), n), (bits(&d1), n1.clone()), "{w}x{h} on {threads} threads");
+            }
+            // And the nearest pixel is a seed at exactly that distance.
+            for (i, (&d, &q)) in d1.iter().zip(&n1).enumerate() {
+                if inside.iter().any(|&b| b) {
+                    let (dx, dy) = ((i % w) as f32 - (q as usize % w) as f32, (i / w) as f32 - (q as usize / w) as f32);
+                    assert!(inside[q as usize] && (dx.hypot(dy) - d).abs() < 1e-3, "{w}x{h} at {i}: {d} vs seed {q}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nearest_distances_survive_degenerate_sizes() {
+        // The slice does not match the size, or there is nothing: no panic, and a result per input pixel.
+        for (len, w, h) in [(0usize, 0usize, 0usize), (0, 5, 0), (0, 0, 5), (6, 2, 2), (6, 4, 2), (1, 0, 1)] {
+            let (d, n) = edt_nearest(&vec![true; len], w, h);
+            assert_eq!((d.len(), n.len()), (len, len), "{len} px as {w}x{h}");
+        }
     }
 
     #[test]
@@ -2137,7 +2546,11 @@ mod tests {
             photosplice_doc::adjust::CurvePoint { input: 0.5, output: 1.0 },
             photosplice_doc::adjust::CurvePoint { input: 1.0, output: 0.0 },
         ];
-        c.contour = Some(photosplice_doc::BevelContour { contour: Contour::Custom { name: "fold".into(), points: fold }, range: 1.0, anti_alias: false });
+        c.contour = Some(photosplice_doc::BevelContour {
+            contour: Contour::Custom { name: "fold".into(), points: fold, corners: vec![] },
+            range: 1.0,
+            anti_alias: false,
+        });
         let (b, _) = bevel_maps(&shape, &c, &l, &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
         let diff: f32 = a[1].v.iter().zip(&b[1].v).map(|(x, y)| (x - y).abs()).sum();
         assert!(diff > 5.0, "{diff}");
@@ -2178,6 +2591,7 @@ mod tests {
                 photosplice_doc::adjust::CurvePoint { input: 128.0 / 255.0, output: 1.0 },
                 photosplice_doc::adjust::CurvePoint { input: 1.0, output: 0.0 },
             ],
+            corners: Vec::new(),
         };
         let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::Smooth);
         (b.size, b.angle) = (14.0, 120.0);
@@ -2221,6 +2635,51 @@ mod tests {
         assert!(glow_lut(&g).is_none());
     }
 
+    /// Photoshop 27.11, measured on a 128 px square (Normal, black, 100 %, Range 50 %): a precise
+    /// glow's coverage across the edge, and a centre-source inner glow as 1 − the edge glow.
+    #[test]
+    fn glows_match_photoshop() {
+        let glow = |technique, size: f32, spread: f32, source| Glow {
+            common: photosplice_doc::FxCommon::new(BlendMode::Normal, 1.0),
+            paint: FxPaint::Color(photosplice_color::Color::BLACK),
+            technique,
+            spread,
+            size,
+            contour: Contour::Linear,
+            anti_alias: false,
+            range: 0.5,
+            jitter: 0.0,
+            noise: 0.0,
+            source,
+        };
+        let n = 60;
+        let mut shape = Map::new(n, n, 0.0);
+        for y in 20..40 {
+            for x in 20..40 {
+                shape.v[y * n + x] = 1.0;
+            }
+        }
+        let at = |m: &Map, x: usize| m.v[30 * n + x];
+        // Outer, precise, size 10: Photoshop's black glow over white reads 47, 93, 140, 186, 232
+        // at 2, 4, 6, 8 and 10 px out from the edge pixel (alpha 1 − D / 11).
+        let m = glow_map(&shape, &glow(GlowTechnique::Precise, 10.0, 0.0, GlowSource::Edge), false, (0, 0));
+        for (d, ps) in [(2, 47.0f32), (4, 93.0), (6, 140.0), (8, 186.0), (10, 232.0)] {
+            let got = 255.0 * (1.0 - at(&m, 20 - d));
+            assert!((got - ps).abs() <= 1.5, "outer precise at {d} px: {got} vs Photoshop {ps}");
+        }
+        // Spread 40 %: solid for the first 4 px.
+        let m = glow_map(&shape, &glow(GlowTechnique::Precise, 10.0, 0.4, GlowSource::Edge), false, (0, 0));
+        assert!((at(&m, 16) - 1.0).abs() < 1e-6 && at(&m, 14) < 1.0);
+        // Centre source = 1 − edge, for both techniques.
+        for t in [GlowTechnique::Precise, GlowTechnique::Softer] {
+            let e = glow_map(&shape, &glow(t, 6.0, 0.0, GlowSource::Edge), true, (0, 0));
+            let c = glow_map(&shape, &glow(t, 6.0, 0.0, GlowSource::Center), true, (0, 0));
+            for x in 20..40 {
+                assert!((at(&c, x) - (1.0 - at(&e, x))).abs() < 1e-5, "{t:?} at {x}");
+            }
+        }
+    }
+
     #[test]
     fn offsets_follow_light() {
         let (dx, dy) = offset(120.0, 10.0);
@@ -2235,6 +2694,28 @@ mod tests {
             }
         }
         m
+    }
+
+    #[test]
+    fn satin_at_distance_zero_matches_photoshop() {
+        // Photoshop 27.11, Satin black 100 %, angle 90°, Linear contour, distance 0, size 5 over a
+        // #808080 square: the rows from the top edge read 82, 102, 123, 128.
+        let s = photosplice_doc::effects::Satin {
+            common: photosplice_doc::FxCommon::new(BlendMode::Normal, 1.0),
+            color: photosplice_color::Color::BLACK,
+            angle: 90.0,
+            distance: 0.0,
+            size: 5.0,
+            contour: Contour::Linear,
+            anti_alias: false,
+            invert: false,
+        };
+        let m = satin_map(&square_shape(60), &s);
+        for (row, gray) in [(5, 82.0), (7, 102.0), (9, 123.0), (11, 128.0), (30, 128.0)] {
+            let want = 1.0 - gray / 128.0;
+            let got = m.v[row * 60 + 30];
+            assert!((got - want).abs() < 0.02, "row {row}: {got} vs {want}");
+        }
     }
 
     fn shadow(noise: f32, origin: (i32, i32)) -> Map {
@@ -2332,6 +2813,15 @@ mod tests {
         for d in 7..=18 {
             let want = ((17.0 - d as f32) / 11.0).clamp(0.0, 1.0);
             assert!((at(30 - d) - want).abs() < 1e-3, "{d}: {} vs {want}", at(30 - d));
+        }
+    }
+
+    #[test]
+    fn shifting_by_hostile_distances_does_not_overflow() {
+        let m = square_shape(12);
+        for d in [1.0e30, -1.0e30, f32::INFINITY, f32::NAN] {
+            let s = m.shifted(d, d, 0.0);
+            assert_eq!(s.v.len(), 144);
         }
     }
 }

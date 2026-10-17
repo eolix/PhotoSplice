@@ -9,6 +9,8 @@ use crate::{ExportSettings, PhotospliceApp};
 
 /// A save waiting on the TIFF Options answer.
 pub struct Prompt {
+    /// The document that requested the save, even if tabs change while this is open.
+    doc: photosplice_doc::DocId,
     /// Where the document goes.
     pub path: String,
     /// "Discard Layers and Save a Copy".
@@ -30,12 +32,14 @@ pub fn wants_prompt(app: &PhotospliceApp, path: &str) -> bool {
         return false;
     }
     // A document without layers has none to keep: it saves straight back, like any flat file.
-    app.session.active().is_some_and(|st| !st.doc.layers.is_empty() && photosplice_io::tiff_layers::would_write_layers(&st.doc))
+    app.session.active().is_some_and(|st| !st.doc.layers.is_empty() && photosplice_engine::file_cmds::tiff_would_write_layers(&st.doc))
 }
 
 /// Parks the save behind the prompt.
-pub fn park(app: &mut PhotospliceApp, path: String) {
-    app.tiff_options = Some(Prompt { path, discard_layers: false, dont_ask_again: false });
+pub fn park(app: &mut PhotospliceApp, path: String) -> Result<(), String> {
+    let doc = app.active_doc_id()?;
+    app.tiff_options = Some(Prompt { doc, path, discard_layers: false, dont_ask_again: false });
+    Ok(())
 }
 
 pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
@@ -60,15 +64,30 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     cancel |= modal.should_close();
     p.discard_layers = discard;
     p.dont_ask_again = dont_ask;
-    if ok || ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+    if ok || ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
         let Some(p) = app.tiff_options.take() else { return };
         if p.dont_ask_again {
             app.session.edit_prefs(|prefs| prefs.file_handling.ask_before_saving_layered_tiff = false);
         }
-        let settings = ExportSettings { tiff_layers: !p.discard_layers, ..Default::default() };
-        if let Err(e) = app.write_document(p.path.clone(), &settings) {
-            app.ui.status = crate::i18n::fmt(tl!("Save failed: {error}"), &[("error", &e)]);
-            app.ui.status_error = true;
+        let settings = ExportSettings { tiff_layers: !p.discard_layers, ..app.save_settings() };
+        // A flattened copy never replaces the document's own file (File › Save in place): it
+        // goes beside it as "name copy.tif", as Reference names a copy.
+        let own = app.session.documents().iter().find(|d| d.doc.id == p.doc).and_then(|d| d.path.clone());
+        let path = if p.discard_layers && own.as_deref() == Some(p.path.as_str()) { copy_path(&p.path) } else { p.path.clone() };
+        let step = serde_json::json!({"path": path, "tiffLayers": !p.discard_layers});
+        let written = app.with_document(p.doc, |app| app.write_document(path, &settings, p.discard_layers));
+        if written.is_ok() {
+            // An action being recorded keeps the Save As with this answer (#2032).
+            app.session.journal.push(("file.saveAs".into(), step));
+        }
+        match written {
+            Err(e) => {
+                app.ui.status = crate::i18n::fmt(tl!("Save failed: {error}"), &[("error", &e)]);
+                app.ui.status_error = true;
+            }
+            Ok(Some(_)) if !p.discard_layers => crate::discard_ui::saved_document(app, ctx, p.doc),
+            // A background save releases the close prompt when it finishes (`jobs_ui`).
+            Ok(_) => {}
         }
     } else if cancel {
         app.tiff_options = None;
@@ -77,9 +96,26 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     }
 }
 
+/// `dir/name.tif` → `dir/name copy.tif`.
+fn copy_path(path: &str) -> String {
+    let name_start = path.rfind(['/', '\\']).map_or(0, |i| i + 1);
+    match path.rfind('.').filter(|&dot| dot > name_start).and_then(|dot| Some((path.get(..dot)?, path.get(dot..)?))) {
+        Some((stem, ext)) => format!("{stem} copy{ext}"),
+        None => format!("{path} copy"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copies_are_named_beside_the_file() {
+        assert_eq!(copy_path("dir/a.tif"), "dir/a copy.tif");
+        assert_eq!(copy_path("C:\\x.y\\b.TIFF"), "C:\\x.y\\b copy.TIFF");
+        assert_eq!(copy_path("dir.v2/noext"), "dir.v2/noext copy");
+        assert_eq!(copy_path("é.tif"), "é copy.tif");
+    }
 
     #[test]
     fn tiff_names() {

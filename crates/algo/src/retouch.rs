@@ -117,49 +117,53 @@ pub fn sponge(c: [f32; 3], amount: f32, saturate: bool, vibrance: bool) -> [f32;
 pub fn local_blur(data: &[f32], w: usize, h: usize, ch: usize, alpha: Option<usize>, win: (usize, usize, usize, usize), sigma: f32) -> Vec<f32> {
     let (x0, y0, x1, y1) = win;
     let (ow, oh) = (x1 - x0, y1 - y0);
+    if ow == 0 || oh == 0 || ch == 0 {
+        return Vec::new();
+    }
     let r = (sigma * 3.0).ceil().max(1.0) as i32;
     let k: Vec<f32> = (-r..=r).map(|i| (-((i * i) as f32) / (2.0 * sigma * sigma).max(1e-6)).exp()).collect();
     let ks: f32 = k.iter().sum();
     let k: Vec<f32> = k.into_iter().map(|v| v / ks).collect();
-    let get = |x: i32, y: i32, out: &mut [f32]| {
-        let (xx, yy) = (x.clamp(0, w as i32 - 1) as usize, y.clamp(0, h as i32 - 1) as usize);
-        let i = (yy * w + xx) * ch;
-        out.copy_from_slice(&data[i..i + ch]);
-        if let Some(a) = alpha {
-            let av = out[a];
-            for (c, v) in out.iter_mut().enumerate() {
-                if c != a {
-                    *v *= av;
+    // Horizontal pass over the window rows extended vertically by r.
+    let th = oh + 2 * r as usize;
+    let stride = ow * ch;
+    let mut tmp = vec![0.0f32; stride * th];
+    let mut row = vec![0.0f32; (ow + 2 * r as usize) * ch];
+    for ty in 0..th {
+        let y = (y0 as i32 + ty as i32 - r).clamp(0, h as i32 - 1) as usize;
+        // Clamp and premultiply each source pixel once, rather than once for every kernel tap.
+        for (rx, px) in row.chunks_exact_mut(ch).enumerate() {
+            let x = (x0 as i32 + rx as i32 - r).clamp(0, w as i32 - 1) as usize;
+            let i = (y * w + x) * ch;
+            px.copy_from_slice(&data[i..i + ch]);
+            if let Some(a) = alpha {
+                let av = px[a];
+                for (c, v) in px.iter_mut().enumerate() {
+                    if c != a {
+                        *v *= av;
+                    }
                 }
             }
         }
-    };
-    // Horizontal pass over the window rows extended vertically by r.
-    let th = oh + 2 * r as usize;
-    let mut tmp = vec![0.0f32; ow * th * ch];
-    let mut px = vec![0.0f32; ch];
-    for ty in 0..th {
-        let y = y0 as i32 + ty as i32 - r;
-        for ox in 0..ow {
-            let o = (ty * ow + ox) * ch;
-            for (i, kv) in k.iter().enumerate() {
-                get(x0 as i32 + ox as i32 + i as i32 - r, y, &mut px);
-                for c in 0..ch {
-                    tmp[o + c] += px[c] * kv;
-                }
+        let dst = &mut tmp[ty * stride..(ty + 1) * stride];
+        // Contiguous accumulation can be vectorized for any channel layout. Each output still
+        // sums the same products in the same kernel order as the scalar convolution.
+        for (i, kv) in k.iter().enumerate() {
+            for (d, s) in dst.iter_mut().zip(&row[i * ch..i * ch + stride]) {
+                *d += s * kv;
             }
         }
     }
     let mut out = vec![0.0f32; ow * oh * ch];
     for oy in 0..oh {
+        let dst = &mut out[oy * stride..(oy + 1) * stride];
+        for (i, kv) in k.iter().enumerate() {
+            for (d, s) in dst.iter_mut().zip(&tmp[(oy + i) * stride..(oy + i + 1) * stride]) {
+                *d += s * kv;
+            }
+        }
         for ox in 0..ow {
             let o = (oy * ow + ox) * ch;
-            for (i, kv) in k.iter().enumerate() {
-                let s = ((oy + i) * ow + ox) * ch;
-                for c in 0..ch {
-                    out[o + c] += tmp[s + c] * kv;
-                }
-            }
             if let Some(a) = alpha {
                 let av = out[o + a];
                 for c in 0..ch {

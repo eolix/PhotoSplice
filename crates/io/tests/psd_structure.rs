@@ -493,13 +493,18 @@ fn guides_and_alpha_names_roundtrip() {
 }
 
 #[test]
-fn resolution_in_cm_converted() {
+fn resolution_info_cm_display_unit_stays_pixels_per_inch() {
     let mut f = testgen::small(Version::Psd, Compression::Raw);
-    let mut ri = photosplice_psd::ResolutionInfo::from_dpi(100.0);
+    let mut ri = photosplice_psd::ResolutionInfo::from_dpi(300.0);
     ri.h_res_unit = 2;
+    ri.v_res_unit = 2;
     f.resources[0] = photosplice_psd::ImageResource::new(1005, ri.to_bytes());
     let (d, _) = psd_to_document(&f);
-    assert!((d.resolution_dpi - 254.0).abs() < 1e-3);
+    assert!((d.resolution_dpi - 300.0).abs() < 1e-3, "{}", d.resolution_dpi);
+    let out = document_to_psd(&d);
+    let written = out.resolution().unwrap();
+    assert!((written.h_res() - 300.0).abs() < 1e-3, "{}", written.h_res());
+    assert!((written.v_res() - 300.0).abs() < 1e-3, "{}", written.v_res());
 }
 
 #[test]
@@ -530,6 +535,11 @@ fn merged_composite_unmattes_photoshop_white() {
     hdr.header.channels = 4;
     hdr.image_data =
         photosplice_psd::ImageData { compression: Compression::Raw, data: [1.5_f32, 0.25, 0.5, 0.5].into_iter().flat_map(f32::to_be_bytes).collect() };
+    assert_eq!(merged_composite(&hdr).unwrap(), vec![[2.0, -0.5, 0.0, 0.5]]);
+    let mut deep = testgen::merged_only(Version::Psd, ColorMode::Rgb, 16, Compression::Raw, 1, 1);
+    deep.header.channels = 4;
+    deep.image_data.data = [65535_u16, 65535, 65535, 65500].into_iter().flat_map(u16::to_be_bytes).collect();
+    assert_eq!(merged_composite(&deep).unwrap()[0][3], 65500.0 / 65535.0);
     let imported = import("hdr.psd", &hdr.to_bytes().unwrap()).unwrap().document;
     assert_eq!(imported.depth, photosplice_color::SampleType::F32);
     assert_eq!(imported.layers[0].surface().unwrap().pixel(0, 0), vec![2.0, -0.5, 0.0, 0.5]);
@@ -837,8 +847,10 @@ fn resolution_keeps_its_units() {
     use photosplice_psd::ResolutionInfo;
     let d = photosplice_doc::Document::new("t", photosplice_geom::Size::new(8, 8), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
     let mut f = PsdFile::from_bytes(&export(&d, "t.psd", &Default::default()).unwrap().bytes).unwrap();
-    // 72 dpi as Photoshop writes it for a document set up in centimetres.
-    let cm = ResolutionInfo { h_res_fixed: 0x001C_58AF, h_res_unit: 2, width_unit: 2, v_res_fixed: 0x001C_58AF, v_res_unit: 2, height_unit: 2 };
+    // 72 ppi as the reference writes it for a document set up in centimetres: the fixed values
+    // stay pixels per inch (28.35 px/cm converted back, a hair under 72), the units only say
+    // how to show them (psd-tools empty-layer.psd).
+    let cm = ResolutionInfo { h_res_fixed: 0x0047_FFFF, h_res_unit: 2, width_unit: 2, v_res_fixed: 0x0047_FFFF, v_res_unit: 2, height_unit: 2 };
     let r = f.resources.iter_mut().find(|r| r.id == 1005).unwrap();
     r.data = cm.to_bytes();
     let mut doc = import("t.psd", &f.to_bytes().unwrap()).unwrap().document;
@@ -852,7 +864,7 @@ fn resolution_keeps_its_units() {
     doc.resolution_dpi = 254.0;
     let w = written(&doc);
     assert_eq!((w.h_res_unit, w.width_unit, w.v_res_unit, w.height_unit), (2, 2, 2, 2));
-    assert!((w.h_res() - 100.0).abs() < 1e-3 && (w.v_res() - 100.0).abs() < 1e-3, "{w:?}");
+    assert!((w.h_res() - 254.0).abs() < 1e-3 && (w.v_res() - 254.0).abs() < 1e-3, "{w:?}");
 }
 
 /// A layer added to an imported document gets an id past the file's seed (1044) and every id in

@@ -53,3 +53,10 @@ path = "fuzz_targets/decode_exr.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "decode_gif"
+path = "fuzz_targets/decode_gif.rs"
+test = false
+doc = false
+bench = false

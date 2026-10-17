@@ -18,6 +18,12 @@ pub fn target(app: &PhotospliceApp) -> Option<u32> {
     app.ui.layer_comp_selected.filter(|id| doc.comp(*id).is_some()).or(doc.last_applied_comp.filter(|id| doc.comp(*id).is_some()))
 }
 
+/// The row's warning triangle: Clear Layer Comp Warning for that comp only (Photoshop keeps
+/// Clear All Layer Comp Warnings as a separate command).
+fn clear_warning_action(comp: u32) -> (&'static str, Value) {
+    ("layerComp.updateWarnings", json!({"clear": true, "comp": comp}))
+}
+
 fn run(app: &mut PhotospliceApp, id: &str, p: Value) {
     if let Err(e) = app.run(id, p) {
         app.ui.status = e;
@@ -104,7 +110,9 @@ pub fn panel(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
                     action = Some(("layerComp.setOptions", json!({"comp": c.id, *key: !on})));
                 }
                 if hov {
-                    resp.clone().on_hover_text(format!("Apply {tip}: {}", if *on { "on" } else { "off" }));
+                    let template = "Apply {option}: {state}";
+                    let state = if *on { "on" } else { "off" };
+                    resp.clone().on_hover_text(crate::i18n::fmt(tl!(template), &[("option", tip), ("state", tl!(state))]));
                 }
                 x -= 22.0;
             }
@@ -114,10 +122,15 @@ pub fn panel(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
                 let r = Rect::from_center_size(pos2(name_x + 7.0, rect.center().y), vec2(14.0, 14.0));
                 crate::icons::paint(ui, r, "triangle-alert", 12.0, t.warning);
                 if ui.rect_contains_pointer(r) {
-                    resp.clone().on_hover_text(format!("{missing} layer(s) recorded by this comp were deleted. Update the comp, or clear the warning."));
+                    resp.clone().on_hover_text(crate::i18n::trn(
+                        crate::i18n::current(),
+                        missing as u64,
+                        "{n} layer recorded by this comp was deleted. Update the comp, or clear the warning.",
+                        "{n} layers recorded by this comp were deleted. Update the comp, or clear the warning.",
+                    ));
                     if resp.clicked() {
                         toggle_hit = true;
-                        action = Some(("layerComp.updateWarnings", json!({"clear": true})));
+                        action = Some(clear_warning_action(c.id));
                     }
                 }
                 name_x += 18.0;
@@ -176,5 +189,28 @@ pub fn panel(app: &mut PhotospliceApp, ui: &mut egui::Ui) {
         if created {
             app.ui.layer_comp_selected = app.session.active().and_then(|d| d.doc.last_applied_comp);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use photosplice_engine::Session;
+
+    #[test]
+    fn warning_icon_clears_only_its_own_comp() {
+        // Regression for #4197.
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 16, "height": 16})).unwrap();
+        let layer = s.execute("layer.new.layer", json!({})).unwrap()["layer"].as_u64().unwrap();
+        let c1 = s.execute("layerComp.new", json!({"name": "One"})).unwrap()["comp"].as_u64().unwrap() as u32;
+        let c2 = s.execute("layerComp.new", json!({"name": "Two"})).unwrap()["comp"].as_u64().unwrap() as u32;
+        s.execute("layer.delete", json!({"layer": layer})).unwrap();
+        let (id, p) = clear_warning_action(c1);
+        assert_eq!(p["comp"], c1);
+        s.execute(id, p).unwrap();
+        let doc = &s.active().unwrap().doc;
+        assert!(doc.comp(c1).unwrap().missing_layers(doc).is_empty());
+        assert_eq!(doc.comp(c2).unwrap().missing_layers(doc).iter().map(|l| l.0).collect::<Vec<_>>(), vec![layer]);
     }
 }

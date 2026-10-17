@@ -1,23 +1,45 @@
 //! The browser shell: web `Services`, drag-and-drop, and the eframe web runner.
 
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use photosplice_codecs::{ChannelLayout, EncodeOptions, Image};
 use photosplice_doc::Document;
-use photosplice_engine::Session;
+use photosplice_ui_egui::i18n;
+use photosplice_ui_egui::served_fonts;
 use photosplice_ui_egui::theme::ThemeKind;
-use photosplice_ui_egui::{PhotospliceApp, Services};
+use photosplice_ui_egui::{FileDialogAnswer, FileDialogRequest, PhotospliceApp, Services};
 use wasm_bindgen::JsCast as _;
 
 type Inbox = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
-/// Everything File › Open reads: PhotoSplice and Photoshop documents, flat images, and Photoshop
-/// brushes (.abr) and gradients (.grd), which go to the preset libraries.
+/// Everything File › Open reads: PhotoSplice, Photoshop, OpenRaster, Krita and Affinity documents, flat images, and
+/// Photoshop brushes (.abr), gradients (.grd), styles (.asl) and swatches (.aco, .ase), which go to the preset libraries.
 const OPEN_EXTS: &[&str] = &[
-    "pcraft", "psd", "psb", "psdt", "png", "jpg", "jpeg", "tif", "tiff", "webp", "gif", "bmp", "tga", "ico", "qoi", "exr", "hdr", "pbm", "pgm", "ppm", "pam",
-    "pfm", "heic", "heif", "hif", "dng", "cr2", "cr3", "nef", "nrw", "arw", "pef", "orf", "rw2", "raf", "abr", "grd", "asl",
+    "pcraft", "pdn", "ora", "kra", "krz", "psd", "psb", "psdt", "png", "jpg", "jpeg", "tif", "tiff", "webp", "gif", "bmp", "tga", "ico", "qoi", "exr", "hdr",
+    "pbm", "pgm", "ppm", "pam", "pfm", "dds", "fits", "fit", "fts", "dpx", "cin", "heic", "heif", "hif", "dng", "cr2", "cr3", "nef", "nrw", "arw", "pef",
+    "orf", "rw2", "raf", "abr", "grd", "asl", "svg", "svgz", "aco", "ase", "af", "afdesign", "afphoto", "afpub",
 ];
+const SVG_EXTS: &[&str] = &["svg", "svgz"];
 const CANVAS_ID: &str = "photosplice_canvas";
+
+/// Fonts the host serves next to the page (`photosplice_ui_egui::served_fonts`): craft-fonts' manifest
+/// format, each file relative to the site root. No manifest (a 404) means no served fonts.
+const FONTS_MANIFEST: &str = "fonts/manifest.txt";
+
+/// The served fonts: the manifest once read, and what the network has delivered.
+#[derive(Default)]
+struct ServedFonts {
+    /// Font files by family, each with its Subresource Integrity value when the manifest has one.
+    files: HashMap<String, Vec<(String, Option<String>)>>,
+    /// Families fetched or being fetched: each one once per page load.
+    fetched: HashSet<String>,
+    /// Downloaded files waiting for the next frame: (family, bytes).
+    arrived: Vec<(String, Vec<u8>)>,
+}
+
+type Served = Arc<Mutex<ServedFonts>>;
 
 pub fn start() {
     eframe::WebLogger::init(log::LevelFilter::Info).ok();
@@ -39,6 +61,16 @@ pub fn start() {
         {
             create.instance_descriptor.backends = eframe::wgpu::Backends::GL;
         }
+        // Hydrate before constructing an interactive session: a late load must never undo a
+        // user deletion/reorder. Storage denial or timeout still opens a usable session.
+        let (database, presets, mut preset_warnings) = match crate::indexed_presets::load().await {
+            Ok((db, bridge, warnings)) => (Some(db), bridge, warnings),
+            Err(e) => {
+                let bridge = crate::preset_bridge::Bridge::default();
+                bridge.unavailable(e);
+                (None, bridge, Vec::new())
+            }
+        };
         let pen_target = canvas.clone();
         let result = eframe::WebRunner::new()
             .start(
@@ -47,7 +79,14 @@ pub fn start() {
                 Box::new(move |cc| {
                     PhotospliceApp::setup_context(&cc.egui_ctx, ThemeKind::Midnight);
                     let inbox: Inbox = Arc::default();
-                    let mut app = PhotospliceApp::new(Session::new(), services(inbox.clone(), cc.egui_ctx.clone()));
+                    let served: Served = Arc::default();
+                    load_font_manifest(served.clone(), cc.egui_ctx.clone());
+                    let (session, warnings) = crate::preset_bridge::session(presets.clone());
+                    preset_warnings.extend(warnings);
+                    let mut app = PhotospliceApp::new(session, services(inbox.clone()));
+                    if !preset_warnings.is_empty() {
+                        photosplice_ui_egui::notices::post(&mut app, i18n::t("Some brush presets could not be loaded"), preset_warnings, true, None);
+                    }
                     listen_pen(&pen_target, app.stylus.feed.clone());
                     app.set_theme(&cc.egui_ctx, ThemeKind::Midnight);
                     if let Some(rs) = cc.wgpu_render_state.clone()
@@ -56,7 +95,9 @@ pub fn start() {
                         log::info!("photosplice-web: wgpu backend {:?}", rs.adapter.get_info().backend);
                         app.set_wgpu(rs);
                     }
-                    Ok(Box::new(WebShell { app, inbox }))
+                    let unsaved = Arc::new(AtomicBool::new(false));
+                    guard_unload(unsaved.clone());
+                    Ok(Box::new(WebShell { app, inbox, unsaved, served, database, presets }))
                 }),
             )
             .await;
@@ -99,8 +140,82 @@ fn listen_pen(target: &web_sys::HtmlCanvasElement, feed: photosplice_ui_egui::st
     }
 }
 
+/// Closing or reloading the tab while a document has unsaved changes asks first, as closing the
+/// desktop window does: the browser shows its own "Leave site?" prompt (#1380). `unsaved` is
+/// refreshed every frame by [`WebShell`].
+fn guard_unload(unsaved: Arc<AtomicBool>) {
+    use wasm_bindgen::closure::Closure;
+    let Some(window) = web_sys::window() else { return };
+    let cb = Closure::<dyn FnMut(web_sys::BeforeUnloadEvent)>::new(move |e: web_sys::BeforeUnloadEvent| {
+        if unsaved.load(Ordering::Relaxed) {
+            e.prevent_default();
+            // Older browsers show the prompt only when a return value is set.
+            e.set_return_value("");
+        }
+    });
+    if window.add_event_listener_with_callback("beforeunload", cb.as_ref().unchecked_ref()).is_ok() {
+        cb.forget();
+    }
+}
+
 fn query() -> String {
     web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default()
+}
+
+/// Reads the served font manifest, if the host has one, and lists its families in the font menus.
+fn load_font_manifest(served: Served, ctx: egui::Context) {
+    wasm_bindgen_futures::spawn_local(async move {
+        // Most hosts serve no fonts: a missing manifest is the normal case, not an error.
+        let Ok(bytes) = fetch_bytes(FONTS_MANIFEST, None).await else { return };
+        let text = String::from_utf8_lossy(&bytes);
+        // A host that answers unknown paths with its HTML page (single-page app fallback).
+        if text.trim_start().starts_with('<') {
+            return;
+        }
+        let (fonts, skipped) = served_fonts::parse_manifest(&text);
+        for s in skipped {
+            log::warn!("{FONTS_MANIFEST}: skipped {s}");
+        }
+        let mut files: HashMap<String, Vec<(String, Option<String>)>> = HashMap::new();
+        for f in &fonts {
+            files.entry(f.family.clone()).or_default().push((f.file.clone(), f.integrity.clone()));
+        }
+        log::info!("photosplice-web: {} served font families", files.len());
+        served.lock().unwrap_or_else(|e| e.into_inner()).files = files;
+        // The families for the font menus, and the script fallbacks (the manifest's `scripts`).
+        served_fonts::add_fonts(&fonts);
+        // Fetch now the fallbacks of the scripts the browser's languages use (an Arabic reader gets
+        // the Arabic font before typing); the rest is fetched when text or a font menu needs it.
+        served_fonts::request_for_languages(browser_languages().iter().map(String::as_str));
+        ctx.request_repaint();
+    });
+}
+
+/// The browser's preferred languages (`navigator.languages`, e.g. `["ar-EG", "en"]`).
+fn browser_languages() -> Vec<String> {
+    web_sys::window().map(|w| w.navigator().languages().iter().filter_map(|l| l.as_string()).collect()).unwrap_or_default()
+}
+
+/// GET `url` (relative to the page) and read the whole body. With `integrity` (a Subresource
+/// Integrity value), the browser rejects a body whose hash differs.
+async fn fetch_bytes(url: &str, integrity: Option<&str>) -> Result<Vec<u8>, String> {
+    use wasm_bindgen_futures::JsFuture;
+    let js = |e: wasm_bindgen::JsValue| format!("{e:?}");
+    let window = web_sys::window().ok_or("no window")?;
+    let request = match integrity {
+        Some(sri) => {
+            let init = web_sys::RequestInit::new();
+            init.set_integrity(sri);
+            window.fetch_with_str_and_init(url, &init)
+        }
+        None => window.fetch_with_str(url),
+    };
+    let resp: web_sys::Response = JsFuture::from(request).await.map_err(js)?.dyn_into().map_err(|_| "not a Response")?;
+    if !resp.ok() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let body = JsFuture::from(resp.array_buffer().map_err(js)?).await.map_err(js)?;
+    Ok(js_sys::Uint8Array::new(&body).to_vec())
 }
 
 /// Wraps the app to read dropped files asynchronously (browsers can't read them synchronously,
@@ -108,6 +223,63 @@ fn query() -> String {
 struct WebShell {
     app: PhotospliceApp,
     inbox: Inbox,
+    /// Read by the `beforeunload` listener ([`guard_unload`]).
+    unsaved: Arc<AtomicBool>,
+    served: Served,
+    database: Option<web_sys::IdbDatabase>,
+    presets: crate::preset_bridge::Bridge,
+}
+
+impl WebShell {
+    fn save_presets(&mut self, ctx: &egui::Context) {
+        if let Some(db) = self.database.clone()
+            && let Some(batch) = self.presets.begin()
+        {
+            let presets = self.presets.clone();
+            let wake = ctx.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let result = crate::indexed_presets::write(&db, &batch).await;
+                if let Err(e) = &result {
+                    log::error!("Could not save browser presets: {e}");
+                }
+                presets.finish(batch, result);
+                wake.request_repaint();
+            });
+        }
+        self.unsaved.store(self.app.has_unsaved_work() || self.presets.unsaved(), Ordering::Relaxed);
+    }
+
+    /// Fetches the served families asked for (picked in a font menu, or needed by a layout) and
+    /// installs the files that arrived.
+    fn serve_fonts(&mut self, ctx: &egui::Context) {
+        let requested = served_fonts::take_requests();
+        let (fetch, arrived) = {
+            let mut s = self.served.lock().unwrap_or_else(|e| e.into_inner());
+            let mut fetch = Vec::new();
+            for family in requested {
+                if let Some(files) = s.files.get(&family).cloned()
+                    && s.fetched.insert(family.clone())
+                {
+                    fetch.extend(files.into_iter().map(|(file, integrity)| (family.clone(), file, integrity)));
+                }
+            }
+            (fetch, std::mem::take(&mut s.arrived))
+        };
+        for (family, file, integrity) in fetch {
+            let served = self.served.clone();
+            let ctx = ctx.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                match fetch_bytes(&file, integrity.as_deref()).await {
+                    Ok(bytes) => {
+                        served.lock().unwrap_or_else(|e| e.into_inner()).arrived.push((family, bytes));
+                        ctx.request_repaint();
+                    }
+                    Err(e) => log::error!("couldn't fetch served font {file}: {e}"),
+                }
+            });
+        }
+        served_fonts::install(&mut self.app, arrived);
+    }
 }
 
 impl eframe::App for WebShell {
@@ -127,50 +299,88 @@ impl eframe::App for WebShell {
                 }
             });
         }
+        self.serve_fonts(ctx);
         self.app.logic(ctx, frame);
+        self.save_presets(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // Only while a preset change is unsaved. Storage the browser denies from the start (a
+        // sandboxed iframe, blocked site data) loses nothing until the first change, and that
+        // change brings the banner with the reason.
+        if self.presets.unsaved()
+            && let Some(error) = self.presets.error()
+        {
+            egui::Panel::top("browser_preset_storage").show(ui, |ui| {
+                let tokens = photosplice_ui_egui::theme::Tokens::for_kind(self.app.ui.theme);
+                // Put retry first so floating brush windows cannot cover the control.
+                ui.horizontal_wrapped(|ui| {
+                    if self.database.is_some() && ui.button(i18n::t("Retry saving presets")).clicked() {
+                        self.presets.retry();
+                        ui.ctx().request_repaint();
+                    }
+                    ui.colored_label(tokens.warning, i18n::fmt(i18n::t("Brush preset changes are not saved: {error}"), &[("error", &error)]));
+                });
+                ui.label(if self.database.is_some() {
+                    i18n::t("Keep this tab open to retain your brushes.")
+                } else {
+                    i18n::t("Browser storage is unavailable; brushes are session-only. Keep this tab open to retain them.")
+                });
+            });
+        }
         self.app.ui(ui, frame);
+        self.save_presets(ui.ctx());
     }
 }
 
-fn services(inbox: Inbox, ctx: egui::Context) -> Services {
-    let open_inbox = inbox.clone();
+fn services(inbox: Inbox) -> Services {
     Services {
-        import: Some(Box::new(|name: &str, bytes: &[u8]| photosplice_io::import(name, bytes).map(|r| (r.document, r.warnings)).map_err(|e| e.to_string()))),
+        screen_pick: screen_color_service(),
+        import: Some(Box::new(|name: &str, bytes: &[u8], max_svg_group_depth: usize| {
+            photosplice_io::import_with_svg_group_depth(name, bytes, max_svg_group_depth).map(|r| (r.document, r.warnings)).map_err(|e| e.to_string())
+        })),
         export: Some(Box::new(|doc: &Document, path: &str, settings: &photosplice_ui_egui::ExportSettings| {
-            let mut opts = photosplice_io::ExportOptions::default();
-            if let Some(q) = settings.jpeg_quality {
-                opts.encode.jpeg_quality = q;
-            }
-            if let Some(q) = settings.webp_quality {
-                opts.encode.webp_lossless = false;
-                opts.encode.webp_quality = q;
-            }
-            opts.tiff_layers = settings.tiff_layers;
+            let mut opts = settings.io_options();
             opts.pdf_discard_editing = !settings.pdf_editing;
             opts.pdf = settings.pdf;
             opts.selected_layers = settings.selected_layers.clone();
             photosplice_io::export(doc, path, &opts).map(|r| (r.bytes, r.warnings)).map_err(|e| e.to_string())
         })),
-        pick_open: Some(Box::new(move || {
-            let inbox = open_inbox.clone();
-            let ctx = ctx.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                let Some(file) = rfd::AsyncFileDialog::new().add_filter("All Formats", OPEN_EXTS).pick_file().await else {
-                    return;
+        file_dialog: Some(Box::new(|request, _parent, reply| match request {
+            // The browser's file picker hands over the files' contents, not paths. File › Open
+            // asks for several files (`multiple`), each opened in its own tab.
+            FileDialogRequest::Open { multiple, extensions, .. } => wasm_bindgen_futures::spawn_local(async move {
+                let dialog = if let Some(exts) = extensions {
+                    rfd::AsyncFileDialog::new().add_filter("Supported Files", &exts)
+                } else {
+                    rfd::AsyncFileDialog::new().add_filter("All Formats", OPEN_EXTS).add_filter("SVG", SVG_EXTS)
                 };
-                let bytes = file.read().await;
-                inbox.lock().unwrap_or_else(|e| e.into_inner()).push((file.file_name(), bytes));
-                ctx.request_repaint();
-            });
-            None
-        })),
-        // No save dialog on the web: the suggested name becomes the download name.
-        pick_save: Some(Box::new(|suggested: &str| {
-            let name = std::path::Path::new(suggested).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| suggested.to_string());
-            Some(name)
+                let answer = if multiple {
+                    match dialog.pick_files().await {
+                        Some(picked) if !picked.is_empty() => {
+                            let mut files = Vec::with_capacity(picked.len());
+                            for file in picked {
+                                files.push((file.file_name(), file.read().await));
+                            }
+                            Some(FileDialogAnswer::ContentsMany(files))
+                        }
+                        _ => None,
+                    }
+                } else {
+                    match dialog.pick_file().await {
+                        Some(file) => Some(FileDialogAnswer::Contents(file.file_name(), file.read().await)),
+                        None => None,
+                    }
+                };
+                reply.send(answer);
+            }),
+            // Browser folder handles cannot be represented as filesystem paths for engine commands.
+            FileDialogRequest::Folder { .. } => reply.send(None),
+            // No save dialog on the web: the suggested name becomes the download name.
+            FileDialogRequest::Save { suggested } => {
+                let name = std::path::Path::new(&suggested).file_name().map_or_else(|| suggested.clone(), |n| n.to_string_lossy().to_string());
+                reply.send(Some(FileDialogAnswer::SaveTo(name)));
+            }
         })),
         write: Some(Box::new(|path: &str, bytes: &[u8]| download(path, bytes))),
         encode_png: Some(Box::new(|w, h, rgba| {
@@ -226,6 +436,77 @@ fn mime_for(name: &str) -> &'static str {
         Some("webp") => "image/webp",
         Some("gif") => "image/gif",
         Some("psd" | "psb") => "image/vnd.adobe.photoshop",
+        Some("ora") => "image/openraster",
+        Some("kra" | "krz") => "application/x-krita",
         _ => "application/octet-stream",
     }
+}
+
+/// Rust bindings to the browser's user-activated EyeDropper API; unsupported browsers keep
+/// the document picker and its normal canvas zoom. The browser owns its screen magnifier.
+fn screen_color_service() -> Option<photosplice_ui_egui::screen_picker::Service> {
+    use js_sys::{Function, Reflect};
+    use photosplice_ui_egui::screen_picker::{Capture, Pending};
+    use wasm_bindgen::{JsValue, closure::Closure};
+    let window = web_sys::window()?;
+    let constructor = Reflect::get(&window, &JsValue::from_str("EyeDropper")).ok()?.dyn_into::<Function>().ok()?;
+    Some(Box::new(move |ctx| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started = (|| -> Result<_, String> {
+            let eye = Reflect::construct(&constructor, &js_sys::Array::new()).map_err(|e| format!("Could not start browser eyedropper: {e:?}"))?;
+            let controller = web_sys::AbortController::new().map_err(|e| format!("Could not create eyedropper cancellation: {e:?}"))?;
+            let options = js_sys::Object::new();
+            Reflect::set(&options, &JsValue::from_str("signal"), &controller.signal()).map_err(|e| format!("Could not set eyedropper options: {e:?}"))?;
+            let open = Reflect::get(&eye, &JsValue::from_str("open"))
+                .map_err(|e| format!("Browser eyedropper has no open method: {e:?}"))?
+                .dyn_into::<Function>()
+                .map_err(|_| "Invalid browser eyedropper method")?;
+            let promise = open
+                .call1(&eye, &options)
+                .map_err(|e| format!("Could not open browser eyedropper: {e:?}"))?
+                .dyn_into::<js_sys::Promise>()
+                .map_err(|_| "Browser eyedropper returned no promise")?;
+            let stop = cancelled.clone();
+            let abort = controller.clone();
+            let timer = Closure::<dyn FnMut()>::new(move || {
+                if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    abort.abort();
+                }
+            });
+            let interval = window.set_interval_with_callback_and_timeout_and_arguments_0(timer.as_ref().unchecked_ref(), 50).map_err(|e| {
+                controller.abort();
+                format!("Could not watch eyedropper cancellation: {e:?}")
+            })?;
+            Ok((promise, timer, interval))
+        })();
+        match started {
+            Err(e) => {
+                let _ = tx.send(Err(e));
+            }
+            Ok((promise, timer, interval)) => {
+                let wake = ctx.clone();
+                let window = window.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    let result = match wasm_bindgen_futures::JsFuture::from(promise).await {
+                        Ok(value) => Reflect::get(&value, &JsValue::from_str("sRGBHex"))
+                            .ok()
+                            .and_then(|v| v.as_string())
+                            .and_then(|h| photosplice_ui_egui::color_picker_ui::parse_hex(&h))
+                            .map(|rgb| Capture::Color(Some(rgb)))
+                            .ok_or_else(|| "Browser eyedropper returned an invalid color".into()),
+                        Err(e) if Reflect::get(&e, &JsValue::from_str("name")).ok().and_then(|v| v.as_string()).as_deref() == Some("AbortError") => {
+                            Ok(Capture::Color(None))
+                        }
+                        Err(e) => Err(format!("Browser screen color selection failed: {e:?}")),
+                    };
+                    window.clear_interval_with_handle(interval);
+                    drop(timer);
+                    let _ = tx.send(result);
+                    wake.request_repaint();
+                });
+            }
+        }
+        Pending { receiver: rx, cancelled }
+    }))
 }

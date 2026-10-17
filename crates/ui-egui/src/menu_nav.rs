@@ -7,9 +7,14 @@
 //!
 //! The highlight is view state only (egui memory), per top-level menu; it follows the pointer too,
 //! so the mouse and the keyboard share one highlighted row like a native menu.
+//!
+//! An open submenu stays open while the pointer heads for it (#1218), as in macOS and Photoshop
+//! menus: crossing the rows between its row and the submenu, on a diagonal, a curved path or with
+//! a pause on the way, neither closes it nor opens the submenu of a row crossed. The pointer
+//! resting on another row, or moving away from the submenu, switches as before.
 
 use egui::containers::menu::{MenuState, SubMenu, find_menu_root};
-use egui::{Id, Key, Modifiers, Rect, Sense, Ui, pos2, vec2};
+use egui::{Id, Key, Modifiers, Pos2, Rect, Sense, Ui, pos2, vec2};
 
 /// Height of a scroll-arrow strip.
 pub const ARROW: f32 = 16.0;
@@ -17,6 +22,23 @@ pub const ARROW: f32 = 16.0;
 const EDGE: f32 = 6.0;
 /// How fast resting on a scroll arrow scrolls, in points per second.
 const SPEED: f32 = 600.0;
+/// How far above and below an open submenu the pointer may aim and still be heading for it.
+const AIM_SLACK: f32 = 24.0;
+/// How long the pointer may rest on another row, heading for an open submenu, before that row
+/// takes over (macOS waits about as long).
+const AIM_REST: f32 = 0.3;
+
+/// The pointer heading for the open submenu of a row (#1218).
+#[derive(Clone, Debug)]
+struct Aim {
+    /// The row whose submenu is open, and its index in its level.
+    row: Id,
+    index: usize,
+    /// Where the pointer last was on that row.
+    from: Pos2,
+    /// The pointer was off the row with its submenu still open in the last frame.
+    held: bool,
+}
 
 /// One actionable row of a menu level: a command or a submenu.
 #[derive(Clone, Debug)]
@@ -28,13 +50,17 @@ pub struct Row {
     pub command: Option<String>,
     /// Where it was drawn (scrolled out of view when outside its level's `views` rect).
     pub rect: Rect,
+    /// The letter that runs it from the keyboard ([`crate::menu_keys`]), upper case.
+    pub mnemonic: Option<char>,
 }
 
 /// Keyboard / highlight state of the open menu.
 #[derive(Clone, Debug, Default)]
 pub struct Nav {
     /// The open top-level menu (index into the menu bar).
-    top: Option<usize>,
+    pub(crate) top: Option<usize>,
+    /// Underline the rows' mnemonics this frame ([`crate::menu_keys`]).
+    pub underline: bool,
     /// Popup ids of the top-level menus, from the last frame.
     tops: Vec<Id>,
     /// The level the arrow keys move in (0 = the top-level menu).
@@ -59,6 +85,11 @@ pub struct Nav {
     /// Highlight the first enabled row of this level once it has been drawn (a keyboard-opened
     /// submenu).
     first_at: Option<usize>,
+    /// Per level: the pointer heading for the open submenu of one of its rows.
+    aims: Vec<Option<Aim>>,
+    /// A held submenu of this level let go: the row under the pointer takes the highlight even
+    /// if the pointer rests.
+    follow: Option<usize>,
 }
 
 fn nav_id() -> Id {
@@ -117,28 +148,108 @@ impl Nav {
     }
 
     /// Draw a row of `level` with `add`, highlighted like a hovered row when the keyboard (or the
-    /// pointer) is on it, and register it for the keys. `add` returns the row's response.
-    pub fn row<R>(&mut self, ui: &mut Ui, level: usize, enabled: bool, command: Option<&str>, add: impl FnOnce(&mut Ui, &mut Nav) -> (egui::Response, R)) -> R {
+    /// pointer) is on it, and register it for the keys. `add` returns the row's response. A row
+    /// without a `command` opens a submenu.
+    pub fn row<R>(
+        &mut self,
+        ui: &mut Ui,
+        level: usize,
+        enabled: bool,
+        command: Option<&str>,
+        mnemonic: Option<char>,
+        add: impl FnOnce(&mut Ui, &mut Nav) -> (egui::Response, R),
+    ) -> R {
         let i = self.rows.get(level).map_or(usize::MAX, Vec::len);
-        let lit = enabled && self.highlighted(level) == Some(i);
-        let saved = ui.visuals().widgets.inactive;
+        // While a submenu is kept open for the pointer heading to it, its row stays lit and the
+        // rows crossed on the way don't light up.
+        let held = self.aims.get(level).and_then(Option::as_ref).filter(|a| a.held).map(|a| a.index);
+        let lit = enabled && (held == Some(i) || held.is_none() && self.highlighted(level) == Some(i));
+        let saved = (ui.visuals().widgets.inactive, ui.visuals().widgets.hovered);
         if lit {
             ui.visuals_mut().widgets.inactive = ui.visuals().widgets.hovered;
+        } else if held.is_some() {
+            ui.visuals_mut().widgets.hovered = ui.visuals().widgets.inactive;
         }
+        let root = self.roots.get(level).copied().filter(|_| command.is_none());
+        let open = root.and_then(|root| MenuState::from_id(ui.ctx(), root, |s| s.open_item));
         let (r, out) = add(ui, self);
-        ui.visuals_mut().widgets.inactive = saved;
+        (ui.visuals_mut().widgets.inactive, ui.visuals_mut().widgets.hovered) = saved;
+        if let Some(root) = root {
+            self.aim(level, i, root, open, &r);
+        }
         if let Some(rows) = self.rows.get_mut(level) {
-            rows.push(Row { widget: r.id, enabled, command: command.map(str::to_string), rect: r.rect });
-            self.after_row(level, i, lit, &r);
+            rows.push(Row { widget: r.id, enabled, command: command.map(str::to_string), rect: r.rect, mnemonic });
+            if let Some(index) = held {
+                self.set_hi(level, Some(index));
+            } else {
+                self.after_row(level, i, lit, &r);
+            }
         }
         out
+    }
+
+    /// After a submenu row is drawn: if egui just closed its submenu because the pointer is over
+    /// another row of this menu, keep it open while the pointer heads for it (#1218). `open` was
+    /// the menu's open submenu before the row was drawn.
+    fn aim(&mut self, level: usize, index: usize, root: Id, open: Option<Id>, r: &egui::Response) {
+        if self.aims.len() <= level {
+            self.aims.resize(level + 1, None);
+        }
+        let Some(p) = r.ctx.pointer_hover_pos() else { return };
+        let was_held = self.aims.get(level).and_then(Option::as_ref).is_some_and(|a| a.row == r.id && a.held);
+        let held = self.hold(level, index, root, open, p, r);
+        if was_held && !held {
+            // Let go: the row under the pointer takes the highlight, moving or not.
+            self.follow = Some(level);
+        }
+    }
+
+    /// [`Self::aim`]: is this row's submenu open with the pointer off the row (held) now?
+    fn hold(&mut self, level: usize, index: usize, root: Id, open: Option<Id>, p: Pos2, r: &egui::Response) -> bool {
+        let ctx = &r.ctx;
+        let sub = SubMenu::id_from_widget_id(r.id);
+        let target = self.views.get(level + 1).copied();
+        let Some(slot) = self.aims.get_mut(level) else { return false };
+        if open != Some(sub) {
+            if slot.as_ref().is_some_and(|a| a.row == r.id) {
+                *slot = None;
+            }
+            return false;
+        }
+        if r.interact_rect.contains(p) {
+            *slot = Some(Aim { row: r.id, index, from: p, held: false });
+            return false;
+        }
+        let Some(aim) = slot.as_mut().filter(|a| a.row == r.id) else { return false };
+        // Off its row with the submenu still open (egui keeps it while the pointer moves straight
+        // at it): the row stays lit.
+        aim.held = true;
+        if MenuState::from_id(ctx, root, |s| s.open_item) == Some(sub) {
+            return true;
+        }
+        aim.held = false;
+        // A click or a key closes menus as usual; so does leaving the submenu's direction, or
+        // resting on another row.
+        let (acted, rest) = ctx.input(|i| (i.pointer.any_pressed() || i.pointer.any_click() || !i.keys_down.is_empty(), i.pointer.time_since_last_movement()));
+        let Some(target) = target else { return false };
+        if acted || rest >= AIM_REST || !heading(aim.from, p, target) {
+            return false;
+        }
+        MenuState::from_id(ctx, root, |s| s.open_item = Some(sub));
+        aim.held = true;
+        ctx.request_repaint_after_secs(AIM_REST - rest);
+        true
     }
 
     /// After a row is drawn: the pointer moving onto it highlights it; a keyboard move scrolls
     /// the highlighted row into view.
     fn after_row(&mut self, level: usize, i: usize, lit: bool, r: &egui::Response) {
         let moved = r.ctx.input(|inp| inp.pointer.delta() != egui::Vec2::ZERO);
-        if moved && r.hovered() && !lit {
+        let follow = self.follow == Some(level);
+        if (moved || follow) && r.hovered() && !lit {
+            if follow {
+                self.follow = None;
+            }
             self.set_hi(level, Some(i));
             self.level = level;
             r.ctx.request_repaint();
@@ -172,9 +283,31 @@ impl Nav {
         self.hi.truncate(level + 1);
         self.level = level;
         self.reveal = true;
+        // The keys move the highlight now, not the pointer heading for a submenu.
+        if let Some(aim) = self.aims.get_mut(level) {
+            *aim = None;
+        }
     }
 
     /// Open the highlighted submenu of `level` and move the keyboard into it.
+    /// Light the first enabled row of `level` once it has been drawn (a menu opened from the
+    /// keyboard, as on Windows).
+    pub(crate) fn highlight_first(&mut self, level: usize) {
+        self.first_at = Some(level);
+    }
+
+    /// The enabled row of the level the arrows are in whose mnemonic is `c`.
+    pub(crate) fn row_with_mnemonic(&self, c: char) -> Option<Row> {
+        let level = self.level.min(self.rows.len().saturating_sub(1));
+        self.rows.get(level)?.iter().find(|r| r.enabled && r.mnemonic == Some(c)).cloned()
+    }
+
+    /// Open the submenu of row `widget` of the level the arrows are in.
+    pub(crate) fn open_sub_row(&mut self, ctx: &egui::Context, widget: Id) {
+        let level = self.level.min(self.rows.len().saturating_sub(1));
+        self.open_sub(ctx, level, widget);
+    }
+
     fn open_sub(&mut self, ctx: &egui::Context, level: usize, widget: Id) {
         let Some(&root) = self.roots.get(level) else { return };
         let sub = SubMenu::id_from_widget_id(widget);
@@ -260,6 +393,22 @@ impl Nav {
     }
 }
 
+/// Is the pointer at `p`, having left a submenu's row at `from`, heading for the submenu at
+/// `target`? It is while it stays inside the triangle from `from` to the submenu's near edge
+/// (with [`AIM_SLACK`] above and below), as macOS menus judge it.
+fn heading(from: Pos2, p: Pos2, target: Rect) -> bool {
+    if !target.is_positive() {
+        return false;
+    }
+    let x = if target.center().x >= from.x { target.left() } else { target.right() };
+    let (a, b) = (pos2(x, target.top() - AIM_SLACK), pos2(x, target.bottom() + AIM_SLACK));
+    let side = |u: Pos2, v: Pos2| (v.x - u.x) * (p.y - u.y) - (v.y - u.y) * (p.x - u.x);
+    let (d1, d2, d3) = (side(from, a), side(a, b), side(b, from));
+    let neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+    let pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+    !(neg && pos)
+}
+
 /// Is the pointer over `rect` on this ui's layer (not under a submenu drawn on top)?
 fn pointer_on(ui: &Ui, rect: Rect) -> bool {
     ui.ctx().pointer_hover_pos().is_some_and(|p| rect.contains(p) && ui.ctx().layer_id_at(p) == Some(ui.layer_id()))
@@ -343,7 +492,8 @@ pub fn level(ui: &mut Ui, depth: usize, nav: &mut Nav, rows: impl FnOnce(&mut Ui
         ui.painter().add(egui::Shape::convex_polygon(tri, if live { t.text } else { t.text_faint.gamma_multiply(0.5) }, egui::Stroke::NONE));
         let id = key.with(dir < 0.0);
         let r = ui.interact(strip, id, Sense::hover());
-        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, live, if dir < 0.0 { "Scroll menu up" } else { "Scroll menu down" }));
+        let label = if dir < 0.0 { "Scroll menu up" } else { "Scroll menu down" };
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, live, tl!(label)));
         if live && pointer_on(ui, strip) {
             target = (offset + dir * SPEED * dt.max(1.0 / 120.0)).clamp(0.0, max);
             ctx.request_repaint();

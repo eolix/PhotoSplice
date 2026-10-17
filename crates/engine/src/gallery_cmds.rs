@@ -66,6 +66,9 @@ pub fn effect_from_json(filter: GalleryFilter, p: &Value, fallback: &Value) -> G
 /// `filter`); hidden entries are skipped.
 pub fn effects_from_json(p: &Value) -> std::result::Result<Vec<GalleryEffect>, String> {
     let Some(list) = p.get("effects").and_then(Value::as_array) else { return Ok(Vec::new()) };
+    if list.len() > 32 {
+        return Err("too many effects in filterGallery stack (max 32)".into());
+    }
     let mut out = Vec::new();
     for (k, item) in list.iter().enumerate() {
         if item.get("visible").and_then(Value::as_bool) == Some(false) {
@@ -86,6 +89,41 @@ pub fn params_for(id: &str, p: &Value) -> Option<FilterParams> {
     }
     let f = id.strip_prefix("filter.gallery.").and_then(GalleryFilter::from_key)?;
     Some(FilterParams::FilterGallery { effects: vec![effect_from_json(f, p, &Value::Null)] })
+}
+
+/// An unknown choice name or a wrong-typed choice is a bad-params error, for one gallery filter
+/// or each effect of a `filter.filterGallery` stack. Checked only for new invocations (via
+/// `filters::validate_params`); stored smart filters keep decoding tolerantly.
+pub(crate) fn validate_params(id: &str, p: &Value) -> Result<()> {
+    let bad = |msg: String| EngineError::BadParams { cmd: id.into(), msg };
+    if id == "filter.filterGallery" {
+        for (k, item) in p.get("effects").and_then(Value::as_array).into_iter().flatten().enumerate() {
+            let Some(f) = item.get("filter").and_then(Value::as_str).and_then(GalleryFilter::from_key) else { continue };
+            let params = item.get("params").filter(|v| v.is_object()).unwrap_or(item);
+            check_choices(f, params).map_err(|m| bad(format!("effect {k}: {m}")))?;
+        }
+        return Ok(());
+    }
+    match id.strip_prefix("filter.gallery.").and_then(GalleryFilter::from_key) {
+        Some(f) => check_choices(f, p).map_err(bad),
+        None => Ok(()),
+    }
+}
+
+fn check_choices(f: GalleryFilter, p: &Value) -> std::result::Result<(), String> {
+    for prm in f.params() {
+        let (Some(v), GalleryParamKind::Choice(names)) = (p.get(prm.key), &prm.kind) else { continue };
+        let ok = match v {
+            Value::String(name) => names.iter().any(|n| n.eq_ignore_ascii_case(name)),
+            // A choice index, clamped as the dialog stores it.
+            Value::Number(_) => true,
+            _ => false,
+        };
+        if !ok {
+            return Err(format!("`{}` must be one of {}", prm.key, names.join("|")));
+        }
+    }
+    Ok(())
 }
 
 /// Whether the command reads the foreground/background colours.

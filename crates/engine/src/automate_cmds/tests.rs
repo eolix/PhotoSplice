@@ -50,8 +50,61 @@ fn browse_runs_a_script_file() {
     assert_eq!((d.size.width, d.size.height), (20, 30));
     assert!(s.execute("file.scripts.browse", json!({"script": "no.such.command"})).is_err());
     // A failing step stops the script and is reported.
-    let r = s.execute("file.scripts.browse", json!({"steps": [["layer.delete", {"layer": 999_999}], ["image.imageRotation.90cw", {}]]})).unwrap();
+    let r = s.execute("file.scripts.browse", json!({"steps": [["layer.delete", {"layer": u64::MAX}], ["image.imageRotation.90cw", {}]]})).unwrap();
     assert_eq!(r["results"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn browse_rejects_photoshop_extendscript() {
+    let dir = tmp("jsx");
+    let jsx = format!("{dir}/hello.jsx");
+    std::fs::write(&jsx, "alert('hi');\n").unwrap();
+    let mut s = Session::new();
+    let err = s.execute("file.scripts.browse", json!({"path": jsx})).unwrap_err().to_string();
+    assert!(err.contains("not Photoshop ExtendScript"), "{err}");
+    assert!(err.contains("JSON"), "{err}");
+    let js = format!("{dir}/hello.js");
+    std::fs::write(&js, "alert('hi');\n").unwrap();
+    assert!(s.execute("file.scripts.browse", json!({"path": js})).is_err());
+    let err = s.execute("file.scripts.browse", json!({"name": "Resize.jsx", "script": "alert(1);"})).unwrap_err().to_string();
+    assert!(err.contains(".js/.jsx"), "{err}");
+    // A JSON script still runs even if the file name is not a Photoshop suffix.
+    let json = format!("{dir}/rotate.json");
+    std::fs::write(&json, r#"[["file.new", {"width": 8, "height": 8}]]"#).unwrap();
+    let r = s.execute("file.scripts.browse", json!({"path": json})).unwrap();
+    assert_eq!(r["ok"], true);
+}
+
+#[test]
+fn recording_browse_script_captures_each_effect_once() {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 12, "height": 8})).unwrap();
+    s.execute("actions.record", json!({"name": "Rotate script"})).unwrap();
+    let run = s.execute("file.scripts.browse", json!({"steps": [["image.imageRotation.90cw", {}]]})).unwrap();
+    assert_eq!(run["ok"], true);
+    assert_eq!((s.active().unwrap().doc.size.width, s.active().unwrap().doc.size.height), (8, 12));
+    let done = s.execute("actions.stop", json!({})).unwrap();
+    assert_eq!(done["steps"], 1, "Browse must not be recorded a second time");
+    let recorded = s.execute("actions.get", json!({"action": "Rotate script"})).unwrap();
+    assert_eq!(recorded["steps"], json!([["image.imageRotation.90cw", {}]]));
+
+    s.execute("image.imageRotation.90ccw", json!({})).unwrap();
+    assert_eq!((s.active().unwrap().doc.size.width, s.active().unwrap().doc.size.height), (12, 8));
+    let replay = s.execute("actions.play", json!({"action": "Rotate script"})).unwrap();
+    assert_eq!(replay["ran"], 1);
+    assert_eq!((s.active().unwrap().doc.size.width, s.active().unwrap().doc.size.height), (8, 12));
+}
+
+#[test]
+fn standalone_browse_script_still_runs_and_journals_concrete_commands() {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 12, "height": 8})).unwrap();
+    let start = s.journal.len();
+    let result = s.execute("file.scripts.browse", json!({"steps": [["image.imageRotation.90cw", {}]]})).unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(s.journal.len(), start + 2, "the child and Browse retain their diagnostic journal entries");
+    assert_eq!(s.journal[start].0, "image.imageRotation.90cw");
+    assert_eq!((s.active().unwrap().doc.size.width, s.active().unwrap().doc.size.height), (8, 12));
 }
 
 #[test]
@@ -106,6 +159,70 @@ fn droplets_are_written_and_run() {
 }
 
 #[test]
+fn droplets_carry_the_actions_their_play_steps_call() {
+    use crate::actions_cmds::Action;
+    let dir = tmp("droplet-called");
+    let inputs = images(&dir, 2, 40, 20);
+    let mut s = Session::new();
+    let act = |name: &str, steps: Value| -> Action { serde_json::from_value(json!({"name": name, "steps": steps})).unwrap() };
+    s.actions.list = vec![
+        act("Unrelated", json!([["image.imageRotation.180", {}]])),
+        act("Rotate", json!([["image.imageRotation.90cw", {}]])),
+        // Calls Rotate by index (as the panel records it) and itself (caught at run time).
+        act("Outer", json!([["actions.play", {"action": 1}]])),
+        act("Loop", json!([["actions.play", {"action": "Loop"}]])),
+    ];
+    let make = |s: &mut Session, name: &str, steps: Value| {
+        let path = format!("{dir}/{name}");
+        let out = format!("{dir}/out-{name}");
+        s.execute("file.automate.createDroplet", json!({"path": path, "steps": steps, "format": "png", "output": out, "shim": false})).unwrap()["path"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let dp = make(&mut s, "Outer", json!([["actions.play", {"action": "Outer"}]]));
+    let looping = make(&mut s, "Loop", json!([["actions.play", {"action": "Loop"}]]));
+    let v: Value = serde_json::from_slice(&std::fs::read(&dp).unwrap()).unwrap();
+    assert!(v.get("actions").is_none(), "the CLI reads `actions` as an action set");
+    let names: Vec<&str> = v["calledActions"].as_array().unwrap().iter().map(|a| a["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["Rotate", "Outer"], "only the called actions, transitively");
+
+    // A fresh session, as `photosplice-cli droplet` and the droplet shim use.
+    let mut fresh = Session::new();
+    let r = fresh.execute("file.automate.runDroplet", json!({"droplet": dp, "input": [dir.clone()]})).unwrap();
+    assert_eq!(r["files"].as_array().unwrap().len(), inputs.len(), "{r}");
+    let out = photosplice_codecs::decode(&std::fs::read(format!("{dir}/out-Outer/img0.png")).unwrap()).unwrap();
+    assert_eq!(out.dimensions(), (20, 40));
+    let r = fresh.execute("file.automate.runDroplet", json!({"droplet": looping, "input": [dir.clone()]})).unwrap();
+    assert_eq!(r["errors"].as_array().unwrap().len(), inputs.len(), "a self-call fails instead of looping: {r}");
+
+    // Droplets written before `calledActions` still run.
+    let old = format!("{dir}/old.pcdroplet");
+    std::fs::write(
+        &old,
+        json!({"photospliceDroplet": 1, "action": {"steps": [["image.imageRotation.90cw", {}]]}, "options": {"output": format!("{dir}/out-old")}}).to_string(),
+    )
+    .unwrap();
+    let r = fresh.execute("file.automate.runDroplet", json!({"droplet": old, "input": [dir.clone()]})).unwrap();
+    assert_eq!(r["files"].as_array().unwrap().len(), inputs.len(), "{r}");
+}
+
+#[test]
+fn batch_and_droplets_skip_recorded_view_steps() {
+    let dir = tmp("view-steps");
+    images(&dir, 1, 40, 20);
+    let steps = json!([["view.zoomIn", {}], ["image.imageRotation.90cw", {}], ["view.fitOnScreen", {}]]);
+    let mut s = Session::new();
+    let r = s.execute("file.automate.batch", json!({"steps": steps, "input": dir.clone(), "output": format!("{dir}/batch"), "format": "png"})).unwrap();
+    assert!(r["errors"].as_array().unwrap().is_empty(), "{r}");
+    let out = photosplice_codecs::decode(&std::fs::read(format!("{dir}/batch/img0.png")).unwrap()).unwrap();
+    assert_eq!(out.dimensions(), (20, 40));
+    let r = s.execute("file.automate.createDroplet", json!({"path": format!("{dir}/Rotate"), "steps": steps})).unwrap();
+    let v: Value = serde_json::from_slice(&std::fs::read(r["path"].as_str().unwrap()).unwrap()).unwrap();
+    assert_eq!(v["action"]["steps"], json!([["image.imageRotation.90cw", {}]]));
+}
+
+#[test]
 fn statistics_makes_a_stack_mode_smart_object() {
     let dir = tmp("stats");
     let files = images(&dir, 3, 16, 12);
@@ -120,6 +237,43 @@ fn statistics_makes_a_stack_mode_smart_object() {
     let px = photosplice_compose::flatten(d).px[0];
     assert!((px[0] * 255.0 - 60.0).abs() < 1.5, "{px:?}");
     assert!(s.execute("file.scripts.statistics", json!({"mode": "average", "input": dir})).is_err());
+}
+
+#[test]
+fn stacked_smart_object_holds_the_loaded_layers_at_its_top_level() {
+    // Like Photoshop, Load Files into Stack › Create Smart Object (Statistics without alignment) and
+    // Statistics with alignment embed one layer per file, bottom to top, with no wrapper group.
+    let dir = tmp("stack-top");
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 96, "height": 72, "background": "#606060"})).unwrap();
+    s.edit("texture", |doc, active| {
+        let surf = doc.layer_mut(active.ok_or(EngineError::NoDocument)?).and_then(Layer::surface_mut).ok_or(EngineError::NoDocument)?;
+        for k in 0..40 {
+            let (x, y, v) = ((k * 37) % 88, (k * 23) % 66, (k % 7) as f32 / 6.0);
+            surf.fill_rect(photosplice_geom::Rect::new(x, y, x + 3 + k % 5, y + 2 + k % 4), &[v, 1.0 - v, 0.5, 1.0]);
+        }
+        Ok(())
+    })
+    .unwrap();
+    let source = photosplice_compose::flatten(&s.active().unwrap().doc);
+    let files: Vec<String> = (0..3)
+        .map(|i| {
+            let path = format!("{dir}/img{i}.png");
+            crate::file_cmds::save_doc(&s.active().unwrap().doc, &path, None).unwrap();
+            path
+        })
+        .collect();
+    for align in [false, true] {
+        let mut s = Session::new();
+        s.execute("file.scripts.statistics", json!({"mode": "median", "input": files, "align": align})).unwrap();
+        let d = &s.active().unwrap().doc;
+        let LayerContent::Smart(so) = &d.layers[0].content else { panic!("not a smart object") };
+        let photosplice_doc::SmartSource::Embedded { file_name, bytes } = &so.source else { panic!("not embedded") };
+        let inner = crate::smart_cmds::decode_source(file_name, bytes).unwrap();
+        let names: Vec<&str> = inner.layers.iter().map(|l| l.name.as_str()).collect();
+        assert_eq!(names, ["img0.png", "img1.png", "img2.png"], "align {align}");
+        assert_eq!(photosplice_compose::flatten(d).px, source.px, "align {align}");
+    }
 }
 
 #[test]
@@ -153,4 +307,85 @@ fn contact_sheet_places_thumbnails_with_captions() {
         let d = &s.documents()[r["documents"][0].as_u64().unwrap() as usize].doc;
         assert_eq!(d.layers.len(), 1);
     }
+}
+
+#[test]
+fn a_failed_step_inside_a_called_action_fails_scripts_and_batch() {
+    use crate::actions_cmds::Action;
+    let dir = tmp("nested-failure");
+    images(&dir, 1, 8, 4);
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 8, "height": 6})).unwrap();
+    s.actions.list.push(Action {
+        name: "Rotate".into(),
+        steps: vec![("image.imageRotation.90cw".into(), json!({}))],
+        disabled: Default::default(),
+        ..Default::default()
+    });
+    s.actions.list.push(Action {
+        name: "Bad".into(),
+        steps: vec![("layer.delete".into(), json!({"layer": u64::MAX}))],
+        disabled: Default::default(),
+        ..Default::default()
+    });
+    // A script stops at the failed call and reports it.
+    let r = s.execute("file.scripts.browse", json!({"steps": [["actions.play", {"action": "Bad"}], ["image.imageRotation.90cw", {}]]})).unwrap();
+    assert_eq!(r["ok"], false, "{r}");
+    assert_eq!(r["results"].as_array().unwrap().len(), 1);
+    // Batch plays called actions, and a failure inside one is a file error, not a saved result.
+    let batch = |s: &mut Session, action: &str| {
+        let p = json!({"steps": [["actions.play", {"action": action}]], "input": dir.clone(), "output": format!("{dir}/{action}"), "format": "png"});
+        s.execute("file.automate.batch", p).unwrap()
+    };
+    let r = batch(&mut s, "Rotate");
+    assert!(r["errors"].as_array().unwrap().is_empty(), "{r}");
+    let r = batch(&mut s, "Bad");
+    assert_eq!(r["files"], json!([]), "{r}");
+    assert!(r["errors"][0]["error"].as_str().unwrap().contains("no such layer"), "{r}");
+    // An action that batches itself stops as a recursive call instead of overflowing the stack.
+    let inner = json!({"steps": [["actions.play", {"action": "Loop"}]], "input": dir.clone(), "output": format!("{dir}/inner"), "format": "png"});
+    s.actions.list.push(Action { name: "Loop".into(), steps: vec![("file.automate.batch".into(), inner)], disabled: Default::default(), ..Default::default() });
+    batch(&mut s, "Loop");
+}
+
+/// #4671: Load Files into Stack's Attempt to Automatically Align Source Images runs Auto-Align
+/// Layers on the loaded layers, then (with Create Smart Object) puts them in one smart object;
+/// without the smart object they stay loose layers, selected.
+#[test]
+fn load_files_into_stack_aligns_before_the_smart_object() {
+    let dir = tmp("stack-align");
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 96, "height": 72, "background": "#606060"})).unwrap();
+    s.edit("texture", |doc, active| {
+        let surf = doc.layer_mut(active.ok_or(EngineError::NoDocument)?).and_then(Layer::surface_mut).ok_or(EngineError::NoDocument)?;
+        for k in 0..40 {
+            let (x, y, v) = ((k * 37) % 88, (k * 23) % 66, (k % 7) as f32 / 6.0);
+            surf.fill_rect(photosplice_geom::Rect::new(x, y, x + 3 + k % 5, y + 2 + k % 4), &[v, 1.0 - v, 0.5, 1.0]);
+        }
+        Ok(())
+    })
+    .unwrap();
+    let files: Vec<String> = (0..2)
+        .map(|i| {
+            let path = format!("{dir}/img{i}.png");
+            crate::file_cmds::save_doc(&s.active().unwrap().doc, &path, None).unwrap();
+            path
+        })
+        .collect();
+    let mut s = Session::new();
+    let r = s.execute("file.scripts.loadFilesIntoStack", json!({"paths": files, "align": true})).unwrap();
+    assert_eq!(r["layers"], 2);
+    let st = s.active().unwrap();
+    assert_eq!(st.doc.layers.len(), 2, "loose layers");
+    assert!(st.doc.layers.iter().all(|l| matches!(l.content, LayerContent::Raster(_))));
+    assert_eq!(st.selected_layers().len(), 2, "Auto-Align ran on them all");
+    let mut s = Session::new();
+    s.execute("file.scripts.loadFilesIntoStack", json!({"paths": files, "align": true, "createSmartObject": true})).unwrap();
+    let d = &s.active().unwrap().doc;
+    assert_eq!(d.layers.len(), 1);
+    let LayerContent::Smart(_) = &d.layers[0].content else { panic!("not a smart object") };
+    // A single file has nothing to align with: it just loads.
+    let mut s = Session::new();
+    s.execute("file.scripts.loadFilesIntoStack", json!({"paths": [files[0].clone()], "align": true})).unwrap();
+    assert_eq!(s.active().unwrap().doc.layers.len(), 1);
 }

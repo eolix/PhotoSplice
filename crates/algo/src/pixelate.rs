@@ -5,6 +5,13 @@
 
 use photosplice_geom::Rect;
 
+mod facet;
+#[cfg(test)]
+mod reference;
+mod screen;
+#[cfg(test)]
+mod tests;
+
 use crate::fxutil::{MAXC, cell_point, luma, native, ncol, rgba, set_rgba, subtractive, via_rgb, xy};
 use crate::image::Image;
 use crate::noise::hash01;
@@ -49,6 +56,14 @@ pub(crate) fn color_halftone(src: &Image, out: Rect, ctx: &Ctx, max_radius: f32,
     };
     let w = out.width() as usize;
     let chans = if rgb { 3 } else { cc };
+    // Keep cache metadata on the stack; only the optional, bounded tables allocate.
+    let mut screens: [Option<screen::Screen>; MAXC] = std::array::from_fn(|c| {
+        if c >= chans {
+            return None;
+        }
+        let &(s, co) = rot.get(c)?;
+        screen::Screen::new(out, (ox, oy), (s, co), cell)
+    });
     let mut vals = [0.0f32; MAXC];
     for (i, px) in res.chunks_exact_mut(n).enumerate() {
         let (x, y) = (out.x0 + (i % w) as i32, out.y0 + (i / w) as i32);
@@ -68,14 +83,21 @@ pub(crate) fn color_halftone(src: &Image, out: Rect, ctx: &Ctx, max_radius: f32,
                     }
                     // Back to document space to read the cell's value.
                     let (dx, dy) = (mu * co - mv * s + ox, mu * s + mv * co + oy);
-                    let raw = value(dx, dy, c).clamp(0.0, 1.0);
-                    let ink = if sub && !rgb { raw } else { 1.0 - raw };
-                    // Dot area tracks ink: πr² = ink·cell² until dots touch, then grow to cover the corners.
-                    let touch = std::f32::consts::FRAC_PI_4;
-                    let r = if ink <= touch {
-                        cell * (ink / std::f32::consts::PI).sqrt()
-                    } else {
-                        cell * (0.5 + (ink - touch) / (1.0 - touch) * (std::f32::consts::FRAC_1_SQRT_2 - 0.5))
+                    // The five source taps and ink-to-radius mapping depend only on
+                    // the screen cell, not on the output pixel inside that cell.
+                    let radius = || {
+                        let raw = value(dx, dy, c).clamp(0.0, 1.0);
+                        let ink = if sub && !rgb { raw } else { 1.0 - raw };
+                        let touch = std::f32::consts::FRAC_PI_4;
+                        if ink <= touch {
+                            cell * (ink / std::f32::consts::PI).sqrt()
+                        } else {
+                            cell * (0.5 + (ink - touch) / (1.0 - touch) * (std::f32::consts::FRAC_1_SQRT_2 - 0.5))
+                        }
+                    };
+                    let r = match screens.get_mut(c).and_then(Option::as_mut) {
+                        Some(screen) => screen.radius(cu + di as f32, cv + dj as f32, radius),
+                        None => radius(),
                     };
                     // Tiny dots cannot cover more than their own area.
                     cov = cov.max((r - d + 0.5).clamp(0.0, 1.0).min(std::f32::consts::PI * r * r));
@@ -93,8 +115,11 @@ pub(crate) fn color_halftone(src: &Image, out: Rect, ctx: &Ctx, max_radius: f32,
     res
 }
 
-/// Crystallize: Voronoi cells around jittered points, each filled with the
-/// (premultiplied) average colour of its pixels.
+/// Crystallize: Voronoi cells around jittered points, each filled with the colour at its
+/// point, as Photoshop's are: cells stay solid, so a black-and-white image (a layer mask
+/// being distressed) keeps hard edges and its weight instead of greying where cells straddle
+/// an edge. A cell whose point falls outside the image takes the (premultiplied) average
+/// colour of its pixels.
 pub(crate) fn crystallize(src: &Image, out: Rect, ctx: &Ctx, cell_size: f32, seed: u32) -> Vec<f32> {
     let n = src.ch;
     let cell = cell_size.max(2.0);
@@ -155,6 +180,14 @@ pub(crate) fn crystallize(src: &Image, out: Rect, ctx: &Ctx, cell_size: f32, see
             continue;
         }
         let (cx, cy) = if win.contains(x, y) { owners[i] } else { owner(x, y) };
+        let (sx, sy) = cell_point(cx, cy, cell, seed, origin);
+        let (sx, sy) = (sx.floor() as i32, sy.floor() as i32);
+        if src.rect.contains(sx, sy) && b.contains(sx, sy) {
+            for (c, v) in px.iter_mut().enumerate() {
+                *v = src.get(sx, sy, c);
+            }
+            continue;
+        }
         if cx < c0.0 || cy < c0.1 || cx > c1.0 || cy > c1.1 {
             continue;
         }
@@ -175,6 +208,10 @@ pub(crate) fn crystallize(src: &Image, out: Rect, ctx: &Ctx, cell_size: f32, see
 /// least-varied of its four overlapping quadrants, clumping similar colours
 /// into flat facets while keeping edges.
 pub(crate) fn facet(src: &Image, out: Rect, ctx: &Ctx) -> Vec<f32> {
+    facet::run(src, out, ctx).unwrap_or_else(|| facet_direct(src, out, ctx))
+}
+
+fn facet_direct(src: &Image, out: Rect, ctx: &Ctx) -> Vec<f32> {
     let n = src.ch;
     let r = 2i32;
     let mut res = src.crop(out);

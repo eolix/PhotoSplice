@@ -160,6 +160,32 @@ fn set_moves_handles_and_restyles_in_one_undo_step() {
 }
 
 #[test]
+fn locked_gradient_fill_rejects_content_edits_without_history() {
+    let mut s = session(8, "white");
+    s.execute(CREATE, json!({"from": [0, 0], "to": [16, 0], "stops": [[0, "#000000"], [1, "#ffffff"]], "dither": false})).unwrap();
+    s.execute("layer.lockLayers", json!({"all": true})).unwrap();
+    let original = active_fill(&s);
+    let locked_history = s.active().unwrap().history.past_len();
+
+    for (command, params) in [(SET, json!({"reverse": true})), (STOP, json!({"action": "color", "index": 0, "color": "#ff0000"}))] {
+        let result = s.execute(command, params.clone());
+        assert!(matches!(&result, Err(EngineError::Other(message)) if message.contains("locked")), "{command} {params}: {result:?}");
+        assert_eq!(active_fill(&s), original, "{command} changed the fill");
+        assert_eq!(s.active().unwrap().history.past_len(), locked_history, "{command} added history");
+    }
+
+    s.execute("layer.lockLayers", json!({"all": false})).unwrap();
+    for (command, params) in [(SET, json!({"reverse": true})), (STOP, json!({"action": "color", "index": 0, "color": "#ff0000"}))] {
+        let history = s.active().unwrap().history.past_len();
+        s.execute(command, params).unwrap();
+        assert_eq!(s.active().unwrap().history.past_len(), history + 1, "{command} records one step");
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(active_fill(&s), original, "undo restores the fill after {command}");
+        assert_eq!(s.active().unwrap().history.past_len(), history);
+    }
+}
+
+#[test]
 fn stops_add_move_recolour_delete_and_midpoints() {
     let mut s = session(8, "white");
     s.execute(CREATE, json!({"from": [0, 0], "to": [48, 0], "stops": [[0, "#000000"], [1, "#ffffff"]], "dither": false})).unwrap();
@@ -247,7 +273,7 @@ fn commands_fail_gracefully() {
     // A zero-length drag still makes a valid gradient.
     s.execute(CREATE, json!({"from": [3, 3], "to": [3, 3]})).unwrap();
     for p in [
-        json!({"layer": 999_999}),
+        json!({"layer": u64::MAX}),
         json!({"from": [0]}),
         json!({"to": [1e30, 0]}),
         json!({"angle": "x"}),
@@ -296,4 +322,65 @@ fn commands_fail_gracefully() {
     assert!((g["scale"].as_f64().unwrap() - 150.0).abs() < 1e-3, "{g}");
     let g = s.execute(SET, json!({"scale": 1})).unwrap();
     assert!((g["scale"].as_f64().unwrap() - 10.0).abs() < 1e-3, "{g}");
+}
+
+/// Dragging one handle past the scale range stops it; the other handle stays put (#1243).
+#[test]
+fn a_clamped_handle_drag_leaves_the_other_handle_alone() {
+    let pt = |g: &Value, k: &str| [g[k][0].as_f64().unwrap(), g[k][1].as_f64().unwrap()];
+    let close = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-2 && (a[1] - b[1]).abs() < 1e-2;
+    for style in STYLES {
+        for (from, to, short, short_start) in [([14.0, 16.0], [34.0, 16.0], [15.0, 16.0], [33.0, 16.0]), ([24.0, 6.0], [24.0, 26.0], [24.0, 7.0], [24.0, 25.0])]
+        {
+            let mut s = session(8, "white");
+            s.execute(CREATE, json!({"from": from, "to": to, "style": style})).unwrap();
+            // End dragged almost onto the start: far below 10 %.
+            let g = s.execute(SET, json!({"to": short})).unwrap();
+            assert!((g["scale"].as_f64().unwrap() - 10.0).abs() < 1e-3, "{style}: {g}");
+            assert!(close(pt(&g, "from"), from), "{style}: start moved to {:?}", pt(&g, "from"));
+            // The end stops on the line towards the pointer.
+            let e = pt(&g, "to");
+            assert!((e[0] - from[0]) * (short[0] - from[0]) >= 0.0 && (e[1] - from[1]) * (short[1] - from[1]) >= 0.0, "{style}: {e:?}");
+            // And the same for the start handle.
+            let mut s = session(8, "white");
+            s.execute(CREATE, json!({"from": from, "to": to, "style": style})).unwrap();
+            let g = s.execute(SET, json!({"from": short_start})).unwrap();
+            assert!(close(pt(&g, "to"), to), "{style}: end moved: {g}");
+        }
+    }
+}
+
+/// Issue #958: a stop or segment index far past the end (up to the largest integer) is a
+/// `BadParams` error for every action and kind, never an overflow panic, and leaves the gradient
+/// and the history as they were.
+#[test]
+fn stop_rejects_huge_indices_without_panicking() {
+    let mut s = session(8, "white");
+    s.execute(CREATE, json!({"from": [0, 0], "to": [8, 8], "stops": [[0, "#000000"], [1, "#ffffff"]]})).unwrap();
+    let before = active_fill(&s);
+    let h = s.active().unwrap().history.past_len();
+    for index in [u64::MAX, usize::MAX as u64, u64::MAX - 1, 1 << 32, 2] {
+        for p in [
+            json!({"action": "midpoint", "index": index, "location": 0.5}),
+            json!({"action": "move", "index": index, "location": 0.5}),
+            json!({"action": "delete", "index": index}),
+            json!({"action": "color", "index": index, "color": "#ff0000"}),
+            json!({"action": "move", "kind": "opacity", "index": index, "location": 0.5}),
+            json!({"action": "delete", "kind": "opacity", "index": index}),
+            json!({"action": "opacity", "kind": "opacity", "index": index, "opacity": 50}),
+        ] {
+            let r = s.execute(STOP, p.clone());
+            assert!(matches!(r, Err(EngineError::BadParams { .. })), "{p}: {r:?}");
+            assert_eq!(active_fill(&s), before, "{p} changed the gradient");
+            assert_eq!(s.active().unwrap().history.past_len(), h, "{p} added a history step");
+        }
+    }
+    // The last segment of a two-stop gradient is 0; segment 1 does not exist.
+    let r = s.execute(STOP, json!({"action": "midpoint", "index": 1, "location": 0.5}));
+    assert!(matches!(&r, Err(EngineError::BadParams { msg, .. }) if msg.contains("no segment 1 (there are 1)")), "{r:?}");
+    // Control: a valid midpoint edit still applies as one undo step.
+    s.execute(STOP, json!({"action": "midpoint", "index": 0, "location": 0.25})).unwrap();
+    let Fill::Gradient { midpoints, .. } = active_fill(&s) else { panic!("not a gradient fill") };
+    assert_eq!(midpoints, vec![0.25]);
+    assert_eq!(s.active().unwrap().history.past_len(), h + 1);
 }

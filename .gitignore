@@ -9,10 +9,16 @@ target/
 /temp/
 /plan/
 /todo.md
+/log/
+*.log
+/secrets/
 
 # ---- Test corpora --------------------------------------------------------------------------
 # Real-file corpora fetched by `cargo xtask corpus --all` at pinned commits (never committed).
 /corpus/
+# Fonts fetched for local builds and the generated book.
+/craft-fonts/
+/book/output/
 
 # ---- Generated reports ---------------------------------------------------------------------
 # `cargo xtask scorecard` writes this; regenerate it rather than committing it.

@@ -1,4 +1,4 @@
-//! Type layers read from a file, made ready for the canvas.
+//! Type layers read from a file, made ready for the canvas and the panels.
 
 use photosplice_doc::{Document, Layer, LayerContent, TextLayer};
 
@@ -20,9 +20,13 @@ fn render_bounded(eng: &mut photosplice_text::TextEngine, t: &mut TextLayer, dpi
     t.cache = Some(r.surface);
 }
 
-/// Renders the type layers of a just-imported document that came without pixels (ag-psd, GIMP
-/// and other writers leave the image data out and let Reference re-render on open), instead of
-/// leaving them empty until edited (storytold/photocraft@d2ad238e).
+/// Prepares the type layers of a document that was just imported:
+/// - a run whose font came as a PostScript name (PSD files) gets the installed family that name
+///   resolves to, as the layout does, so Missing Fonts and the Character panel see the real
+///   family (`CCWildWords-Regular` is the family "CCWildWords", not the guessed "CC Wild Words");
+/// - a type layer without pixels (ag-psd, GIMP and other writers leave the image data out and
+///   let the reference re-render on open) is rendered from its model, instead of staying empty
+///   until it is edited (storytold/photocraft@d2ad238e).
 pub(crate) fn prepare(doc: &mut Document) {
     fn visit(layers: &mut [Layer], eng: &mut photosplice_text::TextEngine, dpi: f32, format: photosplice_color::PixelFormat, depth: usize) {
         if depth > photosplice_doc::MAX_GROUP_DEPTH {
@@ -30,7 +34,34 @@ pub(crate) fn prepare(doc: &mut Document) {
         }
         for l in layers {
             match &mut l.content {
-                LayerContent::Text(t) if t.cache.is_none() => render_bounded(eng, t, dpi, format),
+                LayerContent::Text(t) => {
+                    let mut changed = false;
+                    for r in &mut t.runs {
+                        if let Some(ps) = r.style.postscript_name.clone()
+                            && !eng.fonts.faces(&r.style.font_family).iter().any(|f| f.postscript_name.as_deref() == Some(&ps))
+                        {
+                            let f = eng.fonts.resolve_postscript(&ps);
+                            // Keep installed families, including legacy names whose faces are
+                            // indexed under a typographic family. An exact face may recover a
+                            // truncated hyphenated family; a heuristic only fills a missing one.
+                            let installed = eng.fonts.has_family(&r.style.font_family);
+                            let exact_recovery =
+                                f.exact && (!installed || f.family.strip_prefix(&r.style.font_family).is_some_and(|suffix| suffix.starts_with('-')));
+                            if exact_recovery || (!installed && eng.fonts.has_family(&f.family)) {
+                                r.style.font_family = f.family;
+                                r.style.weight = f.weight;
+                                r.style.italic = f.italic;
+                                changed = true;
+                            }
+                        }
+                    }
+                    if changed {
+                        t.sync_summary();
+                    }
+                    if t.cache.is_none() {
+                        render_bounded(eng, t, dpi, format);
+                    }
+                }
                 LayerContent::Group(g) => visit(&mut g.children, eng, dpi, format, depth + 1),
                 _ => {}
             }

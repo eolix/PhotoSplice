@@ -40,6 +40,147 @@ fn normal_layer_over_background() {
     assert!(close4(px(&d, 5, 1), [1.0; 4]));
 }
 
+// The pre-optimisation Normal formula, independent of the production helper. Its operation
+// order matters: an algebraically equivalent premultiplied mix can round differently.
+fn original_normal_rgb(backdrop: [f32; 4], source: [f32; 4], opacity: f32) -> [f32; 4] {
+    let ab = backdrop[3];
+    let as_ = source[3] * opacity;
+    if as_ <= 0.0 {
+        return backdrop;
+    }
+    let ao = as_ + ab * (1.0 - as_);
+    if ao <= 0.0 {
+        return [0.0; 4];
+    }
+    let kb = ab * (1.0 - as_);
+    let inv = 1.0 / ao;
+    [(kb * backdrop[0] + as_ * source[0]) * inv, (kb * backdrop[1] + as_ * source[1]) * inv, (kb * backdrop[2] + as_ * source[2]) * inv, ao]
+}
+
+#[test]
+fn normal_rgb_kernel_preserves_scalar_bits() {
+    let subnormal = f32::from_bits(1);
+    let backdrops = [[0.0, -0.0, 2.0, 0.0], [0.2, 0.4, 0.6, 0.5], [2.0, -0.25, 4.0, 1.0], [-1.0, 0.01, 1.0, -0.5], [1.0, -0.0, f32::MIN_POSITIVE, subnormal]];
+    let sources = [
+        [0.9, 0.1, 0.3, 1.0],
+        [0.25, 2.0, -1.0, 0.5],
+        [subnormal, 1e-20, 1.0, subnormal],
+        [0.5, 0.2, 0.7, -0.0],
+        [0.5, 0.2, 0.7, -0.5],
+        [f32::NAN, 0.2, 0.7, 0.0],
+    ];
+    for b in backdrops {
+        for s in sources {
+            for opacity in [-1.0, -0.0, 0.0, 0.5, 1.0, 2.0] {
+                let want = original_normal_rgb(b, s, opacity);
+                let got = psblend::composite_normal_rgb(b, s, opacity);
+                assert_eq!(got.map(f32::to_bits), want.map(f32::to_bits), "{b:?} / {s:?} / {opacity}");
+            }
+        }
+    }
+}
+
+fn normal_rgb_test_buffers(fmt: PixelFormat) -> (Buffer, Buffer) {
+    let rect = Rect::new(-3, -2, 5, 0);
+    let mut bottom = Surface::new(fmt);
+    let mut top = Surface::new(fmt);
+    for y in rect.y0..rect.y1 {
+        for x in rect.x0..rect.x1 {
+            let i = ((y - rect.y0) * rect.width() as i32 + x - rect.x0) as usize;
+            let t = i as f32 / 16.0;
+            let b = [2.0 * t, 0.4, -0.25 + t, [0.0, 0.25, 0.75, 1.0][i % 4]];
+            let s = [0.9 - t, 0.1 + t, 0.3, [0.0, -0.0, 0.5, 1.0][i % 4]];
+            bottom.write_pixel(x, y, &photosplice_raster::from_rgba(&fmt, b));
+            top.write_pixel(x, y, &photosplice_raster::from_rgba(&fmt, s));
+        }
+    }
+    (surface_to_buffer(&bottom, rect), surface_to_buffer(&top, rect))
+}
+
+// Keep the old buffer dispatch as an oracle for the specialised loop and all of its fallbacks.
+fn original_blend_into_g(backdrop: &mut Buffer, src: &Buffer, mode: BlendMode, opacity: f32, gamma: f32) {
+    let rect = backdrop.rect;
+    let w = rect.width() as i32;
+    for (i, b) in backdrop.px.iter_mut().enumerate() {
+        let mut s = src.px[i];
+        if s[3] <= 0.0 {
+            continue;
+        }
+        let mut mode = mode;
+        if mode == BlendMode::Dissolve {
+            let x = rect.x0 + (i as i32 % w);
+            let y = rect.y0 + (i as i32 / w);
+            s[3] = if dissolve_noise(x, y) < s[3] * opacity { 1.0 } else { 0.0 };
+            mode = BlendMode::Normal;
+            *b = blend::composite(mode, *b, s, 1.0);
+            continue;
+        }
+        *b = blend::composite_gamma(mode, *b, s, opacity, gamma);
+    }
+}
+
+fn assert_buffer_bits(got: &Buffer, want: &Buffer) {
+    assert_eq!(got.rect, want.rect);
+    assert_eq!(got.px.len(), want.px.len());
+    for (i, (got, want)) in got.px.iter().zip(&want.px).enumerate() {
+        assert_eq!(got.map(f32::to_bits), want.map(f32::to_bits), "pixel {i}: {got:?} vs {want:?}");
+    }
+}
+
+#[test]
+fn normal_rgb_buffer_dispatch_and_fallbacks_preserve_bits() {
+    for fmt in [PixelFormat::RGBA8, PixelFormat::RGBA16, PixelFormat::RGBA32F] {
+        let (bottom, top) = normal_rgb_test_buffers(fmt);
+        for lab in [false, true] {
+            psblend::with_lab_mix(lab, || {
+                psblend::with_hdr(fmt.sample == SampleType::F32, || {
+                    for mode in BlendMode::LAYER_MODES {
+                        for gamma in [1.0, psblend::TEXT_GAMMA] {
+                            for opacity in [0.0, 0.5, 1.0] {
+                                let mut got = bottom.clone();
+                                let mut want = bottom.clone();
+                                original_blend_into_g(&mut want, &top, mode, opacity, gamma);
+                                blend_into_g(&mut got, &top, mode, opacity, gamma);
+                                assert_buffer_bits(&got, &want);
+                            }
+                        }
+                    }
+                });
+            });
+        }
+    }
+}
+
+#[test]
+fn normal_rgb_buffer_preserves_alpha_skip_and_nested_scopes() {
+    let rect = Rect::new(-1, -1, 2, 0);
+    let bottom = Buffer::filled(rect, [-0.0, 0.4, 2.0, 0.75]);
+    let top = Buffer { rect, px: vec![[f32::NAN, 0.3, 0.1, -0.5], [0.2, 0.3, 0.1, -0.0], [0.2, 0.3, 0.1, f32::NAN]] };
+    psblend::with_lab_mix(true, || {
+        psblend::with_hdr(true, || {
+            psblend::with_lab_mix(false, || {
+                psblend::with_hdr(false, || {
+                    let mut got = bottom.clone();
+                    let mut want = bottom.clone();
+                    original_blend_into_g(&mut want, &top, BlendMode::Normal, -1.0, 1.0);
+                    blend_into_g(&mut got, &top, BlendMode::Normal, -1.0, 1.0);
+                    assert_buffer_bits(&got, &want);
+                    assert_eq!(got.px[0].map(f32::to_bits), bottom.px[0].map(f32::to_bits));
+                    assert_eq!(got.px[1].map(f32::to_bits), bottom.px[1].map(f32::to_bits));
+                });
+                assert!(psblend::HDR.with(|h| h.get()));
+            });
+            assert!(psblend::LAB_MIX.with(|l| l.get()));
+            assert!(psblend::HDR.with(|h| h.get()));
+            let mut got = bottom.clone();
+            let mut want = bottom.clone();
+            original_blend_into_g(&mut want, &top, BlendMode::Normal, 0.5, 1.0);
+            blend_into_g(&mut got, &top, BlendMode::Normal, 0.5, 1.0);
+            assert_buffer_bits(&got, &want);
+        });
+    });
+}
+
 #[test]
 fn opacity_and_fill_multiply() {
     let mut d = doc_white(4, 4);
@@ -76,11 +217,65 @@ fn every_blend_mode_matches_reference_on_opaque_pixels() {
         top.blend = mode;
         d.layers = vec![bottom, top];
         let got = px(&d, 0, 0);
+        // A 32-bit document: Add / Divide don't clip at 1 (Divide gives 0.6 / 0.2 = 3 in red).
+        psblend::HDR.with(|h| h.set(true));
         let want = blend::blend_rgb(mode, [0.6, 0.3, 0.2], [0.2, 0.7, 0.5]);
+        psblend::HDR.with(|h| h.set(false));
         for i in 0..3 {
             assert!((got[i] - want[i]).abs() < 1e-5, "{mode:?}: {got:?} vs {want:?}");
         }
         assert!((got[3] - 1.0).abs() < 1e-6);
+    }
+}
+
+/// One opaque pixel: `top` in `mode` over `bottom`, in a document of `depth`.
+fn blend_px(depth: SampleType, mode: BlendMode, bottom: [f32; 3], top: [f32; 3]) -> [f32; 4] {
+    let mut d = Document::new("b", Size::new(1, 1), ColorMode::Rgb, depth);
+    let fmt = d.pixel_format();
+    let mut b = Layer::raster("b", fmt);
+    b.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 1, 1), &photosplice_raster::from_rgba(&fmt, [bottom[0], bottom[1], bottom[2], 1.0]));
+    let mut t = Layer::raster("t", fmt);
+    t.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 1, 1), &photosplice_raster::from_rgba(&fmt, [top[0], top[1], top[2], 1.0]));
+    t.blend = mode;
+    d.layers = vec![b, t];
+    px(&d, 0, 0)
+}
+
+#[test]
+fn non_separable_modes_keep_values_above_one_in_32_bit() {
+    use photosplice_color::blend::{blend_rgb_within, lum};
+    let modes = [BlendMode::Hue, BlendMode::Saturation, BlendMode::Color, BlendMode::Luminosity];
+    // Hue over a grey of 2: the grey (the backdrop has no saturation), not ClipColor dividing
+    // by the rounding noise of `max − lum` (Hue over (4, 3.9999, 4) gave 27.7 in blue).
+    for bg in [[2.0, 2.0, 2.0], [2.0, 2.0, 1.999_99], [4.0, 3.999_9, 4.0]] {
+        for m in modes {
+            for top in [[3.0, 0.25, 0.125], [2.0, 2.0, 2.0], [4.0, 3.999_9, 4.0]] {
+                let got = blend_px(SampleType::F32, m, bg, top);
+                let want = blend_rgb_within(m, bg, top, f32::MAX);
+                assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() <= 1e-4 * w.abs().max(1.0)), "{m:?} {bg:?} {top:?}: {got:?} vs {want:?}");
+                assert!(got.iter().all(|v| v.is_finite() && *v >= -1e-5), "{m:?} {bg:?} {top:?}: {got:?}");
+            }
+        }
+    }
+    // A saturated colour keeps its brightness above 1 in 32-bit, and is clipped into 0..1
+    // (exactly as before) in 8/16-bit.
+    let (bg, top) = ([0.5, 0.5, 0.5], [1.0, 0.0, 0.0]);
+    let hdr = blend_px(SampleType::F32, BlendMode::Color, bg, top);
+    assert!((hdr[0] - 1.2).abs() < 1e-4 && (lum([hdr[0], hdr[1], hdr[2]]) - 0.5).abs() < 1e-4, "{hdr:?}");
+    for depth in [SampleType::U8, SampleType::U16] {
+        for m in modes {
+            let got = blend_px(depth, m, bg, top);
+            let want = photosplice_color::blend::blend_rgb(m, bg, top);
+            assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() <= 1.0 / 255.0), "{m:?} {depth:?}: {got:?} vs {want:?}");
+        }
+        let got = blend_px(depth, BlendMode::Color, bg, top);
+        assert!(got[0] <= 1.0 && got[0] > 0.9, "{depth:?}: {got:?}");
+    }
+    // A 32-bit document's in-range colours that stay in range are unchanged.
+    for m in modes {
+        let got = blend_px(SampleType::F32, m, [0.6, 0.3, 0.2], [0.2, 0.7, 0.5]);
+        let want = photosplice_color::blend::blend_rgb(m, [0.6, 0.3, 0.2], [0.2, 0.7, 0.5]);
+        assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() <= 1e-5), "{m:?}: {got:?} vs {want:?}");
     }
 }
 
@@ -313,11 +508,58 @@ fn solid_and_gradient_fill_layers() {
 
     let g = Fill::gradient(vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], 0.0, 1.0, photosplice_doc::GradientStyle::Linear, false);
     let patterns = pattern::PreparedPatterns::new(&[], pattern::PREPARED_PATTERN_BYTES);
-    let buf = render_fill(&g, Rect::new(0, 0, 10, 1), Rect::new(0, 0, 10, 1), &patterns);
+    let buf = render_fill_quantized(&g, Rect::new(0, 0, 10, 1), Rect::new(0, 0, 10, 1), &patterns, None);
     // tile independence: a 1px render of the right edge equals the full render
-    let one = render_fill(&g, Rect::new(9, 0, 10, 1), Rect::new(0, 0, 10, 1), &patterns);
+    let one = render_fill_quantized(&g, Rect::new(9, 0, 10, 1), Rect::new(0, 0, 10, 1), &patterns, None);
     assert_eq!(one.px[0], buf.px[9]);
     assert!(buf.px[0][0] < buf.px[9][0], "left dark, right light");
+}
+
+fn dithered_gradient(stops: Vec<(f32, Color)>, angle: f32) -> Fill {
+    let mut f = Fill::gradient(stops, angle, 1.0, photosplice_doc::GradientStyle::Linear, false);
+    if let Fill::Gradient { dither, .. } = &mut f {
+        *dither = true;
+    }
+    f
+}
+
+/// #2755: a dithered gradient fill under a bright Color Dodge gradient. Dodge divides by
+/// `1 − cs`, so the dither's fraction of a level, left in float, came out as speckle several
+/// levels high (a black channel lifted to 4/255: coloured fringes). On an 8-bit document the
+/// dithered pixels sit on levels, as a painted gradient's do, so a channel at 0 stays 0.
+#[test]
+fn dithered_gradient_fills_under_color_dodge_keep_black_channels() {
+    let mut d = doc_white(128, 32);
+    // Red to blue: green is 0 everywhere.
+    let bottom = dithered_gradient(vec![(0.0, Color::rgb(1.0, 0.0, 0.0)), (1.0, Color::rgb(0.0, 0.0, 1.0))], 0.0);
+    d.layers.push(Layer::new("bottom", LayerContent::Fill(bottom)));
+    let top = dithered_gradient(vec![(0.0, Color::rgb(0.88, 0.88, 0.88)), (1.0, Color::rgb(0.97, 0.97, 0.97))], 90.0);
+    let mut l = Layer::new("top", LayerContent::Fill(top));
+    l.blend = BlendMode::ColorDodge;
+    d.layers.push(l);
+    for (i, p) in flatten(&d).px.iter().enumerate() {
+        assert_eq!(p[1], 0.0, "pixel {i}: green lifted off black to {} levels", p[1] * 255.0);
+    }
+}
+
+/// Dithered gradient pixels land on the depth's levels; float documents and undithered
+/// gradients keep their float values.
+#[test]
+fn dithered_gradient_fill_is_rounded_to_the_document_depth() {
+    let stops = vec![(0.0, Color::rgb(0.1, 0.4, 0.0)), (1.0, Color::rgb(0.9, 0.2, 1.0))];
+    let rect = Rect::new(0, 0, 64, 8);
+    let f = dithered_gradient(stops.clone(), 0.0);
+    for depth in [SampleType::U8, SampleType::U16] {
+        let q = adjustment_quantum(depth).unwrap();
+        for p in gradient_fill::render_quantized(&f, rect, rect, Some(q)) {
+            for v in &p[..3] {
+                assert_eq!((v * q).round() / q, *v, "{depth:?}: {v} is between levels");
+            }
+        }
+    }
+    assert_eq!(gradient_fill::render_quantized(&f, rect, rect, None), gradient_fill::render(&f, rect, rect));
+    let plain = Fill::gradient(stops, 0.0, 1.0, photosplice_doc::GradientStyle::Linear, false);
+    assert_eq!(gradient_fill::render_quantized(&plain, rect, rect, Some(255.0)), gradient_fill::render(&plain, rect, rect));
 }
 
 #[test]
@@ -350,6 +592,156 @@ fn render_is_tile_independent() {
     }
 }
 
+/// A Lab Invert layer in a 16-bit document keeps a grey neutral (the compositor passes the
+/// document's depth to `adjust::apply_in`).
+#[test]
+fn a_16_bit_lab_invert_layer_keeps_greys_neutral() {
+    let mut d = Document::new("lab", Size::new(2, 2), ColorMode::Lab, SampleType::U16);
+    let mut bg = Layer::raster("bg", d.pixel_format());
+    bg.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 2, 2), &[0.25, 128.0 / 255.0, 128.0 / 255.0, 1.0]);
+    d.layers.push(bg);
+    d.layers.push(Layer::new("inv", LayerContent::Adjustment(Adjustment::Invert)));
+    let p = px(&d, 1, 1);
+    let lab = photosplice_color::convert::srgb_to_lab([p[0], p[1], p[2]]);
+    assert!((lab[0] - 75.0).abs() < 0.1 && lab[1].abs() < 0.05 && lab[2].abs() < 0.05, "{lab:?}");
+}
+
+/// A CMYK document of one opaque raster layer holding `ink` everywhere, at `depth`.
+fn cmyk_doc(ink: [f32; 4], depth: SampleType) -> Document {
+    let mut d = Document::new("c", Size::new(4, 4), ColorMode::Cmyk, depth);
+    let mut l = Layer::raster("bg", d.pixel_format());
+    l.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 4, 4), &[ink[0], ink[1], ink[2], ink[3], 1.0]);
+    d.layers.push(l);
+    d
+}
+
+/// Adjustment layers Photoshop evaluates on the inks composite on the document's own inks, not on
+/// a separation of the RGB composite: exact for Invert, Posterize, Threshold, Brightness/Contrast
+/// and CMYK Levels / Curves (photoshop corpus cmyk8 and cmyk16 oracles), through opacity and an
+/// (unfeathered) mask as linear ink mixes.
+#[test]
+fn cmyk_ink_adjustments_composite_on_the_documents_inks() {
+    use photosplice_color::convert::cmyk_to_rgb;
+    let ink = [0.2, 0.4, 0.6, 0.1];
+    let rgb = |i: [f32; 4]| {
+        let c = cmyk_to_rgb(i);
+        [c[0], c[1], c[2], 1.0]
+    };
+    for depth in [SampleType::U8, SampleType::U16] {
+        let mut d = cmyk_doc(ink, depth);
+        // Stored inks, as the document's surface rounds them.
+        let stored: [f32; 4] = std::array::from_fn(|c| d.layers[0].surface().unwrap().pixel(0, 0)[c]);
+        d.layers.push(Layer::new("inv", LayerContent::Adjustment(Adjustment::Invert)));
+        assert!(close4(px(&d, 1, 1), rgb(stored.map(|v| 1.0 - v))), "{depth:?} invert");
+        // Half opacity and a half mask mix the inks linearly: a quarter of the way.
+        d.layers[1].opacity = 0.5;
+        let mut m = LayerMask::reveal_all();
+        m.surface.fill_rect(Rect::new(0, 0, 4, 4), &[0.5]);
+        d.layers[1].mask = Some(m);
+        let k = 0.5 * d.layers[1].mask.as_ref().unwrap().value(1, 1);
+        assert!(close4(px(&d, 1, 1), rgb(stored.map(|v| v + (1.0 - 2.0 * v) * k))), "{depth:?} mixed");
+        // Brightness/Contrast curves each ink's stored value.
+        let table = adjust::ink_brightness_contrast_lut(25.0, 30.0, true);
+        d.layers[1] = Layer::new("bc", LayerContent::Adjustment(Adjustment::BrightnessContrast { brightness: 25.0, contrast: 30.0, legacy: true }));
+        assert!(close4(px(&d, 1, 1), rgb(stored.map(|v| adjust::ink_through(&table, v)))), "{depth:?} brightness/contrast");
+        // Flattening keeps the adjusted inks exactly, with no trip through RGB.
+        let flat = flatten_to_surface(&d, d.pixel_format(), None);
+        let got = flat.pixel(2, 2);
+        for c in 0..4 {
+            let want = adjust::ink_through(&table, stored[c]);
+            let q = if depth == SampleType::U8 { 255.0 } else { 65535.0 };
+            assert!((got[c] - want).abs() <= 0.5 / q + 1e-6, "{depth:?} flattened ink {c}: {} vs {want}", got[c]);
+        }
+    }
+}
+
+/// Only stacks with ink adjustments take the ink compositor for display: plain CMYK layers keep
+/// the RGB compositor (which the GPU matches), and so does any stack with an adjustment the inks
+/// don't carry or a layer they can't composite.
+#[test]
+fn only_cmyk_stacks_with_ink_adjustments_render_on_their_inks() {
+    let r = Rect::new(0, 0, 4, 4);
+    let mut d = cmyk_doc([0.2, 0.4, 0.6, 0.1], SampleType::U8);
+    assert!(native::render_cmyk(&d, r, 64).is_none(), "plain layers");
+    d.layers.push(Layer::new("inv", LayerContent::Adjustment(Adjustment::Invert)));
+    assert!(native::render_cmyk(&d, r, 64).is_some());
+    let exposure = Adjustment::Exposure { exposure: 0.5, offset: 0.0, gamma: 1.0 };
+    d.layers.push(Layer::new("exposure", LayerContent::Adjustment(exposure)));
+    assert!(native::render_cmyk(&d, r, 64).is_none(), "an adjustment the inks don't carry");
+    d.layers.pop();
+    d.layers[1].blend = BlendMode::Multiply;
+    assert!(native::render_cmyk(&d, r, 64).is_none(), "a blend mode");
+    d.layers[1].blend = BlendMode::Normal;
+    let mut rgb = cmyk_doc([0.2, 0.4, 0.6, 0.1], SampleType::U8);
+    rgb.mode = ColorMode::Rgb;
+    rgb.layers.push(Layer::new("inv", LayerContent::Adjustment(Adjustment::Invert)));
+    assert!(native::render_cmyk(&rgb, r, 64).is_none(), "not a CMYK document");
+    // Tiles render alike whatever their size.
+    let whole = render_tiled(&d, d.bounds(), 64);
+    assert_eq!(render_tiled(&d, d.bounds(), 1).px, whole.px);
+}
+
+/// Hue/Saturation (not Colorize) and Color Balance work on C, M and Y as inverted RGB with the
+/// black ink kept (photoshop corpus cmyk16 hue-saturation.psd: every ink within half a level).
+#[test]
+fn cmyk_hue_saturation_and_color_balance_keep_the_black_ink() {
+    use photosplice_color::convert::cmyk_to_rgb;
+    let ranges = photosplice_doc::adjust::HueRange::defaults();
+    let hue = Adjustment::HueSaturation { hue: 40.0, saturation: 25.0, lightness: -10.0, colorize: false, ranges: ranges.clone() };
+    let balance =
+        Adjustment::ColorBalance { shadows: [20.0, -10.0, 0.0], midtones: [-15.0, 10.0, 30.0], highlights: [0.0, 0.0, -20.0], preserve_luminosity: true };
+    for adj in [hue, balance] {
+        assert!(adjust::cmy_adjustment(&adj) && adjust::cmyk_channel_adjustment(&adj));
+        let mut d = cmyk_doc([0.2, 0.7, 0.1, 0.3], SampleType::U16);
+        let stored: [f32; 4] = std::array::from_fn(|c| d.layers[0].surface().unwrap().pixel(0, 0)[c]);
+        d.layers.push(Layer::new("adj", LayerContent::Adjustment(adj.clone())));
+        // The RGB adjustment on the inks' complement, black untouched.
+        let mut rgb = Buffer::filled(Rect::new(0, 0, 1, 1), [1.0 - stored[0], 1.0 - stored[1], 1.0 - stored[2], 1.0]);
+        adjust::apply(&adj, &mut rgb);
+        let want = [1.0 - rgb.px[0][0], 1.0 - rgb.px[0][1], 1.0 - rgb.px[0][2], stored[3]];
+        assert!(native::render_cmyk(&d, d.bounds(), 64).is_some(), "{}", adj.label());
+        let c = cmyk_to_rgb(want);
+        assert!(close4(px(&d, 1, 1), [c[0], c[1], c[2], 1.0]), "{}", adj.label());
+        let flat = flatten_to_surface(&d, d.pixel_format(), None);
+        let got = flat.pixel(1, 1);
+        assert!((got[3] - stored[3]).abs() < 1e-4, "{}: black kept", adj.label());
+        assert!((0..3).all(|i| (got[i] - want[i]).abs() < 1e-3), "{}: {got:?} vs {want:?}", adj.label());
+    }
+    // Colorize separates its colour again (black included), so it stays on the screen colour.
+    let colorize = Adjustment::HueSaturation { hue: -160.0, saturation: 40.0, lightness: 5.0, colorize: true, ranges };
+    assert!(!adjust::cmy_adjustment(&colorize) && !adjust::cmyk_channel_adjustment(&colorize));
+}
+
+/// Groups at full opacity without a mask are inlined: a pass-through group's adjustment reaches
+/// the layers below it, and an isolated group of raster layers composites as its children would.
+/// An isolated group's adjustment (which only sees the group) or a translucent group keeps the
+/// RGB compositor.
+#[test]
+fn cmyk_ink_compositing_inlines_open_groups() {
+    use photosplice_color::convert::cmyk_to_rgb;
+    let r = Rect::new(0, 0, 4, 4);
+    let mut d = cmyk_doc([0.2, 0.4, 0.6, 0.1], SampleType::U16);
+    let stored: [f32; 4] = std::array::from_fn(|c| d.layers[0].surface().unwrap().pixel(0, 0)[c]);
+    let mut g = Layer::group("g", vec![Layer::new("inv", LayerContent::Adjustment(Adjustment::Invert))]);
+    g.blend = BlendMode::PassThrough;
+    d.layers.push(g);
+    let c = cmyk_to_rgb(stored.map(|v| 1.0 - v));
+    assert!(close4(px(&d, 1, 1), [c[0], c[1], c[2], 1.0]), "a pass-through group's Invert reaches the inks below");
+    d.layers[1].blend = BlendMode::Normal;
+    assert!(native::render_cmyk(&d, r, 64).is_none(), "an isolated group's adjustment");
+    d.layers[1].blend = BlendMode::PassThrough;
+    d.layers[1].opacity = 0.5;
+    assert!(native::render_cmyk(&d, r, 64).is_none(), "a translucent group");
+    // An isolated group of raster layers, with an adjustment above it, still composites on the inks.
+    let mut top = Layer::raster("top", d.pixel_format());
+    top.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 2, 4), &[0.9, 0.0, 0.0, 0.0, 1.0]);
+    d.layers[1] = Layer::group("raster", vec![top]);
+    d.layers.push(Layer::new("inv", LayerContent::Adjustment(Adjustment::Invert)));
+    assert!(native::render_cmyk(&d, r, 64).is_some());
+    let c = cmyk_to_rgb(stored.map(|v| 1.0 - v));
+    assert!(close4(px(&d, 3, 1), [c[0], c[1], c[2], 1.0]), "outside the group's layer");
+}
+
 #[test]
 fn cmyk_document_renders_via_rgb() {
     let mut d = Document::new("c", Size::new(2, 2), ColorMode::Cmyk, SampleType::U8);
@@ -362,6 +754,34 @@ fn cmyk_document_renders_via_rgb() {
     assert!(p[0] < 0.3 && (p[0] - p[1]).abs() < 0.05 && (p[1] - p[2]).abs() < 0.05 && p[3] == 1.0, "{p:?}");
 }
 
+/// Transparent pixels convert to colour in CMYK (K = 100%) and Lab (a/b = 0.5). A flattened
+/// surface must still treat them as empty, or its content spans the whole canvas.
+#[test]
+fn flatten_to_surface_leaves_transparent_pixels_empty_in_every_mode() {
+    let modes = [
+        (ColorMode::Rgb, [SampleType::U8, SampleType::U16, SampleType::F32].as_slice()),
+        (ColorMode::Grayscale, &[SampleType::U8, SampleType::U16, SampleType::F32]),
+        (ColorMode::Cmyk, &[SampleType::U8, SampleType::U16]),
+        (ColorMode::Lab, &[SampleType::U8, SampleType::U16]),
+    ];
+    for (mode, samples) in modes {
+        for &sample in samples {
+            let mut d = Document::new("t", Size::new(300, 200), mode, sample);
+            let fmt = PixelFormat::new(mode, sample, true);
+            let mut l = Layer::raster("dot", fmt);
+            let opaque: Vec<f32> = photosplice_raster::from_rgba(&fmt, [0.9, 0.4, 0.1, 1.0]);
+            l.surface_mut().unwrap().fill_rect(Rect::new(120, 80, 140, 90), &opaque);
+            d.layers.push(l);
+            let s = flatten_to_surface(&d, fmt, None);
+            assert_eq!(s.content_bounds(), Rect::new(120, 80, 140, 90), "{mode:?} {sample:?}");
+            // Over a background everything is content, as before.
+            let fmt_opaque = PixelFormat::new(mode, sample, false);
+            let s = flatten_to_surface(&d, fmt_opaque, Some([1.0, 1.0, 1.0]));
+            assert_eq!(s.rgba(5, 5)[3], 1.0, "{mode:?} {sample:?}: background stays opaque");
+        }
+    }
+}
+
 #[test]
 fn sixteen_bit_and_float_layers_composite() {
     for fmt in [PixelFormat::RGBA16, PixelFormat::RGBA32F] {
@@ -370,6 +790,50 @@ fn sixteen_bit_and_float_layers_composite() {
         l.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 2, 2), &[0.25, 0.5, 0.75, 1.0]);
         d.layers.push(l);
         assert!(close4(px(&d, 1, 1), [0.25, 0.5, 0.75, 1.0]), "{fmt:?}");
+    }
+}
+
+/// `top` blended with `mode` over an opaque `bg`, both solid, in a 4×4 RGB document of `depth`.
+fn two_solid_layers(depth: SampleType, mode: BlendMode, bg: [f32; 3], top: [f32; 3]) -> Document {
+    let mut d = Document::new("hdr", Size::new(4, 4), ColorMode::Rgb, depth);
+    let fmt = d.pixel_format();
+    let mut b = Layer::raster("bg", fmt);
+    b.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 4, 4), &photosplice_raster::from_rgba(&fmt, [bg[0], bg[1], bg[2], 1.0]));
+    let mut t = Layer::raster("top", fmt);
+    t.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 4, 4), &photosplice_raster::from_rgba(&fmt, [top[0], top[1], top[2], 1.0]));
+    t.blend = mode;
+    d.layers.push(b);
+    d.layers.push(t);
+    d
+}
+
+#[test]
+fn float_documents_add_and_divide_past_white() {
+    // 32-bit: Linear Dodge (Add) and Divide keep HDR values (adding light never darkens).
+    let (bg, top) = ([2.0, 0.5, 4.0], [0.5, 0.25, 0.5]);
+    for (mode, want) in [(BlendMode::LinearDodge, [2.5, 0.75, 4.5]), (BlendMode::Divide, [4.0, 2.0, 8.0]), (BlendMode::Multiply, [1.0, 0.125, 2.0])] {
+        let d = two_solid_layers(SampleType::F32, mode, bg, top);
+        for buf in [flatten(&d), render_tiled(&d, d.bounds(), 2)] {
+            for p in &buf.px {
+                assert!(close4(*p, [want[0], want[1], want[2], 1.0]), "{mode:?}: {p:?}");
+            }
+        }
+    }
+    // The flag doesn't leak into later renders on this thread.
+    let d = two_solid_layers(SampleType::U16, BlendMode::LinearDodge, [0.8, 0.5, 0.6], top);
+    assert!(close4(flatten(&d).px[0], [1.0, 0.75, 1.0, 1.0]));
+}
+
+#[test]
+fn integer_documents_clip_add_and_divide_at_white() {
+    let (bg, top) = ([0.8, 0.5, 0.6], [0.5, 0.25, 0.5]);
+    for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        let f32_doc = depth == SampleType::F32;
+        for (mode, clipped, hdr) in [(BlendMode::LinearDodge, [1.0, 0.75, 1.0], [1.3, 0.75, 1.1]), (BlendMode::Divide, [1.0, 1.0, 1.0], [1.6, 2.0, 1.2])] {
+            let want = if f32_doc { hdr } else { clipped };
+            let p = flatten(&two_solid_layers(depth, mode, bg, top)).px[5];
+            assert!(close4(p, [want[0], want[1], want[2], 1.0]), "{mode:?} {depth:?}: {p:?}");
+        }
     }
 }
 
@@ -420,6 +884,29 @@ fn outside_stroke_width() {
     assert!(close4(px(&d, 7, 20), [0.0, 0.0, 1.0, 1.0]));
     assert!(close4(px(&d, 5, 20), [1.0; 4]), "{:?}", px(&d, 5, 20));
     assert!(close4(px(&d, 20, 20), [1.0, 0.0, 0.0, 1.0]), "interior untouched");
+}
+
+#[test]
+fn outside_stroke_at_zero_fill_leaves_the_interior_clear() {
+    // Fill 0 % + an Outside stroke is the classic "outline only" look: the stroke lies outside
+    // the layer's pixels, so the interior shows the backdrop, not the stroke colour.
+    for (depth, fmt) in [(SampleType::U8, PixelFormat::RGBA8), (SampleType::U16, PixelFormat::RGBA16), (SampleType::F32, PixelFormat::RGBA32F)] {
+        let mut d = Document::with_background("t", Size::new(40, 40), ColorMode::Rgb, depth, Color::WHITE);
+        let mut l = Layer::raster("sq", fmt);
+        l.surface_mut().unwrap().fill_rect(Rect::new(10, 10, 30, 30), &[1.0, 0.0, 0.0, 1.0]);
+        l.effects.items = vec![stroke(3.0, StrokePosition::Outside)];
+        l.fill_opacity = 0.0;
+        d.layers.push(l);
+        assert!(close4(px(&d, 20, 20), [1.0; 4]), "{depth:?}: interior shows the white backdrop: {:?}", px(&d, 20, 20));
+        assert!(close4(px(&d, 11, 20), [1.0; 4]), "{depth:?}: just inside the edge too: {:?}", px(&d, 11, 20));
+        assert!(close4(px(&d, 8, 20), [0.0, 0.0, 1.0, 1.0]), "{depth:?}: the stroke itself stays: {:?}", px(&d, 8, 20));
+        // Partial fill: the interior is the layer at that fill over the backdrop, still no stroke.
+        d.layers[1].fill_opacity = 0.5;
+        assert!(close4(px(&d, 20, 20), [1.0, 0.5, 0.5, 1.0]), "{depth:?}: {:?}", px(&d, 20, 20));
+        // 100 % fill is unchanged.
+        d.layers[1].fill_opacity = 1.0;
+        assert!(close4(px(&d, 20, 20), [1.0, 0.0, 0.0, 1.0]), "{depth:?}: {:?}", px(&d, 20, 20));
+    }
 }
 
 #[test]
@@ -485,6 +972,22 @@ fn drop_shadow_falls_away_from_light() {
 }
 
 #[test]
+fn group_effects_reach_past_children_effects() {
+    // A child's outside stroke reaches further than its group's drop shadow: the group's shadow
+    // follows the stroke, not the child's pixels alone (#3274).
+    let mut d = doc_white(48, 48);
+    let mut sq = solid_layer("sq", Rect::new(14, 14, 34, 34), [1.0, 0.0, 0.0, 1.0]);
+    sq.effects.items = vec![stroke(6.0, StrokePosition::Outside)];
+    let mut grp = Layer::group("g", vec![sq]);
+    grp.effects.items = vec![Effect::DropShadow(shadow(2.0, 90.0))];
+    d.layers.push(grp);
+    assert!(close4(px(&d, 9, 24), [0.0, 0.0, 1.0, 1.0]), "stroke left of the pixels: {:?}", px(&d, 9, 24));
+    assert!(close4(px(&d, 24, 38), [0.0, 0.0, 1.0, 1.0]), "stroke below the pixels: {:?}", px(&d, 24, 38));
+    assert!(close4(px(&d, 24, 41), [0.0, 0.0, 0.0, 1.0]), "shadow below the stroke: {:?}", px(&d, 24, 41));
+    assert!(close4(px(&d, 24, 43), [1.0; 4]), "nothing past the shadow: {:?}", px(&d, 24, 43));
+}
+
+#[test]
 fn drop_shadow_uses_global_light_and_knockout() {
     let mut d = fx_doc(vec![Effect::DropShadow(Shadow { use_global_light: true, ..shadow(5.0, 0.0) })]);
     d.global_light.angle = 90.0;
@@ -544,6 +1047,17 @@ fn outer_and_inner_glow_regions() {
     let edge = px(&d, 10, 20);
     assert!(edge[1] > 0.3, "{edge:?}");
     assert!(close4(px(&d, 20, 20), [1.0, 0.0, 0.0, 1.0]));
+    assert!(close4(px(&d, 5, 20), [1.0; 4]));
+}
+
+// A Precise inner glow from the centre is brightest in the middle and fades towards the edge,
+// like the Softer one; it used to paint nothing at all (#966).
+#[test]
+fn precise_inner_glow_from_center_paints_the_middle() {
+    let d = fx_doc(vec![Effect::InnerGlow(glow(GlowTechnique::Precise, GlowSource::Center))]);
+    let (center, edge) = (px(&d, 20, 20), px(&d, 10, 20));
+    assert!(center[1] > 0.9 && center[0] < 0.1, "green in the middle: {center:?}");
+    assert!(edge[0] > center[0] && edge[1] < center[1], "fades towards the edge: {edge:?} vs {center:?}");
     assert!(close4(px(&d, 5, 20), [1.0; 4]));
 }
 
@@ -738,15 +1252,15 @@ fn effect_maps_are_cached_and_invalidated_by_pixel_changes() {
     doc.layers.push(l);
     let patterns = pattern::PreparedPatterns::new(&doc.patterns, pattern::PREPARED_PATTERN_BYTES);
     let cx = Ctx::for_doc(&doc, &patterns);
-    let a = effect_maps(&doc.layers[1], &cx);
-    let b = effect_maps(&doc.layers[1], &cx);
+    let a = effect_maps_in(&doc.layers[1], doc.bounds(), &cx);
+    let b = effect_maps_in(&doc.layers[1], doc.bounds(), &cx);
     assert!(std::sync::Arc::ptr_eq(&a, &b), "second request hits the cache");
     let first = flatten(&doc);
     // Editing the layer's pixels changes its tiles, so the maps are rebuilt.
     doc.layers[1].surface_mut().unwrap().fill_rect(Rect::new(8, 8, 20, 20), &[0.0, 0.0, 1.0, 1.0]);
     let patterns = pattern::PreparedPatterns::new(&doc.patterns, pattern::PREPARED_PATTERN_BYTES);
     let cx = Ctx::for_doc(&doc, &patterns);
-    let c = effect_maps(&doc.layers[1], &cx);
+    let c = effect_maps_in(&doc.layers[1], doc.bounds(), &cx);
     assert!(!std::sync::Arc::ptr_eq(&a, &c), "pixel edit invalidates");
     // Cached rendering equals a fresh build (tiled and full renders agree too).
     let again = flatten(&doc);
@@ -769,18 +1283,227 @@ fn effect_maps_are_cached_and_invalidated_by_pixel_changes() {
     assert!(close4(px(&masked, 20, 32), [1.0; 4]));
 }
 
+// ---------- Transparency Shapes Layer off on tall documents (#1909) ----------
+
+fn bevel_fx(style: photosplice_doc::BevelStyle, soften: f32) -> Effect {
+    Effect::BevelEmboss(photosplice_doc::Bevel {
+        enabled: true,
+        style,
+        technique: photosplice_doc::BevelTechnique::Smooth,
+        depth: 1.0,
+        up: true,
+        size: 5.0,
+        soften,
+        angle: 120.0,
+        altitude: 30.0,
+        use_global_light: false,
+        gloss_contour: photosplice_doc::Contour::Linear,
+        highlight: FxCommon::new(photosplice_color::BlendMode::Screen, 0.75),
+        highlight_color: Color::WHITE,
+        shadow: FxCommon::new(photosplice_color::BlendMode::Multiply, 0.75),
+        shadow_color: Color::BLACK,
+        contour: None,
+        texture: None,
+    })
+}
+
+/// A tall page of layers with Transparency Shapes Layer off, one effect stack each (every local
+/// kind), most masked to a soft-edged block so their effect shapes vary down the page.
+fn shapeless_fx_doc(depth: SampleType) -> Document {
+    use photosplice_doc::BevelStyle;
+    let mut d = Document::with_background("t", Size::new(48, 640), ColorMode::Rgb, depth, Color::WHITE);
+    let satin = Effect::Satin(Satin {
+        common: FxCommon::new(photosplice_color::BlendMode::Multiply, 1.0),
+        color: Color::BLACK,
+        angle: 19.0,
+        distance: 4.0,
+        size: 5.0,
+        contour: photosplice_doc::Contour::Linear,
+        anti_alias: true,
+        invert: false,
+    });
+    let stacks = vec![
+        vec![stroke(3.0, StrokePosition::Outside)],
+        vec![stroke(2.0, StrokePosition::Inside), Effect::DropShadow(Shadow { size: 6.0, spread: 0.3, noise: 0.2, ..shadow(5.0, 120.0) })],
+        vec![stroke(4.0, StrokePosition::Center)],
+        vec![Effect::InnerShadow(Shadow { size: 4.0, spread: 0.0, ..shadow(3.0, 30.0) })],
+        vec![Effect::OuterGlow(Glow { size: 6.0, spread: 0.2, noise: 0.1, ..glow(GlowTechnique::Softer, GlowSource::Edge) })],
+        vec![Effect::InnerGlow(glow(GlowTechnique::Softer, GlowSource::Center)), satin],
+        vec![bevel_fx(BevelStyle::Emboss, 2.0)],
+        vec![bevel_fx(BevelStyle::PillowEmboss, 0.0), bevel_fx(BevelStyle::OuterBevel, 1.0)],
+        vec![stroke(3.0, StrokePosition::Outside), Effect::InnerGlow(glow(GlowTechnique::Softer, GlowSource::Edge))],
+    ];
+    let mask_fmt = PixelFormat::new(ColorMode::Grayscale, depth, false);
+    for (i, fx) in stacks.into_iter().enumerate() {
+        let y = 24 + i as i32 * 66;
+        let mut l = Layer::raster(format!("fx{i}"), d.pixel_format());
+        let c = [0.2 + 0.08 * i as f32, 0.5, 1.0 - 0.1 * i as f32, 1.0];
+        l.surface_mut().unwrap().fill_rect(Rect::new(10, y, 38, y + 18), &photosplice_raster::from_rgba(&d.pixel_format(), c));
+        l.effects.items = fx;
+        l.transparency_shapes = false;
+        l.opacity = 0.8;
+        // The last layer stays unmasked: its shape is the whole canvas, edged only at its sides.
+        if i < 8 {
+            let mut m = photosplice_raster::Surface::new(mask_fmt);
+            m.fill_rect(Rect::new(4 + i as i32, y - 12, 44, y + 30), &[1.0]);
+            m.fill_rect(Rect::new(4 + i as i32, y + 30, 30, y + 34), &[0.5]);
+            l.mask = Some(LayerMask { surface: m, enabled: true, linked: true, density: 1.0, feather: 0.0 });
+        }
+        d.layers.push(l);
+    }
+    // A tsly-off stroked layer inside a group whose own effects reach much further: the group's
+    // effect shape composites its children over the group's whole region, far past any band.
+    let mut inner = Layer::raster("inner", d.pixel_format());
+    inner.surface_mut().unwrap().fill_rect(Rect::new(12, 300, 30, 310), &photosplice_raster::from_rgba(&d.pixel_format(), [0.1, 0.9, 0.3, 1.0]));
+    inner.effects.items = vec![stroke(3.0, StrokePosition::Outside)];
+    inner.transparency_shapes = false;
+    let mut m = photosplice_raster::Surface::new(mask_fmt);
+    m.fill_rect(Rect::new(8, 240, 36, 380), &[1.0]);
+    inner.mask = Some(LayerMask { surface: m, enabled: true, linked: true, density: 1.0, feather: 0.0 });
+    let mut g = Layer::group("g", vec![inner]);
+    g.effects.items = vec![Effect::DropShadow(Shadow { size: 40.0, spread: 0.1, ..shadow(90.0, 70.0) }), stroke(120.0, StrokePosition::Outside)];
+    g.opacity = 0.6;
+    d.layers.push(g);
+    // A clipping mask: a tsly-off stroked layer clipped to a base with large effects of its own.
+    let mut base = Layer::raster("base", d.pixel_format());
+    base.surface_mut().unwrap().fill_rect(Rect::new(6, 420, 42, 470), &photosplice_raster::from_rgba(&d.pixel_format(), [0.9, 0.9, 0.2, 1.0]));
+    base.effects.items = vec![Effect::OuterGlow(Glow { size: 150.0, ..glow(GlowTechnique::Softer, GlowSource::Edge) })];
+    let mut clip = Layer::raster("clip", d.pixel_format());
+    clip.surface_mut().unwrap().fill_rect(Rect::new(14, 430, 34, 450), &photosplice_raster::from_rgba(&d.pixel_format(), [0.6, 0.1, 0.6, 1.0]));
+    clip.effects.items = vec![stroke(2.0, StrokePosition::Center), Effect::InnerShadow(Shadow { size: 3.0, spread: 0.0, ..shadow(2.0, 45.0) })];
+    clip.transparency_shapes = false;
+    clip.clipped = true;
+    d.layers.push(base);
+    d.layers.push(clip);
+    d
+}
+
+#[test]
+fn shapeless_effects_render_the_same_in_bands_and_parts() {
+    for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        let d = shapeless_fx_doc(depth);
+        // Bands and parts first, from an empty cache: maps a band builds (a group's, say) must not
+        // borrow from a whole render's.
+        purge_effect_cache();
+        let mut banded = Vec::new();
+        render_bands(&d, d.bounds(), 64, |b| -> Result<(), ()> {
+            banded.extend_from_slice(&b.px);
+            Ok(())
+        })
+        .unwrap();
+        purge_effect_cache();
+        let parts: Vec<(Rect, Buffer)> =
+            [Rect::new(3, 290, 41, 333), Rect::new(0, 0, 48, 20), Rect::new(20, 600, 48, 640), Rect::new(0, 296, 20, 312), Rect::new(10, 425, 40, 445)]
+                .into_iter()
+                .map(|r| (r, render(&d, r)))
+                .collect();
+        let whole = render(&d, d.bounds());
+        assert_eq!(banded.len(), whole.px.len());
+        let diff = banded.iter().zip(&whole.px).position(|(a, b)| a != b);
+        assert!(diff.is_none(), "{depth:?}: band render differs at {diff:?}");
+        // A small part (an edit's damage) and a tiled render agree with the whole render too.
+        for (part, p) in &parts {
+            let part = *part;
+            for y in part.y0..part.y1 {
+                for x in part.x0..part.x1 {
+                    assert_eq!(p.get(x, y), whole.get(x, y), "{depth:?}: part {part:?} differs at ({x},{y})");
+                }
+            }
+        }
+        assert!(render_tiled(&d, d.bounds(), 16).px == whole.px, "{depth:?}: tiled render differs");
+    }
+}
+
+#[test]
+fn shapeless_effect_maps_cover_only_the_band_being_rendered() {
+    // Transparency Shapes Layer off makes an effect region the whole canvas: on a 1920 × 103675
+    // page each stroked type layer's maps took ~2.4 GB, for every layer at once (#1909). Rendering
+    // a band builds them over that band (plus the effects' reach) only.
+    let d = shapeless_fx_doc(SampleType::U8);
+    let patterns = pattern::PreparedPatterns::new(&d.patterns, pattern::PREPARED_PATTERN_BYTES);
+    let cx = Ctx::for_doc(&d, &patterns);
+    let l = &d.layers[9];
+    let whole = effect_maps_in(l, Rect::new(0, 256, 48, 320), &cx).bytes();
+    cx.set_fx_clip(Rect::new(0, 256, 48, 320));
+    let band = effect_maps_in(l, Rect::new(0, 256, 48, 320), &cx).bytes();
+    assert!(band * 4 < whole, "band maps {band} B vs whole-canvas maps {whole} B");
+    // The next band lets the previous band's maps go.
+    cx.set_fx_clip(Rect::new(0, 320, 48, 384));
+    let _ = effect_maps_in(l, Rect::new(0, 320, 48, 384), &cx);
+    assert_eq!(cx.fx_maps.lock().unwrap().len(), 2, "the unclipped maps and this band's");
+    // Composited over more than the band (a group's effect shape renders its children over the
+    // group's whole region): the whole region.
+    let full = effect_region(l, Rect::new(0, 320, 48, 384), &cx).0;
+    assert_eq!(
+        effect_region(l, Rect::new(0, 200, 48, 500), &cx),
+        (layer_bounds(l, cx.canvas).inflate(effects::margin(l)).intersect(&cx.canvas.inflate(effects::margin(l))), false)
+    );
+    assert!(full.height() < 100, "{full:?}");
+    // Effects whose maps aren't local keep the whole region.
+    let mut g = l.clone();
+    g.effects.items = vec![Effect::OuterGlow(glow(GlowTechnique::Precise, GlowSource::Edge))];
+    assert_eq!(
+        effect_region(&g, Rect::new(0, 320, 48, 384), &cx),
+        (layer_bounds(&g, cx.canvas).inflate(effects::margin(&g)).intersect(&cx.canvas.inflate(effects::margin(&g))), false)
+    );
+}
+
 // ---------- PSD-fidelity effect semantics (fitted on Photoshop composites) ----------
 
 #[test]
-fn stroke_corners_follow_the_5x5_chamfer_metric() {
-    // Square 10..30, outside stroke 3: pixel (9, 7) is offset (1, 3) from the corner pixel.
-    // Photoshop measures √5 + 1 = 3.236 there (exact distance 3.162): coverage 3 + 1 − 3.236.
+fn stroke_edges_use_the_chamfer_when_narrow_and_the_exact_distance_when_wide() {
+    // #3646: a narrow stroke's outer edge keeps the 5 × 5 chamfer, whose sub-pixel seeding
+    // Photoshop matches at small offsets (see `stroke_outside_exact`); only a wide one — where the
+    // chamfer's octagon facets (see `a_wide_outside_stroke_is_round_not_a_polygon`) — uses the
+    // exact Euclidean transform.
+    // Square 10..30, outside stroke 3: (9, 7) is offset (1, 3) from the corner pixel. Photoshop
+    // measures √5 + 1 = 3.236 there, so coverage is 3 + 1 − 3.236 = 0.764 (the exact distance is
+    // 3.162, coverage 0.838).
     let d = fx_doc(vec![stroke(3.0, StrokePosition::Outside)]);
     let a = 1.0 - px(&d, 9, 7)[0]; // blue stroke over white: red channel drops by coverage
     assert!((a - 0.764).abs() < 0.01, "{a}");
-    // (2, 2) stays Euclidean (two diagonal steps).
+    // (2, 2) is the same in both metrics (two diagonal steps).
     let a = 1.0 - px(&d, 8, 8)[0];
     assert!((a - 1.0).abs() < 0.01, "{a}");
+}
+
+#[test]
+fn the_stroke_metric_switches_at_the_fitted_threshold() {
+    // The widest outside stroke any Photoshop oracle matches with the chamfer is 18 px
+    // (ag-psd read-write/strokes): its octagon deviates 0.48 px from a circle there; 20 px keeps
+    // it. Wider strokes (the 60 px #3646 case) are round.
+    assert!(!crate::effects::stroke_outside_exact(18.0));
+    assert!(crate::effects::stroke_outside_exact(crate::effects::STROKE_CHAMFER_MAX));
+    assert!(crate::effects::stroke_outside_exact(60.0));
+}
+
+#[test]
+fn a_wide_outside_stroke_is_round_not_a_polygon() {
+    // A point source dilated by 60 px must stay a circle. The 5 × 5 chamfer's octagonal level set
+    // made the boundary swing ~2.5 px at this radius (~10 px at 245 px) — the "low-poly" #3646.
+    let mut d = doc_white(170, 170);
+    let mut l = solid_layer("dot", Rect::new(85, 85, 86, 86), [1.0, 0.0, 0.0, 1.0]);
+    l.effects.items = vec![stroke(60.0, StrokePosition::Outside)];
+    d.layers.push(l);
+    let buf = render(&d, Rect::new(0, 0, 170, 170));
+    let at = |x: i32, y: i32| buf.px[(y as usize) * 170 + x as usize];
+    let (mut lo, mut hi) = (f64::MAX, 0.0f64);
+    let stroke_at = |x: i32, y: i32| x >= 0 && y >= 0 && x < 170 && y < 170 && at(x, y)[2] > 0.5 && at(x, y)[0] < 0.5;
+    for k in 0..72 {
+        let th = (k as f64) * std::f64::consts::TAU / 72.0;
+        let (dx, dy) = (th.cos(), th.sin());
+        let mut r = 0.0f64;
+        let mut t = 0.0f64;
+        while t < 84.0 {
+            if stroke_at((85.0 + dx * t).round() as i32, (85.0 + dy * t).round() as i32) {
+                r = t;
+            }
+            t += 0.25;
+        }
+        lo = lo.min(r);
+        hi = hi.max(r);
+    }
+    assert!(hi - lo <= 2.0, "the 60 px stroke boundary swings {lo}..{hi} px — a polygon, not a circle (#3646)");
 }
 
 #[test]
@@ -887,6 +1610,36 @@ fn shadow_knockout_needs_see_through_fill() {
 }
 
 #[test]
+fn shadow_knockout_beneath_a_layer_in_a_blending_mode() {
+    // Layer Knocks Out Drop Shadow keeps the shadow out from under the layer's shape. In Normal
+    // mode an opaque layer covers it anyway; in a mode that blends with what's beneath, the shadow
+    // would show through: under a white Exclusion square on white, it read as white (white over
+    // the black shadow) instead of black (white over white), so a logo's Exclusion bar with a
+    // drop shadow came out blank. A red Multiply square came out black instead of red.
+    for (blend, colour, inside, depth) in [
+        (photosplice_color::BlendMode::Exclusion, [1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 1.0]),
+        (photosplice_color::BlendMode::Multiply, [1.0, 0.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]),
+    ]
+    .into_iter()
+    .flat_map(|c| SampleType::ALL.map(|depth| (c, depth)))
+    .map(|((b, c, i), depth)| (b, c, i, depth))
+    {
+        let mut d = Document::new("t", Size::new(40, 40), ColorMode::Rgb, depth);
+        d.layers.push(solid_layer("bg", Rect::new(0, 0, 40, 40), [1.0; 4]));
+        let mut l = solid_layer("sq", Rect::new(10, 10, 30, 30), colour);
+        l.blend = blend;
+        l.effects.items = vec![Effect::DropShadow(shadow(0.0, 90.0))];
+        d.layers.push(l);
+        assert!(close4(px(&d, 20, 20), inside), "{blend:?} {depth:?}: {:?}", px(&d, 20, 20));
+        // Not knocked out, the shadow shows through the blend, as in Photoshop with the box unticked.
+        if let Effect::DropShadow(s) = &mut d.layers[1].effects.items[0] {
+            s.knocks_out = false;
+        }
+        assert!(!close4(px(&d, 20, 20), inside), "{blend:?} {depth:?} without knockout: {:?}", px(&d, 20, 20));
+    }
+}
+
+#[test]
 fn linked_pattern_overlay_anchors_at_the_effects_reference_point() {
     use photosplice_doc::pattern::Pattern;
     // 2 × 1 tile: red, blue. Anchored at x = 11 (reference point), x = 11 is red, 12 blue.
@@ -968,6 +1721,22 @@ fn blend_if_underlying_layer_hides_by_the_backdrop_value() {
     d.layers.push(l);
     assert!(close4(px(&d, 1, 1), [1.0, 0.0, 0.0, 1.0]));
     assert!(close4(px(&d, 6, 1), [1.0, 1.0, 1.0, 1.0]));
+}
+
+/// An 8-bit backdrop at level `k` counts as `k` for a hard Underlying black point at `k`, also
+/// over a semi-transparent backdrop, where compositing leaves the value a few millionths off the
+/// level (19.999998 for 20 before #4395); the GPU compositor agrees.
+#[test]
+fn blend_if_hard_point_includes_its_own_level() {
+    for k in 0..=255u8 {
+        let v = f32::from(k) / 255.0;
+        let mut d = Document::new("t", Size::new(2, 1), ColorMode::Rgb, SampleType::U8);
+        d.layers.push(solid_layer("under", Rect::new(0, 0, 2, 1), [v, v, v, 184.0 / 255.0]));
+        let mut l = solid_layer("top", Rect::new(0, 0, 2, 1), [1.0, 0.0, 0.0, 1.0]);
+        l.blend_if.set(1, [FULL, range([k, k], [255, 255])]);
+        d.layers.push(l);
+        assert!(close4(px(&d, 0, 0), [1.0, 0.0, 0.0, 1.0]), "level {k} is hidden by a black point at {k}");
+    }
 }
 
 #[test]
@@ -1092,6 +1861,43 @@ const BC_REFS: [((f32, f32), [f32; 9]); 13] = [
     ((150.0, 100.0), [0.0, 59.81, 180.58, 235.2, 249.36, 253.24, 254.42, 254.83, 255.0]),
 ];
 
+/// Over the whole slider range the curve stays monotone and inside 0..1, lowering it undoes
+/// raising it by as much, and odd input never panics.
+#[test]
+fn modern_brightness_is_monotone_and_lowering_inverts_raising() {
+    for b in (-150..=150).step_by(5).map(|b| b as f32) {
+        let mut prev = 0.0f32;
+        for k in 0..=1020 {
+            let v = adjust::modern_brightness(k as f32 / 1020.0, b);
+            assert!((0.0..=1.0).contains(&v) && v >= prev - 1e-6, "brightness {b} at {k}/1020: {v} after {prev}");
+            prev = v;
+        }
+        assert!(
+            (adjust::modern_brightness(1.0, b) - 1.0).abs() < 1e-5 && adjust::modern_brightness(0.0, b).abs() < 1e-5,
+            "brightness {b} pins black and white"
+        );
+        for k in 0..=50 {
+            let x = k as f32 / 50.0;
+            let back = adjust::modern_brightness(adjust::modern_brightness(x, b), -b);
+            assert!((back - x).abs() < 2e-3, "brightness {b}: {x} -> {back}");
+        }
+    }
+    for v in [f32::NAN, f32::INFINITY, -3.0, 7.0] {
+        let _ = adjust::modern_brightness(v, 40.0);
+        let _ = adjust::modern_brightness(0.5, v);
+    }
+    assert_eq!(adjust::modern_lut(0.0, 0.0).len(), 4096);
+    // The table agrees with the curves it samples, lowered (inverted in one pass) or raised.
+    for (b, c) in [(-50.0, 30.0), (-150.0, -50.0), (40.0, 0.0), (0.0, 100.0)] {
+        let t = adjust::modern_lut(b, c);
+        for k in (0..4096).step_by(37) {
+            let x = k as f32 / 4095.0;
+            let want = adjust::modern_contrast(adjust::modern_brightness(x, b), c);
+            assert!((t[k] - want).abs() < 1e-3, "({b}, {c}) at {k}: {} vs {want}", t[k]);
+        }
+    }
+}
+
 #[test]
 fn modern_brightness_contrast_match_reference() {
     for ((b, c), want) in BC_REFS {
@@ -1117,6 +1923,65 @@ fn modern_brightness_contrast_match_reference() {
         let ys: Vec<f32> = (-150..=150).step_by(10).map(|b| adjust::modern_brightness(x, b as f32)).collect();
         assert!(ys.windows(2).all(|w| w[1] >= w[0]), "x={x} not monotone in brightness");
     }
+}
+
+#[test]
+fn modern_brightness_matches_photoshop() {
+    let cases: [(f32, [u8; 10]); 2] = [(50.0, [0, 22, 44, 88, 132, 171, 203, 228, 246, 255]), (-50.0, [0, 12, 23, 47, 70, 93, 118, 148, 186, 255])];
+    let xs = [0usize, 16, 32, 64, 96, 128, 160, 192, 224, 255];
+    for (b, out) in cases {
+        for (i, &x) in xs.iter().enumerate() {
+            let got = adjust::modern_brightness(x as f32 / 255.0, b) * 255.0;
+            let err = (got - out[i] as f32).abs();
+            // Within about a level of Photoshop's (rounded) output everywhere.
+            assert!(err <= 1.2, "brightness {b} x={x}: got {got:.1} want {} (err {err:.1})", out[i]);
+        }
+    }
+    // Photoshop 27.11's brightness +25 with contrast +30 (photoshop corpus rgb8
+    // brightness-contrast.psd): what the oracle's levels become.
+    let oracle = [
+        (8, 7),
+        (24, 23),
+        (48, 49),
+        (72, 78),
+        (88, 99),
+        (104, 120),
+        (128, 154),
+        (144, 174),
+        (160, 192),
+        (176, 208),
+        (192, 222),
+        (200, 228),
+        (216, 239),
+        (232, 247),
+        (240, 250),
+        (248, 253),
+    ];
+    for (x, want) in oracle {
+        let got = adjust::modern_contrast(adjust::modern_brightness(x as f32 / 255.0, 25.0), 30.0) * 255.0;
+        assert!((got - want as f32).abs() <= 1.0, "+25/+30 x={x}: got {got:.2} want {want}");
+    }
+    // psd-tools' brightnesscontrast_rgb.psd masks four layers to their own columns: the brightness
+    // each applies, read back through its (exact) contrast curve.
+    // (brightness, tolerance in levels, [(input level, Photoshop's output level)])
+    type Measured = (f32, f32, &'static [(u32, f32)]);
+    let measured: [Measured; 4] = [
+        (-95.0, 1.5, &[(24, 13.3), (64, 35.1), (96, 52.9), (128, 69.7), (160, 89.6), (192, 114.4), (224, 151.6)]),
+        (-31.0, 1.5, &[(24, 20.3), (64, 53.4), (96, 79.0), (128, 105.6), (160, 132.3), (192, 161.8), (224, 197.4)]),
+        (23.0, 1.5, &[(24, 27.9), (64, 74.0), (96, 110.9), (128, 147.7), (160, 182.9), (192, 213.7), (224, 239.6)]),
+        (150.0, 6.0, &[(24, 60.3), (64, 162.1), (96, 214.5), (128, 238.4), (160, 248.9)]),
+    ];
+    for (b, tol, points) in measured {
+        for &(x, want) in points {
+            let got = adjust::modern_brightness(x as f32 / 255.0, b) * 255.0;
+            assert!((got - want).abs() <= tol, "brightness {b} x={x}: got {got:.1} want {want}");
+        }
+    }
+    // Endpoints and the zero slider are exact.
+    assert_eq!(adjust::modern_brightness(0.0, 120.0), 0.0);
+    assert_eq!(adjust::modern_brightness(1.0, -120.0), 1.0);
+    assert_eq!(adjust::modern_brightness(0.37, 0.0), 0.37);
+    assert_eq!(adjust::modern_contrast(0.37, 0.0), 0.37);
 }
 
 /// Color Balance against Reference's 16-bit curves (temp kit `psd-verify-adjust`): shadows and
@@ -1182,7 +2047,7 @@ fn color_balance_matches_reference() {
 }
 
 // Levels ground truth from Adobe Photoshop 2026 (adjustLevels on a 0..255 ramp). Verifies our
-// `levels()` matches the real app, including the gamma>1 soft shadow toe (initial slope 2^gamma).
+// `levels()` matches the real app, including the gamma>1 shadow toe (initial slope 2^gamma).
 #[test]
 fn levels_matches_photoshop() {
     let ident = |g: f32| LevelsChannel { in_black: 0.0, in_white: 1.0, gamma: g, out_black: 0.0, out_white: 1.0 };
@@ -1198,8 +2063,8 @@ fn levels_matches_photoshop() {
         let want = ((x as f32 / 255.0).powi(2) * 255.0).round();
         assert_eq!(got, want, "levels gamma 0.5 x={x}");
     }
-    // Endpoints pinned; identity is identity. (The gamma>1 toe's soft-min leaves white within a
-    // few parts in 1e5 of 1.0 — invisible at any bit depth; exact at 8-bit.)
+    // Endpoints pinned; identity is identity. (The gamma>1 toe ends before white, so white
+    // stays exactly 1.0.)
     assert_eq!(adjust::levels(&ident(2.5), 0.0), 0.0);
     assert_eq!((adjust::levels(&ident(2.5), 1.0) * 255.0).round(), 255.0);
     assert!((adjust::levels(&ident(2.5), 1.0) - 1.0).abs() < 5e-4);
@@ -1240,6 +2105,86 @@ fn levels_work_on_whole_levels() {
     }
 }
 
+// Every Levels step lands on a whole level in 8 bits, and the gamma's shadow toe starts at
+// slope 2^gamma (`adjust::levels_gamma`). Level → Photoshop's level, exact, from:
+// - psd-tools levels_rgb.psd, Levels 2 (each channel, then the master): master 0..213, gamma
+//   1.22, output 48..255; R gamma 0.47 to 0..194; B 61..255, gamma 0.47, to 0..213. Narrow
+//   output ranges merge neighbouring levels (R 43..48 → 58, G 8, 9 → 63, B 89, 90 → 54).
+// - the photoshop corpus's rgb8 levels.psd: master 15..230, gamma 1.3, output 10..245.
+// - psd-tools levels_grayscale.psd, Levels 3: 44..214, gamma 1.78 (52 → 37 is one level off).
+#[test]
+fn levels_steps_match_photoshop() {
+    let ch = |ib: f32, iw: f32, gamma: f32, ob: f32, ow: f32| LevelsChannel {
+        in_black: ib / 255.0,
+        in_white: iw / 255.0,
+        gamma,
+        out_black: ob / 255.0,
+        out_white: ow / 255.0,
+    };
+    let id = LevelsChannel::default();
+    let levels = |master: LevelsChannel, per_channel: [LevelsChannel; 3]| Adjustment::Levels {
+        master,
+        per_channel,
+        space: Default::default(),
+        black: LevelsChannel::default(),
+    };
+    let run = |adj: &Adjustment, xs: &[u8]| {
+        let px = xs.iter().map(|&x| f32::from(x) / 255.0).map(|v| [v, v, v, 1.0]).collect();
+        let mut b = Buffer { rect: Rect::new(0, 0, xs.len() as i32, 1), px };
+        adjust::apply_depth(adj, &mut b, adjust::Transfer::Srgb, Some(SampleType::U8));
+        b.px
+    };
+    let rgb = levels(ch(0.0, 213.0, 1.22, 48.0, 255.0), [ch(0.0, 255.0, 0.47, 0.0, 194.0), id.clone(), ch(61.0, 255.0, 0.47, 0.0, 213.0)]);
+    let xs = [2, 8, 9, 15, 16, 43, 45, 48, 55, 61, 72, 79, 84, 89, 90, 101, 106, 120, 150, 180, 200];
+    let want: [[u8; 21]; 3] = [
+        [48, 48, 48, 50, 50, 58, 58, 58, 63, 63, 69, 72, 76, 79, 79, 86, 89, 100, 123, 153, 174],
+        [51, 63, 63, 72, 72, 103, 106, 109, 116, 122, 133, 141, 145, 149, 150, 160, 165, 178, 204, 228, 244],
+        [48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 50, 51, 54, 54, 54, 63, 63, 76, 102, 136, 164],
+    ];
+    for (k, p) in run(&rgb, &xs).iter().enumerate() {
+        for c in 0..3 {
+            assert_eq!((p[c] * 255.0).round(), f32::from(want[c][k]), "levels_rgb channel {c} at {}", xs[k]);
+        }
+    }
+    let single = |c: LevelsChannel| levels(c, [id.clone(), id.clone(), id.clone()]);
+    let oracles: [(Adjustment, &[u8], &[u8]); 2] = [
+        (
+            single(ch(15.0, 230.0, 1.3, 10.0, 245.0)),
+            &[0, 21, 22, 49, 82, 118, 154, 176, 195, 215, 235, 251],
+            &[10, 25, 27, 66, 106, 144, 178, 198, 215, 232, 245, 245],
+        ),
+        (
+            single(ch(44.0, 214.0, 1.78, 0.0, 255.0)),
+            &[44, 45, 46, 47, 48, 49, 50, 51, 53, 55, 57, 60, 65, 70, 80, 100, 150, 200, 214],
+            &[0, 7, 10, 17, 20, 26, 29, 35, 43, 51, 58, 66, 79, 89, 107, 137, 196, 243, 255],
+        ),
+    ];
+    for (adj, xs, want) in &oracles {
+        for ((p, x), w) in run(adj, xs).iter().zip(*xs).zip(*want) {
+            assert_eq!((p[0] * 255.0).round(), f32::from(*w), "levels at {x}");
+        }
+    }
+}
+
+// The shadow toe stays a well-behaved curve for any gamma: from 0 to 1, rising, and without a
+// jump where it meets the power curve.
+#[test]
+fn levels_gamma_toe_is_monotone_for_any_gamma() {
+    for g in [1.0001, 1.05, 1.5, 3.0, 9.99, 1e6, f32::INFINITY] {
+        let mut last = 0.0f32;
+        for k in 0..=4096 {
+            let u = k as f32 / 4096.0;
+            let t = adjust::levels_gamma(u, g);
+            assert!(t.is_finite() && (0.0..=1.0 + 1e-6).contains(&t), "gamma {g} at {u}: {t}");
+            assert!(t >= last - 1e-6, "gamma {g} falls at {u}: {last} -> {t}");
+            // Never steeper than the toe's initial slope 2^g.
+            assert!(k == 0 || t - last <= 2f32.powf(g) / 4096.0 + 1e-4, "gamma {g} jumps at {u}: {last} -> {t}");
+            last = t;
+        }
+        assert!((adjust::levels_gamma(1.0, g) - 1.0).abs() < 1e-6, "gamma {g}: white");
+    }
+}
+
 // The oracle corpus' rgb32 levels.psd: input 15..230, gamma 1.3, output 10..245. In a
 // 32-bit document neither range clips and the gamma is a plain power curve mirrored below black:
 // 0.0497 → 3 (the clipped curve gives 10), 0.9473 → 255 (245). Integer documents still clip.
@@ -1252,9 +2197,11 @@ fn levels_dont_clip_in_32_bit() {
         adjust::apply_depth(&adj, &mut b, adjust::Transfer::Srgb, Some(depth));
         (b.px[0][0] * 255.0).round()
     };
-    for (v, want) in [(0.0, 0.0), (0.0497, 3.0), (0.0976, 32.0), (0.4508, 140.0), (0.9473, 255.0), (1.0, 255.0)] {
+    for (v, want) in [(0.0497, 3.0), (0.0976, 32.0), (0.4508, 140.0), (0.9473, 255.0)] {
         assert_eq!(level(SampleType::F32, v), want, "{v}");
     }
+    assert!(level(SampleType::F32, 0.0) < 0.0);
+    assert!(level(SampleType::F32, 1.0) > 255.0);
     assert_eq!(level(SampleType::U8, 0.0), 10.0);
     assert_eq!(level(SampleType::U8, 1.0), 245.0);
 }
@@ -1287,6 +2234,109 @@ fn exposure_scales_32_bit_samples_as_stored() {
     }
 }
 
+#[test]
+fn float_adjustments_preserve_hdr_range() {
+    let identity = vec![photosplice_doc::adjust::CurvePoint { input: 0.0, output: 0.0 }, photosplice_doc::adjust::CurvePoint { input: 1.0, output: 1.0 }];
+    let levels = LevelsChannel { in_black: 0.25, in_white: 0.75, gamma: 2.0, out_black: -0.1, out_white: 1.5 };
+    let adjustments = [
+        (Adjustment::Exposure { exposure: 0.0, offset: 0.0, gamma: 1.0 }, [4.0, 2.0, 0.5]),
+        (Adjustment::Exposure { exposure: 1.0, offset: 0.0, gamma: 1.0 }, [8.0, 4.0, 1.0]),
+        (
+            Adjustment::Levels { master: Default::default(), per_channel: Default::default(), space: Default::default(), black: Default::default() },
+            [4.0, 2.0, 0.5],
+        ),
+        (
+            Adjustment::Levels { master: levels, per_channel: Default::default(), space: Default::default(), black: Default::default() },
+            [4.0, 2.0, 0.5].map(|v| -0.1 + ((v - 0.25_f32) / 0.5).sqrt() * 1.6),
+        ),
+        (
+            Adjustment::Curves {
+                master: identity.clone(),
+                per_channel: std::array::from_fn(|_| identity.clone()),
+                space: Default::default(),
+                black: Vec::new(),
+                pencil: false,
+            },
+            [4.0, 2.0, 0.5],
+        ),
+        (
+            Adjustment::Curves { master: Vec::new(), per_channel: Default::default(), space: Default::default(), black: Vec::new(), pencil: false },
+            [4.0, 2.0, 0.5],
+        ),
+    ];
+    for (adj, want) in adjustments {
+        let mut d = Document::new("HDR", Size::new(1, 1), ColorMode::Rgb, SampleType::F32);
+        let mut l = Layer::raster("pixels", PixelFormat::RGBA32F);
+        l.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 1, 1), &[4.0, 2.0, 0.5, 0.75]);
+        d.layers = vec![l, Layer::new("adjustment", LayerContent::Adjustment(adj.clone()))];
+        let got = px(&d, 0, 0);
+        for (a, b) in got[..3].iter().zip(want) {
+            assert!((a - b).abs() < 1e-5, "{adj:?}: {got:?} vs {want:?}");
+        }
+        assert_eq!(got[3], 0.75);
+    }
+}
+
+#[test]
+fn float_tone_adjustments_preserve_negative_and_untouched_channels() {
+    let identity = vec![photosplice_doc::adjust::CurvePoint { input: 0.0, output: 0.0 }, photosplice_doc::adjust::CurvePoint { input: 1.0, output: 1.0 }];
+    let edited = vec![photosplice_doc::adjust::CurvePoint { input: 0.0, output: 0.0 }, photosplice_doc::adjust::CurvePoint { input: 1.0, output: 0.5 }];
+    for (adj, want) in [
+        (
+            Adjustment::Levels { master: Default::default(), per_channel: Default::default(), space: Default::default(), black: Default::default() },
+            [-0.1, 4.0, 0.5],
+        ),
+        (
+            Adjustment::Curves {
+                master: identity.clone(),
+                per_channel: [identity.clone(), Vec::new(), edited],
+                space: Default::default(),
+                black: Vec::new(),
+                pencil: false,
+            },
+            [-0.1, 4.0, 0.25],
+        ),
+    ] {
+        let mut b = Buffer::filled(Rect::new(0, 0, 1, 1), [-0.1, 4.0, 0.5, 0.75]);
+        adjust::apply_depth(&adj, &mut b, adjust::Transfer::Gamma(1.0), Some(SampleType::F32));
+        for (a, b) in b.px[0][..3].iter().zip(want) {
+            assert!((a - b).abs() < 1e-5, "{adj:?}: {:?} vs {want:?}", b);
+        }
+        assert_eq!(b.px[0][3], 0.75);
+    }
+}
+
+#[test]
+fn float_exposure_stops_round_trip_without_losing_highlights() {
+    let input = [4.0, -2.0, 0.5, 0.75];
+    let mut b = Buffer::filled(Rect::new(0, 0, 1, 1), input);
+    for exposure in [1.0, -1.0] {
+        adjust::apply_depth(&Adjustment::Exposure { exposure, offset: 0.0, gamma: 1.0 }, &mut b, adjust::Transfer::Gamma(1.0), Some(SampleType::F32));
+    }
+    assert_eq!(b.px[0], input);
+}
+
+#[test]
+fn float_exposure_preserves_signed_gamma_and_offset() {
+    let mut b = Buffer::filled(Rect::new(0, 0, 1, 1), [-0.5, 0.0, 4.0, 0.75]);
+    adjust::apply_depth(&Adjustment::Exposure { exposure: 1.0, offset: -0.25, gamma: 2.0 }, &mut b, adjust::Transfer::Gamma(1.0), Some(SampleType::F32));
+    for (got, want) in b.px[0].iter().zip([-1.25_f32.sqrt(), -0.5, 7.75_f32.sqrt(), 0.75]) {
+        assert!((got - want).abs() < 1e-6, "{:?}", b.px[0]);
+    }
+}
+
+#[test]
+fn float_levels_apply_channel_before_master_outside_unit_range() {
+    let channel = LevelsChannel { in_black: 0.5, in_white: 1.5, ..Default::default() };
+    let master = LevelsChannel { out_black: -0.1, out_white: 1.5, ..Default::default() };
+    let adj = Adjustment::Levels { master, per_channel: std::array::from_fn(|_| channel.clone()), space: Default::default(), black: Default::default() };
+    let mut b = Buffer::filled(Rect::new(0, 0, 1, 1), [4.0, 2.0, -0.1, 1.0]);
+    adjust::apply_depth(&adj, &mut b, adjust::Transfer::Gamma(1.0), Some(SampleType::F32));
+    for (got, want) in b.px[0].iter().zip([5.5, 2.3, -1.06, 1.0]) {
+        assert!((got - want).abs() < 1e-6, "{:?}", b.px[0]);
+    }
+}
+
 // A 30° Reflected gradient fill on a 4 × 4 canvas renders as Photoshop's (its end point snaps to
 // the corner: t = |x − y| / 4) at every depth.
 #[test]
@@ -1302,6 +2352,61 @@ fn small_gradient_fill_matches_photoshop_at_all_depths() {
                 let want = (x as f32 - y as f32).abs() / 4.0;
                 let got = out.px[y * 4 + x][0];
                 assert!((got - want).abs() < 1.0 / 255.0, "{depth:?} ({x},{y}): {got} vs {want}");
+            }
+        }
+    }
+}
+
+/// A shape layer's gradient fill must render the same pixels as the compositor's gradient
+/// fill layers, for every non-default gradient field (midpoints, opacity stops, centre offset,
+/// dither, unsorted stops) and all five styles, in both frames: "Align with layer" on lays the
+/// gradient out over the shape's bounds, off over the canvas. `photosplice-vector` cannot
+/// depend on this crate, so it carries a copy of this ramp and geometry — this test is what
+/// keeps the two in step (only interior pixels, where the shape's coverage is exactly 1).
+#[test]
+fn shape_layer_gradients_match_fill_layers() {
+    use photosplice_doc::GradientStyle;
+    let canvas = Rect::new(0, 0, 64, 48);
+    // rect(x, y, w, h): the shape spans (16, 8)–(64, 48), so its whole-pixel bounds sit strictly
+    // inside the canvas — "Align with layer" then picks a different frame than the canvas.
+    let path = photosplice_vector::shapes::rect(16.0, 8.0, 48.0, 40.0);
+    let layer_frame = Rect::new(16, 8, 64, 48);
+    let grad = |style: GradientStyle, midpoints: Vec<f32>, opacity_stops: Vec<(f32, f32)>, offset: (f32, f32), dither: bool, unsorted: bool, align: bool| {
+        let mut stops = vec![(0.0, Color::BLACK), (0.5, Color::rgb(1.0, 0.25, 0.5)), (1.0, Color::WHITE)];
+        if unsorted {
+            stops.reverse();
+        }
+        Fill::Gradient { stops, angle: 30.0, scale: 1.7, style, reverse: false, opacity_stops, midpoints, offset, dither, align }
+    };
+    let styles = [GradientStyle::Linear, GradientStyle::Radial, GradientStyle::Angle, GradientStyle::Reflected, GradientStyle::Diamond];
+    // (name, midpoints, opacity stops, centre offset, dither, unsorted stops) per case.
+    type Case = (&'static str, Vec<f32>, Vec<(f32, f32)>, (f32, f32), bool, bool);
+    let cases: Vec<Case> = vec![
+        ("plain", vec![], vec![], (0.0, 0.0), false, false),
+        ("midpoints", vec![0.25, 0.9], vec![], (0.0, 0.0), false, false),
+        ("opacity stops", vec![], vec![(0.0, 1.0), (0.5, 0.2), (1.0, 0.9)], (0.0, 0.0), false, false),
+        ("offset", vec![], vec![], (0.3, -0.2), false, false),
+        ("dither", vec![], vec![], (0.0, 0.0), true, false),
+        ("all of them", vec![0.75], vec![(0.0, 1.0), (1.0, 0.4)], (0.1, 0.1), true, true),
+    ];
+    for style in styles {
+        for (name, mids, opac, offset, dither, unsorted) in &cases {
+            for align in [true, false] {
+                let f = grad(style, mids.clone(), opac.clone(), *offset, *dither, *unsorted, align);
+                let frame = if align { layer_frame } else { canvas };
+                let want = gradient_fill::render(&f, canvas, frame);
+                let sh = photosplice_doc::vector::ShapeLayer { path: path.clone(), fill: Some(f), ..Default::default() };
+                let s = photosplice_vector::render_shape(&sh, PixelFormat::RGBA8, canvas);
+                let mut worst = 0.0f32;
+                for y in 9..47 {
+                    for x in 17..63 {
+                        let p = want[(y as usize) * canvas.width() as usize + x as usize];
+                        for (got, want_ch) in (0..4usize).map(|ch| (s.sample_channel(x, y, ch), p[ch])) {
+                            worst = worst.max((got - want_ch).abs());
+                        }
+                    }
+                }
+                assert!(worst <= 1.5 / 255.0, "{style:?} {name} align={align}: worst delta {worst}");
             }
         }
     }
@@ -1394,7 +2499,7 @@ fn reference_reduce(doc: &Document, w: usize, h: usize) -> Vec<[f32; 4]> {
 fn reduced_render_matches_the_full_composite_averaged() {
     let d = tall_doc(53, 1000);
     for (w, h, band) in [(10, 190, 0), (7, 33, 256), (53, 999, 512), (1, 1, 256)] {
-        let got = render_reduced_in_bands(&d, w, h, None, band);
+        let got = render_reduced_in_bands(&d, d.bounds(), w, h, None, band);
         assert_eq!((got.rect.width(), got.rect.height()), (w, h));
         assert_eq!(got.px, reference_reduce(&d, w as usize, h as usize), "{w}x{h} band {band}");
     }
@@ -1410,9 +2515,9 @@ fn reduced_damage_matches_the_whole_reduction() {
     // whole reduction's, for uneven factors, damage on span edges and bands smaller than the area.
     let d = tall_doc(53, 1000);
     for (w, h, band) in [(10, 190, 0), (7, 33, 256), (53, 999, 64), (53, 1000, 0), (1, 1, 256)] {
-        let all = render_reduced_in_bands(&d, w, h, None, band);
+        let all = render_reduced_in_bands(&d, d.bounds(), w, h, None, band);
         for dmg in [Rect::new(0, 0, 1, 1), Rect::new(5, 17, 6, 18), Rect::new(12, 300, 40, 701), Rect::new(-9, 990, 80, 2000), Rect::new(0, 0, 53, 1000)] {
-            let part = render_reduced_in_bands(&d, w, h, Some(dmg), band);
+            let part = render_reduced_in_bands(&d, d.bounds(), w, h, Some(dmg), band);
             let r = part.rect;
             assert!(!r.is_empty() && r.x0 >= 0 && r.y0 >= 0 && r.x1 as u32 <= w && r.y1 as u32 <= h, "{w}x{h} {dmg:?} -> {r:?}");
             for y in r.y0..r.y1 {
@@ -1431,8 +2536,38 @@ fn reduced_damage_matches_the_whole_reduction() {
                 }
             }
         }
-        assert!(render_reduced_in_bands(&d, w, h, Some(Rect::new(60, 0, 70, 10)), band).rect.is_empty());
+        assert!(render_reduced_in_bands(&d, d.bounds(), w, h, Some(Rect::new(60, 0, 70, 10)), band).rect.is_empty());
     }
+}
+
+#[test]
+fn reduced_render_of_an_area_past_the_canvas() {
+    // The Crop tool shows layer pixels beyond the canvas: rendered in place, they must equal the
+    // same pixels on a canvas that holds them (adjustment layers apply out there too).
+    let paint = |d: &mut Document, dx: i32, dy: i32| {
+        let mut l = Layer::raster("big", PixelFormat::RGBA8);
+        let s = l.surface_mut().unwrap();
+        for y in -10..40 {
+            for x in -20..60 {
+                let a = if x < 0 || y >= 30 { 0.6 } else { 1.0 };
+                s.fill_rect(Rect::new(x + dx, y + dy, x + dx + 1, y + dy + 1), &[(x + 20) as f32 / 80.0, (y + 10) as f32 / 50.0, 0.5, a]);
+            }
+        }
+        d.layers.push(l);
+        d.layers.push(Layer::new("inv", LayerContent::Adjustment(Adjustment::Invert)));
+    };
+    let mut d = Document::new("d", Size::new(40, 30), ColorMode::Rgb, SampleType::U8);
+    paint(&mut d, 0, 0);
+    let mut whole = Document::new("w", Size::new(80, 50), ColorMode::Rgb, SampleType::U8);
+    paint(&mut whole, 20, 10);
+    let area = Rect::new(-20, -10, 60, 40);
+    for (w, h) in [(80, 50), (8, 5), (27, 13), (1, 1)] {
+        let got = render_reduced_rect(&d, area, w, h);
+        assert_eq!(got.rect, Rect::new(0, 0, w as i32, h as i32));
+        assert_eq!(got.px, render_reduced(&whole, w, h).px, "{w}x{h}");
+    }
+    // Past every layer there is nothing to show.
+    assert!(render_reduced_rect(&d, Rect::new(100, 100, 120, 110), 20, 10).px.iter().all(|p| p[3] == 0.0));
 }
 
 #[test]
@@ -1456,7 +2591,7 @@ fn large_documents_thumbnail_from_a_proxy() {
 /// parallel), each carrying a different effect.
 #[cfg(not(target_arch = "wasm32"))]
 fn nested_parallel_fx_doc() -> Document {
-    use photosplice_doc::{Contour, Effect, FxCommon, FxPaint, Glow, GlowSource, GlowTechnique, StrokeFx, StrokePosition};
+    use photosplice_doc::{Bevel, BevelStyle, BevelTechnique, Contour, Effect, FxCommon, FxPaint, Glow, GlowSource, GlowTechnique, StrokeFx, StrokePosition};
     let mut d = doc_white(512, 512);
     let g = |a: f32| Fill::gradient(vec![(0.0, Color::BLACK), (1.0, Color::rgb(0.2, 0.5, 0.9))], a, 1.0, photosplice_doc::GradientStyle::Linear, false);
     let mut shadow = Layer::new("shadow", LayerContent::Fill(g(0.0)));
@@ -1484,11 +2619,32 @@ fn nested_parallel_fx_doc() -> Document {
         noise: 0.0,
         source: GlowSource::Edge,
     })];
+    // A chiselled bevel: its distance transforms run on threads of their own, inside the tile that builds them.
+    let mut chisel = solid_layer("chisel", Rect::new(60, 60, 450, 450), [0.8, 0.6, 0.2, 1.0]);
+    chisel.effects.items = vec![Effect::BevelEmboss(Bevel {
+        enabled: true,
+        style: BevelStyle::InnerBevel,
+        technique: BevelTechnique::ChiselHard,
+        depth: 1.5,
+        up: true,
+        size: 9.0,
+        soften: 0.0,
+        angle: 120.0,
+        altitude: 32.0,
+        use_global_light: false,
+        gloss_contour: Contour::Linear,
+        highlight: FxCommon::new(BlendMode::Screen, 0.75),
+        highlight_color: Color::WHITE,
+        shadow: FxCommon::new(BlendMode::Multiply, 0.75),
+        shadow_color: Color::BLACK,
+        contour: None,
+        texture: None,
+    })];
     // Unaffected layers whose rows also render in parallel keep both workers stealing.
     let base = Layer::new("base", LayerContent::Fill(g(30.0)));
     let mut top = Layer::new("top", LayerContent::Fill(g(60.0)));
     top.opacity = 0.3;
-    d.layers.extend([base, shadow, stroke, glow, top]);
+    d.layers.extend([base, shadow, stroke, glow, chisel, top]);
     d
 }
 
@@ -1547,9 +2703,10 @@ fn photo_filter_matches_photoshop() {
         }
     }
     // The 32-bit file picks the same numbers as linear values (Lab 81.5, 9.41, 82.19). Its fit is
-    // looser (mean 0.9/255 over the file, 6.9/255 with a plain RGB multiply).
+    // looser (mean 0.9/255 over the file, 6.9/255 with a plain RGB multiply), and Photoshop's
+    // results there are unclipped: above 1 and below 0.
     let warming32 = [0.966_445_6, 0.761_806_3, 0.0];
-    for (v, ps) in [([0.2159, 0.2159, 0.2159], [66.0, 53.0, 40.0]), ([1.0, 1.0, 0.0], [255.0, 251.0, 0.0]), ([1.0, 0.0, 0.0], [255.0, 0.0, 0.0])] {
+    for (v, ps) in [([0.2159, 0.2159, 0.2159], [65.7, 53.4, 39.5]), ([1.0, 1.0, 0.0], [271.7, 250.9, -9.0]), ([1.0, 0.0, 0.0], [262.2, -2.0, -1.2])] {
         let got = filter(warming32, SampleType::F32, v);
         assert!(got.iter().zip(ps).all(|(g, p)| (g - p).abs() <= 2.5), "F32 {v:?}: got {got:?} want {ps:?}");
     }
@@ -1741,4 +2898,520 @@ fn stroke_emboss_leaves_the_backdrop_share_alone() {
         shaded += usize::from((e[0] - p[0]).abs() > 0.01);
     }
     assert!(shaded > 50, "the stroke is shaded at all ({shaded} pixels)");
+}
+
+#[test]
+fn rendering_restores_the_lab_mix_flag_it_found() {
+    // #1112: a render set LAB_MIX for its document, then cleared it. A nested rayon job (a
+    // gradient fill, say) can let a thread render another tile in the middle of an outer Lab
+    // tile, and clearing the flag made the rest of that outer tile mix in sRGB.
+    for mode in [ColorMode::Lab, ColorMode::Rgb] {
+        let doc = Document::with_background("t", Size::new(8, 8), mode, SampleType::U8, Color::WHITE);
+        // Single-tile and multi-tile paths (the latter also prepares effect maps under the flag).
+        for tile in [RENDER_TILE, 4] {
+            for outer in [true, false] {
+                psblend::LAB_MIX.with(|l| l.set(outer));
+                let _ = render_tiled(&doc, doc.bounds(), tile);
+                let after = psblend::LAB_MIX.with(|l| l.get());
+                psblend::LAB_MIX.with(|l| l.set(false));
+                assert_eq!(after, outer, "{mode:?} with tile {tile} inside a tile that had LAB_MIX = {outer}");
+            }
+        }
+    }
+}
+
+#[test]
+fn clipped_brightness_and_desaturation_whiten_a_lighter_color_logo() {
+    // постер.psd: a yellow logo in Lighter Color over the same yellow, with Brightness/Contrast +150
+    // and Vibrance › Saturation −100 clipped to it. Photoshop shows it white (254); 0.5.0 left it
+    // yellow (its Saturation −100 greyed (255, 255, 0) to 128, darker than the yellow beneath).
+    let yellow = [251.0 / 255.0, 201.0 / 255.0, 0.0, 1.0];
+    let mut d = doc_white(2, 1);
+    d.layers[0].surface_mut().unwrap().fill_rect(Rect::new(0, 0, 2, 1), &yellow);
+    let mut logo = solid_layer("logo", Rect::new(0, 0, 1, 1), yellow);
+    logo.blend = BlendMode::LighterColor;
+    d.layers.push(logo);
+    for adj in [Adjustment::BrightnessContrast { brightness: 150.0, contrast: 0.0, legacy: false }, Adjustment::Vibrance { vibrance: 0.0, saturation: -100.0 }]
+    {
+        let mut l = Layer::new("adj", LayerContent::Adjustment(adj));
+        l.clipped = true;
+        d.layers.push(l);
+    }
+    let p = px(&d, 0, 0);
+    assert!(p[..3].iter().all(|v| *v * 255.0 >= 252.0), "logo whitened: {p:?}");
+    assert!(close4(px(&d, 1, 0), yellow), "the yellow beside it is untouched");
+}
+
+#[test]
+fn outer_glow_does_not_paint_through_a_zero_fill_layer() {
+    use photosplice_doc::{Contour, Effect, FxCommon, FxPaint, Glow, GlowSource, GlowTechnique};
+
+    let background = [0.18, 0.42, 0.85, 1.0];
+    let rect = Rect::new(24, 24, 72, 72);
+    for technique in [GlowTechnique::Softer, GlowTechnique::Precise] {
+        let mut d = doc_white(96, 96);
+        let bounds = d.bounds();
+        d.layers[0].surface_mut().unwrap().fill_rect(bounds, &background);
+        let mut layer = solid_layer("glow", rect, [1.0, 0.92, 0.25, 1.0]);
+        layer.fill_opacity = 0.0;
+        layer.effects.items.push(Effect::OuterGlow(Glow {
+            common: FxCommon::new(BlendMode::Normal, 1.0),
+            paint: FxPaint::Color(Color::rgb(1.0, 0.94, 0.28)),
+            technique,
+            spread: 0.5,
+            size: 12.0,
+            contour: Contour::Linear,
+            anti_alias: false,
+            range: 0.5,
+            jitter: 0.0,
+            noise: 0.0,
+            source: GlowSource::Edge,
+        }));
+        d.layers.push(layer);
+
+        let center = px(&d, 48, 48);
+        assert!(close4(center, background), "{technique:?}: glow leaked into fully transparent fill: {center:?}");
+        let distant = px(&d, 5, 5);
+        assert!(close4(distant, background), "{technique:?}: changed distant background: {distant:?}");
+        let halo = px(&d, 22, 48);
+        assert!(halo[0] > background[0] + 0.1, "{technique:?}: exterior halo disappeared: {halo:?}");
+
+        d.layers[1].fill_opacity = 1.0;
+        let opaque = px(&d, 48, 48);
+        assert!(opaque[0] > 0.9 && opaque[1] > 0.8, "{technique:?}: opaque fill disappeared: {opaque:?}");
+    }
+}
+
+// Lab documents: Invert mirrors L, a and b; Threshold splits on L with a neutral result; Gradient
+// Map follows L. Rendered through the document compositor at every depth.
+#[test]
+fn lab_documents_evaluate_invert_threshold_and_gradient_map_on_lab() {
+    use photosplice_color::convert::{lab_to_srgb, srgb_to_lab};
+    let c = lab_to_srgb([30.0, 12.0, -18.0]);
+    for depth in SampleType::ALL {
+        let render = |adj: Adjustment| {
+            let mut d = Document::with_background("t", Size::new(4, 4), ColorMode::Lab, depth, Color::rgb(c[0], c[1], c[2]));
+            d.layers.push(Layer::new("adj", LayerContent::Adjustment(adj)));
+            let p = flatten(&d).px[5];
+            srgb_to_lab([p[0], p[1], p[2]])
+        };
+        let near = |got: [f32; 3], want: [f32; 3], tol: f32| got.iter().zip(want).all(|(g, w)| (g - w).abs() <= tol);
+        let inv = render(Adjustment::Invert);
+        // 8-bit bytes become 255 - v (a, b one step past the mirror); 16 bits mirror them exactly.
+        let want = if depth == SampleType::U8 { [70.0, -13.0, 17.0] } else { [70.0, -12.0, 18.0] };
+        assert!(near(inv, want, 0.5), "{depth:?}: {inv:?}");
+        let th = render(Adjustment::Threshold { level: 0.25 });
+        assert!(near(th, [100.0, 0.0, 0.0], 0.5), "{depth:?}: L 30 is above level 64: {th:?}");
+        let gm = render(Adjustment::GradientMap { stops: vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])], reverse: false, dither: false, ink_stops: Vec::new() });
+        let want = srgb_to_lab([0.3; 3]);
+        assert!(near(gm, want, 1.0), "{depth:?}: L 30 → 30 % of the way: {gm:?} vs {want:?}");
+    }
+}
+
+/// `adj` over a one-colour Lab document (background `rgb`) at `depth`, read back as Lab.
+fn lab_doc_adjusted(rgb: [f32; 3], adj: Adjustment, depth: SampleType) -> [f32; 3] {
+    let mut doc = Document::with_background("lab", Size::new(4, 4), ColorMode::Lab, depth, Color::rgb(rgb[0], rgb[1], rgb[2]));
+    doc.layers.push(Layer::new("adj", LayerContent::Adjustment(adj)));
+    let p = px(&doc, 1, 1);
+    photosplice_color::convert::srgb_to_lab([p[0], p[1], p[2]])
+}
+
+fn near3(got: [f32; 3], want: [f32; 3], tol: f32, what: &str) {
+    assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() <= tol), "{what}: got {got:?}, want {want:?}");
+}
+
+/// A muted, in-gamut colour (L ≈ 46, a ≈ 10, b ≈ -20) and its Lab coordinates.
+const MUTED: [f32; 3] = [0.40, 0.42, 0.60];
+
+#[test]
+fn lab_documents_invert_and_posterize_l_a_and_b() {
+    let lab = photosplice_color::convert::srgb_to_lab(MUTED);
+    for depth in SampleType::ALL {
+        // Invert: L -> 100 - L and a, b -> their opposites (-a - 1 on the 8-bit 0..255 grid).
+        let inv = lab_doc_adjusted(MUTED, Adjustment::Invert, depth);
+        let step = if depth == SampleType::U8 { 1.0 } else { 0.0 };
+        near3(inv, [100.0 - lab[0], -lab[1] - step, -lab[2] - step], 1.0, &format!("{depth:?} invert"));
+        // An RGB invert would land elsewhere: lightness 100 - L is the Lab rule.
+        let rgb_inv = photosplice_color::convert::srgb_to_lab(MUTED.map(|v| 1.0 - v));
+        assert!((rgb_inv[0] - inv[0]).abs() > 2.0, "{depth:?}: {rgb_inv:?} vs {inv:?}");
+        // Posterize, three levels: the same steps on L, a and b (here all land on the middle
+        // step: L ≈ 50 and a, b ≈ -1 (0 at 16 bits, whose middle level is 128), a neutral grey).
+        let post = lab_doc_adjusted(MUTED, Adjustment::Posterize { levels: 3 }, depth);
+        let n = [lab[0] / 100.0, (lab[1] + 128.0) / 255.0, (lab[2] + 128.0) / 255.0].map(|v| adjust::posterize_in(v, 3, Some(depth)));
+        let want = [n[0] * 100.0, n[1] * 255.0 - 128.0, n[2] * 255.0 - 128.0];
+        assert!(want[0] > 45.0 && want[1].abs() < 2.0 && want[2].abs() < 2.0, "{want:?}");
+        near3(post, want, 1.0, &format!("{depth:?} posterize"));
+    }
+}
+
+/// A Lab document of one opaque layer holding stored L, a, b `lab` (normalised as Lab surfaces
+/// store them), with `adjustments` above it.
+fn lab_stack(lab: [f32; 3], depth: SampleType, adjustments: Vec<Adjustment>) -> Document {
+    let mut doc = Document::new("lab", Size::new(4, 4), ColorMode::Lab, depth);
+    let fmt = doc.pixel_format();
+    let mut layer = Layer::raster("bg", fmt);
+    if let Some(s) = layer.surface_mut() {
+        s.fill_rect(Rect::new(0, 0, 4, 4), &[lab[0], lab[1], lab[2], 1.0][..fmt.channels()]);
+    }
+    doc.layers.push(layer);
+    doc.layers.extend(adjustments.into_iter().map(|a| Layer::new("adj", LayerContent::Adjustment(a))));
+    doc
+}
+
+/// Display RGB of stored Lab `n`.
+fn lab_display(n: [f32; 3]) -> [f32; 3] {
+    photosplice_color::convert::lab_to_srgb([n[0] * 100.0, n[1] * 255.0 - 128.0, n[2] * 255.0 - 128.0])
+}
+
+// A saturated purple far outside sRGB (L 60, a +90, b -90). Read through display RGB it clips,
+// so Invert and Levels on L, a and b saw the clipped colour: the photoshop corpus's lab8 and
+// lab16 invert.psd were up to 11 levels off there. Worked out on the stored values, Invert gives
+// the bytes' complements (L 153 → 102, a 218 → 37, b 38 → 217), as Photoshop does.
+#[test]
+fn lab_adjustments_work_on_the_stored_values() {
+    let byte = |v: u8| f32::from(v) / 255.0;
+    let doc = lab_stack([byte(153), byte(218), byte(38)], SampleType::U8, vec![Adjustment::Invert]);
+    let p = px(&doc, 1, 1);
+    // The composite keeps colours outside sRGB unclipped (`lab.rs`), so compare unclipped.
+    let n = [byte(102), byte(37), byte(217)];
+    let want = photosplice_color::convert::lab_to_srgb_unclamped([n[0] * 100.0, n[1] * 255.0 - 128.0, n[2] * 255.0 - 128.0]);
+    near3([p[0], p[1], p[2]], want, 1e-4, "inverted out-of-gamut purple");
+    // Through clipped display RGB the result is another colour.
+    let clipped = photosplice_color::convert::srgb_to_lab(lab_display([byte(153), byte(218), byte(38)]));
+    let via_rgb = lab_display([1.0 - clipped[0] / 100.0, (-clipped[1] - 1.0 + 128.0) / 255.0, (-clipped[2] - 1.0 + 128.0) / 255.0]);
+    assert!(via_rgb.iter().zip(want).any(|(a, b)| (a - b).abs() > 4.0 / 255.0), "the clipped path differs: {via_rgb:?} vs {want:?}");
+    // PhotoSplice composites a Lab document in unclipped screen RGB (`lab.rs`), so an
+    // adjustment at half opacity mixes there, not halfway on L: that part of this check is left
+    // out.
+}
+
+// Flattening a Lab document keeps its stored values, out-of-gamut colours included (the RGB
+// compositor clipped them on the way through display RGB).
+#[test]
+fn lab_flatten_keeps_the_stored_values() {
+    let lab = [0.6, 218.0 / 255.0, 38.0 / 255.0];
+    for depth in [SampleType::U8, SampleType::U16] {
+        let doc = lab_stack(lab, depth, vec![]);
+        let s = flatten_to_surface(&doc, doc.pixel_format(), None);
+        let got = s.pixel(2, 2);
+        assert!(got.iter().zip(lab).all(|(g, w)| (g - w).abs() < 1e-3), "{depth:?}: {got:?}");
+    }
+}
+
+// Anything the stored values can't carry exactly keeps the RGB compositor.
+#[test]
+fn lab_stacks_with_other_layers_keep_the_rgb_compositor() {
+    let lab = [0.6, 0.5, 0.5];
+    assert!(native_lab::LabStack::new(&lab_stack(lab, SampleType::U8, vec![Adjustment::Invert])).is_some_and(|s| s.adjusts()));
+    let hue = Adjustment::HueSaturation { hue: 30.0, saturation: 0.0, lightness: 0.0, colorize: false, ranges: photosplice_doc::adjust::HueRange::defaults() };
+    assert!(native_lab::LabStack::new(&lab_stack(lab, SampleType::U8, vec![hue])).is_none());
+    let mut multiply = lab_stack(lab, SampleType::U8, vec![Adjustment::Invert]);
+    if let Some(l) = multiply.layers.last_mut() {
+        l.blend = photosplice_color::blend::BlendMode::Multiply;
+    }
+    assert!(native_lab::LabStack::new(&multiply).is_none());
+    let rgb = Document::with_background("rgb", Size::new(4, 4), ColorMode::Rgb, SampleType::U8, Color::rgb(0.5, 0.5, 0.5));
+    assert!(native_lab::LabStack::new(&rgb).is_none());
+}
+
+#[test]
+fn lab_documents_brightness_contrast_moves_lightness_only() {
+    let lab = photosplice_color::convert::srgb_to_lab(MUTED);
+    for depth in SampleType::ALL {
+        for legacy in [true, false] {
+            let got = lab_doc_adjusted(MUTED, Adjustment::BrightnessContrast { brightness: 40.0, contrast: 20.0, legacy }, depth);
+            assert!(got[0] > lab[0] + 5.0, "{depth:?} legacy {legacy}: {got:?}");
+            near3([lab[0], got[1], got[2]], lab, 0.75, &format!("{depth:?} legacy {legacy}: a, b kept"));
+        }
+    }
+}
+
+#[test]
+fn lab_documents_threshold_on_lightness_with_a_neutral_result() {
+    for depth in SampleType::ALL {
+        // A saturated yellow is light (L ≈ 97): white, not a coloured result.
+        let yellow = lab_doc_adjusted([1.0, 1.0, 0.0], Adjustment::Threshold { level: 0.5 }, depth);
+        near3(yellow, [100.0, 0.0, 0.0], 0.5, &format!("{depth:?} yellow"));
+        // Pure blue has L ≈ 30: black.
+        let blue = lab_doc_adjusted([0.0, 0.0, 1.0], Adjustment::Threshold { level: 0.5 }, depth);
+        near3(blue, [0.0, 0.0, 0.0], 0.5, &format!("{depth:?} blue"));
+        // Mid grey L 53.4 against level 128 (n 0.502): Lab L decides, not RGB luminance.
+        let level = 0.52;
+        let grey = lab_doc_adjusted([0.5; 3], Adjustment::Threshold { level }, depth);
+        near3(grey, [100.0, 0.0, 0.0], 0.5, &format!("{depth:?} grey"));
+    }
+}
+
+#[test]
+fn lab_documents_gradient_map_follows_lightness() {
+    let stops = vec![(0.0, [0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 0.0])];
+    // A grey and a saturated colour of the same L map to the same colour.
+    let red = [0.9, 0.1, 0.1];
+    let l = photosplice_color::convert::srgb_to_lab(red)[0];
+    let grey = photosplice_color::convert::lab_to_srgb([l, 0.0, 0.0]);
+    for depth in SampleType::ALL {
+        for reverse in [false, true] {
+            let adj = Adjustment::GradientMap { stops: stops.clone(), reverse, dither: false, ink_stops: Vec::new() };
+            let a = lab_doc_adjusted(red, adj.clone(), depth);
+            let b = lab_doc_adjusted(grey, adj.clone(), depth);
+            near3(a, b, 1.0, &format!("{depth:?} reverse {reverse}"));
+            let t = if reverse { 1.0 - l / 100.0 } else { l / 100.0 };
+            let want = photosplice_color::convert::srgb_to_lab([t, t, 1.0 - t]);
+            near3(a, want, 1.5, &format!("{depth:?} reverse {reverse}"));
+        }
+    }
+    // In RGB documents the map still follows RGB luminance: red and grey differ there.
+    let mut buf = Buffer::filled(Rect::new(0, 0, 1, 1), [red[0], red[1], red[2], 1.0]);
+    let adj = Adjustment::GradientMap { stops, reverse: false, dither: false, ink_stops: Vec::new() };
+    adjust::apply_in(&adj, &mut buf, adjust::Transfer::Srgb, None, ColorMode::Rgb);
+    let mut grey_buf = Buffer::filled(Rect::new(0, 0, 1, 1), [grey[0], grey[1], grey[2], 1.0]);
+    adjust::apply_in(&adj, &mut grey_buf, adjust::Transfer::Srgb, None, ColorMode::Rgb);
+    assert!((buf.px[0][0] - grey_buf.px[0][0]).abs() > 0.05, "{:?} {:?}", buf.px[0], grey_buf.px[0]);
+}
+
+// ---------- Effect-map identity is computed once per layer per render (#4437) ----------
+
+/// Effect layers of every kind the cache key walks: a plain layer, a styled group with a styled
+/// child, and a layer whose mask hides its effects (rendered from a temporary copy).
+fn identity_doc(depth: SampleType) -> Document {
+    let mut d = Document::with_background("t", Size::new(96, 96), ColorMode::Rgb, depth, Color::WHITE);
+    let fmt = d.pixel_format();
+    let mut sq = Layer::raster("sq", fmt);
+    sq.surface_mut().unwrap().fill_rect(Rect::new(8, 8, 40, 40), &[1.0, 0.0, 0.0, 1.0]);
+    sq.effects.items = vec![stroke(3.0, StrokePosition::Outside), Effect::DropShadow(shadow(4.0, 120.0))];
+    d.layers.push(sq);
+    let mut child = Layer::raster("child", fmt);
+    child.surface_mut().unwrap().fill_rect(Rect::new(50, 10, 86, 46), &[0.0, 0.6, 0.2, 1.0]);
+    child.effects.items = vec![stroke(2.0, StrokePosition::Outside)];
+    let mut group = Layer::group("g", vec![child]);
+    group.effects.items = vec![Effect::DropShadow(shadow(5.0, 60.0))];
+    d.layers.push(group);
+    let mut hidden = Layer::raster("hidden", fmt);
+    hidden.surface_mut().unwrap().fill_rect(Rect::new(10, 54, 46, 90), &[0.1, 0.2, 0.9, 1.0]);
+    hidden.effects.items = vec![stroke(3.0, StrokePosition::Outside)];
+    hidden.mask = Some(LayerMask::reveal_all());
+    hidden.mask_hides_effects = true;
+    d.layers.push(hidden);
+    d
+}
+
+#[test]
+fn memoised_effect_identity_leaves_every_render_unchanged() {
+    for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        let d = identity_doc(depth);
+        let b = d.bounds();
+        // One tile for the whole canvas never goes through `prepare_effects`; small tiles do.
+        purge_effect_cache();
+        let whole = render_tiled(&d, b, 4096);
+        purge_effect_cache();
+        let tiled = render_tiled(&d, b, 16);
+        let warm = render_tiled(&d, b, 24);
+        assert!(whole.px == tiled.px, "{depth:?}: tiled differs from one tile");
+        assert!(whole.px == warm.px, "{depth:?}: warm differs from cold");
+        assert!(whole.px.iter().any(|p| *p != [1.0; 4]), "{depth:?}: the effects should draw");
+        // Edits still invalidate: a changed layer must not keep its old maps.
+        let mut e = d.clone();
+        e.layers[1].effects.items = vec![Effect::DropShadow(shadow(9.0, 200.0))];
+        let edited = render_tiled(&e, b, 16);
+        purge_effect_cache();
+        assert!(edited.px == render_tiled(&e, b, 4096).px, "{depth:?}: stale maps after an edit");
+        assert!(edited.px != whole.px, "{depth:?}: the edit should show");
+    }
+}
+
+#[test]
+fn effect_identity_is_built_once_per_layer_not_per_tile() {
+    let mut d = identity_doc(SampleType::U8);
+    // Leave out the temporary-copy layer: it is rebuilt per call by design.
+    d.layers.pop();
+    let patterns = pattern::PreparedPatterns::new(&d.patterns, pattern::PREPARED_PATTERN_BYTES);
+    let cx = Ctx::for_doc(&d, &patterns);
+    let b = d.bounds();
+    let tiles = 6 * 6;
+    let first = render_tiled_with(&d, b, 16, &cx);
+    let built = cx.layer_keys.built.load(std::sync::atomic::Ordering::Relaxed);
+    // sq, the group and its child: three effect layers, however many tiles.
+    assert_eq!(built, 3, "identity built {built} times over {tiles} tiles");
+    // A second render with the same context finds all of them memoised.
+    let second = render_tiled_with(&d, b, 16, &cx);
+    assert_eq!(cx.layer_keys.built.load(std::sync::atomic::Ordering::Relaxed), 3);
+    assert!(first.px == second.px);
+}
+
+#[test]
+fn render_refuses_rects_beyond_the_pixel_cap() {
+    let doc = Document::new("c", Size::new(4, 4), ColorMode::Rgb, SampleType::U8);
+    // 2^32 - 1 px wide: the width wraps negative as an i32, which once took the single-tile path.
+    for tile in [crate::RENDER_TILE, 1 << 20] {
+        let b = crate::render_tiled(&doc, Rect::new(i32::MIN, 0, i32::MAX, 1), tile);
+        assert!(b.px.is_empty() && b.rect.is_empty());
+    }
+}
+
+// The effect-map cache key covers Transparency Shapes Layer and Blend If: both change the shape
+// the maps are built from (a layer's own, or a styled group's children composite) without
+// touching pixels, masks or effects, and stale maps kept stroking a hole the layer no longer
+// had. Each case renders with the cache warm, edits, renders again and compares with a cold
+// render. (A purge by a concurrent test only makes the warm render cold, never a false failure.)
+#[test]
+fn effect_cache_follows_transparency_shapes_layer() {
+    let mut d = doc_white(32, 32);
+    let mut l = solid_layer("holed", Rect::new(0, 0, 32, 32), [0.9, 0.2, 0.2, 1.0]);
+    l.surface_mut().unwrap().fill_rect(Rect::new(12, 12, 20, 20), &[0.0, 0.0, 0.0, 0.0]);
+    l.effects.items = vec![stroke(2.0, StrokePosition::Outside)];
+    assert!(l.transparency_shapes);
+    d.layers.push(l);
+    let on = render(&d, d.bounds());
+    d.layers[1].transparency_shapes = false;
+    let warm = render(&d, d.bounds());
+    purge_effect_cache();
+    let cold = render(&d, d.bounds());
+    assert!(on.px != cold.px, "the stroke should stop rimming the hole");
+    assert!(warm.px == cold.px, "stale effect maps after turning Transparency Shapes Layer off");
+}
+
+#[test]
+fn effect_cache_follows_a_group_childs_blend_if() {
+    let mut d = doc_white(32, 32);
+    let mut child = solid_layer("bw", Rect::new(4, 4, 16, 28), [0.0, 0.0, 0.0, 1.0]);
+    child.surface_mut().unwrap().fill_rect(Rect::new(16, 4, 28, 28), &[1.0, 1.0, 1.0, 1.0]);
+    let mut g = Layer::group("g", vec![child]);
+    g.effects.items = vec![Effect::DropShadow(Shadow { size: 2.0, spread: 0.0, ..shadow(3.0, 90.0) })];
+    d.layers.push(g);
+    let before = render(&d, d.bounds());
+    let LayerContent::Group(grp) = &mut d.layers[1].content else { panic!("not a group") };
+    // Gray › This Layer: black point at 128 hides the black half.
+    grp.children[0].blend_if.set(0, [range([128, 128], [255, 255]), FULL]);
+    let warm = render(&d, d.bounds());
+    purge_effect_cache();
+    let cold = render(&d, d.bounds());
+    assert!(before.px != cold.px, "Blend If should change the group's shadow");
+    assert!(warm.px == cold.px, "stale group effect maps after a child's Blend If changed");
+}
+
+#[test]
+fn shape_layer_bounds_includes_vector_bounds_clipped_to_canvas_and_preserves_effects() {
+    let canvas = Rect::new(0, 0, 100, 100);
+    let subpath = photosplice_doc::vector::Subpath::polygon(&[(-20.0, -20.0), (50.0, -20.0), (50.0, 50.0), (-20.0, 50.0)]);
+    let path = photosplice_doc::vector::Path { subpaths: vec![subpath], ..Default::default() };
+    let sh = photosplice_doc::vector::ShapeLayer {
+        path,
+        fill: Some(photosplice_doc::Fill::Solid(photosplice_doc::Color::BLACK)),
+        stroke: Some(photosplice_doc::vector::ShapeStroke { width: 4.0, opacity: 1.0, ..Default::default() }),
+        ..Default::default()
+    };
+    let mut layer = Layer::new("shape", LayerContent::Shape(sh));
+
+    // Vector bounds reach outside canvas (-24..54), but layer_bounds clips vector bounds to canvas:
+    let b = layer_bounds(&layer, canvas);
+    assert_eq!(b, Rect::new(0, 0, 54, 54), "shape vector bounds must clip to canvas and not reach past it");
+
+    // When the shape has layer effects, layer_bounds preserves effects union handling:
+    layer.effects.items = vec![Effect::DropShadow(Shadow { size: 5.0, spread: 0.0, ..shadow(5.0, 90.0) })];
+    let b_fx = layer_bounds(&layer, canvas);
+    assert!(!b_fx.is_empty());
+    assert!(b_fx.contains_rect(&b));
+}
+
+#[test]
+#[ignore = "timing: cargo test --release -p photosplice-compose modern_lut_timing -- --ignored --nocapture"]
+fn modern_lut_timing() {
+    let t = std::time::Instant::now();
+    for _ in 0..100 {
+        std::hint::black_box(adjust::modern_lut(-50.0, 30.0));
+    }
+    println!("modern_lut(-50, 30): {:?} each", t.elapsed() / 100);
+}
+
+#[test]
+#[ignore = "timing: cargo test --release -p photosplice-compose cmyk_ink_render_timing -- --ignored --nocapture"]
+fn cmyk_ink_render_timing() {
+    // 24 MP CMYK8 photo-sized noise with one adjustment layer: the ink path (Invert) against the
+    // RGB compositor (Exposure, which the inks don't carry).
+    let (w, h) = (6000, 4000);
+    let mut d = Document::new("c", Size::new(w, h), ColorMode::Cmyk, SampleType::U8);
+    let mut l = Layer::raster("bg", d.pixel_format());
+    let data: Vec<f32> = (0..(w * h) as usize)
+        .flat_map(|i| [(i % 251) as f32 / 255.0, (i % 241) as f32 / 255.0, (i % 239) as f32 / 255.0, (i % 97) as f32 / 255.0, 1.0])
+        .collect();
+    l.surface_mut().unwrap().write_region(Rect::new(0, 0, w as i32, h as i32), &data);
+    d.layers.push(l);
+    for adj in [Adjustment::Invert, Adjustment::Exposure { exposure: 0.5, offset: 0.0, gamma: 1.0 }] {
+        d.layers.truncate(1);
+        d.layers.push(Layer::new("adj", LayerContent::Adjustment(adj.clone())));
+        let _ = render(&d, Rect::new(0, 0, 512, 512));
+        let t = std::time::Instant::now();
+        let b = render(&d, d.bounds());
+        println!("{}: {:?} ({} px)", adj.label(), t.elapsed(), b.px.len());
+    }
+}
+
+// A pass-through group with an adjustment layer reaches the layers beneath, unless the group is
+// the base of a clipping group: then Photoshop renders it isolated, and an adjustment with no
+// content of its own in the group changes nothing (psd-tools passthrough_clipping_mask_adjustment).
+#[test]
+fn a_pass_through_clipping_base_keeps_its_adjustments_inside() {
+    let base = || {
+        let mut d = doc_white(4, 4);
+        let group = Layer::group("group", vec![Layer::new("invert", LayerContent::Adjustment(Adjustment::Invert))]);
+        d.layers.push(group);
+        d
+    };
+    // Unclipped: the invert reaches the white background.
+    assert!(close4(px(&base(), 1, 1), [0.0, 0.0, 0.0, 1.0]), "{:?}", px(&base(), 1, 1));
+    // With a layer clipped to the group: the background stays white.
+    let mut d = base();
+    let mut clip = Layer::raster("clipped", PixelFormat::RGBA8);
+    clip.clipped = true;
+    d.layers.push(clip);
+    assert!(close4(px(&d, 1, 1), [1.0, 1.0, 1.0, 1.0]), "{:?}", px(&d, 1, 1));
+}
+
+// A cache entry reserves the addresses of the tiles its key hashes, not their pixels (#4530): once
+// the document lets go of a styled layer or group (an edit replaced its tiles, or it was
+// deleted), the effect cache keeps none of its pixel memory alive, and the maps are still
+// reused while the layer is unchanged.
+#[test]
+fn effect_cache_keeps_no_pixels_of_a_dropped_layer() {
+    let mut d = doc_white(300, 300);
+    let mut l = solid_layer("styled", Rect::new(20, 20, 280, 280), [0.9, 0.2, 0.2, 1.0]);
+    l.effects.items = vec![stroke(3.0, StrokePosition::Outside)];
+    d.layers.push(l);
+    let mut g = Layer::group("g", vec![solid_layer("child", Rect::new(40, 40, 120, 120), [0.1, 0.2, 0.9, 1.0])]);
+    g.effects.items = vec![Effect::DropShadow(Shadow { size: 2.0, spread: 0.0, ..shadow(3.0, 90.0) })];
+    d.layers.push(g);
+    let first = render(&d, d.bounds());
+    let tile = |l: &Layer| l.surface().and_then(|s| s.tiles().next()).map(|(_, t)| t.clone()).unwrap();
+    let own = tile(&d.layers[1]);
+    let LayerContent::Group(grp) = &d.layers[2].content else { panic!("not a group") };
+    let child = tile(&grp.children[0]);
+    assert_eq!(render(&d, d.bounds()).px, first.px, "warm render");
+    drop(d);
+    // Only this test's handles are left: the cache pins neither the layer's nor the child's pixels.
+    assert_eq!(std::sync::Arc::strong_count(&own), 1);
+    assert_eq!(std::sync::Arc::strong_count(&child), 1);
+}
+
+// Concurrent callers share one memoized effect identity.
+#[test]
+fn concurrent_effect_identity_misses_compute_once() {
+    let mut doc = identity_doc(SampleType::U8);
+    // Make the existing pure identity hash long enough to expose overlapping misses.
+    doc.layers[1].effects.items = vec![Effect::DropShadow(shadow(4.0, 120.0)); 512];
+    let layer = &doc.layers[1];
+    let keys = LayerKeys::default();
+    let start = std::sync::Barrier::new(8);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    start.wait();
+                    keys.identity(layer, Some(&doc))
+                })
+            })
+            .collect();
+        let ids: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert!(ids.iter().all(|id| *id == ids[0]));
+    });
+    assert_eq!(keys.built.load(std::sync::atomic::Ordering::Relaxed), 1, "concurrent cache misses must compute one memoized identity");
 }

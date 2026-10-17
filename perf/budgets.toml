@@ -36,6 +36,13 @@ args = ["--no-cpu", "--reps", "5"]
 note = "36 MP document with layer effects, GPU compositor"
 
 [[bench]]
+name = "bevel_bench"
+package = "photosplice-ui-egui"
+args = ["--reps", "9"]
+quick_args = ["--size", "1200x800", "--reps", "3"]
+note = "chisel bevel size change (a dragged slider) on a 12 MP ellipse and a text paragraph, GPU canvas and CPU"
+
+[[bench]]
 name = "type_bench"
 package = "photosplice-ui-egui"
 quick_args = ["--size", "2000x1500", "--layers", "20", "--steps", "15"]
@@ -165,6 +172,15 @@ bench = "perf_scenarios"
 row = "nudge 1 px in the many-layer document + refresh"
 budget_ms = 30
 enforce = false  # over budget in the 2026-10-05 baseline
+
+[[scenario]]
+id = "P51"
+title = "New layer in a 150-layer document"
+issue = 1771
+bench = "perf_scenarios"
+row = "new layer in the many-layer document + refresh"
+budget_ms = 16
+enforce = false  # not in the baseline yet
 
 [[scenario]]
 id = "P13"
@@ -302,7 +318,7 @@ issue = 211
 bench = "perf_scenarios"
 row = "Select > Modify > Smooth r 50 on 24 MP"
 budget_ms = 100
-enforce = false  # #211: fastest samples 30-33 ms; p95 still over budget at load avg > 100
+enforce = false  # #2873: p95 20-45 ms on 16 cores (load up to ~15), over 100 ms only at load avg > 20; CI cores unmeasured
 
 [[scenario]]
 id = "P27"
@@ -311,7 +327,7 @@ issue = 211
 bench = "perf_scenarios"
 row = "Select > Modify > Feather r 50 on 24 MP"
 budget_ms = 100
-enforce = false  # #211: fastest samples 30-33 ms; p95 still over budget at load avg > 100
+enforce = false  # #2873: p95 20-45 ms on 16 cores (load up to ~15), over 100 ms only at load avg > 20; CI cores unmeasured
 
 [[scenario]]
 id = "P28"
@@ -329,14 +345,17 @@ issue = 211
 bench = "perf_scenarios"
 row = "Select Subject 24 MP (repeat)"
 budget_ms = 100
-enforce = false  # over budget in the 2026-10-05 baseline
+enforce = false  # #2865: met (repeats answer from the last mask, 7-10 ms p95, was 270-370 ms); enforce once the baseline is refreshed
 
 [[scenario]]
 id = "P30"
 title = "Liquify 800 px brush on 3500×2200 at full resolution"
 issue = 211
 target = "≤ 1 ms per update"
-not_measurable = "the Liquify proxy is capped at 1600 px and the stroke path lives in the UI tool"
+bench = "perf_scenarios"
+row = "Liquify 800 px brush on 3500x2200 at full resolution"
+budget_ms = 1
+enforce = false # visible source-resolution rendering is measurable; target remains aspirational
 
 [[scenario]]
 id = "P31"
@@ -349,8 +368,11 @@ not_measurable = "the proxy is built inside the dialog; no headless entry point 
 id = "P32"
 title = "Brush release on a long stroke"
 issue = 211
-target = "no hitch at mouse-up"
-not_measurable = "the live renderer and the release re-render are UI-side; needs a frame harness"
+target = "≤ 16 ms (no hitch at mouse-up)"
+bench = "perf_scenarios"
+row = "brush release: 600-point stroke, 200 px soft, 24 MP"
+budget_ms = 16
+enforce = false  # measurable since the release commits the live stroke's pixels; awaiting a baseline run
 
 [[scenario]]
 id = "P33"
@@ -430,3 +452,69 @@ id = "P48"
 title = "Full refresh of a 14000×14000 document"
 bench = "large_image_bench"
 row = "full refresh"
+
+[[scenario]]
+id = "P52"
+title = "Chisel bevel size change, 12 MP ellipse, size 8 (GPU)"
+bench = "bevel_bench"
+row = "bevel size change to 8, ellipse (GPU)"
+
+[[scenario]]
+id = "P53"
+title = "Chisel bevel size change, 12 MP ellipse, size 50 (GPU)"
+bench = "bevel_bench"
+row = "bevel size change to 50, ellipse (GPU)"
+
+[[scenario]]
+id = "P54"
+title = "Chisel bevel size change, 12 MP ellipse, size 250 (GPU)"
+bench = "bevel_bench"
+row = "bevel size change to 250, ellipse (GPU)"
+
+[[scenario]]
+id = "P55"
+title = "Chisel bevel size change, 12 MP text paragraph, size 8 (GPU)"
+bench = "bevel_bench"
+row = "bevel size change to 8, text (GPU)"
+
+[[scenario]]
+id = "P56"
+title = "Chisel bevel size change, 12 MP text paragraph, size 50 (GPU)"
+bench = "bevel_bench"
+row = "bevel size change to 50, text (GPU)"
+
+[[scenario]]
+id = "P57"
+title = "Chisel bevel size change, 12 MP text paragraph, size 250 (GPU)"
+bench = "bevel_bench"
+row = "bevel size change to 250, text (GPU)"
+
+[[scenario]]
+id = "P58"
+title = "Chisel bevel size change, 12 MP ellipse, size 8 (CPU)"
+bench = "bevel_bench"
+row = "bevel size change to 8, ellipse (CPU)"
+
+[[scenario]]
+id = "P59"
+title = "Chisel bevel size change, 12 MP text paragraph, size 8 (CPU)"
+bench = "bevel_bench"
+row = "bevel size change to 8, text (CPU)"
+
+[[scenario]]
+id = "P60"
+title = "Layer opacity among 150 full-canvas layers, 6 MP (app GPU budget)"
+issue = 5973
+bench = "perf_scenarios"
+row = "opacity of a layer among many full-canvas layers + refresh"
+budget_ms = 30
+enforce = false  # new; no baseline yet
+
+[[scenario]]
+id = "P61"
+title = "Hide a layer among 150 full-canvas layers, 6 MP (app GPU budget)"
+issue = 5973
+bench = "perf_scenarios"
+row = "hide a layer among many full-canvas layers + refresh"
+budget_ms = 30
+enforce = false  # new; no baseline yet

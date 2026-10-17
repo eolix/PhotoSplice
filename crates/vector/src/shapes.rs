@@ -29,9 +29,11 @@ pub fn clamp_radii(w: f64, h: f64, radii: [f64; 4]) -> [f64; 4] {
     r.map(|v| v * f)
 }
 
-/// Rectangle with corner radii `[top-left, top-right, bottom-right, bottom-left]`.
+/// Rectangle with corner radii `[top-left, top-right, bottom-right, bottom-left]`. A negative
+/// width or height extends from the origin to the left or up, like [`ellipse`] and [`polygon`].
 pub fn rounded_rect(x: f64, y: f64, w: f64, h: f64, radii: [f64; 4]) -> Path {
-    let (w, h) = (w.abs(), h.abs());
+    let (x, w) = if w < 0.0 { (x + w, -w) } else { (x, w) };
+    let (y, h) = if h < 0.0 { (y + h, -h) } else { (y, h) };
     let [tl, tr, br, bl] = clamp_radii(w, h, radii);
     if tl <= 0.0 && tr <= 0.0 && br <= 0.0 && bl <= 0.0 {
         return rect(x, y, w, h);
@@ -141,6 +143,20 @@ mod tests {
         let mixed = rounded_rect(0.0, 0.0, 100.0, 50.0, [10.0, 0.0, 10.0, 0.0]);
         assert_eq!(mixed.subpaths[0].knots.len(), 6);
         assert_eq!(clamp_radii(10.0, 10.0, [10.0; 4]), [5.0; 4]);
+    }
+
+    #[test]
+    fn negative_size_rect_extends_from_its_origin_like_the_ellipse() {
+        // Issue #4203: a negative width/height drew the rectangle on the far side of its origin.
+        let want = ellipse(50.0, 10.0, -20.0, 30.0).control_bounds().unwrap();
+        let want_neg_h = ellipse(50.0, 40.0, -20.0, -30.0).control_bounds().unwrap();
+        for radii in [[0.0; 4], [5.0; 4]] {
+            let b = rounded_rect(50.0, 10.0, -20.0, 30.0, radii).control_bounds().unwrap();
+            assert_eq!(b, want, "radii {radii:?}");
+            assert_eq!(b, (30.0, 10.0, 50.0, 40.0), "radii {radii:?}");
+            let b = rounded_rect(50.0, 40.0, -20.0, -30.0, radii).control_bounds().unwrap();
+            assert_eq!(b, want_neg_h, "radii {radii:?}");
+        }
     }
 
     #[test]

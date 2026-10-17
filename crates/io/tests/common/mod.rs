@@ -89,6 +89,9 @@ pub fn gen_doc(mode: ColorMode, depth: SampleType, f: Features) -> Document {
     neg.fill_opacity = g(128);
     neg.blend = BlendMode::Multiply;
     neg.label = LabelColor::Blue;
+    // Advanced Blending switches round-trip as `infx` / `tsly` (and the rest below).
+    neg.blend_interior = true;
+    neg.transparency_shapes = false;
     d.layers.push(neg);
 
     let mut hidden = raster("Hidden", fmt, Rect::new(3, 3, 9, 9), 3, true);
@@ -105,6 +108,8 @@ pub fn gen_doc(mode: ColorMode, depth: SampleType, f: Features) -> Document {
     if f.masks {
         let mut m = raster("Masked", fmt, Rect::new(2, 2, 14, 12), 5, true);
         m.mask = Some(LayerMask { surface: mask_surface(depth, Rect::new(4, 4, 10, 9), 1.0, 1), enabled: true, linked: true, density: 1.0, feather: 0.0 });
+        m.mask_hides_effects = true;
+        m.vector_mask_hides_effects = true;
         d.layers.push(m);
         let mut m2 = raster("Masked2", fmt, Rect::new(-2, 1, 6, 5), 6, true);
         m2.mask =
@@ -120,10 +125,13 @@ pub fn gen_doc(mode: ColorMode, depth: SampleType, f: Features) -> Document {
         if let LayerContent::Group(gr) = &mut inner.content {
             gr.expanded = false;
         }
+        inner.knockout = photosplice_doc::Knockout::Shallow;
         let a = raster("Outer child", fmt, Rect::new(6, 2, 12, 8), 8, true);
         let mut outer = Layer::group("Outer", vec![a, inner]);
         outer.locks.position = true;
         outer.label = LabelColor::Red;
+        outer.knockout = photosplice_doc::Knockout::Deep;
+        outer.blend_clipped = false;
         d.layers.push(outer);
         d.layers.push(Layer::group("Empty group", vec![]));
     }
@@ -162,6 +170,7 @@ pub fn gen_doc(mode: ColorMode, depth: SampleType, f: Features) -> Document {
                 ],
                 space: tone_space(mode),
                 black: Vec::new(),
+                pencil: false,
             },
             Adjustment::Unsupported { psd_key: "selc".into(), raw: vec![0, 1, 0, 0] },
         ];
@@ -235,6 +244,9 @@ pub fn assert_layers_eq(a: &Layer, b: &Layer, path: &str) {
     assert_eq!(a.fill_opacity, b.fill_opacity, "{ctx}: fill");
     assert_eq!(a.clipped, b.clipped, "{ctx}: clipped");
     assert_eq!(a.label, b.label, "{ctx}: label");
+    assert_eq!(a.advanced(), b.advanced(), "{ctx}: advanced blending");
+    assert_eq!(a.excluded_channels, b.excluded_channels, "{ctx}: channel restrictions");
+    assert_eq!(a.blend_if, b.blend_if, "{ctx}: blend if");
     assert_eq!(a.effects.psd_raw, b.effects.psd_raw, "{ctx}: effects raw");
     assert_eq!(a.effects.enabled, b.effects.enabled, "{ctx}: effects enabled");
     if a.psd_id.is_some() {
@@ -353,8 +365,10 @@ pub fn strict_block_errors(bytes: &[u8]) -> Vec<String> {
     if let Some(li) = &file.layer_info {
         let body = li.unpadded_len(v).unwrap_or(1);
         let inner = li.padding.as_ref().map_or(body % 2, |p| p.len() as u64);
+        // In a global block the padding follows the block, outside its length; `None` there is
+        // the default padding to 4 (`TaggedBlock::default_padding`), as the reader reports it.
         let pad = match &file.layer_info_placement {
-            photosplice_psd::file::LayerInfoPlacement::GlobalBlock { padding, .. } => inner + padding.as_ref().map_or((body + inner) % 2, |p| p.len() as u64),
+            photosplice_psd::file::LayerInfoPlacement::GlobalBlock { padding, .. } => inner + padding.as_ref().map_or((4 - (body + inner) % 4) % 4, |p| p.len() as u64),
             _ => inner,
         };
         if (body + pad) % 4 != 0 {
@@ -362,7 +376,7 @@ pub fn strict_block_errors(bytes: &[u8]) -> Vec<String> {
         }
     }
     for b in &file.global_blocks {
-        let pad = b.padding.as_ref().map_or(b.data.len() % 2, Vec::len);
+        let pad = b.padding.as_ref().map_or((4 - b.data.len() % 4) % 4, Vec::len);
         if (b.data.len() + pad) % 4 != 0 {
             errs.push(format!("global {}: {} data bytes + {pad} padding is not a multiple of 4", b.key_str(), b.data.len()));
         }

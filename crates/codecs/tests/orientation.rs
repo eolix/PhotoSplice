@@ -236,6 +236,7 @@ fn webp_opens_upright() {
         // WebP has no gray mode: it comes back as RGB.
         let img = decode(&out).unwrap().convert(ChannelLayout::Gray, SampleType::U8);
         assert_eq!((img.dimensions(), img.data()), ((w as u32, h as u32), &up[..]), "o={o}");
+        assert_eq!(probe_size(&out).unwrap(), (w as u32, h as u32), "the header probe turns upright too, o={o}");
     }
 }
 
@@ -553,4 +554,25 @@ fn long_orientation_reads_and_rewrites_in_both_byte_orders() {
         let kept = img.meta.exif.as_deref().unwrap();
         assert_eq!(kept.strip_prefix(b"Exif\0\0").unwrap_or(kept), &ifd(big, &[long(1)], &[])[..]);
     }
+}
+
+/// `probe_size` reads the size `decode` returns from the header alone, for every format it
+/// covers, and a file cut short inside its header is refused rather than given a size.
+#[test]
+fn probe_size_matches_decode() {
+    let img = synth(7, 5, ChannelLayout::Rgb, SampleType::U8, 3, 0.0);
+    let probed = [Format::WebP, Format::Gif, Format::Bmp, Format::Tga, Format::Qoi, Format::Hdr, Format::Ico, Format::OpenExr];
+    assert!(probed.iter().all(|f| rw_formats().contains(f)));
+    for format in rw_formats() {
+        let bytes = encode(&img, format, &EncodeOptions::default()).unwrap();
+        let decoded = decode(&bytes).unwrap().dimensions();
+        match probe_size(&bytes) {
+            Ok(size) => assert_eq!(size, decoded, "{format:?}"),
+            Err(_) => assert!(!probed.contains(&format), "{format:?} should be probed"),
+        }
+        if probed.contains(&format) {
+            assert!(probe_size(&bytes[..10]).is_err(), "{format:?} cut inside its header");
+        }
+    }
+    assert!(probe_size(&[]).is_err());
 }

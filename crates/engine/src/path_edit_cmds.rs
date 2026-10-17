@@ -1,5 +1,6 @@
-//! Point-level path edits, what Photoshop's Direct Selection (A) and Convert Point tools do on
-//! the canvas: move anchors, drag direction handles, bend segments and convert points. The
+//! Point-level path edits, what Photoshop's Direct Selection (A), Convert Point and Add / Delete
+//! Anchor Point tools do on the canvas: move anchors, drag direction handles, bend segments,
+//! convert points, and insert or remove anchors. The
 //! geometry is `photosplice_vector::edit`; the canvas previews a drag with it and commits the
 //! whole drag as one command (one history step).
 //!
@@ -79,6 +80,9 @@ fn move_anchors(s: &mut Session, p: &Value) -> Result<Value> {
         })
         .collect::<Result<_>>()?;
     let d = offset(CMD, p)?;
+    if p.get("curvature").and_then(Value::as_bool).unwrap_or(false) {
+        return edit_path(s, CMD, p, "Drag Anchor Points", |path| edit::move_anchors_curvature(path, &anchors, d));
+    }
     edit_path(s, CMD, p, "Drag Anchor Points", |path| edit::move_anchors(path, &anchors, d))
 }
 
@@ -105,6 +109,9 @@ fn bend_segment(s: &mut Session, p: &Value) -> Result<Value> {
 fn convert_point(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "path.convertPoint";
     let k = knot(CMD, p)?;
+    if p.get("curvature").and_then(Value::as_bool).unwrap_or(false) {
+        return edit_path(s, CMD, p, "Convert Point", |path| edit::toggle_curvature_point(path, k));
+    }
     let out = point(CMD, p, "out")?;
     edit_path(s, CMD, p, "Convert Point", |path| edit::convert_point(path, k, out))
 }
@@ -112,14 +119,40 @@ fn convert_point(s: &mut Session, p: &Value) -> Result<Value> {
 fn add_anchor(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "path.addAnchor";
     let k = knot(CMD, p)?;
-    let t = p.get("t").and_then(Value::as_f64).unwrap_or(0.5);
-    edit_path(s, CMD, p, "Add Anchor Point", |path| edit::insert_anchor(path, k, t).map(|_| ()))
+    let t = match p.get("t") {
+        Some(v) => v.as_f64().filter(|t| *t > 0.0 && *t < 1.0).ok_or_else(|| bad(CMD, "`t` must be strictly between 0 and 1"))?,
+        None => 0.5,
+    };
+    let mut added = None;
+    let mut r = edit_path(s, CMD, p, "Add Anchor Point", |path| {
+        added = Some(edit::insert_anchor(path, k, t)?);
+        Ok(())
+    })?;
+    if let (Some(o), Some([sp, kn])) = (r.as_object_mut(), added) {
+        o.insert("anchor".into(), json!({"subpath": sp, "knot": kn}));
+    }
+    Ok(r)
 }
 
 fn delete_anchor(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "path.deleteAnchor";
     let k = knot(CMD, p)?;
-    edit_path(s, CMD, p, "Delete Anchor Point", |path| edit::delete_anchor(path, k))
+    let mut removed = false;
+    let mut r = edit_path(s, CMD, p, "Delete Anchor Point", |path| {
+        // The path's only anchor is refused (unchanged): delete the path instead.
+        let total: usize = path.subpaths.iter().map(|sp| sp.knots.len()).fold(0, usize::saturating_add);
+        if total <= 1 {
+            return Err("can't delete the path's only anchor point; delete the path instead".into());
+        }
+        let before = path.subpaths.len();
+        edit::delete_anchor(path, k)?;
+        removed = path.subpaths.len() < before;
+        Ok(())
+    })?;
+    if let Some(o) = r.as_object_mut() {
+        o.insert("subpathRemoved".into(), json!(removed));
+    }
+    Ok(r)
 }
 
 /// History labels of the Pen's edits, as Photoshop names them.
@@ -167,7 +200,7 @@ pub fn specs() -> Vec<CommandSpec> {
         journal: true,
     };
     vec![
-        spec("path.moveAnchors", "Drag Anchor Points", r#""anchors":[[subpath,knot],…],"move":[dx,dy] (anchors move with their handles; Direct Selection drag)"#.into(), move_anchors),
+        spec("path.moveAnchors", "Drag Anchor Points", r#""anchors":[[subpath,knot],…],"move":[dx,dy],"curvature":bool=false (anchors move with their handles; Direct Selection drag. curvature = the Curvature Pen's drag: every smooth knot of the touched subpaths gets its handles recomputed so the curve flows through the anchors)"#.into(), move_anchors),
         spec(
             "path.moveHandle",
             "Drag Direction Point",
@@ -180,8 +213,18 @@ pub fn specs() -> Vec<CommandSpec> {
             r#""subpath":i,"knot":j (the segment leaving it),"t":0..1=0.5 (where it was grabbed),"move":[dx,dy] (a straight segment moves with its anchors; a curve reshapes through the dragged point)"#.into(),
             bend_segment,
         ),
-        spec("path.addAnchor", "Add Anchor Point", r#""subpath":i,"knot":j (the segment leaving it),"t":0..1=0.5 (where on it; the curve keeps its shape)"#.into(), add_anchor),
-        spec("path.deleteAnchor", "Delete Anchor Point", r#""subpath":i,"knot":j (its segments join; an emptied subpath goes)"#.into(), delete_anchor),
+        spec(
+            "path.addAnchor",
+            "Add Anchor Point",
+            r#""subpath":i,"knot":j (the segment leaving it),"t":0<t<1=0.5 (where on it; the curve keeps its shape) (the result also has anchor:{subpath,knot})"#.into(),
+            add_anchor,
+        ),
+        spec(
+            "path.deleteAnchor",
+            "Delete Anchor Point",
+            r#""subpath":i,"knot":j (its segments join; an emptied subpath goes; the path's only anchor is refused) (the result also has subpathRemoved:bool)"#.into(),
+            delete_anchor,
+        ),
         spec(
             "path.pen",
             "Pen",
@@ -191,7 +234,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec(
             "path.convertPoint",
             "Convert Point",
-            r#""subpath":i,"knot":j,"out":[x,y]? (none: corner with retracted handles; given: smooth with this out handle and its mirror)"#.into(),
+            r#""subpath":i,"knot":j,"out":[x,y]? (none: corner with retracted handles; given: smooth with this out handle and its mirror),"curvature":bool=false (the Curvature Pen's double-click: toggles smooth/corner and reflows the smooth knots of the subpath; out ignored)"#.into(),
             convert_point,
         ),
     ]
@@ -232,6 +275,36 @@ mod tests {
         assert_eq!(s.active().unwrap().history.undo_label(), Some("Drag Anchor Points"));
         assert!(s.undo());
         assert_eq!(work(&s), before);
+    }
+
+    #[test]
+    fn a_curvature_anchor_drag_reflows_the_smooth_knots() {
+        let mut s = session();
+        let smooth = |a: [f64; 2]| json!({"anchor": a, "in": a, "out": a, "smooth": true});
+        let path = json!({"subpaths": [{"closed": true, "knots": [smooth([0.0, 50.0]), smooth([100.0, 0.0]), smooth([200.0, 50.0]), smooth([100.0, 100.0])]}]});
+        s.execute("path.set", json!({"path": path})).unwrap();
+        s.execute("path.moveAnchors", json!({"anchors": [[0, 1]], "move": [0, 60], "curvature": true})).unwrap();
+        let p = work(&s);
+        let pts = [[0.0, 50.0], [100.0, 60.0], [200.0, 50.0], [100.0, 100.0]];
+        let want = photosplice_vector::edit::curvature_knots(&pts, &[false; 4], true);
+        for (k, w) in p.subpaths[0].knots.iter().zip(want) {
+            assert_eq!([[k.anchor.x, k.anchor.y], [k.in_ctrl.x, k.in_ctrl.y], [k.out_ctrl.x, k.out_ctrl.y]], w);
+        }
+        assert_eq!(s.active().unwrap().history.undo_label(), Some("Drag Anchor Points"));
+        assert!(s.execute("path.moveAnchors", json!({"anchors": [[0, 9]], "move": [1, 0], "curvature": true})).is_err());
+    }
+
+    #[test]
+    fn a_curvature_convert_toggles_the_point_and_reflows() {
+        let mut s = session();
+        s.execute("path.set", json!({"path": square()})).unwrap();
+        let before = work(&s);
+        s.execute("path.convertPoint", json!({"subpath": 0, "knot": 1, "curvature": true})).unwrap();
+        let k = work(&s).subpaths[0].knots[1];
+        assert!(k.smooth && k.in_ctrl != k.anchor && k.out_ctrl != k.anchor, "{k:?}");
+        s.execute("path.convertPoint", json!({"subpath": 0, "knot": 1, "curvature": true})).unwrap();
+        assert_eq!(work(&s), before);
+        assert!(s.execute("path.convertPoint", json!({"subpath": 0, "knot": 9, "curvature": true})).is_err());
     }
 
     #[test]
@@ -286,6 +359,87 @@ mod tests {
         assert_eq!(vm.path.subpaths[0].knots[0].anchor, photosplice_geom::Point::new(5.0, 5.0));
     }
 
+    fn curve() -> serde_json::Value {
+        json!({"subpaths": [{"closed": false, "knots": [
+            {"anchor": [10, 80], "in": [10, 80], "out": [10, 20]},
+            {"anchor": [60, 50], "in": [40, 20], "out": [80, 80], "smooth": true},
+            {"anchor": [110, 80], "in": [110, 20], "out": [110, 80]}
+        ]}]})
+    }
+
+    fn knots(s: &Session) -> usize {
+        work(s).subpaths.iter().map(|sp| sp.knots.len()).sum()
+    }
+
+    #[test]
+    fn anchors_are_added_and_deleted_in_one_undoable_step_each() {
+        let mut s = session();
+        s.execute("path.set", json!({"path": curve()})).unwrap();
+        let before = work(&s);
+        let steps = s.active().unwrap().history.entries().len();
+        let r = s.execute("path.addAnchor", json!({"subpath": 0, "knot": 0, "t": 0.5})).unwrap();
+        assert_eq!(r["anchor"], json!({"subpath": 0, "knot": 1}));
+        assert_eq!((knots(&s), s.active().unwrap().history.entries().len()), (4, steps + 1));
+        assert_eq!(s.active().unwrap().history.undo_label(), Some("Add Anchor Point"));
+        assert!(work(&s).subpaths[0].knots[1].smooth);
+        let added = work(&s);
+        assert!(s.undo());
+        assert_eq!(work(&s), before, "one undo restores the path exactly");
+        assert!(s.redo());
+        assert_eq!(work(&s), added);
+        let r = s.execute("path.deleteAnchor", json!({"subpath": 0, "knot": 1})).unwrap();
+        assert_eq!(r["subpathRemoved"], json!(false));
+        assert_eq!(s.active().unwrap().history.undo_label(), Some("Delete Anchor Point"));
+        assert_eq!(knots(&s), 3);
+        // Deleting the middle anchor of the original curve joins the ends with their own handles.
+        s.execute("path.set", json!({"path": curve()})).unwrap();
+        s.execute("path.deleteAnchor", json!({"subpath": 0, "knot": 1})).unwrap();
+        let k = &work(&s).subpaths[0].knots;
+        assert_eq!((k.len(), k[0].out_ctrl, k[1].in_ctrl), (2, before.subpaths[0].knots[0].out_ctrl, before.subpaths[0].knots[2].in_ctrl));
+    }
+
+    #[test]
+    fn anchor_tools_edit_saved_paths_shapes_and_vector_masks() {
+        let mut s = session();
+        s.execute("path.set", json!({"name": "Outline", "path": square()})).unwrap();
+        let r = s.execute("path.deleteAnchor", json!({"name": "Outline", "subpath": 0, "knot": 0})).unwrap();
+        assert_eq!((r["path"]["subpaths"][0]["knots"].as_array().unwrap().len(), r["path"]["subpaths"][0]["closed"].clone()), (3, json!(true)));
+        for depth in [8, 16, 32] {
+            let mut s = Session::new();
+            s.execute("file.new", json!({"width": 120, "height": 100, "depth": depth})).unwrap();
+            let id = s.execute("shape.create", json!({"kind": "rect", "rect": [10, 10, 40, 40], "fill": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+            // Top edge, then pull the new midpoint up: the layer re-renders from the edited path.
+            let r = s.execute("path.addAnchor", json!({"name": "layer", "layer": id, "subpath": 0, "knot": 0, "t": 0.5})).unwrap();
+            assert_eq!(anchor(&r, 1), [30.0, 10.0]);
+            s.execute("path.moveAnchors", json!({"name": "layer", "layer": id, "anchors": [[0, 1]], "move": [0, -8]})).unwrap();
+            let st = s.active().unwrap();
+            let photosplice_doc::LayerContent::Shape(ShapeLayer { live, cache, .. }) = &st.doc.layer(LayerId(id)).unwrap().content else { panic!("shape") };
+            assert!(live.is_none());
+            assert_eq!(cache.as_ref().unwrap().content_bounds().y0, 2, "depth {depth}: re-rendered");
+            s.execute("path.deleteAnchor", json!({"name": "layer", "layer": id, "subpath": 0, "knot": 1})).unwrap();
+            let st = s.active().unwrap();
+            let photosplice_doc::LayerContent::Shape(ShapeLayer { cache, path, .. }) = &st.doc.layer(LayerId(id)).unwrap().content else { panic!("shape") };
+            assert_eq!((path.subpaths[0].knots.len(), cache.as_ref().unwrap().content_bounds().y0), (4, 10), "depth {depth}");
+        }
+        let id = s.active().unwrap().active_layer.unwrap().0;
+        s.execute("layer.vectorMask.add", json!({"layer": id, "path": square()})).unwrap();
+        s.execute("path.addAnchor", json!({"name": "layer", "layer": id, "subpath": 0, "knot": 3, "t": 0.5})).unwrap();
+        let vm = s.active().unwrap().doc.layer(LayerId(id)).unwrap().vector_mask.clone().unwrap();
+        assert_eq!(vm.path.subpaths[0].knots[4].anchor, photosplice_geom::Point::new(10.0, 35.0), "the closing segment's midpoint");
+    }
+
+    #[test]
+    fn the_last_anchor_of_a_shape_is_refused() {
+        let mut s = session();
+        let one = json!({"subpaths": [{"closed": false, "knots": [[10, 10], [50, 10]]}]});
+        let id = s.execute("shape.create", json!({"kind": "path", "path": one, "fill": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("path.deleteAnchor", json!({"name": "layer", "layer": id, "subpath": 0, "knot": 0})).unwrap();
+        let steps = s.active().unwrap().history.entries().len();
+        let e = s.execute("path.deleteAnchor", json!({"name": "layer", "layer": id, "subpath": 0, "knot": 0})).unwrap_err();
+        assert!(e.to_string().contains("only anchor"), "{e}");
+        assert_eq!(s.active().unwrap().history.entries().len(), steps);
+    }
+
     #[test]
     fn bad_params_fail_without_an_edit() {
         let mut s = session();
@@ -307,6 +461,18 @@ mod tests {
             ("path.convertPoint", json!({"subpath": 0, "knot": 0, "out": "x"})),
             ("path.convertPoint", json!({"name": "nope", "subpath": 0, "knot": 0})),
             ("path.convertPoint", json!({"name": "layer", "subpath": 0, "knot": 0})),
+            ("path.addAnchor", json!({"subpath": 0, "knot": 0, "t": 0})),
+            ("path.addAnchor", json!({"subpath": 0, "knot": 0, "t": 1})),
+            ("path.addAnchor", json!({"subpath": 0, "knot": 0, "t": -0.5})),
+            ("path.addAnchor", json!({"subpath": 0, "knot": 0, "t": "half"})),
+            ("path.addAnchor", json!({"subpath": 0, "knot": 4})),
+            ("path.addAnchor", json!({"subpath": 1, "knot": 0})),
+            ("path.addAnchor", json!({"knot": 0})),
+            ("path.addAnchor", json!({"name": "nope", "subpath": 0, "knot": 0})),
+            ("path.deleteAnchor", json!({"subpath": 0, "knot": 4})),
+            ("path.deleteAnchor", json!({"subpath": 0, "knot": -1})),
+            ("path.deleteAnchor", json!({"subpath": 0})),
+            ("path.deleteAnchor", json!({"name": "layer", "subpath": 0, "knot": 0})),
         ] {
             assert!(s.execute(id, p.clone()).is_err(), "{id} {p}");
         }

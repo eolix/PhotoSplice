@@ -122,7 +122,7 @@ fn eraser_bad_params_fail_gracefully() {
     assert!(s.execute("paint.stroke", json!({"erase": true})).is_err());
     assert!(s.execute("paint.stroke", json!({"erase": true, "points": []})).is_err());
     assert!(s.execute("paint.stroke", json!({"erase": true, "points": "x"})).is_err());
-    assert!(erase(&mut s, json!({"layer": 99999})).is_err());
+    assert!(erase(&mut s, json!({"layer": u64::MAX})).is_err());
     assert!(erase(&mut s, json!({"target": "mask"})).is_err(), "no mask");
     // Absurd coordinates are refused up front (a stroke that long would run billions of dabs).
     assert!(erase(&mut s, json!({"points": [[0, 0], [f64::MAX, 0.0]]})).is_err());

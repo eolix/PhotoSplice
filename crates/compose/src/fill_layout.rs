@@ -26,51 +26,7 @@ pub fn fill_gradient_layout(style: GradientStyle, angle: f32, scale: f32, frame:
 /// frame's centre: layer-effect gradients (overlays, gradient glows and strokes) snap the same
 /// way (psd-tools layer_effects: an 87° overlay on a 600 × 60 text line runs along (3, 60), i.e.
 /// 87.14°).
-pub fn gradient_layout(style: GradientStyle, angle: f32, scale: f32, offset: (f32, f32), frame: Rect) -> (f32, f32, (f32, f32)) {
-    let unchanged = (angle, scale, offset);
-    if !matches!(style, GradientStyle::Linear | GradientStyle::Reflected)
-        || !angle.is_finite()
-        || !scale.is_finite()
-        || !offset.0.is_finite()
-        || !offset.1.is_finite()
-    {
-        return unchanged;
-    }
-    let w = f64::from(frame.width().max(1));
-    let h = f64::from(frame.height().max(1));
-    let (cx, cy) = (f64::from(frame.x0) + w / 2.0 + f64::from(offset.0) * w, f64::from(frame.y0) + h / 2.0 + f64::from(offset.1) * h);
-    // Unscaled chord length along `a` (radians), as `effects::gradient_t`.
-    let chord_of = |a: f64| {
-        let (s, c) = a.sin_cos();
-        (w / c.abs().max(1e-6)).min(h / s.abs().max(1e-6)).max(1.0)
-    };
-    let a = f64::from(angle).to_radians();
-    let scale64 = f64::from(scale.max(1e-3));
-    let half = chord_of(a) * scale64 / 2.0;
-    let (s, c) = a.sin_cos();
-    let (dx, dy) = (c * half, -s * half);
-    // Truncate to the pixel grid (with a little slack for rounding error in exact cases).
-    let snap = |v: f64| (v + 1e-4).floor();
-    let end = (snap(cx + dx), snap(cy + dy));
-    let (start, mid) = match style {
-        GradientStyle::Reflected => ((cx, cy), (cx, cy)),
-        _ => {
-            let s0 = (snap(cx - dx), snap(cy - dy));
-            (s0, ((s0.0 + end.0) / 2.0, (s0.1 + end.1) / 2.0))
-        }
-    };
-    let v = (end.0 - start.0, end.1 - start.1);
-    let len = v.0.hypot(v.1);
-    if len < 0.5 {
-        return unchanged;
-    }
-    let a2 = (-v.1).atan2(v.0);
-    // Reflected spans half the chord from the centre; Linear the whole chord.
-    let span = if style == GradientStyle::Reflected { 2.0 * len } else { len };
-    let scale2 = span / chord_of(a2);
-    let shift = (((mid.0 - cx) / w) as f32, ((mid.1 - cy) / h) as f32);
-    (a2.to_degrees() as f32, scale2 as f32, (offset.0 + shift.0, offset.1 + shift.1))
-}
+pub use photosplice_vector::gradient::gradient_layout;
 
 /// Gradient parameter `t` of a gradient fill at pixel centre `(x, y)` (see [`fill_gradient_layout`]).
 pub fn fill_gradient_t(style: GradientStyle, angle: f32, scale: f32, reverse: bool, frame: Rect, x: f32, y: f32) -> f32 {

@@ -171,6 +171,7 @@ pub fn rich_doc(mode: ColorMode, depth: SampleType) -> Document {
     let smart = Layer::new(
         "Smart",
         LayerContent::Smart(SmartObject {
+            contents_id: SmartContentsId::fresh(),
             source: SmartSource::Embedded { file_name: "inner.png".into(), bytes: blob(11, 2000) },
             transform: Affine::scale(0.5),
             smart_filters: vec![SmartFilter {
@@ -199,6 +200,7 @@ pub fn rich_doc(mode: ColorMode, depth: SampleType) -> Document {
     let linked = Layer::new(
         "Linked",
         LayerContent::Smart(SmartObject {
+            contents_id: SmartContentsId::fresh(),
             source: SmartSource::Linked { path: "/tmp/linked.psd".into() },
             transform: Affine::IDENTITY,
             smart_filters: vec![],
@@ -222,6 +224,7 @@ pub fn rich_doc(mode: ColorMode, depth: SampleType) -> Document {
     d.channels.push(alpha);
     d.channels.push(AlphaChannel { spot: Some((Color::rgb(1.0, 0.0, 0.5), 0.7)), ..AlphaChannel::new("Spot", ch.clone()) });
     d.quick_mask = Some(AlphaChannel::new("Quick Mask", ch));
+    d.quick_mask_unselected = true;
     let mut pat = Surface::new(PixelFormat::new(photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U16, true));
     scribble(&mut pat, 21, false);
     d.patterns.push(photosplice_doc::Pattern::new("$$$/Patterns/Test=Scribble", pat, 32, 24));
@@ -230,11 +233,14 @@ pub fn rich_doc(mode: ColorMode, depth: SampleType) -> Document {
         inks: vec![photosplice_doc::DuotoneInk::new("Black", [0.0; 3]), photosplice_doc::DuotoneInk::new("PANTONE 151 C", [1.0, 0.5, 0.0])],
         psd_raw: Some(vec![1, 2, 3]),
     });
-    d.guides = Guides { horizontal: vec![10.0, 20.5], vertical: vec![100.25] };
+    d.guides =
+        Guides { horizontal: vec![10.0, 20.5], vertical: vec![100.25], colors: vec![GuideColor { vertical: true, position: 100.25, rgb: [0x33, 0x66, 0xff] }] };
+    d.ruler_origin = [12.5, -4.25];
     let mut sel = Surface::new(PixelFormat::GRAY8);
     scribble(&mut sel, 14, false);
     d.selection = Some(sel);
     d.metadata.xmp = Some("<x:xmpmeta/>".into());
+    d.metadata.text = vec![("Author".into(), "Synthetic é 雪".into()), ("Comment".into(), "first".into()), ("Comment".into(), "second".into())];
     d.metadata.exif = Some(blob(15, 64));
     d.metadata.psd_resources.push((1036, "thumb".into(), blob(16, 20)));
     d.metadata.psd_global_blocks.push((*b"8BIM", *b"Patt", blob(17, 50)));

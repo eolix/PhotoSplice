@@ -79,6 +79,72 @@ fn manual_and_off_kerning_round_trip_through_psd() {
     assert!(f.iter().enumerate().filter(|(j, _)| ![1, 4, 8, 9, 10].contains(j)).all(|(_, x)| *x == (true, 0)), "{f:?}");
 }
 
+/// Whether a saved file carries a document `Txt2` block.
+fn saves_txt2(bytes: &[u8]) -> bool {
+    photosplice_psd::PsdFile::from_bytes(bytes).unwrap().global_blocks.iter().any(|b| &b.key == b"Txt2")
+}
+
+/// The automatic mode (Metrics/Optical) lives in the document `Txt2` block, which PhotoSplice
+/// keeps and updates from the file (see `psd_txt2_sync`) but never invents: Reference reads
+/// `Txt2` in preference to each layer's `TySh`, so a made-up one could misplace the layers. A
+/// fresh document's Optical runs therefore reopen as Metrics (EngineData's `AutoKerning` covers
+/// both), with every run boundary and manual kern intact.
+#[test]
+fn fresh_optical_kerning_reopens_as_metrics_without_a_txt2() {
+    use Kerning::{Metrics as M, Optical as P};
+    let t1 = layer("AVATAR", &[(4, P, 0.0), (2, M, 0.0)]);
+    let t2 = layer("Wave", &[(2, M, 0.0), (2, P, 0.0)]);
+    let mut doc = Document::new("k", photosplice_geom::Size::new(64, 32), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+    for (name, want) in [("one", &t1), ("two", &t2)] {
+        let mut t = want.clone();
+        photosplice_text::TextEngine::new().render_layer(&mut t, doc.resolution_dpi, doc.pixel_format());
+        doc.layers.push(Layer::new(name, LayerContent::Text(t)));
+    }
+    let bytes = photosplice_io::export(&doc, "k.psd", &Default::default()).unwrap().bytes;
+    assert!(!saves_txt2(&bytes));
+    let back = photosplice_io::import("k.psd", &bytes).unwrap().document;
+    for (want, l) in [(&t1, &back.layers[0]), (&t2, &back.layers[1])] {
+        let LayerContent::Text(b) = &l.content else { panic!("not text") };
+        let want: Vec<_> = chars(want).into_iter().map(|(m, k)| (if m == P { M } else { m }, k)).collect();
+        assert_eq!(chars(b), want, "{}", l.name);
+    }
+}
+
+/// #3514: a fresh document writes no document `Txt2` block, Metrics or Optical: Reference never
+/// writes an empty `<< /0 << >> >>` stub, and some readers reject it.
+#[test]
+fn fresh_metrics_text_writes_no_txt2_block() {
+    use photosplice_doc::text::Kerning;
+    let save = |kerning: Kerning| {
+        let t = layer("AV", &[(2, kerning, 0.0)]);
+        let mut doc = Document::new("k", photosplice_geom::Size::new(64, 32), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+        let mut r = t.clone();
+        photosplice_text::TextEngine::new().render_layer(&mut r, doc.resolution_dpi, doc.pixel_format());
+        doc.layers.push(Layer::new("t", LayerContent::Text(r)));
+        photosplice_io::export(&doc, "k.psd", &Default::default()).unwrap().bytes
+    };
+    assert!(!saves_txt2(&save(Kerning::Metrics)), "a plain Metrics layer must not write the empty Txt2 stub");
+    assert!(!saves_txt2(&save(Kerning::Optical)), "no Txt2 is invented for an Optical layer either");
+}
+
+/// A file-controlled `TextIndex` must not size the save: `i32::MAX` writes no `Txt2` slots for
+/// it, and the document still saves and reopens with its text.
+#[test]
+fn hostile_text_index_never_sizes_the_save() {
+    let t = layer("AV", &[(1, Kerning::Metrics, 0.0), (1, Kerning::Optical, 0.0)]);
+    let mut doc = Document::new("k", photosplice_geom::Size::new(64, 32), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+    let mut r = t.clone();
+    photosplice_text::TextEngine::new().render_layer(&mut r, doc.resolution_dpi, doc.pixel_format());
+    r.psd_raw = Some(std::sync::Arc::new(photosplice_text::psd::set_text_index(&photosplice_text::psd::build_tysh(&r, 72.0, None), i32::MAX).unwrap()));
+    doc.layers.push(Layer::new("hostile", LayerContent::Text(r)));
+    let bytes = photosplice_io::export(&doc, "k.psd", &Default::default()).unwrap().bytes;
+    assert!(bytes.len() < 1 << 20, "a file-controlled TextIndex sized the save: {} bytes", bytes.len());
+    assert!(!saves_txt2(&bytes));
+    let back = photosplice_io::import("k.psd", &bytes).unwrap().document;
+    let LayerContent::Text(b) = &back.layers[0].content else { panic!("not text") };
+    assert_eq!(b.text, "AV");
+}
+
 /// Kerning that can't be represented (non-finite) and bad PSD fields never panic and stay sane.
 #[test]
 fn hostile_kerning_values() {

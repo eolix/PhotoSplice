@@ -17,8 +17,8 @@ use photosplice_psd::resources::ids;
 use photosplice_psd::tiff::{ByteOrder, ImageSourceData, resources_from_bytes, resources_to_bytes};
 use photosplice_psd::{ColorMode as PsdMode, Compression, Header, ImageData, ImageResource, ResolutionInfo};
 
-use crate::flat::{csample, image_to_document, layout_for, single_layer, try_buffer};
-use crate::psd_export::{PsdExportOptions, document_to_psd_with};
+use crate::flat::{csample, encode_image, image_to_document, layout_for, single_layer, try_buffer};
+use crate::psd_export::PsdExportOptions;
 use crate::psd_import::psd_to_document;
 use crate::{ExportOptions, ExportResult, ImportResult, IoError};
 
@@ -53,7 +53,7 @@ pub(crate) fn import_layered(name: &str, img: &Image, layers: &[u8]) -> Result<I
         Ok(v) => v,
         Err(e) => {
             let mut r = image_to_document(name, img)?;
-            r.warnings.push(format!("the Photoshop layer data could not be read ({e}); opened flattened"));
+            r.warnings.push(format!("the PSD layer data could not be read ({e}); opened flattened"));
             return Ok(r);
         }
     };
@@ -61,7 +61,7 @@ pub(crate) fn import_layered(name: &str, img: &Image, layers: &[u8]) -> Result<I
     let (mut resources, w) = match img.meta.photoshop_resources.as_deref().filter(|r| !r.is_empty()).map(resources_from_bytes) {
         Some(Ok(v)) => v,
         Some(Err(e)) => {
-            warnings.push(format!("the Photoshop image resources could not be read: {e}"));
+            warnings.push(format!("the PSD image resources could not be read: {e}"));
             (Vec::new(), Vec::new())
         }
         None => (Vec::new(), Vec::new()),
@@ -70,8 +70,10 @@ pub(crate) fn import_layered(name: &str, img: &Image, layers: &[u8]) -> Result<I
     // The profile, resolution, XMP and EXIF are the TIFF's own tags; they win over any copy
     // in the resources.
     set_resource(&mut resources, ids::ICC_PROFILE, img.icc.clone());
-    if let Some((x, _)) = img.meta.dpi.filter(|d| d.0 > 0.0) {
-        set_resource(&mut resources, ids::RESOLUTION_INFO, Some(ResolutionInfo::from_dpi(f64::from(x)).to_bytes()));
+    if let Some((x, y)) = img.meta.dpi.filter(|d| d.0 > 0.0) {
+        // Both axes, so the PSD import notes a vertical resolution the document can't keep.
+        let ri = ResolutionInfo { v_res_fixed: ResolutionInfo::from_dpi(f64::from(y)).v_res_fixed, ..ResolutionInfo::from_dpi(f64::from(x)) };
+        set_resource(&mut resources, ids::RESOLUTION_INFO, Some(ri.to_bytes()));
     }
     if let Some(xmp) = &img.meta.xmp {
         set_resource(&mut resources, ids::XMP, Some(xmp.as_bytes().to_vec()));
@@ -91,6 +93,7 @@ pub(crate) fn import_layered(name: &str, img: &Image, layers: &[u8]) -> Result<I
         ChannelLayout::Gray | ChannelLayout::GrayA => (PsdMode::Grayscale, 1),
         ChannelLayout::Rgb | ChannelLayout::Rgba => (PsdMode::Rgb, 3),
         ChannelLayout::Cmyk | ChannelLayout::CmykA => (PsdMode::Cmyk, 4),
+        ChannelLayout::Lab | ChannelLayout::LabA => (PsdMode::Lab, 3),
     };
     let depth = match img.sample_type() {
         CSample::U8 => 8,
@@ -104,9 +107,7 @@ pub(crate) fn import_layered(name: &str, img: &Image, layers: &[u8]) -> Result<I
     let image_data = ImageData { compression: Compression::Raw, data };
     let file = isd.into_psd(header, resources, image_data);
     // The same nesting cap as a PSD (storytold/photocraft@fd351918).
-    if crate::psd_import::group_depth(&file) > photosplice_doc::MAX_GROUP_DEPTH {
-        return Err(crate::IoError::Unsupported(format!("layer groups nested deeper than {}", photosplice_doc::MAX_GROUP_DEPTH)));
-    }
+    crate::psd_import::check_group_depth(&file)?;
     let (mut doc, w) = psd_to_document(&file);
     crate::text_import::prepare(&mut doc);
     warnings.extend(w);
@@ -114,10 +115,8 @@ pub(crate) fn import_layered(name: &str, img: &Image, layers: &[u8]) -> Result<I
     if doc.icc_profile.is_none() {
         doc.icc_profile = img.icc.clone().map(Arc::new);
     }
-    if !img.meta.text.is_empty() {
-        warnings.push(format!("{} text metadata entries are not kept in the document", img.meta.text.len()));
-    }
-    Ok(ImportResult { document: doc, warnings, selected: Vec::new() })
+    doc.metadata.text = img.meta.text.clone();
+    Ok(ImportResult { document: doc, warnings, selected: Vec::new(), source_read_only: false, preview_only: false })
 }
 
 /// Interleaved native-endian samples → planar big-endian planes (PSD merged-image order),
@@ -182,11 +181,19 @@ fn interleave(planes: &[u8], w: u32, h: u32, channels: usize, color_channels: us
     Ok(out)
 }
 
+/// A layered TIFF export's progress once the layers and composite are converted, the layer
+/// block is assembled and the composite interleaved; the TIFF encoder does the rest (#3389).
+/// Measured on a 24 MP, 5-layer RGB/8 document: about 40 %, 70 % and 72 % of the time.
+const TIFF_MODEL_DONE: f32 = 0.4;
+const TIFF_LAYERS_DONE: f32 = 0.68;
+const TIFF_COMPOSITE_DONE: f32 = 0.72;
+
 /// Saves `doc` as a layered TIFF. Documents whose colour mode a TIFF cannot hold in our
-/// codec (Lab) are saved flat, with a warning.
-pub(crate) fn export_layered(doc: &Document, opts: &ExportOptions) -> Result<ExportResult, IoError> {
+/// codec (Lab) are saved flat, with a warning. Reports progress through `ctl` (see
+/// [`crate::export_with`]).
+pub(crate) fn export_layered(doc: &Document, opts: &ExportOptions, ctl: &photosplice_raster::Interrupt) -> Result<ExportResult, IoError> {
     if !layered_mode(doc) {
-        let mut r = crate::flat::export_flat(doc, Format::Tiff, opts)?;
+        let mut r = crate::flat::export_flat_with(doc, Format::Tiff, opts, ctl)?;
         if !doc.layers.is_empty() {
             r.warnings.push(format!("{:?} documents are saved as a flat TIFF: their layers are not kept", doc.pixel_format().mode));
         }
@@ -196,14 +203,29 @@ pub(crate) fn export_layered(doc: &Document, opts: &ExportOptions) -> Result<Exp
     let big = doc.size.width > 30_000 || doc.size.height > 30_000;
     // The PSD exporter renders the composite we need for the TIFF itself: unmatted (the TIFF
     // keeps straight alpha) and uncompressed (its planes are interleaved below).
-    let psd_opts = PsdExportOptions { force_psb: opts.force_psb || big, merged_matte: false, merged_compression: Compression::Raw, native_modes: false , selected_layers: opts.selected_layers.clone() };
-    let (file, w) = document_to_psd_with(doc, &psd_opts);
+    // Layer data must be RGB/Gray here (`native_modes` off); the thumbnail resource goes along
+    // with the others as for a PSD.
+    let psd_opts = PsdExportOptions {
+        force_psb: opts.force_psb || big,
+        merged_matte: false,
+        merged_compression: Compression::Raw,
+        native_modes: false,
+        selected_layers: opts.selected_layers.clone(),
+        maximize_compatibility: true,
+        image_previews: opts.image_previews,
+    };
+    let (file, w) = crate::with_span(ctl, 0.0, TIFF_MODEL_DONE, |ctl| crate::psd_export::document_to_psd_interruptible(doc, &psd_opts, ctl));
+    // A cancelled conversion stops early with an incomplete model: never encode it.
+    ctl.check().map_err(|_| IoError::Cancelled)?;
     warnings.extend(w);
     let order = if codecs::tiff_writes_little_endian() { ByteOrder::Little } else { ByteOrder::Big };
     let (layers, w) = ImageSourceData::from_psd(&file).to_bytes(order)?;
+    ctl.check().map_err(|_| IoError::Cancelled)?;
+    ctl.progress(TIFF_LAYERS_DONE);
     warnings.extend(w.into_iter().map(|w| format!("layer data: {w}")));
     // The profile and XMP are written as TIFF tags, not as resources. EXIF stays a resource
-    // (1058): the TIFF codec has no EXIF directory, and the PSD importer reads it back from there.
+    // (1058), which the PSD importer reads back unchanged; a block rebuilt from the TIFF's own
+    // Exif directory keeps only the Exif, GPS and descriptive tags.
     let resources: Vec<ImageResource> = file.resources.iter().filter(|r| !matches!(r.id, ids::ICC_PROFILE | ids::XMP)).cloned().collect();
     let resources = resources_to_bytes(&resources)?;
 
@@ -219,23 +241,51 @@ pub(crate) fn export_layered(doc: &Document, opts: &ExportOptions) -> Result<Exp
     let (w, h) = (doc.size.width, doc.size.height);
     let cmyk = fmt.mode == ColorMode::Cmyk;
     let data = interleave(&file.image_data.data, w, h, channels, cc, sample, cmyk)?;
+    ctl.check().map_err(|_| IoError::Cancelled)?;
+    ctl.progress(TIFF_COMPOSITE_DONE);
     let layout = layout_for(fmt.mode, has_alpha);
     let mut img = Image::from_raw(w, h, layout, sample, data)?;
     img.icc = doc.icc_profile.as_ref().map(|i| i.to_vec());
     img.meta = codecs::Metadata {
-        exif: doc.metadata.exif.as_ref().map(|e| e.to_vec()),
-        xmp: doc.metadata.xmp.clone(),
+        // EXIF is deliberately not set here: the tags above carry it as resource 1058 and the
+        // importer reads it back from there unchanged. A second copy in `meta.exif` (the codec's
+        // Exif directory) would be read back in its place, rebuilt without the thumbnail and IFD0
+        // orientation (#1545).
+        xmp: doc.metadata.xmp.clone().filter(|_| opts.xmp == crate::XmpEmbed::All),
+        text: if opts.xmp == crate::XmpEmbed::All { doc.metadata.text.clone() } else { Vec::new() },
         dpi: Some((doc.resolution_dpi, doc.resolution_dpi)),
         photoshop_resources: Some(resources),
         photoshop_layers: Some(layers),
         ..Default::default()
     };
-    for w in codecs::fidelity_warnings_with(&img, Format::Tiff, &opts.encode) {
-        if w.is_fatal() {
-            return Err(IoError::Unsupported(w.to_string()));
+    encode_image(&img, Format::Tiff, opts, warnings)
+}
+
+/// Removes the blocks a document kept verbatim from a little-endian TIFF because their layout
+/// is unknown ([`photosplice_psd::TaggedBlock::is_foreign_order`]) before `file` is written as a
+/// PSD: their bytes are in the wrong order for a PSD and cannot be converted. Returns a warning
+/// per block dropped. A save back to TIFF keeps them (see [`photosplice_psd::tiff`]).
+pub fn strip_foreign_order_blocks(file: &mut photosplice_psd::PsdFile) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let mut strip = |blocks: &mut Vec<photosplice_psd::TaggedBlock>, owner: &str| {
+        blocks.retain(|b| {
+            let keep = !b.is_foreign_order();
+            if !keep {
+                warnings.push(format!(
+                    "{owner}: {} block ({} bytes) kept from a little-endian TIFF cannot be written to PSD and was dropped",
+                    b.key_str(),
+                    b.data.len()
+                ));
+            }
+            keep
+        });
+    };
+    if let Some(info) = &mut file.layer_info {
+        for l in &mut info.layers {
+            let name = l.name();
+            strip(&mut l.blocks, &format!("layer \"{name}\""));
         }
-        warnings.push(w.to_string());
     }
-    let bytes = codecs::encode(&img, Format::Tiff, &opts.encode)?;
-    Ok(ExportResult { bytes, warnings })
+    strip(&mut file.global_blocks, "document");
+    warnings
 }

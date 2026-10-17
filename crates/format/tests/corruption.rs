@@ -23,6 +23,22 @@ fn rebuild(bytes: &[u8], f: impl Fn(&str, Vec<u8>) -> Option<Vec<u8>>) -> Vec<u8
 }
 
 #[test]
+fn older_bundles_without_text_metadata_still_load() {
+    let mut doc = rich_doc(ColorMode::Rgb, SampleType::U8);
+    let bytes = save_to_bytes(&doc, &SaveOptions::default()).unwrap();
+    let old = rebuild(&bytes, |name, data| {
+        if name != "manifest.json" {
+            return Some(data);
+        }
+        let mut manifest: serde_json::Value = serde_json::from_slice(&data).unwrap();
+        assert!(manifest["document"]["metadata"].as_object_mut().unwrap().remove("text").is_some());
+        Some(serde_json::to_vec(&manifest).unwrap())
+    });
+    doc.metadata.text.clear();
+    assert_eq!(load_from_bytes(&old).unwrap(), doc);
+}
+
+#[test]
 fn truncation_never_panics_and_fails() {
     let b = sample();
     let step = (b.len() / 200).max(1);
@@ -136,6 +152,37 @@ fn total_size_limit() {
     let b = sample();
     let opts = LoadOptions { max_total_bytes: 1000, ..Default::default() };
     assert!(matches!(load_from_bytes_with(&b, &opts), Err(FormatError::LimitExceeded(_))));
+}
+
+/// A hostile manifest may name one stored tile at very many coordinates. The load decodes and
+/// charges it once, each reference only clones the shared tile, and the budget still bounds the
+/// distinct bytes (#3315).
+#[test]
+fn many_references_to_one_tile_load_within_the_budget() {
+    let mut doc = photosplice_doc::Document::new("d", photosplice_doc::Size::new(256, 256), ColorMode::Rgb, SampleType::U8);
+    let mut l = photosplice_doc::Layer::raster("solid", doc.pixel_format());
+    l.surface_mut().unwrap().fill_rect(photosplice_geom::Rect::new(0, 0, 256, 256), &[1.0, 0.0, 0.0, 1.0]);
+    doc.layers.push(l);
+    let bytes = save_to_bytes(&doc, &SaveOptions::default()).unwrap();
+    let hostile = rebuild(&bytes, |name, data| {
+        if name != "manifest.json" {
+            return Some(data);
+        }
+        let mut m: serde_json::Value = serde_json::from_slice(&data).unwrap();
+        let tiles = m["document"]["layers"][0]["content"]["surface"]["tiles"].as_array_mut().unwrap();
+        let hash = tiles[0]["hash"].clone();
+        *tiles = (0..256 * 256).map(|i| serde_json::json!({ "tx": i % 256, "ty": i / 256, "hash": hash })).collect();
+        Some(serde_json::to_vec(&m).unwrap())
+    });
+    let one_tile = 256 * 256 * 4;
+    let back = load_from_bytes_with(&hostile, &LoadOptions { max_total_bytes: one_tile, ..Default::default() }).unwrap();
+    let s = back.layers[0].surface().unwrap();
+    assert_eq!(s.tile_count(), 256 * 256);
+    let first = s.tiles().next().unwrap().1;
+    assert!(s.tiles().all(|(_, t)| std::sync::Arc::ptr_eq(t, first)));
+    // The one distinct tile is still charged against the budget.
+    let opts = LoadOptions { max_total_bytes: one_tile - 1, ..Default::default() };
+    assert!(matches!(load_from_bytes_with(&hostile, &opts), Err(FormatError::LimitExceeded(_))));
 }
 
 #[test]
@@ -328,4 +375,115 @@ proptest! {
 fn sample_cached() -> &'static [u8] {
     static S: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     S.get_or_init(sample)
+}
+
+/// Moves the first tile of the first top-level layer that has pixels to `(tx, ty)`; returns that
+/// layer's index.
+fn move_first_tile(v: &mut serde_json::Value, tx: i64, ty: i64) -> Option<usize> {
+    let layers = v["document"]["layers"].as_array_mut()?;
+    let (i, tile) = layers.iter_mut().enumerate().find_map(|(i, l)| l["content"]["surface"]["tiles"].get_mut(0).map(|t| (i, t)))?;
+    tile["tx"] = tx.into();
+    tile["ty"] = ty.into();
+    Some(i)
+}
+
+#[test]
+fn tile_coordinates_outside_the_i32_pixel_range_are_rejected() {
+    // #938: a tile index whose rectangle overflows i32 loaded fine and panicked later, in
+    // `TileCoord::rect`, wherever the layer's bounds were asked for (wrapping in release).
+    let with_tile_at = |tx: i64, ty: i64| {
+        let layer = std::cell::Cell::new(None);
+        let b = rebuild(&sample(), |n, d| {
+            Some(if n == "manifest.json" {
+                let mut v: serde_json::Value = serde_json::from_slice(&d).unwrap();
+                layer.set(move_first_tile(&mut v, tx, ty));
+                serde_json::to_vec(&v).unwrap()
+            } else {
+                d
+            })
+        });
+        (b, layer.get().expect("the sample has a raster layer with a tile"))
+    };
+    let (lo, hi) = (i64::from(i32::MIN / 256), i64::from(i32::MAX / 256 - 1));
+    for (tx, ty) in [(hi + 1, 0), (0, hi + 1), (lo - 1, 0), (0, lo - 1), (i64::from(i32::MAX), 0), (0, i64::from(i32::MIN))] {
+        let err = load_from_bytes(&with_tile_at(tx, ty).0).unwrap_err();
+        assert!(err.to_string().contains("outside the coordinate range"), "({tx}, {ty}): {err}");
+    }
+    // The extreme valid indices still load, and the layer's bounds can be computed.
+    for (tx, ty) in [(hi, hi), (lo, lo), (hi, lo)] {
+        let (b, i) = with_tile_at(tx, ty);
+        let doc = load_from_bytes(&b).unwrap_or_else(|e| panic!("({tx}, {ty}): {e}"));
+        let s = doc.layers[i].surface().expect("raster layer");
+        assert!(s.tiles().any(|(c, _)| (i64::from(c.tx), i64::from(c.ty)) == (tx, ty)), "({tx}, {ty})");
+        assert!(!s.content_bounds().is_empty());
+    }
+}
+
+#[test]
+fn an_unlimited_blob_budget_still_loads_blobs() {
+    // `max_blob_bytes + 1` overflowed (debug panic; release read zero bytes, failing every blob).
+    let doc = rich_doc(ColorMode::Rgb, SampleType::U8);
+    let bytes = save_to_bytes(&doc, &SaveOptions::default()).unwrap();
+    let opts = LoadOptions { max_blob_bytes: usize::MAX, ..LoadOptions::default() };
+    assert_eq!(load_from_bytes_with(&bytes, &opts).unwrap(), doc);
+}
+
+/// Rewrites the first pattern's declared size (its tiles stay as saved).
+fn with_pattern_size(w: u64, h: u64) -> Vec<u8> {
+    rebuild(sample_cached(), |n, d| {
+        if n != "manifest.json" {
+            return Some(d);
+        }
+        let mut v: serde_json::Value = serde_json::from_slice(&d).unwrap();
+        let p = &mut v["document"]["patterns"][0];
+        assert!(p.is_object(), "the sample has a pattern");
+        p["width"] = w.into();
+        p["height"] = h.into();
+        Some(serde_json::to_vec(&v).unwrap())
+    })
+}
+
+#[test]
+fn pattern_sizes_from_the_file_are_checked() {
+    // A pattern can claim any size without tiles; painting it allocated per pixel (abort).
+    let huge = load_from_bytes(&with_pattern_size(65_535, 65_535));
+    assert!(matches!(huge, Err(FormatError::LimitExceeded(_))), "{huge:?}");
+    let empty = load_from_bytes(&with_pattern_size(0, 24));
+    assert!(matches!(empty, Err(FormatError::Corrupt(_))), "{empty:?}");
+    assert!(load_from_bytes(&with_pattern_size(32, 24)).is_ok());
+}
+
+/// A canvas is a few bytes of manifest JSON; one past the budget is refused before any work (#2935).
+/// The default budget is the largest canvas the app creates (300000 × 300000, as `file.new`,
+/// Canvas Size and PSB import allow), so everything a user can save reopens.
+#[test]
+fn declared_canvas_outside_the_budget_is_refused() {
+    let with_size = |w: u64, h: u64| {
+        rebuild(&sample(), |name, data| {
+            if name != "manifest.json" {
+                return Some(data);
+            }
+            let mut manifest: serde_json::Value = serde_json::from_slice(&data).unwrap();
+            manifest["document"]["size"] = serde_json::json!({ "width": w, "height": h });
+            Some(serde_json::to_vec(&manifest).unwrap())
+        })
+    };
+    for (w, h) in [(300_001, 1), (1, 300_001), (300_001, 300_001), (u64::from(u32::MAX), u64::from(u32::MAX))] {
+        let r = load_from_bytes(&with_size(w, h)).map(|d| d.size);
+        assert!(matches!(r, Err(FormatError::LimitExceeded(_))), "{w}x{h}: {r:?}");
+    }
+    assert!(load_from_bytes(&with_size(0, 64)).is_err());
+    // The largest creatable canvas loads, without allocating anything for its area: the layers
+    // keep only the tiles the bundle holds.
+    let edge = with_size(300_000, 300_000);
+    let small = load_from_bytes(&sample()).unwrap();
+    let big = load_from_bytes(&edge).unwrap();
+    assert_eq!(big.size, photosplice_geom::Size::new(300_000, 300_000));
+    let tiles = |d: &photosplice_doc::Document| d.layers.iter().filter_map(|l| l.surface()).map(|s| s.tile_count()).sum::<usize>();
+    assert_eq!(tiles(&big), tiles(&small));
+    // A caller may lower the budget.
+    let opts = LoadOptions { max_canvas_pixels: 1 << 20, ..Default::default() };
+    assert!(matches!(load_from_bytes_with(&edge, &opts), Err(FormatError::LimitExceeded(_))));
+    let opts = LoadOptions { max_canvas_side: 65_536, ..Default::default() };
+    assert!(matches!(load_from_bytes_with(&with_size(65_537, 1), &opts), Err(FormatError::LimitExceeded(_))));
 }

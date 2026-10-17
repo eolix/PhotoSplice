@@ -60,7 +60,7 @@ pub enum Id {
 /// Photoshop-authored file of the oracle corpus: `warp` on placed-layer and type warps, `list`
 /// in layer comps, `time` in the timeline). Photoshop tells the two forms apart, so a code
 /// would name a different key.
-const STRING_IDS: [&str; 6] = ["warp", "list", "time", "view", "json", "PNG8"];
+pub const STRING_IDS: [&str; 6] = ["warp", "list", "time", "view", "json", "PNG8"];
 
 impl Id {
     /// Convenience constructor: 4-byte strings become [`Id::Code`], others (and the four-byte
@@ -149,10 +149,20 @@ pub enum ReferenceItem {
         /// Offset.
         offset: i32,
     },
-    /// `Idnt`
-    Identifier(u32),
-    /// `indx`
-    Index(u32),
+    /// `Idnt`: a class plus an identifier (Photoshop's layer ids in action references).
+    Identifier {
+        /// Class.
+        class: Class,
+        /// Identifier.
+        id: u32,
+    },
+    /// `indx`: a class plus a zero-based index.
+    Index {
+        /// Class.
+        class: Class,
+        /// Index.
+        index: u32,
+    },
     /// `name`
     Name {
         /// Class.
@@ -349,6 +359,15 @@ impl VersionedDescriptor {
     }
 }
 
+/// Most items preallocated for a file-declared count. `check_count` only
+/// guarantees a few bytes per item while parsed items are far larger, so the
+/// count must not drive the up-front reservation (or abort on allocation).
+const MAX_PREALLOC: usize = 4096;
+
+pub(crate) fn vec_for_count<T>(n: u32) -> Vec<T> {
+    Vec::with_capacity((n as usize).min(MAX_PREALLOC))
+}
+
 fn read_descriptor(r: &mut Reader<'_>, depth: usize) -> Result<Descriptor> {
     if depth > MAX_DEPTH {
         return Err(PsdError::LimitExceeded("descriptor nesting too deep"));
@@ -365,15 +384,6 @@ fn read_descriptor(r: &mut Reader<'_>, depth: usize) -> Result<Descriptor> {
         items.push((key, v));
     }
     Ok(Descriptor { name, class_id, items })
-}
-
-/// Preallocation for a list or object of `n` declared items: the count comes from the file, so
-/// it only sizes the first allocation up to a cap; real items still grow the vector
-/// (storytold/photocraft@64a02107).
-const MAX_PREALLOC: usize = 4096;
-
-fn vec_for_count<T>(n: u32) -> Vec<T> {
-    Vec::with_capacity((n as usize).min(MAX_PREALLOC))
 }
 
 fn read_value(r: &mut Reader<'_>, depth: usize) -> Result<Value> {
@@ -454,8 +464,8 @@ fn read_reference_item(r: &mut Reader<'_>) -> Result<ReferenceItem> {
         b"Clss" => ReferenceItem::Class(Class::read(r)?),
         b"Enmr" => ReferenceItem::Enumerated { class: Class::read(r)?, type_id: Id::read(r)?, value: Id::read(r)? },
         b"rele" => ReferenceItem::Offset { class: Class::read(r)?, offset: r.i32()? },
-        b"Idnt" => ReferenceItem::Identifier(r.u32()?),
-        b"indx" => ReferenceItem::Index(r.u32()?),
+        b"Idnt" => ReferenceItem::Identifier { class: Class::read(r)?, id: r.u32()? },
+        b"indx" => ReferenceItem::Index { class: Class::read(r)?, index: r.u32()? },
         b"name" => ReferenceItem::Name { class: Class::read(r)?, name: UnicodeString::read(r)? },
         other => {
             return Err(PsdError::Unsupported(format!("reference item type {:?}", String::from_utf8_lossy(other))));
@@ -556,13 +566,15 @@ fn write_reference_item(it: &ReferenceItem, out: &mut Vec<u8>) {
             class.write(out);
             out.put_i32(*offset);
         }
-        ReferenceItem::Identifier(v) => {
+        ReferenceItem::Identifier { class, id } => {
             out.put(b"Idnt");
-            out.put_u32(*v);
+            class.write(out);
+            out.put_u32(*id);
         }
-        ReferenceItem::Index(v) => {
+        ReferenceItem::Index { class, index } => {
             out.put(b"indx");
-            out.put_u32(*v);
+            class.write(out);
+            out.put_u32(*index);
         }
         ReferenceItem::Name { class, name } => {
             out.put(b"name");
@@ -617,8 +629,8 @@ mod tests {
                     ReferenceItem::Class(class("", "Dcmn")),
                     ReferenceItem::Enumerated { class: class("", "Lyr "), type_id: Id::new("Ordn"), value: Id::new("Trgt") },
                     ReferenceItem::Offset { class: class("", "Lyr "), offset: -1 },
-                    ReferenceItem::Identifier(7),
-                    ReferenceItem::Index(2),
+                    ReferenceItem::Identifier { class: class("", "Lyr "), id: 7 },
+                    ReferenceItem::Index { class: class("\0", "Lyr "), index: 2 },
                     ReferenceItem::Name { class: class("", "Lyr "), name: UnicodeString::new("Bg") },
                 ]),
             )
@@ -644,6 +656,34 @@ mod tests {
         let p = Descriptor::from_bytes(&b).unwrap();
         assert_eq!(p, d);
         assert_eq!(p.to_bytes(), b);
+    }
+
+    /// `warp`, `list`, `time`, `view`, `json` and `PNG8` are written as length-4 strings, as
+    /// Reference writes them, both as keys and as class ids; other four-character names stay codes. Reading accepts both
+    /// forms, and a code read from a file is written back as a code.
+    #[test]
+    fn photoshop_string_ids_are_written_as_strings() {
+        let str_id = |s: &str| [&[0, 0, 0, 4][..], s.as_bytes()].concat();
+        let code_id = |s: &str| [&[0, 0, 0, 0][..], s.as_bytes()].concat();
+        for name in STRING_IDS {
+            assert_eq!(Id::new(name), Id::Str(name.as_bytes().to_vec()));
+            let d = Descriptor::new(name).with(name, Value::Integer(1));
+            let b = d.to_bytes();
+            // Name (empty unicode string), then the class id; then the item count and the key.
+            assert_eq!(&b[4..12], &str_id(name)[..], "class {name}");
+            assert_eq!(&b[16..24], &str_id(name)[..], "key {name}");
+            let back = Descriptor::from_bytes(&b).unwrap();
+            assert_eq!(back, d);
+            assert!(back.class_id.is(name) && back.get(name).is_some());
+            // A file that wrote the code form keeps it, and lookups still find the key.
+            let mut coded = b.clone();
+            coded.splice(16..24, code_id(name));
+            let back = Descriptor::from_bytes(&coded).unwrap();
+            assert_eq!(back.get(name), Some(&Value::Integer(1)));
+            assert_eq!(back.to_bytes(), coded);
+        }
+        assert_eq!(Id::new("Lyr "), Id::Code(*b"Lyr "));
+        assert_eq!(Id::new("Txt "), Id::Code(*b"Txt "));
     }
 
     #[test]
@@ -768,8 +808,8 @@ pub(crate) mod proptests {
             arb_class().prop_map(ReferenceItem::Class),
             (arb_class(), arb_id(), arb_id()).prop_map(|(class, type_id, value)| ReferenceItem::Enumerated { class, type_id, value }),
             (arb_class(), any::<i32>()).prop_map(|(class, offset)| ReferenceItem::Offset { class, offset }),
-            any::<u32>().prop_map(ReferenceItem::Identifier),
-            any::<u32>().prop_map(ReferenceItem::Index),
+            (arb_class(), any::<u32>()).prop_map(|(class, id)| ReferenceItem::Identifier { class, id }),
+            (arb_class(), any::<u32>()).prop_map(|(class, index)| ReferenceItem::Index { class, index }),
             (arb_class(), arb_ustr()).prop_map(|(class, name)| ReferenceItem::Name { class, name }),
         ]
     }

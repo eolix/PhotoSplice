@@ -4,7 +4,7 @@ A standalone reader and writer for Adobe Photoshop **PSD** (version 1) and **PSB
 
 * Clean-room implementation from Adobe's public *Photoshop File Formats Specification*. Where the spec is silent, behavior follows MIT-licensed psd-tools / ag-psd documentation, and the code comments say so.
 * `#![forbid(unsafe_code)]`. Builds for `wasm32-unknown-unknown`. The core API works on byte slices; the file helpers only exist on native targets.
-* Parsing never panics on malformed input. Limits: dimensions ≤ 300 000; allocations are checked against the remaining input; a single decode produces at most `MAX_DECODED_BYTES` (2 GiB); descriptor nesting depth ≤ 64.
+* Parsing never panics on malformed input. Limits: dimensions ≤ 300 000; allocations are checked against the remaining input; a single decode produces at most `MAX_DECODED_BYTES` (8 GiB on 64-bit targets, 2 GiB on 32-bit targets); descriptor nesting depth ≤ 64.
 
 ## Guarantees
 
@@ -20,6 +20,8 @@ A standalone reader and writer for Adobe Photoshop **PSD** (version 1) and **PSB
 ```rust
 // Top level
 PsdFile::from_bytes(&[u8]) -> Result<PsdFile>
+PsdFile::from_bytes_and_merged(&[u8], want) -> Result<(PsdFile, Option<Result<Vec<u8>>>)>
+                                            // + decode_merged() when want(&file): ZIP inflated once
 PsdFile::to_bytes(&self) -> Result<Vec<u8>>
 PsdFile::open(path) / save(path)            // native only
 PsdFile { header, color_mode_data, resources, layer_info, layer_info_placement,
@@ -28,6 +30,7 @@ PsdFile::layers() -> &[LayerRecord]         // file order = bottom-most first
 PsdFile::layers_mut() -> &mut Vec<LayerRecord>
 PsdFile::layer(i) -> Option<Layer<'_>>;  iter_layers()
 PsdFile::layer_tree() -> Vec<LayerNode>     // nested groups, children bottom-to-top
+PsdFile::layer_tree_max_depth(n) -> Vec<LayerNode> // same, groups nested n deep keep no children
 PsdFile::decode_merged() -> Result<Vec<u8>> // planar big-endian samples
 PsdFile::composite_rgba8() -> Result<RgbaImage>
 PsdFile::resource(id), global_block(key), icc_profile(), resolution(),
@@ -98,7 +101,7 @@ testgen::{all_cases, merged_only, layered, small, sample_descriptor, pattern_pla
 | Layer masks | ✓ | ✓ | ✓ | 20 / 36-byte forms, mask parameters, real mask; unparseable masks stay raw |
 | Channel ids -1 / -2 / -3 | ✓ | ✓ | ✓ | per-channel rect via `channel_rect` |
 | Raw / RLE / ZIP / ZIP+prediction | ✓ | ✓ | – | prediction at 8/16/32 bits (32: byte-plane shuffle + delta); RLE counts are u16 in PSD, u32 in PSB |
-| Merged image data | ✓ | ✓ | – | validated at parse time (sizes, RLE counts, zlib stream incl. checksum) |
+| Merged image data | ✓ | ✓ | – | validated at parse time (sizes, RLE counts, zlib stream incl. checksum); a zlib stream declaring more than `MAX_DECODED_BYTES` is kept verbatim without inflating it, and decoding it reports the limit |
 | Tagged blocks (raw passthrough) | ✓ | ✓ | – | keeps `8BIM` / `8B64` and exact padding |
 | PSB 8-byte-length keys | ✓ | ✓ | – | LMsk Lr16 Lr32 Layr Mt16 Mt32 Mtrn Alph FMsk lnk2 FEid FXid PxSD |
 | Lr16 / Lr32 / Layr layer info | ✓ | ✓ | ✓ | lifted into `layer_info`; re-inserted at its original position |
@@ -108,6 +111,15 @@ testgen::{all_cases, merged_only, layered, small, sample_descriptor, pattern_pla
 | RGBA8 extraction | ✓ | – | – | RGB / gray / CMYK layers; merged image also supports indexed / bitmap / duotone |
 | Builder | – | ✓ | – | RGB / gray / CMYK at 8/16 bit, masks, groups, blend modes, opacity, fill, visibility, clipping |
 | Patterns | ✓ | ✓ | ✓ | `Patt` / `Pat2` / `Pat3`, `.pat`, and `.abr` embedded patterns; non-empty tiles allow in-bounds channel subrectangles, decoded size is capped and PackBits expansion is input-bounded |
+| Actions (`.atn`) | ✓ | ✓ | ✓ | `atn::parse` / `atn::write`: version-16 sets (Photoshop 6+): actions with function key, modifiers and colour; steps with event code or string name, panel name, enabled/dialog flags and their descriptor. Exact round trip; version-12 (Photoshop 5) files are rejected as unsupported |
+
+Pattern channel subrectangles are padded with zeroes to the tile rectangle. All channel
+metadata is checked before any plane is decoded, against one `PatternBudget` shared by every
+pattern of a parse (a block, a `.pat` file): `MAX_DECODED_BYTES` decoded and 512 MiB of zero
+padding in total. `parse_pattern_block_with` lets several blocks of one document share a budget;
+`.abr` patterns are charged to the file's sample budget. All channels of a pattern must have the
+same depth. Fully populated channels reuse their decoded buffer without a second copy;
+allocations for padded channels return an error on failure.
 
 ### Preserved raw, not yet typed (parsers planned for M8)
 

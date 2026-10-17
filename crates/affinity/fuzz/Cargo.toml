@@ -1,0 +1,41 @@
+[package]
+name = "photosplice-affinity-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[features]
+io = ["dep:photosplice-io"]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+photosplice-affinity = { path = "..", features = ["synth"] }
+photosplice-io = { path = "../../io", optional = true }
+
+[[bin]]
+name = "preview"
+path = "fuzz_targets/preview.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import_preview"
+path = "fuzz_targets/import_preview.rs"
+required-features = ["io"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stream"
+path = "fuzz_targets/stream.rs"
+test = false
+doc = false
+bench = false

@@ -1,19 +1,24 @@
 //! [`Document`] → PSD/PSB.
 
 use photosplice_color::{ColorMode, PixelFormat, SampleType};
-use photosplice_doc::{Document, Layer, LayerContent, LayerMask};
+use photosplice_doc::{Document, Layer, LayerContent, LayerMask, SmartContentsId};
 use photosplice_psd::file::{GlobalLayerMask, LayerInfoPlacement};
 use photosplice_psd::layer::{ChannelData, LayerFlags, LayerInfo, LayerMask as PsdMask, MaskData, MaskParameters};
 use photosplice_psd::resources::{ImageResource, ResolutionInfo, ids, version_info_resource};
 use photosplice_psd::{
     BlendMode as PsdBlend, ColorMode as PsdMode, Compression, Header, ImageData, LayerRecord, PsdFile, Rect as PsdRect, SectionType, TaggedBlock, Version,
 };
-use photosplice_raster::Surface;
+use photosplice_raster::{Interrupt, Surface};
 
 use crate::adjust_map;
 use crate::blocks;
 use crate::pixels::{deinterleave, encode_be, psd_depth};
 use crate::psd_import::REGENERATED;
+
+/// Blocks that define a layer's content as something other than pixels: fill (`SoCo`, `GdFl`,
+/// `PtFl`), placed / smart object (`SoLd`, `PlLd`, `SoLE`), type (`TySh`) and shape fill (`vscg`).
+/// A raster layer never writes them, nor adjustment blocks.
+const RASTER_STALE_KEYS: [&[u8; 4]; 8] = [b"SoCo", b"GdFl", b"PtFl", b"SoLd", b"PlLd", b"SoLE", b"TySh", b"vscg"];
 
 const PSD_MAX_FILE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 const PSD_ESTIMATE_FIXED_OVERHEAD: u64 = 1024 * 1024;
@@ -40,11 +45,28 @@ pub struct PsdExportOptions {
     pub native_modes: bool,
     /// The selected layers, the target first (resources 1024 and 1069). Empty: the top layer.
     pub selected_layers: Vec<photosplice_doc::LayerId>,
+    /// Write the real merged image (Preferences › File Handling › Maximize PSD and PSB File
+    /// Compatibility). `false` writes Photoshop's white placeholder instead and records
+    /// `has_real_merged_data = false` in resource 1057: a smaller file and a faster save, but
+    /// readers that only show the merged image see white. A document without layer records always
+    /// gets the real image, since its pixels live nowhere else.
+    pub maximize_compatibility: bool,
+    /// Write the composite's thumbnail (resource 1036; Preferences › File Handling › Image
+    /// Previews). Sampled while the merged image is rendered.
+    pub image_previews: bool,
 }
 
 impl Default for PsdExportOptions {
     fn default() -> Self {
-        PsdExportOptions { force_psb: false, merged_matte: true, merged_compression: Compression::Rle, native_modes: true, selected_layers: Vec::new() }
+        PsdExportOptions {
+            force_psb: false,
+            merged_matte: true,
+            merged_compression: Compression::Rle,
+            native_modes: true,
+            selected_layers: Vec::new(),
+            maximize_compatibility: true,
+            image_previews: true,
+        }
     }
 }
 
@@ -204,6 +226,13 @@ struct Source {
     dpi: f64,
 }
 
+fn contents_uuid(contents_id: SmartContentsId, bytes: &[u8]) -> String {
+    let mut identity = blake3::Hasher::new();
+    identity.update(&contents_id.0.to_le_bytes());
+    identity.update(bytes);
+    crate::smart_map::uuid_from(identity.finalize().as_bytes())
+}
+
 /// Smart-object state collected while emitting layers, written into the global blocks at the end.
 #[derive(Default)]
 struct SmartOut {
@@ -219,14 +248,22 @@ struct SmartOut {
     prune_ok: bool,
     /// Files to embed.
     add: Vec<crate::linked::LinkedFile>,
-    /// Sources converted so far, by content hash (`Err` = can't be embedded).
-    /// Embedded files written, by (content hash, owner): one file per independent contents.
-    converted: std::collections::HashMap<([u8; 32], usize), Result<Source, String>>,
+    /// Embedded files written, by (content hash, owner): one file per independent contents
+    /// (`Err` = can't be embedded).
+    converted: std::collections::HashMap<([u8; 32], Owner), Result<Source, String>>,
     /// The owner of each embedded file uuid written by this export (see [`Ex::embed`]).
-    uuid_owner: std::collections::HashMap<String, usize>,
+    uuid_owner: std::collections::HashMap<String, Owner>,
     /// Placed-layer ids written so far: each smart object instance needs its own (a duplicated
     /// layer arrives with its source's).
     placed_seen: std::collections::HashSet<String>,
+    /// The instance that keeps each imported placed id (the original, wherever it sits in the
+    /// stack): a duplicate never takes it, even when it is written first.
+    placed_owners: std::collections::HashMap<String, photosplice_doc::LayerId>,
+    /// The imported contents identity that keeps each preserved linked file's uuid.
+    linked_contents: std::collections::HashMap<String, SmartContentsId>,
+    /// Independent copies of preserved linked files (another contents identity naming the same
+    /// file), appended to their block.
+    linked_copies: std::collections::BTreeMap<(String, SmartContentsId), photosplice_doc::PsdGlobalBlock>,
     /// Embedded documents decoded while converting them, by uuid (for the filter caches).
     docs: std::collections::HashMap<String, Document>,
     /// Source composites (document pixel format, source space) by uuid; `None` = unreadable.
@@ -242,8 +279,11 @@ struct SmartOut {
     new_fx: Vec<photosplice_psd::filter_effects::FilterEffectsItem>,
 }
 
-/// `FEid` data padded to 4 bytes inside the block length: Photoshop counts the padding in the
-/// length and can't open a file whose `FEid` is padded outside it.
+/// Who an embedded file belongs to: the contents buffer (0 = a file read from disk, shared by
+/// content) and the smart object's contents identity. Equal bytes with another owner are
+/// independent contents and get a file of their own.
+type Owner = (usize, SmartContentsId);
+
 /// The signature a kept tagged block is written with: `8B64` exists only in PSB files, and
 /// Reference refuses a PSD holding one (kept from a PSB source, e.g. its `FMsk` or `cinf`) as
 /// "not compatible" (storytold/photocraft@3f72158f).
@@ -252,19 +292,20 @@ pub(crate) fn block_signature(sig: [u8; 4], version: Version) -> [u8; 4] {
 }
 
 /// Resolution info (1005): the file's own while the resolution is unchanged, so Photoshop keeps
-/// the user's units (pixels/cm, width in cm…); else the new resolution in the file's units.
+/// the user's units (pixels/cm, width in cm…); else the new resolution with the file's units.
+/// `hRes`/`vRes` are pixels per inch whatever the unit (the unit is display only: psd-tools
+/// empty-layer.psd and artboard.psd store 72.0 / 300.0 with unit 2).
 pub(crate) fn resolution_resource(doc: &Document) -> Vec<u8> {
     let dpi = f64::from(doc.resolution_dpi);
     let raw = doc.metadata.psd_resources.iter().find(|r| r.0 == ids::RESOLUTION_INFO);
     let Some((ri, data)) = raw.and_then(|r| ResolutionInfo::from_bytes(&r.2).ok().map(|ri| (ri, &r.2))) else {
         return ResolutionInfo::from_dpi(dpi).to_bytes();
     };
-    let per_inch = |unit: u16, res: f64| if unit == 2 { res * 2.54 } else { res };
-    if (per_inch(ri.h_res_unit, ri.h_res()) - dpi).abs() < 1e-3 && (per_inch(ri.v_res_unit, ri.v_res()) - dpi).abs() < 1e-3 {
+    if (ri.h_res() - dpi).abs() < 1e-3 && (ri.v_res() - dpi).abs() < 1e-3 {
         return data.to_vec();
     }
-    let fixed = |unit: u16| ((if unit == 2 { dpi / 2.54 } else { dpi }) * 65536.0).round().clamp(0.0, f64::from(u32::MAX)) as u32;
-    ResolutionInfo { h_res_fixed: fixed(ri.h_res_unit), v_res_fixed: fixed(ri.v_res_unit), ..ri }.to_bytes()
+    let fixed = (dpi * 65536.0).round().clamp(0.0, f64::from(u32::MAX)) as u32;
+    ResolutionInfo { h_res_fixed: fixed, v_res_fixed: fixed, ..ri }.to_bytes()
 }
 
 /// The layer id (`lyid`) kept among a group's end-divider blocks; 0 isn't an id.
@@ -274,6 +315,8 @@ fn divider_id(blocks: &[([u8; 4], std::sync::Arc<Vec<u8>>)]) -> Option<u32> {
     Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]])).filter(|&id| id != 0)
 }
 
+/// `FEid` data padded to 4 bytes inside the block length: Photoshop counts the padding in the
+/// length and can't open a file whose `FEid` is padded outside it.
 fn padded_fx(fx: &photosplice_psd::filter_effects::FilterEffects) -> Vec<u8> {
     let mut d = fx.to_bytes();
     d.resize(d.len().next_multiple_of(4), 0);
@@ -293,7 +336,24 @@ impl SmartOut {
             .filter_map(|(_, _, d)| photosplice_psd::filter_effects::FilterEffects::parse(d).ok())
             .flat_map(|fx| fx.items)
             .collect();
-        SmartOut { depth, globals, known, prune_ok: true, old_fx, ..Default::default() }
+        let mut linked_contents = std::collections::HashMap::new();
+        let mut placed_owners = std::collections::HashMap::new();
+        let mut layers = doc.walk();
+        // Duplicating a layer clears psd_id and gives it a newer runtime id.
+        layers.sort_by_key(|(_, _, layer)| (layer.psd_id.is_none(), layer.id));
+        for (_, _, layer) in layers {
+            if let LayerContent::Smart(sm) = &layer.content
+                && let photosplice_doc::SmartSource::Linked { path } = &sm.source
+                && let Some(placed) = sm.psd_raw.as_ref().and_then(|d| crate::smart_map::parse_sold(d))
+                && placed.idnt == *path
+            {
+                linked_contents.entry(path.clone()).or_insert(sm.contents_id);
+                if !placed.placed.is_empty() {
+                    placed_owners.entry(placed.placed).or_insert(layer.id);
+                }
+            }
+        }
+        SmartOut { depth, globals, known, prune_ok: true, old_fx, linked_contents, placed_owners, ..Default::default() }
     }
 
     /// The document's global blocks with the linked-layer files and filter caches brought up to
@@ -338,6 +398,13 @@ impl SmartOut {
         if !added && !self.add.is_empty() {
             let data: Vec<u8> = self.add.iter().flat_map(crate::linked::encode_linked_file).collect();
             out.push((*b"8BIM", *b"lnk2", Arc::new(data)));
+        }
+        for (sig, key, data) in self.linked_copies.values() {
+            if let Some((_, _, block)) = out.iter_mut().find(|(s, k, _)| s == sig && k == key) {
+                Arc::make_mut(block).extend_from_slice(data);
+            } else {
+                out.push((*sig, *key, data.clone()));
+            }
         }
         if !fx_placed && !self.new_fx.is_empty() {
             let fx = photosplice_psd::filter_effects::FilterEffects { version: 3, items: self.new_fx.clone() };
@@ -416,6 +483,10 @@ fn upsert(raw: &mut Vec<([u8; 4], Vec<u8>)>, key: &[u8; 4], data: Vec<u8>, befor
     }
 }
 
+fn h_of(r: photosplice_geom::Rect) -> usize {
+    r.height() as usize
+}
+
 fn psd_mode(m: ColorMode) -> PsdMode {
     match m {
         ColorMode::Grayscale => PsdMode::Grayscale,
@@ -455,18 +526,29 @@ impl Ex {
 
     /// Channel data of a layer's pixels. A `background` candidate whose pixels are opaque over
     /// exactly the canvas is written as Photoshop's Background, with no transparency channel.
-    fn pixel_channels(&mut self, s: &Surface, name: &str, background: bool) -> (PsdRect, Vec<ChannelData>) {
+    /// Conversion warnings are returned, not pushed.
+    fn pixel_channels(&self, s: &Surface, name: &str, background: bool) -> (PsdRect, Vec<ChannelData>, Vec<String>) {
+        let mut warnings = Vec::new();
         let s = if s.format() != self.fmt {
-            self.warnings.push(format!("layer \"{name}\": pixels converted from {:?} to {:?}", s.format(), self.fmt));
+            warnings.push(format!("layer \"{name}\": pixels converted from {:?} to {:?}", s.format(), self.fmt));
             s.convert(self.fmt)
         } else {
             s.clone()
         };
         let r = s.content_bounds();
         if r.is_empty() {
-            return (PsdRect::default(), self.empty_channels());
+            return (PsdRect::default(), self.empty_channels(), warnings);
         }
-        let mut bytes = s.to_interleaved(r);
+        // The interleaved gather is the sequential pass for full-canvas layers, so it runs
+        // in row bands on all cores and the band results concatenate in order.
+        let row_len = r.width() as usize;
+        let bands = crate::pixels::bands(h_of(r));
+        let parts =
+            crate::pixels::par_map(bands, |rows| s.to_interleaved(photosplice_geom::Rect::new(r.x0, r.y0 + rows.start as i32, r.x1, r.y0 + rows.end as i32)));
+        let mut bytes = Vec::with_capacity(row_len * h_of(r) * s.format().bytes_per_pixel());
+        for part in parts {
+            bytes.extend_from_slice(&part);
+        }
         if self.fmt.mode == ColorMode::Lab && self.fmt.sample == SampleType::U16 {
             crate::pixels::lab16_chroma(&mut bytes, self.cc + 1, false);
         }
@@ -482,12 +564,15 @@ impl Ex {
         };
         let alpha = !(background && r == self.canvas && opaque());
         // Alpha (-1) first, then the colour channels; each compressed on its own thread.
-        let order: Vec<(i16, &Vec<u8>)> = std::iter::once((-1, &planes[self.cc]))
+        let order: Vec<(i16, &Vec<u8>)> = planes
+            .get(self.cc)
+            .map(|p| (-1, p))
+            .into_iter()
             .filter(|_| alpha)
             .chain(planes.iter().take(self.cc).enumerate().map(|(c, p)| (c as i16, p)))
             .collect();
         let ch = crate::pixels::par_map(order, |(id, plane)| self.encode(id, plane, w, h));
-        (to_psd_rect(r), ch)
+        (to_psd_rect(r), ch, warnings)
     }
 
     fn mask(&self, m: &LayerMask, vector: Option<(f32, f32)>) -> (MaskData, Option<ChannelData>) {
@@ -519,7 +604,6 @@ impl Ex {
         (MaskData::Mask(pm), Some(self.encode(-2, &plane, w, h)))
     }
 
-    /// Ids for section dividers: above every layer id.
     /// A layer id no record uses yet: past the ids in use, wrapping to the smallest free one at
     /// u32::MAX (storytold/photocraft@ccb33741).
     fn fresh_id(&mut self) -> u32 {
@@ -540,10 +624,11 @@ impl Ex {
 
     fn record(&mut self, l: &Layer, extra: Vec<TaggedBlock>, pixels: Option<&Surface>) -> LayerRecord {
         let id = self.layer_id(l);
-        let (rect, mut channels) = match pixels {
+        let (rect, mut channels, warnings) = match pixels {
             Some(s) => self.pixel_channels(s, &l.name, self.background == Some(l.id)),
-            None => (PsdRect::default(), self.empty_channels()),
+            None => (PsdRect::default(), self.empty_channels(), Vec::new()),
         };
+        self.warnings.extend(warnings);
         let mut mask = MaskData::None;
         // Vector mask density/feather live in the mask parameters, with or without a user mask.
         let vector = l.vector_mask.as_ref().map(|vm| (vm.density, vm.feather));
@@ -581,6 +666,29 @@ impl Ex {
         // all), an unchanged lmfx stays with the raw blocks; otherwise regenerated onto the
         // original block, as lmfx when a kind has several instances (as Photoshop stores them).
         let fx = &l.effects;
+        for effect in &fx.items {
+            use photosplice_doc::effects::Effect;
+            let modes = match effect {
+                Effect::DropShadow(s) | Effect::InnerShadow(s) => [Some(s.common.blend), None],
+                Effect::OuterGlow(g) | Effect::InnerGlow(g) => [Some(g.common.blend), None],
+                Effect::Stroke(s) => [Some(s.common.blend), None],
+                Effect::ColorOverlay { common, .. } | Effect::GradientOverlay { common, .. } | Effect::PatternOverlay { common, .. } => {
+                    [Some(common.blend), None]
+                }
+                Effect::Satin(s) => [Some(s.common.blend), None],
+                Effect::BevelEmboss(b) => [Some(b.highlight.blend), Some(b.shadow.blend)],
+            };
+            for mode in modes.into_iter().flatten() {
+                if !mode.has_psd_equivalent() {
+                    self.warnings.push(format!(
+                        "layer \"{}\", {}: {} has no PSD equivalent and was written as Normal; save as .pcraft to preserve it",
+                        l.name,
+                        effect.label(),
+                        mode.label()
+                    ));
+                }
+            }
+        }
         let lmfx = l.psd_blocks.iter().find(|(k, _)| k == b"lmfx").map(|(_, d)| d.clone());
         let key = if l.is_group() { *b"lfxs" } else { *b"lfx2" };
         let fx_block = match effects_unchanged(l) {
@@ -612,6 +720,13 @@ impl Ex {
             if b.data.len() % 2 == 1 && b.padding.is_none() {
                 b.data.push(0);
             }
+        }
+        if !l.blend.has_psd_equivalent() {
+            self.warnings.push(format!(
+                "layer \"{}\": {} has no PSD equivalent and was written as Normal; save as .pcraft to preserve it",
+                l.name,
+                l.blend.label()
+            ));
         }
         LayerRecord {
             rect,
@@ -681,12 +796,32 @@ impl Ex {
                     _ => adjust_map::Channels::Other,
                 };
                 let cged = raw.iter().find(|(k, _)| k == b"CgEd").map(|(_, d)| d.clone());
-                let keep = raw.iter().any(|(k, d)| adjust_map::ADJUSTMENT_KEYS.contains(&k) && adjust_map::parse(k, d, cged.as_deref(), channels) == *a);
+                let keep = raw.iter().any(|(k, d)| {
+                    // A previously saved PhotoSplice v2 Photo Filter block may be 18 bytes.
+                    // It parses here, but Photoshop requires four-byte alignment, so repair
+                    // that legacy record on re-save rather than preserving the broken bytes.
+                    let legacy_phfl = k == b"phfl" && d.starts_with(&[0, 2]) && d.len() % 4 != 0;
+                    !legacy_phfl && adjust_map::ADJUSTMENT_KEYS.contains(&k) && adjust_map::parse(k, d, cged.as_deref(), channels) == *a
+                });
+                // A Gradient Map whose stops are unchanged keeps the file's own block (stops in
+                // the document's CMYK/Lab/Gray space, smoothness, method) with Reverse and Dither
+                // updated in place.
+                let keep = keep
+                    || (matches!(a, photosplice_doc::Adjustment::GradientMap { .. })
+                        && raw.iter_mut().any(|(k, d)| k == b"grdm" && adjust_map::retarget_gradient_map(d, a, channels)));
                 if !keep {
                     raw.retain(|(k, _)| !adjust_map::ADJUSTMENT_KEYS.contains(&k) && k != b"CgEd");
                     let w = adjust_map::write_in(a, channels);
                     if w.is_empty() {
                         self.warnings.push(format!("layer \"{}\": {} adjustment is not yet written to PSD", l.name, a.label()));
+                    }
+                    // Photoshop's `clrL` descriptor has no interpolation setting, so the
+                    // reopened layer renders trilinear.
+                    if matches!(a, photosplice_doc::Adjustment::ColorLookup { tetrahedral: true, .. }) {
+                        self.warnings.push(format!(
+                            "layer \"{}\": Color Lookup tetrahedral interpolation is saved as trilinear (PSD has no interpolation setting)",
+                            l.name
+                        ));
                     }
                     regenerated.extend(w);
                 }
@@ -752,7 +887,21 @@ impl Ex {
                     self.smart_blocks(l, sm, parsed, &mut raw);
                 }
             }
-            LayerContent::Raster(_) | LayerContent::Group(_) => {}
+            // A pixel layer carries no content-defining blocks: a fill, placed (smart), type or
+            // shape-fill block left over from before Rasterize would make a reader (ours or
+            // Photoshop's) reopen the layer as that kind and discard the pixels. A shape stroke
+            // (`vstk`) beside a vector mask makes a shape too; without one, Photoshop keeps it on
+            // pixel layers, so it stays. A vector mask (`vmsk`/`vsms`, `vogk`) stays.
+            // A fill block we can't read (imported as pixels for that reason) stays as it was.
+            LayerContent::Raster(_) => {
+                let masked = l.vector_mask.is_some();
+                let unreadable_fill = |k: &[u8; 4], d: &[u8]| matches!(k, b"SoCo" | b"GdFl" | b"PtFl") && blocks::parse_fill(k, d).is_none();
+                raw.retain(|(k, d)| {
+                    unreadable_fill(k, d.as_slice())
+                        || !(RASTER_STALE_KEYS.contains(&k) || adjust_map::ADJUSTMENT_KEYS.contains(&k) || k == b"CgEd" || (k == b"vstk" && masked))
+                });
+            }
+            LayerContent::Group(_) => {}
         }
         // Effects reference point: written from the field (in place, keeping block order).
         match l.effects.reference {
@@ -765,12 +914,14 @@ impl Ex {
             }
             None => raw.retain(|(k, _)| k != b"fxrp"),
         }
-        // Knockout and Blend Clipped / Interior as Group: written from the fields (in place); a
-        // non-default one also on groups (layers get Photoshop's defaults further on).
+        // Knockout, Blend Clipped / Interior as Group, Transparency Shapes Layer and the mask
+        // options: written from the fields (in place); a non-default one also on groups (layers
+        // get Photoshop's defaults further on). `tsly` is written when off or when the file had it.
         for (key, v, default) in [
             (b"knko", l.knockout.psd(), 0u8),
             (b"clbl", u8::from(l.blend_clipped), 1),
             (b"infx", u8::from(l.blend_interior), 0),
+            (b"tsly", u8::from(l.transparency_shapes), 1),
             (b"lmgm", u8::from(l.mask_hides_effects), 0),
             (b"vmgm", u8::from(l.vector_mask_hides_effects), 0),
         ] {
@@ -841,7 +992,9 @@ impl Ex {
             mask_linked: sm.filter_mask.as_ref().is_some_and(|m| m.linked),
         };
         let same_source = template.as_ref().filter(|t| t.idnt == src.uuid);
-        let repeated = same_source.is_some_and(|t| self.smart.placed_seen.contains(&t.placed));
+        // Taken already, or kept for the original instance this one duplicates.
+        let repeated = same_source
+            .is_some_and(|t| self.smart.placed_seen.contains(&t.placed) || self.smart.placed_owners.get(&t.placed).is_some_and(|owner| *owner != l.id));
         if let (Some(t), Some(data)) = (same_source, sm.psd_raw.as_ref())
             && !repeated
             && self.placed_unchanged(t, data, sm, &stack)
@@ -860,7 +1013,18 @@ impl Ex {
         }
         let placed = match same_source {
             Some(t) if !t.placed.is_empty() && !repeated => t.placed.clone(),
-            _ => uuid_from(format!("{}:{}", src.uuid, l.id.0).as_bytes()),
+            _ => {
+                // Deterministic, and never an id another instance keeps or was given.
+                let seed = format!("{}:{}", src.uuid, l.id.0);
+                let mut suffix = 0u64;
+                loop {
+                    let id = uuid_from(if suffix == 0 { seed.clone() } else { format!("{seed}:{suffix}") }.as_bytes());
+                    if !self.smart.placed_owners.contains_key(&id) && !self.smart.placed_seen.contains(&id) {
+                        break id;
+                    }
+                    suffix += 1;
+                }
+            }
         };
         self.smart.placed_seen.insert(placed.clone());
         let size = same_source.and_then(|t| crate::smart_map::stored_size(&t.descriptor)).unwrap_or(src.size);
@@ -897,7 +1061,13 @@ impl Ex {
                         }
                         None => photosplice_algo::warp::place_source(&img, img_bounds, &sm.transform, sm.warp.as_ref()),
                     };
-                    crate::smart_map::feid_item(&placed, &unfiltered, sm.filter_mask.as_ref(), bounds, self.fmt)
+                    match unfiltered {
+                        Ok(unfiltered) => crate::smart_map::feid_item(&placed, &unfiltered, sm.filter_mask.as_ref(), bounds, self.fmt),
+                        Err(e) => {
+                            warnings.push(format!("smart filter mask was not re-rendered for PSD export ({e})"));
+                            None
+                        }
+                    }
                 }
                 _ => None,
             };
@@ -941,7 +1111,8 @@ impl Ex {
         }
         // Placed as the importer places it (the same source size, from the same file, and the
         // same frame: a custom warp's control-point box).
-        let size = crate::linked::source_size_in_blocks(self.smart.globals.iter().map(|(_, k, d)| (k, d.as_slice())), &id, &photosplice_raster::Interrupt::NONE);
+        let size =
+            crate::linked::source_size_in_blocks(self.smart.globals.iter().map(|(_, k, d)| (k, d.as_slice())), &id, &photosplice_raster::Interrupt::NONE);
         blocks::plld_transform(&corners, size, warp.as_ref()) != (sm.transform, sm.perspective)
     }
 
@@ -979,7 +1150,30 @@ impl Ex {
                     source_geometry(&f.file_name, &f.bytes).ok()
                 });
                 let (size, dpi) = geometry.unwrap_or((size_from_layer(sm), f64::from(self.dpi)));
-                Ok(Source { uuid: path.clone(), size, dpi })
+                let original = self.smart.linked_contents.entry(path.clone()).or_insert(sm.contents_id);
+                // Another contents identity naming the same preserved file is an independent copy:
+                // it gets a copy of the file under a uuid of its own (an absent Idnt is no shared
+                // identity). Without a record to copy, the file stays shared.
+                let mut uuid = path.clone();
+                if !path.is_empty() && *original != sm.contents_id {
+                    let copy_uuid = contents_uuid(sm.contents_id, path.as_bytes());
+                    let key = (path.clone(), sm.contents_id);
+                    if !self.smart.linked_copies.contains_key(&key)
+                        && let Some(copy) = self.smart.globals.iter().find_map(|(sig, k, data)| {
+                            LINK_KEYS
+                                .contains(&k)
+                                .then(|| crate::linked::copy_item(data, path, &copy_uuid))
+                                .flatten()
+                                .map(|data| (*sig, *k, std::sync::Arc::new(data)))
+                        })
+                    {
+                        self.smart.linked_copies.insert(key.clone(), copy);
+                    }
+                    if self.smart.linked_copies.contains_key(&key) {
+                        uuid = copy_uuid;
+                    }
+                }
+                Ok(Source { uuid, size, dpi })
             }
             SmartSource::Linked { path } => {
                 #[cfg(not(target_arch = "wasm32"))]
@@ -987,14 +1181,15 @@ impl Ex {
                     let bytes = std::fs::read(path).map_err(|e| format!("the linked file {path} can't be read: {e}"))?;
                     let name = path.rsplit(['/', '\\']).next().unwrap_or(path).to_string();
                     self.warnings.push(format!("the linked smart object {name} was embedded (PSD export keeps no external links)"));
-                    self.embed(&name, &bytes, 0)
+                    self.embed(&name, &bytes, (0, sm.contents_id))
                 }
                 #[cfg(target_arch = "wasm32")]
                 Err(format!("the linked file {path} can't be read here"))
             }
             // Each embedded buffer is its own contents: smart objects share one only when they
-            // share the buffer (duplicates), not when an independent copy has equal bytes.
-            SmartSource::Embedded { file_name, bytes } => self.embed(file_name, bytes, std::sync::Arc::as_ptr(bytes) as usize),
+            // share the buffer and the contents identity (duplicates), not when an independent
+            // copy has equal bytes.
+            SmartSource::Embedded { file_name, bytes } => self.embed(file_name, bytes, (std::sync::Arc::as_ptr(bytes) as usize, sm.contents_id)),
         }
     }
 
@@ -1008,7 +1203,10 @@ impl Ex {
             Some(d) => Some(d.clone()),
             None => {
                 let file = self.smart.add.iter().find(|f| f.uuid == uuid).cloned().or_else(|| {
-                    let meta = photosplice_doc::Metadata { psd_global_blocks: self.smart.globals.clone(), ..Default::default() };
+                    let meta = photosplice_doc::Metadata {
+                        psd_global_blocks: self.smart.globals.iter().chain(self.smart.linked_copies.values()).cloned().collect(),
+                        ..Default::default()
+                    };
                     crate::linked::find_linked_file(&meta, uuid)
                 });
                 file.and_then(|f| crate::import(&f.file_name, &f.bytes).ok()).map(|r| r.document)
@@ -1035,10 +1233,10 @@ impl Ex {
     }
 
     /// Adds `bytes` as an embedded file (converted to PSB when it is a `.pcraft` bundle), once
-    /// per distinct `owner` (an independent contents buffer; 0 = files read from disk, shared by
-    /// content). Photoshop updates every layer that names a file's uuid when one is edited, so
+    /// per distinct [`Owner`] (an independent contents buffer and identity; buffer 0 = files read
+    /// from disk, shared by content). Photoshop updates every layer that names a file's uuid when one is edited, so
     /// independent contents with equal bytes get uuids of their own.
-    fn embed(&mut self, file_name: &str, bytes: &[u8], owner: usize) -> Result<Source, String> {
+    fn embed(&mut self, file_name: &str, bytes: &[u8], owner: Owner) -> Result<Source, String> {
         let key = (*blake3::hash(bytes).as_bytes(), owner);
         if let Some(r) = self.smart.converted.get(&key) {
             return r.clone();
@@ -1048,13 +1246,14 @@ impl Ex {
         r
     }
 
-    fn convert_source(&mut self, file_name: &str, bytes: &[u8], owner: usize) -> Result<Source, String> {
+    fn convert_source(&mut self, file_name: &str, bytes: &[u8], owner: Owner) -> Result<Source, String> {
         let (name, data, size, dpi, nested) = if photosplice_format::is_pcraft(bytes) {
             if self.smart.depth >= MAX_NESTING {
                 return Err(format!("smart objects nest more than {MAX_NESTING} deep"));
             }
             let doc = photosplice_format::load_from_bytes(bytes).map_err(|e| format!("its contents can't be read: {e}"))?;
-            let (file, warnings) = document_to_psd_nested(&doc, &PsdExportOptions { force_psb: true, ..Default::default() }, self.smart.depth + 1);
+            let (file, warnings) =
+                document_to_psd_nested(&doc, &PsdExportOptions { force_psb: true, ..Default::default() }, self.smart.depth + 1, &Interrupt::NONE);
             let data = file.to_bytes().map_err(|e| format!("its contents can't be written: {e}"))?;
             let stem = file_name.rsplit_once('.').map_or(file_name, |(a, _)| a);
             self.warnings.extend(warnings.into_iter().map(|w| format!("smart object {stem}: {w}")));
@@ -1069,7 +1268,7 @@ impl Ex {
         // Another contents (or an imported file) already took this uuid: derive a distinct,
         // still deterministic one.
         let mut salt = 0u32;
-        while self.smart.uuid_owner.get(&uuid).is_some_and(|o| *o != owner) || (owner != 0 && self.smart.known.contains(&uuid)) {
+        while self.smart.uuid_owner.get(&uuid).is_some_and(|o| *o != owner) || (owner.0 != 0 && self.smart.known.contains(&uuid)) {
             salt += 1;
             let mut h = blake3::Hasher::new();
             h.update(&data);
@@ -1119,7 +1318,11 @@ impl Ex {
                 .map(|p| p.get(..if alpha { 5 } else { 4 }).unwrap_or_default().to_vec())
                 .collect()
         } else {
-            photosplice_compose::render_fill_content(l, f, self.canvas, &self.patterns).px.iter().map(|p| photosplice_raster::from_rgba(&self.fmt, *p)).collect()
+            photosplice_compose::render_fill_content(l, f, self.canvas, &self.patterns)
+                .px
+                .iter()
+                .map(|p| photosplice_raster::from_rgba(&self.fmt, *p))
+                .collect()
         };
         let (cw, x0, w) = (self.canvas.width() as usize, (shown.x0 - self.canvas.x0) as usize, shown.width() as usize);
         let rows = (shown.y0 - self.canvas.y0) as usize..(shown.y1 - self.canvas.y0) as usize;
@@ -1134,7 +1337,9 @@ impl Ex {
         s
     }
 
-    fn emit(&mut self, layers: &[Layer]) {
+    /// Write the records of `layers` (and their groups' children). `tick` runs after each one:
+    /// it reports progress and returns `false` to stop early (a cancelled save, #3389).
+    fn emit(&mut self, layers: &[Layer], tick: &mut dyn FnMut() -> bool) {
         for l in layers {
             let extra = self.content_blocks(l);
             match &l.content {
@@ -1145,8 +1350,7 @@ impl Ex {
                     };
                     // The divider's own blocks from the file (`shmd`, `fxrp`, `lnsr`…); its comp
                     // settings go when the comps are regenerated.
-                    let mut kept: Vec<([u8; 4], Vec<u8>)> =
-                        g.divider_blocks.iter().filter(|(k, _)| k != b"lyid").map(|(k, d)| (*k, d.to_vec())).collect();
+                    let mut kept: Vec<([u8; 4], Vec<u8>)> = g.divider_blocks.iter().filter(|(k, _)| k != b"lyid").map(|(k, d)| (*k, d.to_vec())).collect();
                     if self.comps.is_some() {
                         crate::comps_map::set_cmls(&mut kept, None);
                     }
@@ -1167,7 +1371,7 @@ impl Ex {
                         .collect(),
                         ..Default::default()
                     });
-                    self.emit(&g.children);
+                    self.emit(&g.children, tick);
                     let kind = if g.expanded { SectionType::OpenFolder } else { SectionType::ClosedFolder };
                     // Photoshop's 16-byte form: kind, blend, sub-type 0 (a plain group).
                     let lsct = TaggedBlock::section_divider(kind, Some(PsdBlend::from_key(l.blend.psd_key())), Some(0));
@@ -1208,6 +1412,9 @@ impl Ex {
                     let r = self.record(l, extra, unmixed.as_ref().or(sm.cache.as_ref()));
                     self.records.push(r);
                 }
+            }
+            if !tick() {
+                return;
             }
         }
     }
@@ -1420,6 +1627,31 @@ pub(crate) fn guides_resource(doc: &Document) -> Vec<u8> {
     v
 }
 
+/// Whether an imported (unmodelled) resource still describes the document and is written back.
+pub(crate) fn keep_imported_resource(doc: &Document, id: u16, data: &[u8]) -> bool {
+    // Measurement scale / count resources: only while they still describe the document.
+    if !crate::annotations_map::keep_resource(doc, id) {
+        return false;
+    }
+    // A preserved clipping-path resource is only valid while it names the current one.
+    if id == crate::vector_map::CLIPPING_PATH {
+        let n = usize::from(data.first().copied().unwrap_or(0));
+        let raw_name = data.get(1..1 + n).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
+        return doc.clipping_path.as_ref().is_some_and(|c| c.name == raw_name);
+    }
+    true
+}
+
+/// A document-level (global) tagged block. Photoshop pads these to a multiple of 4, and readers
+/// such as psd-tools step to the next block that way: an even pad after `CAI ` (77 bytes)
+/// misaligned every block after it (#200).
+pub(crate) fn global_block(signature: [u8; 4], key: [u8; 4], data: &[u8]) -> TaggedBlock {
+    let mut tb = TaggedBlock::new(key, data.to_vec());
+    tb.signature = signature;
+    tb.padding = Some(vec![0; (4 - data.len() % 4) % 4]);
+    tb
+}
+
 fn cmyk_of(fmt: &PixelFormat) -> bool {
     fmt.mode == ColorMode::Cmyk
 }
@@ -1471,8 +1703,14 @@ impl Thumb {
 
     /// Resource 1036 data: the thumbnail header (format 1 = JPEG RGB, size, row bytes, sizes,
     /// 24 bits per pixel, 1 plane; Adobe PSD spec, "Thumbnail resource format") and a JFIF image.
-    fn resource(&self) -> Option<Vec<u8>> {
-        let rgb: Vec<u8> = self.sum.iter().flat_map(|s| (0..3).map(move |c| if s[3] > 0.0 { q255(s[c] / s[3]) } else { 255 })).collect();
+    /// `to_srgb` converts the averaged composite to sRGB (the document's profile is honoured).
+    fn resource(&self, to_srgb: Option<&photosplice_cms::Transform>) -> Option<Vec<u8>> {
+        let mut px: Vec<[f32; 4]> =
+            self.sum.iter().map(|s| if s[3] > 0.0 { [s[0] / s[3], s[1] / s[3], s[2] / s[3], 1.0] } else { [1.0; 4] }).collect();
+        if let Some(t) = to_srgb {
+            t.apply(px.as_flattened_mut(), 4);
+        }
+        let rgb: Vec<u8> = px.iter().flat_map(|p| p[..3].iter().map(|&v| q255(v))).collect();
         let jpeg = photosplice_codecs::web::encode_jpeg_rgb8(self.tw as u32, self.th as u32, &rgb, 85, false, false, None, None, None).ok()?;
         let row = (self.tw * 24).div_ceil(32) * 4;
         let mut v = Vec::with_capacity(28 + jpeg.len());
@@ -1488,8 +1726,10 @@ impl Thumb {
 
 /// The merged image's planes (colour channels, then alpha), big-endian, matted against white
 /// when `matte`; with whether any pixel needs the alpha channel and whether any is below 1.
-/// `thumb`, when given, collects the composite's thumbnail on the way.
-fn merged_planes(doc: &Document, fmt: &PixelFormat, cmyk: bool, matte: bool, mut thumb: Option<&mut Thumb>) -> (Vec<u8>, bool, bool) {
+/// `thumb`, when given, collects the composite's thumbnail on the way. `ctl` gets the fraction of
+/// rows done after each band; once it is cancelled the rest of the image is left blank (the caller
+/// discards it).
+fn merged_planes(doc: &Document, fmt: &PixelFormat, cmyk: bool, matte: bool, mut thumb: Option<&mut Thumb>, ctl: &Interrupt) -> (Vec<u8>, bool, bool) {
     let sample = fmt.sample;
     let cc = fmt.mode.color_channels();
     let bps = sample.bytes();
@@ -1502,9 +1742,13 @@ fn merged_planes(doc: &Document, fmt: &PixelFormat, cmyk: bool, matte: bool, mut
     let w = canvas.width() as usize;
     let space = photosplice_compose::cmyk_space(doc);
     let lab16 = fmt.mode == ColorMode::Lab && sample == SampleType::U16;
+    let rows = canvas.height().max(1) as f32;
     // A CMYK document's composite in its own inks (screen RGB would regenerate K).
     if cmyk && doc.mode == ColorMode::Cmyk {
         let _ = photosplice_compose::render_ink_bands(doc, canvas, 0, |band| -> Result<(), ()> {
+            if ctl.cancelled() {
+                return Err(());
+            }
             has_alpha |= band.px.iter().any(|p| match sample {
                 SampleType::U8 => q255(p[4]) < 255,
                 SampleType::U16 => (p[4].clamp(0.0, 1.0) * 65535.0 + 0.5) as u16 != u16::MAX,
@@ -1543,11 +1787,15 @@ fn merged_planes(doc: &Document, fmt: &PixelFormat, cmyk: bool, matte: bool, mut
                     planes[o..o + src.len()].copy_from_slice(src);
                 }
             }
+            ctl.progress((band.rect.y1 - canvas.y0) as f32 / rows);
             Ok(())
         });
         return (planes, has_alpha, translucent);
     }
     let _ = photosplice_compose::render_bands(doc, canvas, 0, |band| -> Result<(), ()> {
+        if ctl.cancelled() {
+            return Err(());
+        }
         // Retain alpha whenever it differs from opaque at the stored precision.
         has_alpha |= band.px.iter().any(|p| match sample {
             SampleType::U8 => q255(p[3]) < 255,
@@ -1585,9 +1833,32 @@ fn merged_planes(doc: &Document, fmt: &PixelFormat, cmyk: bool, matte: bool, mut
                 planes[o..o + src.len()].copy_from_slice(src);
             }
         }
+        ctl.progress((band.rect.y1 - canvas.y0) as f32 / rows);
         Ok(())
     });
     (planes, has_alpha, translucent)
+}
+
+/// The merged image of a file saved without Maximize Compatibility: Photoshop's white placeholder
+/// in the document's colour channels, with no alpha. Encoded like [`merged_planes`], so CMYK white
+/// is no ink and Lab white is L 100 with neutral a*/b*.
+fn placeholder_planes(doc: &Document, fmt: &PixelFormat) -> Vec<u8> {
+    let cc = fmt.mode.color_channels();
+    let cmyk = cmyk_of(fmt);
+    let lab16 = fmt.mode == ColorMode::Lab && fmt.sample == SampleType::U16;
+    let space = photosplice_compose::cmyk_space(doc);
+    let white = photosplice_color::convert::with_cmyk_space(space.as_ref(), || photosplice_raster::from_rgba(fmt, [1.0, 1.0, 1.0, 1.0]));
+    let n = doc.size.area() as usize;
+    let mut planes = Vec::with_capacity(n * fmt.sample.bytes() * cc);
+    for c in 0..cc {
+        let v = white.get(c).copied().unwrap_or(1.0);
+        let x = if cmyk { 1.0 - v } else { v };
+        let x = if lab16 && (c == 1 || c == 2) { x * (crate::pixels::LAB16_CHROMA_MAX / 65535.0) } else { x };
+        let mut sample = Vec::with_capacity(4);
+        encode_be(x, fmt.sample, &mut sample);
+        planes.extend(sample.iter().copied().cycle().take(n * sample.len()));
+    }
+    planes
 }
 
 /// Converts a document to a PSD file model (see [`document_to_psd_with`]).
@@ -1599,8 +1870,22 @@ pub fn document_to_psd(doc: &Document) -> PsdFile {
 /// anything that could not be represented. The merged composite is rendered
 /// with `photosplice_compose::flatten`.
 pub fn document_to_psd_with(doc: &Document, opts: &PsdExportOptions) -> (PsdFile, Vec<String>) {
-    document_to_psd_nested(doc, opts, 0)
+    document_to_psd_nested(doc, opts, 0, &Interrupt::NONE)
 }
+
+/// [`document_to_psd_with`] for a background save (#3389): reports progress through `ctl` after
+/// each layer record and each band of the merged composite. Once `ctl` is cancelled it stops
+/// early and returns an **incomplete** model: callers check `ctl` and discard it.
+pub(crate) fn document_to_psd_interruptible(doc: &Document, opts: &PsdExportOptions, ctl: &Interrupt) -> (PsdFile, Vec<String>) {
+    document_to_psd_nested(doc, opts, 0, ctl)
+}
+
+/// How much of a PSD conversion the merged composite weighs, in layer records: rendering it
+/// (all layers composited) and encoding its planes cost about two full-canvas layers.
+const MERGED_WEIGHT: f32 = 2.0;
+/// The part of the merged composite's share filled once its bands are rendered and converted; the
+/// rest is compressing its planes.
+const MERGED_RENDERED: f32 = 0.8;
 
 /// Adds headroom for compressed channel streams and their per-row length tables.
 fn estimate_encoded_size(raw_bytes: u64, rows: u64, structural_bytes: u64) -> Option<u64> {
@@ -1715,7 +2000,7 @@ pub(crate) fn psd_size_exceeds_limit(doc: &Document) -> bool {
 }
 
 /// [`document_to_psd_with`] for a document embedded `depth` smart objects deep.
-fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -> (PsdFile, Vec<String>) {
+fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32, ctl: &Interrupt) -> (PsdFile, Vec<String>) {
     if doc.mode == ColorMode::Multichannel {
         return crate::multichannel_map::document_to_psd(doc, opts.force_psb);
     }
@@ -1755,8 +2040,9 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     }
     // A duotone from a PSD goes back as Duotone with its ink data (undocumented, kept verbatim);
     // one made here has no Photoshop ink data to write and goes out as its gray plate.
-    let duotone_raw =
-        (opts.native_modes && doc.mode == ColorMode::Duotone && sample != SampleType::F32).then(|| doc.duotone.as_ref().and_then(|d| d.psd_raw.clone())).flatten();
+    let duotone_raw = (opts.native_modes && doc.mode == ColorMode::Duotone && sample != SampleType::F32)
+        .then(|| doc.duotone.as_ref().and_then(|d| d.psd_raw.clone()))
+        .flatten();
     // A single plain Indexed / Bitmap image goes back in its own mode (see `flat_modes`).
     let flat_mode = opts.native_modes && crate::flat_modes::eligible(doc);
     if fmt.mode != doc.mode && duotone_raw.is_none() && !flat_mode {
@@ -1785,7 +2071,13 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         }
         // New layers are numbered past every id in use and the file's seed (1044), as Reference
         // does: an id a deleted layer had may still be named by a layer comp or a link.
-        let seed = doc.metadata.psd_resources.iter().find(|r| r.0 == ids::DOCUMENT_IDS_SEED).and_then(|r| r.2.get(..4)).map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+        let seed = doc
+            .metadata
+            .psd_resources
+            .iter()
+            .find(|r| r.0 == ids::DOCUMENT_IDS_SEED)
+            .and_then(|r| r.2.get(..4))
+            .map_or(0, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
         ex.next_id = used.iter().copied().max().unwrap_or(0).max(seed);
         ex.used_ids = used;
         for (_, _, l) in &walk {
@@ -1795,19 +2087,41 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
             }
         }
     }
+    // Progress: one unit per layer record, then the merged composite (#3389).
+    let records = doc.walk().len() as f32;
+    let units = records + MERGED_WEIGHT;
+    let layers_share = records / units;
+    let mut done = 0.0f32;
+    let mut tick = || {
+        done += 1.0;
+        ctl.progress(done / units);
+        !ctl.cancelled()
+    };
     // Fill and type pixels are separated through the document's own CMYK profile, like its
     // composite (storytold/photocraft@cf83e058).
     let space = photosplice_compose::cmyk_space(doc);
-    photosplice_color::convert::with_cmyk_space(space.as_ref(), || ex.emit(&doc.layers));
+    photosplice_color::convert::with_cmyk_space(space.as_ref(), || ex.emit(&doc.layers, &mut tick));
 
-    // Merged composite, rendered and encoded in bands (no full-size float composite). Matting
-    // against white only changes pixels with alpha < 1; if some are slightly translucent but all
-    // round to opaque (so no alpha channel is written), encode once more without the matte.
-    let mut thumb = Thumb::new(doc.size.width as usize, doc.size.height as usize);
-    let (mut planes, has_alpha, translucent) = merged_planes(doc, &fmt, cmyk_of(&fmt), opts.merged_matte, Some(&mut thumb));
-    if !has_alpha && translucent && opts.merged_matte {
-        planes = merged_planes(doc, &fmt, cmyk_of(&fmt), false, None).0;
-    }
+    // Without Maximize Compatibility the merged image is a white placeholder and the composite
+    // isn't rendered at all. A document without layer records keeps the real image: its pixels
+    // live nowhere else.
+    let real_merged = opts.maximize_compatibility || ex.records.is_empty();
+    // The thumbnail (resource 1036) is sampled from the merged image's bands as they render.
+    let mut thumb = (opts.image_previews && real_merged).then(|| Thumb::new(doc.size.width as usize, doc.size.height as usize));
+    let (mut planes, has_alpha) = if real_merged {
+        // Merged composite, rendered and encoded in bands (no full-size float composite). Matting
+        // against white only changes pixels with alpha < 1; if some are slightly translucent but
+        // all round to opaque (so no alpha channel is written), encode once more without the matte.
+        let merged_end = layers_share + (1.0 - layers_share) * MERGED_RENDERED;
+        let (mut planes, has_alpha, translucent) =
+            crate::with_span(ctl, layers_share, merged_end, |ctl| merged_planes(doc, &fmt, cmyk_of(&fmt), opts.merged_matte, thumb.as_mut(), ctl));
+        if !has_alpha && translucent && opts.merged_matte {
+            planes = merged_planes(doc, &fmt, cmyk_of(&fmt), false, None, &Interrupt::cancel_only(&|| ctl.cancelled())).0;
+        }
+        (planes, has_alpha)
+    } else {
+        (placeholder_planes(doc, &fmt), false)
+    };
     let n = doc.size.area() as usize;
     if !has_alpha {
         planes.truncate(cc * n * sample.bytes());
@@ -1843,6 +2157,7 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     let image_data = ImageData::encode(mcomp, &planes, &header)
         .or_else(|_| ImageData::encode(Compression::Raw, &planes, &header))
         .unwrap_or(ImageData { compression: Compression::Raw, data: planes });
+    ctl.progress(1.0);
 
     // Resources.
     let mut resources = vec![
@@ -1851,9 +2166,16 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         ImageResource::new(ids::GLOBAL_ALTITUDE, (doc.global_light.altitude.round() as i32).to_be_bytes().to_vec()),
     ];
     // Photoshop's own thumbnail (Finder, Bridge and other readers show it); regenerated, since an
-    // imported one goes stale with any edit.
-    if let Some(t) = thumb.resource() {
-        resources.push(ImageResource::new(ids::THUMBNAIL, t));
+    // imported one goes stale with any edit. Without the merged composite it is rendered apart.
+    if opts.image_previews {
+        let data = match &thumb {
+            // A profile that can't be converted leaves the preview in the document's colours.
+            Some(t) => t.resource(crate::psd_thumbnail::srgb_transform(doc).ok().flatten().as_ref()),
+            None => crate::psd_thumbnail::resource(doc).ok().map(|r| r.data),
+        };
+        if let Some(t) = data {
+            resources.push(ImageResource::new(ids::THUMBNAIL, t));
+        }
     }
     if let Some(icc) = &doc.icc_profile {
         resources.push(ImageResource::new(ids::ICC_PROFILE, icc.to_vec()));
@@ -1863,7 +2185,8 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     // Alpha channel names, ids and display options. Reference lists the merged transparency
     // first ("Transparency", id 0), then the alpha and spot channels.
     if has_alpha || !extra.is_empty() {
-        let names: Vec<&str> = has_alpha.then_some(photosplice_psd::resources::TRANSPARENCY_NAME).into_iter().chain(extra.iter().map(|a| a.name.as_str())).collect();
+        let names: Vec<&str> =
+            has_alpha.then_some(photosplice_psd::resources::TRANSPARENCY_NAME).into_iter().chain(extra.iter().map(|a| a.name.as_str())).collect();
         resources.push(ImageResource::new(1006, pascal_names_resource(&names)));
         resources.push(ImageResource::new(1045, unicode_names_resource(&names)));
         let old = doc.metadata.psd_resources.iter().find(|r| r.0 == ids::ALPHA_IDS).map(|r| r.2.as_slice());
@@ -1881,19 +2204,33 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     }
     resources.extend(path_resources(doc, &mut ex.warnings));
     resources.push(ImageResource::new(ids::LAYER_GROUP_INFO, link_group_resource(&doc.layers)));
-    let old_seed = doc.metadata.psd_resources.iter().find(|r| r.0 == ids::DOCUMENT_IDS_SEED).and_then(|r| r.2.get(..4)).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    let old_seed = doc
+        .metadata
+        .psd_resources
+        .iter()
+        .find(|r| r.0 == ids::DOCUMENT_IDS_SEED)
+        .and_then(|r| r.2.get(..4))
+        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
     let selected: Vec<u32> = opts.selected_layers.iter().filter_map(|id| ex.layer_ids.get(id).copied()).collect();
     resources.extend(layer_state_resources(&ex.records, old_seed.unwrap_or(0), &selected));
+    // The pixels are saved as they are shown: never let a reader rotate them again. The XMP and
+    // EXIF resolution follow the ResolutionInfo resource, so no copy contradicts it (#1691).
+    let ppi = Some((doc.resolution_dpi, doc.resolution_dpi)).filter(|d| d.0 > 0.0);
     if let Some(x) = &doc.metadata.xmp {
-        // The pixels are saved as they are shown: never let a reader rotate them again.
-        resources.push(ImageResource::new(ids::XMP, photosplice_codecs::upright_xmp(x).as_bytes().to_vec()));
+        resources.push(ImageResource::new(ids::XMP, photosplice_codecs::export_xmp(x, ppi).as_bytes().to_vec()));
     }
     if let Some(e) = &doc.metadata.exif {
-        resources.push(ImageResource::new(ids::EXIF, photosplice_codecs::upright_exif(e).into_owned()));
+        resources.push(ImageResource::new(ids::EXIF, photosplice_codecs::export_exif(e, ppi).into_owned()));
     }
     let mut global_blocks = Vec::new();
     for (sig, key, data) in &ex.smart.finish(crate::annotations_map::export_blocks(doc, crate::pattern_map::export_global_blocks(doc))) {
         if *key == GLOBAL_MASK_KEY {
+            continue;
+        }
+        // A kept layer block (one the import could not read, #2700) describes layers the
+        // document doesn't have. The document's own layers are written below, and a file holds
+        // one layer list: a second `Lr16`/`Lr32` would contradict it.
+        if !ex.records.is_empty() && matches!(key, b"Lr16" | b"Lr32" | b"Layr") {
             continue;
         }
         // Txt2 overrides the type layers in Photoshop: updated for edits, else dropped (rebuilt).
@@ -1905,13 +2242,7 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         } else {
             std::borrow::Cow::Borrowed(data.as_slice())
         };
-        let mut tb = TaggedBlock::new(*key, data.to_vec());
-        tb.signature = block_signature(*sig, version);
-        // Reference pads document-level (global) blocks to a multiple of 4, and readers such as
-        // psd-tools step to the next block that way: an even pad after `CAI ` (77 bytes)
-        // misaligned every block after it (#200).
-        tb.padding = Some(vec![0; (4 - data.len() % 4) % 4]);
-        global_blocks.push(tb);
+        global_blocks.push(global_block(block_signature(*sig, version), *key, &data));
     }
     let comps_resource = ex.comps.is_some().then(|| crate::comps_map::write_comps_resource(doc));
     let (slices_resource, slices_warning) = crate::slices_map::export_resource(doc, &ex.layer_ids);
@@ -1932,17 +2263,10 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
         if *id == ids::DOCUMENT_IDS_SEED || *id == ids::ALPHA_IDS || *id == ids::RESOLUTION_INFO || *id == crate::channel_map::DISPLAY_INFO_OLD {
             continue;
         }
-        // Measurement scale / count resources: only while they still describe the document.
-        if !crate::annotations_map::keep_resource(doc, *id) {
+        // Measurement scale / count resources and the clipping path name: only while they still
+        // describe the document.
+        if !keep_imported_resource(doc, *id, data) {
             continue;
-        }
-        // A preserved clipping-path resource is only valid while it names the current one.
-        if *id == crate::vector_map::CLIPPING_PATH {
-            let n = usize::from(data.first().copied().unwrap_or(0));
-            let raw_name = data.get(1..1 + n).map(|b| String::from_utf8_lossy(b).into_owned()).unwrap_or_default();
-            if doc.clipping_path.as_ref().is_none_or(|c| c.name != raw_name) {
-                continue;
-            }
         }
         let mut r = ImageResource::new(*id, data.to_vec());
         r.name = legacy_name(name);
@@ -1957,9 +2281,13 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     if let Some(Some(data)) = slices_resource {
         resources.push(ImageResource::new(crate::slices_map::SLICES, data));
     }
-    resources.push(version_info_resource(true));
+    resources.push(version_info_resource(real_merged));
 
     let has_layers = !ex.records.is_empty();
+    // Photoshop writes a merged-transparency marker (`Mtrn`, `Mt16`, `Mt32`) before the layer
+    // block, and won't open a file whose `Lr32` comes first (#5068): the layer block goes right
+    // after the last kept marker, else first.
+    let index = global_blocks.iter().rposition(|b| matches!(&b.key, b"Mtrn" | b"Mt16" | b"Mt32")).map_or(0, |i| i + 1);
     let records = std::mem::take(&mut ex.records);
     let mut layer_info = has_layers.then_some(LayerInfo { merged_alpha: has_alpha, layers: records, padding: None });
     // The layer info is padded to 4 bytes (an even pad misaligns readers after a global
@@ -1970,7 +2298,7 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32) -
     let placement = match (layer_info.as_ref(), sample) {
         (Some(info), SampleType::U16 | SampleType::F32) => {
             let key = if sample == SampleType::U16 { *b"Lr16" } else { *b"Lr32" };
-            LayerInfoPlacement::GlobalBlock { index: 0, signature: *b"8BIM", key, padding: pad4(info) }
+            LayerInfoPlacement::GlobalBlock { index, signature: *b"8BIM", key, padding: pad4(info) }
         }
         _ => LayerInfoPlacement::Section,
     };
@@ -2041,6 +2369,184 @@ mod tests {
         Document::new("size estimate", photosplice_geom::Size::new(width, height), ColorMode::Rgb, SampleType::U8)
     }
 
+    /// Photoshop opens a PSD's bottom layer as its Background only when that layer has no
+    /// transparency channel (measured on Photoshop 27.11: with the channel written, re-exported
+    /// files reopened with the Background as an ordinary layer).
+    #[test]
+    fn a_background_is_written_without_a_transparency_channel() {
+        use photosplice_color::Color;
+        let size = photosplice_geom::Size::new(8, 6);
+        let mut doc = Document::with_background("bg", size, ColorMode::Rgb, SampleType::U8, Color::rgb(0.2, 0.4, 0.6));
+        doc.layers.push(Layer::raster("Layer 1", doc.pixel_format()));
+        let file = document_to_psd(&doc);
+        let layers = &file.layer_info.as_ref().unwrap().layers;
+        let ids = |i: usize| layers[i].channels.iter().map(|c| c.id).collect::<Vec<_>>();
+        assert_eq!(ids(0), vec![0, 1, 2], "the Background has no -1 channel");
+        assert_eq!(layers[0].flags.0, LayerFlags::BIT4_USEFUL | LayerFlags::TRANSPARENCY_PROTECTED, "as Photoshop writes it");
+        assert!(ids(1).contains(&-1), "other layers keep their transparency");
+        // It comes back as the same locked, opaque Background.
+        let back = crate::import("bg.psd", &file.to_bytes().unwrap()).unwrap().document;
+        let bg = &back.layers[0];
+        assert!(bg.locks.transparency && bg.locks.position, "{:?}", bg.locks);
+        assert_eq!(bg.surface().unwrap().read_region(back.bounds()), doc.layers[0].surface().unwrap().read_region(doc.bounds()));
+        // A bottom layer with transparency (or unlocked) is not a Background.
+        let mut holey = doc.clone();
+        holey.layers[0].surface_mut().unwrap().write_pixel(2, 2, &[0.0, 0.0, 0.0, 0.0]);
+        assert!(document_to_psd(&holey).layer_info.unwrap().layers[0].channels.iter().any(|c| c.id == -1));
+        let mut unlocked = doc.clone();
+        unlocked.layers[0].locks.position = false;
+        assert!(document_to_psd(&unlocked).layer_info.unwrap().layers[0].channels.iter().any(|c| c.id == -1));
+    }
+
+    /// A flat 1-bit Bitmap file (no layers) opens in Photoshop as its Background; so does it in
+    /// PhotoSplice. In its own mode it goes back flat; written as layers (no native modes), the
+    /// layer is a Background (no transparency channel).
+    #[test]
+    fn a_flat_bitmap_file_opens_and_saves_as_a_background() {
+        let file = photosplice_psd::testgen::merged_only(Version::Psd, PsdMode::Bitmap, 1, Compression::Raw, 8, 4);
+        let doc = crate::import("flat.psd", &file.to_bytes().unwrap()).unwrap().document;
+        let bg = &doc.layers[0];
+        assert!(bg.name == "Background" && bg.locks.transparency && bg.locks.position, "{:?}", bg.locks);
+        for native_modes in [true, false] {
+            let out = document_to_psd_with(&doc, &PsdExportOptions { native_modes, ..Default::default() }).0;
+            match out.layer_info {
+                Some(info) => assert!(info.layers[0].channels.iter().all(|c| c.id >= 0)),
+                None => assert!(native_modes, "written as layers without native modes"),
+            }
+        }
+    }
+
+    #[test]
+    fn group_divider_id_wraps_without_colliding_with_imported_layer_ids() {
+        let mut doc = document(8, 8);
+        let mut group = Layer::group("Imported group", vec![Layer::raster("Child", doc.pixel_format())]);
+        group.psd_id = Some(u32::MAX);
+        doc.layers.push(group);
+
+        let file = document_to_psd(&doc);
+        let ids: Vec<u32> = file.layers().iter().filter_map(|layer| layer.layer_id()).collect();
+        let unique: std::collections::HashSet<u32> = ids.iter().copied().collect();
+        assert_eq!(ids.len(), 3, "group, child and closing divider");
+        assert_eq!(unique.len(), ids.len(), "no generated ID may collide");
+        assert!(unique.contains(&u32::MAX), "preserve the imported group ID");
+        assert!(unique.contains(&1), "reuse the first unused positive ID on wrap");
+
+        let encoded = file.to_bytes().unwrap();
+        let parsed = PsdFile::from_bytes(&encoded).unwrap();
+        let reloaded_ids: std::collections::HashSet<u32> = parsed.layers().iter().filter_map(|layer| layer.layer_id()).collect();
+        assert_eq!(unique, reloaded_ids);
+    }
+
+    /// #5068: Photoshop won't open a file whose `Lr32` comes before the `Mt32` marker it keeps for
+    /// a 32-bit document's merged transparency (verified in Photoshop 2026 on psd-tools'
+    /// `transparentbg.psd` re-saved both ways). The layer block follows a kept marker.
+    #[test]
+    fn layer_block_follows_a_kept_merged_transparency_marker() {
+        for (depth, key, marker) in [(SampleType::F32, *b"Lr32", *b"Mt32"), (SampleType::U16, *b"Lr16", *b"Mt16"), (SampleType::F32, *b"Lr32", *b"Mtrn")] {
+            let mut doc = Document::new("t", photosplice_geom::Size::new(8, 6), ColorMode::Rgb, depth);
+            let mut s = Surface::new(doc.pixel_format());
+            s.fill_rect(photosplice_geom::Rect::new(1, 1, 5, 4), &[0.5, 0.2, 0.9, 1.0]);
+            doc.layers.push(Layer::new("Layer 1", LayerContent::Raster(s)));
+            doc.metadata.psd_global_blocks = vec![(*b"8BIM", *b"Patt", std::sync::Arc::new(Vec::new())), (*b"8BIM", marker, std::sync::Arc::new(Vec::new()))];
+            let saved = PsdFile::from_bytes(&document_to_psd(&doc).to_bytes().unwrap()).unwrap();
+            let LayerInfoPlacement::GlobalBlock { index, key: written, .. } = saved.layer_info_placement else { panic!("{depth:?}: a global layer block") };
+            assert_eq!(written, key);
+            let at = saved.global_blocks.iter().position(|b| b.key == marker).expect("the marker is kept");
+            assert!(at < index, "{depth:?}: {marker:?} at {at}, the layer block at {index}");
+        }
+        // Without a marker the layer block stays first.
+        let mut doc = Document::new("t", photosplice_geom::Size::new(8, 6), ColorMode::Rgb, SampleType::F32);
+        doc.layers.push(Layer::new("Layer 1", LayerContent::Raster(Surface::new(doc.pixel_format()))));
+        doc.metadata.psd_global_blocks = vec![(*b"8BIM", *b"Patt", std::sync::Arc::new(Vec::new()))];
+        let saved = PsdFile::from_bytes(&document_to_psd(&doc).to_bytes().unwrap()).unwrap();
+        assert!(matches!(saved.layer_info_placement, LayerInfoPlacement::GlobalBlock { index: 0, .. }));
+    }
+
+    #[test]
+    fn unreadable_lr16_warns_on_import_and_is_not_saved_twice() {
+        // #2700: a 16-bit file whose Lr16 block claims five layers but holds none.
+        let mut file = photosplice_psd::testgen::merged_only(Version::Psd, PsdMode::Rgb, 16, Compression::Raw, 8, 6);
+        file.global_layer_mask = Some(GlobalLayerMask::default());
+        file.global_blocks.push(TaggedBlock::new(*b"Lr16", vec![0, 5, 0, 0]));
+        let imported = crate::import("broken.psd", &file.to_bytes().unwrap()).unwrap();
+        assert!(imported.warnings.iter().any(|w| w.contains("Lr16") && w.contains("could not be read")), "{:?}", imported.warnings);
+
+        let saved = PsdFile::from_bytes(&document_to_psd(&imported.document).to_bytes().unwrap()).unwrap();
+        let ours = matches!(saved.layer_info_placement, LayerInfoPlacement::GlobalBlock { key, .. } if key == *b"Lr16");
+        let kept = saved.global_blocks.iter().filter(|b| b.key == *b"Lr16").count();
+        assert_eq!((ours, kept), (true, 0), "exactly one Lr16 block: the document's own layers");
+        assert_eq!(saved.layers().len(), 1);
+    }
+
+    #[test]
+    fn photo_filter_psd_is_four_byte_aligned_and_round_trips() {
+        let color = [60000u16, 30000, 0].map(|x| x as f32 / 65535.0);
+        let adjustment = photosplice_doc::Adjustment::PhotoFilter { color, density: 0.14, preserve_luminosity: true };
+        let mut doc =
+            Document::with_background("Photo Filter PSD", photosplice_geom::Size::new(32, 24), ColorMode::Rgb, SampleType::U8, photosplice_doc::Color::WHITE);
+        let mut layer = Layer::new("Warming Filter", LayerContent::Adjustment(adjustment.clone()));
+        doc.layers.push(layer.clone());
+
+        let assert_phfl = |file: &PsdFile| {
+            let records = &file.layer_info.as_ref().unwrap().layers;
+            let data =
+                records.iter().flat_map(|r| r.blocks.iter()).find(|b| b.key == *b"phfl").map(|b| b.data.as_slice()).expect("Photo Filter adjustment data");
+            assert_eq!(data.len(), 20, "PSD layer block length includes four-byte padding");
+            assert_eq!(&data[0..2], &[0, 2], "version 2 RGB Photo Filter");
+            assert_eq!(&data[17..], &[0, 0, 0], "three padding bytes after the 17-byte payload");
+        };
+
+        let exported = document_to_psd(&doc);
+        assert_phfl(&exported);
+        let encoded = exported.to_bytes().unwrap();
+        let parsed = PsdFile::from_bytes(&encoded).unwrap();
+        assert_phfl(&parsed);
+        let (restored, _) = crate::psd_import::psd_to_document(&parsed);
+        assert!(restored.layers.iter().any(|l| l.content == LayerContent::Adjustment(adjustment.clone())));
+
+        // Importing a legacy 18-byte block must still work; saving it again should repair it
+        // even when the adjustment values have not changed (normally raw blocks are reused).
+        let mut legacy = crate::adjust_map::write(&adjustment)[0].1.clone();
+        legacy.truncate(18);
+        layer.psd_blocks = vec![(*b"phfl", std::sync::Arc::new(legacy))];
+        doc.layers.pop();
+        doc.layers.push(layer);
+        let repaired = document_to_psd(&doc);
+        assert_phfl(&repaired);
+        let repaired_bytes = repaired.to_bytes().unwrap();
+        assert_phfl(&PsdFile::from_bytes(&repaired_bytes).unwrap());
+    }
+
+    #[test]
+    fn photo_filter_version_3_is_kept_until_edited() {
+        // The #3777 block (Photoshop CS2, XYZ colour): saved back byte-exact while unchanged.
+        let v3 = vec![0, 3, 0, 0, 0x5e, 0x7f, 0, 0, 0x61, 0xaa, 0, 0, 0x0e, 0xf3, 0, 0, 0, 0x3f, 1, 0];
+        let adjustment = crate::adjust_map::parse(b"phfl", &v3, None, crate::adjust_map::Channels::Rgb);
+        let photosplice_doc::Adjustment::PhotoFilter { color, .. } = adjustment else { panic!("{adjustment:?}") };
+        let mut doc =
+            Document::with_background("Photo Filter v3", photosplice_geom::Size::new(8, 8), ColorMode::Rgb, SampleType::U8, photosplice_doc::Color::WHITE);
+        let mut layer = Layer::new("Photo Filter 1", LayerContent::Adjustment(adjustment.clone()));
+        layer.psd_blocks = vec![(*b"phfl", std::sync::Arc::new(v3.clone()))];
+        doc.layers.push(layer);
+        let phfl = |doc: &Document| {
+            let file = PsdFile::from_bytes(&document_to_psd(doc).to_bytes().unwrap()).unwrap();
+            let records = &file.layer_info.as_ref().unwrap().layers;
+            records.iter().flat_map(|r| r.blocks.iter()).find(|b| b.key == *b"phfl").map(|b| b.data.clone()).expect("Photo Filter adjustment data")
+        };
+        assert_eq!(phfl(&doc), v3);
+        // Once edited it is written as version 2 (RGB), and the colour survives.
+        let edited = photosplice_doc::Adjustment::PhotoFilter { color, density: 0.5, preserve_luminosity: true };
+        if let Some(l) = doc.layers.last_mut() {
+            l.content = LayerContent::Adjustment(edited.clone());
+        }
+        let saved = phfl(&doc);
+        assert_eq!(&saved[..2], &[0, 2]);
+        let reread = crate::adjust_map::parse(b"phfl", &saved, None, crate::adjust_map::Channels::Rgb);
+        let photosplice_doc::Adjustment::PhotoFilter { color: back, density, .. } = reread else { panic!("{reread:?}") };
+        assert!(back.iter().zip(color).all(|(b, c)| (b - c).abs() <= 1.0 / 65535.0), "{back:?} vs {color:?}");
+        assert_eq!(density, 0.5);
+    }
+
     #[test]
     fn size_limit_boundary_keeps_limit_and_switches_above_it() {
         assert!(!exceeds_psd_size_limit(Some(PSD_MAX_FILE_SIZE)));
@@ -2067,5 +2573,54 @@ mod tests {
         let small_size_exceeds_limit = psd_size_exceeds_limit(&small);
         assert_eq!(psd_version(&small, false, small_size_exceeds_limit), Version::Psd);
         assert_eq!(psd_version(&small, true, small_size_exceeds_limit), Version::Psb);
+    }
+    #[test]
+    fn kept_psb_blocks_are_written_as_8bim_in_a_psd() {
+        // Photoshop 27.11 refuses a PSD holding `8B64` blocks ("not compatible with this
+        // version"); they came from re-saving a PSB as PSD with its global FMsk and cinf kept.
+        let mut doc = document(4, 4);
+        doc.metadata.psd_global_blocks = vec![
+            (*b"8B64", *b"FMsk", std::sync::Arc::new(vec![0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 50])),
+            (*b"8BIM", *b"Patt", std::sync::Arc::new(Vec::new())),
+        ];
+        let signatures = |force_psb| {
+            let opts = PsdExportOptions { force_psb, ..PsdExportOptions::default() };
+            let bytes = document_to_psd_with(&doc, &opts).0.to_bytes().unwrap();
+            let file = PsdFile::from_bytes(&bytes).unwrap();
+            file.global_blocks.iter().map(|b| (b.signature, b.key)).collect::<Vec<_>>()
+        };
+        assert_eq!(signatures(false), vec![(*b"8BIM", *b"FMsk"), (*b"8BIM", *b"Patt")]);
+        assert_eq!(signatures(true), vec![(*b"8B64", *b"FMsk"), (*b"8BIM", *b"Patt")], "a PSB keeps 8B64");
+    }
+
+    /// A layered document with transparency in the merged image and an alpha channel: the name
+    /// and DisplayInfo resources hold one entry per extra channel, the merged transparency first,
+    /// as in every file Photoshop opens (one short, Photoshop 27.11 refused the file with "Could
+    /// not import the clipboard because an unexpected end-of-file was encountered"). The alpha
+    /// channel keeps its own name and options on the way back.
+    #[test]
+    fn alpha_names_count_the_merged_transparency() {
+        let mut doc = document(8, 6);
+        let mut layer = Layer::raster("Layer 1", doc.pixel_format());
+        layer.surface_mut().unwrap().write_pixel(1, 1, &[1.0, 0.0, 0.0, 1.0]);
+        doc.layers.push(layer);
+        let mut a = photosplice_doc::AlphaChannel::new("Alpha 1", photosplice_raster::Surface::new(PixelFormat::GRAY8));
+        a.opacity = 0.5;
+        doc.channels.push(a);
+        let file = document_to_psd(&doc);
+        let header_extra = usize::from(file.header.channels) - 3;
+        let names = |id| file.resources.iter().find(|r| r.id == id).map(|r| r.data.clone()).unwrap();
+        let pascal = names(1006);
+        let (mut count, mut i) = (0, 0);
+        while i < pascal.len() {
+            count += 1;
+            i += 1 + usize::from(pascal[i]);
+        }
+        assert_eq!((header_extra, count), (2, 2), "transparency + Alpha 1");
+        assert_eq!(names(crate::channel_map::DISPLAY_INFO).len(), 4 + 2 * 13);
+        let back = crate::import("a.psd", &file.to_bytes().unwrap()).unwrap().document;
+        assert_eq!(back.channels.len(), 1);
+        assert_eq!(back.channels[0].name, "Alpha 1");
+        assert!((back.channels[0].opacity - 0.5).abs() < 1e-6);
     }
 }

@@ -28,6 +28,7 @@ pub struct Library {
 }
 
 /// A finished background pattern load: (group, patterns or the error).
+#[cfg(not(target_arch = "wasm32"))]
 type PatternLoad = (String, Result<Vec<photosplice_doc::Pattern>, String>);
 
 /// Run-time state of the bundled libraries.

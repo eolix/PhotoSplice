@@ -6,6 +6,8 @@
 //!     --script '[["ui.set", {"tool": "type"}], ["ui.menu.invoke", {"id": "image.imageSize"}]]'
 //! ```
 //!
+//! `--system-theme light|dark|none` supplies a deterministic OS appearance for theme captures.
+//!
 //! `--safe-gpu` draws the canvas on the CPU path, like the app's `--safe-gpu` launch.
 //!
 //! `--script` is a JSON array of `[method, params]` control-protocol calls (see
@@ -33,12 +35,11 @@ fn main() {
         arg(&args, "--script").map(|s| serde_json::from_str::<Vec<(String, Value)>>(&s).expect("--script must be [[method, params], …]")).unwrap_or_default();
 
     let services = Services {
-        import: Some(Box::new(|name: &str, bytes: &[u8]| photosplice_io::import(name, bytes).map(|r| (r.document, r.warnings)).map_err(|e| e.to_string()))),
+        import: Some(Box::new(|name: &str, bytes: &[u8], depth: usize| {
+            photosplice_io::import_with_svg_group_depth(name, bytes, depth).map(|r| (r.document, r.warnings)).map_err(|e| e.to_string())
+        })),
         export: Some(Box::new(|doc: &photosplice_doc::Document, path: &str, settings: &photosplice_ui_egui::ExportSettings| {
-            let mut opts = photosplice_io::ExportOptions::default();
-            if let Some(q) = settings.jpeg_quality {
-                opts.encode.jpeg_quality = q;
-            }
+            let opts = settings.io_options();
             photosplice_io::export(doc, path, &opts).map(|r| (r.bytes, r.warnings)).map_err(|e| e.to_string())
         })),
         write: Some(Box::new(|path: &str, bytes: &[u8]| photosplice_format::atomic_write(std::path::Path::new(path), bytes).map_err(|e| e.to_string()))),
@@ -74,6 +75,17 @@ fn main() {
             }
             app
         });
+    if let Some(appearance) = arg(&args, "--system-theme") {
+        harness.input_mut().system_theme = match appearance.as_str() {
+            "light" => Some(egui::Theme::Light),
+            "dark" => Some(egui::Theme::Dark),
+            "none" => None,
+            _ => {
+                eprintln!("--system-theme must be light, dark or none");
+                std::process::exit(2);
+            }
+        };
+    }
     harness.run_steps(4);
     let ctx = harness.ctx.clone();
     let timing = std::env::var_os("SNAPSHOT_TIMING").is_some();

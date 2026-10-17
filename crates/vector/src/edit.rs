@@ -1,6 +1,6 @@
-//! Point-level path editing, Photoshop's Direct Selection and Convert Point tools: move anchors,
-//! drag direction handles, reshape a segment by dragging it, convert between smooth and corner
-//! points, and hit-test a path's parts. Pure geometry on [`Path`]; the engine's `path.*` edit
+//! Point-level path editing, Photoshop's Direct Selection, Convert Point and Add / Delete Anchor
+//! Point tools: move anchors, drag direction handles, reshape a segment by dragging it, convert
+//! between smooth and corner points, insert and remove anchors, and hit-test a path's parts. Pure geometry on [`Path`]; the engine's `path.*` edit
 //! commands and the canvas previews share it, so a preview is exactly what the command commits.
 //!
 //! Knots are addressed as `[subpath, knot]`. Every edit validates its indices and returns an
@@ -80,6 +80,12 @@ fn handle(k: &Knot, h: Handle) -> Point {
     }
 }
 
+/// Whether the segment from knot `a` to knot `b` is straight: both of its handles retracted.
+fn straight(a: &Knot, b: &Knot) -> bool {
+    let retracted = |k: &Knot, h: Handle| dist(handle(k, h), k.anchor) < 1e-9;
+    retracted(a, Handle::Out) && retracted(b, Handle::In)
+}
+
 fn other(h: Handle) -> Handle {
     match h {
         Handle::In => Handle::Out,
@@ -116,6 +122,39 @@ pub fn move_anchors(path: &mut Path, anchors: &[[usize; 2]], d: [f64; 2]) -> Res
     Ok(())
 }
 
+/// The Curvature Pen's anchor drag: moves the anchors like [`move_anchors`], then recomputes the
+/// handles of every smooth knot in the subpaths it touched with [`curvature_knots`], so the curve
+/// keeps flowing smoothly through all its anchors, as Photoshop does. Corner knots keep their own
+/// handles (moved with them).
+pub fn move_anchors_curvature(path: &mut Path, anchors: &[[usize; 2]], d: [f64; 2]) -> Result<(), String> {
+    move_anchors(path, anchors, d)?;
+    let mut subs: Vec<usize> = anchors.iter().map(|a| a[0]).collect();
+    subs.sort_unstable();
+    subs.dedup();
+    for s in subs {
+        let sp = path.subpaths.get_mut(s).ok_or_else(|| format!("no subpath {s}"))?;
+        let pts: Vec<[f64; 2]> = sp.knots.iter().map(|k| [k.anchor.x, k.anchor.y]).collect();
+        let corners: Vec<bool> = sp.knots.iter().map(|k| !k.smooth).collect();
+        let fresh = curvature_knots(&pts, &corners, sp.closed);
+        for (k, f) in sp.knots.iter_mut().zip(fresh) {
+            if k.smooth {
+                k.in_ctrl = Point::new(f[1][0], f[1][1]);
+                k.out_ctrl = Point::new(f[2][0], f[2][1]);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The Curvature Pen's double-click on an anchor: a corner becomes smooth and a smooth knot a
+/// corner (handles retracted), then the subpath reflows as [`move_anchors_curvature`] does, so the
+/// segments around a new smooth point curve through it.
+pub fn toggle_curvature_point(path: &mut Path, knot: [usize; 2]) -> Result<(), String> {
+    let k = knot_mut(path, knot)?;
+    *k = if k.smooth { Knot::corner(k.anchor.x, k.anchor.y) } else { Knot { smooth: true, ..*k } };
+    move_anchors_curvature(path, &[knot], [0.0, 0.0])
+}
+
 /// Puts handle `h` of a knot at `to`. A smooth knot turns its other handle to stay collinear,
 /// unless `independent` (Convert Point / ⌥), which makes it a corner whose handles move apart.
 pub fn move_handle(path: &mut Path, knot: [usize; 2], h: Handle, to: Point, independent: bool) -> Result<(), String> {
@@ -145,10 +184,9 @@ pub fn convert_point(path: &mut Path, knot: [usize; 2], out: Option<Point>) -> R
 /// the pointer exactly, with the nearer handle moving more. Smooth end knots stay smooth.
 pub fn bend_segment(path: &mut Path, knot: [usize; 2], t: f64, d: [f64; 2]) -> Result<(), String> {
     let end = segment_end(path, knot)?;
-    let retracted = |k: &Knot, h: Handle| dist(handle(k, h), k.anchor) < 1e-9;
     let a = *knot_mut(path, knot)?;
     let b = *knot_mut(path, end)?;
-    if retracted(&a, Handle::Out) && retracted(&b, Handle::In) {
+    if straight(&a, &b) {
         return move_anchors(path, &[knot, end], d);
     }
     // B(t) moves by 3(1−t)²t·Δc1 + 3(1−t)t²·Δc2. With Δc1 = (1−t)·s·d and Δc2 = t·s·d that is
@@ -210,6 +248,57 @@ pub fn delete_anchor(path: &mut Path, [s, k]: [usize; 2]) -> Result<(), String> 
     Ok(())
 }
 
+/// Add Anchor Point: inserts an anchor into the segment leaving `knot` at curve parameter `t`
+/// (strictly between 0 and 1) and returns the new knot's `[subpath, knot]`. A curve is split at
+/// `t` (de Casteljau), so its shape does not change and the new anchor is smooth; on a straight
+/// segment (both handles retracted) the new anchor is a corner on the line.
+pub fn add_anchor(path: &mut Path, knot: [usize; 2], t: f64) -> Result<[usize; 2], String> {
+    if !(t.is_finite() && t > 0.0 && t < 1.0) {
+        return Err("`t` must be strictly between 0 and 1".into());
+    }
+    let end = segment_end(path, knot)?;
+    let a = *knot_mut(path, knot)?;
+    let b = *knot_mut(path, end)?;
+    let new = if straight(&a, &b) {
+        // Hit testing and hover feedback use the cubic parameter, which is not linear even
+        // when both handles are retracted. Keep the inserted corner at that same point.
+        let p = eval(&[a.anchor, a.out_ctrl, b.in_ctrl, b.anchor], t);
+        Knot::corner(p.x, p.y)
+    } else {
+        let (p01, p12, p23) = (lerp(a.anchor, a.out_ctrl, t), lerp(a.out_ctrl, b.in_ctrl, t), lerp(b.in_ctrl, b.anchor, t));
+        let (p012, p123) = (lerp(p01, p12, t), lerp(p12, p23, t));
+        knot_mut(path, knot)?.out_ctrl = p01;
+        knot_mut(path, end)?.in_ctrl = p23;
+        Knot::smooth(lerp(p012, p123, t), p012, p123)
+    };
+    let [s, k] = knot;
+    let at = k.checked_add(1).ok_or_else(|| format!("no segment leaves knot {k} of subpath {s}"))?;
+    let sp = path.subpaths.get_mut(s).ok_or_else(|| format!("no subpath {s}"))?;
+    // `at` ≤ len: the segment leaving `k` exists, so `k` < len.
+    sp.knots.insert(at.min(sp.knots.len()), new);
+    Ok([s, at])
+}
+
+/// Delete Anchor Point, reporting whether the subpath went (the `path.deleteAnchor` command's
+/// form; [`delete_anchor`] is the Pen tool's). Removes a knot. Its neighbours are joined by one
+/// segment that keeps the previous anchor's out handle and the next anchor's in handle; a closed
+/// subpath stays closed. Removing a subpath's last anchor removes the subpath. Refused
+/// (unchanged) when it would leave the path with no anchors at all.
+pub fn delete_anchor_reporting(path: &mut Path, [s, k]: [usize; 2]) -> Result<bool, String> {
+    knot_mut(path, [s, k])?;
+    let total: usize = path.subpaths.iter().map(|sp| sp.knots.len()).fold(0, usize::saturating_add);
+    if total <= 1 {
+        return Err("can't delete the path's only anchor point; delete the path instead".into());
+    }
+    let sp = path.subpaths.get_mut(s).ok_or_else(|| format!("no subpath {s}"))?;
+    if sp.knots.len() <= 1 {
+        path.subpaths.remove(s);
+        return Ok(true);
+    }
+    sp.knots.remove(k);
+    Ok(false)
+}
+
 /// Every anchor of subpath `s` (⌥-click with Direct Selection selects the whole subpath).
 pub fn subpath_anchors(path: &Path, s: usize) -> Vec<[usize; 2]> {
     path.subpaths.get(s).map_or_else(Vec::new, |sp| (0..sp.knots.len()).map(|k| [s, k]).collect())
@@ -229,7 +318,55 @@ pub fn anchors_in(path: &Path, [x0, y0, x1, y1]: [f64; 4]) -> Vec<[usize; 2]> {
     out
 }
 
-fn eval(seg: &[Point; 4], t: f64) -> Point {
+/// The Curvature Pen's knots, `[anchor, in, out]`, through `anchors`: a smooth curve that passes
+/// through every anchor, Catmull-Rom style. An inner anchor's handles lie on the line parallel
+/// to its neighbours' chord (so they are collinear), each a third of the distance to the
+/// neighbour on its side long (the chordal scaling that keeps uneven spacing from overshooting).
+/// The ends of an open path aim at their neighbour's nearer handle. `corners[i]` retracts anchor
+/// `i`'s handles (a corner point); a missing entry is smooth. Coincident points give retracted
+/// handles, never NaN.
+pub fn curvature_knots(anchors: &[[f64; 2]], corners: &[bool], closed: bool) -> Vec<[[f64; 2]; 3]> {
+    let n = anchors.len();
+    let mut knots: Vec<[[f64; 2]; 3]> = anchors.iter().map(|&a| [a; 3]).collect();
+    let dist = |a: [f64; 2], b: [f64; 2]| (b[0] - a[0]).hypot(b[1] - a[1]);
+    let unit = |a: [f64; 2], b: [f64; 2]| {
+        let l = dist(a, b);
+        (l > 1e-9).then(|| [(b[0] - a[0]) / l, (b[1] - a[1]) / l])
+    };
+    let corner = |i: usize| corners.get(i).copied().unwrap_or(false);
+    let inner = |i: usize| closed || (i > 0 && i + 1 < n);
+    for (i, &p) in anchors.iter().enumerate() {
+        if n < 3 || corner(i) || !inner(i) {
+            continue;
+        }
+        let prev = anchors[(i + n - 1) % n];
+        let next = anchors[(i + 1) % n];
+        let Some(d) = unit(prev, next).or_else(|| unit(p, next)) else { continue };
+        let (li, lo) = (dist(prev, p) / 3.0, dist(p, next) / 3.0);
+        knots[i] = [p, [p[0] - d[0] * li, p[1] - d[1] * li], [p[0] + d[0] * lo, p[1] + d[1] * lo]];
+    }
+    if !closed && n >= 3 {
+        for (end, nb, take_in) in [(0, 1, true), (n - 1, n - 2, false)] {
+            if corner(end) {
+                continue;
+            }
+            let p = anchors[end];
+            let aim = if take_in { knots[nb][1] } else { knots[nb][2] };
+            let Some(d) = unit(p, aim) else { continue };
+            let l = dist(p, anchors[nb]) / 3.0;
+            let h = [p[0] + d[0] * l, p[1] + d[1] * l];
+            if take_in {
+                knots[end][2] = h;
+            } else {
+                knots[end][1] = h;
+            }
+        }
+    }
+    knots
+}
+
+/// The point at parameter `t` of the cubic segment `[anchor, out, in, anchor]`.
+pub fn eval(seg: &[Point; 4], t: f64) -> Point {
     let u = 1.0 - t;
     let (a, b, c, d) = (u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t);
     Point::new(a * seg[0].x + b * seg[1].x + c * seg[2].x + d * seg[3].x, a * seg[0].y + b * seg[1].y + c * seg[2].y + d * seg[3].y)
@@ -286,6 +423,60 @@ mod tests {
 
     fn at(path: &Path, s: usize, k: usize) -> Knot {
         path.subpaths[s].knots[k]
+    }
+
+    /// A closed four-anchor curvature loop (all smooth), as the Curvature Pen draws it.
+    fn loop4() -> Path {
+        let pts = [[0.0, 50.0], [100.0, 0.0], [200.0, 50.0], [100.0, 100.0]];
+        let knots = curvature_knots(&pts, &[false; 4], true)
+            .into_iter()
+            .map(|k| Knot::smooth(Point::new(k[0][0], k[0][1]), Point::new(k[1][0], k[1][1]), Point::new(k[2][0], k[2][1])))
+            .collect();
+        Path::new(vec![Subpath { closed: true, knots, op: Default::default() }])
+    }
+
+    #[test]
+    fn a_curvature_drag_reflows_every_smooth_knot_through_the_moved_anchor() {
+        let mut p = loop4();
+        move_anchors_curvature(&mut p, &[[0, 1]], [0.0, 60.0]).unwrap();
+        let pts = [[0.0, 50.0], [100.0, 60.0], [200.0, 50.0], [100.0, 100.0]];
+        let want = curvature_knots(&pts, &[false; 4], true);
+        for (k, w) in p.subpaths[0].knots.iter().zip(want) {
+            assert_eq!([[k.anchor.x, k.anchor.y], [k.in_ctrl.x, k.in_ctrl.y], [k.out_ctrl.x, k.out_ctrl.y]], w);
+        }
+        // The neighbours turned: not a plain move.
+        assert_ne!(at(&p, 0, 0).out_ctrl, at(&loop4(), 0, 0).out_ctrl);
+    }
+
+    #[test]
+    fn a_curvature_drag_keeps_corner_handles_and_rejects_bad_indices() {
+        let mut p = curve();
+        move_anchors_curvature(&mut p, &[[0, 1]], [0.0, 10.0]).unwrap();
+        assert_eq!((at(&p, 0, 0), at(&p, 0, 2)), (at(&curve(), 0, 0), at(&curve(), 0, 2)), "the corners kept their handles");
+        assert_eq!(at(&p, 0, 1).anchor, Point::new(50.0, 10.0));
+        let before = curve();
+        let mut q = curve();
+        assert!(move_anchors_curvature(&mut q, &[[0, 9]], [1.0, 1.0]).is_err());
+        assert!(move_anchors_curvature(&mut q, &[[4, 0]], [1.0, 1.0]).is_err());
+        assert_eq!(q, before, "a refused edit changes nothing");
+    }
+
+    #[test]
+    fn a_curvature_double_click_turns_a_corner_smooth_and_back() {
+        // A closed square of corners, as the Pen draws it.
+        let square = || Path::new(vec![Subpath::polygon(&[(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)])]);
+        let mut p = square();
+        toggle_curvature_point(&mut p, [0, 1]).unwrap();
+        let k = at(&p, 0, 1);
+        assert!(k.smooth);
+        let want = curvature_knots(&[[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]], &[true, false, true, true], true)[1];
+        assert_eq!([[k.in_ctrl.x, k.in_ctrl.y], [k.out_ctrl.x, k.out_ctrl.y]], [want[1], want[2]], "its handles follow its neighbours");
+        assert_eq!((at(&p, 0, 0), at(&p, 0, 2)), (at(&square(), 0, 0), at(&square(), 0, 2)), "the corners around keep theirs");
+        toggle_curvature_point(&mut p, [0, 1]).unwrap();
+        assert_eq!(p, square(), "a second double-click makes it a corner again");
+        assert!(toggle_curvature_point(&mut p, [0, 7]).is_err());
+        assert!(toggle_curvature_point(&mut p, [3, 0]).is_err());
+        assert_eq!(p, square());
     }
 
     #[test]
@@ -372,6 +563,102 @@ mod tests {
         assert_eq!(r, [0, 0]);
         assert!((t - 0.5).abs() < 0.02, "{t}");
         assert_eq!(hit(&tri(), Point::new(50.0, 40.0), 3.0, &[]), None);
+    }
+
+    #[test]
+    fn adding_to_a_curve_splits_it_without_changing_its_shape() {
+        for t in [0.5, 0.13, 0.9] {
+            let mut p = curve();
+            let seg = curve().subpaths[0].segments()[0];
+            let r = add_anchor(&mut p, [0, 0], t).unwrap();
+            assert_eq!((r, p.subpaths[0].knots.len()), ([0, 1], 4));
+            let k = at(&p, 0, 1);
+            assert!(k.smooth, "a split curve gets a smooth anchor");
+            assert!(dist(k.anchor, eval(&seg, t)) < 1e-9, "the new anchor is where it was clicked");
+            // 100 evenly spaced parameters of the old segment land on the two halves.
+            let halves = p.subpaths[0].segments();
+            for i in 0..=100 {
+                let u = i as f64 / 100.0;
+                let q = if u <= t { eval(&halves[0], u / t) } else { eval(&halves[1], (u - t) / (1.0 - t)) };
+                assert!(dist(q, eval(&seg, u)) < 0.01, "t={t} u={u}");
+            }
+            assert_eq!(halves[2], curve().subpaths[0].segments()[1], "the next segment is untouched");
+        }
+    }
+
+    #[test]
+    fn adding_to_a_straight_segment_uses_the_hit_position() {
+        for (points, closed) in [
+            (vec![(0.0, 0.0), (100.0, 0.0)], false),
+            (vec![(0.0, 0.0), (0.0, 100.0)], false),
+            (vec![(0.0, 0.0), (100.0, 100.0)], false),
+            (vec![(0.0, 0.0), (100.0, 0.0), (100.0, 100.0)], true),
+        ] {
+            for t in [0.25, 0.75] {
+                let sp = if closed { Subpath::polygon(&points) } else { Subpath::polyline(&points) };
+                let mut p = Path::new(vec![sp]);
+                let segment = if closed { 2 } else { 0 };
+                let clicked = eval(&p.subpaths[0].segments()[segment], t);
+                let Some(Hit::Segment(knot, hit_t)) = hit(&p, clicked, 1.0, &[]) else { panic!("expected a segment hit at {clicked:?}") };
+                let added = add_anchor(&mut p, knot, hit_t).unwrap();
+                let inserted = at(&p, added[0], added[1]);
+                assert!(dist(inserted.anchor, clicked) < 1e-9, "t={t}: inserted {:?}, clicked {clicked:?}", inserted.anchor);
+                assert_eq!(inserted, Knot::corner(clicked.x, clicked.y), "straight segments retain retracted handles");
+            }
+        }
+    }
+
+    #[test]
+    fn adding_to_a_straight_segment_makes_a_corner_on_the_line() {
+        let mut p = tri();
+        // The closing segment (2 → 0) wraps: the new anchor goes last.
+        assert_eq!(add_anchor(&mut p, [0, 2], 0.5).unwrap(), [0, 3]);
+        assert_eq!(at(&p, 0, 3), Knot::corner(25.0, 40.0));
+        assert_eq!(add_anchor(&mut p, [0, 0], 0.25).unwrap(), [0, 1]);
+        assert_eq!(at(&p, 0, 1), Knot::corner(15.625, 0.0));
+        assert_eq!(p.subpaths[0].knots.len(), 5);
+        assert!(p.subpaths[0].closed);
+    }
+
+    #[test]
+    fn deleting_joins_the_neighbours_with_their_handles() {
+        let mut sq = Path::new(vec![Subpath::polygon(&[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)])]);
+        assert!(!delete_anchor_reporting(&mut sq, [0, 2]).unwrap());
+        assert_eq!((sq.subpaths[0].knots.len(), sq.subpaths[0].closed), (3, true));
+        let mut c = Path::new(vec![Subpath::polyline(&[(0.0, 50.0), (50.0, 0.0), (100.0, 50.0)])]);
+        c.subpaths[0].knots[0].out_ctrl = Point::new(10.0, 20.0);
+        c.subpaths[0].knots[2].in_ctrl = Point::new(90.0, 20.0);
+        delete_anchor(&mut c, [0, 1]).unwrap();
+        assert_eq!(c.subpaths[0].segments(), vec![[Point::new(0.0, 50.0), Point::new(10.0, 20.0), Point::new(90.0, 20.0), Point::new(100.0, 50.0)]]);
+    }
+
+    #[test]
+    fn deleting_a_subpaths_last_anchor_removes_it_but_never_the_last_anchor() {
+        let mut p = tri();
+        p.subpaths.push(Subpath::polyline(&[(5.0, 5.0)]));
+        assert!(delete_anchor_reporting(&mut p, [1, 0]).unwrap());
+        assert_eq!(p, tri());
+        let mut one = Path::new(vec![Subpath::polyline(&[(5.0, 5.0)])]);
+        let before = one.clone();
+        assert!(delete_anchor_reporting(&mut one, [0, 0]).is_err());
+        assert_eq!(one, before);
+        // The Pen's own `delete_anchor` removes the emptied subpath (callers guard the last one).
+        assert!(delete_anchor(&mut one, [0, 0]).is_ok());
+        assert!(one.subpaths.is_empty());
+    }
+
+    #[test]
+    fn bad_anchor_edits_are_errors_and_change_nothing() {
+        let mut p = curve();
+        for t in [0.0, 1.0, -0.5, 2.0, f64::NAN, f64::INFINITY] {
+            assert!(add_anchor(&mut p, [0, 0], t).is_err(), "t={t}");
+        }
+        assert!(add_anchor(&mut p, [0, 2], 0.5).is_err(), "an open subpath's last knot starts no segment");
+        assert!(add_anchor(&mut p, [0, usize::MAX], 0.5).is_err());
+        assert!(add_anchor(&mut p, [usize::MAX, 0], 0.5).is_err());
+        assert!(delete_anchor(&mut p, [0, 3]).is_err());
+        assert!(delete_anchor(&mut p, [1, 0]).is_err());
+        assert_eq!(p, curve());
     }
 
     #[test]

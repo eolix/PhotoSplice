@@ -80,8 +80,11 @@ fn srgb_is_the_identity_fast_path() {
         assert!(s.color.canvas_lut(&d, 9).unwrap().is_none(), "no GPU LUT either");
         assert!(close(shown(&s, &d), [204.0, 127.5, 76.5], 0.6));
     }
-    // Untagged gray (sGray), CMYK (shown in sRGB) and Lab composites are sRGB too.
-    let g = Document::with_background("g", Size::new(4, 4), ColorMode::Grayscale, SampleType::U8, Color::gray(0.3));
+    // sGray-tagged gray and CMYK (shown in sRGB) composites are sRGB too; untagged gray takes the
+    // default working gray (Dot Gain 20 %-compatible), which is not.
+    let mut g = Document::with_background("g", Size::new(4, 4), ColorMode::Grayscale, SampleType::U8, Color::gray(0.3));
+    assert!(!s.color.canvas_display(&g).unwrap().is_identity());
+    g.icc_profile = Some(Builtin::SGray.profile().to_bytes());
     assert!(s.color.canvas_display(&g).unwrap().is_identity());
     assert!(s.color.canvas_display(&cmyk_doc(None, [0.1, 0.5, 0.5, 0.0])).unwrap().is_identity());
     // Cached: the same Arc for the same profiles.
@@ -184,6 +187,26 @@ fn exr_round_trip_is_linear() {
     let v = back.layers[0].surface().unwrap().pixel(1, 1);
     assert!((v[0] - 0.214).abs() < 2e-3, "stored linear: {v:?}");
     assert!(close(shown(&s, &back), shown(&s, &d), 1.0));
+    // Opening keeps it linear without a mismatch prompt.
+    let (_, report) = s.open_document(back, None);
+    assert_eq!(report["action"], "kept");
+    assert!(report.get("ask").is_none());
+}
+
+#[test]
+fn gray_exr_round_trip_is_linear() {
+    let mut s = Session::new();
+    // An sGray document exported to EXR is linearised (#2386); re-opened it is tagged linear gray
+    // and displays as before.
+    let mut d = Document::with_background("t", Size::new(8, 8), ColorMode::Grayscale, SampleType::U8, Color::gray(128.0 / 255.0));
+    d.icc_profile = Some(Builtin::SGray.profile().to_bytes());
+    let r = photosplice_io::export(&d, "x.exr", &photosplice_io::ExportOptions::default()).unwrap();
+    let back = photosplice_io::import("x.exr", &r.bytes).unwrap().document;
+    let icc = back.icc_profile.clone().expect("tagged");
+    assert_eq!(Profile::parse(&icc).unwrap().content_hash(), photosplice_cms::builtin::linear_gray().content_hash());
+    let v = back.layers[0].surface().unwrap().pixel(1, 1);
+    assert!((v[0] - 0.2159).abs() < 1e-3, "stored linear: {v:?}");
+    assert!(close(shown(&s, &back), shown(&s, &d), 1.0), "{:?} vs {:?}", shown(&s, &back), shown(&s, &d));
     // Opening keeps it linear without a mismatch prompt.
     let (_, report) = s.open_document(back, None);
     assert_eq!(report["action"], "kept");
@@ -373,4 +396,62 @@ fn proof_colors_still_apply_on_top() {
     let sig = s.color.display_signature(&d);
     s.execute("view.gamutWarning", json!({"on": true})).unwrap();
     assert_ne!(sig, s.color.display_signature(&d));
+}
+
+#[test]
+fn parallel_linear_encodes_match_the_scalar_curve() {
+    // Several parallel pieces, a ragged last one, and HDR, negative and NaN values.
+    let n: usize = 3 * 16 * 1024 + 77;
+    let px: Vec<[f32; 4]> = (0..n)
+        .map(|i| {
+            let v = match i % 9 {
+                0 => f32::NAN,
+                1 => -0.5,
+                2 => 3.25,
+                _ => (i % 1001) as f32 / 1000.0,
+            };
+            [v, (i % 257) as f32 / 256.0, 1.0 - (i % 113) as f32 / 112.0, (i % 5) as f32 / 4.0]
+        })
+        .collect();
+    let buf = photosplice_compose::Buffer { rect: Rect::new(-4, 2, -4 + n as i32, 3), px };
+    let mut doc = Document::new("t", Size::new(1, 1), ColorMode::Rgb, SampleType::F32);
+    doc.icc_profile = Some(Builtin::LinearSrgb.profile().to_bytes());
+    let mut color = crate::color_cmds::ColorState::default();
+    color.settings.monitor_profile = "srgb".into();
+    let d = color.canvas_display(&doc).unwrap();
+    assert!(d.encode_srgb);
+    let enc = |v: f32| photosplice_color::convert::linear_to_srgb(v.clamp(0.0, 65504.0));
+    let tex = d.texture_buffer(&buf);
+    assert_eq!(tex.rect, buf.rect);
+    for (t, p) in tex.px.iter().zip(&buf.px) {
+        let want = [enc(p[0]), enc(p[1]), enc(p[2]), p[3]];
+        assert!(t.iter().zip(want).all(|(a, b)| a.to_bits() == b.to_bits()), "{p:?} -> {t:?}, want {want:?}");
+    }
+    let code = |v: f32| (photosplice_color::convert::linear_to_srgb(((v.clamp(0.0, 1.0) * 65535.0 + 0.5) as usize) as f32 / 65535.0) * 255.0 + 0.5) as u8;
+    let img = d.to_rgba8(&buf);
+    for (o, p) in img.pixels.as_chunks::<4>().0.iter().zip(&buf.px) {
+        assert_eq!(*o, [code(p[0]), code(p[1]), code(p[2]), (p[3].clamp(0.0, 1.0) * 255.0 + 0.5) as u8], "{p:?}");
+    }
+}
+
+#[test]
+fn parallel_plain_quantize_matches_the_scalar_rounding() {
+    let n: usize = 3 * 16 * 1024 + 77;
+    let px: Vec<[f32; 4]> = (0..n)
+        .map(|i| {
+            let v = match i % 9 {
+                0 => f32::NAN,
+                1 => -0.5,
+                2 => 3.25,
+                _ => (i % 1001) as f32 / 1000.0,
+            };
+            [v, (i % 257) as f32 / 256.0, 1.0 - (i % 113) as f32 / 112.0, (i % 5) as f32 / 4.0]
+        })
+        .collect();
+    let buf = photosplice_compose::Buffer { rect: Rect::new(-4, 2, -4 + n as i32, 3), px };
+    let img = buf.to_rgba8();
+    let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+    for (o, p) in img.pixels.as_chunks::<4>().0.iter().zip(&buf.px) {
+        assert_eq!(*o, p.map(q), "{p:?}");
+    }
 }

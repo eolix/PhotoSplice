@@ -9,7 +9,8 @@
 //! - over the target's area within the selection only (`switch_region`), and of that only what
 //!   the view shows; the rest catches up as the view moves (`uncovered`);
 //! - zoomed out on a large document, on a copy reduced to about the screen's resolution, built
-//!   once per session ([`gpu_proxy`]).
+//!   once per session ([`gpu_proxy`]), unless Preferences › Performance › Low Resolution Previews
+//!   is off.
 //!
 //! OK still runs the real command (one history step); Cancel just drops the preview. The base
 //! document (with the preview layer) and the region are built once per dialog session; a change
@@ -199,7 +200,7 @@ fn hash(parts: &[&[u8]]) -> u64 {
 fn cheap(app: &PhotospliceApp, doc: &Document) -> bool {
     match &app.gpu {
         Some(g) => g.supports(doc),
-        None => crate::proxy::factor(doc) <= 1,
+        None => crate::proxy::preview_factor(doc, crate::proxy::reduced_previews(app)) <= 1,
     }
 }
 
@@ -386,6 +387,9 @@ pub struct ProxyFrame {
 /// and the view is far enough out that a reduced copy shows the same detail as the full-size
 /// composite: each change then composites ~1/k² of the pixels. Built once per session and factor.
 pub fn gpu_proxy(app: &mut PhotospliceApp, idx: usize, zoom: f32) -> Option<ProxyFrame> {
+    if !crate::proxy::reduced_previews(app) {
+        return None;
+    }
     let gpu = app.gpu.clone()?;
     update(app, idx)?;
     let p = app.adjust_preview.as_mut()?;

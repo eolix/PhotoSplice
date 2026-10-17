@@ -55,10 +55,16 @@ choice!(TypeUnit { Points = "points", Pixels = "pixels", Millimeters = "mm" } de
 choice!(PointSize { PostScript = "postScript", Traditional = "traditional" } default PostScript);
 choice!(Interpolation { BicubicAutomatic = "bicubicAutomatic", Nearest = "nearestNeighbor", Bilinear = "bilinear", Bicubic = "bicubic", BicubicSmoother = "bicubicSmoother", BicubicSharper = "bicubicSharper", PreserveDetails = "preserveDetails" } default BicubicAutomatic);
 choice!(ColorPicker { Adobe = "adobe", System = "system" } default Adobe);
-choice!(Theme { Midnight = "midnight", Anthracite = "anthracite", Slate = "slate", Pearl = "pearl", Aubergine = "aubergine", Ocean = "ocean" } default Slate);
+// PhotoSplice's own themes come first. The rest are upstream's extra palettes and light levels
+// (`MidnightLightGray`/`MidnightLight` keep its `proLightGray`/`proLight` ids), kept so its
+// appearance-mode code and saved files load; the shell decides which it offers.
+choice!(Theme { Midnight = "midnight", Anthracite = "anthracite", Slate = "slate", Pearl = "pearl", Aubergine = "aubergine", Ocean = "ocean", MidnightLightGray = "proLightGray", MidnightLight = "proLight", SolarizedDark = "solarizedDark", Adwaita = "adwaita", AdwaitaDark = "adwaitaDark", BreezeLight = "breezeLight", BreezeDark = "breezeDark", SoftDark = "softDark", SoftLight = "softLight" } default Slate);
+choice!(AppearanceMode { Auto = "auto", Dark = "dark", Light = "light" } default Dark);
+choice!(DarkTheme { Midnight = "midnight", Anthracite = "anthracite", Slate = "slate", Aubergine = "aubergine", Ocean = "ocean", SolarizedDark = "solarizedDark", AdwaitaDark = "adwaitaDark", BreezeDark = "breezeDark", SoftDark = "softDark" } default Slate);
+choice!(LightTheme { Pearl = "pearl", MidnightLightGray = "proLightGray", MidnightLight = "proLight", Adwaita = "adwaita", BreezeLight = "breezeLight", SoftLight = "softLight" } default Pearl);
 choice!(CanvasColor { Default = "default", Black = "black", DarkGray = "darkGray", MediumGray = "mediumGray", LightGray = "lightGray", Custom = "custom" } default Default);
 choice!(CanvasBorder { DropShadow = "dropShadow", Line = "line", None = "none" } default DropShadow);
-choice!(UiScale { Auto = "auto", P75 = "75", P100 = "100", P125 = "125", P150 = "150", P175 = "175", P200 = "200", P250 = "250", P300 = "300" } default Auto);
+choice!(UiScale { Auto = "auto", P75 = "75", P80 = "80", P85 = "85", P90 = "90", P95 = "95", P100 = "100", P125 = "125", P150 = "150", P175 = "175", P200 = "200", P250 = "250", P300 = "300" } default Auto);
 choice!(
     /// Graphics backend of the desktop app's window and GPU canvas (applies at next launch).
     /// `auto` lets PhotoSplice pick (DX12 for Intel adapters on Windows); `cpu` composites on the
@@ -70,6 +76,14 @@ choice!(
     /// Rendering policy, independent of the advanced graphics backend selection.
     /// CPU disables image acceleration; the native window may still need hardware graphics.
     RenderingMode { Auto = "auto", Gpu = "gpu", Cpu = "cpu" } default Auto
+);
+choice!(
+    /// Linux display server of the desktop app's window (applies at next launch). `x11` runs
+    /// PhotoSplice through XWayland on a Wayland session, where native file drag and drop works
+    /// (winit 0.30 has none on Wayland, issue #386); fractional scaling may then look softer.
+    /// It needs an X server (`DISPLAY`); without one PhotoSplice starts as `auto`. Other
+    /// platforms ignore it.
+    LinuxDisplayServer { Auto = "auto", X11 = "x11" } default Auto
 );
 choice!(UiFontSize { Tiny = "tiny", Small = "small", Medium = "medium", Large = "large", ExtraLarge = "extraLarge" } default Small);
 choice!(LogDestination { Metadata = "metadata", TextFile = "textFile", Both = "both" } default Metadata);
@@ -138,13 +152,47 @@ impl Unit {
             Unit::Percent => "%",
         }
     }
-    /// Decimal places a readout in this unit needs.
+    /// Decimal places a readout in this unit needs, following Photoshop: whole pixels, one place
+    /// for points and percent, two for millimetres, centimetres and picas, three for inches
+    /// (#2434). [`fmt_decimals`] rounds to this many places and drops trailing zeros.
     pub fn decimals(self) -> usize {
         match self {
             Unit::Pixels => 0,
-            Unit::Points | Unit::Percent | Unit::Millimeters => 1,
-            _ => 2,
+            Unit::Points | Unit::Percent => 1,
+            Unit::Millimeters | Unit::Centimeters | Unit::Picas => 2,
+            Unit::Inches => 3,
         }
+    }
+    /// A length as typed in Photoshop's numeric fields: a number with an optional unit suffix
+    /// ("50%", "2.5 cm", "12pt", "3pc", "1,5 in", "100"). Returns the number and its unit (`None`
+    /// when there is no suffix, so the caller picks the default), or `None` if the text is not a
+    /// finite number followed by a known unit.
+    pub fn parse_length(text: &str) -> Option<(f64, Option<Unit>)> {
+        let t = text.trim();
+        let end = t.find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | ',' | '-' | '+'))).unwrap_or(t.len());
+        let (number, suffix) = t.split_at(end);
+        let v: f64 = number.trim().replace(',', ".").parse().ok()?;
+        if !v.is_finite() {
+            return None;
+        }
+        let suffix = suffix.trim();
+        let unit = if suffix.is_empty() { None } else { Some(Unit::from_suffix(suffix)?) };
+        Some((v, unit))
+    }
+    /// The unit a typed suffix names, in any case: `px`, `in` or `"`, `cm`, `mm`, `pt`, `pc` or
+    /// `pica`, `%`, and their long forms (`pixels`, `inches`, `centimetres`…). The one table every
+    /// length field reads.
+    pub fn from_suffix(suffix: &str) -> Option<Unit> {
+        Some(match suffix.to_ascii_lowercase().as_str() {
+            "px" | "pixel" | "pixels" => Unit::Pixels,
+            "in" | "inch" | "inches" | "\"" => Unit::Inches,
+            "cm" | "centimeter" | "centimeters" | "centimetre" | "centimetres" => Unit::Centimeters,
+            "mm" | "millimeter" | "millimeters" | "millimetre" | "millimetres" => Unit::Millimeters,
+            "pt" | "point" | "points" => Unit::Points,
+            "pc" | "pica" | "picas" => Unit::Picas,
+            "%" | "percent" => Unit::Percent,
+            _ => return None,
+        })
     }
 }
 
@@ -199,10 +247,22 @@ impl Default for General {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Interface {
+    /// Legacy single-theme preference, retained for old automation and saved settings.
     pub theme: Theme,
+    pub appearance_mode: AppearanceMode,
+    pub dark_theme: DarkTheme,
+    pub light_theme: LightTheme,
+    /// Theme shortcuts shown in the appearance button's context menu.
+    pub favorite_themes: Vec<Theme>,
     /// Pasteboard colour in standard screen mode (`canvasCustomColor` when "custom").
     pub canvas_color: CanvasColor,
     pub canvas_custom_color: String,
+    /// Show the repeating dot pattern on the canvas surround (including the empty workspace).
+    /// Disable for a uniform background, for example on OLED displays (#2264).
+    pub show_canvas_dots: bool,
+    /// List recent files on the Home screen (the empty workspace). Off hides the list; the
+    /// recent files themselves are kept and File > Open Recent still shows them.
+    pub show_home_recent_files: bool,
     /// Document border in standard screen mode.
     pub canvas_border: CanvasBorder,
     pub ui_scale: UiScale,
@@ -215,18 +275,39 @@ pub struct Interface {
     pub dynamic_color_sliders: bool,
     /// Draw menu item colours set with Edit › Menus.
     pub show_menu_colors: bool,
+    /// Layers panel thumbnails frame the layer's own pixels instead of the whole canvas, so small
+    /// objects in a large document stay visible (Photoshop's Clip Thumbnails to Layer Bounds; #4281).
+    pub clip_thumbnails_to_layer_bounds: bool,
     pub show_tooltips: bool,
+    /// Menus, popups and collapsing sections fade and slide, and scroll areas glide to a new
+    /// position. Off, everything changes at once (a reduced-motion mode; #1218, #3273).
+    pub enable_animations: bool,
     /// Move tool drags show only the layer's outline and an arrow, leaving its pixels in place
     /// until release. Off (the default), the pixels follow the pointer live inside the outline.
     pub show_bounding_box_when_dragging_layer: bool,
+    /// Windows and Linux: use the system's title bar and window buttons instead of PhotoSplice's
+    /// own one-row title bar (tiling window managers, desktops that draw their own decorations;
+    /// #1271, #1316). Read when the app starts. macOS always uses the system's.
+    pub system_title_bar: bool,
+    /// Notices (the lower-right cards) hide themselves after
+    /// [`Interface::notification_duration_seconds`] unless the pointer rests on them (#2022).
+    pub notification_auto_hide: bool,
+    /// Seconds a notice stays on screen before it hides itself (Auto Hide Notifications).
+    pub notification_duration_seconds: u32,
 }
 
 impl Default for Interface {
     fn default() -> Self {
         Self {
             theme: Theme::Slate,
+            appearance_mode: AppearanceMode::Dark,
+            dark_theme: DarkTheme::Slate,
+            light_theme: LightTheme::Pearl,
+            favorite_themes: Vec::new(),
             canvas_color: CanvasColor::Default,
             canvas_custom_color: "#282828".into(),
+            show_canvas_dots: true,
+            show_home_recent_files: true,
             canvas_border: CanvasBorder::DropShadow,
             ui_scale: UiScale::Auto,
             language: "auto".into(),
@@ -234,8 +315,13 @@ impl Default for Interface {
             show_channels_in_color: false,
             dynamic_color_sliders: true,
             show_menu_colors: true,
+            clip_thumbnails_to_layer_bounds: false,
             show_tooltips: true,
+            enable_animations: true,
             show_bounding_box_when_dragging_layer: false,
+            system_title_bar: false,
+            notification_auto_hide: true,
+            notification_duration_seconds: 6,
         }
     }
 }
@@ -266,43 +352,74 @@ impl Default for Workspace {
     }
 }
 
+impl Workspace {
+    /// Preferences ▸ Workspace ▸ Enable Narrow Options Bar: the options bar drops to its compact
+    /// height, as in Photoshop, so the document gets more room (see `panels::options_bar`).
+    pub fn narrow_options_bar(&self) -> bool {
+        self.enable_narrow_options_bar
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Tools {
     pub show_tooltips: bool,
-    /// Tool keys cycle a tool group only with ⇧ held (Photoshop's "Use Shift Key for Tool Switch").
+    /// Tool keys cycle a tool group only with ⇧ held (Photoshop's "Use Shift Key for Tool Switch", on by default there too).
     pub use_shift_key_for_tool_switch: bool,
     pub zoom_clicked_point_to_center: bool,
     pub enable_flick_panning: bool,
     pub vary_round_brush_hardness_on_hud: bool,
     /// Round snapped vector and transform coordinates to whole pixels.
     pub snap_vector_tools_and_transforms_to_pixel_grid: bool,
+    /// The size and angle readouts beside the pointer while a marquee or crop frame is drawn,
+    /// resized or turned (off: none).
     pub show_transformation_values: bool,
+    /// Move tool with Auto-Select: outline the layer a click would pick under the pointer.
+    pub show_highlight_on_rollover: bool,
     pub overscroll: bool,
     pub double_click_layer_mask_launches_select_and_mask: bool,
     /// What the right mouse button does on the canvas with the Brush and other painting tools.
     pub right_click_with_painting_tools: RightClickPaint,
     /// Pen tablets: pressure, tilt and rotation reach the brush (off: a pen paints like a mouse).
     pub use_tablet_pressure: bool,
+    /// Pen pressure response: `[input, output]` control points in 0..1 that the pen's pressure
+    /// passes through before it reaches any brush ([`PressureCurve`]). Linear by default.
+    pub pressure_curve: Vec<[f32; 2]>,
+    /// Arrow-key nudges of one thing (the selected layers, the selection outline, the Free
+    /// Transform box) that follow each other within [`Tools::nudge_bundle_pause_ms`] are one
+    /// History state (#2259). Off: every press is a state.
+    pub bundle_nudges: bool,
+    /// The longest pause, in milliseconds, between two nudges that still bundle into one state.
+    /// Longer than a key's auto-repeat delay (about half a second), so a held key is one state.
+    pub nudge_bundle_pause_ms: u32,
 }
 
 impl Default for Tools {
     fn default() -> Self {
         Self {
             show_tooltips: true,
-            use_shift_key_for_tool_switch: false,
+            use_shift_key_for_tool_switch: true,
             zoom_clicked_point_to_center: false,
             enable_flick_panning: true,
             vary_round_brush_hardness_on_hud: true,
             snap_vector_tools_and_transforms_to_pixel_grid: true,
             show_transformation_values: true,
+            show_highlight_on_rollover: true,
             overscroll: true,
             double_click_layer_mask_launches_select_and_mask: true,
             right_click_with_painting_tools: RightClickPaint::BrushPicker,
             use_tablet_pressure: true,
+            pressure_curve: vec![[0.0, 0.0], [1.0, 1.0]],
+            bundle_nudges: true,
+            nudge_bundle_pause_ms: 1000,
         }
     }
 }
+
+/// Preferences › Tools › Pressure Curve, ready to evaluate: the same monotone cubic every brush
+/// dynamic uses for its own control ([`photosplice_paint::ResponseCurve`]), sanitised the same way,
+/// since a whole-section update or a hand-edited preferences file can store anything.
+pub use photosplice_paint::ResponseCurve as PressureCurve;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -332,9 +449,15 @@ pub struct FileHandling {
     pub autosave_minutes: u32,
     /// Offer to reopen recovered documents at launch.
     pub recover_on_launch: bool,
+    /// Open a file with no ICC profile as untagged even when its EXIF ColorSpace tag says sRGB.
     pub ignore_exif_profile_tag: bool,
+    /// Most renderers write ACEScg EXRs without stating the colour space. With this on, an EXR
+    /// that would otherwise open as linear sRGB opens as ACEScg (AP1, linear) instead.
+    pub exr_aces_cg: bool,
     pub ask_before_saving_layered_tiff: bool,
     pub maximize_psd_compatibility: Ask,
+    /// SVG groups deeper than this are rasterised on import; parser and document safety caps remain fixed.
+    pub rasterize_svg_groups_deeper_than: u32,
     pub recent_file_count: u32,
     /// Most recently opened files, newest first (File › Open Recent).
     pub recent_files: Vec<String>,
@@ -350,8 +473,10 @@ impl Default for FileHandling {
             autosave_minutes: 10,
             recover_on_launch: true,
             ignore_exif_profile_tag: false,
+            exr_aces_cg: false,
             ask_before_saving_layered_tiff: true,
             maximize_psd_compatibility: Ask::Always,
+            rasterize_svg_groups_deeper_than: photosplice_doc::MAX_GROUP_DEPTH as u32,
             recent_file_count: 20,
             recent_files: Vec::new(),
         }
@@ -364,6 +489,9 @@ pub struct Export {
     pub quick_export_format: QuickExportFormat,
     pub quick_export_location: ExportLocation,
     pub jpeg_quality: u32,
+    /// Keep the existing lossless Quick Export default until the user opts into lossy WebP.
+    pub webp_lossless: bool,
+    pub webp_quality: u32,
     pub metadata: ExportMetadata,
     pub convert_to_srgb: bool,
 }
@@ -374,6 +502,8 @@ impl Default for Export {
             quick_export_format: QuickExportFormat::Png,
             quick_export_location: ExportLocation::Ask,
             jpeg_quality: 85,
+            webp_lossless: true,
+            webp_quality: 85,
             metadata: ExportMetadata::Copyright,
             convert_to_srgb: true,
         }
@@ -398,6 +528,23 @@ pub struct Performance {
     pub rendering_mode: Option<RenderingMode>,
     /// Graphics backend (applies at next launch; see [`GpuBackend`]).
     pub gpu_backend: GpuBackend,
+    /// Live previews of large documents (adjustment and filter dialogs, an adjustment layer's
+    /// sliders while they drag) render on a reduced copy: fast, but blocky when zoomed in. Off
+    /// (PhotoSplice's default): they render at full resolution, so a preview is the real result.
+    pub low_resolution_previews: bool,
+    /// Low-latency drawing (applies at next launch): frames reach the screen without waiting for
+    /// vsync, so a stroke follows the pen about 50 ms sooner (the swap chain's wait, #1343). wgpu
+    /// picks Immediate where the driver has it (most Vulkan and DX12 drivers on Windows and X11),
+    /// so the canvas usually tears while it changes; Mailbox (no tearing) only where Immediate is
+    /// missing. Frames are capped at 240 fps. Off (the default): vsync, smooth but late. Desktop
+    /// only.
+    pub low_latency_drawing: bool,
+    /// Linux display server (applies at next launch; see [`LinuxDisplayServer`]).
+    pub linux_display_server: LinuxDisplayServer,
+    /// GPU memory the canvas compositor may hold for layer pages and effect maps, in MB; 0 is
+    /// automatic (a graphics card's own memory isn't charged for the document's pixels, memory
+    /// shared with the system is). Layers that don't fit redraw the whole document on the CPU.
+    pub gpu_memory_mb: u32,
     /// Memory budget of the layer-effect cache, in MB.
     pub effect_cache_mb: u32,
     pub legacy_compositing: bool,
@@ -426,6 +573,10 @@ impl Default for Performance {
             use_gpu: true,
             rendering_mode: None,
             gpu_backend: GpuBackend::Auto,
+            low_resolution_previews: false,
+            low_latency_drawing: false,
+            linux_display_server: LinuxDisplayServer::Auto,
+            gpu_memory_mb: 0,
             effect_cache_mb: 768,
             legacy_compositing: false,
         }
@@ -537,6 +688,10 @@ pub struct UnitsAndRulers {
     pub print_resolution: f64,
     pub screen_resolution: f64,
     pub point_size: PointSize,
+    /// View › Rulers as last set: written when the user toggles the rulers and applied at
+    /// launch, so new and opened documents show them as Photoshop does. Set from the View
+    /// menu (⌘R), not from the Preferences dialog.
+    pub show_rulers: bool,
 }
 
 impl Default for UnitsAndRulers {
@@ -549,15 +704,32 @@ impl Default for UnitsAndRulers {
             print_resolution: 300.0,
             screen_resolution: 72.0,
             point_size: PointSize::PostScript,
+            show_rulers: false,
         }
     }
 }
 
+/// Rounds `v` to `decimals` places (half away from zero) and drops trailing zeros, so a readout
+/// never shows more precision than it has: 0.7995 at three places is `0.8`, never `0.799` or
+/// `0.800`, and a whole number keeps no `.0` (#2434).
+pub fn fmt_decimals(v: f64, decimals: usize) -> String {
+    let p = 10f64.powi(decimals as i32);
+    let r = (v * p).round() / p;
+    // -0.0 would format as "-0".
+    let r = if r == 0.0 { 0.0 } else { r };
+    let s = format!("{r:.*}", decimals);
+    // Only a fractional part may lose zeros: "550" must not become "55".
+    if !s.contains('.') {
+        return s;
+    }
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
 impl UnitsAndRulers {
-    /// Format a length in document pixels in the ruler unit, e.g. `"2.50 in"`.
+    /// Format a length in document pixels in the ruler unit, e.g. `"2.5 in"`.
     pub fn format(&self, px: f64, dpi: f64, extent: f64) -> String {
         let v = self.rulers.from_px(px, dpi, extent, self.point_size.per_inch());
-        format!("{:.*}", self.rulers.decimals(), v)
+        fmt_decimals(v, self.rulers.decimals())
     }
 }
 
@@ -652,6 +824,15 @@ impl Default for TypePrefs {
     }
 }
 
+impl TypePrefs {
+    /// Preferences ▸ Type ▸ Missing Glyph Protection: with it on (the default, as in Photoshop),
+    /// glyphs the chosen face lacks fall back through the coverage fonts (#1909). The text engine
+    /// applies this in `Session::apply_prefs`.
+    pub fn missing_glyph_protection(&self) -> bool {
+        self.missing_glyph_protection
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct EnhancedControls {
@@ -676,6 +857,10 @@ pub struct RawDefaults {
     pub sharpen_for: RawSharpen,
     pub open_as_smart_object: bool,
     pub apply_auto_tone: bool,
+    /// Opening a raw file interactively shows the Camera Raw dialog first (Open / Cancel), as
+    /// Photoshop does; off develops it with the defaults straight away. Automation opens never
+    /// show the dialog.
+    pub open_in_camera_raw: bool,
 }
 
 impl Default for RawDefaults {
@@ -687,6 +872,7 @@ impl Default for RawDefaults {
             sharpen_for: RawSharpen::None,
             open_as_smart_object: false,
             apply_auto_tone: false,
+            open_in_camera_raw: true,
         }
     }
 }
@@ -725,6 +911,22 @@ pub struct MenuCustomization {
     pub defaults_version: u32,
     /// Command id → colour name (red, orange, yellow, green, blue, violet, gray).
     pub colors: BTreeMap<String, String>,
+}
+
+impl MenuCustomization {
+    /// False for the items Edit › Menus can't hide (#5096): the way back into this dialog
+    /// (Edit › Keyboard Shortcuts, which opens the same dialog), Preferences, Save, Save As and
+    /// Exit. Edit › Menus itself stays hideable: PhotoSplice ships it hidden
+    /// ([`crate::prefs_hidden::HIDDEN_MENU_ITEMS`]) while the dialog shows only its shortcuts tab.
+    pub fn hideable(id: &str) -> bool {
+        !matches!(id, "edit.keyboardShortcuts" | "file.save" | "file.saveAs" | "file.exit") && !id.starts_with("edit.preferences")
+    }
+
+    /// Whether the menus leave `id` out. Items that can't be hidden stay shown even when an
+    /// older or hand-edited preferences file lists them.
+    pub fn is_hidden(&self, id: &str) -> bool {
+        Self::hideable(id) && self.hidden.iter().any(|h| h == id)
+    }
 }
 
 /// Edit › Toolbar: hidden tools and a custom order (tool names as in `ui.set {tool}`).
@@ -829,6 +1031,15 @@ pub struct Preferences {
     /// When each file on the recent list was last opened (ms since the Unix epoch), for the Home
     /// screen's "41 minutes ago". Pruned to `fileHandling.recentFiles`.
     pub recent_opened: BTreeMap<String, u64>,
+    /// Edit › Keyboard Shortcuts: a command's further keys besides its main one (#3665),
+    /// command id → keys. A list replaces the command's default alternates
+    /// ([`ALTERNATE_SHORTCUTS`]); an empty list removes them. Settings files from before this
+    /// map load with nothing stored, so every command keeps its defaults.
+    pub alternate_shortcuts: BTreeMap<String, Vec<String>>,
+    /// Edit › Keyboard Shortcuts › Set: saved shortcut sets by name (`crate::shortcut_sets`).
+    pub shortcut_sets: BTreeMap<String, crate::shortcut_sets::ShortcutSet>,
+    /// The saved set in use ("" for the defaults).
+    pub shortcut_set: String,
     pub menus: MenuCustomization,
     pub toolbar: ToolbarCustomization,
     /// Edit › Check Spelling: words added to the dictionary ("Add").
@@ -844,6 +1055,25 @@ pub struct Preferences {
     /// The last choices of dialogs that remember them across restarts, by command id (Edit ›
     /// Fill…: `"edit.fill"` → its params). JSON owned by the shell.
     pub dialogs: BTreeMap<String, Value>,
+    /// The Brush Preset picker's remembered view: which card parts show (name, stroke, tip) and
+    /// the footer slider's card scale, saved as the user changes them and restored at launch.
+    /// JSON owned by the shell.
+    pub brush_picker: Value,
+    /// The brush the tool was last using (settings and tip references, never the full bitmaps;
+    /// shaped by `brush_cmds::remembered_brush`), restored at launch so the tool starts where it
+    /// was left. Written only when `ToolState::brush_rev` moves.
+    pub last_brush: Value,
+    /// The tools' options-bar settings (Move › Auto-Select, marquee Feather, tolerance, …) that
+    /// differ from their defaults, saved as the user changes them and restored at launch, as
+    /// Photoshop remembers each tool's options between sessions. JSON owned by the shell.
+    pub tool_options: Value,
+    /// Last selected tool, restored at launch. A tool-name string owned and validated by the
+    /// shell; null in older files. Kept separate from tool options so neither overwrites the other.
+    pub selected_tool: Value,
+    /// View › Extras, the View › Show items (Pixel Grid, Grid, Guides, …) and the View › Snap To
+    /// targets that differ from their defaults, saved as the user toggles them and restored at
+    /// launch, as Photoshop keeps them between sessions (#3762). JSON owned by the shell.
+    pub view_extras: Value,
     /// File › Scripts › Script Events Manager: event → script bindings.
     pub script_events: crate::automate_cmds::ScriptEvents,
     /// File › New: the settings of the documents created there, newest first (the New Document
@@ -885,55 +1115,24 @@ pub const HIDDEN_UNTIL_IMPLEMENTED: &[&str] = &[
     "menus.defaultsVersion",
     "toolbar.defaultsVersion",
     "general.colorPicker",
-    "general.beepWhenDone",
-    "general.exportClipboard",
-    "general.resizeImageDuringPlace",
-    "general.alwaysCreateSmartObjectsWhenPlacing",
     "general.animatedZoom",
     "general.zoomResizesWindows",
-    "interface.showChannelsInColor",
-    "interface.dynamicColorSliders",
-    "workspace.autoCollapseIconPanels",
     "workspace.autoShowHiddenPanels",
-    "workspace.openDocumentsAsTabs",
     "workspace.enableFloatingDocumentWindowDocking",
-    "workspace.largeTabs",
-    "workspace.enableNarrowOptionsBar",
-    "tools.zoomClickedPointToCenter",
-    "tools.enableFlickPanning",
-    "tools.varyRoundBrushHardnessOnHud",
-    "tools.showTransformationValues",
-    "tools.doubleClickLayerMaskLaunchesSelectAndMask",
-    "fileHandling.imagePreviews",
-    "fileHandling.lowercaseExtension",
     "fileHandling.saveInBackground",
-    "fileHandling.ignoreExifProfileTag",
-    "fileHandling.maximizePsdCompatibility",
     "performance.cacheLevels",
     "performance.effectCacheMb",
     "performance.legacyCompositing",
     "scratchDisks.disks",
-    "cursors.brushPreviewColor",
-    "unitsAndRulers.typeUnits",
     "unitsAndRulers.columnWidth",
     "unitsAndRulers.gutter",
-    "unitsAndRulers.printResolution",
-    "unitsAndRulers.screenResolution",
     "plugIns.showExtensionPanels",
     "plugIns.allowScriptsToConnect",
     "plugIns.generatorEnabled",
-    "type.smartQuotes",
-    "type.missingGlyphProtection",
-    "type.showFontNamesInEnglish",
-    "type.useEscToCommit",
     "type.textEngine",
-    "type.fontPreview",
-    "type.fillNewTypeLayersWithPlaceholder",
     "type.recentFonts",
     "enhancedControls.scrubbySliderAcceleration",
     "enhancedControls.touchGestures",
-    "enhancedControls.zoomWithTrackpadPinch",
-    "enhancedControls.rotateViewWithTrackpad",
     "rawDefaults.colorSpace",
     "rawDefaults.bitDepth",
     "rawDefaults.resolution",
@@ -946,10 +1145,76 @@ pub const HIDDEN_UNTIL_IMPLEMENTED: &[&str] = &[
     "integrations.controlPort",
 ];
 
+/// Preferences that work but PhotoSplice keeps out of Edit › Preferences, so the dialog stays the
+/// set it shipped with. Unlike [`HIDDEN_UNTIL_IMPLEMENTED`], these are read: their defaults apply.
+pub const HIDDEN_IN_PHOTOSPLICE: &[&str] = &[
+    "cursors.brushPreviewColor",
+    "enhancedControls.rotateViewWithTrackpad",
+    "enhancedControls.zoomWithTrackpadPinch",
+    "fileHandling.ignoreExifProfileTag",
+    "fileHandling.imagePreviews",
+    "fileHandling.lowercaseExtension",
+    "fileHandling.maximizePsdCompatibility",
+    "general.alwaysCreateSmartObjectsWhenPlacing",
+    "general.beepWhenDone",
+    "general.exportClipboard",
+    "general.resizeImageDuringPlace",
+    "interface.dynamicColorSliders",
+    "interface.showChannelsInColor",
+    "tools.doubleClickLayerMaskLaunchesSelectAndMask",
+    "tools.enableFlickPanning",
+    "tools.showTransformationValues",
+    "tools.varyRoundBrushHardnessOnHud",
+    "tools.zoomClickedPointToCenter",
+    "type.fillNewTypeLayersWithPlaceholder",
+    "type.fontPreview",
+    "type.missingGlyphProtection",
+    "type.showFontNamesInEnglish",
+    "type.smartQuotes",
+    "type.useEscToCommit",
+    "unitsAndRulers.printResolution",
+    "unitsAndRulers.screenResolution",
+    "unitsAndRulers.typeUnits",
+    "workspace.autoCollapseIconPanels",
+    "workspace.enableNarrowOptionsBar",
+    "workspace.largeTabs",
+    "workspace.openDocumentsAsTabs",
+    // Upstream-merge additions (2026-10): working settings outside the dialog PhotoSplice ships.
+    "export.webpLossless",
+    "export.webpQuality",
+    "fileHandling.exrAcesCg",
+    "fileHandling.rasterizeSvgGroupsDeeperThan",
+    "interface.clipThumbnailsToLayerBounds",
+    "interface.enableAnimations",
+    "interface.notificationAutoHide",
+    "interface.notificationDurationSeconds",
+    "interface.showCanvasDots",
+    "interface.showHomeRecentFiles",
+    "interface.systemTitleBar",
+    "performance.gpuMemoryMb",
+    "performance.lowLatencyDrawing",
+    "performance.lowResolutionPreviews",
+    "rawDefaults.openInCameraRaw",
+    "tools.bundleNudges",
+    "tools.nudgeBundlePauseMs",
+    "tools.pressureCurve",
+    "tools.showHighlightOnRollover",
+    // Upstream's appearance modes, not taken: Interface › Theme picks one of PhotoSplice's six
+    // themes, and these follow it (`interface.theme`) so saved settings stay consistent.
+    "interface.appearanceMode",
+    "interface.darkTheme",
+    "interface.favoriteThemes",
+    "interface.lightTheme",
+];
+
 /// Is the preference at `path` (`"section.key"`) hidden from the Preferences dialog?
 pub fn is_hidden(path: &str) -> bool {
-    HIDDEN_UNTIL_IMPLEMENTED.contains(&path)
+    HIDDEN_UNTIL_IMPLEMENTED.contains(&path) || HIDDEN_IN_PHOTOSPLICE.contains(&path) || (!cfg!(target_os = "linux") && LINUX_ONLY.contains(&path))
 }
+
+/// Preferences that only do something on Linux; the dialog doesn't show them elsewhere. They
+/// still load, save and round-trip on every platform.
+pub const LINUX_ONLY: &[&str] = &["performance.linuxDisplayServer"];
 
 /// Choices of an enumerated preference (dotted path, e.g. `"cursors.painting"`).
 pub fn choices(path: &str) -> Option<&'static [&'static str]> {
@@ -957,6 +1222,9 @@ pub fn choices(path: &str) -> Option<&'static [&'static str]> {
         "general.colorPicker" => ColorPicker::NAMES,
         "general.imageInterpolation" => Interpolation::NAMES,
         "interface.theme" => Theme::NAMES,
+        "interface.appearanceMode" => AppearanceMode::NAMES,
+        "interface.darkTheme" => DarkTheme::NAMES,
+        "interface.lightTheme" => LightTheme::NAMES,
         "interface.canvasColor" => CanvasColor::NAMES,
         "interface.canvasBorder" => CanvasBorder::NAMES,
         "interface.uiScale" => UiScale::NAMES,
@@ -982,6 +1250,7 @@ pub fn choices(path: &str) -> Option<&'static [&'static str]> {
         "rawDefaults.bitDepth" => RawDepth::NAMES,
         "rawDefaults.sharpenFor" => RawSharpen::NAMES,
         "performance.gpuBackend" => GpuBackend::NAMES,
+        "performance.linuxDisplayServer" => LinuxDisplayServer::NAMES,
         "performance.renderingMode" => RenderingMode::NAMES,
         _ => return None,
     })
@@ -992,8 +1261,12 @@ pub fn range(path: &str) -> Option<(f64, f64)> {
     Some(match path {
         "fileHandling.autosaveMinutes" => (1.0, 240.0),
         "fileHandling.recentFileCount" => (0.0, 100.0),
-        "export.jpegQuality" => (1.0, 100.0),
+        "tools.nudgeBundlePauseMs" => (100.0, 10_000.0),
+        "fileHandling.rasterizeSvgGroupsDeeperThan" => (0.0, photosplice_doc::MAX_GROUP_DEPTH as f64),
+        "interface.notificationDurationSeconds" => (1.0, 120.0),
+        "export.jpegQuality" | "export.webpQuality" => (1.0, 100.0),
         "performance.memoryUsageMb" => (256.0, 1_048_576.0),
+        "performance.gpuMemoryMb" => (0.0, 1_048_576.0),
         "performance.historyStates" => (1.0, 1000.0),
         "performance.cacheLevels" => (1.0, 8.0),
         "performance.cacheTileSize" => (256.0, 16384.0),
@@ -1011,7 +1284,7 @@ pub fn range(path: &str) -> Option<(f64, f64)> {
 
 /// Is this preference a `#rrggbb` colour?
 pub fn is_color(path: &str) -> bool {
-    if choices(path).is_some() || path.starts_with("shortcuts.") || path.starts_with("menus.") {
+    if choices(path).is_some() || path.starts_with("shortcuts.") || path.starts_with("alternateShortcuts.") || path.starts_with("menus.") {
         return false;
     }
     let leaf = path.rsplit('.').next().unwrap_or(path);
@@ -1040,9 +1313,10 @@ pub fn parse_hex(s: &str) -> Option<[u8; 3]> {
 
 // ------------------------------------------------------------------ JSON paths
 
-/// Map keys that are command ids (which contain dots): `shortcuts.<id>`, `menus.colors.<id>`.
+/// Map keys that are command ids (which contain dots): `shortcuts.<id>`,
+/// `alternateShortcuts.<id>`, `menus.colors.<id>`.
 fn keyed(path: &str) -> Option<(&str, &str)> {
-    for prefix in ["shortcuts.", "menus.colors."] {
+    for prefix in ["shortcuts.", "alternateShortcuts.", "menus.colors."] {
         if let Some(id) = path.strip_prefix(prefix) {
             return Some((&prefix[..prefix.len() - 1], id));
         }
@@ -1087,6 +1361,20 @@ fn set_path(root: &mut Value, path: &str, value: Value) -> std::result::Result<(
 
 /// Validate one value for `path` before it is stored (choices, ranges, colours).
 fn check_value(path: &str, v: &Value) -> std::result::Result<(), String> {
+    if path == "interface.favoriteThemes" {
+        let items = v.as_array().ok_or("`interface.favoriteThemes` must be a list of theme ids")?;
+        if items.len() > Theme::NAMES.len() {
+            return Err("`interface.favoriteThemes` contains too many themes".into());
+        }
+        let mut seen = Vec::with_capacity(items.len());
+        for item in items {
+            let theme = item.as_str().and_then(Theme::parse).ok_or_else(|| format!("unknown favorite theme `{item}`"))?;
+            if seen.contains(&theme) {
+                return Err(format!("duplicate favorite theme `{}`", theme.name()));
+            }
+            seen.push(theme);
+        }
+    }
     if path == "performance.renderingMode" && v.is_null() {
         return Ok(()); // Legacy policy, resolved from useGpu and gpuBackend.
     }
@@ -1111,6 +1399,18 @@ fn check_value(path: &str, v: &Value) -> std::result::Result<(), String> {
     if is_color(path) && v.as_str().and_then(parse_hex).is_none() {
         return Err(format!("`{path}` must be a #rrggbb colour"));
     }
+    if path == "tools.pressureCurve" {
+        let pts = v.as_array().ok_or("`tools.pressureCurve` must be a list of [input, output] points")?;
+        if !(2..=PressureCurve::MAX_POINTS).contains(&pts.len()) {
+            return Err(format!("`tools.pressureCurve` needs 2..={} points (got {})", PressureCurve::MAX_POINTS, pts.len()));
+        }
+        for p in pts {
+            let ok = p.as_array().is_some_and(|a| a.len() == 2 && a.iter().all(|x| x.as_f64().is_some_and(|x| (0.0..=1.0).contains(&x))));
+            if !ok {
+                return Err(format!("`tools.pressureCurve` points are [input, output] pairs within 0..1 (got {p})"));
+            }
+        }
+    }
     if let Some(sc) = path.strip_prefix("shortcuts.") {
         let s = v.as_str().ok_or_else(|| format!("shortcut for `{sc}` must be a string"))?;
         if !s.is_empty() && normalize_shortcut(s).is_none() {
@@ -1133,6 +1433,28 @@ impl Preferences {
 
     /// Set a value by dotted path, validating it. Unknown paths and wrong types are errors.
     pub fn set(&mut self, path: &str, value: Value) -> std::result::Result<(), String> {
+        if path == "alternateShortcuts" {
+            let obj = value.as_object().ok_or("`alternateShortcuts` maps command ids to lists of shortcuts")?;
+            let mut map = BTreeMap::new();
+            for (id, v) in obj {
+                map.insert(id.clone(), alternate_keys(v).map_err(|e| format!("`alternateShortcuts.{id}`: {e}"))?);
+            }
+            self.alternate_shortcuts = map;
+            return Ok(());
+        }
+        if let Some(id) = path.strip_prefix("alternateShortcuts.") {
+            // null = back to the command's default alternates.
+            match value {
+                Value::Null => {
+                    self.alternate_shortcuts.remove(id);
+                }
+                v => {
+                    let keys = alternate_keys(&v).map_err(|e| format!("`{path}`: {e}"))?;
+                    self.alternate_shortcuts.insert(id.to_string(), keys);
+                }
+            }
+            return Ok(());
+        }
         let value = match (path.strip_prefix("shortcuts."), &value) {
             // Normalise shortcut spelling so conflicts compare equal.
             (Some(_), Value::String(s)) if !s.is_empty() => Value::String(normalize_shortcut(s).ok_or_else(|| format!("`{s}` is not a valid shortcut"))?),
@@ -1157,6 +1479,22 @@ impl Preferences {
             *self = Preferences::default();
             return Ok(());
         };
+        // These maps have no stored defaults; removing an override restores the fallback.
+        match keyed(path) {
+            Some(("shortcuts", id)) => {
+                self.shortcuts.remove(id);
+                return Ok(());
+            }
+            Some(("alternateShortcuts", id)) => {
+                self.alternate_shortcuts.remove(id);
+                return Ok(());
+            }
+            Some(("menus.colors", id)) => {
+                self.menus.colors.remove(id);
+                return Ok(());
+            }
+            _ => {}
+        }
         let def = Preferences::default().get(path).ok_or_else(|| format!("unknown preference `{path}`"))?;
         if path == "shortcuts" {
             self.shortcuts.clear();
@@ -1176,6 +1514,50 @@ impl Preferences {
             None => default,
         }
     }
+
+    /// A command's further keys in effect (#3665): the user's list, else its defaults
+    /// ([`ALTERNATE_SHORTCUTS`]), normalised, without duplicates and without `primary` (the
+    /// command's main key in effect, which it already answers).
+    pub fn alternates(&self, id: &str, primary: Option<&str>) -> Vec<String> {
+        let main = primary.and_then(normalize_shortcut);
+        let keys: Vec<String> = match self.alternate_shortcuts.get(id) {
+            Some(list) => list.iter().filter_map(|s| normalize_shortcut(s)).collect(),
+            None => default_alternates(id).filter_map(normalize_shortcut).collect(),
+        };
+        let mut out: Vec<String> = Vec::with_capacity(keys.len());
+        for k in keys {
+            if main.as_ref() != Some(&k) && !out.contains(&k) {
+                out.push(k);
+            }
+        }
+        out
+    }
+}
+
+/// Most further keys one command may hold; Photoshop's own defaults use one.
+pub const MAX_ALTERNATES: usize = 8;
+
+/// Validate and normalise a command's alternate keys: a list of shortcut strings (a single
+/// string is a one-key list, `""` none).
+pub fn alternate_keys(v: &Value) -> std::result::Result<Vec<String>, String> {
+    let items: Vec<&Value> = match v {
+        Value::String(s) if s.is_empty() => Vec::new(),
+        Value::String(_) => vec![v],
+        Value::Array(a) => a.iter().collect(),
+        _ => return Err("alternate shortcuts are a list of shortcuts (e.g. [\"F3\"])".into()),
+    };
+    if items.len() > MAX_ALTERNATES {
+        return Err(format!("at most {MAX_ALTERNATES} alternate shortcuts (got {})", items.len()));
+    }
+    let mut out: Vec<String> = Vec::with_capacity(items.len());
+    for item in items {
+        let s = item.as_str().ok_or_else(|| format!("alternate shortcut `{item}` must be a string"))?;
+        let n = normalize_shortcut(s).ok_or_else(|| format!("`{s}` is not a valid shortcut (e.g. Cmd+Shift+N, F7)"))?;
+        if !out.contains(&n) {
+            out.push(n);
+        }
+    }
+    Ok(out)
 }
 
 // ------------------------------------------------------------------ shortcuts
@@ -1255,15 +1637,91 @@ fn capitalize(s: &str) -> String {
 /// Tools › Temporary, `edit.keyboardShortcuts`) but held rather than pressed, so they are not
 /// commands; the UI reads their keys through [`Preferences::shortcut`]. While a selection or
 /// shape is being dragged, the Hand key repositions it instead of panning (Photoshop's Space).
+/// The erase key keeps the Brush or Pencil and makes its strokes erase (Photoshop's `~`).
 pub const TEMPORARY_TOOLS: &[(&str, &str, &str)] = &[
     ("tools.temporary.hand", "Hand Tool (hold)", "Space"),
     ("tools.temporary.zoomIn", "Zoom In (hold, drag to scrub)", "Cmd+Space"),
-    ("tools.temporary.zoomOut", "Zoom Out (hold)", "Cmd+Alt+Space"),
+    ("tools.temporary.zoomOut", "Zoom Out (hold)", "Alt+Space"),
+    ("tools.temporary.erase", "Erase with Brush or Pencil (hold)", "`"),
 ];
 
-/// Every bindable id with its default: commands, then the temporary tools.
+/// Photoshop's second default keys (#3665): (command, key). Each command keeps its main key
+/// (the one its menu shows) and answers these as well, as in Photoshop's default set: the
+/// legacy function keys F2 Cut, F3 Copy, F4 Paste and Shift+F7 Inverse; Shift+Backspace
+/// (Shift+Delete on a Mac) for Fill; and ⌘+ beside ⌘= for Zoom In.
+pub const ALTERNATE_SHORTCUTS: &[(&str, &str)] = &[
+    ("edit.cut", "F2"),
+    ("edit.copy", "F3"),
+    ("edit.paste", "F4"),
+    ("edit.fill", "Shift+Backspace"),
+    ("select.inverse", "Shift+F7"),
+    ("view.zoomIn", "Cmd++"),
+];
+
+/// A command's default alternate keys ([`ALTERNATE_SHORTCUTS`]).
+pub fn default_alternates(id: &str) -> impl Iterator<Item = &'static str> + '_ {
+    ALTERNATE_SHORTCUTS.iter().filter(move |(c, _)| *c == id).map(|(_, sc)| *sc)
+}
+
+/// Keys the system takes before the app sees them (switching apps, closing the window, force
+/// quit): `edit.keyboardShortcuts` won't bind them, as Photoshop won't. `sc` is in our notation,
+/// where `Cmd` is Ctrl off the Mac.
+pub fn reserved_shortcut(sc: &str) -> bool {
+    let Some(n) = normalize_shortcut(sc) else { return false };
+    let reserved: &[&str] = if cfg!(target_os = "macos") {
+        &["Cmd+Tab", "Cmd+Shift+Tab", "Cmd+Alt+Escape", "Cmd+`"]
+    } else if cfg!(target_os = "windows") {
+        &["Alt+Tab", "Alt+Shift+Tab", "Alt+F4", "Cmd+Alt+Delete", "Cmd+Escape", "Cmd+Shift+Escape"]
+    } else {
+        // Linux and the BSDs: window switching and closing, and the virtual consoles.
+        &[
+            "Alt+Tab",
+            "Alt+Shift+Tab",
+            "Alt+F4",
+            "Cmd+Alt+Delete",
+            "Cmd+Alt+F1",
+            "Cmd+Alt+F2",
+            "Cmd+Alt+F3",
+            "Cmd+Alt+F4",
+            "Cmd+Alt+F5",
+            "Cmd+Alt+F6",
+            "Cmd+Alt+F7",
+            "Cmd+Alt+F8",
+            "Cmd+Alt+F9",
+            "Cmd+Alt+F10",
+            "Cmd+Alt+F11",
+            "Cmd+Alt+F12",
+        ]
+    };
+    reserved.iter().filter_map(|r| normalize_shortcut(r)).any(|r| r == n)
+}
+
+/// What a bindable id is: a command (the engine's or the shell's), a tool, or a held tool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BindKind {
+    Command,
+    Tool,
+    Hold,
+}
+
+/// Every bindable id: (id, label, menu path, default key, kind). The engine's commands, the
+/// shell's ([`crate::shell_commands::SHELL_COMMANDS`]), the tools and the held temporary tools,
+/// so Edit › Keyboard Shortcuts works the same with or without the app's UI.
+pub fn bindable_items() -> impl Iterator<Item = (&'static str, &'static str, &'static [&'static str], Option<&'static str>, BindKind)> {
+    let engine = crate::command_specs().iter().map(|c| (c.id, c.label, c.menu, c.shortcut, BindKind::Command));
+    let shell = crate::shell_commands::SHELL_COMMANDS.iter().map(|c| (c.0, c.1, c.2, c.3, BindKind::Command));
+    let tools = crate::shell_commands::TOOLS.iter().map(|t| (t.0, t.1, &["Tools"][..], t.2, BindKind::Tool));
+    let hold = TEMPORARY_TOOLS.iter().map(|t| (t.0, t.1, &["Tools", "Temporary"][..], Some(t.2), BindKind::Hold));
+    engine.chain(shell).chain(tools).chain(hold)
+}
+
+/// Every bindable id with its default.
 fn bindable() -> impl Iterator<Item = (&'static str, Option<&'static str>)> {
-    crate::command_specs().iter().map(|c| (c.id, c.shortcut)).chain(TEMPORARY_TOOLS.iter().map(|t| (t.0, Some(t.2))))
+    bindable_items().map(|i| (i.0, i.3))
+}
+
+fn is_tool(id: &str) -> bool {
+    crate::shell_commands::tool_default(id).is_some()
 }
 
 /// Shortcuts bound to more than one command: (shortcut, ids). `bindings` are (id, shortcut).
@@ -1314,8 +1772,8 @@ impl Session {
         r
     }
 
-    /// Push engine-relevant preferences into live state: every document's history limit and
-    /// the layer-effect cache budget.
+    /// Push engine-relevant preferences into live state: every document's history limit, the
+    /// layer-effect cache budget and the text engine's missing-glyph protection.
     pub fn apply_prefs(&mut self) {
         let n = self.prefs().performance.history_states.max(1) as usize;
         let bytes = self.prefs().performance.history_budget_bytes();
@@ -1323,9 +1781,11 @@ impl Session {
         for st in &mut self.docs {
             st.history.max_states = n;
             st.history.max_bytes = bytes;
-            st.history.trim(&st.doc);
+            st.trim_history();
         }
         photosplice_compose::set_effect_cache_budget(budget << 20);
+        // Without waiting for the system font scan: this runs on the UI thread at launch.
+        photosplice_text::set_shared_missing_glyph_protection(self.prefs().type_.missing_glyph_protection());
         crate::plugin_cmds::sync_prefs(self);
     }
 
@@ -1349,6 +1809,30 @@ impl Session {
     /// defaults and unknown keys are ignored, so files from older and newer versions load.
     pub fn load_prefs_json(&mut self, s: &str) -> std::result::Result<(), String> {
         let mut v: Value = serde_json::from_str(s).map_err(|e| format!("preferences: {e}"))?;
+        // Saved preferences before appearance modes had one concrete theme. Preserve its
+        // appearance instead of silently switching established users to Auto.
+        if let Some(interface) = v.get_mut("interface").and_then(Value::as_object_mut)
+            && !interface.contains_key("appearanceMode")
+            && let Some(theme) = interface.get("theme").and_then(Value::as_str).and_then(Theme::parse)
+        {
+            let (mode, slot) = match theme {
+                Theme::Midnight
+                | Theme::Anthracite
+                | Theme::Slate
+                | Theme::Aubergine
+                | Theme::Ocean
+                | Theme::SolarizedDark
+                | Theme::AdwaitaDark
+                | Theme::BreezeDark
+                | Theme::SoftDark => ("dark", "darkTheme"),
+                Theme::Pearl | Theme::MidnightLightGray | Theme::MidnightLight | Theme::Adwaita | Theme::BreezeLight | Theme::SoftLight => {
+                    ("light", "lightTheme")
+                }
+            };
+            interface.insert("appearanceMode".into(), json!(mode));
+            // A partially migrated file may already contain a newer theme selection (#5139).
+            interface.entry(slot).or_insert_with(|| json!(theme.name()));
+        }
         let color = v.as_object_mut().and_then(|m| m.remove("colorSettings"));
         let presets = v.as_object_mut().and_then(|m| m.remove("presets"));
         let mut prefs: Preferences = serde_json::from_value(v).map_err(|e| format!("preferences: {e}"))?;
@@ -1375,7 +1859,9 @@ impl Session {
     }
 
     /// Set one dotted path, routing `colorSettings.*` to the colour state.
-    fn set_pref(&mut self, path: &str, value: Value) -> std::result::Result<(), String> {
+    /// Batches defer colour validation until their complete candidate is staged. Returns
+    /// whether colour settings were touched, including whole-section/root-object updates.
+    fn set_pref(&mut self, path: &str, value: Value, validate_color: bool) -> std::result::Result<bool, String> {
         if let Some(rest) = path.strip_prefix("colorSettings") {
             let mut cur = serde_json::to_value(&self.color.settings).map_err(|e| e.to_string())?;
             let rest = rest.trim_start_matches('.');
@@ -1384,22 +1870,31 @@ impl Session {
             } else {
                 set_path(&mut cur, rest, value)?;
             }
-            self.color.settings = serde_json::from_value(cur).map_err(|e| format!("invalid value for `{path}`: {e}"))?;
-            crate::color_cmds::validate_settings(&self.color.settings)?;
+            let next = serde_json::from_value(cur).map_err(|e| format!("invalid value for `{path}`: {e}"))?;
+            if validate_color {
+                crate::color_cmds::validate_settings(&next)?;
+            }
+            self.color.settings = next;
             self.prefs.edit(|_| ());
-            return Ok(());
+            return Ok(true);
         }
         let mut next = self.prefs().clone();
-        if path.is_empty() || SECTIONS.iter().any(|(id, _)| *id == path) || matches!(path, "shortcuts" | "menus" | "toolbar") {
+        let mut color_changed = false;
+        if path.is_empty() || SECTIONS.iter().any(|(id, _)| *id == path) || matches!(path, "shortcuts" | "alternateShortcuts" | "menus" | "toolbar") {
             // Whole section (or everything): merge the object key by key so each value is checked.
             let obj = value.as_object().ok_or_else(|| format!("`{path}` needs an object"))?;
             for (k, v) in obj {
                 let p = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
                 if path.is_empty() && k == "colorSettings" {
-                    self.set_pref("colorSettings", v.clone())?;
+                    color_changed |= self.set_pref("colorSettings", v.clone(), validate_color)?;
                     continue;
                 }
-                if v.is_object() && !p.starts_with("shortcuts") && !p.ends_with(".colors") && next.get(&p).is_some_and(|c| c.is_object()) {
+                if v.is_object()
+                    && !p.starts_with("shortcuts")
+                    && !p.starts_with("alternateShortcuts")
+                    && !p.ends_with(".colors")
+                    && next.get(&p).is_some_and(|c| c.is_object())
+                {
                     for (k2, v2) in v.as_object().into_iter().flatten() {
                         next.set(&format!("{p}.{k2}"), v2.clone())?;
                     }
@@ -1410,8 +1905,74 @@ impl Session {
         } else {
             next.set(path, value)?;
         }
+        // Old `prefs.set interface.theme` clients (by path or inside a section object) still
+        // select a visible theme.
+        if path == "interface.theme" || next.interface.theme != self.prefs().interface.theme {
+            match next.interface.theme {
+                Theme::Midnight => {
+                    next.interface.dark_theme = DarkTheme::Midnight;
+                    next.interface.appearance_mode = AppearanceMode::Dark;
+                }
+                Theme::Slate => {
+                    next.interface.dark_theme = DarkTheme::Slate;
+                    next.interface.appearance_mode = AppearanceMode::Dark;
+                }
+                Theme::Anthracite => {
+                    next.interface.dark_theme = DarkTheme::Anthracite;
+                    next.interface.appearance_mode = AppearanceMode::Dark;
+                }
+                Theme::Aubergine => {
+                    next.interface.dark_theme = DarkTheme::Aubergine;
+                    next.interface.appearance_mode = AppearanceMode::Dark;
+                }
+                Theme::Ocean => {
+                    next.interface.dark_theme = DarkTheme::Ocean;
+                    next.interface.appearance_mode = AppearanceMode::Dark;
+                }
+                Theme::Pearl => {
+                    next.interface.light_theme = LightTheme::Pearl;
+                    next.interface.appearance_mode = AppearanceMode::Light;
+                }
+                Theme::MidnightLightGray => {
+                    next.interface.light_theme = LightTheme::MidnightLightGray;
+                    next.interface.appearance_mode = AppearanceMode::Light;
+                }
+                Theme::MidnightLight => {
+                    next.interface.light_theme = LightTheme::MidnightLight;
+                    next.interface.appearance_mode = AppearanceMode::Light;
+                }
+                Theme::Adwaita => {
+                    next.interface.light_theme = LightTheme::Adwaita;
+                    next.interface.appearance_mode = AppearanceMode::Light;
+                }
+                Theme::SolarizedDark => {
+                    next.interface.dark_theme = DarkTheme::SolarizedDark;
+                    next.interface.appearance_mode = AppearanceMode::Dark;
+                }
+                Theme::AdwaitaDark => {
+                    next.interface.dark_theme = DarkTheme::AdwaitaDark;
+                    next.interface.appearance_mode = AppearanceMode::Dark;
+                }
+                Theme::BreezeDark => {
+                    next.interface.dark_theme = DarkTheme::BreezeDark;
+                    next.interface.appearance_mode = AppearanceMode::Dark;
+                }
+                Theme::BreezeLight => {
+                    next.interface.light_theme = LightTheme::BreezeLight;
+                    next.interface.appearance_mode = AppearanceMode::Light;
+                }
+                Theme::SoftDark => {
+                    next.interface.dark_theme = DarkTheme::SoftDark;
+                    next.interface.appearance_mode = AppearanceMode::Dark;
+                }
+                Theme::SoftLight => {
+                    next.interface.light_theme = LightTheme::SoftLight;
+                    next.interface.appearance_mode = AppearanceMode::Light;
+                }
+            }
+        }
         self.prefs.edit(|p| *p = next);
-        Ok(())
+        Ok(color_changed)
     }
 }
 
@@ -1445,13 +2006,24 @@ fn prefs_set(s: &mut Session, p: &Value) -> Result<Value> {
     }
     // All or nothing: validate against a scratch copy first.
     let (saved_prefs, saved_color) = (s.prefs().clone(), s.color.settings.clone());
+    let mut color_changed = false;
     for (path, v) in &changes {
-        if let Err(e) = s.set_pref(path, v.clone()) {
-            s.prefs.edit(|p| *p = saved_prefs);
-            s.color.settings = saved_color;
-            return Err(bad(cmd, e));
+        match s.set_pref(path, v.clone(), false) {
+            Ok(touched) => color_changed |= touched,
+            Err(e) => {
+                s.prefs.edit(|p| *p = saved_prefs);
+                s.color.settings = saved_color;
+                return Err(bad(cmd, e));
+            }
         }
     }
+    if color_changed && let Err(e) = crate::color_cmds::validate_settings(&s.color.settings) {
+        s.prefs.edit(|p| *p = saved_prefs);
+        s.color.settings = saved_color;
+        return Err(bad(cmd, e));
+    }
+    // `colorSettings.blendTextGamma` lives in the compositor too, as `edit.colorSettings` sets it.
+    photosplice_compose::psblend::set_text_gamma(s.color.settings.blend_text_gamma);
     s.apply_prefs();
     let view = s.prefs_view();
     let out: Map<String, Value> = changes.iter().map(|(k, _)| (k.clone(), get_path(&view, k).cloned().unwrap_or(Value::Null))).collect();
@@ -1468,7 +2040,7 @@ fn prefs_reset(s: &mut Session, p: &Value) -> Result<Value> {
             let defaults = serde_json::to_value(crate::color_cmds::ColorSettings::default()).map_err(|e| bad("prefs.reset", e.to_string()))?;
             let key = path.strip_prefix("colorSettings.").unwrap_or(path);
             let def = get_path(&defaults, key).cloned().ok_or_else(|| bad("prefs.reset", format!("unknown preference `{path}`")))?;
-            s.set_pref(path, def).map_err(|e| bad("prefs.reset", e))?;
+            s.set_pref(path, def, true).map_err(|e| bad("prefs.reset", e))?;
         }
         None => {
             s.color.settings = Default::default();
@@ -1481,8 +2053,14 @@ fn prefs_reset(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     s.prefs.edit(|_| ());
+    photosplice_compose::psblend::set_text_gamma(s.color.settings.blend_text_gamma);
     s.apply_prefs();
-    prefs_get(s, &json!({"path": path.unwrap_or("")}))
+    if path.is_some_and(|path| keyed(path).is_some()) {
+        // The removed override is absent, so reading its old path would report an error.
+        Ok(Value::Null)
+    } else {
+        prefs_get(s, &json!({"path": path.unwrap_or("")}))
+    }
 }
 
 /// `edit.preferences.<section>`: the section's values (the GUI opens the dialog on it instead).
@@ -1496,65 +2074,457 @@ fn preferences_section(s: &mut Session, p: &Value) -> Result<Value> {
 /// Edit › Keyboard Shortcuts (engine part): list, change and reset application shortcuts.
 fn keyboard_shortcuts(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "edit.keyboardShortcuts";
+    // Every change lands at once, after all of it validated: a bad key leaves the set as it was.
+    let mut next = s.prefs().clone();
+    // A set loads first, so the call's other changes apply on top of it.
+    let mut changed = crate::shortcut_sets::load(&mut next, p).map_err(|e| bad(cmd, e))?;
     if let Some(r) = p.get("reset") {
         match r {
-            Value::Bool(true) => s.edit_prefs(|p| p.shortcuts.clear()),
-            Value::Array(ids) => s.edit_prefs(|p| {
+            Value::Bool(true) => {
+                next.shortcuts.clear();
+                next.alternate_shortcuts.clear();
+                changed = true;
+            }
+            Value::Array(ids) => {
                 for id in ids.iter().filter_map(Value::as_str) {
-                    p.shortcuts.remove(id);
+                    next.shortcuts.remove(id);
+                    next.alternate_shortcuts.remove(id);
                 }
-            }),
+                changed = true;
+            }
             _ => {}
         }
     }
-    if let Some(m) = p.get("set").and_then(Value::as_object) {
-        let mut next = s.prefs().clone();
-        for (id, v) in m {
-            if !bindable().any(|(b, _)| b == id) && !p.get("allowUnknown").and_then(Value::as_bool).unwrap_or(false) {
+    // A Photoshop `.kys` set (`importKys`, its XML text) becomes `set` and `alternates` entries,
+    // matched by label (`crate::kys`); a key equal to the command's default restores the
+    // default, and keys given in `set` / `alternates` as well win over the file's.
+    let imported;
+    let mut import = None;
+    let p = match p.get("importKys") {
+        Some(v) => {
+            // The file's text, or {"path": …} to read it.
+            let read;
+            let xml = match v {
+                Value::String(s) => s.as_str(),
+                Value::Object(o) => {
+                    let path =
+                        o.get("path").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).ok_or_else(|| bad(cmd, "`importKys.path` is a .kys file"))?;
+                    read = read_text_file(path, crate::kys::MAX_BYTES).map_err(|e| bad(cmd, format!("{path}: {e}")))?;
+                    read.as_str()
+                }
+                _ => return Err(bad(cmd, "`importKys` is the text of a .kys file, or {\"path\": …}")),
+            };
+            let set = crate::kys::parse(xml).map_err(|e| bad(cmd, e))?;
+            let plan = crate::kys::plan(crate::kys::command_candidates(), &set);
+            let mut merged = serde_json::Map::new();
+            // A key the system reserves is left out (reported as `reserved`), not a failed import.
+            let mut skipped: Vec<String> = Vec::new();
+            for (id, sc) in plan.set.iter().filter(|(id, sc)| {
+                let bad = reserved_shortcut(sc);
+                if bad {
+                    skipped.push(format!("{id}: {sc}"));
+                }
+                !bad
+            }) {
+                let default = crate::command_specs().iter().find(|c| c.id == id).and_then(|c| c.shortcut).and_then(normalize_shortcut);
+                merged.insert(id.clone(), if default.as_deref() == Some(sc.as_str()) { Value::Null } else { json!(sc) });
+            }
+            // Tool keys: a tool's own letter restores it (and its Shift cycling).
+            let tools = crate::shell_commands::TOOLS.iter().map(|t| (t.0, t.1));
+            let (tool_keys, unknown_tools) = crate::kys::plan_tools(tools, &set);
+            for (id, key) in &tool_keys {
+                let own = crate::shell_commands::tool_default(id).flatten().is_some_and(|d| d.eq_ignore_ascii_case(key));
+                merged.insert(id.clone(), if own { Value::Null } else { json!(key) });
+            }
+            merged.extend(p.get("set").and_then(Value::as_object).cloned().unwrap_or_default());
+            let mut alternates = serde_json::Map::new();
+            for (id, keys) in &plan.alternate_keys {
+                let keys: &Vec<String> = &keys.iter().filter(|k| !reserved_shortcut(k)).cloned().collect();
+                let main = plan.set.get(id).map(String::as_str);
+                let default = Preferences::default().alternates(id, main);
+                alternates.insert(id.clone(), if *keys == default { Value::Null } else { json!(keys) });
+            }
+            alternates.extend(p.get("alternates").and_then(Value::as_object).cloned().unwrap_or_default());
+            import = Some(json!({
+                "name": set.name,
+                "imported": plan.set.len(),
+                "set": plan.set,
+                "unknown": plan.unknown,
+                "unreadable": plan.unreadable,
+                "alternates": plan.alternates,
+                "alternateKeys": plan.alternate_keys,
+                "toolKeys": set.tool_keys,
+                "tools": tool_keys,
+                "unknownTools": unknown_tools,
+                "reserved": skipped,
+                "windows": set.windows,
+            }));
+            let mut with_import = p.clone();
+            with_import["set"] = Value::Object(merged);
+            with_import["alternates"] = Value::Object(alternates);
+            imported = with_import;
+            &imported
+        }
+        None => p,
+    };
+    let empty = serde_json::Map::new();
+    let set = match p.get("set") {
+        Some(Value::Object(m)) => m,
+        _ => &empty,
+    };
+    let alts = match p.get("alternates") {
+        None | Some(Value::Null) => &empty,
+        Some(v) => v.as_object().ok_or_else(|| bad(cmd, "`alternates` maps command ids to lists of shortcuts"))?,
+    };
+    if !set.is_empty() || !alts.is_empty() {
+        let allow_unknown = p.get("allowUnknown").and_then(Value::as_bool).unwrap_or(false);
+        changed = true;
+        // Reserved system keys can't be bound, by hand or from a file.
+        let reserved = |v: &Value| -> Option<String> {
+            let keys = match v {
+                Value::String(s) => vec![s.clone()],
+                other => alternate_keys(other).unwrap_or_default(),
+            };
+            keys.into_iter().find(|k| reserved_shortcut(k))
+        };
+        if let Some((id, k)) = set.iter().chain(alts.iter()).find_map(|(id, v)| reserved(v).map(|k| (id, k))) {
+            return Err(bad(cmd, format!("`{k}` (for `{id}`) is reserved by the system and can't be assigned")));
+        }
+        for (id, v) in set {
+            if !bindable().any(|(b, _)| b == id) && !allow_unknown {
                 return Err(bad(cmd, format!("unknown command `{id}`")));
             }
             next.set(&format!("shortcuts.{id}"), v.clone()).map_err(|e| bad(cmd, e))?;
         }
-        // Like Photoshop, a shortcut moved to a new command is taken away from the old one.
+        for (id, v) in alts {
+            if !bindable().any(|(b, _)| b == id) && default_alternates(id).next().is_none() && !allow_unknown {
+                return Err(bad(cmd, format!("unknown command `{id}`")));
+            }
+            next.set(&format!("alternateShortcuts.{id}"), v.clone()).map_err(|e| bad(cmd, e))?;
+        }
+        // Like Photoshop, a shortcut moved to a new command is taken away from the old one,
+        // whether the old one held it as its main key or as an alternate (#3665).
         if p.get("removeConflicts").and_then(Value::as_bool).unwrap_or(true) {
-            for (id, v) in m {
-                let Some(sc) = v.as_str().and_then(normalize_shortcut) else { continue };
+            let assigned: Vec<(&str, String)> = set
+                .iter()
+                .filter_map(|(id, v)| Some((id.as_str(), v.as_str().and_then(normalize_shortcut)?)))
+                .chain(alts.iter().flat_map(|(id, v)| alternate_keys(v).unwrap_or_default().into_iter().map(move |k| (id.as_str(), k))))
+                .collect();
+            for (id, sc) in assigned {
                 for (c, def) in bindable() {
+                    // Tools may share a key: they cycle with Shift, as Photoshop's groups do.
+                    if is_tool(id) && is_tool(c) {
+                        continue;
+                    }
                     // Never strip a command that this same call is assigning:
                     // two entries for one key are a clash inside the call, which
                     // the returned conflicts list reports (#719). Stripping
                     // each other here unbound both silently.
-                    if c == id || m.contains_key(c) {
+                    if c == id || set.contains_key(c) || alts.contains_key(c) {
                         continue;
                     }
-                    if next.shortcut(c, def).and_then(normalize_shortcut).as_deref() == Some(sc.as_str()) {
+                    let main = next.shortcut(c, def).map(str::to_string);
+                    if main.as_deref().and_then(normalize_shortcut).as_deref() == Some(sc.as_str()) {
                         next.shortcuts.insert(c.to_string(), String::new());
+                    }
+                    let held = next.alternates(c, main.as_deref());
+                    if held.contains(&sc) {
+                        next.alternate_shortcuts.insert(c.to_string(), held.into_iter().filter(|k| *k != sc).collect());
                     }
                 }
             }
         }
-        s.edit_prefs(|p| *p = next);
     }
-    let prefs = s.prefs();
+    // Then the sets are saved, deleted or switched, from the bindings as they now stand.
+    changed |= crate::shortcut_sets::store(&mut next, p).map_err(|e| bad(cmd, e))?;
+    // The reply and the exports read the bindings as they will be; they are committed only once
+    // the exports are written, so a bad export target changes nothing.
+    let prefs = &next;
     let filter = p.get("filter").and_then(Value::as_str).map(str::to_ascii_lowercase);
-    let temporary = TEMPORARY_TOOLS.iter().map(|t| (t.0, t.1, &["Tools", "Temporary"][..], Some(t.2), true));
-    let list: Vec<Value> = crate::command_specs()
-        .iter()
-        .map(|c| (c.id, c.label, c.menu, c.shortcut, false))
-        .chain(temporary)
+    let list: Vec<Value> = bindable_items()
         .filter(|c| filter.as_ref().is_none_or(|f| c.0.to_ascii_lowercase().contains(f) || c.1.to_ascii_lowercase().contains(f)))
-        .filter(|c| p.get("list").and_then(Value::as_bool).unwrap_or(false) || filter.is_some() || prefs.shortcuts.contains_key(c.0))
-        .map(|(id, label, menu, def, hold)| {
-            let mut v = json!({"id": id, "label": label, "menu": menu, "default": def, "shortcut": prefs.shortcut(id, def)});
-            if hold {
-                v["hold"] = json!(true);
+        .filter(|c| {
+            p.get("list").and_then(Value::as_bool).unwrap_or(false)
+                || filter.is_some()
+                || prefs.shortcuts.contains_key(c.0)
+                || prefs.alternate_shortcuts.contains_key(c.0)
+        })
+        .map(|(id, label, menu, def, kind)| {
+            let main = prefs.shortcut(id, def);
+            let defaults: Vec<&str> = default_alternates(id).collect();
+            let mut v = json!({"id": id, "label": label, "menu": menu, "default": def, "shortcut": main, "alternates": prefs.alternates(id, main)});
+            if !defaults.is_empty() {
+                v["defaultAlternates"] = json!(defaults);
+            }
+            match kind {
+                BindKind::Hold => v["hold"] = json!(true),
+                BindKind::Tool => v["tool"] = json!(true),
+                BindKind::Command => {}
             }
             v
         })
         .collect();
-    let bindings: Vec<(&str, &str)> = bindable().filter_map(|(id, def)| Some((id, prefs.shortcut(id, def)?))).collect();
-    let conflicts: Vec<Value> = conflicts(bindings).into_iter().map(|(sc, ids)| json!({"shortcut": sc, "commands": ids})).collect();
-    Ok(json!({"overrides": prefs.shortcuts, "commands": list, "conflicts": conflicts}))
+    let mut bindings: Vec<(&str, String)> = Vec::new();
+    for (id, def) in bindable() {
+        let main = prefs.shortcut(id, def);
+        bindings.extend(main.map(|m| (id, m.to_string())));
+        bindings.extend(prefs.alternates(id, main).into_iter().map(|k| (id, k)));
+    }
+    // Tools sharing a key are a cycling group, not a conflict.
+    let conflicts: Vec<Value> = conflicts(bindings.iter().map(|(id, k)| (*id, k.as_str())))
+        .into_iter()
+        .filter(|(_, ids)| !ids.iter().all(|id| is_tool(id)))
+        .map(|(sc, ids)| json!({"shortcut": sc, "commands": ids}))
+        .collect();
+    let mut out = json!({"overrides": prefs.shortcuts, "alternateOverrides": prefs.alternate_shortcuts, "commands": list, "conflicts": conflicts});
+    if let (Some(o), Value::Object(sets)) = (out.as_object_mut(), crate::shortcut_sets::describe(prefs)) {
+        o.extend(sets);
+    }
+    // The bindings as a `.kys` file, or Photoshop's Summarize page: every bindable item (the
+    // engine's commands, the shell's commands and the tools).
+    let set_name = if prefs.shortcut_set.is_empty() { crate::shortcut_sets::DEFAULTS_NAME } else { prefs.shortcut_set.as_str() };
+    // Both targets are resolved and their texts made before anything is written, and a path that
+    // can't be written is refused before either file is: a bad export changes nothing.
+    let kys_target = file_target(cmd, p.get("exportKys"))?;
+    let html_target = file_target(cmd, p.get("summarize"))?;
+    let mut files: Vec<(&str, String, String)> = Vec::new();
+    if let Some(target) = kys_target {
+        let entries: Vec<crate::kys::Entry> =
+            crate::shortcut_sets::bound(prefs).into_iter().map(|b| crate::kys::Entry { id: b.id, label: b.label, tool: b.tool, keys: b.keys }).collect();
+        let text = crate::kys::write(set_name, &entries);
+        match target {
+            Some(path) => files.push(("kysPath", path, text)),
+            None => out["kys"] = json!(text),
+        }
+    }
+    if let Some(target) = html_target {
+        let v = p.get("summarize").cloned().unwrap_or(Value::Null);
+        let mac = v.get("mac").and_then(Value::as_bool).unwrap_or(cfg!(target_os = "macos"));
+        let mut sections: Vec<crate::shortcut_sets::Section> = Vec::new();
+        for crate::shortcut_sets::Bound { label, menu, keys, .. } in crate::shortcut_sets::bound(prefs) {
+            match sections.iter_mut().find(|(m, _)| *m == menu) {
+                Some((_, rows)) => rows.push((label, keys)),
+                None => sections.push((menu, vec![(label, keys)])),
+            }
+        }
+        let html = crate::shortcut_sets::summarize(set_name, &sections, mac);
+        match target {
+            Some(path) => files.push(("htmlPath", path, html)),
+            None => out["html"] = json!(html),
+        }
+    }
+    for (_, path, _) in &files {
+        writable(path).map_err(|e| bad(cmd, format!("{path}: {e}")))?;
+    }
+    let list: Vec<(&str, &str)> = files.iter().map(|(_, path, text)| (path.as_str(), text.as_str())).collect();
+    write_files_atomically(&list, &rename_path).map_err(|e| bad(cmd, e))?;
+    for (key, path, _) in &files {
+        out[*key] = json!(path);
+    }
+    if changed {
+        s.edit_prefs(|p| *p = next);
+    }
+    if let Some(import) = import {
+        out["import"] = import;
+    }
+    Ok(out)
+}
+
+/// An output parameter (`exportKys`, `summarize`): absent or false → `None`; true (or an object
+/// without `path`) → `Some(None)`, the text comes back in the reply; `{"path": …}` →
+/// `Some(Some(path))`, written there.
+fn file_target(cmd: &str, v: Option<&Value>) -> Result<Option<Option<String>>> {
+    match v {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => Ok(None),
+        Some(Value::Bool(true)) => Ok(Some(None)),
+        Some(Value::Object(o)) => match o.get("path") {
+            None | Some(Value::Null) => Ok(Some(None)),
+            Some(Value::String(s)) if !s.trim().is_empty() => Ok(Some(Some(s.clone()))),
+            Some(_) => Err(bad(cmd, "`path` must be a non-empty string")),
+        },
+        Some(_) => Err(bad(cmd, "expected true or {\"path\": …}")),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_text_file(path: &str, max: usize) -> std::result::Result<String, String> {
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if !meta.is_file() || meta.len() > max as u64 {
+        return Err(format!("not a file of at most {} KiB", max / 1024));
+    }
+    std::fs::read_to_string(path).map_err(|e| e.to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn read_text_file(_: &str, _: usize) -> std::result::Result<String, String> {
+    Err("paths can't be read on the web; pass the file's text instead".into())
+}
+
+/// Whether `path` can be written: not a folder, in a folder that exists.
+#[cfg(not(target_arch = "wasm32"))]
+fn writable(path: &str) -> std::result::Result<(), String> {
+    let p = std::path::Path::new(path);
+    if p.is_dir() {
+        return Err("is a folder".into());
+    }
+    if std::fs::metadata(p).is_ok_and(|m| m.permissions().readonly()) {
+        return Err("is read-only".into());
+    }
+    match p.parent().filter(|d| !d.as_os_str().is_empty()) {
+        Some(d) if !d.is_dir() => Err("its folder doesn't exist".into()),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn writable(_: &str) -> std::result::Result<(), String> {
+    Err("paths can't be written on the web; omit `path` to get the text back".into())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn rename_path(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::rename(from, to)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn rename_path(_: &std::path::Path, _: &std::path::Path) -> std::io::Result<()> {
+    Err(std::io::Error::other("paths can't be written on the web"))
+}
+
+/// Where `path` points, for telling whether two targets are one file: its folder resolved, its
+/// name compared without case where the file system ignores it.
+#[cfg(not(target_arch = "wasm32"))]
+fn path_key(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    let dir = p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    let key = dir.join(p.file_name().unwrap_or_default()).to_string_lossy().into_owned();
+    if cfg!(any(target_os = "windows", target_os = "macos")) { key.to_lowercase() } else { key }
+}
+
+/// A new, empty file beside `path` with a name nothing else uses (`create_new`), for staging
+/// (`kind` "tmp") or a backup ("bak").
+#[cfg(not(target_arch = "wasm32"))]
+fn sibling(path: &str, kind: &str) -> std::io::Result<(std::path::PathBuf, std::fs::File)> {
+    for n in 0..1000u32 {
+        let p = std::path::PathBuf::from(format!("{path}.{}-{n}.photosplice-{kind}", std::process::id()));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
+            Ok(f) => return Ok((p, f)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other("no free name beside it"))
+}
+
+/// Write `files` ((path, text)) all or nothing. Each text is staged in a new file beside its
+/// target; once every one is written, each existing target is moved aside to a backup and the
+/// staged file moved in. Any failure moves the backups back and removes what was staged, so the
+/// user's files end as they began; on success the backups go. Two targets naming one file are
+/// refused. `rename` is `std::fs::rename` (a test fails it on purpose).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn write_files_atomically(
+    files: &[(&str, &str)],
+    rename: &dyn Fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+) -> std::result::Result<(), String> {
+    use std::io::Write;
+    use std::path::{Path, PathBuf};
+    for (i, (a, _)) in files.iter().enumerate() {
+        if files.iter().skip(i + 1).any(|(b, _)| path_key(a) == path_key(b)) {
+            return Err(format!("{a}: two exports to the same file"));
+        }
+    }
+    let mut staged: Vec<PathBuf> = Vec::new();
+    let drop_all = |paths: &[PathBuf]| {
+        for p in paths {
+            let _ = std::fs::remove_file(p);
+        }
+    };
+    for (path, text) in files {
+        let (tmp, mut f) = match sibling(path, "tmp") {
+            Ok(v) => v,
+            Err(e) => {
+                drop_all(&staged);
+                return Err(format!("{path}: {e}"));
+            }
+        };
+        staged.push(tmp);
+        if let Err(e) = f.write_all(text.as_bytes()).and_then(|()| f.sync_all()) {
+            drop_all(&staged);
+            return Err(format!("{path}: {e}"));
+        }
+    }
+    // (target, its backup) of each file moved in so far.
+    let mut moved: Vec<(&Path, Option<PathBuf>)> = Vec::new();
+    // Put each backup back over its target (a target that had none is removed). What couldn't be
+    // put back is named, so the user can find their previous file.
+    let undo = |moved: &[(&Path, Option<PathBuf>)]| -> String {
+        let mut stranded = Vec::new();
+        for (target, backup) in moved.iter().rev() {
+            match backup {
+                Some(b) => {
+                    if rename(b, target).is_err() {
+                        stranded.push(format!("the previous {} is at {}", target.display(), b.display()));
+                    }
+                }
+                None => {
+                    let _ = std::fs::remove_file(target);
+                }
+            }
+        }
+        if stranded.is_empty() { String::new() } else { format!(" ({})", stranded.join("; ")) }
+    };
+    for ((path, _), tmp) in files.iter().zip(&staged) {
+        let target = Path::new(*path);
+        let backup = if target.exists() {
+            let moved_aside = sibling(path, "bak").and_then(|(b, f)| {
+                drop(f);
+                match rename(target, &b) {
+                    Ok(()) => Ok(b),
+                    Err(e) => {
+                        // The placeholder the backup name reserved goes too.
+                        let _ = std::fs::remove_file(&b);
+                        Err(e)
+                    }
+                }
+            });
+            match moved_aside {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    let stranded = undo(&moved);
+                    drop_all(&staged);
+                    return Err(format!("{path}: {e}{stranded}"));
+                }
+            }
+        } else {
+            None
+        };
+        if let Err(e) = rename(tmp, target) {
+            let mut stranded = undo(&moved);
+            if let Some(b) = &backup
+                && rename(b, target).is_err()
+            {
+                stranded = format!("{stranded} (the previous {path} is at {})", b.display());
+            }
+            drop_all(&staged);
+            return Err(format!("{path}: {e}{stranded}"));
+        }
+        moved.push((target, backup));
+    }
+    for (_, backup) in moved {
+        if let Some(b) = backup {
+            let _ = std::fs::remove_file(b);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn write_files_atomically(
+    files: &[(&str, &str)],
+    _: &dyn Fn(&std::path::Path, &std::path::Path) -> std::io::Result<()>,
+) -> std::result::Result<(), String> {
+    if files.is_empty() { Ok(()) } else { Err("paths can't be written on the web; omit `path` to get the text back".into()) }
 }
 
 /// Edit › Menus: hide/show items and give them colours.
@@ -1571,6 +2541,9 @@ fn menus(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     let (hide, show) = (ids("hide"), ids("show"));
+    if let Some(id) = hide.iter().find(|id| !MenuCustomization::hideable(id)) {
+        return Err(bad("edit.menus", format!("`{id}` can't be hidden")));
+    }
     s.edit_prefs(|pr| {
         if p.get("reset").and_then(Value::as_bool) == Some(true) {
             pr.menus = MenuCustomization::default();
@@ -1622,7 +2595,10 @@ macro_rules! spec {
 
 macro_rules! section {
     ($id:literal, $label:literal) => {
-        CommandSpec { id: $id, label: $label, menu: &["Edit", "Preferences"], shortcut: None, params: r##"{}"##, enabled: always, run: |s, _| preferences_section(s, &json!({"__section": section_of($id)})), journal: false }
+        section!($id, $label, None)
+    };
+    ($id:literal, $label:literal, $shortcut:expr) => {
+        CommandSpec { id: $id, label: $label, menu: &["Edit", "Preferences"], shortcut: $shortcut, params: r##"{}"##, enabled: always, run: |s, _| preferences_section(s, &json!({"__section": section_of($id)})), journal: false }
     };
 }
 
@@ -1652,7 +2628,8 @@ pub fn specs() -> Vec<CommandSpec> {
             false
         ),
         spec!("prefs.reset", "Reset Preferences", [], None, r##"{"path":"section|section.key"?=everything}"##, prefs_reset, false),
-        section!("edit.preferences.general", "General…"),
+        // Photoshop: ⌘K opens Preferences › General (⌘, is Layer › Hide Layers).
+        section!("edit.preferences.general", "General…", Some("Cmd+K")),
         section!("edit.preferences.interface", "Interface…"),
         section!("edit.preferences.workspace", "Workspace…"),
         section!("edit.preferences.tools", "Tools…"),
@@ -1675,7 +2652,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Keyboard Shortcuts…",
             ["Edit"],
             Some("Cmd+Alt+Shift+K"),
-            r##"{"set":{"<command id>|tools.temporary.hand|zoomIn|zoomOut":"Cmd+Shift+X"|""(remove)|null(default)}?,"reset":true|["<id>",…]?,"removeConflicts":bool=true,"filter":str?,"list":bool=false}"##,
+            r##"{"set":{"<command id>|tools.temporary.hand|zoomIn|zoomOut":"Cmd+Shift+X"|""(remove)|null(default)}?,"alternates":{"<command id>":["F3",…]|[](none)|null(default)}?,"reset":true|["<id>",…]?,"removeConflicts":bool=true,"filter":str?,"list":bool=false,"importKys":"<.kys XML>"|{"path":".kys"}?,"useSet":"<name>"|""(defaults)?,"saveSet":"<name>"?,"deleteSet":"<name>"?,"sets":{"<name>":{"shortcuts":{…},"alternateShortcuts":{…}}}?,"activeSet":"<name>"|""?,"exportKys":true|{"path":".kys"}?,"summarize":true|{"mac":bool,"path":".html"}?} (with a path the file is written and the reply has kysPath/htmlPath instead of kys/html)"##,
             keyboard_shortcuts,
             true
         ),
