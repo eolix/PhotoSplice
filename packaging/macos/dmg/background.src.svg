@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="660" height="400" viewBox="0 0 660 400">
+  <defs>
+    <linearGradient id="panel" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#121d45"/>
+      <stop offset="1" stop-color="#03071c"/>
+    </linearGradient>
+    <linearGradient id="ink" x1="268" y1="0" x2="624" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#08d0f5"/>
+      <stop offset="0.35" stop-color="#2f6bf0"/>
+      <stop offset="0.6" stop-color="#e2409a"/>
+      <stop offset="0.82" stop-color="#f2555a"/>
+      <stop offset="1" stop-color="#f6b21b"/>
+    </linearGradient>
+    <linearGradient id="arrow" x1="410" y1="0" x2="490" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2f6bf0"/>
+      <stop offset="1" stop-color="#e2409a"/>
+    </linearGradient>
+    <clipPath id="left"><rect width="232" height="400"/></clipPath>
+  </defs>
+  <!-- Paper: Finder draws the icon labels in black, so the area under the icons stays light. -->
+  <rect width="660" height="400" fill="#f4f5f9"/>
+  <!-- The app's colour field and icon. -->
+  <g clip-path="url(#left)">
+    <rect width="232" height="400" fill="url(#panel)"/>
+    <image href="../../../assets/app-icon/photosplice-small.svg" x="26" y="110" width="180" height="180"/>
+  </g>
+  <rect x="232" y="0" width="1" height="400" fill="#d9dce6"/>
+  <!-- Wordmark, rule and line. -->
+  <text x="268" y="70" font-family="Roboto" font-weight="600" font-size="34" fill="#12162b" letter-spacing="-0.68">PhotoSplice</text>
+  <rect x="268" y="88" width="356" height="2" rx="1" fill="url(#ink)"/>
+  <text x="268" y="110" font-family="Roboto" font-weight="400" font-size="11.5" fill="#5b6175">An open-source, native image editor</text>
+  <!-- Between the app (326, 205) and Applications (574, 205): 128 pt icon boxes kept clear. -->
+  <path d="M412 205 H478" stroke="url(#arrow)" stroke-width="3" stroke-linecap="round" fill="none"/>
+  <path d="M470 196 L482 205 L470 214" stroke="#e2409a" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <!-- Instruction. -->
+  <rect x="268" y="334" width="356" height="1" fill="#d9dce6"/>
+  <text x="268" y="360" font-family="Roboto" font-weight="600" font-size="11" fill="#5b6175" letter-spacing="1.2">DRAG ONTO APPLICATIONS TO INSTALL</text>
+</svg>

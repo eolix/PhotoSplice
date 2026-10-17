@@ -28,7 +28,6 @@ VOLUME = "PhotoSplice"
 WIDTH, HEIGHT = 660, 400  # window content, pt; the background's 1x size
 TITLE_BAR = 32
 ICON_SIZE = 128
-PALETTE = 16  # colours in background.tiff
 ICONS = {"PhotoSplice.app": (326, 205), "Applications": (574, 205)}
 # A fixed date for the alias and the colour profile. Finder never matches it against the image
 # (each build is a new volume): it finds the background by volume name and path.
@@ -46,11 +45,6 @@ def render(svg, width, out):
         return im.convert("RGB")
 
 
-def quantize(im):
-    # No dithering: dither noise compresses badly and the artwork has flat fills.
-    return im.quantize(PALETTE, method=Image.Quantize.FASTOCTREE, dither=Image.Dither.NONE)
-
-
 def srgb_profile():
     # LittleCMS's built-in sRGB ("No copyright, use freely"), with its creation date fixed.
     icc = bytearray(ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes())
@@ -65,11 +59,11 @@ def write_tiff(svg, out):
     """1x (72 dpi) and 2x (144 dpi) in one TIFF, as `tiffutil -cathidpicheck` writes them."""
     with tempfile.TemporaryDirectory() as tmp:
         one, two = (
-            quantize(render(svg, WIDTH * s, os.path.join(tmp, f"{s}x.png"))) for s in (1, 2)
+            render(svg, WIDTH * s, os.path.join(tmp, f"{s}x.png")) for s in (1, 2)
         )
     two.encoderinfo = {"dpi": (144, 144)}  # the rest as the first page
-    # Opaque 16-colour palette, Deflate: the artwork is three inks plus antialiasing, and a palette
-    # keeps the file under ~90 KB (RGB was ~200 KB; repository assets must stay small).
+    # Opaque RGB, Deflate: the icon's gradients band in a palette (even at 256 colours), and RGB
+    # stays near 100 KB (repository assets must stay small).
     one.save(
         out,
         "TIFF",

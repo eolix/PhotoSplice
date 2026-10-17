@@ -15,6 +15,7 @@ Every bundled third-party work keeps its licence text next to it:
 | Directory | Licence file |
 |---|---|
 | `assets/fonts/` | `OFL-Inter.txt`, `OFL-JetBrainsMono.txt` |
+| `packaging/macos/dmg/` | `OFL-Roboto.txt` |
 | `assets/icons/` | `LICENSE-lucide.txt` |
 | `assets/dict/` | `LICENSE-SCOWL.txt` |
 | `assets/ico/` | `LICENSE` |
@@ -37,11 +38,15 @@ The engine, document model, codecs and UI framework of this application come fro
 contributors, licensed under MIT OR Apache-2.0. The attribution and the statement of changes
 required by Apache-2.0 §4 are in [`NOTICE`](NOTICE).
 
-## SIL Open Font License 1.1 — Inter, JetBrains Mono
+## SIL Open Font License 1.1 — Inter, JetBrains Mono, Roboto
 
 The interface fonts [Inter](https://github.com/rsms/inter) (© The Inter Project Authors) and
 [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) (© The JetBrains Mono Project
 Authors). Full texts: `assets/fonts/OFL-Inter.txt`, `assets/fonts/OFL-JetBrainsMono.txt`.
+
+The macOS installer's background (`packaging/macos/dmg/background.svg`, `background.tiff`) carries
+outlines of a few words set in [Roboto](https://github.com/googlefonts/roboto-classic) (© 2011 The
+Roboto Project Authors), from Google Fonts. Full text: `packaging/macos/dmg/OFL-Roboto.txt`.
 
 ## MIT — Tabler Icons
 
