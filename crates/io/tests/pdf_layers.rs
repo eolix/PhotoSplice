@@ -1235,3 +1235,15 @@ fn probe_open() {
         eprintln!("page 1 type: {texts:?}");
     }
 }
+
+#[test]
+fn a_clip_that_contains_its_text_or_shape_is_no_mask() {
+    // A table cell around its text, and around a square: nothing is clipped, so no masks.
+    let d = open(&pdf("q 10 40 180 40 re W n BT /F1 12 Tf 0 g 20 55 Td (Cell) Tj ET Q q 0 0 60 40 re W n 1 0 0 rg 10 5 20 20 re f Q", "", &[]));
+    assert_eq!(kinds(&d), ["text", "shape"]);
+    assert!(d.layers.iter().all(|l| l.vector_mask.is_none()), "{:?}", d.layers.iter().map(|l| l.vector_mask.is_some()).collect::<Vec<_>>());
+    // A clip that cuts through the type, and one that isn't a rectangle, still mask.
+    let d = open(&pdf("q 10 40 25 40 re W n BT /F1 24 Tf 0 g 20 50 Td (Cut) Tj ET Q q 0 0 m 60 0 l 30 40 l h W n 1 0 0 rg 10 5 40 30 re f Q", "", &[]));
+    assert_eq!(kinds(&d), ["text", "shape"]);
+    assert!(d.layers.iter().all(|l| l.vector_mask.is_some()));
+}
