@@ -612,7 +612,7 @@ pub fn body(app: &mut crate::PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<Stri
     let chosen = get_s(f, "__preset", "");
     // A fixed body height, so the dialog keeps its size from tab to tab with room to breathe;
     // the preset grid scrolls inside it. Smaller windows get a shorter body.
-    let body_h = (ui.ctx().content_rect().height() - 220.0).clamp(300.0, 400.0);
+    let body_h = (crate::dialogs::host_rect(ui.ctx()).height() - 220.0).clamp(300.0, 400.0);
     ui.horizontal_top(|ui| {
         // Left: preset grid.
         ui.vertical(|ui| {

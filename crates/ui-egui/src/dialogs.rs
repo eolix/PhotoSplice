@@ -66,14 +66,273 @@ struct FrameOpts {
 ///
 /// `body` gets the frame's content `Ui` and, for a fixed size, the body's size below the title
 /// bar. The response says whether it should close (Esc is the caller's).
+///
+/// A large dialog ([`FrameSize::Fixed`]: Camera Raw, Filter Gallery, Lens Correction, Liquify…) is
+/// a window of its own where the platform has them ([`floating`]): it can leave the main window,
+/// as Reference's large dialogs do. The small ones stay in the main window.
 pub fn frame<R>(
     ctx: &egui::Context,
     id: egui::Id,
     title: &str,
     size: FrameSize,
     body: impl FnOnce(&mut egui::Ui, Option<egui::Vec2>) -> R,
-) -> egui::ModalResponse<R> {
-    frame_with(ctx, id, title, size, FrameOpts::default(), body)
+) -> FrameResponse<R> {
+    if let FrameSize::Fixed(outer) = size
+        && !ctx.embed_viewports()
+    {
+        return floating(ctx, id, title, outer, body);
+    }
+    let modal = frame_with(ctx, id, title, size, FrameOpts::default(), body);
+    // Esc closes it; a click outside doesn't (Reference keeps the dialog).
+    let close = modal.is_top_modal && !modal.any_popup_open && ctx.input(|i| i.key_pressed(egui::Key::Escape));
+    FrameResponse { close, inner: Some(modal.inner) }
+}
+
+/// What [`frame`] returns: the body's value (`None` only if a separate window never drew it) and
+/// whether the dialog asked to close (Esc with no popup open, or the close box of its own window).
+pub struct FrameResponse<R> {
+    pub inner: Option<R>,
+    close: bool,
+}
+
+impl<R> FrameResponse<R> {
+    pub fn should_close(&self) -> bool {
+        self.close
+    }
+}
+
+/// Key presses from a floating dialog's window, handed to the main window on the
+/// next frame ([`forward_floating_keys`]): the dialogs read their keys (Esc, Enter, Liquify's tool
+/// letters, Camera Raw's Y and ⌘Z) where the main window's shortcuts do, as when they were drawn
+/// in it.
+const FLOATING_KEYS: &str = "pc-floating-dialog-keys";
+
+#[derive(Clone, Default)]
+struct FloatingKeys {
+    events: Vec<egui::Event>,
+}
+
+/// Where a floating dialog opens (screen points) and at what size, kept while it stays open so the
+/// window isn't moved under the user each frame. `measured` is a content-sized window's last
+/// measured size (none before its first frame, while it stays hidden).
+#[derive(Clone, Copy)]
+struct FloatingPlace {
+    pos: egui::Pos2,
+    size: egui::Vec2,
+    measured: Option<egui::Vec2>,
+    pass: u64,
+}
+
+/// How a floating dialog's window is sized.
+#[derive(Clone, Copy)]
+enum FloatSize {
+    /// A given size the user can change (the large tool dialogs).
+    Fixed(egui::Vec2),
+    /// Its content's, in a width range (Layer Style, New Document, Preferences): the window
+    /// follows the content.
+    Content(f32, f32),
+}
+
+/// What the dialog loop adds to a floating window.
+#[derive(Clone, Copy)]
+struct FloatOpts {
+    /// Where its place (relative to the main window) is remembered between runs.
+    place: egui::Id,
+    /// Greyed out: a dialog above it takes the input.
+    inactive: bool,
+    /// The window a press on the main window (or on an inactive dialog) brings to the front.
+    front: egui::ViewportId,
+    /// Hand its unused key presses to the main window ([`forward_floating_keys`]): the large tool
+    /// dialogs read Esc, Enter and their shortcuts there. The dialog loop's dialogs read theirs
+    /// in their own window.
+    forward_keys: bool,
+}
+
+/// The size of the main window's content (points), also while drawing in a dialog's own window:
+/// dialogs that fit themselves to the window (Preferences, New Document) fit to this one.
+pub fn host_rect(ctx: &egui::Context) -> egui::Rect {
+    ctx.data(|m| m.get_temp::<egui::Rect>(egui::Id::new(HOST_RECT))).unwrap_or_else(|| ctx.content_rect())
+}
+
+const HOST_RECT: &str = "pc-dialog-host-rect";
+
+/// Records the main window's content rect for [`host_rect`]; call once per frame from it.
+pub fn note_host_rect(ctx: &egui::Context) {
+    let r = ctx.content_rect();
+    ctx.data_mut(|m| m.insert_temp(egui::Id::new(HOST_RECT), r));
+}
+
+/// A large dialog in a window of its own, styled like the in-window frame: PhotoSplice's title
+/// strip (on macOS in place of the system's title bar, beside the window buttons) over the dialog
+/// background. The main window stays inert under it (not dimmed) and a press there brings the
+/// dialog back to the front. Where it was left is remembered relative to the main window.
+fn floating<R>(
+    ctx: &egui::Context,
+    id: egui::Id,
+    title: &str,
+    outer: egui::Vec2,
+    body: impl FnOnce(&mut egui::Ui, Option<egui::Vec2>) -> R,
+) -> FrameResponse<R> {
+    let opts = FloatOpts { place: id.with("floating-offset"), inactive: false, front: egui::ViewportId::from_hash_of(id), forward_keys: true };
+    let shown = floating_window(ctx, id, title, FloatSize::Fixed(outer), opts, body);
+    FrameResponse { inner: shown.inner, close: shown.close }
+}
+
+/// What [`floating_window`] returns.
+struct Floated<R> {
+    inner: Option<R>,
+    /// Esc (no popup open) or the window's close box.
+    close: bool,
+}
+
+fn floating_window<R>(
+    ctx: &egui::Context,
+    id: egui::Id,
+    title: &str,
+    sizing: FloatSize,
+    opts: FloatOpts,
+    body: impl FnOnce(&mut egui::Ui, Option<egui::Vec2>) -> R,
+) -> Floated<R> {
+    let t = crate::theme::Tokens::get(ctx);
+    let vid = egui::ViewportId::from_hash_of(id);
+    let main = ctx.content_rect();
+    let pressed = egui::Area::new(id.with("floating-modal"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(main.min)
+        .show(ctx, |ui| ui.allocate_exact_size(main.size(), egui::Sense::click_and_drag()).1)
+        .inner;
+    if pressed.clicked() || pressed.drag_stopped() {
+        ctx.send_viewport_cmd_to(opts.front, egui::ViewportCommand::Focus);
+    }
+    // Placed once when it opens (the builder is re-applied every frame, so it must not change).
+    let main_outer = ctx.input(|i| i.viewport().outer_rect).unwrap_or(main);
+    let place_key = id.with("floating-place");
+    let pass = ctx.cumulative_pass_nr();
+    let mut place = match ctx.data(|m| m.get_temp::<FloatingPlace>(place_key)) {
+        Some(p) if p.pass.saturating_add(1) >= pass => p,
+        _ => {
+            let size = match sizing {
+                FloatSize::Fixed(outer) => outer.max(egui::vec2(320.0, 240.0)),
+                // As wide as the in-window frame lets it grow, until measured.
+                FloatSize::Content(min_w, max_w) => egui::vec2(max_w.max(min_w).max(320.0) + 16.0, 400.0),
+            };
+            let centred = main_outer.center() - size / 2.0;
+            // A remembered place is relative to the main window, and kept near it.
+            let pos = ctx
+                .data_mut(|m| m.get_persisted::<egui::Vec2>(opts.place))
+                .filter(|o| o.is_finite() && o.x.abs() <= main_outer.width() && o.y.abs() <= main_outer.height())
+                .map_or(centred, |o| main_outer.min + o);
+            FloatingPlace { pos, size, measured: None, pass }
+        }
+    };
+    place.pass = pass;
+    let own_strip = cfg!(target_os = "macos");
+    let strip_h = if own_strip { crate::panels::title_bar_height(ctx) } else { 0.0 };
+    let mut builder = egui::ViewportBuilder::default().with_title(title).with_position(place.pos);
+    builder = match sizing {
+        FloatSize::Fixed(_) => builder
+            .with_inner_size(place.size)
+            .with_min_inner_size((place.size * 0.6).max(egui::vec2(480.0, 360.0)).min(place.size))
+            .with_resizable(true),
+        // Hidden until its content was measured once, then the content's size.
+        FloatSize::Content(..) => builder.with_inner_size(place.measured.unwrap_or(place.size)).with_resizable(false).with_visible(place.measured.is_some()),
+    };
+    if own_strip {
+        builder = builder.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false);
+    }
+    let mut body = Some(body);
+    let (mut close_box, mut escape, mut any_popup_open) = (false, false, false);
+    let mut moved_to = None;
+    let mut measured = None;
+    let inner = ctx.show_viewport_immediate(vid, builder, |ui, _class| {
+        let vctx = ui.ctx().clone();
+        let (close_requested, outer_rect, pressed_here) =
+            vctx.input(|i| (i.viewport().close_requested(), i.viewport().outer_rect, i.pointer.any_pressed()));
+        close_box |= close_requested;
+        moved_to = outer_rect.map(|r| r.min);
+        if opts.inactive && pressed_here {
+            vctx.send_viewport_cmd_to(opts.front, egui::ViewportCommand::Focus);
+        }
+        // The system title bar follows the theme where there is one (Windows, Linux).
+        if !own_strip {
+            let theme_key = id.with("floating-theme");
+            let dark = t.dark();
+            if vctx.data(|m| m.get_temp::<bool>(theme_key)) != Some(dark) {
+                vctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(if dark { egui::SystemTheme::Dark } else { egui::SystemTheme::Light }));
+                vctx.data_mut(|m| m.insert_temp(theme_key, dark));
+            }
+        }
+        let out = egui::CentralPanel::default()
+            .frame(egui::Frame::NONE.fill(t.card))
+            .show(ui, |ui| {
+                if own_strip {
+                    let (band, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), strip_h), egui::Sense::click_and_drag());
+                    ui.painter().rect_filled(band, 0.0, t.chrome);
+                    ui.painter().line_segment([band.left_bottom(), band.right_bottom()], egui::Stroke::new(1.0, t.separator));
+                    let galley = ui.painter().layout_no_wrap(title.to_string(), crate::theme::semibold(13.0), t.text);
+                    let at = egui::pos2(band.left() + 78.0, band.center().y - galley.size().y / 2.0);
+                    ui.painter().with_clip_rect(band).galley(at, galley, t.text);
+                    if resp.drag_started() {
+                        vctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                }
+                if opts.inactive {
+                    ui.disable();
+                }
+                let content = egui::Frame::NONE.inner_margin(ui.spacing().menu_margin).show(ui, |ui| match sizing {
+                    FloatSize::Fixed(_) => {
+                        let size = ui.available_size();
+                        body.take().map(|body| body(ui, Some(size)))
+                    }
+                    FloatSize::Content(min_w, max_w) => {
+                        ui.set_min_width(min_w);
+                        ui.set_max_width(max_w.max(min_w));
+                        body.take().map(|body| body(ui, None))
+                    }
+                });
+                if matches!(sizing, FloatSize::Content(..)) && !ui.is_sizing_pass() {
+                    let r = content.response.rect;
+                    measured = Some(egui::vec2(r.width(), strip_h + r.height()).round());
+                }
+                content.inner
+            })
+            .inner;
+        any_popup_open = egui::Popup::is_any_open(&vctx);
+        // Esc closes it, as in the in-window frame; it also goes on to the main window's handlers,
+        // which some dialogs cancel from (Liquify, the Filter Gallery).
+        escape = !any_popup_open && vctx.input(|i| i.key_pressed(egui::Key::Escape));
+        // Unused key presses go to the main window's handlers; none while a text field has them.
+        let (events, focused) =
+            vctx.input(|i| (i.events.iter().filter(|e| matches!(e, egui::Event::Key { .. })).cloned().collect::<Vec<_>>(), i.viewport().focused));
+        if opts.forward_keys && !opts.inactive && focused != Some(false) && !vctx.text_edit_focused() && !events.is_empty() {
+            vctx.data_mut(|m| m.get_temp_mut_or_default::<FloatingKeys>(egui::Id::new(FLOATING_KEYS)).events.extend(events));
+        }
+        out
+    });
+    if let Some(size) = measured.filter(|s| s.is_finite() && s.x >= 1.0 && s.y >= 1.0) {
+        if place.measured.is_none_or(|m| (m - size).length() > 0.5) {
+            ctx.request_repaint();
+        }
+        place.measured = Some(size);
+    }
+    ctx.data_mut(|m| m.insert_temp(place_key, place));
+    if let Some(at) = moved_to {
+        let offset = at - main_outer.min;
+        if offset.is_finite() {
+            ctx.data_mut(|m| m.insert_persisted(opts.place, offset));
+        }
+    }
+    Floated { inner, close: close_box || escape }
+}
+
+/// Hands a floating dialog's key presses ([`floating`]) to the main window's input:
+/// call from the app's raw input hook.
+pub fn forward_floating_keys(ctx: &egui::Context, raw: &mut egui::RawInput) {
+    if raw.viewport_id != egui::ViewportId::ROOT {
+        return;
+    }
+    let Some(keys) = ctx.data_mut(|m| m.remove_temp::<FloatingKeys>(egui::Id::new(FLOATING_KEYS))) else { return };
+    raw.events.extend(keys.events);
 }
 
 /// [`frame`] with the dialog loop's options. A dialog opens centred below the title bar (or where
@@ -230,14 +489,26 @@ fn older_dialog_above(ctx: &egui::Context, live: egui::LayerId, dialogs: &[Dialo
 /// keeps PhotoSplice's look without one: Esc and Cancel close it.
 pub(crate) const CLOSE_BOX: bool = !cfg!(target_os = "macos");
 
+/// The dialogs Reference opens as windows of their own (as PhotoSplice does for its large tool
+/// dialogs, [`frame`]): Layer Style, New Document and Preferences.
+fn floats(d: &Dialog) -> bool {
+    matches!(d.kind, DialogKind::LayerStyle | DialogKind::NewDocument) || (d.kind == DialogKind::Command && crate::prefs_ui::is_preferences(&d.fields))
+}
+
 pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
+    note_host_rect(ctx);
     crate::layer_style::color_picker::prune(app);
     crate::type_panels_ui::color_picker::prune(app);
     crate::edit_history::track_dialogs(app, ctx);
     let dialogs = app.ui.dialogs.clone();
     let top = dialogs.last().map(|d| d.id);
+    // From the first one that floats, every dialog does: one opened over it (the Color Picker
+    // over Layer Style) would otherwise sit in the main window, behind it.
+    let float_from = if ctx.embed_viewports() { None } else { dialogs.iter().position(floats) };
+    let front = egui::ViewportId::from_hash_of(egui::Id::new(("dialog", top.unwrap_or_default())));
     let mut shown = Vec::new();
-    for d in dialogs {
+    for (index, d) in dialogs.into_iter().enumerate() {
+        let floating = float_from.is_some_and(|f| index >= f);
         // Preferences previews the language picked in it, without changing other dialogs.
         let lang = if crate::prefs_ui::is_preferences(&d.fields) {
             crate::i18n::Lang::from_pref(d.fields.get("values").and_then(|v| v.pointer("/interface/language")).and_then(Value::as_str).unwrap_or("auto"))
@@ -304,15 +575,15 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
         // in front and the live one unreachable behind it. Raise the live one only then: every
         // frame would also cover its own popups.
         let layer = egui::LayerId::new(egui::Order::Foreground, id);
-        if interactive && older_dialog_above(ctx, layer, &app.ui.dialogs) {
+        if !floating && interactive && older_dialog_above(ctx, layer, &app.ui.dialogs) {
             ctx.move_to_top(layer);
         }
-        // Tab / ⇧Tab walk the topmost dialog's text fields, not every widget (field_tab.rs).
-        let tab = if interactive && !egui::Popup::is_any_open(ctx) { crate::field_tab::take_step(ctx) } else { 0 };
         let web = fields.contains_key("__web");
-        let web_popup_open = web && egui::Popup::is_any_open(ctx);
-        let opts = FrameOpts { place: Some(place_id(&d)), inactive: !interactive, first: crate::blur_pins::first_place(&d.fields, ctx) };
-        let modal = frame_with(ctx, id, &title, FrameSize::Width(min_w, max_w), opts, |ui, _| {
+        let draw = |ui: &mut egui::Ui, _: Option<egui::Vec2>| {
+            // Read where the dialog is drawn (its own window, when it floats).
+            // Tab / ⇧Tab walk the topmost dialog's text fields, not every widget (field_tab.rs).
+            let tab = if interactive && !egui::Popup::is_any_open(ui.ctx()) { crate::field_tab::take_step(ui.ctx()) } else { 0 };
+            let web_popup_open = web && egui::Popup::is_any_open(ui.ctx());
             crate::field_tab::begin(ui.ctx());
             match d.kind {
                 DialogKind::NewDocument => {
@@ -512,15 +783,20 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
             }
             // The frame around the content (Frame::popup's margin and stroke).
             ui.min_rect().expand(ui.spacing().menu_margin.sum().max_elem() + 2.0)
-        });
-        shown.push(modal.inner);
-        // Esc cancels (topmost dialog, no popup open). A click outside does nothing: Photoshop keeps
+        };
+        // Esc cancels (topmost dialog, no popup open). A click outside does nothing: Reference keeps
         // the dialog, and the pointer may be panning or zooming the canvas under it.
-        if interactive
-            && outcome.is_none()
-            && (modal.response.should_close()
-                || (modal.is_top_modal && !modal.any_popup_open && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))))
-        {
+        let close = if floating {
+            let opts = FloatOpts { place: place_id(&d), inactive: !interactive, front, forward_keys: false };
+            floating_window(ctx, id, &title, FloatSize::Content(min_w, max_w), opts, draw).close
+        } else {
+            let opts = FrameOpts { place: Some(place_id(&d)), inactive: !interactive, first: crate::blur_pins::first_place(&d.fields, ctx) };
+            let modal = frame_with(ctx, id, &title, FrameSize::Width(min_w, max_w), opts, draw);
+            shown.push(modal.inner);
+            modal.response.should_close()
+                || (modal.is_top_modal && !modal.any_popup_open && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)))
+        };
+        if interactive && outcome.is_none() && close {
             outcome = Some(false);
         }
         if let Some(dm) = app.ui.dialog_mut(d.id) {
@@ -705,6 +981,67 @@ pub fn open_command_dialog(app: &mut PhotospliceApp, command: &str, label: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A floating dialog's key presses reach the main window's input on the next frame, once, and
+    /// never another window's.
+    #[test]
+    fn floating_dialog_keys_go_to_the_main_window_once() {
+        let ctx = egui::Context::default();
+        let enter = egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        ctx.data_mut(|m| m.insert_temp(egui::Id::new(FLOATING_KEYS), FloatingKeys { events: vec![enter.clone()] }));
+        let mut other = egui::RawInput { viewport_id: egui::ViewportId::from_hash_of("dialog"), ..Default::default() };
+        forward_floating_keys(&ctx, &mut other);
+        assert!(other.events.is_empty(), "only the main window takes them");
+        let mut root = egui::RawInput::default();
+        forward_floating_keys(&ctx, &mut root);
+        assert_eq!(root.events, vec![enter]);
+        let mut again = egui::RawInput::default();
+        forward_floating_keys(&ctx, &mut again);
+        assert!(again.events.is_empty(), "handed over once");
+    }
+
+    /// Layer Style, New Document and Preferences open as windows of their own, as in Reference;
+    /// the small dialogs (Image Size here) stay in the main window.
+    #[test]
+    fn the_large_dialogs_float() {
+        let dialog = |kind, fields: serde_json::Value| Dialog { id: 1, kind, fields: fields.as_object().cloned().unwrap_or_default() };
+        assert!(floats(&dialog(DialogKind::LayerStyle, json!({}))));
+        assert!(floats(&dialog(DialogKind::NewDocument, json!({}))));
+        assert!(floats(&dialog(DialogKind::Command, json!({"__prefsui": "prefs"}))));
+        assert!(!floats(&dialog(DialogKind::Command, json!({"__sizing": true, "__command": "image.imageSize"}))));
+        assert!(!floats(&dialog(DialogKind::Error, json!({"message": "x"}))));
+    }
+
+    /// In the main window (no separate windows: the web build, tests), a large dialog's frame
+    /// asks to close on Esc but not on a click outside it, as Reference keeps the dialog.
+    #[test]
+    fn a_fixed_frame_closes_on_escape_but_not_on_a_click_outside() {
+        use egui_kittest::Harness;
+        let closed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let ready = std::rc::Rc::new(std::cell::Cell::new(false));
+        let (seen, drawn) = (closed.clone(), ready.clone());
+        let mut h = Harness::builder().with_size(egui::vec2(900.0, 700.0)).build_ui(move |ui| {
+            // Drawn once the theme's fonts are in (the harness runs a frame as it is built).
+            if !drawn.get() {
+                return;
+            }
+            let r = frame(ui.ctx(), egui::Id::new("big"), "Big", FrameSize::Fixed(egui::vec2(400.0, 300.0)), |ui, size| {
+                let _ = ui.allocate_exact_size(size.unwrap_or(egui::vec2(10.0, 10.0)), egui::Sense::hover());
+            });
+            assert!(r.inner.is_some(), "the in-window frame always draws the body");
+            seen.set(seen.get() || r.should_close());
+        });
+        PhotospliceApp::setup_context(&h.ctx, crate::theme::ThemeKind::default());
+        ready.set(true);
+        h.run_steps(2);
+        h.drag_at(egui::pos2(10.0, 690.0));
+        h.drop_at(egui::pos2(10.0, 690.0));
+        h.run_steps(2);
+        assert!(!closed.get(), "a click outside keeps it");
+        h.key_press(egui::Key::Escape);
+        h.run_steps(1);
+        assert!(closed.get(), "Esc closes it");
+    }
 
     /// A dialog opens centred below the title bar (its first frame, when its size isn't known
     /// yet, used to leave it pinned to a corner), and Camera Raw gets the same frame: the same

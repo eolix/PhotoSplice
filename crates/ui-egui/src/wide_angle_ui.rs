@@ -229,10 +229,11 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let heading = app.wide_angle.as_ref().map(|d| format!("{} ({})", tl!("Adaptive Wide Angle"), d.layer_name)).unwrap_or_default();
     let rect = widgets::tool_dialog_rect(ctx, DIALOG_MAX);
     let mut action: Option<&str> = None;
-    let shift = ctx.input(|i| i.modifiers.shift);
     // The dialogs' own frame (title bar, dragging), at a fixed size, like Lens Correction's.
     let size = crate::dialogs::FrameSize::Fixed(rect.size());
     crate::dialogs::frame(ctx, egui::Id::new("awa-dialog"), &heading, size, |ui, size| {
+        // Read where the dialog is drawn (its own window, where there are windows).
+        let shift = ui.input(|i| i.modifiers.shift);
         let Some(d) = app.wide_angle.as_mut() else { return };
         d.history.settle(&d.params, ctx.input(|i| i.pointer.any_down()));
         if d.dirty {

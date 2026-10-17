@@ -635,44 +635,14 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let Some(d) = app.camera_raw.as_ref() else { return };
     let heading = d.heading();
     let rect = widgets::tool_dialog_rect(ctx, DIALOG_MAX);
-    // Where the platform has no extra windows (the web build), the dialogs' own frame over the
-    // document (title bar, dragging, kept below the app's title bar), at a fixed size.
-    if ctx.embed_viewports() {
-        let mut action = None;
-        crate::dialogs::frame(ctx, egui::Id::new("camera-raw-dialog"), &heading, crate::dialogs::FrameSize::Fixed(rect.size()), |ui, size| {
-            action = body(app, ui, size.unwrap_or(rect.size()));
-        });
-        let action = keys(app, ctx).or(action);
-        finish(app, ctx, action);
-        return;
-    }
-    // Modal, as in Photoshop: the main window takes no input while Camera Raw is open (not
-    // dimmed, like the other dialogs).
-    let main = ctx.content_rect();
-    egui::Area::new(egui::Id::new("camera-raw-modal")).order(egui::Order::Foreground).fixed_pos(main.min).show(ctx, |ui| {
-        let _ = ui.allocate_exact_size(main.size(), Sense::click_and_drag());
-    });
-    // A window of its own (title bar, moved and resized like any window), like Adobe Camera Raw.
-    let builder = egui::ViewportBuilder::default().with_title(heading).with_inner_size(rect.size()).with_min_inner_size([900.0, 600.0]);
-    let mut close = false;
+    // A window of its own (title bar, moved and resized like any window), like Adobe Camera Raw;
+    // the dialogs' own frame over the document where the platform has no extra windows (the web
+    // build). Modal either way, as in Reference: the main window takes no input meanwhile.
     let mut action = None;
-    ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("camera-raw-window"), builder, |ui, class| {
-        if ui.ctx().input(|i| i.viewport().close_requested()) {
-            close = true;
-        }
-        let t = Tokens::get(ui.ctx());
-        // A window of its own fills it; one egui draws inside the main window keeps the size.
-        let own = class != egui::ViewportClass::EmbeddedWindow;
-        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.chrome)).show(ui, |ui| {
-            let size = if own { ui.available_size() } else { rect.size() };
-            action = body(app, ui, size);
-        });
-        action = keys(app, ui.ctx()).or(action);
+    let modal = crate::dialogs::frame(ctx, egui::Id::new("camera-raw-dialog"), &heading, crate::dialogs::FrameSize::Fixed(rect.size()), |ui, size| {
+        action = body(app, ui, size.unwrap_or(rect.size()));
     });
-    // Closing Camera Raw's window is Cancel.
-    if close && action.is_none() {
-        action = Some("cancel");
-    }
+    let action = keys(app, ctx).or(action).or_else(|| modal.should_close().then_some("cancel"));
     finish(app, ctx, action);
 }
 

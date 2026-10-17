@@ -1965,6 +1965,8 @@ impl eframe::App for PhotospliceApp {
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         let frame_start = gpu_canvas::now_ms();
+        // A large dialog in a window of its own reads its keys here, as when drawn in this one.
+        dialogs::forward_floating_keys(ctx, raw_input);
         // Native menu key equivalents become the key presses they were (see `native_menu`).
         if let Some(menu) = self.services.native_menu.as_mut() {
             menu.raw_input(raw_input);
