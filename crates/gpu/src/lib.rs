@@ -1597,11 +1597,25 @@ impl Compositor {
                     self.staged += put_tiles(device, queue, encoder, &r, &missing, &bytes);
                 }
                 let staged = &mut self.staged;
-                convert_tiles(surface, present, kind, |t, cs, bytes| {
-                    *staged += put_tiles(device, queue, encoder, &r, cs, bytes);
+                // Zeroed and written once: a tile only needs its texels that aren't zero (a line
+                // of type covers a sliver of its 256² tiles), and one with none needs nothing.
+                let partial = !default_nonzero && !r.ordered;
+                convert_tiles(surface, present, kind, |t, cs, bytes, ink| {
+                    match (cs, partial) {
+                        ([c], true) => {
+                            if let Some(ink) = ink {
+                                let n = write_tile_part(queue, &r, *c, bytes, ink);
+                                *staged += n;
+                                stats.bytes_uploaded += n as usize;
+                            }
+                        }
+                        _ => {
+                            *staged += put_tiles(device, queue, encoder, &r, cs, bytes);
+                            stats.bytes_uploaded += bytes.len() * cs.len();
+                        }
+                    }
                     for &c in cs {
                         stats.tiles_uploaded += 1;
-                        stats.bytes_uploaded += bytes.len();
                         r.tiles.insert(c, t.clone());
                     }
                 });
@@ -1641,7 +1655,7 @@ impl Compositor {
             self.staged += put_tiles(device, queue, encoder, r, &gone, &bytes);
         }
         let staged = &mut self.staged;
-        convert_tiles(surface, changed, kind, |t, cs, bytes| {
+        convert_tiles(surface, changed, kind, |t, cs, bytes, _| {
             *staged += put_tiles(device, queue, encoder, r, cs, bytes);
             for &c in cs {
                 stats.tiles_uploaded += 1;
@@ -2032,6 +2046,53 @@ fn write_tile(queue: &wgpu::Queue, r: &Resident, c: TileCoord, bytes: &[u8]) {
     );
 }
 
+/// Tile-local bounds of the texels of `bytes` (a converted tile, `bpp` bytes a texel) that
+/// aren't all zero; `None` when every one is.
+fn ink_bounds(bytes: &[u8], bpp: usize) -> Option<Rect> {
+    let ts = TILE_SIZE as usize;
+    let row = ts * bpp;
+    if bpp == 0 || bytes.len() < row * ts {
+        return Some(Rect::new(0, 0, TILE_SIZE, TILE_SIZE));
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (ts, ts, 0, 0);
+    for (y, r) in bytes.chunks_exact(row).take(ts).enumerate() {
+        // Whole words first: most rows of a sparse tile are empty.
+        if r.iter().all(|b| *b == 0) {
+            continue;
+        }
+        let first = r.chunks_exact(bpp).position(|px| px.iter().any(|b| *b != 0)).unwrap_or(0);
+        let last = ts - r.chunks_exact(bpp).rev().position(|px| px.iter().any(|b| *b != 0)).unwrap_or(0);
+        (x0, x1) = (x0.min(first), x1.max(last));
+        (y0, y1) = (y0.min(y), y + 1);
+    }
+    (x1 > x0).then(|| Rect::new(x0 as i32, y0 as i32, x1 as i32, y1 as i32))
+}
+
+/// Writes the texels of tile `c` inside `part` (tile-local) from its converted `bytes` into
+/// resident `r`; returns the bytes staged.
+fn write_tile_part(queue: &wgpu::Queue, r: &Resident, c: TileCoord, bytes: &[u8], part: Rect) -> u64 {
+    if part == Rect::new(0, 0, TILE_SIZE, TILE_SIZE) {
+        write_tile(queue, r, c, bytes);
+        return bytes.len() as u64;
+    }
+    let tr = c.rect();
+    let bpp = r.kind.bytes_per_pixel() as u64;
+    let row = u64::from(TILE_SIZE as u32) * bpp;
+    let offset = part.y0 as u64 * row + part.x0 as u64 * bpp;
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &r.texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d { x: (tr.x0 + part.x0 - r.region.x0) as u32, y: (tr.y0 + part.y0 - r.region.y0) as u32, z: 0 },
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytes,
+        wgpu::TexelCopyBufferLayout { offset, bytes_per_row: Some(row as u32), rows_per_image: Some(TILE_SIZE as u32) },
+        wgpu::Extent3d { width: part.width(), height: part.height(), depth_or_array_layers: 1 },
+    );
+    part.height() as u64 * row
+}
+
 /// Submit what `encoder` recorded and continue in a fresh one, then wait for the previous
 /// intermediate submit (`last`), so at most two batches of uploads and evicted pages are in
 /// flight. The web has no blocking wait and relies on the browser's own scheduling.
@@ -2155,7 +2216,10 @@ fn keep_overlap(device: &wgpu::Device, queue: &wgpu::Queue, old: &Resident, new:
 /// one `Arc` across every coordinate it covers), in parallel batches. Converting every tile one
 /// after another on the UI thread froze a 50 MP 16-bit document for about 1.4 s after a
 /// full-canvas fill (#1774). Returns how many tiles were converted.
-fn convert_tiles(surface: &Surface, tiles: Vec<(TileCoord, Arc<Tile>)>, kind: TexKind, mut put: impl FnMut(&Arc<Tile>, &[TileCoord], &[u8])) -> usize {
+/// Converts each distinct tile once (in parallel batches) and hands it to `put` with the
+/// coordinates showing it and the tile-local bounds of its texels that aren't all zero (`None`:
+/// every texel is zero).
+fn convert_tiles(surface: &Surface, tiles: Vec<(TileCoord, Arc<Tile>)>, kind: TexKind, mut put: impl FnMut(&Arc<Tile>, &[TileCoord], &[u8], Option<Rect>)) -> usize {
     let mut groups: Vec<(Arc<Tile>, Vec<TileCoord>)> = Vec::new();
     let mut index: HashMap<*const Tile, usize> = HashMap::new();
     for (c, t) in tiles {
@@ -2170,9 +2234,13 @@ fn convert_tiles(surface: &Surface, tiles: Vec<(TileCoord, Arc<Tile>)>, kind: Te
     for batch in groups.chunks(CONVERT_BATCH) {
         // A tile's content is the same at every coordinate sharing it: convert it at the first.
         let jobs: Vec<_> = batch.iter().filter_map(|(t, cs)| cs.first().map(|c| (t, *c))).collect();
-        let converted = fx::par_map(jobs, |(t, c)| convert_tile(surface, Some(t), kind, c));
-        for ((t, cs), bytes) in batch.iter().zip(&converted) {
-            put(t, cs, bytes);
+        let converted = fx::par_map(jobs, |(t, c)| {
+            let bytes = convert_tile(surface, Some(t), kind, c);
+            let ink = ink_bounds(&bytes, kind.bytes_per_pixel());
+            (bytes, ink)
+        });
+        for ((t, cs), (bytes, ink)) in batch.iter().zip(&converted) {
+            put(t, cs, bytes, *ink);
         }
     }
     groups.len()
@@ -2547,6 +2615,20 @@ mod tests {
     /// every coordinate (shared or not) still gets exactly the bytes `convert_tile` gives it, at
     /// every depth and texture kind.
     #[test]
+    fn ink_bounds_finds_the_texels_that_arent_zero() {
+        let ts = TILE_SIZE as usize;
+        let mut b = vec![0u8; ts * ts * 4];
+        assert_eq!(ink_bounds(&b, 4), None, "all zero: nothing to upload");
+        b[(10 * ts + 3) * 4 + 2] = 7;
+        b[(40 * ts + 200) * 4] = 1;
+        assert_eq!(ink_bounds(&b, 4), Some(Rect::new(3, 10, 201, 41)));
+        b[(ts * ts - 1) * 4 + 3] = 255;
+        assert_eq!(ink_bounds(&b, 4), Some(Rect::new(3, 10, TILE_SIZE, TILE_SIZE)));
+        assert_eq!(ink_bounds(&b[..10], 4), Some(Rect::new(0, 0, TILE_SIZE, TILE_SIZE)), "short: all of it");
+        assert_eq!(ink_bounds(&b, 0), Some(Rect::new(0, 0, TILE_SIZE, TILE_SIZE)));
+    }
+
+    #[test]
     fn convert_tiles_converts_each_distinct_tile_once() {
         let area = Rect::new(0, 0, TILE_SIZE * 9, TILE_SIZE * 9);
         for (fmt, kind) in [
@@ -2567,7 +2649,7 @@ mod tests {
             let tiles: Vec<_> = area.tiles().filter_map(|c| s.tile(c).map(|t| (c, t.clone()))).collect();
             assert_eq!(tiles.len(), 81, "{fmt:?}");
             let mut seen = Vec::new();
-            let converted = convert_tiles(&s, tiles, kind, |t, cs, bytes| {
+            let converted = convert_tiles(&s, tiles, kind, |t, cs, bytes, _| {
                 for &c in cs {
                     assert!(s.tile(c).is_some_and(|own| Arc::ptr_eq(own, t)), "{fmt:?} {c:?}");
                     assert_eq!(bytes, convert_tile(&s, Some(t), kind, c).as_slice(), "{fmt:?} {c:?}");
@@ -2588,7 +2670,7 @@ mod tests {
         }
         let tiles: Vec<_> = wide.tiles().filter_map(|c| s.tile(c).map(|t| (c, t.clone()))).collect();
         let mut n = 0;
-        let converted = convert_tiles(&s, tiles, TexKind::Rgba16F, |t, cs, bytes| {
+        let converted = convert_tiles(&s, tiles, TexKind::Rgba16F, |t, cs, bytes, _| {
             for &c in cs {
                 assert_eq!(bytes, convert_tile(&s, Some(t), TexKind::Rgba16F, c).as_slice());
                 n += 1;
