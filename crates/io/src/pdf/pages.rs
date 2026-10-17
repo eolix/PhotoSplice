@@ -12,10 +12,12 @@ use photosplice_raster::Surface;
 use super::{OpenOptions, PageAs};
 use crate::{ImportResult, IoError};
 
-/// Gaps between pages and between rows, and the widest a row may get, at 72 ppi.
+/// Gaps between pages and between rows, at 72 ppi (scaled to the resolution).
 const PAGE_GAP: f32 = 30.0;
 const ROW_GAP: f32 = 120.0;
-const MAX_ROW: f32 = 8192.0;
+/// The widest a row of pages may get, in pixels: rows wrap so the document stays near square
+/// instead of one long strip (fewer pixels around the pages, and within GPU texture sizes).
+const MAX_ROW_PX: i32 = 8192;
 
 /// Opens `pages` (0-based) of the PDF as one document of artboards, at `o`'s resolution, box and
 /// way (layers or pixels). One page opens as [`super::open_page_with`] does (no board), and so
@@ -75,7 +77,7 @@ fn lay_out(name: &str, bytes: &[u8], pages: &[usize], o: &OpenOptions) -> Result
     }
     // Rows: pages left to right, a new row once one would pass the widest row.
     let k = dpi / 72.0;
-    let (gap, row_gap, max_row) = ((PAGE_GAP * k).round() as i32, (ROW_GAP * k).round() as i32, (MAX_ROW * k).round() as i32);
+    let (gap, row_gap, max_row) = ((PAGE_GAP * k).round() as i32, (ROW_GAP * k).round() as i32, MAX_ROW_PX);
     let mut spots = Vec::with_capacity(boards.len());
     let (mut x, mut y, mut row_h, mut width) = (0i32, 0i32, 0i32, 0i32);
     for (_, d) in &boards {
@@ -120,6 +122,7 @@ fn lay_out(name: &str, bytes: &[u8], pages: &[usize], o: &OpenOptions) -> Result
         }
         doc.layers.push(board);
     }
+    warm_bounds(&doc.layers);
     let n = super::page_count_with(bytes, &o.password).unwrap_or(pages.len());
     if n > pages.len() {
         warnings.push(format!("PDF has {n} pages; opened {}", pages.len()));
@@ -129,16 +132,28 @@ fn lay_out(name: &str, bytes: &[u8], pages: &[usize], o: &OpenOptions) -> Result
     Ok(ImportResult { document: doc, warnings, selected: Vec::new(), source_read_only: false, preview_only: false })
 }
 
-/// `s` with its pixels moved by (`dx`, `dy`).
-fn shift_surface(s: &Surface, dx: i32, dy: i32) -> Surface {
-    let mut out = Surface::with_default(s.format(), &s.default_pixel());
-    let r = s.content_bounds();
-    if !r.is_empty() {
-        let mut v = Vec::new();
-        s.read_region_into(r, &mut v);
-        out.write_region(r.translate(dx, dy), &v);
+/// Finds the content bounds of every layer's pixels (and masks) once, in parallel: each tile
+/// keeps its bounds until it's written, so the canvas's first composite needn't scan thousands of
+/// layers' pixels on one thread.
+pub(super) fn warm_bounds(layers: &[Layer]) {
+    use rayon::prelude::*;
+    fn one(l: &Layer) {
+        if let Some(s) = l.surface() {
+            let _ = s.content_bounds();
+        }
+        if let Some(m) = &l.mask {
+            let _ = m.surface.content_bounds();
+        }
+        if let Some(c) = l.children() {
+            c.par_iter().for_each(one);
+        }
     }
-    out
+    layers.par_iter().for_each(one);
+}
+
+/// `s` with its pixels moved by (`dx`, `dy`) (tile by tile, no float round trip).
+fn shift_surface(s: &Surface, dx: i32, dy: i32) -> Surface {
+    s.translated(dx, dy, s.content_bounds())
 }
 
 /// Moves a layer the importer made by (`dx`, `dy`): its pixels, paths, type and masks. A fill

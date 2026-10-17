@@ -36,9 +36,37 @@ impl fmt::Display for AllocationError {
 impl std::error::Error for AllocationError {}
 
 /// Pixel storage for one tile: `TILE_SIZE² × bytes_per_pixel`, row-major, interleaved channels.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Tile {
-    data: Box<[u8]>,
+    data: Pixels,
+    /// [`Tile::content_bounds`] against one default pixel, kept from the first time it's asked
+    /// for until the tile is written ([`Tile::data_mut`]): tiles are shared copy-on-write, so an
+    /// unchanged tile's bounds are scanned once however often a plan, a cull or a bounds query
+    /// asks (thousands of small layers otherwise rescan every pixel on every composite).
+    bounds: std::sync::OnceLock<(Box<[u8]>, Option<TileBounds>)>,
+}
+
+/// Tile-local half-open bounds `(x0, y0, x1, y1)`.
+pub type TileBounds = (u16, u16, u16, u16);
+
+impl PartialEq for Tile {
+    fn eq(&self, other: &Self) -> bool {
+        self.data.0 == other.data.0
+    }
+}
+
+impl Eq for Tile {}
+
+/// A tile's bytes, readable as a slice; writing goes through [`Tile::data_mut`], which drops the
+/// cached bounds.
+#[derive(Clone, Debug)]
+struct Pixels(Box<[u8]>);
+
+impl std::ops::Deref for Pixels {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
 }
 
 impl Tile {
@@ -53,7 +81,17 @@ impl Tile {
                 px.copy_from_slice(pixel);
             }
         }
-        Ok(Tile { data: data.into_boxed_slice() })
+        Ok(Tile::from_bytes(data.into_boxed_slice()))
+    }
+
+    fn from_bytes(data: Box<[u8]>) -> Self {
+        Tile { data: Pixels(data), bounds: std::sync::OnceLock::new() }
+    }
+
+    /// The bytes, for writing: the cached bounds go.
+    fn data_mut(&mut self) -> &mut [u8] {
+        self.bounds = std::sync::OnceLock::new();
+        &mut self.data.0
     }
 
     /// Clone this tile's pixel buffer with a fallible reservation.
@@ -62,7 +100,7 @@ impl Tile {
         let mut data = Vec::new();
         data.try_reserve_exact(bytes).map_err(|_| AllocationError::NotEnoughMemory { bytes })?;
         data.extend_from_slice(&self.data);
-        Ok(Tile { data: data.into_boxed_slice() })
+        Ok(Tile { data: Pixels(data.into_boxed_slice()), bounds: self.bounds.clone() })
     }
 
     fn filled(format: &PixelFormat, pixel: &[u8]) -> Self {
@@ -79,19 +117,24 @@ impl Tile {
                 out.copy_from_slice(&row);
             }
         }
-        Tile { data: data.into_boxed_slice() }
+        Tile::from_bytes(data.into_boxed_slice())
     }
     pub fn bytes(&self) -> &[u8] {
         &self.data
     }
     pub fn bytes_mut(&mut self) -> &mut [u8] {
-        &mut self.data
+        self.data_mut()
     }
 
     /// Tile-local half-open bounds `(x0, y0, x1, y1)` of the pixels that differ from the encoded
     /// pixel `dp` (one pixel of the tile's format), or `None` when every pixel equals it (or `dp`
     /// is empty).
     pub fn content_bounds(&self, dp: &[u8]) -> Option<(u16, u16, u16, u16)> {
+        let (cached, b) = self.bounds.get_or_init(|| (dp.into(), self.scan_bounds(dp)));
+        if **cached == *dp { *b } else { self.scan_bounds(dp) }
+    }
+
+    fn scan_bounds(&self, dp: &[u8]) -> Option<(u16, u16, u16, u16)> {
         let bpp = dp.len();
         if bpp == 0 {
             return None;
@@ -272,13 +315,13 @@ impl Surface {
         }
         for tc in r.tiles() {
             let tr = tc.rect().intersect(&r);
-            let t = self.try_tile_mut(tc)?;
+            let t = self.try_tile_mut(tc)?.data_mut();
             let span = tr.width() as usize * n;
             for y in tr.y0..tr.y1 {
                 let src = (((y - r.y0) as usize) * r.width() as usize + (tr.x0 - r.x0) as usize) * n;
                 let dst = (((y - tc.ty * TILE_SIZE) as usize) * TILE_SIZE as usize + (tr.x0 - tc.tx * TILE_SIZE) as usize) * n;
                 for (i, v) in data[src..src + span].iter().enumerate() {
-                    write_sample(&mut t.data, sample, dst + i, *v);
+                    write_sample(t, sample, dst + i, *v);
                 }
             }
         }
@@ -360,9 +403,9 @@ impl Surface {
         let (c, base) = self.locate(x, y);
         let n = self.channels();
         let sample = self.format.sample;
-        let t = self.tile_mut(c);
+        let t = self.tile_mut(c).data_mut();
         for (i, v) in px.iter().enumerate().take(n) {
-            write_sample(&mut t.data, sample, base + i, *v);
+            write_sample(t, sample, base + i, *v);
         }
     }
 
@@ -600,7 +643,7 @@ impl Surface {
                 let base = (((y - tc.ty * TILE_SIZE) as usize) * TILE_SIZE as usize + (tr.x0 - tc.tx * TILE_SIZE) as usize) * n;
                 let src = &data[o..o + span];
                 let bytes = sample.bytes();
-                let dst = &mut t.data[base * bytes..(base + span) * bytes];
+                let dst = &mut t.data_mut()[base * bytes..(base + span) * bytes];
                 match sample {
                     SampleType::U8 => {
                         for (d, v) in dst.iter_mut().zip(src) {
@@ -702,7 +745,7 @@ impl Surface {
                 let ly = (y - tc.ty * TILE_SIZE) as usize;
                 let lx0 = (tr.x0 - tc.tx * TILE_SIZE) as usize;
                 let lx1 = (tr.x1 - tc.tx * TILE_SIZE) as usize;
-                let row = &mut t.data[(ly * TILE_SIZE as usize + lx0) * bpp..(ly * TILE_SIZE as usize + lx1) * bpp];
+                let row = &mut t.data_mut()[(ly * TILE_SIZE as usize + lx0) * bpp..(ly * TILE_SIZE as usize + lx1) * bpp];
                 for p in row.chunks_exact_mut(bpp) {
                     p.copy_from_slice(&enc);
                 }
@@ -729,7 +772,7 @@ impl Surface {
             for y in tr.y0..tr.y1 {
                 let src = (((y - r.y0) as usize) * w + (tr.x0 - r.x0) as usize) * bpp;
                 let dst = (((y - tc.ty * TILE_SIZE) as usize) * TILE_SIZE as usize + (tr.x0 - tc.tx * TILE_SIZE) as usize) * bpp;
-                t.data[dst..dst + span].copy_from_slice(&bytes[src..src + span]);
+                t.data_mut()[dst..dst + span].copy_from_slice(&bytes[src..src + span]);
             }
         }
     }
@@ -813,7 +856,7 @@ impl Surface {
                 continue;
             }
 
-            let mut tile = Tile { data: vec![0u8; (TILE_SIZE * TILE_SIZE) as usize * bpp].into_boxed_slice() };
+            let mut tile = Tile::from_bytes(vec![0u8; (TILE_SIZE * TILE_SIZE) as usize * bpp].into_boxed_slice());
             let (tx0, ty0) = (i64::from(dc.tx) * i64::from(TILE_SIZE), i64::from(dc.ty) * i64::from(TILE_SIZE));
             let row_len = TILE_SIZE as usize * bpp;
             // Per stored row: copy the source span that falls inside the content in as few
@@ -821,7 +864,7 @@ impl Surface {
             // row — no whole-tile pre-fill, which rewrote nearly every byte twice.
             for local_y in 0..i64::from(TILE_SIZE) {
                 let y = ty0 + local_y;
-                let Some(row) = tile.data.get_mut(local_y as usize * row_len..(local_y as usize + 1) * row_len) else { continue };
+                let Some(row) = tile.data_mut().get_mut(local_y as usize * row_len..(local_y as usize + 1) * row_len) else { continue };
                 let in_content_y = y - i64::from(dy) >= i64::from(content.y0) && y - i64::from(dy) < i64::from(content.y1);
                 // The row's target columns whose SOURCE lies inside the content are copied
                 // (the copy loop crosses source tiles as needed); the rest stays default —
@@ -922,12 +965,12 @@ impl Surface {
                 self.tiles.insert(c, mapped.clone());
                 continue;
             }
-            let tile = self.tile_mut(c);
+            let tile = self.tile_mut(c).data_mut();
             for i in 0..px_count {
                 for k in 0..color {
                     let at = i * n + k;
-                    let v = read_sample(&tile.data, format.sample, at);
-                    write_sample(&mut tile.data, format.sample, at, f(v));
+                    let v = read_sample(tile, format.sample, at);
+                    write_sample(tile, format.sample, at, f(v));
                 }
             }
             if let Some(mapped) = self.tiles.get(&c) {
@@ -948,7 +991,7 @@ impl Surface {
                 out.tiles.insert(*c, converted.clone());
                 continue;
             }
-            let dst = out.tile_mut(*c);
+            let dst = out.tile_mut(*c).data_mut();
             let px_count = (TILE_SIZE * TILE_SIZE) as usize;
             for i in 0..px_count {
                 for (k, v) in src.iter_mut().enumerate() {
@@ -956,7 +999,7 @@ impl Surface {
                 }
                 let px = convert_pixel(&self.format, &to, &src);
                 for (k, v) in px.iter().enumerate() {
-                    write_sample(&mut dst.data, to.sample, i * to.channels() + k, *v);
+                    write_sample(dst, to.sample, i * to.channels() + k, *v);
                 }
             }
             if let Some(converted) = out.tiles.get(c) {
@@ -979,7 +1022,7 @@ impl Surface {
                 out.tiles.insert(*c, converted.clone());
                 continue;
             }
-            let dst = out.try_tile_mut(*c)?;
+            let dst = out.try_tile_mut(*c)?.data_mut();
             let px_count = (TILE_SIZE * TILE_SIZE) as usize;
             for i in 0..px_count {
                 for (k, v) in src.iter_mut().enumerate() {
@@ -987,7 +1030,7 @@ impl Surface {
                 }
                 let px = convert_pixel(&self.format, &to, &src);
                 for (k, v) in px.iter().enumerate() {
-                    write_sample(&mut dst.data, to.sample, i * to.channels() + k, *v);
+                    write_sample(dst, to.sample, i * to.channels() + k, *v);
                 }
             }
             if let Some(converted) = out.tiles.get(c) {
@@ -1177,7 +1220,7 @@ mod tests {
                     let o = (((y - r.y0) as usize) * w + (x - r.x0) as usize) * n;
                     let base = (((y - tc.ty * TILE_SIZE) as usize) * TILE_SIZE as usize + (x - tc.tx * TILE_SIZE) as usize) * n;
                     for i in 0..n {
-                        write_sample(&mut t.data, sample, base + i, data[o + i]);
+                        write_sample(t.data_mut(), sample, base + i, data[o + i]);
                     }
                 }
             }

@@ -47,6 +47,7 @@ const MAX_LAYERS: usize = 4000;
 pub(crate) fn import_layers(name: &str, page: &Page<'_>, place: &super::Placement, dpi: f32) -> (Document, Vec<String>) {
     let mut doc = empty_document(name, place, dpi);
     let (layers, warnings) = stack(page, place, dpi, doc.pixel_format(), Keep::All);
+    super::pages::warm_bounds(&layers);
     doc.layers = layers;
     if doc.layers.is_empty() {
         doc.layers.push(Layer::raster("Layer 1", doc.pixel_format()));
@@ -186,6 +187,8 @@ struct TextAcc {
     end: f64,
     cache: Surface,
     clip: Option<u64>,
+    /// Where the runs' glyphs reach, unclipped (document pixels).
+    ink: Option<kurbo::Rect>,
 }
 
 /// How a glyph run joins the text layer being built.
@@ -385,7 +388,15 @@ impl<'g> LayerBuilder<'g> {
     }
 
     fn vector_mask(&self) -> Option<VectorMask> {
-        let clips: Vec<&ClipPath> = self.active_clips().map(|c| &c.0).collect();
+        self.vector_mask_for(None)
+    }
+
+    /// [`Self::vector_mask`] for a layer whose pixels cover `content`: a rectangular clip that
+    /// contains them clips nothing and is left out (a table cell around its text), so the layer
+    /// needs no mask at all when none clips it. Masks cost every composite a rasterisation.
+    fn vector_mask_for(&self, content: Option<Rect>) -> Option<VectorMask> {
+        let area = content.map(|r| kurbo::Rect::new(f64::from(r.x0), f64::from(r.y0), f64::from(r.x1), f64::from(r.y1)));
+        let clips: Vec<&ClipPath> = self.active_clips().map(|c| &c.0).filter(|c| area.is_none_or(|a| !covers(&c.path, a))).collect();
         if clips.is_empty() {
             return None;
         }
@@ -482,8 +493,10 @@ impl<'g> LayerBuilder<'g> {
         };
         layer.sync_summary();
         let name: String = t.text.chars().take_while(|c| *c != '\r').take(40).collect();
+        // The glyphs' own extent: the cache was drawn clipped, so its bounds can't tell.
+        let content = t.ink.map(|r| Rect::new(r.x0.floor() as i32, r.y0.floor() as i32, r.x1.ceil() as i32, r.y1.ceil() as i32));
         let mut l = Layer::new(if name.trim().is_empty() { "Text".to_string() } else { name }, LayerContent::Text(layer));
-        l.vector_mask = if t.clip.is_some() { self.vector_mask() } else { None };
+        l.vector_mask = if t.clip.is_some() { self.vector_mask_for(content) } else { None };
         self.push_layer(l);
     }
 
@@ -494,9 +507,10 @@ impl<'g> LayerBuilder<'g> {
             (Some(_), Some(_)) | (Some(_), None) => "Shape",
             (None, _) => "Stroke",
         };
+        let content = s.shape.cache.as_ref().map(photosplice_raster::Surface::content_bounds);
         let mut l = Layer::new(name, LayerContent::Shape(s.shape));
         l.blend = s.blend;
-        l.vector_mask = if s.clip.is_some() { self.vector_mask() } else { None };
+        l.vector_mask = if s.clip.is_some() { self.vector_mask_for(content) } else { None };
         self.push_layer(l);
     }
 
@@ -760,9 +774,13 @@ impl<'g> LayerBuilder<'g> {
             end: 0.0,
             cache: Surface::new(self.fmt),
             clip,
+            ink: None,
         });
         acc.text.push_str(&text);
         acc.end = end;
+        if let Some(a) = area {
+            acc.ink = Some(acc.ink.map_or(a, |i| i.union(a)));
+        }
         if let Some((rect, rgba)) = pixels {
             over(&mut acc.cache, rect, &rgba);
         }
