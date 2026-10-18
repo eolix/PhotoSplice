@@ -152,7 +152,7 @@ pub fn dialog_width(f: &Map<String, Value>) -> Option<f32> {
     if f.contains_key("__web") {
         Some(1090.0)
     } else if f.contains_key("__print") {
-        Some(720.0)
+        Some(740.0)
     } else {
         None
     }
@@ -652,16 +652,6 @@ fn check(ui: &mut egui::Ui, f: &mut Map<String, Value>, key: &str, label: &str, 
     let mut v = b(f, key, d);
     crate::widgets::checkbox(ui, &mut v, label);
     f.insert(key.into(), json!(v));
-}
-
-fn number(ui: &mut egui::Ui, f: &mut Map<String, Value>, key: &str, label: &str, range: std::ops::RangeInclusive<f32>, unit: &str, d: f64) {
-    let t = Tokens::get(ui.ctx());
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(tl!(&label)).color(t.text_dim));
-        let mut v = n(f, key, d) as f32;
-        crate::widgets::value_field(ui, &mut v, range, unit, 64.0);
-        f.insert(key.into(), json!(v.round()));
-    });
 }
 
 /// The export size (pixels) the dialog's Image Size settings give `doc`.
@@ -1358,29 +1348,58 @@ fn print_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, V
                 }
             }
         });
-        ui.add_space(12.0);
+        ui.add_space(20.0);
         ui.vertical(|ui| {
-            ui.set_width(340.0);
-            let head = |ui: &mut egui::Ui, s: &str| {
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new(s).font(crate::theme::semibold(12.0)).color(t.text));
+            ui.set_width(PRINT_SIDE);
+            ui.spacing_mut().item_spacing.y = 6.0;
+            // Each section: a heading, then label | control rows on one grid, so every control
+            // starts at the same column.
+            let section = |ui: &mut egui::Ui, title: &str, first: bool| {
+                if !first {
+                    ui.add_space(6.0);
+                    crate::widgets::hairline(ui);
+                    ui.add_space(2.0);
+                }
+                ui.label(egui::RichText::new(title).font(crate::theme::semibold(12.0)).color(t.text));
             };
-            head(ui, tl!("Printer Setup"));
-            if let Some(printers) = &printers {
-                // Windows: Photoshop's Printer menu and Print Settings… (the driver's own dialog).
+            let label = |ui: &mut egui::Ui, s: &str| {
+                ui.add_sized([PRINT_LABEL, 22.0], egui::Label::new(egui::RichText::new(s).color(t.text_dim)).halign(egui::Align::Max));
+            };
+            let note = |ui: &mut egui::Ui, s: &str, warn: bool| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(tl!("Printer")).color(t.text_dim));
+                    ui.add_space(PRINT_LABEL + 10.0);
+                    ui.add(egui::Label::new(egui::RichText::new(s).color(if warn { t.warning } else { t.text_dim }).size(11.0)).wrap());
+                });
+            };
+            let grid = |id: &str| egui::Grid::new(id).num_columns(2).spacing([10.0, 6.0]);
+
+            section(ui, tl!("Printer Setup"), true);
+            grid("print-setup").show(ui, |ui| {
+                label(ui, tl!("Printer:"));
+                if let Some(printers) = &printers {
+                    // Windows: the Reference's Printer menu and Print Settings… (the driver's own dialog).
                     let before = s(f, "printer", "");
                     let opts: Vec<(&str, &str)> = printers.iter().map(|n| (n.as_str(), n.as_str())).collect();
-                    dropdown_str(ui, "print-printer", f, "printer", &opts, 220.0);
+                    dropdown_str(ui, "print-printer", f, "printer", &opts, PRINT_CONTROL);
                     if s(f, "printer", "") != before {
                         f.remove("printerSettings");
                         driver_page(f);
                     }
-                });
+                } else {
+                    let mut pr = s(f, "printer", "");
+                    let opts = printer_options(f.get("__systemPrinters"), &pr);
+                    let o: Vec<(String, &str)> = opts.iter().map(|(k, l)| (k.clone(), l.as_str())).collect();
+                    if crate::widgets::dropdown(ui, "print-printer", &mut pr, &o, PRINT_CONTROL) {
+                        f.insert("printer".into(), json!(pr));
+                    }
+                }
+                ui.end_row();
+                label(ui, tl!("Copies:"));
                 ui.horizontal(|ui| {
-                    number(ui, f, "copies", tl!("Copies"), 1.0..=999.0, "", 1.0);
-                    if ui.button(tl!("Print Settings…")).clicked() {
+                    let mut v = n(f, "copies", 1.0) as f32;
+                    crate::widgets::value_field(ui, &mut v, 1.0..=999.0, "", 64.0);
+                    f.insert("copies".into(), json!(v.round()));
+                    if printers.is_some() && ui.button(tl!("Print Settings…")).clicked() {
                         let printer = s(f, "printer", "");
                         let current = f.get("printerSettings").and_then(Value::as_str).and_then(|h| craft_print::rgb::DevMode::from_hex(h).ok());
                         match craft_print::rgb::settings_dialog(&printer, current.as_ref(), None) {
@@ -1395,64 +1414,64 @@ fn print_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, V
                         }
                     }
                 });
+                ui.end_row();
+                if printers.is_none() {
+                    label(ui, tl!("Paper:"));
+                    ui.vertical(|ui| print_paper_controls(ui, f));
+                    ui.end_row();
+                }
+            });
+            if printers.is_some() {
                 let paper = p.get("paper").and_then(Value::as_array).map(|a| (a.first().and_then(Value::as_f64), a.get(1).and_then(Value::as_f64)));
-                let text = match paper {
-                    Some((Some(w), Some(h))) => format!("{:.0} × {:.0} mm  ·  {}", w / 72.0 * 25.4, h / 72.0 * 25.4, tl!("set in Print Settings…")),
-                    _ => String::new(),
-                };
-                ui.label(egui::RichText::new(text).color(t.text_dim).size(11.0));
-                if let Some(e) = f.get("__pageError").and_then(Value::as_str) {
-                    ui.label(egui::RichText::new(e).color(t.warning).size(11.0));
+                if let Some((Some(w), Some(h))) = paper {
+                    note(ui, &format!("{:.0} × {:.0} mm  ·  {}", w / 72.0 * 25.4, h / 72.0 * 25.4, tl!("set in Print Settings…")), false);
                 }
-            } else {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(tl!("Printer")).color(t.text_dim));
-                    let mut pr = s(f, "printer", "");
-                    let opts = printer_options(f.get("__systemPrinters"), &pr);
-                    let o: Vec<(String, &str)> = opts.iter().map(|(k, l)| (k.clone(), l.as_str())).collect();
-                    if crate::widgets::dropdown(ui, "print-printer", &mut pr, &o, 240.0) {
-                        f.insert("printer".into(), json!(pr));
-                    }
-                });
-                number(ui, f, "copies", tl!("Copies"), 1.0..=999.0, "", 1.0);
-                print_paper_controls(ui, f);
+                if let Some(e) = f.get("__pageError").and_then(Value::as_str).map(str::to_string) {
+                    note(ui, &e, true);
+                }
             }
-            head(ui, tl!("Color Management"));
-            dropdown_str(
-                ui,
-                "print-color",
-                f,
-                "colorHandling",
-                &[
-                    ("printerManages", tl!("Printer Manages Colors")),
-                    ("photospliceManages", tl!("PhotoSplice Manages Colors")),
-                    ("noColorManagement", tl!("No Color Management")),
-                ],
-                240.0,
-            );
-            if s(f, "colorHandling", "") == "photospliceManages" {
-                // Photoshop's Printer Profile menu: the built-ins, then every installed printer
-                // (output class) profile by its description.
-                let installed: Vec<_> = photosplice_engine::installed_profiles::installed()
-                    .into_iter()
-                    .filter(|p| p.is_destination() && p.class == photosplice_cms::ProfileClass::Output)
-                    .collect();
-                let mut profiles: Vec<(&str, &str)> = vec![
-                    ("coated-cmyk", tl!("Coated CMYK")),
-                    ("srgb", "sRGB IEC61966-2.1"),
-                    ("adobe-rgb-compat", tl!("Adobe RGB (1998) compatible")),
-                    ("display-p3", tl!("Display P3")),
-                    ("gray-gamma-2.2", tl!("Gray Gamma 2.2")),
-                ];
-                profiles.extend(installed.iter().map(|p| (p.path.as_str(), p.description.as_str())));
-                // A remembered profile that is no longer installed still shows, by its file name.
-                let cur = s(f, "printerProfile", "coated-cmyk");
-                let stem = std::path::Path::new(&cur).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                if !profiles.iter().any(|(v, _)| *v == cur) {
-                    profiles.push((cur.as_str(), stem.as_str()));
-                }
-                dropdown_str(ui, "print-profile", f, "printerProfile", &profiles, 240.0);
-                ui.horizontal(|ui| {
+
+            section(ui, tl!("Color Management"), false);
+            grid("print-color").show(ui, |ui| {
+                label(ui, tl!("Color Handling:"));
+                dropdown_str(
+                    ui,
+                    "print-color",
+                    f,
+                    "colorHandling",
+                    &[
+                        ("printerManages", tl!("Printer Manages Colors")),
+                        ("photospliceManages", tl!("PhotoSplice Manages Colors")),
+                        ("noColorManagement", tl!("No Color Management")),
+                    ],
+                    PRINT_CONTROL,
+                );
+                ui.end_row();
+                if s(f, "colorHandling", "") == "photospliceManages" {
+                    // The Reference's Printer Profile menu: the built-ins, then every installed
+                    // printer (output class) profile by its description.
+                    let installed: Vec<_> = photosplice_engine::installed_profiles::installed()
+                        .into_iter()
+                        .filter(|p| p.is_destination() && p.class == photosplice_cms::ProfileClass::Output)
+                        .collect();
+                    let mut profiles: Vec<(&str, &str)> = vec![
+                        ("coated-cmyk", tl!("Coated CMYK")),
+                        ("srgb", "sRGB IEC61966-2.1"),
+                        ("adobe-rgb-compat", tl!("Adobe RGB (1998) compatible")),
+                        ("display-p3", tl!("Display P3")),
+                        ("gray-gamma-2.2", tl!("Gray Gamma 2.2")),
+                    ];
+                    profiles.extend(installed.iter().map(|p| (p.path.as_str(), p.description.as_str())));
+                    // A remembered profile that is no longer installed still shows, by its file name.
+                    let cur = s(f, "printerProfile", "coated-cmyk");
+                    let stem = std::path::Path::new(&cur).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    if !profiles.iter().any(|(v, _)| *v == cur) {
+                        profiles.push((cur.as_str(), stem.as_str()));
+                    }
+                    label(ui, tl!("Printer Profile:"));
+                    dropdown_str(ui, "print-profile", f, "printerProfile", &profiles, PRINT_CONTROL);
+                    ui.end_row();
+                    label(ui, tl!("Rendering Intent:"));
                     dropdown_str(
                         ui,
                         "print-intent",
@@ -1464,49 +1483,62 @@ fn print_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, V
                             ("saturation", tl!("Saturation")),
                             ("absolute", tl!("Absolute Colorimetric")),
                         ],
-                        170.0,
+                        PRINT_CONTROL,
                     );
+                    ui.end_row();
+                    ui.label("");
                     check(ui, f, "bpc", tl!("Black Point Compensation"), true);
-                });
-                if printers.is_some() {
-                    ui.label(
-                        egui::RichText::new(tl!("Remember to turn off the printer's own colour management in Print Settings…")).color(t.warning).size(11.0),
-                    );
+                    ui.end_row();
                 }
+            });
+            if s(f, "colorHandling", "") == "photospliceManages" && printers.is_some() {
+                note(ui, tl!("Remember to turn off the printer's own colour management in Print Settings…"), true);
             }
-            head(ui, tl!("Position and Size"));
-            dropdown_str(ui, "print-units", f, "units", &[("cm", tl!("Centimeters")), ("mm", tl!("Millimeters")), ("in", tl!("Inches"))], 130.0);
+
+            section(ui, tl!("Position and Size"), false);
             let units = s(f, "units", "cm");
-            check(ui, f, "center", tl!("Center"), true);
-            if !b(f, "center", true) {
-                ui.horizontal(|ui| {
-                    // Kept in inches (Photoshop's Position fields), shown in the chosen units.
-                    for (key, label) in [("top", tl!("Top")), ("left", tl!("Left"))] {
-                        let mut pt = n(f, key, 0.0) * 72.0;
-                        if length_field(ui, label, &mut pt, &units) {
-                            f.insert(key.into(), json!(pt / 72.0));
-                        }
-                    }
-                });
-            }
-            check(ui, f, "scaleToFit", tl!("Scale to Fit Media"), false);
-            // Scaled Print Size: Scale, Height and Width move together; Print Resolution follows.
-            if let Ok(l) = photosplice_engine::print_cmds::layout(&doc, &params(f), "file.print") {
-                let (_, _, w, h) = l.rect;
-                let (mut w2, mut h2) = (w, h);
-                let fit = b(f, "scaleToFit", false);
-                if !fit {
-                    // Two decimals: Height and Width set fractional scales.
+            let layout = photosplice_engine::print_cmds::layout(&doc, &params(f), "file.print").ok();
+            grid("print-position").show(ui, |ui| {
+                label(ui, tl!("Units:"));
+                dropdown_str(ui, "print-units", f, "units", &[("cm", tl!("Centimeters")), ("mm", tl!("Millimeters")), ("in", tl!("Inches"))], 130.0);
+                ui.end_row();
+                label(ui, tl!("Position:"));
+                check(ui, f, "center", tl!("Center"), true);
+                ui.end_row();
+                if !b(f, "center", true) {
+                    ui.label("");
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(tl!("Scale")).color(t.text_dim));
+                        // Kept in inches (the Reference's Position fields), shown in the chosen units.
+                        for (key, l) in [("top", tl!("Top")), ("left", tl!("Left"))] {
+                            let mut pt = n(f, key, 0.0) * 72.0;
+                            if length_field(ui, l, &mut pt, &units) {
+                                f.insert(key.into(), json!(pt / 72.0));
+                            }
+                        }
+                    });
+                    ui.end_row();
+                }
+                label(ui, tl!("Print Size:"));
+                check(ui, f, "scaleToFit", tl!("Scale to Fit Media"), false);
+                ui.end_row();
+                // Scaled Print Size: Scale, Height and Width move together; Print Resolution follows.
+                if let Some(l) = &layout {
+                    let (_, _, w, h) = l.rect;
+                    let (mut w2, mut h2) = (w, h);
+                    if !b(f, "scaleToFit", false) {
+                        // Two decimals: Height and Width set fractional scales.
+                        label(ui, tl!("Scale:"));
                         let mut v = n(f, "scale", 100.0) as f32;
                         crate::widgets::value_field(ui, &mut v, 1.0..=1000.0, "%", 64.0);
                         f.insert("scale".into(), json!((f64::from(v) * 100.0).round() / 100.0));
-                    });
-                }
-                ui.horizontal(|ui| {
-                    let hc = length_field(ui, tl!("Height"), &mut h2, &units);
-                    let wc = length_field(ui, tl!("Width"), &mut w2, &units);
+                        ui.end_row();
+                    }
+                    label(ui, tl!("Height:"));
+                    let hc = length_field(ui, "", &mut h2, &units);
+                    ui.end_row();
+                    label(ui, tl!("Width:"));
+                    let wc = length_field(ui, "", &mut w2, &units);
+                    ui.end_row();
                     let k = if wc && w > 0.0 {
                         Some(w2 / w)
                     } else if hc && h > 0.0 {
@@ -1518,35 +1550,40 @@ fn print_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, V
                         f.insert("scale".into(), json!(((l.scale * k * 100.0) * 100.0).round() / 100.0));
                         f.insert("scaleToFit".into(), json!(false));
                     }
-                });
-                if w > 0.0 {
-                    let ppi = f64::from(doc.size.width) / (w / 72.0);
-                    ui.label(egui::RichText::new(format!("{} {ppi:.0} PPI", tl!("Print Resolution:"))).color(t.text_dim).size(11.0));
+                    if w > 0.0 {
+                        let ppi = f64::from(doc.size.width) / (w / 72.0);
+                        label(ui, tl!("Print Resolution:"));
+                        ui.label(egui::RichText::new(format!("{ppi:.0} PPI")).color(t.text_dim));
+                        ui.end_row();
+                    }
                 }
-            }
-            head(ui, tl!("Printing Marks"));
-            ui.horizontal(|ui| {
+            });
+
+            section(ui, tl!("Printing Marks"), false);
+            egui::Grid::new("print-marks").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
                 check(ui, f, "cornerCropMarks", tl!("Corner Crop Marks"), false);
-                check(ui, f, "centerCropMarks", tl!("Center Crop Marks"), false);
-            });
-            ui.horizontal(|ui| {
                 check(ui, f, "registrationMarks", tl!("Registration Marks"), false);
+                ui.end_row();
+                check(ui, f, "centerCropMarks", tl!("Center Crop Marks"), false);
                 check(ui, f, "description", tl!("Description"), false);
+                ui.end_row();
                 check(ui, f, "labels", tl!("Labels"), false);
+                ui.end_row();
             });
-            head(ui, tl!("Functions"));
+
+            section(ui, tl!("Functions"), false);
             check(ui, f, "emulsionDown", tl!("Emulsion Down"), false);
             if b(f, "emulsionDown", false) && printers.is_some() {
                 ui.label(egui::RichText::new(tl!("Don't also tick Mirror Image in Print Settings…: the two flips cancel out.")).color(t.text_dim).size(11.0));
             }
-            head(ui, tl!("Save as PDF"));
-            let mut out = s(f, "output", "");
-            if ui.add(egui::TextEdit::singleline(&mut out).hint_text(tl!("(print to the printer)")).desired_width(300.0)).changed() {
-                f.insert("output".into(), json!(out));
-            }
         });
     });
 }
+
+/// The Print dialog's settings column, its label column and its controls' width.
+const PRINT_SIDE: f32 = 380.0;
+const PRINT_LABEL: f32 = 112.0;
+const PRINT_CONTROL: f32 = 240.0;
 
 fn print_confirm(app: &mut PhotospliceApp, f: &Map<String, Value>) -> Result<Value, String> {
     let r = app.run("file.print", params(f))?;

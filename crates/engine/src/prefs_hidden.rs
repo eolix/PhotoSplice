@@ -8,7 +8,7 @@
 //! [`HIDDEN_MENU_ADDED`]: preferences saved by an older version take those once, on load.
 
 /// Incremented whenever the lists below change.
-pub const DEFAULTS_VERSION: u32 = 7;
+pub const DEFAULTS_VERSION: u32 = 8;
 
 pub const HIDDEN_MENU_ITEMS: &[&str] = &[
     "edit.checkSpelling",
@@ -28,6 +28,7 @@ pub const HIDDEN_MENU_ITEMS: &[&str] = &[
     "file.automate.photomerge",
     "file.export.artboardsToPdf",
     "file.import.variableDataSets",
+    "file.printOneCopy",
     "file.import.wiaSupport",
     "file.openExrParts",
     "file.package",
@@ -178,6 +179,7 @@ pub const HIDDEN_MENU_ADDED: &[(u32, &str)] = &[
     (7, "layer.mergeGroup"),
     (7, "layer.new.backgroundFromLayer"),
     (7, "layer.rasterize.layerStyle"),
+    (8, "file.printOneCopy"),
 ];
 
 /// `Tool` enum variant names, as `ToolbarCustomization::hidden` stores them.
