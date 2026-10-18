@@ -70,7 +70,9 @@ pub fn start() {
                 canvas,
                 options,
                 Box::new(move |cc| {
-                    PhotospliceApp::setup_context(&cc.egui_ctx, ThemeKind::Midnight);
+                    // The default theme until the saved preferences load on the first frame, as on
+                    // desktop; forcing one here would also save it for a first-time visitor.
+                    PhotospliceApp::setup_context(&cc.egui_ctx, ThemeKind::default());
                     let inbox: Inbox = Arc::default();
                     let served: Served = Arc::default();
                     load_font_manifest(served.clone(), cc.egui_ctx.clone());
@@ -81,7 +83,6 @@ pub fn start() {
                         photosplice_ui_egui::notices::post(&mut app, i18n::t("Some brush presets could not be loaded"), preset_warnings, true, None);
                     }
                     listen_pen(&pen_target, app.stylus.feed.clone());
-                    app.set_theme(&cc.egui_ctx, ThemeKind::Midnight);
                     if let Some(rs) = cc.wgpu_render_state.clone()
                         && !force_cpu
                     {
