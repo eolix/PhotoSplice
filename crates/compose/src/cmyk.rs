@@ -11,7 +11,9 @@
 //! Adjustments work on the inks too: Levels and Curves through their CMYK records, Invert,
 //! Posterize and Brightness/Contrast through one curve for every ink, Threshold and Gradient Map
 //! on the inks' own lightness ([`ink_lightness`]), Hue/Saturation, Color Balance, Selective
-//! Color and Photo Filter on C, M, Y as an RGB colour with K kept. Layer effects, gradients and
+//! Color and Photo Filter on C, M, Y as an RGB colour with K kept (Hue/Saturation holding each
+//! ink within 0..100 %), Colorize on the inks as a plain RGB colour separated back with full
+//! black replacement. Layer effects, gradients and
 //! patterns reuse the RGB code twice, on stand-in colours ([`Projection`]): once with C, M, Y's
 //! complements as R, G, B, once with K's in all three, so every separable blend is per ink. A layer this module doesn't composite in CMYK
 //! yet (effects with non-separable modes or a bevel texture, Blend If, the other adjustments)
@@ -305,7 +307,7 @@ fn native_adjustment(a: &Adjustment) -> bool {
         Adjustment::Invert
             | Adjustment::Threshold { .. }
             | Adjustment::GradientMap { .. }
-            | Adjustment::HueSaturation { colorize: false, .. }
+            | Adjustment::HueSaturation { .. }
             | Adjustment::ColorBalance { .. }
             | Adjustment::SelectiveColor { .. }
             | Adjustment::PhotoFilter { .. }
@@ -369,12 +371,26 @@ fn adjust(a: &Adjustment, buf: &mut CBuf, cx: &Ctx) {
         }
         return;
     }
+    // Colorize: the inks as a plain RGB colour (the complements times 1 − K, no profile),
+    // colorized, and separated back with full black replacement (K = 1 − the largest channel).
+    // Reference kit inks-hs-colorize: patches whose complements share an HSL lightness all land
+    // on the same inks, and K comes out as the smallest of the separated inks.
+    if let Adjustment::HueSaturation { colorize: true, .. } = a {
+        use photosplice_color::convert::{cmyk_to_rgb_naive, rgb_to_cmyk_naive};
+        let mut rgb = Buffer { rect: buf.rect, px: buf.px.iter().map(|p| { let c = cmyk_to_rgb_naive(inks(p)); [c[0], c[1], c[2], 1.0] }).collect() };
+        crate::adjust::apply_depth(a, &mut rgb, cx.transfer, Some(cx.depth));
+        for (p, o) in buf.px.iter_mut().zip(&rgb.px) {
+            let k = rgb_to_cmyk_naive([o[0], o[1], o[2]]);
+            p[..4].copy_from_slice(&[1.0 - k[0], 1.0 - k[1], 1.0 - k[2], 1.0 - k[3]]);
+        }
+        return;
+    }
     // Colour adjustments: C, M, Y's complements through the RGB adjustment as an RGB colour, K
     // untouched (Photoshop corpus cmyk8: K exact in every one; Selective Color within 0.006, the
     // others carry the residual their RGB versions have; `cmyk_probe` ADJ=1).
     if matches!(a, Adjustment::HueSaturation { .. } | Adjustment::ColorBalance { .. } | Adjustment::SelectiveColor { .. } | Adjustment::PhotoFilter { .. }) {
         let mut rgb = Buffer { rect: buf.rect, px: buf.px.iter().map(|p| [p[0], p[1], p[2], 1.0]).collect() };
-        crate::adjust::apply_depth(a, &mut rgb, cx.transfer, Some(cx.depth));
+        crate::adjust::in_ink_space(|| crate::adjust::apply_depth(a, &mut rgb, cx.transfer, Some(cx.depth)));
         for (p, o) in buf.px.iter_mut().zip(&rgb.px) {
             p[..3].copy_from_slice(&o[..3]);
         }
@@ -908,5 +924,40 @@ mod tests {
         assert!(close(inks_at(&d, 3), [0.0, 0.0, 0.0, 0.75]));
         let over = inks_at(&d, 0);
         assert!(over[1] > 0.5 && over[2] > 0.5, "{over:?}");
+    }
+
+    fn hs(hue: f32, saturation: f32, lightness: f32, colorize: bool) -> Layer {
+        Layer::new("h", LayerContent::Adjustment(Adjustment::HueSaturation { hue, saturation, lightness, colorize, ranges: photosplice_doc::adjust::HueRange::defaults() }))
+    }
+
+    fn near(a: [f32; 4], b: [f32; 4], tol: f32) -> bool {
+        a.iter().zip(b).all(|(a, b)| (a - b).abs() < tol)
+    }
+
+    /// Saturation on inks stops before any ink would leave 0..100 % once Lightness has applied
+    /// (Reference kit inks-hs-sat50 / inks-hs-master, exact on 192 patches each).
+    #[test]
+    fn saturation_holds_every_ink_in_range() {
+        for (inks, (h, s, l), want) in [
+            ([0.78, 0.18, 0.58, 0.055], (0.0, 50.0, 0.0), [0.96, 0.0, 0.64, 0.055]),
+            ([0.22, 0.20, 0.91, 0.0], (0.0, 50.0, 0.0), [0.135, 0.11, 1.0, 0.0]),
+        ] {
+            let mut d = doc(inks);
+            d.layers.push(hs(h, s, l, false));
+            assert!(near(inks_at(&d, 0), want, 0.006), "{inks:?}: {:?}", inks_at(&d, 0));
+        }
+    }
+
+    /// Colorize takes the inks as a plain RGB colour and separates the result with full black
+    /// replacement (Reference kit inks-hs-colorize: 30 % K alone → (27.5, 9.2, 0, 17.1) %).
+    #[test]
+    fn colorize_separates_with_full_black_replacement() {
+        let mut d = doc([0.0, 0.0, 0.0, 0.3]);
+        d.layers.push(hs(200.0, 40.0, 5.0, true));
+        assert!(near(inks_at(&d, 0), [0.275, 0.092, 0.0, 0.171], 0.006), "{:?}", inks_at(&d, 0));
+        // Paper stays paper.
+        let mut d = doc([0.0; 4]);
+        d.layers.push(hs(200.0, 40.0, 5.0, true));
+        assert!(near(inks_at(&d, 0), [0.0; 4], 1e-4), "{:?}", inks_at(&d, 0));
     }
 }
