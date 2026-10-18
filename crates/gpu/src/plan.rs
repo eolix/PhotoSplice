@@ -1390,19 +1390,33 @@ impl<'a> Planner<'a> {
             if let Effect::BevelEmboss(b) = e
                 && bevel_paint(b) == photosplice_compose::effects::BevelPaint::Outer
             {
+                // Knocked out under a see-through fill, as the CPU does (and as outer glows are).
                 let k = 0;
-                w = self.paint(
+                let see_through = 1.0 - layer.fill_opacity.clamp(0.0, 1.0);
+                w = self.paint_k(
                     w,
                     content,
                     Cov::Map(map(i, k), 0.0),
                     &Paint::Color(b.highlight_color.to_rgb_unclamped()),
                     b.highlight.blend,
                     b.highlight.opacity,
-                    0,
+                    F_KNOCKOUT,
                     clip,
                     sb,
+                    see_through,
                 );
-                w = self.paint(w, content, Cov::Map(map(i, k + 1), 0.0), &Paint::Color(b.shadow_color.to_rgb_unclamped()), b.shadow.blend, b.shadow.opacity, 0, clip, sb);
+                w = self.paint_k(
+                    w,
+                    content,
+                    Cov::Map(map(i, k + 1), 0.0),
+                    &Paint::Color(b.shadow_color.to_rgb_unclamped()),
+                    b.shadow.blend,
+                    b.shadow.opacity,
+                    F_KNOCKOUT,
+                    clip,
+                    sb,
+                    see_through,
+                );
             }
         }
 

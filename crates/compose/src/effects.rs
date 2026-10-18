@@ -2136,7 +2136,12 @@ pub(crate) fn composite_with_effects_prepared(
         if let Effect::BevelEmboss(b) = e
             && maps.bevel_paint[i] == BevelPaint::Outer
         {
-            let (hi, sh) = (fx(i, 0), fx(i, 1));
+            // Beneath the layer like a glow: a see-through fill shows the bare backdrop under its
+            // shape, not the bevel (Reference kit hard-outer-s20 at Fill 0 %: an edge pixel half
+            // covered shades half as much; it was shaded in full, up to 0.43 off).
+            let (mut hi, mut sh) = (fx(i, 0), fx(i, 1));
+            knock_out_exterior(&mut hi, &shape, layer.fill_opacity);
+            knock_out_exterior(&mut sh, &shape, layer.fill_opacity);
             paint_color(&mut work, &hi, rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
             paint_color(&mut work, &sh, rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
         }
@@ -3163,5 +3168,41 @@ mod tests {
         let e = dist_inside_by(&s, Metric::Euclidean);
         let old = (0..n * n).filter(|&i| s.v[i] >= 1.0).map(|i| (e[i] - (r - ((i % n) as f32 + 0.5 - c).hypot((i / n) as f32 + 0.5 - c))).abs()).fold(0.0f32, f32::max);
         assert!(worst < 0.1 && worst < old * 0.7, "{worst} (nearest pixel: {old})");
+    }
+
+    /// An outer bevel lies beneath the layer like a glow: under a see-through fill a half-covered
+    /// edge pixel shows half of it (Reference kit hard-outer-s20 at Fill 0 %).
+    #[test]
+    fn outer_bevel_is_knocked_out_under_a_see_through_fill() {
+        use photosplice_doc::Document;
+        let doc = Document::new("d", photosplice_geom::Size::new(40, 40), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+        let fmt = doc.pixel_format();
+        let mut bg = Layer::raster("bg", fmt);
+        bg.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 40, 40), &[0.0, 0.0, 0.0, 1.0]);
+        let mut l = Layer::raster("l", fmt);
+        l.surface_mut().unwrap().fill_rect(Rect::new(12, 10, 30, 30), &[0.5, 0.5, 0.5, 1.0]);
+        // The left edge column half covered.
+        l.surface_mut().unwrap().fill_rect(Rect::new(12, 10, 13, 30), &[0.5, 0.5, 0.5, 0.5]);
+        let mut b = bevel_of(BevelStyle::OuterBevel, BevelTechnique::ChiselHard);
+        b.angle = 180.0;
+        b.highlight = photosplice_doc::FxCommon::new(BlendMode::Normal, 1.0);
+        b.shadow = photosplice_doc::FxCommon::new(BlendMode::Normal, 0.0);
+        l.effects.items = vec![Effect::BevelEmboss(b)];
+        l.fill_opacity = 0.0;
+        let mut d = doc.clone();
+        d.layers = vec![bg, l];
+        let px = crate::flatten(&d).px;
+        // The highlight the bevel's map gives that pixel, before the layer knocks it out.
+        let mut shape = Map::new(40, 40, 0.0);
+        for y in 10..30 {
+            for x in 12..30 {
+                shape.v[y * 40 + x] = if x == 12 { 0.5 } else { 1.0 };
+            }
+        }
+        let Effect::BevelEmboss(b) = &d.layers[1].effects.items[0] else { panic!("a bevel") };
+        let (maps, _) = bevel_maps(&shape, b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        let lit = maps[0].v[20 * 40 + 12];
+        assert!(lit > 0.2, "the edge pixel is on the lit facet: {lit}");
+        assert!((px[20 * 40 + 12][0] - 0.5 * lit).abs() < 0.01, "{} vs half of {lit}", px[20 * 40 + 12][0]);
     }
 }
