@@ -739,12 +739,12 @@ pub fn hue_saturation_ranged(c: [f32; 3], hue: f32, s: f32, l: f32, range_l: f32
     } else if l < 0.0 {
         rgb = rgb.map(|v| v * (1.0 + l));
     }
-    rgb.map(|v| v.clamp(0.0, 1.0))
+    if float { rgb } else { rgb.map(|v| v.clamp(0.0, 1.0)) }
 }
 
 /// Hue/Saturation's saturation step on `rgb` (see [`hue_saturation`]). 32-bit documents don't
-/// hold the smallest channel at 0: it may go below and is clipped at the end (Photoshop corpus
-/// rgb32 hue-saturation.psd: within 1/255, was 34/255 held).
+/// hold the smallest channel at 0 nor clip: channels leave 0..1 as Reference's float composite
+/// keeps them (corpus rgb32 hue-saturation.psd: (1, 0, 0) at +25 % ends at (1.048, …, −0.148)).
 fn hue_saturation_scale(rgb: [f32; 3], s: f32, float: bool, hold_white: bool) -> [f32; 3] {
     let (max, min) = (rgb[0].max(rgb[1]).max(rgb[2]), rgb[0].min(rgb[1]).min(rgb[2]));
     let mid = (max + min) / 2.0;
@@ -1655,6 +1655,16 @@ mod brightness_contrast_tests {
 mod tone_tests {
     use super::*;
     use photosplice_geom::Rect;
+
+    /// Corpus rgb32 hue-saturation.psd (hue +40, saturation +25, lightness −10): float documents
+    /// keep channels outside 0..1; 8/16-bit clip.
+    #[test]
+    fn float_hue_saturation_is_not_clipped() {
+        let f = hue_saturation_ranged([1.0, 0.0, 0.0], 40.0, 0.25, -0.1, 0.0, true, false);
+        assert!((f[0] - 1.0477).abs() < 0.004 && (f[1] - 0.649).abs() < 0.004 && (f[2] + 0.1477).abs() < 0.004, "{f:?}");
+        let i = hue_saturation_ranged([1.0, 0.0, 0.0], 40.0, 0.25, -0.1, 0.0, false, false);
+        assert!(i.iter().all(|v| (0.0..=1.0).contains(v)), "{i:?}");
+    }
 
     fn ramp() -> Buffer {
         let rect = Rect::new(0, 0, 8, 8);

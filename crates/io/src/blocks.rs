@@ -319,8 +319,9 @@ pub(crate) fn gradient_style_value(s: GradientStyle) -> Value {
 /// Colour stops and opacity stops of a gradient.
 pub(crate) type Stops = (Vec<(f32, Color)>, Vec<(f32, f32)>);
 
-/// Stops of a `Grdn` descriptor, baked to Photoshop's interpolation (smoothness `Intr`, stop
-/// midpoints, and the parent's interpolation method when given, see [`gradient_method`]).
+/// Stops of a `Grdn` descriptor, baked to Reference's interpolation (smoothness `Intr`, stop
+/// midpoints, and the parent's interpolation method when given, see [`gradient_method`]). The
+/// opacity stops follow the same smoothness ([`smoothed_opacity_stops`]) unless all opaque.
 pub(crate) fn gradient_stops_with(grad: &Descriptor, method: Option<&[u8]>) -> Stops {
     let raw = gradient_stops_raw(grad);
     let stops = if raw.stops.len() >= 2 && !raw.noise {
@@ -328,7 +329,8 @@ pub(crate) fn gradient_stops_with(grad: &Descriptor, method: Option<&[u8]>) -> S
     } else {
         raw.stops
     };
-    (stops, raw.opacity)
+    let opacity = if raw.opacity.iter().all(|o| o.1 >= 1.0 - 1e-4) { raw.opacity } else { smoothed_opacity_stops(grad) };
+    (stops, opacity)
 }
 
 /// A `Grdn` descriptor's stops as stored: colour stops (sorted), the midpoint of each segment
@@ -364,7 +366,7 @@ pub(crate) fn gradient_stops_editable(grad: &Descriptor, method: Option<&[u8]>) 
     raw
 }
 
-fn gradient_stops_raw(grad: &Descriptor) -> RawStops {
+pub(crate) fn gradient_stops_raw(grad: &Descriptor) -> RawStops {
     // Noise gradients have no stops: an approximation of Photoshop's random ramp, generated.
     if let Some(n) = crate::noise_gradient::Noise::from_desc(grad) {
         let (stops, opacity) = n.stops();

@@ -175,7 +175,16 @@ fn parse_shadow(d: &Descriptor, inner: bool) -> Shadow {
 }
 
 fn parse_glow(d: &Descriptor, inner: bool) -> Glow {
-    let paint = if d.get("Grad").is_some() { FxPaint::Gradient(gradient_from(d)) } else { FxPaint::Color(color(d, "Clr ")) };
+    let paint = match get_desc(d, "Grad") {
+        Some(grad) => {
+            // A glow samples its gradient by strength, not position: Reference takes the opacity
+            // stops as stored there, without the smoothness (layer_params' gradient glow).
+            let mut g = gradient_from(d);
+            g.opacity_stops = crate::blocks::gradient_stops_raw(grad).opacity;
+            FxPaint::Gradient(g)
+        }
+        None => FxPaint::Color(color(d, "Clr ")),
+    };
     Glow {
         common: common(d, BlendMode::Screen, 0.75),
         paint,
@@ -1053,6 +1062,33 @@ mod tests {
         assert!(placeholder(shadow) && shadow.get("unmodelled").is_some());
         assert_eq!(d.get("numModifyingFX"), Some(&Value::Integer(1)));
         assert_eq!(parse_lfx2(&data).unwrap().1, fx);
+    }
+
+    /// Smoothness shapes an overlay's opacity stops as it does its colours (psd-tools
+    /// clipping-mask2.psd: 40 % of pixels off with a linear ramp); a glow keeps them as stored.
+    #[test]
+    fn gradient_opacity_follows_smoothness_except_in_glows() {
+        let enumv = |t: &str, v: &str| Value::Enumerated { type_id: Id::new(t), value: Id::new(v) };
+        let rgb = |v: f64| Value::Descriptor(Descriptor::new("RGBC").with("Rd  ", Value::Double(v)).with("Grn ", Value::Double(v)).with("Bl  ", Value::Double(v)));
+        let stop = |l: i32| {
+            Value::Descriptor(Descriptor::new("Clrt").with("Clr ", rgb(255.0)).with("Type", enumv("Clry", "UsrS")).with("Lctn", Value::Integer(l)).with("Mdpn", Value::Integer(50)))
+        };
+        let alpha = |l: i32, o: f64| Value::Descriptor(Descriptor::new("TrnS").with("Opct", Value::UnitFloat { unit: *b"#Prc", value: o }).with("Lctn", Value::Integer(l)).with("Mdpn", Value::Integer(50)));
+        let grad = Descriptor::new("Grdn")
+            .with("GrdF", enumv("GrdF", "CstS"))
+            .with("Intr", Value::Double(4096.0))
+            .with("Clrs", Value::List(vec![stop(0), stop(4096)]))
+            .with("Trns", Value::List(vec![alpha(0, 100.0), alpha(4096, 0.0)]));
+        let at = |stops: &[(f32, f32)], t: f32| {
+            let i = stops.iter().position(|s| s.0 >= t).unwrap();
+            stops[i].1
+        };
+        let overlay = gradient_from(&Descriptor::new("GrFl").with("Grad", Value::Descriptor(grad.clone())));
+        // Eased: past the linear ramp before the middle, below it after.
+        assert!(at(&overlay.opacity_stops, 0.25) > 0.76 && at(&overlay.opacity_stops, 0.75) < 0.24, "{:?}", overlay.opacity_stops);
+        let glow = parse_glow(&Descriptor::new("OrGl").with("Grad", Value::Descriptor(grad)), false);
+        let FxPaint::Gradient(g) = glow.paint else { panic!("{:?}", glow.paint) };
+        assert_eq!(g.opacity_stops, vec![(0.0, 1.0), (1.0, 0.0)]);
     }
 
     /// A gradient overlay whose opacity is edited keeps its gradient definition verbatim (gray

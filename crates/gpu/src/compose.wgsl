@@ -718,6 +718,8 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
             } else if (ml < 0.0) {
                 rgb = rgb * (1.0 + ml);
             }
+            // 32-bit documents keep channels outside 0..1 (adjust::hue_saturation_ranged).
+            if (p1.y > 0.5) { return rgb; }
             return clamp(rgb, vec3(0.0), vec3(1.0));
         }
         case 9: {                                                              // Vibrance
