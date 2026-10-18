@@ -263,6 +263,19 @@ pub fn import(name: &str, bytes: &[u8]) -> Result<ImportResult, IoError> {
     import_with_svg_group_depth(name, bytes, photosplice_doc::MAX_GROUP_DEPTH)
 }
 
+/// Every file extension [`import`] opens, lowercase and without the dot, for open dialogs: the
+/// native format, PSD/PSB and templates, Affinity, OpenRaster, Krita, Paint.NET, PDF, SVG, camera
+/// raws, and each flat format `photosplice-codecs` decodes in this build.
+pub fn import_extensions() -> Vec<&'static str> {
+    let named = [photosplice_format::EXTENSION, "psd", "psb", "psdt", "ora", "pdn", "pdf", "svg", "svgz"];
+    let flat = photosplice_codecs::Format::ALL.into_iter().filter(|&f| photosplice_codecs::caps(f).read).flat_map(|f| f.extensions().iter().copied());
+    let mut exts: Vec<&'static str> =
+        named.into_iter().chain(affinity::EXTENSIONS.iter().copied()).chain(kra::EXTENSIONS).chain(photosplice_raw::EXTENSIONS.iter().copied()).chain(flat).collect();
+    let mut seen = std::collections::HashSet::new();
+    exts.retain(|e| seen.insert(*e));
+    exts
+}
+
 /// [`import`] for a background open: checks `ctl` between stages (and per layer for PSD/PSB) and
 /// reports progress. A cancelled import fails with [`IoError::Cancelled`].
 pub fn import_with(name: &str, bytes: &[u8], ctl: &photosplice_raster::Interrupt) -> Result<ImportResult, IoError> {
@@ -550,7 +563,35 @@ pub fn merged_composite(file: &PsdFile) -> Result<Vec<[f32; 4]>, IoError> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_svg_input;
+    use super::{IoError, import, import_extensions, is_svg_input};
+
+    #[test]
+    fn import_extensions_are_unique_lowercase_and_cover_every_importer() {
+        let exts = import_extensions();
+        let mut seen = std::collections::HashSet::new();
+        for e in &exts {
+            assert!(!e.is_empty() && !e.contains('.') && *e == e.to_ascii_lowercase(), "{e:?}");
+            assert!(seen.insert(e), "{e} listed twice");
+        }
+        for e in ["psd", "psb", "pdf", "svg", "svgz", "kra", "krz", "ora", "pdn", "afphoto", "cr3", "dng", "png", "jpg", "tiff", "heic", "exr", "dds", "fits"] {
+            assert!(exts.contains(&e), "{e} missing from {exts:?}");
+        }
+        // Encode-only formats can't be opened.
+        assert!(!exts.contains(&"avif"));
+    }
+
+    /// Formats chosen by extension, not signature: a damaged file under that name must fail in its
+    /// own importer, not fall through to the flat codecs' "unknown format".
+    #[test]
+    fn named_import_extensions_reach_their_own_importer() {
+        for ext in ["pdf", "svg", "kra", "krz", "ora", "pdn", "af", "afphoto", "afdesign", "afpub"] {
+            assert!(import_extensions().contains(&ext), "{ext}");
+            match import(&format!("damaged.{ext}"), b"not a real file") {
+                Ok(_) => panic!("{ext}: junk bytes imported"),
+                Err(e) => assert!(!matches!(e, IoError::Codec(photosplice_codecs::CodecError::UnknownFormat)), "{ext} fell through to the flat codecs: {e}"),
+            }
+        }
+    }
 
     #[test]
     fn svg_extension_does_not_override_another_format_signature() {

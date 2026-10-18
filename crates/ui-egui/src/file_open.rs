@@ -8,6 +8,18 @@
 use crate::{PhotospliceApp, notices};
 use photosplice_engine::file_cmds::{is_template, untitled_name};
 
+/// Every extension File › Open offers, on desktop and on the web: what [`photosplice_io::import`]
+/// reads plus the preset files [`crate::preset_files_ui`] sends to their panels.
+pub fn open_extensions() -> Vec<&'static str> {
+    let mut exts = photosplice_io::import_extensions();
+    for e in crate::preset_files_ui::PRESET_EXTS {
+        if !exts.contains(e) {
+            exts.push(e);
+        }
+    }
+    exts
+}
+
 /// A request from the operating system, delivered by the platform shell through
 /// [`Services::os_events`](crate::Services::os_events).
 #[derive(Clone, Debug, PartialEq, Eq)]

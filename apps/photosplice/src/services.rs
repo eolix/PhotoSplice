@@ -16,13 +16,6 @@ use std::sync::Arc;
 #[cfg(test)]
 mod recovery_tests;
 
-/// Everything File › Open offers: PhotoSplice and PSD documents, PDFs, flat images, camera raw
-/// files, and brushes (.abr), gradients (.grd) and styles (.asl), which go to the preset libraries.
-const OPEN_EXTS: &[&str] = &[
-    "pcraft", "psd", "psb", "psdt", "png", "jpg", "jpeg", "tif", "tiff", "webp", "gif", "bmp", "tga", "ico", "qoi", "exr", "hdr", "pbm", "pgm", "ppm", "pam",
-    "pfm", "heic", "heif", "hif", "dng", "cr2", "cr3", "nef", "nrw", "arw", "pef", "orf", "rw2", "raf", "abr", "grd", "asl", "pdf",
-];
-
 /// Open dialog extensions that also match uppercase and mixed-case names (`IMG_0001.JPG`).
 /// On Linux and the BSDs rfd turns each extension into a case-sensitive `*.ext` glob for the XDG
 /// portal or zenity, so every letter becomes a character class, as the portal spec suggests
@@ -34,7 +27,7 @@ fn open_filter_extensions(extensions: &[&str]) -> Vec<String> {
 }
 
 fn open_filters() -> Vec<(&'static str, Vec<String>)> {
-    vec![("All Formats", open_filter_extensions(OPEN_EXTS)), ("PhotoSplice", open_filter_extensions(&["pcraft"]))]
+    vec![("All Formats", open_filter_extensions(&photosplice_ui_egui::file_open::open_extensions())), ("PhotoSplice", open_filter_extensions(&["pcraft"]))]
 }
 
 /// File › Save As formats: (filter name, extensions). The filter matching the suggested name's
@@ -771,9 +764,10 @@ mod tests {
             text.next().is_none()
         }
         assert_eq!(open_filter_extensions(&["cr2", "pcraft"]), ["[cC][rR]2", "[pP][cC][rR][aA][fF][tT]"]);
-        let globs = open_filter_extensions(OPEN_EXTS);
-        assert_eq!(globs.len(), OPEN_EXTS.len());
-        for (ext, glob) in OPEN_EXTS.iter().zip(&globs) {
+        let exts = photosplice_ui_egui::file_open::open_extensions();
+        let globs = open_filter_extensions(&exts);
+        assert_eq!(globs.len(), exts.len());
+        for (ext, glob) in exts.iter().zip(&globs) {
             // Every casing: lower, UPPER, and alternating both ways (JpG, jPg).
             let alternating = |upper_first: bool| -> String {
                 ext.chars().enumerate().map(|(i, c)| if (i % 2 == 0) == upper_first { c.to_ascii_uppercase() } else { c }).collect()
@@ -789,7 +783,8 @@ mod tests {
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     #[test]
     fn open_filters_keep_literal_extensions_on_windows_and_macos() {
-        assert_eq!(open_filter_extensions(OPEN_EXTS), OPEN_EXTS);
+        let exts = photosplice_ui_egui::file_open::open_extensions();
+        assert_eq!(open_filter_extensions(&exts), exts);
         assert_eq!(open_filter_extensions(&["pcraft"]), ["pcraft"]);
     }
 
