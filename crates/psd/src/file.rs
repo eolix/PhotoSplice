@@ -375,10 +375,15 @@ impl PsdFile {
         let ids = self.resource(crate::resources::ids::ALPHA_IDS).map(|r| r.data.chunks_exact(4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]])).collect::<Vec<_>>());
         // Only while the two lists agree: names that cover the channels and leave it out win
         // over a stale id list.
+        let no_channel_info = names.is_none() && ids.is_none() && self.resource(1006).is_none();
         let named = match ids {
             Some(ids) if ids.len() >= extra && ids.first() == Some(&0) && names.as_ref().is_none_or(|n| n.len() == ids.len()) => Some(true),
             _ => named,
         };
+        // The Reference names every alpha and spot channel it saves (1006 / 1045). Extra channels
+        // without any name or id resource come from other writers, which add only the merged
+        // transparency (psd-tools third-party-psds/cactus_top.psd).
+        let named = if no_channel_info { Some(true) } else { named };
         let marked = self.global_blocks.iter().any(|b| matches!(&b.key, b"Mtrn" | b"Mt16" | b"Mt32"));
         match &self.layer_info {
             // A positive layer count says there is none, but a name list that starts with it

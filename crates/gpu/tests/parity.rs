@@ -67,6 +67,7 @@ fn hdr_adjustments_preserve_range_and_cpu_parity() {
         Adjustment::PhotoFilter { color: [0.97, 0.76, 0.0], density: 0.4, preserve_luminosity: true },
         Adjustment::PhotoFilter { color: [0.2, 0.6, 0.9], density: 0.3, preserve_luminosity: false },
         Adjustment::BlackWhite { weights: [70.0, 20.0, 50.0, 10.0, 90.0, 30.0], tint: Some([0.9, 0.7, 0.5]) },
+        Adjustment::HueSaturation { hue: 40.0, saturation: 25.0, lightness: -10.0, colorize: false, ranges: photosplice_doc::adjust::HueRange::defaults() },
     ] {
         let mut d = Document::new("HDR adjustments", Size::new(3, 1), ColorMode::Rgb, SampleType::F32);
         let mut layer = Layer::raster("pixels", PixelFormat::RGBA32F);
@@ -1400,6 +1401,15 @@ fn effect_cases() -> Vec<(&'static str, Vec<Effect>)> {
         ("drop shadow hard", vec![Effect::DropShadow(shadow(BlendMode::Normal, 1.0, 45.0, 3.0, 0.0, 0.0))]),
         ("drop shadow global light", vec![Effect::DropShadow(ds_global)]),
         ("inner shadow", vec![Effect::InnerShadow(shadow(BlendMode::Multiply, 0.8, 120.0, 4.0, 6.0, 0.0))]),
+        // The special eight take the strength as Fill (pulled toward neutral, blended at full coverage).
+        ("inner shadow linear burn", vec![Effect::InnerShadow(shadow(BlendMode::LinearBurn, 0.7, 120.0, 4.0, 6.0, 0.0))]),
+        (
+            "outer glow linear dodge gradient",
+            vec![Effect::OuterGlow(Glow {
+                common: FxCommon::new(BlendMode::LinearDodge, 0.4),
+                ..glow(FxPaint::Gradient(gradient()), GlowTechnique::Softer, 8.0, 0.0, GlowSource::Edge)
+            })],
+        ),
         ("inner shadow choke", vec![Effect::InnerShadow(shadow(BlendMode::Normal, 0.9, 300.0, 3.0, 7.0, 0.4))]),
         ("outer glow softer", vec![Effect::OuterGlow(glow(FxPaint::Color(Color::rgb(1.0, 0.9, 0.2)), GlowTechnique::Softer, 10.0, 0.3, GlowSource::Edge))]),
         ("outer glow contour", vec![Effect::OuterGlow(og_contour)]),

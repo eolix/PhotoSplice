@@ -109,6 +109,32 @@ fn soft_shape_fill(rec: &LayerRecord, has_vector: bool, fill_key: Option<&[u8; 4
     (soft || pattern).then_some((fill, soft))
 }
 
+/// Divides `vm`'s coverage out of `s`'s alpha (at most 1; untouched where the path covers
+/// nothing, which the vector mask hides anyway), or multiplies it back in (`unclip` false, as
+/// Reference stores a pattern fill: export). Dividing what multiplying wrote gives it back.
+pub(crate) fn vector_mask_alpha(s: &mut Surface, vm: &photosplice_doc::VectorMask, unclip: bool) {
+    if !s.format().alpha {
+        return;
+    }
+    let r = s.content_bounds();
+    if r.is_empty() {
+        return;
+    }
+    let n = s.channels();
+    let cov = photosplice_vector::vector_mask_values(vm, r);
+    let mut px = s.read_region(r);
+    for (p, c) in px.chunks_exact_mut(n).zip(&cov) {
+        if let Some(a) = p.last_mut() {
+            if !unclip {
+                *a *= c.clamp(0.0, 1.0);
+            } else if *c > 1e-4 {
+                *a = (*a / c).min(1.0);
+            }
+        }
+    }
+    s.write_region(r, &px);
+}
+
 /// Where a placed layer's source goes: read from `SoLd`/`SoLE`, or from a CS2 `PlLd` record.
 /// An empty `id` leaves the contents unavailable (the stored pixels stay the rendering).
 #[derive(Default)]
@@ -283,7 +309,9 @@ impl Ctx<'_> {
         if let Some(Ok(BlockData::Protection(v))) = rec.block(b"lspf").and_then(TaggedBlock::parsed) {
             l.locks = blocks::locks_from_lspf(v);
         }
-        if rec.flags.transparency_protected() {
+        // The record's transparency flag is set by a transparency lock or by Lock All (whose
+        // `lspf` leaves the transparency bit clear): it adds a lock only where Lock All isn't on.
+        if rec.flags.transparency_protected() && !l.locks.all {
             l.locks.transparency = true;
         }
         if let Some(Ok(BlockData::SheetColor(v))) = rec.block(b"lclr").and_then(TaggedBlock::parsed) {
@@ -497,6 +525,13 @@ impl Ctx<'_> {
         }
         if !matches!(l.content, LayerContent::Shape(_)) {
             self.apply_vector_mask(&mut l, rec);
+        }
+        // A pattern fill's stored pixels are the fill seen through its vector mask (Reference) or
+        // the unclipped fill (our export). The compositor applies the vector mask itself, so take
+        // the path's coverage back out of the stored alpha (psd-tools vector-mask2.psd: it was
+        // applied twice, edges at the square of their coverage).
+        if let (LayerContent::Fill(photosplice_doc::Fill::Pattern { .. }), Some(cache), Some(vm)) = (&l.content, l.fill_cache.as_mut(), &l.vector_mask) {
+            vector_mask_alpha(&mut cache.surface, vm, true);
         }
         l
     }

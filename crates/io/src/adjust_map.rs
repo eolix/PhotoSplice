@@ -470,8 +470,9 @@ fn desc_enum<'a>(d: &'a Descriptor, key: &str) -> Option<&'a [u8]> {
 }
 
 /// `clrL`: version 1 + a versioned descriptor carrying the LUT file itself (`LUT3DFileData`, in
-/// the format named by `LUTFormat`). Profile-based lookups (abstract / device link) have no
-/// table and stay [`Adjustment::Unsupported`].
+/// the format named by `LUTFormat`), or an abstract / device-link ICC profile (`profile`), which
+/// is sampled into a [`PROFILE_LUT_SIZE`]³ table. A lookup with neither (none chosen yet, an empty
+/// descriptor) is the identity.
 fn parse_lookup(d: &[u8]) -> Option<Adjustment> {
     read_lookup(d).ok()
 }
@@ -485,10 +486,20 @@ fn read_lookup(d: &[u8]) -> Result<Adjustment, String> {
     }
     let (v, _) = VersionedDescriptor::parse_prefix(d.get(2..).unwrap_or_default()).map_err(|e| format!("unreadable settings ({e})"))?;
     let desc = v.descriptor;
+    let name = desc_text(&desc, "LUT3DFileName").or_else(|| desc_text(&desc, "NM  ")).unwrap_or_default();
+    let dither = desc_bool(&desc, "Dthr").unwrap_or(false);
     let bytes = match desc.get("LUT3DFileData") {
         Some(Value::RawData(b)) if !b.is_empty() => b,
         Some(_) => return Err("its LUT data is empty".into()),
-        None => return Err("it uses a colour profile (abstract or device link), not a LUT file, which isn't supported yet".into()),
+        None => {
+            return match desc.get("profile") {
+                Some(Value::RawData(icc)) if !icc.is_empty() => {
+                    let lut = photosplice_cms::lutfile::from_icc(icc, PROFILE_LUT_SIZE).map_err(|e| format!("its colour profile can't be used ({e})"))?;
+                    Ok(Adjustment::ColorLookup { name, size: lut.size as u32, lut: Some(std::sync::Arc::new(lut.data)), tetrahedral: false, dither })
+                }
+                _ => Ok(Adjustment::ColorLookup { name, size: 0, lut: None, tetrahedral: false, dither }),
+            };
+        }
     };
     let (ext, format) = match desc_enum(&desc, "LUTFormat") {
         Some(b"LUTFormat3DL") => ("x.3dl", "3DL"),
@@ -496,15 +507,11 @@ fn read_lookup(d: &[u8]) -> Result<Adjustment, String> {
         _ => ("x.cube", "CUBE"),
     };
     let lut = photosplice_cms::lutfile::parse(ext, bytes).map_err(|e| format!("its {format} LUT can't be read ({e})"))?;
-    let name = desc_text(&desc, "LUT3DFileName").or_else(|| desc_text(&desc, "NM  ")).unwrap_or_default();
-    Ok(Adjustment::ColorLookup {
-        name,
-        size: lut.size as u32,
-        lut: Some(std::sync::Arc::new(lut.data)),
-        tetrahedral: false,
-        dither: desc_bool(&desc, "Dthr").unwrap_or(false),
-    })
+    Ok(Adjustment::ColorLookup { name, size: lut.size as u32, lut: Some(std::sync::Arc::new(lut.data)), tetrahedral: false, dither })
 }
+
+/// Grid size an abstract / device-link Color Lookup profile is sampled at.
+const PROFILE_LUT_SIZE: usize = 33;
 
 /// The descriptor of a `vibA` / `blwh` block: a 4-byte descriptor version (16), then the descriptor.
 fn versioned(d: &[u8]) -> Option<Descriptor> {
@@ -1229,13 +1236,36 @@ mod tests {
         let Adjustment::ColorLookup { name, lut: Some(t), size: 2, dither: true, .. } = &a else { panic!("{a:?}") };
         assert_eq!(name, "Id");
         assert_eq!(&t[..6], &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
-        // A profile-based lookup (no table) is preserved raw.
+        // A lookup with no table and no profile (none chosen yet) is the identity, not unreadable.
         let mut p = vec![0, 1];
         p.extend(VersionedDescriptor::new(Descriptor::new("null").with("lookupType", en("colorLookupType", "abstractProfile"))).to_bytes());
-        assert!(matches!(parse(b"clrL", &p, None, Channels::Rgb), Adjustment::Unsupported { .. }));
+        assert!(matches!(parse(b"clrL", &p, None, Channels::Rgb), Adjustment::ColorLookup { lut: None, size: 0, .. }));
+        assert_eq!(unreadable_reason(b"clrL", &p), None);
+        let mut empty = vec![0, 1];
+        empty.extend(VersionedDescriptor::new(Descriptor::new("null")).to_bytes());
+        assert!(matches!(parse(b"clrL", &empty, None, Channels::Rgb), Adjustment::ColorLookup { lut: None, .. }));
+        // A device-link profile is sampled into a table.
+        let mut link = photosplice_cms::Builtin::Srgb.profile().clone();
+        link.class = photosplice_cms::ProfileClass::DeviceLink;
+        link.description = "Swap".into();
+        let id = || photosplice_cms::pipeline::Stage::Curves(vec![photosplice_cms::Curve::Identity; 3]);
+        let swap = photosplice_cms::pipeline::Stage::Matrix { rows: 3, cols: 3, m: vec![0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0], offset: vec![0.0; 3] };
+        link.a2b = [Some(photosplice_cms::profile::Lut { kind: photosplice_cms::profile::LutKind::Ab, inputs: 3, outputs: 3, stages: vec![id(), swap, id()] }), None, None];
+        let icc = link.with_encoded_bytes().to_bytes();
+        let with_profile = |icc: Vec<u8>| {
+            let mut v = vec![0, 1];
+            v.extend(VersionedDescriptor::new(Descriptor::new("null").with("lookupType", en("colorLookupType", "deviceLinkProfile")).with("profile", Value::RawData(icc))).to_bytes());
+            v
+        };
+        let a = parse(b"clrL", &with_profile(icc.to_vec()), None, Channels::Rgb);
+        let Adjustment::ColorLookup { lut: Some(t), size: 33, .. } = &a else { panic!("{a:?}") };
+        let red = &t[32 * 3..][..3];
+        assert!((red[0]).abs() < 1e-3 && (red[2] - 1.0).abs() < 1e-3, "{red:?}");
         // Each way a lookup can't be read has a reason for the import warning (#1763).
         assert_eq!(unreadable_reason(b"clrL", &d), None);
-        assert!(unreadable_reason(b"clrL", &p).unwrap().contains("colour profile"));
+        let display = with_profile(photosplice_cms::Builtin::Srgb.profile().to_bytes().to_vec());
+        assert!(matches!(parse(b"clrL", &display, None, Channels::Rgb), Adjustment::Unsupported { .. }));
+        assert!(unreadable_reason(b"clrL", &display).unwrap().contains("colour profile"));
         assert!(unreadable_reason(b"clrL", &[0]).unwrap().contains("truncated"));
         assert!(unreadable_reason(b"clrL", &[0, 2, 0, 0]).unwrap().contains("version 2"));
         assert!(unreadable_reason(b"clrL", &[0, 1, 9]).unwrap().contains("unreadable settings"));

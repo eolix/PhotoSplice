@@ -38,6 +38,7 @@ const F_MASK_TEX: u32 = 2u;      // mask pixels live in `mask_tex`
 const F_TEX: u32 = 4u;           // layer pixels live in `layer_tex`
 const F_GRADIENT: u32 = 8u;      // gradient fill (stops in `lut_tex`)
 const F_KNOCKOUT: u32 = 16u;     // effect paint: the layer knocks out the coverage (drop shadow)
+const F_STROKE_KNOCK: u32 = 1048576u; // effect paint: outside the shape, also 1 - C.a (outside strokes)
 const F_NO_LAYER: u32 = 32u;    // effect merge: A already holds the layer (only the opacity mix)
 const F_OUTLINE: u32 = 131072u;      // outside strokes: filled shape outline (effects::outline_share)
 const F_VECTOR: u32 = 64u;       // effect paint: shape layer (outside stroke never inside)
@@ -718,6 +719,8 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
             } else if (ml < 0.0) {
                 rgb = rgb * (1.0 + ml);
             }
+            // 32-bit documents keep channels outside 0..1 (adjust::hue_saturation_ranged).
+            if (p1.y > 0.5) { return rgb; }
             return clamp(rgb, vec3(0.0), vec3(1.0));
         }
         case 9: {                                                              // Vibrance
@@ -1130,6 +1133,7 @@ fn fs_fxpaint(in: VOut) -> @location(0) vec4<f32> {
     var m = 1.0;
     if (op.kind == 0) { m = map_value(d, op.p2.w); }
     if ((op.flags & F_KNOCKOUT) != 0u) { m = m * (1.0 - a * op.p4.w); }
+    if ((op.flags & F_STROKE_KNOCK) != 0u && !inside_shape) { m = m * (1.0 - clamp(textureLoad(tex_c, p, 0).a, 0.0, 1.0)); }
     if ((op.flags & F_GATE) != 0u && !inside_shape) { m = 0.0; }
     if ((op.flags & F_REL) != 0u) {
         if (inside_shape) { m = min(m / a, 1.0); } else { m = 0.0; }
@@ -1137,17 +1141,18 @@ fn fs_fxpaint(in: VOut) -> @location(0) vec4<f32> {
     if ((op.flags & F_STROKE_OUT) != 0u && inside_shape) {
         m = select(1.0, 0.0, (op.flags & F_VECTOR) != 0u);
     }
+    // The strength `k` acts as Fill does (composite_fill: the special eight pull the colour toward
+    // neutral and blend it at full coverage); one call keeps a single blend_rgb copy inlined.
     if (i32(op.p2.z) == 4) {
         // effects::paint_glow: the gradient at 1 - strength, opaque from strength 1 / gain (p0.x).
         let k = min(m * op.p0.x, 1.0) * op.opacity;
         if (k <= 0.0) { return dst; }
         let t = 1.0 - clamp(m, 0.0, 1.0);
-        return composite(op.mode, dst, vec4(lut(0, t), lut(1, t), lut(2, t), lut(3, t) * k), 1.0);
+        return composite_fill(op.mode, dst, vec4(lut(0, t), lut(1, t), lut(2, t), lut(3, t)), 1.0, k, false);
     }
     let k = m * op.opacity;
     if (k <= 0.0) { return dst; }
-    let c = fx_color(d);
-    return composite(op.mode, dst, vec4(c.rgb, c.a * k), 1.0);
+    return composite_fill(op.mode, dst, fx_color(d), 1.0, k, false);
 }
 
 // Outside strokes (A = the exterior result before them, B = the layer, C = coverage so far in
@@ -1383,8 +1388,11 @@ fn ra_clamped(p: vec2<i32>) -> f32 {
 }
 
 fn bevel_part(p: vec2<i32>, depth: f32, region: f32) -> f32 {
-    let gx = (ra_clamped(p + vec2(1, 0)) - ra_clamped(p - vec2(1, 0))) * 0.5 * depth;
-    let gy = (ra_clamped(p + vec2(0, 1)) - ra_clamped(p - vec2(0, 1))) * 0.5 * depth;
+    // Prewitt over the 3 × 3 neighbourhood, as `shade_into`.
+    let gx = (ra_clamped(p + vec2(1, -1)) + ra_clamped(p + vec2(1, 0)) + ra_clamped(p + vec2(1, 1))
+        - ra_clamped(p + vec2(-1, -1)) - ra_clamped(p + vec2(-1, 0)) - ra_clamped(p + vec2(-1, 1))) / 6.0 * depth;
+    let gy = (ra_clamped(p + vec2(-1, 1)) + ra_clamped(p + vec2(0, 1)) + ra_clamped(p + vec2(1, 1))
+        - ra_clamped(p + vec2(-1, -1)) - ra_clamped(p + vec2(0, -1)) - ra_clamped(p + vec2(1, -1))) / 6.0 * depth;
     let n = vec3(-gx, -gy, 1.0);
     let len = sqrt(n.x * n.x + n.y * n.y + 1.0);
     let shade = (n.x * op.p0.x + n.y * op.p0.y + n.z * op.p0.z) / len;

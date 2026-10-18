@@ -229,11 +229,15 @@ fn mt32_marks_the_merged_transparency() {
     file.image_data.compression = Compression::Raw;
     let plane = |v: [f32; 2]| v.into_iter().flat_map(f32::to_be_bytes).collect::<Vec<u8>>();
     file.image_data.data = [plane([0.0, 1.0]), plane([0.0, 1.0]), plane([0.0, 1.0]), plane([1.0, 0.0])].concat();
-    // Without names or ids, a positive layer count alone says there is no transparency. (A name
-    // list that starts with "Transparency", or id 0 in 1053, also marks it: see
-    // `PsdFile::merged_has_alpha`.)
+    // Without any channel names or ids the extra channel can only be the transparency (the
+    // Reference names every channel it saves; other writers add only that one).
     file.resources.retain(|r| ![1006, 1045, 1053].contains(&r.id));
-    assert!(!file.merged_has_alpha(), "a positive layer count alone");
+    assert!(file.merged_has_alpha(), "an unnamed extra channel");
+    // With a user channel id and a positive layer count there is no transparency. (A name list
+    // that starts with "Transparency", or id 0 in 1053, also marks it: see
+    // `PsdFile::merged_has_alpha`.)
+    file.resources.push(photosplice_psd::ImageResource::new(1053, 5u32.to_be_bytes().to_vec()));
+    assert!(!file.merged_has_alpha(), "a positive layer count and a user channel id");
     file.global_blocks.push(photosplice_psd::TaggedBlock::new(*b"Mt32", Vec::new()));
     assert!(file.merged_has_alpha());
     let name: Vec<u8> = [0u8, 0, 0, 13].into_iter().chain("Transparency\0".encode_utf16().flat_map(u16::to_be_bytes)).collect();

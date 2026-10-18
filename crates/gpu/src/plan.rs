@@ -386,6 +386,9 @@ fn cpu_clipping(layers: &[Layer], depth: u32) -> Option<String> {
         if !inside_stroke && l.effects.items.iter().any(|e| e.enabled() && matches!(e, Effect::BevelEmboss(b) if b.style == photosplice_doc::BevelStyle::StrokeEmboss)) {
             return Some(format!("Stroke Emboss on `{}` (composited on the CPU)", l.name));
         }
+        if l.effects.items.iter().any(|e| e.enabled() && photosplice_compose::effects::has_anti_aliased_contour(e)) {
+            return Some(format!("anti-aliased contour on `{}` (composited on the CPU)", l.name));
+        }
         if photosplice_compose::effects_unmasked(l).is_some() {
             return Some(format!("masks of `{}` hide its effects (composited on the CPU)", l.name));
         }
@@ -424,6 +427,9 @@ enum Cov {
 /// knockout `m × (1 − a × k)` (k in `p4.w`); gate `inside ? m : 0`; rel `inside ? min(m / a, 1) : 0`;
 /// stroke-out `inside ? (vector ? 0 : (1 − a) / (1 − layer alpha), 1 at an opaque layer) : m`.
 pub const F_KNOCKOUT: u32 = 16;
+/// Drop shadow knockout: also `m × (1 − C.a)` outside the shape, C = the outside strokes' bands
+/// joined (`effects::shadow_knocked_out_by_stroke`).
+pub const F_STROKE_KNOCK: u32 = 1048576;
 /// Effect merge: A already holds the layer; only mix with the backdrop by the layer's opacity.
 pub const F_NO_LAYER: u32 = 32;
 /// Outside strokes along a filled shape's outline (`effects::outline_share`; the coverage slot
@@ -1163,25 +1169,49 @@ impl<'a> Planner<'a> {
         } else {
             self.retain(backdrop)
         };
+        // The outside strokes' bands joined: a knocked-out drop shadow stays out from under them
+        // too (`effects::shadow_knocked_out_by_stroke`).
+        let stroke_knock = if photosplice_compose::effects::shadow_knocked_out_by_stroke(&layer.effects.items) {
+            let c = self.retain(content);
+            let mut k = init(self, c, None, INIT_COVER, 1.0);
+            for (i, e) in items.iter().enumerate() {
+                if let Effect::Stroke(st) = e
+                    && stroke_widths(st).1 > 0.0
+                {
+                    let mut p = Pass::new(Kernel::FxInit, 0);
+                    p.a = Some(k);
+                    p.adjust_kind = INIT_OUTLINE;
+                    p.map = Some(map(i, 0));
+                    p.clip = Some(clip);
+                    k = self.emit(p);
+                }
+            }
+            Some(k)
+        } else {
+            None
+        };
         for &(i, e) in &rev {
             if let Effect::DropShadow(s) = e {
                 // The layer hides the shadow beneath it where its fill is see-through, and wholly
                 // in a mode that blends with it (as the CPU renderer: `shadow_see_through`).
                 let flags = if s.knocks_out { F_KNOCKOUT } else { 0 };
                 let see_through = photosplice_compose::effects::shadow_see_through(layer);
-                w = self.paint_k(
-                    w,
-                    content,
-                    Cov::Map(map(i, 0), 0.0),
-                    &Paint::Color(s.color.to_rgb_unclamped()),
-                    s.common.blend,
-                    s.common.opacity,
-                    flags,
-                    clip,
-                    sb,
-                    see_through,
-                );
+                let paint = Paint::Color(s.color.to_rgb_unclamped());
+                let mut p = self.fx_pass(w, content, &paint, s.common.blend, s.common.opacity, flags, clip, sb);
+                self.release(w);
+                p.adjust_kind = 0;
+                p.map = Some(map(i, 0));
+                p.params[2][3] = 0.0;
+                p.extra[3] = see_through;
+                if let Some(k) = stroke_knock.filter(|_| s.knocks_out) {
+                    p.c = Some(self.retain(k));
+                    p.flags |= F_STROKE_KNOCK;
+                }
+                w = self.emit(p);
             }
+        }
+        if let Some(k) = stroke_knock {
+            self.release(k);
         }
         for &(i, e) in &rev {
             if let Effect::OuterGlow(g) = e {
@@ -1360,19 +1390,33 @@ impl<'a> Planner<'a> {
             if let Effect::BevelEmboss(b) = e
                 && bevel_paint(b) == photosplice_compose::effects::BevelPaint::Outer
             {
+                // Knocked out under a see-through fill, as the CPU does (and as outer glows are).
                 let k = 0;
-                w = self.paint(
+                let see_through = 1.0 - layer.fill_opacity.clamp(0.0, 1.0);
+                w = self.paint_k(
                     w,
                     content,
                     Cov::Map(map(i, k), 0.0),
                     &Paint::Color(b.highlight_color.to_rgb_unclamped()),
                     b.highlight.blend,
                     b.highlight.opacity,
-                    0,
+                    F_KNOCKOUT,
                     clip,
                     sb,
+                    see_through,
                 );
-                w = self.paint(w, content, Cov::Map(map(i, k + 1), 0.0), &Paint::Color(b.shadow_color.to_rgb_unclamped()), b.shadow.blend, b.shadow.opacity, 0, clip, sb);
+                w = self.paint_k(
+                    w,
+                    content,
+                    Cov::Map(map(i, k + 1), 0.0),
+                    &Paint::Color(b.shadow_color.to_rgb_unclamped()),
+                    b.shadow.blend,
+                    b.shadow.opacity,
+                    F_KNOCKOUT,
+                    clip,
+                    sb,
+                    see_through,
+                );
             }
         }
 

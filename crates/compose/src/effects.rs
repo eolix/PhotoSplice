@@ -503,20 +503,152 @@ fn edge_normal(s: &Map, x: i64, y: i64) -> Option<(f32, f32, f32)> {
 /// seed-centre staircase streaked around curves. Glows keep [`dist_outside`], which matched
 /// Photoshop's precise glows slightly better.
 fn dist_outside_smooth(s: &Map) -> Vec<f32> {
-    let inside: Vec<bool> = s.v.iter().map(|&a| a > INSIDE_EPS).collect();
-    let (d, near) = edt_nearest(&inside, s.w, s.h);
-    (0..d.len())
+    let d = aa_edt(&s.v, s.w, s.h);
+    s.v.iter().zip(d).map(|(&a, d)| if a > INSIDE_EPS { -0.5 } else { d }).collect()
+}
+
+/// Distance from each pixel centre with no coverage in `cov` to the edge of what is covered, the
+/// edge placed inside the anti-aliased pixels from their coverage and the direction the coverage
+/// rises in (the anti-aliased Euclidean distance transform, Gustavson and Strand 2011). Covered
+/// pixels read their own centre's distance to the edge (negative inside). A chisel bevel's
+/// facets follow these distances: Reference's slopes are exactly radial around a disc, where a
+/// nearest-pixel distance tilted them by up to 4° and changed their steepness by 6 %.
+fn aa_edt(cov: &[f32], w: usize, h: usize) -> Vec<f32> {
+    const FAR: f32 = 1.0e6;
+    let n = w * h;
+    let at = |x: i64, y: i64| if x < 0 || y < 0 || x >= w as i64 || y >= h as i64 { 0.0 } else { cov[y as usize * w + x as usize].clamp(0.0, 1.0) };
+    // The coverage gradient (3 × 3, √2-weighted), normalised: the edge's normal at each pixel.
+    let r2 = std::f32::consts::SQRT_2;
+    let grad: Vec<(f32, f32)> = (0..n)
         .map(|i| {
-            let q = near.get(i).map_or(i, |&q| q as usize);
-            if inside[i] { -0.5 } else { edge_distance_dir(s, i, q, d[i], -1.0, s.v.get(q).map_or(1.0, |a| a.min(1.0)) - 0.5) }
+            let (x, y) = ((i % w) as i64, (i / w) as i64);
+            let gx = -at(x - 1, y - 1) - r2 * at(x - 1, y) - at(x - 1, y + 1) + at(x + 1, y - 1) + r2 * at(x + 1, y) + at(x + 1, y + 1);
+            let gy = -at(x - 1, y - 1) - r2 * at(x, y - 1) - at(x + 1, y - 1) + at(x - 1, y + 1) + r2 * at(x, y + 1) + at(x + 1, y + 1);
+            let len = gx.hypot(gy);
+            if len > 1e-6 { (gx / len, gy / len) } else { (0.0, 0.0) }
         })
-        .collect()
+        .collect();
+    // Distance from a pixel's centre to the edge line through it (normal `(gx, gy)`, area `a`
+    // covered): positive where the centre lies outside the covered part.
+    let edge_df = |gx: f32, gy: f32, a: f32| -> f32 {
+        if gx == 0.0 || gy == 0.0 {
+            return 0.5 - a;
+        }
+        let len = gx.hypot(gy);
+        let (mut gx, mut gy) = ((gx / len).abs(), (gy / len).abs());
+        if gx < gy {
+            std::mem::swap(&mut gx, &mut gy);
+        }
+        let a1 = 0.5 * gy / gx;
+        if a < a1 {
+            0.5 * (gx + gy) - (2.0 * gx * gy * a).sqrt()
+        } else if a < 1.0 - a1 {
+            (0.5 - a) * gx
+        } else {
+            -0.5 * (gx + gy) + (2.0 * gx * gy * (1.0 - a)).sqrt()
+        }
+    };
+    let mut near: Vec<u32> = vec![u32::MAX; n];
+    let mut dist = vec![FAR; n];
+    for i in 0..n {
+        let a = cov[i].clamp(0.0, 1.0);
+        if a > 0.0 {
+            near[i] = i as u32;
+            dist[i] = if a < 1.0 { edge_df(grad[i].0, grad[i].1, a) } else { 0.0 };
+        }
+    }
+    // Distance from pixel `i` to the edge at covered pixel `c`: along the vector between them,
+    // through `c`'s own edge offset in that direction.
+    let through = |i: usize, c: usize| -> f32 {
+        let a = cov[c].clamp(0.0, 1.0);
+        if a <= 0.0 {
+            return FAR;
+        }
+        let (dx, dy) = ((i % w) as f32 - (c % w) as f32, (i / w) as f32 - (c / w) as f32);
+        let di = dx.hypot(dy);
+        if di == 0.0 { edge_df(grad[c].0, grad[c].1, a) } else { di + edge_df(dx, dy, a) }
+    };
+    let relax = |i: usize, j: usize, dist: &mut Vec<f32>, near: &mut Vec<u32>| -> bool {
+        let c = near[j];
+        if c == u32::MAX || c == near[i] {
+            return false;
+        }
+        let d = through(i, c as usize);
+        if d < dist[i] - 1e-3 {
+            dist[i] = d;
+            near[i] = c;
+            return true;
+        }
+        false
+    };
+    // Sweeps down and up (each with a row pass both ways) until nothing changes.
+    for _ in 0..16 {
+        let mut changed = false;
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                if cov[i] >= 1.0 {
+                    continue;
+                }
+                if y > 0 {
+                    changed |= relax(i, i - w, &mut dist, &mut near);
+                    if x > 0 {
+                        changed |= relax(i, i - w - 1, &mut dist, &mut near);
+                    }
+                    if x + 1 < w {
+                        changed |= relax(i, i - w + 1, &mut dist, &mut near);
+                    }
+                }
+                if x > 0 {
+                    changed |= relax(i, i - 1, &mut dist, &mut near);
+                }
+            }
+            for x in (0..w.saturating_sub(1)).rev() {
+                let i = y * w + x;
+                if cov[i] < 1.0 {
+                    changed |= relax(i, i + 1, &mut dist, &mut near);
+                }
+            }
+        }
+        for y in (0..h).rev() {
+            for x in (0..w).rev() {
+                let i = y * w + x;
+                if cov[i] >= 1.0 {
+                    continue;
+                }
+                if y + 1 < h {
+                    changed |= relax(i, i + w, &mut dist, &mut near);
+                    if x + 1 < w {
+                        changed |= relax(i, i + w + 1, &mut dist, &mut near);
+                    }
+                    if x > 0 {
+                        changed |= relax(i, i + w - 1, &mut dist, &mut near);
+                    }
+                }
+                if x + 1 < w {
+                    changed |= relax(i, i + 1, &mut dist, &mut near);
+                }
+            }
+            for x in 1..w {
+                let i = y * w + x;
+                if cov[i] < 1.0 {
+                    changed |= relax(i, i - 1, &mut dist, &mut near);
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    dist
 }
 
 /// Distance from each pixel centre inside the shape to the shape's edge
 /// (≤ 0 outside).
 fn dist_inside(s: &Map) -> Vec<f32> {
-    dist_inside_by(s, Metric::Euclidean)
+    let outside: Vec<f32> = s.v.iter().map(|a| 1.0 - a.clamp(0.0, 1.0)).collect();
+    let d = aa_edt(&outside, s.w, s.h);
+    s.v.iter().zip(d).map(|(&a, d)| if a <= INSIDE_EPS { -0.5 } else { d }).collect()
 }
 
 fn dist_inside_by(s: &Map, m: Metric) -> Vec<f32> {
@@ -618,6 +750,13 @@ fn dilate(s: &Map, r: f32) -> Map {
 fn contour_lut(c: &Contour) -> Option<Vec<f32>> {
     match c {
         Contour::Linear => None,
+        // A custom curve from (0, 0) straight to (1, 1) is the linear contour: no lookup, so no
+        // anti-aliasing shift either (Reference: such a Satin draws exactly as the linear one).
+        Contour::Custom { points, .. }
+            if points.len() == 2 && points.iter().zip([(0.0, 0.0), (1.0, 1.0)]).all(|(p, (i, o))| (p.input - i).abs() < 1e-4 && (p.output - o).abs() < 1e-4) =>
+        {
+            None
+        }
         Contour::Custom { points, corners, .. } => Some(crate::adjust::contour_curve_lut(points, corners)),
     }
 }
@@ -638,6 +777,18 @@ fn lut_at(l: &[f32], v: f32) -> f32 {
     let i = x.floor() as usize;
     let j = (i + 1).min(l.len() - 1);
     l[i] + (l[j] - l[i]) * (x - i as f32)
+}
+
+/// Whether `e` reads a contour with the Anti-aliased option on, which takes its input a third of a
+/// pixel away ([`CONTOUR_AA_SHIFT`]; the GPU leaves such layers to the CPU).
+pub fn has_anti_aliased_contour(e: &Effect) -> bool {
+    match e {
+        Effect::OuterGlow(g) | Effect::InnerGlow(g) => g.anti_alias && glow_lut(g).is_some(),
+        Effect::DropShadow(s) | Effect::InnerShadow(s) => s.anti_alias && contour_lut(&s.contour).is_some(),
+        Effect::Satin(s) => s.anti_alias && contour_lut(&s.contour).is_some(),
+        Effect::BevelEmboss(b) => b.contour.as_ref().is_some_and(|c| c.anti_alias),
+        _ => false,
+    }
 }
 
 /// A glow's coverage transfer: its contour applied over the Range (Photoshop maps a Softer
@@ -698,6 +849,21 @@ pub fn ranged_lut(contour: &Contour, range: f32) -> Option<Vec<f32>> {
     )
 }
 
+/// Where an anti-aliased contour reads its input: Reference samples the coverage a third of a
+/// pixel down and right of each pixel, so the shaped effect sits that far up and left (Reference
+/// 16-bit glows and satins, linear, ramp, double-ring and Gaussian contours: a linear anti-aliased
+/// glow 12.8 % of pixels off → 0, a Gaussian satin 5 % → 0.02 %). Without a contour lookup there is
+/// no shift (a linear satin matches unshifted).
+const CONTOUR_AA_SHIFT: f32 = 1.0 / 3.0;
+
+/// [`apply_lut`] with the contour's Anti-aliased option ([`CONTOUR_AA_SHIFT`]).
+fn apply_lut_aa(m: Map, l: Option<Vec<f32>>, anti_alias: bool) -> Map {
+    match l {
+        Some(l) if anti_alias => m.shifted(-CONTOUR_AA_SHIFT, -CONTOUR_AA_SHIFT, 0.0).map(|v| lut_at(&l, v)),
+        l => apply_lut(m, l),
+    }
+}
+
 fn apply_lut(m: Map, l: Option<Vec<f32>>) -> Map {
     match l {
         None => m,
@@ -734,10 +900,10 @@ fn noise(m: &mut Map, amount: f32, x0: i32, y0: i32) {
     }
 }
 
-fn apply_contour(m: Map, c: &Contour) -> Map {
+fn apply_contour(m: Map, c: &Contour, anti_alias: bool) -> Map {
     match contour_lut(c) {
         None => m,
-        Some(l) => m.map(|v| {
+        Some(l) => (if anti_alias { m.shifted(-CONTOUR_AA_SHIFT, -CONTOUR_AA_SHIFT, 0.0) } else { m }).map(|v| {
             let x = v.clamp(0.0, 1.0) * (l.len() - 1) as f32;
             let i = x.floor() as usize;
             let j = (i + 1).min(l.len() - 1);
@@ -792,15 +958,17 @@ fn sample_stops(stops: &[(f32, [f32; 3])], t: f32) -> [f32; 3] {
     crate::adjust::gradient(stops, t)
 }
 
-/// Composite `color × coverage` into `dst` (both over the same rectangle).
+/// Composite `color × coverage` into `dst` (both over the same rectangle). The special eight
+/// modes (`psblend::fill_is_special`) take the strength as Reference takes a layer's Fill: the
+/// colour pulled toward the mode's neutral, blended at full coverage (a 15 % Linear Dodge
+/// highlight adds 15 % of its colour and clips, rather than mixing 15 % of the clipped sum).
 fn paint(dst: &mut Buffer, m: &Map, color: impl Fn(usize) -> [f32; 4], blend: BlendMode, opacity: f32) {
     for (i, p) in dst.px.iter_mut().enumerate() {
         let a = m.v[i] * opacity;
         if a <= 0.0 {
             continue;
         }
-        let c = color(i);
-        *p = psblend::composite(blend, *p, [c[0], c[1], c[2], c[3] * a], 1.0);
+        *p = psblend::composite_fill(blend, *p, color(i), 1.0, a, 1.0);
     }
 }
 
@@ -823,7 +991,7 @@ fn shadow_map(shape: &Map, s: &Shadow, light: &GlobalLight, inner: bool, origin:
     let (r, bw) = spread_split(s.size, s.spread);
     m = dilate(&m, r);
     blur(&mut m, bw);
-    let mut m = apply_contour(m, &s.contour);
+    let mut m = apply_contour(m, &s.contour, s.anti_alias);
     noise(&mut m, s.noise, origin.0, origin.1);
     if inner {
         for (v, a) in m.v.iter_mut().zip(&shape.v) {
@@ -862,7 +1030,7 @@ fn glow_map(shape: &Map, g: &Glow, inner: bool, origin: (i32, i32)) -> Map {
             m
         }
     };
-    m = apply_lut(m, glow_lut(g));
+    m = apply_lut_aa(m, glow_lut(g), g.anti_alias);
     if inner && g.source == GlowSource::Center {
         m = m.map(|v| 1.0 - v);
     }
@@ -1239,7 +1407,7 @@ fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, pattern
     };
     // Contour element: the height profile through the contour over its range.
     if let Some(c) = &b.contour {
-        h = apply_lut(h, Some(bevel_contour_lut(c)));
+        h = apply_lut_aa(h, Some(bevel_contour_lut(c)), c.anti_alias);
     }
     // Texture element: the pattern's luminance as extra height, scaled so a full-contrast step
     // at 100 % depth slopes like the bevel at its depth.
@@ -1323,8 +1491,12 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
         for y in 0..shape.h as i64 {
             for x in 0..shape.w as i64 {
                 let i = y as usize * shape.w + x as usize;
-                let gx = (hc(x + 1, y) - hc(x - 1, y)) * 0.5 * depth;
-                let gy = (hc(x, y + 1) - hc(x, y - 1)) * 0.5 * depth;
+                // The height's slope over the 3 × 3 neighbourhood, all six neighbours weighted
+                // alike (Prewitt; Reference corpus bevel-emboss-smooth 1.7 % of pixels off → 0, a
+                // pillow chisel 0.23 → 0.07 max; a centre difference along each axis left
+                // diagonal edges and corners off).
+                let gx = (hc(x + 1, y - 1) + hc(x + 1, y) + hc(x + 1, y + 1) - hc(x - 1, y - 1) - hc(x - 1, y) - hc(x - 1, y + 1)) / 6.0 * depth;
+                let gy = (hc(x - 1, y + 1) + hc(x, y + 1) + hc(x + 1, y + 1) - hc(x - 1, y - 1) - hc(x, y - 1) - hc(x + 1, y - 1)) / 6.0 * depth;
                 let n = [-gx, -gy, 1.0];
                 let len = (n[0] * n[0] + n[1] * n[1] + 1.0).sqrt();
                 let shade = (n[0] * light_v[0] + n[1] * light_v[1] + n[2] * light_v[2]) / len;
@@ -1443,7 +1615,7 @@ fn satin_map(shape: &Map, s: &photosplice_doc::effects::Satin) -> Map {
     // The contour shapes each blurred copy before they are differenced (Photoshop corpus
     // satin-default.psd, an S contour: 27/255 → 1.1/255; satin-inverted-ramp-peak-aa.psd
     // 112/255 → 19/255); a linear contour is the same either way.
-    let (a, b) = (apply_contour(a, &s.contour), apply_contour(b, &s.contour));
+    let (a, b) = (apply_contour(a, &s.contour, s.anti_alias), apply_contour(b, &s.contour, s.anti_alias));
     let mut m = Map { w: shape.w, h: shape.h, v: a.v.iter().zip(&b.v).map(|(x, y)| (x - y).abs()).collect() };
     if s.invert {
         m = m.map(|v| 1.0 - v);
@@ -1598,6 +1770,14 @@ fn knock_out_exterior(map: &mut Map, shape: &Map, fill_opacity: f32) {
     }
 }
 
+/// Whether a knocked-out drop shadow is also knocked out beneath an outside stroke (see
+/// `stroke_knock` in `composite_with_effects_prepared`): the GPU compositor leaves such layers
+/// to the CPU.
+pub fn shadow_knocked_out_by_stroke(e: &[Effect]) -> bool {
+    let on = || e.iter().filter(|e| e.enabled());
+    on().any(|e| matches!(e, Effect::DropShadow(s) if s.knocks_out)) && on().any(|e| matches!(e, Effect::Stroke(st) if stroke_widths(st).1 > 0.0))
+}
+
 /// How far the layer lets a knocked-out drop shadow show beneath its own shape (Layer Knocks Out
 /// Drop Shadow), 0 = covered, 1 = knocked out wholly. In a normal mode an opaque layer covers the
 /// shadow anyway, so only see-through fill knocks it out (and anti-aliased edges are not
@@ -1673,6 +1853,47 @@ pub(crate) fn composite_with_effects_prepared(
     // Multiple instances: the first listed is on top, so paint in reverse.
     let rev = || items.iter().copied().enumerate().rev();
 
+    let strokes: Vec<&photosplice_doc::StrokeFx> = items.iter().filter_map(|e| if let Effect::Stroke(s) = e { Some(s) } else { None }).collect();
+    let ready = !strokes.is_empty();
+    let din = if ready { maps.din.as_ref().map(|a| maps.crop_vec(a, big, 0.0)).unwrap_or_default() } else { Vec::new() };
+    // A stroke's outer edge picks the chamfer or the exact field by its width
+    // ([`stroke_outside_exact`]); both are cropped here, and only the ones a stroke needs exist.
+    let crop_out = |v: &Option<Vec<f32>>| v.as_ref().map(|b| maps.crop_vec(b, big, FAR));
+    let (dout, dout_exact, vdout, vdout_exact) =
+        if ready { (crop_out(&maps.dout), crop_out(&maps.dout_exact), crop_out(&maps.vdout), crop_out(&maps.vdout_exact)) } else { (None, None, None, None) };
+    // Shape layers without a filled outline stroke their vector outline, estimated from local
+    // coverage; every other layer strokes its shape. The width then picks the field.
+    let vector_outline = vector_shape && !maps.outline;
+    // The distance field an outside stroke of width `out_w` measures its band with.
+    let stroke_field = |out_w: f32| -> &[f32] {
+        let exact = stroke_outside_exact(out_w);
+        if vector_outline {
+            (if exact { vdout_exact.as_deref() } else { vdout.as_deref() }).unwrap_or_default()
+        } else if exact {
+            dout_exact.as_deref().unwrap_or_default()
+        } else {
+            dout.as_deref().unwrap_or_default()
+        }
+    };
+    // Layer Knocks Out Drop Shadow counts the outside strokes as the layer's: a 10 % stroke
+    // shows the bare backdrop beneath it, not the shadow (psd-tools masks.psd: the header's
+    // stroke row was 0.08 dark).
+    let stroke_knock: Option<Vec<f32>> = strokes.iter().any(|st| stroke_widths(st).1 > 0.0).then(|| {
+        let mut k = vec![0.0f32; w * h];
+        for st in &strokes {
+            let out_w = stroke_widths(st).1;
+            if out_w <= 0.0 {
+                continue;
+            }
+            let d = stroke_field(out_w);
+            for ((kv, a), dv) in k.iter_mut().zip(&shape.v).zip(d) {
+                if *a <= INSIDE_EPS {
+                    *kv = kv.max((out_w + 0.5 - dv).clamp(0.0, 1.0));
+                }
+            }
+        }
+        k
+    });
     for (i, e) in rev() {
         if let Effect::DropShadow(s) = e {
             let mut m = fx(i, 0);
@@ -1681,6 +1902,9 @@ pub(crate) fn composite_with_effects_prepared(
                 // fill in a normal mode it covers it anyway; at 0 % the shape shows the bare
                 // backdrop), and wholly in a mode that blends with it ([`shadow_see_through`]).
                 knock_out_exterior(&mut m, &shape, 1.0 - shadow_see_through(layer));
+                if let Some(k) = &stroke_knock {
+                    m.v.iter_mut().zip(k).for_each(|(v, k)| *v *= 1.0 - k);
+                }
             }
             paint_color(&mut work, &m, rgb(&s.color), s.common.blend, s.common.opacity);
         }
@@ -1777,14 +2001,6 @@ pub(crate) fn composite_with_effects_prepared(
     }
     // Strokes. Inside parts are painted over the layer (bottom instance first); outside parts
     // are slid beneath it, so the first listed (top) instance is processed first.
-    let strokes: Vec<&photosplice_doc::StrokeFx> = items.iter().filter_map(|e| if let Effect::Stroke(s) = e { Some(s) } else { None }).collect();
-    let ready = !strokes.is_empty();
-    let din = if ready { maps.din.as_ref().map(|a| maps.crop_vec(a, big, 0.0)).unwrap_or_default() } else { Vec::new() };
-    // A stroke's outer edge picks the chamfer or the exact field by its width
-    // ([`stroke_outside_exact`]); both are cropped here, and only the ones a stroke needs exist.
-    let crop_out = |v: &Option<Vec<f32>>| v.as_ref().map(|b| maps.crop_vec(b, big, FAR));
-    let (dout, dout_exact, vdout, vdout_exact) =
-        if ready { (crop_out(&maps.dout), crop_out(&maps.dout_exact), crop_out(&maps.vdout), crop_out(&maps.vdout_exact)) } else { (None, None, None, None) };
     let widths = stroke_widths;
     // A gradient stroke aligned with the layer spans the stroke's own extent.
     let frame = |st: &photosplice_doc::StrokeFx| maps.stroke_frame(st).unwrap_or(sb);
@@ -1837,9 +2053,6 @@ pub(crate) fn composite_with_effects_prepared(
     for (p, a) in lay.px.iter_mut().zip(&shape.v) {
         p[3] *= a.min(1.0);
     }
-    // Shape layers without a filled outline stroke their vector outline, estimated from local
-    // coverage; every other layer strokes its shape. The width then picks the field.
-    let vector_outline = vector_shape && !maps.outline;
     // Outside parts lie beneath the layer and blend onto the backdrop with their own mode. A
     // higher stroke covers the ones below it (Photoshop: a Multiply stroke listed above a wider
     // Normal stroke multiplies the backdrop, not the lower stroke). Each stroke's share is its
@@ -1857,14 +2070,7 @@ pub(crate) fn composite_with_effects_prepared(
             // Shape layers: Photoshop strokes the vector outline (estimated from local coverage
             // for unfilled shapes); the stroke never shows through the shape's pixels. Along a
             // filled shape's outline it covers the part of each edge pixel outside the path.
-            let exact = stroke_outside_exact(out_w);
-            let d: &[f32] = if vector_outline {
-                (if exact { vdout_exact.as_deref() } else { vdout.as_deref() }).unwrap_or_default()
-            } else if exact {
-                dout_exact.as_deref().unwrap_or_default()
-            } else {
-                dout.as_deref().unwrap_or_default()
-            };
+            let d = stroke_field(out_w);
             let mut share = vec![0.0f32; w * h];
             for (i, sh) in share.iter_mut().enumerate() {
                 let band = (out_w + 0.5 - d[i]).clamp(0.0, 1.0);
@@ -1930,7 +2136,12 @@ pub(crate) fn composite_with_effects_prepared(
         if let Effect::BevelEmboss(b) = e
             && maps.bevel_paint[i] == BevelPaint::Outer
         {
-            let (hi, sh) = (fx(i, 0), fx(i, 1));
+            // Beneath the layer like a glow: a see-through fill shows the bare backdrop under its
+            // shape, not the bevel (Reference kit hard-outer-s20 at Fill 0 %: an edge pixel half
+            // covered shades half as much; it was shaded in full, up to 0.43 off).
+            let (mut hi, mut sh) = (fx(i, 0), fx(i, 1));
+            knock_out_exterior(&mut hi, &shape, layer.fill_opacity);
+            knock_out_exterior(&mut sh, &shape, layer.fill_opacity);
             paint_color(&mut work, &hi, rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
             paint_color(&mut work, &sh, rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
         }
@@ -2823,5 +3034,175 @@ mod tests {
             let s = m.shifted(d, d, 0.0);
             assert_eq!(s.v.len(), 144);
         }
+    }
+
+    /// An anti-aliased contour reads the coverage a third of a pixel down and right, so the glow
+    /// sits up and left of the plain one (Reference, the effects kit's square at x 40..80: an
+    /// Outer Glow, size 24, range 60 %, a linear custom contour; 2 px out on either side).
+    #[test]
+    fn anti_aliased_contour_glow_matches_reference() {
+        let (w, h) = (256usize, 128usize);
+        let mut shape = Map::new(w, h, 0.0);
+        for y in 44..84 {
+            for x in 40..80 {
+                shape.v[y * w + x] = 1.0;
+            }
+        }
+        let linear = Contour::Custom { name: "kit".into(), points: vec![photosplice_doc::adjust::CurvePoint { input: 0.0, output: 0.0 }, photosplice_doc::adjust::CurvePoint { input: 1.0, output: 1.0 }], corners: Vec::new() };
+        let g = |anti_alias: bool| Glow {
+            common: photosplice_doc::FxCommon::new(BlendMode::Normal, 1.0),
+            paint: FxPaint::Color(photosplice_color::Color::WHITE),
+            technique: GlowTechnique::Softer,
+            spread: 0.0,
+            size: 24.0,
+            contour: linear.clone(),
+            anti_alias,
+            range: 0.6,
+            jitter: 0.0,
+            noise: 0.0,
+            source: GlowSource::Edge,
+        };
+        let aa = glow_map(&shape, &g(true), false, (0, 0));
+        let plain = glow_map(&shape, &g(false), false, (0, 0));
+        let at = |m: &Map, x: usize| m.v[64 * w + x];
+        assert!((at(&aa, 38) - 0.7333).abs() < 0.005, "{}", at(&aa, 38));
+        assert!((at(&aa, 81) - 0.6902).abs() < 0.005, "{}", at(&aa, 81));
+        // The plain glow is symmetric about the square.
+        assert!((at(&plain, 38) - at(&plain, 81)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn linear_dodge_and_burn_strength_acts_as_fill() {
+        // psd-tools layer_comps: a 15 % Linear Dodge highlight and a 70 % Linear Burn shadow.
+        let m = Map::new(2, 1, 1.0);
+        let mut dst = Buffer { rect: Rect::new(0, 0, 2, 1), px: vec![[0.9, 0.9, 0.2, 1.0]; 2] };
+        paint_color(&mut dst, &m, [0.984, 0.979, 0.537], BlendMode::LinearDodge, 0.15);
+        // base + 15 % of the colour, clipped (not 15 % of the way to the clipped sum: 0.915).
+        assert!((dst.px[0][0] - 1.0).abs() < 1e-5, "{:?}", dst.px[0]);
+        assert!((dst.px[0][2] - (0.2 + 0.15 * 0.537)).abs() < 1e-5, "{:?}", dst.px[0]);
+        paint_color(&mut dst, &m, [0.957, 0.823, 0.083], BlendMode::LinearBurn, 0.7);
+        // base − 70 % of the colour's distance from white, clipped at 0.
+        assert!(dst.px[1][2].abs() < 1e-5, "{:?}", dst.px[1]);
+        assert!((dst.px[1][0] - (1.0 - 0.7 * (1.0 - 0.957))).abs() < 1e-5, "{:?}", dst.px[1]);
+        // Normal keeps mixing by strength.
+        let mut n = Buffer { rect: Rect::new(0, 0, 2, 1), px: vec![[0.0, 0.0, 0.0, 1.0]; 2] };
+        paint_color(&mut n, &m, [1.0, 1.0, 1.0], BlendMode::Normal, 0.25);
+        assert!((n.px[0][0] - 0.25).abs() < 1e-5);
+    }
+
+    #[test]
+    fn knocked_out_shadow_stays_out_from_under_an_outside_stroke() {
+        // psd-tools masks.psd: a 10 % outside stroke over a drop shadow shows the bare backdrop.
+        use photosplice_doc::{Document, Shadow};
+        let doc = Document::new("d", photosplice_geom::Size::new(40, 40), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+        let fmt = doc.pixel_format();
+        let mut bg = Layer::raster("bg", fmt);
+        bg.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 40, 40), &[1.0, 1.0, 1.0, 1.0]);
+        let mut l = Layer::raster("l", fmt);
+        l.surface_mut().unwrap().fill_rect(Rect::new(10, 10, 30, 30), &[0.0, 0.0, 1.0, 1.0]);
+        let shadow = |knocks_out| {
+            Effect::DropShadow(Shadow {
+                common: photosplice_doc::FxCommon::new(BlendMode::Normal, 1.0),
+                color: photosplice_doc::Color::BLACK,
+                angle: 90.0,
+                use_global_light: false,
+                distance: 4.0,
+                spread: 0.0,
+                size: 0.0,
+                contour: Contour::Linear,
+                anti_alias: false,
+                noise: 0.0,
+                knocks_out,
+            })
+        };
+        let stroke = Effect::Stroke(photosplice_doc::StrokeFx {
+            common: photosplice_doc::FxCommon::new(BlendMode::Normal, 0.1),
+            size: 2.0,
+            position: StrokePosition::Outside,
+            paint: FxPaint::Color(photosplice_doc::Color::rgb(1.0, 0.0, 0.0)),
+        });
+        let at = |knocks_out: bool| {
+            let mut d = doc.clone();
+            let mut l = l.clone();
+            l.effects.items = vec![stroke.clone(), shadow(knocks_out)];
+            d.layers = vec![bg.clone(), l];
+            crate::flatten(&d).px[31 * 40 + 20]
+        };
+        // Below the square, in the stroke's band and the shadow (cast 4 px down).
+        let out = at(true);
+        assert!((out[0] - 1.0).abs() < 0.01 && (out[1] - 0.9).abs() < 0.01, "{out:?}");
+        let kept = at(false);
+        assert!(kept[1] < 0.05, "without knockout the shadow shows: {kept:?}");
+    }
+
+    /// Distances to an anti-aliased disc's edge, from its coverage alone: within 0.1 px of the
+    /// true radius everywhere inside, where the nearest-pixel distance was 0.15 off (the facets of
+    /// a chisel bevel follow them).
+    #[test]
+    fn aa_distances_follow_an_anti_aliased_edge() {
+        let (n, c, r) = (80usize, 40.0f32, 27.3f32);
+        let mut s = Map::new(n, n, 0.0);
+        for y in 0..n {
+            for x in 0..n {
+                let mut k = 0;
+                for sy in 0..8 {
+                    for sx in 0..8 {
+                        let (px, py) = (x as f32 + (sx as f32 + 0.5) / 8.0, y as f32 + (sy as f32 + 0.5) / 8.0);
+                        k += usize::from((px - c).hypot(py - c) <= r);
+                    }
+                }
+                s.v[y * n + x] = k as f32 / 64.0;
+            }
+        }
+        let d = dist_inside(&s);
+        let mut worst = 0.0f32;
+        for y in 0..n {
+            for x in 0..n {
+                let i = y * n + x;
+                if s.v[i] >= 1.0 {
+                    let want = r - (x as f32 + 0.5 - c).hypot(y as f32 + 0.5 - c);
+                    worst = worst.max((d[i] - want).abs());
+                }
+            }
+        }
+        let e = dist_inside_by(&s, Metric::Euclidean);
+        let old = (0..n * n).filter(|&i| s.v[i] >= 1.0).map(|i| (e[i] - (r - ((i % n) as f32 + 0.5 - c).hypot((i / n) as f32 + 0.5 - c))).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 0.1 && worst < old * 0.7, "{worst} (nearest pixel: {old})");
+    }
+
+    /// An outer bevel lies beneath the layer like a glow: under a see-through fill a half-covered
+    /// edge pixel shows half of it (Reference kit hard-outer-s20 at Fill 0 %).
+    #[test]
+    fn outer_bevel_is_knocked_out_under_a_see_through_fill() {
+        use photosplice_doc::Document;
+        let doc = Document::new("d", photosplice_geom::Size::new(40, 40), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+        let fmt = doc.pixel_format();
+        let mut bg = Layer::raster("bg", fmt);
+        bg.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 40, 40), &[0.0, 0.0, 0.0, 1.0]);
+        let mut l = Layer::raster("l", fmt);
+        l.surface_mut().unwrap().fill_rect(Rect::new(12, 10, 30, 30), &[0.5, 0.5, 0.5, 1.0]);
+        // The left edge column half covered.
+        l.surface_mut().unwrap().fill_rect(Rect::new(12, 10, 13, 30), &[0.5, 0.5, 0.5, 0.5]);
+        let mut b = bevel_of(BevelStyle::OuterBevel, BevelTechnique::ChiselHard);
+        b.angle = 180.0;
+        b.highlight = photosplice_doc::FxCommon::new(BlendMode::Normal, 1.0);
+        b.shadow = photosplice_doc::FxCommon::new(BlendMode::Normal, 0.0);
+        l.effects.items = vec![Effect::BevelEmboss(b)];
+        l.fill_opacity = 0.0;
+        let mut d = doc.clone();
+        d.layers = vec![bg, l];
+        let px = crate::flatten(&d).px;
+        // The highlight the bevel's map gives that pixel, before the layer knocks it out.
+        let mut shape = Map::new(40, 40, 0.0);
+        for y in 10..30 {
+            for x in 12..30 {
+                shape.v[y * 40 + x] = if x == 12 { 0.5 } else { 1.0 };
+            }
+        }
+        let Effect::BevelEmboss(b) = &d.layers[1].effects.items[0] else { panic!("a bevel") };
+        let (maps, _) = bevel_maps(&shape, b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        let lit = maps[0].v[20 * 40 + 12];
+        assert!(lit > 0.2, "the edge pixel is on the lit facet: {lit}");
+        assert!((px[20 * 40 + 12][0] - 0.5 * lit).abs() < 0.01, "{} vs half of {lit}", px[20 * 40 + 12][0]);
     }
 }

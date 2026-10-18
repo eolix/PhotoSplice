@@ -146,7 +146,7 @@ const fn code(c: &[u8; 4]) -> i32 {
     i32::from_be_bytes(*c)
 }
 
-const KNOWN: [Known; 14] = [
+const KNOWN: [Known; 24] = [
     Known { class: "GsnB", filter_id: code(b"GsnB"), name: "Gaussian Blur...", command: "filter.blur.gaussianBlur" },
     Known { class: "boxblur", filter_id: 840, name: "Box Blur...", command: "filter.blur.boxBlur" },
     Known { class: "MtnB", filter_id: code(b"MtnB"), name: "Motion Blur...", command: "filter.blur.motionBlur" },
@@ -162,7 +162,71 @@ const KNOWN: [Known; 14] = [
     Known { class: "Crvs", filter_id: code(b"Crvs"), name: "Curves...", command: "image.adjustments.curves" },
     // Shadows/Highlights at its defaults stores no `Fltr` (`hasoptions` false).
     Known { class: "adaptCorrect", filter_id: 781, name: "Shado&ws/Highlights...", command: "image.adjustments.shadowsHighlights" },
+    Known { class: "HStr", filter_id: code(b"HStr"), name: "Hue/Saturation...", command: "image.adjustments.hueSaturation" },
+    Known { class: "oilPaint", filter_id: 1065, name: "Oil Paint...", command: "filter.stylize.oilPaint" },
+    // Filters without settings (no `Fltr`, `hasoptions` false).
+    Known { class: "Invr", filter_id: code(b"Invr"), name: "Invert", command: "image.adjustments.invert" },
+    Known { class: "Shrp", filter_id: code(b"Shrp"), name: "Sharpen", command: "filter.sharpen.sharpen" },
+    Known { class: "ShrM", filter_id: code(b"ShrM"), name: "Sharpen More", command: "filter.sharpen.sharpenMore" },
+    Known { class: "ShrE", filter_id: code(b"ShrE"), name: "Sharpen Edges", command: "filter.sharpen.sharpenEdges" },
+    Known { class: "Blr ", filter_id: code(b"Blr "), name: "Blur", command: "filter.blur.blur" },
+    Known { class: "BlrM", filter_id: code(b"BlrM"), name: "Blur More", command: "filter.blur.blurMore" },
+    Known { class: "Dspc", filter_id: code(b"Dspc"), name: "Despeckle", command: "filter.noise.despeckle" },
+    Known { class: "FndE", filter_id: code(b"FndE"), name: "Find Edges", command: "filter.stylize.findEdges" },
 ];
+
+/// [`KNOWN`] filters that have no settings.
+const PLAIN: [&str; 8] = ["Invr", "Shrp", "ShrM", "ShrE", "Blr ", "BlrM", "Dspc", "FndE"];
+
+/// Hue/Saturation's colour ranges in `LclR` order (1 = reds … 6 = magentas), as the
+/// `image.adjustments.hueSaturation` parameters name them.
+const HUE_RANGES: [&str; 6] = ["reds", "yellows", "greens", "cyans", "blues", "magentas"];
+
+/// `HStr` settings: `Clrz` and an `Adjs` list whose entry without `LclR` is the master (hue,
+/// saturation, lightness) and whose `LclR` 1–6 entries are colour ranges with their four bounds.
+fn hue_saturation_params(f: &Descriptor) -> Option<J> {
+    let mut out = Map::new();
+    out.insert("colorize".into(), J::Bool(bool_or(f, "Clrz", false)));
+    for a in adjustment_list(f)? {
+        let hsl = json!({"hue": int(a, "H   ")?, "saturation": int(a, "Strt")?, "lightness": int(a, "Lght")?});
+        match int(a, "LclR") {
+            None => {
+                if let J::Object(m) = hsl {
+                    out.extend(m);
+                }
+            }
+            Some(r) => {
+                let key = HUE_RANGES.get(usize::try_from(r).ok()?.checked_sub(1)?)?;
+                let mut o = hsl;
+                o["range"] = json!([int(a, "BgnR")?, int(a, "BgnS")?, int(a, "EndS")?, int(a, "EndR")?]);
+                out.insert((*key).into(), o);
+            }
+        }
+    }
+    Some(J::Object(out))
+}
+
+/// The `HStr` descriptor for [`hue_saturation_params`]' parameters.
+fn hue_saturation_fltr(d: Descriptor, p: &J) -> Result<Descriptor, String> {
+    let obj = p.as_object().ok_or("parameters are not an object")?;
+    let allowed = ["colorize", "hue", "saturation", "lightness"];
+    if let Some(k) = obj.keys().find(|k| !is_meta(k) && !allowed.contains(&k.as_str()) && !HUE_RANGES.contains(&k.as_str())) {
+        return Err(format!("setting `{k}` has no PSD equivalent"));
+    }
+    let hsl = |a: Descriptor, o: &J| a.with("H   ", pi(o, "hue", 0.0)).with("Strt", pi(o, "saturation", 0.0)).with("Lght", pi(o, "lightness", 0.0));
+    let mut list = vec![Value::Descriptor(hsl(Descriptor::new("Hst2"), p))];
+    for (i, key) in HUE_RANGES.iter().enumerate() {
+        let Some(o) = p.get(*key) else { continue };
+        let b: Vec<f64> = o.get("range").and_then(J::as_array).map(|v| v.iter().filter_map(J::as_f64).collect()).unwrap_or_default();
+        let [b0, b1, b2, b3] = b.as_slice() else { return Err(format!("`{key}` has no four range bounds")) };
+        let bound = |v: f64| Value::Integer(v.round().clamp(-720.0, 720.0) as i32);
+        let a = Descriptor::new("Hst2").with("LclR", Value::Integer(i as i32 + 1)).with("BgnR", bound(*b0)).with("BgnS", bound(*b1)).with("EndS", bound(*b2)).with("EndR", bound(*b3));
+        list.push(Value::Descriptor(hsl(a, o)));
+    }
+    Ok(d.with("presetKind", Value::Enumerated { type_id: Id::new("presetKindType"), value: Id::new("presetKindCustom") })
+        .with("Clrz", Value::Boolean(p.get("colorize").and_then(J::as_bool).unwrap_or(false)))
+        .with("Adjs", Value::List(list)))
+}
 
 fn known_by_command(command: &str) -> Option<&'static Known> {
     KNOWN.iter().find(|k| k.command == command)
@@ -266,6 +330,7 @@ fn known_params(class: &str, f: Option<&Descriptor>) -> Option<(&'static str, J)
     let k = KNOWN.iter().find(|k| k.class == class)?;
     let params = match (class, f) {
         ("adaptCorrect", None) => json!({}),
+        (c, _) if PLAIN.contains(&c) => json!({}),
         (_, None) => return None,
         ("GsnB" | "boxblur" | "Mdn " | "HghP" | "Mxm " | "Mnm ", Some(f)) => json!({"radius": px(f, "Rds ")?}),
         ("MtnB", Some(f)) => json!({"angle": int(f, "Angl")?, "distance": px(f, "Dstn")?}),
@@ -286,6 +351,16 @@ fn known_params(class: &str, f: Option<&Descriptor>) -> Option<(&'static str, J)
         ("Embs", Some(f)) => json!({"angle": int(f, "Angl")?, "height": int(f, "Hght")?, "amount": int(f, "Amnt")?}),
         ("Lvls", Some(f)) => levels_params(f)?,
         ("Crvs", Some(f)) => curves_params(f)?,
+        ("HStr", Some(f)) => hue_saturation_params(f)?,
+        ("oilPaint", Some(f)) => json!({
+            "stylization": px(f, "stylization")?,
+            "cleanliness": px(f, "cleanliness")?,
+            "scale": px(f, "brushScale")?,
+            "bristleDetail": px(f, "microBrush")?,
+            "lighting": match f.get("lightingOn") { Some(Value::Boolean(b)) => *b, _ => return None },
+            "angle": int(f, "LghD")?,
+            "shine": px(f, "specularity")?,
+        }),
         _ => return None,
     };
     Some((k.command, params))
@@ -530,6 +605,21 @@ fn fltr_for(k: &Known, p: &J) -> Result<Option<Descriptor>, String> {
         "Embs" => d.with("Angl", pi(p, "angle", 135.0)).with("Hght", pi(p, "height", 3.0)).with("Amnt", pi(p, "amount", 100.0)),
         "Lvls" => d.with("Adjs", adjustments(p, false)?),
         "Crvs" => d.with("Adjs", adjustments(p, true)?),
+        "HStr" => hue_saturation_fltr(d, p)?,
+        "oilPaint" => d
+            .with("lightingOn", Value::Boolean(p.get("lighting").and_then(J::as_bool).unwrap_or(true)))
+            .with("stylization", Value::Double(pf(p, "stylization", 4.0)))
+            .with("brushScale", Value::Double(pf(p, "scale", 1.0)))
+            .with("microBrush", Value::Double(pf(p, "bristleDetail", 5.0)))
+            .with("LghD", pi(p, "angle", -60.0))
+            .with("specularity", Value::Double(pf(p, "shine", 1.0)))
+            .with("cleanliness", Value::Double(pf(p, "cleanliness", 5.0))),
+        c if PLAIN.contains(&c) => {
+            if p.as_object().is_some_and(|o| o.keys().any(|k| !is_meta(k))) {
+                return Err(format!("{} has no settings in PSD", k.name));
+            }
+            return Ok(None);
+        }
         "adaptCorrect" => {
             if p.as_object().is_some_and(|o| o.keys().any(|k| !is_meta(k))) {
                 return Err("only default Shadows/Highlights settings are written to PSD".into());
@@ -1083,6 +1173,17 @@ mod tests {
             sf("image.adjustments.shadowsHighlights", json!({})),
             // A pencil-drawn curve: 256 output levels (`Mpng`).
             sf("image.adjustments.curves", json!({"pencil": true, "points": (0..256).rev().collect::<Vec<i32>>()})),
+            sf("image.adjustments.hueSaturation", json!({"colorize": false, "hue": 20, "saturation": -100, "lightness": 5, "reds": {"hue": 10, "saturation": 30, "lightness": 0, "range": [315, 345, 15, 45]}})),
+            sf("image.adjustments.hueSaturation", json!({"colorize": true, "hue": 200, "saturation": 25, "lightness": 0})),
+            sf("filter.stylize.oilPaint", json!({"stylization": 1.2, "cleanliness": 10.0, "scale": 10.0, "bristleDetail": 10.0, "lighting": false, "angle": -60, "shine": 0.0})),
+            sf("image.adjustments.invert", json!({})),
+            sf("filter.sharpen.sharpen", json!({})),
+            sf("filter.sharpen.sharpenMore", json!({})),
+            sf("filter.sharpen.sharpenEdges", json!({})),
+            sf("filter.blur.blur", json!({})),
+            sf("filter.blur.blurMore", json!({})),
+            sf("filter.noise.despeckle", json!({})),
+            sf("filter.stylize.findEdges", json!({})),
         ];
         for mut f in filters {
             f.blend = BlendMode::Overlay;
@@ -1093,6 +1194,22 @@ mod tests {
             let back = filter_from_item(&Descriptor::from_bytes(&bytes).unwrap());
             assert_eq!(back, f, "{}", f.command);
         }
+    }
+
+    /// Reference writes a filter without settings as its name and `filterID` alone (watercolor
+    /// portrait template: Invert, Sharpen More); they read as our commands.
+    #[test]
+    fn filters_without_settings_read_from_their_id() {
+        for (id, command) in [(b"Invr", "image.adjustments.invert"), (b"ShrM", "filter.sharpen.sharpenMore")] {
+            let item = Descriptor::new("filterFX")
+                .with("Nm  ", Value::Text(UnicodeString::new_nul("x")))
+                .with("enab", Value::Boolean(true))
+                .with("filterID", Value::Integer(code(id)));
+            let f = filter_from_item(&item);
+            assert_eq!((f.command.as_str(), &f.params), (command, &json!({})));
+        }
+        // Settings on a filter that has none can't be written.
+        assert!(item_for_filter(&sf("image.adjustments.invert", json!({"amount": 2}))).is_err());
     }
 
     #[test]

@@ -82,3 +82,34 @@ fn vector_masked_pattern_fill_survives_psd() {
         assert!(diff < 0.02, "{mode:?}: the reopened layer differs by {diff}");
     }
 }
+
+/// Reference stores a pattern fill seen through its vector mask: its pixels are already clipped
+/// to the path. Reopened, the compositor applies the vector mask once, not on top of that
+/// (psd-tools vector-mask2.psd: anti-aliased edges came out at the square of their coverage).
+#[test]
+fn pattern_fill_stored_through_its_vector_mask_is_masked_once() {
+    use photosplice_doc::{Path, Subpath, VectorMask};
+    let mask = VectorMask::new(Path::new(vec![Subpath::polygon(&[(3.0, 2.0), (31.5, 5.0), (12.0, 21.5)])]));
+    let mut live = doc(ColorMode::Rgb, SampleType::U8);
+    live.layers[0].vector_mask = Some(mask.clone());
+    let want = photosplice_compose::flatten(&live);
+    assert!(want.px.iter().any(|p| p[3] > 0.05 && p[3] < 0.95), "the path has anti-aliased edges");
+    // The same layer as Reference saves it: pixels = the masked fill, plus the pattern fill block.
+    let mut stored = Surface::new(PixelFormat::RGBA8);
+    let r = Rect::new(0, 0, 40, 24);
+    stored.write_region(r, &want.px.iter().flatten().copied().collect::<Vec<f32>>());
+    let mut as_saved = Document::new("p", Size::new(40, 24), ColorMode::Rgb, SampleType::U8);
+    as_saved.patterns.push(checker());
+    let mut l = Layer::new("Pattern Fill 1", LayerContent::Raster(stored));
+    l.vector_mask = Some(mask);
+    as_saved.layers.push(l);
+    let mut file = photosplice_psd::PsdFile::from_bytes(&export(&as_saved, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap();
+    let live_file = photosplice_psd::PsdFile::from_bytes(&export(&live, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap();
+    let ptfl = live_file.layers().iter().flat_map(|r| &r.blocks).find(|b| &b.key == b"PtFl").unwrap().clone();
+    file.layers_mut()[0].blocks.push(ptfl);
+    let back = import("x.psd", &file.to_bytes().unwrap()).unwrap().document;
+    assert!(matches!(back.layers[0].content, LayerContent::Fill(Fill::Pattern { .. })));
+    let got = photosplice_compose::flatten(&back);
+    let diff = want.px.iter().zip(&got.px).map(|(p, q)| (p[3] - q[3]).abs()).fold(0.0, f32::max);
+    assert!(diff < 0.01, "edge alpha differs by {diff}");
+}

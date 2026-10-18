@@ -54,9 +54,12 @@ fn open_three(h: &mut Harness<'static, PhotospliceApp>) {
 
 /// Run frames until no open is still reading.
 fn settle(h: &mut Harness<'static, PhotospliceApp>) {
-    for _ in 0..200 {
+    // Background opens finish on worker threads: wait for them by the clock, not a step count, so
+    // a busy machine (the whole test suite at once) doesn't run past them.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
         h.run_steps(2);
-        if h.state().jobs.opens.is_empty() && h.state().session.jobs().is_empty() {
+        if (h.state().jobs.opens.is_empty() && h.state().session.jobs().is_empty()) || std::time::Instant::now() > deadline {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -296,4 +299,20 @@ fn without_remember_the_next_file_still_asks() {
     answer(&mut h, CONVERT);
     assert_eq!(h.state().ui.dialogs.len(), 1);
     assert!(h.state().session.color.settings.ask_on_mismatch);
+}
+
+/// A file read while another waits at its prompt: the home screen hides for that read and must
+/// not come back over the prompt when it ends (the prompt was hidden under it, so the first file
+/// never opened and nothing said why).
+#[test]
+fn the_home_screen_stays_hidden_while_a_file_waits_at_its_prompt() {
+    let mut h = harness(true);
+    let png = adobe_png();
+    h.state_mut().open_file("/pics/a.png", &png).unwrap();
+    settle(&mut h);
+    assert!(prompt(&h).contains("a.png"));
+    h.state_mut().open_file("/pics/b.png", &png).unwrap();
+    settle(&mut h);
+    click(&mut h, "OK");
+    assert_eq!(docs(&h), vec!["a.png"], "the click reached the prompt");
 }

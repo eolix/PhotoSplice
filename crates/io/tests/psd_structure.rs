@@ -339,9 +339,11 @@ fn layered_import_skips_the_unused_merged_composite() {
     let (d, warnings) = psd_to_document(&f);
     assert_eq!(d.layers.len(), 1);
     assert!(!warnings.iter().any(|w| w.contains("merged image")), "an unused composite is not decoded: {warnings:?}");
-    // A real extra channel behind the colour ones is part of the composite: it is decoded,
-    // and the garbage above surfaces as a warning.
+    // A real extra channel behind the colour ones (a named alpha channel) is part of the
+    // composite: it is decoded, and the garbage above surfaces as a warning.
     f.layer_info.as_mut().unwrap().merged_alpha = false;
+    let name: Vec<u8> = [0u8, 0, 0, 8].into_iter().chain("Alpha 1\0".encode_utf16().flat_map(u16::to_be_bytes)).collect();
+    f.resources.push(photosplice_psd::ImageResource::new(1045, name));
     let (_, warnings) = psd_to_document(&f);
     assert!(warnings.iter().any(|w| w.contains("merged image")), "{warnings:?}");
 }

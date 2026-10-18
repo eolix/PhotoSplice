@@ -733,22 +733,55 @@ pub fn hue_saturation_ranged(c: [f32; 3], hue: f32, s: f32, l: f32, range_l: f32
     } else if range_l < 0.0 {
         rgb = rgb.map(|v| v + (min - v) * -range_l);
     }
-    let mut rgb = hue_saturation_scale(rgb, s, float, ranges);
+    let mut rgb = hue_saturation_scale(rgb, s, l, float, ranges);
     if l > 0.0 {
         rgb = rgb.map(|v| v + (1.0 - v) * l);
     } else if l < 0.0 {
         rgb = rgb.map(|v| v * (1.0 + l));
     }
-    rgb.map(|v| v.clamp(0.0, 1.0))
+    if float { rgb } else { rgb.map(|v| v.clamp(0.0, 1.0)) }
+}
+
+thread_local! {
+    /// Set while a CMYK document runs a colour adjustment on its inks' complements (see
+    /// `cmyk::adjust`): what Reference holds there is the ink, not the screen colour.
+    static INK_SPACE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with [`INK_SPACE`] set, then restores the value it had (also on unwind).
+pub fn in_ink_space<R>(f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            INK_SPACE.with(|l| l.set(self.0));
+        }
+    }
+    let _restore = Restore(INK_SPACE.with(|l| l.replace(true)));
+    f()
 }
 
 /// Hue/Saturation's saturation step on `rgb` (see [`hue_saturation`]). 32-bit documents don't
-/// hold the smallest channel at 0: it may go below and is clipped at the end (Photoshop corpus
-/// rgb32 hue-saturation.psd: within 1/255, was 34/255 held).
-fn hue_saturation_scale(rgb: [f32; 3], s: f32, float: bool, hold_white: bool) -> [f32; 3] {
+/// hold the smallest channel at 0 nor clip: channels leave 0..1 as Reference's float composite
+/// keeps them (corpus rgb32 hue-saturation.psd: (1, 0, 0) at +25 % ends at (1.048, …, −0.148)).
+fn hue_saturation_scale(rgb: [f32; 3], s: f32, l: f32, float: bool, hold_white: bool) -> [f32; 3] {
     let (max, min) = (rgb[0].max(rgb[1]).max(rgb[2]), rgb[0].min(rgb[1]).min(rgb[2]));
     let mid = (max + min) / 2.0;
     let mut k = if s > 0.0 { 1.0 / (1.0 - s).max(1e-6) } else { 1.0 + s };
+    if s > 0.0 && INK_SPACE.with(|i| i.get()) {
+        // On ink complements no ink leaves 0..100 % once the lightness step `l` has applied:
+        // the scale stops where the first complement would end up past 0 or 1 (Reference kit
+        // inks-hs-sat50: (78, 18, 58, 6) % → (96, 0, 64, 6) held at the smallest ink,
+        // (22, 20, 91, 0) → (13.5, 11, 100, 0) at the largest; inks-hs-master, lightness −10,
+        // exact on all 192 patches with the limits taken through it).
+        let (lo, hi) = if l < 0.0 { (0.0, 1.0 / (1.0 + l).max(1e-3)) } else { (-l / (1.0 - l).max(1e-3), 1.0) };
+        if max > mid {
+            k = k.min(((hi - mid) / (max - mid)).max(1.0));
+        }
+        if min < mid {
+            k = k.min(((mid - lo) / (mid - min)).max(1.0));
+        }
+        return rgb.map(|v| mid + (v - mid) * k);
+    }
     if s > 0.0 && !float && min < mid {
         k = k.min(mid / (mid - min));
     }
@@ -1655,6 +1688,16 @@ mod brightness_contrast_tests {
 mod tone_tests {
     use super::*;
     use photosplice_geom::Rect;
+
+    /// Corpus rgb32 hue-saturation.psd (hue +40, saturation +25, lightness −10): float documents
+    /// keep channels outside 0..1; 8/16-bit clip.
+    #[test]
+    fn float_hue_saturation_is_not_clipped() {
+        let f = hue_saturation_ranged([1.0, 0.0, 0.0], 40.0, 0.25, -0.1, 0.0, true, false);
+        assert!((f[0] - 1.0477).abs() < 0.004 && (f[1] - 0.649).abs() < 0.004 && (f[2] + 0.1477).abs() < 0.004, "{f:?}");
+        let i = hue_saturation_ranged([1.0, 0.0, 0.0], 40.0, 0.25, -0.1, 0.0, false, false);
+        assert!(i.iter().all(|v| (0.0..=1.0).contains(v)), "{i:?}");
+    }
 
     fn ramp() -> Buffer {
         let rect = Rect::new(0, 0, 8, 8);

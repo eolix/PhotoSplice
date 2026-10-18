@@ -6,12 +6,14 @@
 //! - Brightness/Contrast (both kinds) curve L only, a and b kept (a, b exact);
 //! - Levels and Curves apply their Lab records (L, a, b curves);
 //! - Threshold splits on L alone (exact) and leaves a neutral grey (a = b = 0);
-//! - Gradient Map is driven by L (max error 0.46 → 0.04).
+//! - Gradient Map is driven by L (max error 0.46 → 0.04);
+//! - Photo Filter filters the colour unclipped, and Preserve Luminosity keeps L (Reference kit
+//!   lab-pf-warm-d50: a and b equal those without it, L the source's).
 //!
 //! The composite itself is kept in screen RGB, unclipped (colours outside sRGB go below 0 or
 //! above 1, so every L, a, b survives), and these convert the backdrop to Lab and back around
-//! the adjustment; the others (Hue/Saturation, Photo Filter, …) stay on the clipped screen
-//! colour, which matches Reference more closely than any Lab rule tried.
+//! the adjustment; the others (Hue/Saturation, …) stay on the clipped screen colour, which
+//! matches Reference more closely than any Lab rule tried.
 
 use photosplice_color::convert::{lab_to_srgb_unclamped, srgb_to_lab};
 use photosplice_doc::Adjustment;
@@ -31,6 +33,7 @@ pub fn native(adj: &Adjustment) -> bool {
             | Adjustment::BrightnessContrast { .. }
             | Adjustment::Levels { space: ToneSpace::Lab, .. }
             | Adjustment::Curves { space: ToneSpace::Lab, .. }
+            | Adjustment::PhotoFilter { .. }
     )
 }
 
@@ -84,6 +87,26 @@ pub(crate) fn apply(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, dept
             [r.clone(), r.clone(), r]
         }
     };
+    if let Adjustment::PhotoFilter { color, density, preserve_luminosity } = adj {
+        use photosplice_color::convert::{linear_to_srgb, mat3_mul, srgb_to_linear};
+        let m = crate::adjust::photo_filter_matrix(*color, *density, false);
+        for p in &mut buf.px {
+            if p[3] <= 0.0 {
+                continue;
+            }
+            let c = [p[0], p[1], p[2]];
+            let f = mat3_mul(&m, c.map(srgb_to_linear)).map(linear_to_srgb);
+            let f = if *preserve_luminosity {
+                let mut lab = srgb_to_lab(f);
+                lab[0] = srgb_to_lab(c)[0];
+                lab_to_srgb_unclamped(lab)
+            } else {
+                f
+            };
+            p[..3].copy_from_slice(&f);
+        }
+        return;
+    }
     // Gradient Map: driven by L, the stops' colour out.
     if let Adjustment::GradientMap { stops, reverse, .. } = adj {
         let stops = &crate::adjust::by_location(stops);
@@ -126,6 +149,25 @@ pub(crate) fn apply(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, dept
 mod tests {
     use super::*;
     use photosplice_color::convert::lab_to_srgb;
+
+    /// Reference kit lab-pf-warm-d50 (Warming 85, 50 %): a colour outside sRGB is filtered
+    /// unclipped, and Preserve Luminosity keeps its L with the a, b of the plain filter.
+    #[test]
+    fn photo_filter_works_unclipped_and_keeps_l() {
+        let pf = |preserve_luminosity| Adjustment::PhotoFilter { color: [0.925_485_2, 0.541_191_8, 0.0], density: 0.5, preserve_luminosity };
+        let lab = [54.29, 80.81, 69.89];
+        let run = |adj: Adjustment| {
+            let mut b = one(lab_to_srgb_unclamped(lab));
+            apply(&adj, &mut b, Transfer::Srgb, photosplice_color::SampleType::U16);
+            srgb_to_lab([b.px[0][0], b.px[0][1], b.px[0][2]])
+        };
+        let (plain, kept) = (run(pf(false)), run(pf(true)));
+        for (got, want) in [(plain, [45.94, 80.19, 65.48]), (kept, [54.29, 80.19, 65.48])] {
+            for i in 0..3 {
+                assert!((got[i] - want[i]).abs() < 0.1, "{got:?} vs {want:?}");
+            }
+        }
+    }
 
     /// A Lab document keeps colours outside sRGB through its composite, so Invert flips the
     /// file's own L, a, b rather than a clipped screen colour (Reference corpus lab8/invert.psd:
