@@ -618,6 +618,13 @@ fn dilate(s: &Map, r: f32) -> Map {
 fn contour_lut(c: &Contour) -> Option<Vec<f32>> {
     match c {
         Contour::Linear => None,
+        // A custom curve from (0, 0) straight to (1, 1) is the linear contour: no lookup, so no
+        // anti-aliasing shift either (Reference: such a Satin draws exactly as the linear one).
+        Contour::Custom { points, .. }
+            if points.len() == 2 && points.iter().zip([(0.0, 0.0), (1.0, 1.0)]).all(|(p, (i, o))| (p.input - i).abs() < 1e-4 && (p.output - o).abs() < 1e-4) =>
+        {
+            None
+        }
         Contour::Custom { points, corners, .. } => Some(crate::adjust::contour_curve_lut(points, corners)),
     }
 }
@@ -638,6 +645,18 @@ fn lut_at(l: &[f32], v: f32) -> f32 {
     let i = x.floor() as usize;
     let j = (i + 1).min(l.len() - 1);
     l[i] + (l[j] - l[i]) * (x - i as f32)
+}
+
+/// Whether `e` reads a contour with the Anti-aliased option on, which takes its input a third of a
+/// pixel away ([`CONTOUR_AA_SHIFT`]; the GPU leaves such layers to the CPU).
+pub fn has_anti_aliased_contour(e: &Effect) -> bool {
+    match e {
+        Effect::OuterGlow(g) | Effect::InnerGlow(g) => g.anti_alias && glow_lut(g).is_some(),
+        Effect::DropShadow(s) | Effect::InnerShadow(s) => s.anti_alias && contour_lut(&s.contour).is_some(),
+        Effect::Satin(s) => s.anti_alias && contour_lut(&s.contour).is_some(),
+        Effect::BevelEmboss(b) => b.contour.as_ref().is_some_and(|c| c.anti_alias),
+        _ => false,
+    }
 }
 
 /// A glow's coverage transfer: its contour applied over the Range (Photoshop maps a Softer
@@ -698,6 +717,21 @@ pub fn ranged_lut(contour: &Contour, range: f32) -> Option<Vec<f32>> {
     )
 }
 
+/// Where an anti-aliased contour reads its input: Reference samples the coverage a third of a
+/// pixel down and right of each pixel, so the shaped effect sits that far up and left (Reference
+/// 16-bit glows and satins, linear, ramp, double-ring and Gaussian contours: a linear anti-aliased
+/// glow 12.8 % of pixels off → 0, a Gaussian satin 5 % → 0.02 %). Without a contour lookup there is
+/// no shift (a linear satin matches unshifted).
+const CONTOUR_AA_SHIFT: f32 = 1.0 / 3.0;
+
+/// [`apply_lut`] with the contour's Anti-aliased option ([`CONTOUR_AA_SHIFT`]).
+fn apply_lut_aa(m: Map, l: Option<Vec<f32>>, anti_alias: bool) -> Map {
+    match l {
+        Some(l) if anti_alias => m.shifted(-CONTOUR_AA_SHIFT, -CONTOUR_AA_SHIFT, 0.0).map(|v| lut_at(&l, v)),
+        l => apply_lut(m, l),
+    }
+}
+
 fn apply_lut(m: Map, l: Option<Vec<f32>>) -> Map {
     match l {
         None => m,
@@ -734,10 +768,10 @@ fn noise(m: &mut Map, amount: f32, x0: i32, y0: i32) {
     }
 }
 
-fn apply_contour(m: Map, c: &Contour) -> Map {
+fn apply_contour(m: Map, c: &Contour, anti_alias: bool) -> Map {
     match contour_lut(c) {
         None => m,
-        Some(l) => m.map(|v| {
+        Some(l) => (if anti_alias { m.shifted(-CONTOUR_AA_SHIFT, -CONTOUR_AA_SHIFT, 0.0) } else { m }).map(|v| {
             let x = v.clamp(0.0, 1.0) * (l.len() - 1) as f32;
             let i = x.floor() as usize;
             let j = (i + 1).min(l.len() - 1);
@@ -823,7 +857,7 @@ fn shadow_map(shape: &Map, s: &Shadow, light: &GlobalLight, inner: bool, origin:
     let (r, bw) = spread_split(s.size, s.spread);
     m = dilate(&m, r);
     blur(&mut m, bw);
-    let mut m = apply_contour(m, &s.contour);
+    let mut m = apply_contour(m, &s.contour, s.anti_alias);
     noise(&mut m, s.noise, origin.0, origin.1);
     if inner {
         for (v, a) in m.v.iter_mut().zip(&shape.v) {
@@ -862,7 +896,7 @@ fn glow_map(shape: &Map, g: &Glow, inner: bool, origin: (i32, i32)) -> Map {
             m
         }
     };
-    m = apply_lut(m, glow_lut(g));
+    m = apply_lut_aa(m, glow_lut(g), g.anti_alias);
     if inner && g.source == GlowSource::Center {
         m = m.map(|v| 1.0 - v);
     }
@@ -1239,7 +1273,7 @@ fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, pattern
     };
     // Contour element: the height profile through the contour over its range.
     if let Some(c) = &b.contour {
-        h = apply_lut(h, Some(bevel_contour_lut(c)));
+        h = apply_lut_aa(h, Some(bevel_contour_lut(c)), c.anti_alias);
     }
     // Texture element: the pattern's luminance as extra height, scaled so a full-contrast step
     // at 100 % depth slopes like the bevel at its depth.
@@ -1447,7 +1481,7 @@ fn satin_map(shape: &Map, s: &photosplice_doc::effects::Satin) -> Map {
     // The contour shapes each blurred copy before they are differenced (Photoshop corpus
     // satin-default.psd, an S contour: 27/255 → 1.1/255; satin-inverted-ramp-peak-aa.psd
     // 112/255 → 19/255); a linear contour is the same either way.
-    let (a, b) = (apply_contour(a, &s.contour), apply_contour(b, &s.contour));
+    let (a, b) = (apply_contour(a, &s.contour, s.anti_alias), apply_contour(b, &s.contour, s.anti_alias));
     let mut m = Map { w: shape.w, h: shape.h, v: a.v.iter().zip(&b.v).map(|(x, y)| (x - y).abs()).collect() };
     if s.invert {
         m = m.map(|v| 1.0 - v);
@@ -2827,5 +2861,40 @@ mod tests {
             let s = m.shifted(d, d, 0.0);
             assert_eq!(s.v.len(), 144);
         }
+    }
+
+    /// An anti-aliased contour reads the coverage a third of a pixel down and right, so the glow
+    /// sits up and left of the plain one (Reference, the effects kit's square at x 40..80: an
+    /// Outer Glow, size 24, range 60 %, a linear custom contour; 2 px out on either side).
+    #[test]
+    fn anti_aliased_contour_glow_matches_reference() {
+        let (w, h) = (256usize, 128usize);
+        let mut shape = Map::new(w, h, 0.0);
+        for y in 44..84 {
+            for x in 40..80 {
+                shape.v[y * w + x] = 1.0;
+            }
+        }
+        let linear = Contour::Custom { name: "kit".into(), points: vec![photosplice_doc::adjust::CurvePoint { input: 0.0, output: 0.0 }, photosplice_doc::adjust::CurvePoint { input: 1.0, output: 1.0 }], corners: Vec::new() };
+        let g = |anti_alias: bool| Glow {
+            common: photosplice_doc::FxCommon::new(BlendMode::Normal, 1.0),
+            paint: FxPaint::Color(photosplice_color::Color::WHITE),
+            technique: GlowTechnique::Softer,
+            spread: 0.0,
+            size: 24.0,
+            contour: linear.clone(),
+            anti_alias,
+            range: 0.6,
+            jitter: 0.0,
+            noise: 0.0,
+            source: GlowSource::Edge,
+        };
+        let aa = glow_map(&shape, &g(true), false, (0, 0));
+        let plain = glow_map(&shape, &g(false), false, (0, 0));
+        let at = |m: &Map, x: usize| m.v[64 * w + x];
+        assert!((at(&aa, 38) - 0.7333).abs() < 0.005, "{}", at(&aa, 38));
+        assert!((at(&aa, 81) - 0.6902).abs() < 0.005, "{}", at(&aa, 81));
+        // The plain glow is symmetric about the square.
+        assert!((at(&plain, 38) - at(&plain, 81)).abs() < 1e-4);
     }
 }

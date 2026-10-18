@@ -386,6 +386,9 @@ fn cpu_clipping(layers: &[Layer], depth: u32) -> Option<String> {
         if !inside_stroke && l.effects.items.iter().any(|e| e.enabled() && matches!(e, Effect::BevelEmboss(b) if b.style == photosplice_doc::BevelStyle::StrokeEmboss)) {
             return Some(format!("Stroke Emboss on `{}` (composited on the CPU)", l.name));
         }
+        if l.effects.items.iter().any(|e| e.enabled() && photosplice_compose::effects::has_anti_aliased_contour(e)) {
+            return Some(format!("anti-aliased contour on `{}` (composited on the CPU)", l.name));
+        }
         if photosplice_compose::effects_unmasked(l).is_some() {
             return Some(format!("masks of `{}` hide its effects (composited on the CPU)", l.name));
         }
