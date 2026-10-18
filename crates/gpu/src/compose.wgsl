@@ -1137,17 +1137,18 @@ fn fs_fxpaint(in: VOut) -> @location(0) vec4<f32> {
     if ((op.flags & F_STROKE_OUT) != 0u && inside_shape) {
         m = select(1.0, 0.0, (op.flags & F_VECTOR) != 0u);
     }
+    // The strength `k` acts as Fill does (composite_fill: the special eight pull the colour toward
+    // neutral and blend it at full coverage); one call keeps a single blend_rgb copy inlined.
     if (i32(op.p2.z) == 4) {
         // effects::paint_glow: the gradient at 1 - strength, opaque from strength 1 / gain (p0.x).
         let k = min(m * op.p0.x, 1.0) * op.opacity;
         if (k <= 0.0) { return dst; }
         let t = 1.0 - clamp(m, 0.0, 1.0);
-        return composite(op.mode, dst, vec4(lut(0, t), lut(1, t), lut(2, t), lut(3, t) * k), 1.0);
+        return composite_fill(op.mode, dst, vec4(lut(0, t), lut(1, t), lut(2, t), lut(3, t)), 1.0, k, false);
     }
     let k = m * op.opacity;
     if (k <= 0.0) { return dst; }
-    let c = fx_color(d);
-    return composite(op.mode, dst, vec4(c.rgb, c.a * k), 1.0);
+    return composite_fill(op.mode, dst, fx_color(d), 1.0, k, false);
 }
 
 // Outside strokes (A = the exterior result before them, B = the layer, C = coverage so far in

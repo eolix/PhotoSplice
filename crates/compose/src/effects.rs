@@ -826,15 +826,17 @@ fn sample_stops(stops: &[(f32, [f32; 3])], t: f32) -> [f32; 3] {
     crate::adjust::gradient(stops, t)
 }
 
-/// Composite `color × coverage` into `dst` (both over the same rectangle).
+/// Composite `color × coverage` into `dst` (both over the same rectangle). The special eight
+/// modes (`psblend::fill_is_special`) take the strength as Reference takes a layer's Fill: the
+/// colour pulled toward the mode's neutral, blended at full coverage (a 15 % Linear Dodge
+/// highlight adds 15 % of its colour and clips, rather than mixing 15 % of the clipped sum).
 fn paint(dst: &mut Buffer, m: &Map, color: impl Fn(usize) -> [f32; 4], blend: BlendMode, opacity: f32) {
     for (i, p) in dst.px.iter_mut().enumerate() {
         let a = m.v[i] * opacity;
         if a <= 0.0 {
             continue;
         }
-        let c = color(i);
-        *p = psblend::composite(blend, *p, [c[0], c[1], c[2], c[3] * a], 1.0);
+        *p = psblend::composite_fill(blend, *p, color(i), 1.0, a, 1.0);
     }
 }
 
@@ -2896,5 +2898,24 @@ mod tests {
         assert!((at(&aa, 81) - 0.6902).abs() < 0.005, "{}", at(&aa, 81));
         // The plain glow is symmetric about the square.
         assert!((at(&plain, 38) - at(&plain, 81)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn linear_dodge_and_burn_strength_acts_as_fill() {
+        // psd-tools layer_comps: a 15 % Linear Dodge highlight and a 70 % Linear Burn shadow.
+        let m = Map::new(2, 1, 1.0);
+        let mut dst = Buffer { rect: Rect::new(0, 0, 2, 1), px: vec![[0.9, 0.9, 0.2, 1.0]; 2] };
+        paint_color(&mut dst, &m, [0.984, 0.979, 0.537], BlendMode::LinearDodge, 0.15);
+        // base + 15 % of the colour, clipped (not 15 % of the way to the clipped sum: 0.915).
+        assert!((dst.px[0][0] - 1.0).abs() < 1e-5, "{:?}", dst.px[0]);
+        assert!((dst.px[0][2] - (0.2 + 0.15 * 0.537)).abs() < 1e-5, "{:?}", dst.px[0]);
+        paint_color(&mut dst, &m, [0.957, 0.823, 0.083], BlendMode::LinearBurn, 0.7);
+        // base − 70 % of the colour's distance from white, clipped at 0.
+        assert!(dst.px[1][2].abs() < 1e-5, "{:?}", dst.px[1]);
+        assert!((dst.px[1][0] - (1.0 - 0.7 * (1.0 - 0.957))).abs() < 1e-5, "{:?}", dst.px[1]);
+        // Normal keeps mixing by strength.
+        let mut n = Buffer { rect: Rect::new(0, 0, 2, 1), px: vec![[0.0, 0.0, 0.0, 1.0]; 2] };
+        paint_color(&mut n, &m, [1.0, 1.0, 1.0], BlendMode::Normal, 0.25);
+        assert!((n.px[0][0] - 0.25).abs() < 1e-5);
     }
 }
