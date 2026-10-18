@@ -2741,7 +2741,10 @@ const HOME_CARD_GAP: f32 = 24.0;
 /// canvas transform is the same before and after a document opens.
 pub fn home_overlay(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let n = app.session.documents().len();
-    if !app.jobs.opens.is_empty() || !app.ui.chrome.shows_home(n, app.session.prefs().general.auto_show_home_screen) {
+    // Hidden while a file opens, and while one read already waits at its profile prompt: shown
+    // again then, the home screen would come up over the prompt and hide it (the file never
+    // opened, without a word).
+    if !app.jobs.opens.is_empty() || crate::open_prompt::waiting(app) || !app.ui.chrome.shows_home(n, app.session.prefs().general.auto_show_home_screen) {
         return;
     }
     let screen = ctx.content_rect();
