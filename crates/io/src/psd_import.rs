@@ -309,7 +309,9 @@ impl Ctx<'_> {
         if let Some(Ok(BlockData::Protection(v))) = rec.block(b"lspf").and_then(TaggedBlock::parsed) {
             l.locks = blocks::locks_from_lspf(v);
         }
-        if rec.flags.transparency_protected() {
+        // The record's transparency flag is set by a transparency lock or by Lock All (whose
+        // `lspf` leaves the transparency bit clear): it adds a lock only where Lock All isn't on.
+        if rec.flags.transparency_protected() && !l.locks.all {
             l.locks.transparency = true;
         }
         if let Some(Ok(BlockData::SheetColor(v))) = rec.block(b"lclr").and_then(TaggedBlock::parsed) {

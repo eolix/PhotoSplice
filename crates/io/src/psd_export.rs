@@ -650,7 +650,8 @@ impl Ex {
         }
         let mut flags = LayerFlags(layer_flags(l));
         flags.set_hidden(!l.visible);
-        flags.set_transparency_protected(l.locks.transparency);
+        // Reference sets the record's transparency flag for Lock All too.
+        flags.set_transparency_protected(l.locks.transparency || l.locks.all);
         // Photoshop writes the locks and the label colour on every layer, zero or not.
         let mut blocks = vec![
             TaggedBlock::unicode_name(&l.name),
@@ -1370,7 +1371,8 @@ impl Ex {
                             TaggedBlock::layer_id(id),
                             TaggedBlock::section_divider(SectionType::BoundingDivider, None, None),
                             TaggedBlock::protection(0),
-                            TaggedBlock::sheet_color(0),
+                            // Reference repeats the group's label colour on its closing record.
+                            TaggedBlock::sheet_color(blocks::label_index(l.label)),
                         ]
                         .into_iter()
                         .chain(kept.into_iter().map(|(k, d)| TaggedBlock::new(k, d)))
@@ -2373,6 +2375,31 @@ mod tests {
 
     fn document(width: u32, height: u32) -> Document {
         Document::new("size estimate", photosplice_geom::Size::new(width, height), ColorMode::Rgb, SampleType::U8)
+    }
+
+    /// Lock All: Reference sets the record's transparency flag with an `lspf` of 0x8000000E
+    /// (transparency bit clear; PsFiles T-shirt mockup). It reads back as Lock All alone and is
+    /// written the same way, group closing records repeating the group's label colour.
+    #[test]
+    fn lock_all_and_group_labels_round_trip_as_written() {
+        let mut doc = document(4, 4);
+        let mut l = Layer::raster("locked", doc.pixel_format());
+        l.locks = photosplice_doc::Locks { pixels: true, position: true, artboard: true, all: true, ..Default::default() };
+        let mut g = Layer::group("g", vec![l]);
+        g.label = photosplice_doc::LabelColor::Violet;
+        doc.layers.push(g);
+        let bytes = document_to_psd(&doc).to_bytes().unwrap();
+        let file = PsdFile::from_bytes(&bytes).unwrap();
+        let rec = |name: &str| file.layers().iter().find(|r| r.name == name.as_bytes()).unwrap();
+        let lspf = |r: &LayerRecord| r.blocks.iter().find(|b| &b.key == b"lspf").map(|b| b.data.clone());
+        assert!(rec("locked").flags.transparency_protected());
+        assert_eq!(lspf(rec("locked")), Some(vec![0x80, 0, 0, 0x0E]));
+        let lclr = |r: &LayerRecord| r.blocks.iter().find(|b| &b.key == b"lclr").and_then(|b| b.data.get(1).copied());
+        assert_eq!(lclr(rec("</Layer group>")), lclr(rec("g")));
+        assert_ne!(lclr(rec("g")), Some(0));
+        let back = crate::import("l.psd", &bytes).unwrap().document;
+        let locked = &back.layers[0].children().unwrap()[0];
+        assert!(locked.locks.all && !locked.locks.transparency, "{:?}", locked.locks);
     }
 
     /// Photoshop opens a PSD's bottom layer as its Background only when that layer has no
