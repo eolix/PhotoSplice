@@ -503,20 +503,152 @@ fn edge_normal(s: &Map, x: i64, y: i64) -> Option<(f32, f32, f32)> {
 /// seed-centre staircase streaked around curves. Glows keep [`dist_outside`], which matched
 /// Photoshop's precise glows slightly better.
 fn dist_outside_smooth(s: &Map) -> Vec<f32> {
-    let inside: Vec<bool> = s.v.iter().map(|&a| a > INSIDE_EPS).collect();
-    let (d, near) = edt_nearest(&inside, s.w, s.h);
-    (0..d.len())
+    let d = aa_edt(&s.v, s.w, s.h);
+    s.v.iter().zip(d).map(|(&a, d)| if a > INSIDE_EPS { -0.5 } else { d }).collect()
+}
+
+/// Distance from each pixel centre with no coverage in `cov` to the edge of what is covered, the
+/// edge placed inside the anti-aliased pixels from their coverage and the direction the coverage
+/// rises in (the anti-aliased Euclidean distance transform, Gustavson and Strand 2011). Covered
+/// pixels read their own centre's distance to the edge (negative inside). A chisel bevel's
+/// facets follow these distances: Reference's slopes are exactly radial around a disc, where a
+/// nearest-pixel distance tilted them by up to 4° and changed their steepness by 6 %.
+fn aa_edt(cov: &[f32], w: usize, h: usize) -> Vec<f32> {
+    const FAR: f32 = 1.0e6;
+    let n = w * h;
+    let at = |x: i64, y: i64| if x < 0 || y < 0 || x >= w as i64 || y >= h as i64 { 0.0 } else { cov[y as usize * w + x as usize].clamp(0.0, 1.0) };
+    // The coverage gradient (3 × 3, √2-weighted), normalised: the edge's normal at each pixel.
+    let r2 = std::f32::consts::SQRT_2;
+    let grad: Vec<(f32, f32)> = (0..n)
         .map(|i| {
-            let q = near.get(i).map_or(i, |&q| q as usize);
-            if inside[i] { -0.5 } else { edge_distance_dir(s, i, q, d[i], -1.0, s.v.get(q).map_or(1.0, |a| a.min(1.0)) - 0.5) }
+            let (x, y) = ((i % w) as i64, (i / w) as i64);
+            let gx = -at(x - 1, y - 1) - r2 * at(x - 1, y) - at(x - 1, y + 1) + at(x + 1, y - 1) + r2 * at(x + 1, y) + at(x + 1, y + 1);
+            let gy = -at(x - 1, y - 1) - r2 * at(x, y - 1) - at(x + 1, y - 1) + at(x - 1, y + 1) + r2 * at(x, y + 1) + at(x + 1, y + 1);
+            let len = gx.hypot(gy);
+            if len > 1e-6 { (gx / len, gy / len) } else { (0.0, 0.0) }
         })
-        .collect()
+        .collect();
+    // Distance from a pixel's centre to the edge line through it (normal `(gx, gy)`, area `a`
+    // covered): positive where the centre lies outside the covered part.
+    let edge_df = |gx: f32, gy: f32, a: f32| -> f32 {
+        if gx == 0.0 || gy == 0.0 {
+            return 0.5 - a;
+        }
+        let len = gx.hypot(gy);
+        let (mut gx, mut gy) = ((gx / len).abs(), (gy / len).abs());
+        if gx < gy {
+            std::mem::swap(&mut gx, &mut gy);
+        }
+        let a1 = 0.5 * gy / gx;
+        if a < a1 {
+            0.5 * (gx + gy) - (2.0 * gx * gy * a).sqrt()
+        } else if a < 1.0 - a1 {
+            (0.5 - a) * gx
+        } else {
+            -0.5 * (gx + gy) + (2.0 * gx * gy * (1.0 - a)).sqrt()
+        }
+    };
+    let mut near: Vec<u32> = vec![u32::MAX; n];
+    let mut dist = vec![FAR; n];
+    for i in 0..n {
+        let a = cov[i].clamp(0.0, 1.0);
+        if a > 0.0 {
+            near[i] = i as u32;
+            dist[i] = if a < 1.0 { edge_df(grad[i].0, grad[i].1, a) } else { 0.0 };
+        }
+    }
+    // Distance from pixel `i` to the edge at covered pixel `c`: along the vector between them,
+    // through `c`'s own edge offset in that direction.
+    let through = |i: usize, c: usize| -> f32 {
+        let a = cov[c].clamp(0.0, 1.0);
+        if a <= 0.0 {
+            return FAR;
+        }
+        let (dx, dy) = ((i % w) as f32 - (c % w) as f32, (i / w) as f32 - (c / w) as f32);
+        let di = dx.hypot(dy);
+        if di == 0.0 { edge_df(grad[c].0, grad[c].1, a) } else { di + edge_df(dx, dy, a) }
+    };
+    let relax = |i: usize, j: usize, dist: &mut Vec<f32>, near: &mut Vec<u32>| -> bool {
+        let c = near[j];
+        if c == u32::MAX || c == near[i] {
+            return false;
+        }
+        let d = through(i, c as usize);
+        if d < dist[i] - 1e-3 {
+            dist[i] = d;
+            near[i] = c;
+            return true;
+        }
+        false
+    };
+    // Sweeps down and up (each with a row pass both ways) until nothing changes.
+    for _ in 0..16 {
+        let mut changed = false;
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                if cov[i] >= 1.0 {
+                    continue;
+                }
+                if y > 0 {
+                    changed |= relax(i, i - w, &mut dist, &mut near);
+                    if x > 0 {
+                        changed |= relax(i, i - w - 1, &mut dist, &mut near);
+                    }
+                    if x + 1 < w {
+                        changed |= relax(i, i - w + 1, &mut dist, &mut near);
+                    }
+                }
+                if x > 0 {
+                    changed |= relax(i, i - 1, &mut dist, &mut near);
+                }
+            }
+            for x in (0..w.saturating_sub(1)).rev() {
+                let i = y * w + x;
+                if cov[i] < 1.0 {
+                    changed |= relax(i, i + 1, &mut dist, &mut near);
+                }
+            }
+        }
+        for y in (0..h).rev() {
+            for x in (0..w).rev() {
+                let i = y * w + x;
+                if cov[i] >= 1.0 {
+                    continue;
+                }
+                if y + 1 < h {
+                    changed |= relax(i, i + w, &mut dist, &mut near);
+                    if x + 1 < w {
+                        changed |= relax(i, i + w + 1, &mut dist, &mut near);
+                    }
+                    if x > 0 {
+                        changed |= relax(i, i + w - 1, &mut dist, &mut near);
+                    }
+                }
+                if x + 1 < w {
+                    changed |= relax(i, i + 1, &mut dist, &mut near);
+                }
+            }
+            for x in 1..w {
+                let i = y * w + x;
+                if cov[i] < 1.0 {
+                    changed |= relax(i, i - 1, &mut dist, &mut near);
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    dist
 }
 
 /// Distance from each pixel centre inside the shape to the shape's edge
 /// (≤ 0 outside).
 fn dist_inside(s: &Map) -> Vec<f32> {
-    dist_inside_by(s, Metric::Euclidean)
+    let outside: Vec<f32> = s.v.iter().map(|a| 1.0 - a.clamp(0.0, 1.0)).collect();
+    let d = aa_edt(&outside, s.w, s.h);
+    s.v.iter().zip(d).map(|(&a, d)| if a <= INSIDE_EPS { -0.5 } else { d }).collect()
 }
 
 fn dist_inside_by(s: &Map, m: Metric) -> Vec<f32> {
@@ -2996,5 +3128,40 @@ mod tests {
         assert!((out[0] - 1.0).abs() < 0.01 && (out[1] - 0.9).abs() < 0.01, "{out:?}");
         let kept = at(false);
         assert!(kept[1] < 0.05, "without knockout the shadow shows: {kept:?}");
+    }
+
+    /// Distances to an anti-aliased disc's edge, from its coverage alone: within 0.1 px of the
+    /// true radius everywhere inside, where the nearest-pixel distance was 0.15 off (the facets of
+    /// a chisel bevel follow them).
+    #[test]
+    fn aa_distances_follow_an_anti_aliased_edge() {
+        let (n, c, r) = (80usize, 40.0f32, 27.3f32);
+        let mut s = Map::new(n, n, 0.0);
+        for y in 0..n {
+            for x in 0..n {
+                let mut k = 0;
+                for sy in 0..8 {
+                    for sx in 0..8 {
+                        let (px, py) = (x as f32 + (sx as f32 + 0.5) / 8.0, y as f32 + (sy as f32 + 0.5) / 8.0);
+                        k += usize::from((px - c).hypot(py - c) <= r);
+                    }
+                }
+                s.v[y * n + x] = k as f32 / 64.0;
+            }
+        }
+        let d = dist_inside(&s);
+        let mut worst = 0.0f32;
+        for y in 0..n {
+            for x in 0..n {
+                let i = y * n + x;
+                if s.v[i] >= 1.0 {
+                    let want = r - (x as f32 + 0.5 - c).hypot(y as f32 + 0.5 - c);
+                    worst = worst.max((d[i] - want).abs());
+                }
+            }
+        }
+        let e = dist_inside_by(&s, Metric::Euclidean);
+        let old = (0..n * n).filter(|&i| s.v[i] >= 1.0).map(|i| (e[i] - (r - ((i % n) as f32 + 0.5 - c).hypot((i / n) as f32 + 0.5 - c))).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 0.1 && worst < old * 0.7, "{worst} (nearest pixel: {old})");
     }
 }
