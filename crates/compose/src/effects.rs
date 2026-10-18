@@ -1638,6 +1638,14 @@ fn knock_out_exterior(map: &mut Map, shape: &Map, fill_opacity: f32) {
     }
 }
 
+/// Whether a knocked-out drop shadow is also knocked out beneath an outside stroke (see
+/// `stroke_knock` in `composite_with_effects_prepared`): the GPU compositor leaves such layers
+/// to the CPU.
+pub fn shadow_knocked_out_by_stroke(e: &[Effect]) -> bool {
+    let on = || e.iter().filter(|e| e.enabled());
+    on().any(|e| matches!(e, Effect::DropShadow(s) if s.knocks_out)) && on().any(|e| matches!(e, Effect::Stroke(st) if stroke_widths(st).1 > 0.0))
+}
+
 /// How far the layer lets a knocked-out drop shadow show beneath its own shape (Layer Knocks Out
 /// Drop Shadow), 0 = covered, 1 = knocked out wholly. In a normal mode an opaque layer covers the
 /// shadow anyway, so only see-through fill knocks it out (and anti-aliased edges are not
@@ -1713,6 +1721,47 @@ pub(crate) fn composite_with_effects_prepared(
     // Multiple instances: the first listed is on top, so paint in reverse.
     let rev = || items.iter().copied().enumerate().rev();
 
+    let strokes: Vec<&photosplice_doc::StrokeFx> = items.iter().filter_map(|e| if let Effect::Stroke(s) = e { Some(s) } else { None }).collect();
+    let ready = !strokes.is_empty();
+    let din = if ready { maps.din.as_ref().map(|a| maps.crop_vec(a, big, 0.0)).unwrap_or_default() } else { Vec::new() };
+    // A stroke's outer edge picks the chamfer or the exact field by its width
+    // ([`stroke_outside_exact`]); both are cropped here, and only the ones a stroke needs exist.
+    let crop_out = |v: &Option<Vec<f32>>| v.as_ref().map(|b| maps.crop_vec(b, big, FAR));
+    let (dout, dout_exact, vdout, vdout_exact) =
+        if ready { (crop_out(&maps.dout), crop_out(&maps.dout_exact), crop_out(&maps.vdout), crop_out(&maps.vdout_exact)) } else { (None, None, None, None) };
+    // Shape layers without a filled outline stroke their vector outline, estimated from local
+    // coverage; every other layer strokes its shape. The width then picks the field.
+    let vector_outline = vector_shape && !maps.outline;
+    // The distance field an outside stroke of width `out_w` measures its band with.
+    let stroke_field = |out_w: f32| -> &[f32] {
+        let exact = stroke_outside_exact(out_w);
+        if vector_outline {
+            (if exact { vdout_exact.as_deref() } else { vdout.as_deref() }).unwrap_or_default()
+        } else if exact {
+            dout_exact.as_deref().unwrap_or_default()
+        } else {
+            dout.as_deref().unwrap_or_default()
+        }
+    };
+    // Layer Knocks Out Drop Shadow counts the outside strokes as the layer's: a 10 % stroke
+    // shows the bare backdrop beneath it, not the shadow (psd-tools masks.psd: the header's
+    // stroke row was 0.08 dark).
+    let stroke_knock: Option<Vec<f32>> = strokes.iter().any(|st| stroke_widths(st).1 > 0.0).then(|| {
+        let mut k = vec![0.0f32; w * h];
+        for st in &strokes {
+            let out_w = stroke_widths(st).1;
+            if out_w <= 0.0 {
+                continue;
+            }
+            let d = stroke_field(out_w);
+            for ((kv, a), dv) in k.iter_mut().zip(&shape.v).zip(d) {
+                if *a <= INSIDE_EPS {
+                    *kv = kv.max((out_w + 0.5 - dv).clamp(0.0, 1.0));
+                }
+            }
+        }
+        k
+    });
     for (i, e) in rev() {
         if let Effect::DropShadow(s) = e {
             let mut m = fx(i, 0);
@@ -1721,6 +1770,9 @@ pub(crate) fn composite_with_effects_prepared(
                 // fill in a normal mode it covers it anyway; at 0 % the shape shows the bare
                 // backdrop), and wholly in a mode that blends with it ([`shadow_see_through`]).
                 knock_out_exterior(&mut m, &shape, 1.0 - shadow_see_through(layer));
+                if let Some(k) = &stroke_knock {
+                    m.v.iter_mut().zip(k).for_each(|(v, k)| *v *= 1.0 - k);
+                }
             }
             paint_color(&mut work, &m, rgb(&s.color), s.common.blend, s.common.opacity);
         }
@@ -1817,14 +1869,6 @@ pub(crate) fn composite_with_effects_prepared(
     }
     // Strokes. Inside parts are painted over the layer (bottom instance first); outside parts
     // are slid beneath it, so the first listed (top) instance is processed first.
-    let strokes: Vec<&photosplice_doc::StrokeFx> = items.iter().filter_map(|e| if let Effect::Stroke(s) = e { Some(s) } else { None }).collect();
-    let ready = !strokes.is_empty();
-    let din = if ready { maps.din.as_ref().map(|a| maps.crop_vec(a, big, 0.0)).unwrap_or_default() } else { Vec::new() };
-    // A stroke's outer edge picks the chamfer or the exact field by its width
-    // ([`stroke_outside_exact`]); both are cropped here, and only the ones a stroke needs exist.
-    let crop_out = |v: &Option<Vec<f32>>| v.as_ref().map(|b| maps.crop_vec(b, big, FAR));
-    let (dout, dout_exact, vdout, vdout_exact) =
-        if ready { (crop_out(&maps.dout), crop_out(&maps.dout_exact), crop_out(&maps.vdout), crop_out(&maps.vdout_exact)) } else { (None, None, None, None) };
     let widths = stroke_widths;
     // A gradient stroke aligned with the layer spans the stroke's own extent.
     let frame = |st: &photosplice_doc::StrokeFx| maps.stroke_frame(st).unwrap_or(sb);
@@ -1877,9 +1921,6 @@ pub(crate) fn composite_with_effects_prepared(
     for (p, a) in lay.px.iter_mut().zip(&shape.v) {
         p[3] *= a.min(1.0);
     }
-    // Shape layers without a filled outline stroke their vector outline, estimated from local
-    // coverage; every other layer strokes its shape. The width then picks the field.
-    let vector_outline = vector_shape && !maps.outline;
     // Outside parts lie beneath the layer and blend onto the backdrop with their own mode. A
     // higher stroke covers the ones below it (Photoshop: a Multiply stroke listed above a wider
     // Normal stroke multiplies the backdrop, not the lower stroke). Each stroke's share is its
@@ -1897,14 +1938,7 @@ pub(crate) fn composite_with_effects_prepared(
             // Shape layers: Photoshop strokes the vector outline (estimated from local coverage
             // for unfilled shapes); the stroke never shows through the shape's pixels. Along a
             // filled shape's outline it covers the part of each edge pixel outside the path.
-            let exact = stroke_outside_exact(out_w);
-            let d: &[f32] = if vector_outline {
-                (if exact { vdout_exact.as_deref() } else { vdout.as_deref() }).unwrap_or_default()
-            } else if exact {
-                dout_exact.as_deref().unwrap_or_default()
-            } else {
-                dout.as_deref().unwrap_or_default()
-            };
+            let d = stroke_field(out_w);
             let mut share = vec![0.0f32; w * h];
             for (i, sh) in share.iter_mut().enumerate() {
                 let band = (out_w + 0.5 - d[i]).clamp(0.0, 1.0);
@@ -2917,5 +2951,50 @@ mod tests {
         let mut n = Buffer { rect: Rect::new(0, 0, 2, 1), px: vec![[0.0, 0.0, 0.0, 1.0]; 2] };
         paint_color(&mut n, &m, [1.0, 1.0, 1.0], BlendMode::Normal, 0.25);
         assert!((n.px[0][0] - 0.25).abs() < 1e-5);
+    }
+
+    #[test]
+    fn knocked_out_shadow_stays_out_from_under_an_outside_stroke() {
+        // psd-tools masks.psd: a 10 % outside stroke over a drop shadow shows the bare backdrop.
+        use photosplice_doc::{Document, Shadow};
+        let doc = Document::new("d", photosplice_geom::Size::new(40, 40), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+        let fmt = doc.pixel_format();
+        let mut bg = Layer::raster("bg", fmt);
+        bg.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 40, 40), &[1.0, 1.0, 1.0, 1.0]);
+        let mut l = Layer::raster("l", fmt);
+        l.surface_mut().unwrap().fill_rect(Rect::new(10, 10, 30, 30), &[0.0, 0.0, 1.0, 1.0]);
+        let shadow = |knocks_out| {
+            Effect::DropShadow(Shadow {
+                common: photosplice_doc::FxCommon::new(BlendMode::Normal, 1.0),
+                color: photosplice_doc::Color::BLACK,
+                angle: 90.0,
+                use_global_light: false,
+                distance: 4.0,
+                spread: 0.0,
+                size: 0.0,
+                contour: Contour::Linear,
+                anti_alias: false,
+                noise: 0.0,
+                knocks_out,
+            })
+        };
+        let stroke = Effect::Stroke(photosplice_doc::StrokeFx {
+            common: photosplice_doc::FxCommon::new(BlendMode::Normal, 0.1),
+            size: 2.0,
+            position: StrokePosition::Outside,
+            paint: FxPaint::Color(photosplice_doc::Color::rgb(1.0, 0.0, 0.0)),
+        });
+        let at = |knocks_out: bool| {
+            let mut d = doc.clone();
+            let mut l = l.clone();
+            l.effects.items = vec![stroke.clone(), shadow(knocks_out)];
+            d.layers = vec![bg.clone(), l];
+            crate::flatten(&d).px[31 * 40 + 20]
+        };
+        // Below the square, in the stroke's band and the shadow (cast 4 px down).
+        let out = at(true);
+        assert!((out[0] - 1.0).abs() < 0.01 && (out[1] - 0.9).abs() < 0.01, "{out:?}");
+        let kept = at(false);
+        assert!(kept[1] < 0.05, "without knockout the shadow shows: {kept:?}");
     }
 }

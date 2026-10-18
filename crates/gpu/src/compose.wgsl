@@ -38,6 +38,7 @@ const F_MASK_TEX: u32 = 2u;      // mask pixels live in `mask_tex`
 const F_TEX: u32 = 4u;           // layer pixels live in `layer_tex`
 const F_GRADIENT: u32 = 8u;      // gradient fill (stops in `lut_tex`)
 const F_KNOCKOUT: u32 = 16u;     // effect paint: the layer knocks out the coverage (drop shadow)
+const F_STROKE_KNOCK: u32 = 1048576u; // effect paint: outside the shape, also 1 - C.a (outside strokes)
 const F_NO_LAYER: u32 = 32u;    // effect merge: A already holds the layer (only the opacity mix)
 const F_OUTLINE: u32 = 131072u;      // outside strokes: filled shape outline (effects::outline_share)
 const F_VECTOR: u32 = 64u;       // effect paint: shape layer (outside stroke never inside)
@@ -1132,6 +1133,7 @@ fn fs_fxpaint(in: VOut) -> @location(0) vec4<f32> {
     var m = 1.0;
     if (op.kind == 0) { m = map_value(d, op.p2.w); }
     if ((op.flags & F_KNOCKOUT) != 0u) { m = m * (1.0 - a * op.p4.w); }
+    if ((op.flags & F_STROKE_KNOCK) != 0u && !inside_shape) { m = m * (1.0 - clamp(textureLoad(tex_c, p, 0).a, 0.0, 1.0)); }
     if ((op.flags & F_GATE) != 0u && !inside_shape) { m = 0.0; }
     if ((op.flags & F_REL) != 0u) {
         if (inside_shape) { m = min(m / a, 1.0); } else { m = 0.0; }

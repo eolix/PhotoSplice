@@ -1291,7 +1291,13 @@ impl Ex {
         if let Some(c) = &l.fill_cache
             && c.fill == *f
         {
-            return c.surface.clone();
+            let mut s = c.surface.clone();
+            // A pattern fill is stored seen through its vector mask, as Reference saves it (the
+            // import takes the coverage back out).
+            if let (photosplice_doc::Fill::Pattern { .. }, Some(vm)) = (f, &l.vector_mask) {
+                crate::psd_import::vector_mask_alpha(&mut s, vm, false);
+            }
+            return s;
         }
         // In the frame the layer's masks give it, like the compositor (masks are stored apart).
         // Photoshop keeps the pixels to the part of the canvas a hiding mask shows.

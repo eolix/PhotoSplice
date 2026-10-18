@@ -192,7 +192,7 @@ pub struct VectorMask {
     pub linked: bool,
     /// Density `0..=1` (Properties panel), like [`crate::LayerMask::density`].
     pub density: f32,
-    /// Feather radius in px (stored; rendered unfeathered for now).
+    /// Feather radius in px (Properties › Feather; blurred as a pixel mask's feather is).
     pub feather: f32,
 }
 
