@@ -229,10 +229,15 @@ fn mt32_marks_the_merged_transparency() {
     file.image_data.compression = Compression::Raw;
     let plane = |v: [f32; 2]| v.into_iter().flat_map(f32::to_be_bytes).collect::<Vec<u8>>();
     file.image_data.data = [plane([0.0, 1.0]), plane([0.0, 1.0]), plane([0.0, 1.0]), plane([1.0, 0.0])].concat();
-    // Without any channel names or ids the extra channel can only be the transparency (the
-    // Reference names every channel it saves; other writers add only that one).
+    // Without channel names or ids, an extra channel in a file with version info (1057, as the
+    // Reference and this export write) is an ordinary channel; in one without it (another
+    // writer, which adds only the merged transparency) it is the transparency.
     file.resources.retain(|r| ![1006, 1045, 1053].contains(&r.id));
-    assert!(file.merged_has_alpha(), "an unnamed extra channel");
+    assert!(!file.merged_has_alpha(), "an unnamed extra channel beside version info");
+    let version = file.resources.iter().position(|r| r.id == 1057).map(|i| file.resources.remove(i));
+    assert!(version.is_some(), "the export writes version info");
+    assert!(file.merged_has_alpha(), "an unnamed extra channel from another writer");
+    file.resources.extend(version);
     // With a user channel id and a positive layer count there is no transparency. (A name list
     // that starts with "Transparency", or id 0 in 1053, also marks it: see
     // `PsdFile::merged_has_alpha`.)
