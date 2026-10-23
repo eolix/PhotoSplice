@@ -248,6 +248,7 @@ fn parse_bevel(d: &Descriptor) -> Bevel {
         altitude: f(d, "Lald", 30.0),
         use_global_light: !matches!(d.get("uglg"), Some(Value::Boolean(false))),
         gloss_contour: contour(d, "TrnS"),
+        gloss_anti_alias: bool_of(d, "antialiasGloss"),
         highlight: FxCommon { enabled: true, blend: blend_of(d, "hglM", BlendMode::Screen), opacity: pct(d, "hglO", 0.75) },
         highlight_color: get_desc(d, "hglC").and_then(color_from_desc).unwrap_or(Color::WHITE),
         shadow: FxCommon { enabled: true, blend: blend_of(d, "sdwM", BlendMode::Multiply), opacity: pct(d, "sdwO", 0.75) },
@@ -501,7 +502,8 @@ fn write_one(e: &Effect) -> (&'static str, Descriptor) {
                 .with("blur", unit(b"#Pxl", b.size))
                 .with("bvlD", Value::Enumerated { type_id: Id::new("BESs"), value: Id::new(if b.up { "In  " } else { "Out " }) })
                 .with("TrnS", contour_value(&b.gloss_contour))
-                .with("Sftn", unit(b"#Pxl", b.soften));
+                .with("Sftn", unit(b"#Pxl", b.soften))
+                .with("antialiasGloss", Value::Boolean(b.gloss_anti_alias));
             let d = match &b.contour {
                 Some(c) => d
                     .with("useShape", Value::Boolean(true))
@@ -894,6 +896,7 @@ mod tests {
                 altitude: 40.0,
                 use_global_light: false,
                 gloss_contour: Contour::Linear,
+                gloss_anti_alias: true,
                 highlight: FxCommon::new(BlendMode::Screen, 0.75),
                 highlight_color: Color::WHITE,
                 shadow: FxCommon::new(BlendMode::Multiply, 0.6),
@@ -917,6 +920,8 @@ mod tests {
         let (master, back) = parse_lfx2(&data).unwrap();
         assert!(!master);
         approx(&fx, &back);
+        // Gloss Contour › Anti-aliased (`antialiasGloss`) survives.
+        assert!(back.iter().any(|e| matches!(e, Effect::BevelEmboss(b) if b.gloss_anti_alias)));
         // Kind order is canonical: shadows first ... strokes last.
         assert!(matches!(back[0], Effect::DropShadow(_)));
         assert!(matches!(back.last().unwrap(), Effect::Stroke(_)));

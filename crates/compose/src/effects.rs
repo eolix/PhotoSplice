@@ -786,7 +786,7 @@ pub fn has_anti_aliased_contour(e: &Effect) -> bool {
         Effect::OuterGlow(g) | Effect::InnerGlow(g) => g.anti_alias && glow_lut(g).is_some(),
         Effect::DropShadow(s) | Effect::InnerShadow(s) => s.anti_alias && contour_lut(&s.contour).is_some(),
         Effect::Satin(s) => s.anti_alias && contour_lut(&s.contour).is_some(),
-        Effect::BevelEmboss(b) => b.contour.as_ref().is_some_and(|c| c.anti_alias),
+        Effect::BevelEmboss(b) => b.contour.as_ref().is_some_and(|c| c.anti_alias) || (b.gloss_anti_alias && contour_lut(&b.gloss_contour).is_some()),
         _ => false,
     }
 }
@@ -1527,6 +1527,8 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
     let hc = |x: i64, y: i64| hmap.get(x.clamp(0, mw.max(0)), y.clamp(0, mh.max(0)));
     let shade_into = |depth: f32, region_kind: u8| -> (Map, Map) {
         let (mut hi, mut sh) = (Map::new(shape.w, shape.h, 0.0), Map::new(shape.w, shape.h, 0.0));
+        // The shading and the region first, then the gloss over them.
+        let (mut sm, mut rg) = (Map::new(shape.w, shape.h, 0.0), Map::new(shape.w, shape.h, 0.0));
         for y in 0..shape.h as i64 {
             for x in 0..shape.w as i64 {
                 let i = y as usize * shape.w + x as usize;
@@ -1540,10 +1542,18 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
                 let len = (n[0] * n[0] + n[1] * n[1] + 1.0).sqrt();
                 let shade = (n[0] * light_v[0] + n[1] * light_v[1] + n[2] * light_v[2]) / len;
                 let region = if region_kind == 0 { shape.v[i] } else { f32::from(shape.v[i] < 1.0 - INSIDE_EPS && on_bevel(x, y)) };
-                let (h, s) = gloss(shade - se, se, gloss_lut.as_deref());
-                hi.v[i] = h * region;
-                sh.v[i] = s * region;
+                sm.v[i] = shade;
+                rg.v[i] = region;
             }
+        }
+        // Gloss Contour › Anti-aliased reads the shading a third of a pixel away, as the other
+        // anti-aliased contours read their input; a linear contour has nothing to smooth (Reference corpus bevel-inner-gloss-double-ring-aa:
+        // within 2/255 on 31 616 → 35 557 pixels, worst 55 → 25/255).
+        let sm = if b.gloss_anti_alias && gloss_lut.is_some() { sm.shifted(-CONTOUR_AA_SHIFT, -CONTOUR_AA_SHIFT, 0.0) } else { sm };
+        for i in 0..sm.v.len() {
+            let (h, s) = gloss(sm.v[i] - se, se, gloss_lut.as_deref());
+            hi.v[i] = h * rg.v[i];
+            sh.v[i] = s * rg.v[i];
         }
         (hi, sh)
     };
@@ -2501,6 +2511,7 @@ mod tests {
             altitude: 30.0,
             use_global_light: false,
             gloss_contour: Contour::Linear,
+            gloss_anti_alias: false,
             highlight: photosplice_doc::FxCommon::new(BlendMode::Screen, 0.75),
             highlight_color: photosplice_color::Color::WHITE,
             shadow: photosplice_doc::FxCommon::new(BlendMode::Multiply, 0.75),
@@ -2830,6 +2841,33 @@ mod tests {
         let mid: f32 = (16..24).map(|y| m[0].v[y * 40 + 20] + m[1].v[y * 40 + 20]).sum();
         let flat: f32 = (16..24).map(|y| a[0].v[y * 40 + 20] + a[1].v[y * 40 + 20]).sum();
         assert!(mid > flat + 0.5, "{mid} vs {flat}");
+    }
+
+    /// Gloss Contour › Anti-aliased reads the shading a third of a pixel away (Reference corpus
+    /// bevel-inner-gloss-double-ring-aa); with a linear contour it changes nothing, and either
+    /// way such a layer is left to the CPU.
+    #[test]
+    fn gloss_anti_alias_reads_the_shading_a_third_of_a_pixel_away() {
+        let shape = square(48, 8, 40);
+        let l = GlobalLight::default();
+        let pp = PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES);
+        let ring = Contour::Custom {
+            name: "double ring".into(),
+            points: [(0.0, 0.0), (0.25, 1.0), (0.5, 0.16), (0.75, 1.0), (1.0, 0.0)].iter().map(|(i, o)| photosplice_doc::adjust::CurvePoint { input: *i, output: *o }).collect(),
+            corners: Vec::new(),
+        };
+        let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::Smooth);
+        b.size = 12.0;
+        for (contour, differs) in [(ring, true), (Contour::Linear, false)] {
+            b.gloss_contour = contour;
+            b.gloss_anti_alias = false;
+            let (plain, _) = bevel_maps(&shape, &b, &l, &no_tex(), &pp);
+            b.gloss_anti_alias = true;
+            let (aa, _) = bevel_maps(&shape, &b, &l, &no_tex(), &pp);
+            let most = plain[0].v.iter().zip(&aa[0].v).map(|(a, c)| (a - c).abs()).fold(0.0f32, f32::max);
+            assert_eq!(most > 0.01, differs, "{most}");
+            assert_eq!(has_anti_aliased_contour(&Effect::BevelEmboss(b.clone())), differs);
+        }
     }
 
     /// The Contour's Range spans each style's own profile: a Smooth inner bevel's from ½ at the

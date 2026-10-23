@@ -98,7 +98,7 @@ pub fn effect_defaults(kind: &str) -> Value {
         }
         "patternOverlay" => json!({"blend": "Normal", "opacity": 100, "pattern": "", "angle": 0, "scale": 100, "link": true}),
         "bevelEmboss" => {
-            json!({"style": "inner", "technique": "smooth", "depth": 100, "direction": "up", "size": 5, "soften": 0, "angle": 120, "useGlobalLight": true, "altitude": 30, "glossContour": "Linear", "contour": false, "contourName": "Linear", "contourRange": 50, "contourAntiAlias": false})
+            json!({"style": "inner", "technique": "smooth", "depth": 100, "direction": "up", "size": 5, "soften": 0, "angle": 120, "useGlobalLight": true, "altitude": 30, "glossContour": "Linear", "glossAntiAlias": false, "contour": false, "contourName": "Linear", "contourRange": 50, "contourAntiAlias": false})
         }
         "satin" => {
             json!({"blend": "Multiply", "color": "#000000", "opacity": 50, "angle": 19, "distance": 11, "size": 14, "contour": "Linear", "antiAlias": true, "invert": true})
@@ -544,6 +544,7 @@ fn fresh_effect(kind: &str) -> Option<Effect> {
             altitude: 30.0,
             use_global_light: true,
             gloss_contour: Contour::Linear,
+            gloss_anti_alias: false,
             highlight: FxCommon::new(BlendMode::Screen, 0.75),
             highlight_color: Color::WHITE,
             shadow: FxCommon::new(BlendMode::Multiply, 0.75),
@@ -789,6 +790,7 @@ pub fn overlay_effect(fx: &mut Effect, p: &Value) {
                 bv.use_global_light = x;
             }
             set_contour(p, "glossContour", &mut bv.gloss_contour);
+            set_bool(p, "glossAntiAlias", &mut bv.gloss_anti_alias);
             // The Contour element: `contour` turns it on/off; its curve, Range and
             // Anti-aliased edit the element in place, so an imported curve survives.
             match b_of(p, "contour") {
@@ -1021,7 +1023,7 @@ pub fn specs() -> Vec<CommandSpec> {
         style_cmd!(
             "bevelEmboss",
             "Bevel & Emboss…",
-            r##"{"style":"inner|outer|emboss|pillow|stroke","technique":"smooth|chiselHard|chiselSoft","contour":bool,"contourName":name|curve,"contourRange":1..100=50,"contourAntiAlias":bool,"glossContour":name|curve,"texture":pattern id|name?,"textureScale":1..1000=100,"textureDepth":-1000..1000=100,"textureInvert":bool,"textureLink":bool=true,"depth":1..1000=100,"direction":"up|down","size":px=5,"soften":px,"angle":deg,"altitude":deg,"add":bool}"##
+            r##"{"style":"inner|outer|emboss|pillow|stroke","technique":"smooth|chiselHard|chiselSoft","contour":bool,"contourName":name|curve,"contourRange":1..100=50,"contourAntiAlias":bool,"glossContour":name|curve,"glossAntiAlias":bool,"texture":pattern id|name?,"textureScale":1..1000=100,"textureDepth":-1000..1000=100,"textureInvert":bool,"textureLink":bool=true,"depth":1..1000=100,"direction":"up|down","size":px=5,"soften":px,"angle":deg,"altitude":deg,"add":bool}"##
         ),
         style_cmd!(
             "satin",
@@ -1128,10 +1130,11 @@ mod tests {
     #[test]
     fn bevel_command_sets_technique_contour_and_texture() {
         let mut s = session();
-        s.execute("layer.layerStyle.bevelEmboss", json!({"style": "pillow", "technique": "chiselHard", "contour": true, "contourRange": 70, "texture": "Bubbles", "textureDepth": -200, "textureInvert": true})).unwrap();
+        s.execute("layer.layerStyle.bevelEmboss", json!({"style": "pillow", "technique": "chiselHard", "contour": true, "contourRange": 70, "texture": "Bubbles", "textureDepth": -200, "textureInvert": true, "glossContour": "Ring", "glossAntiAlias": true})).unwrap();
         let fx = effects(&s);
         let Effect::BevelEmboss(b) = &fx[0] else { panic!("{fx:?}") };
         assert_eq!((b.style, b.technique), (photosplice_doc::BevelStyle::PillowEmboss, BevelTechnique::ChiselHard));
+        assert!(b.gloss_anti_alias);
         assert!((b.contour.as_ref().unwrap().range - 0.7).abs() < 1e-6);
         let t = b.texture.as_ref().unwrap();
         assert_eq!((t.name.as_str(), t.depth, t.invert), ("Bubbles", -2.0, true));
