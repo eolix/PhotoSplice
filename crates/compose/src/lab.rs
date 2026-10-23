@@ -237,7 +237,7 @@ pub(crate) fn apply(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, dept
     }
     if let Adjustment::PhotoFilter { color, density, preserve_luminosity } = adj {
         use photosplice_color::convert::{linear_to_srgb, mat3_mul, srgb_to_linear};
-        let m = crate::adjust::photo_filter_matrix(*color, *density, false);
+        let m = crate::adjust::photo_filter_matrix(*color, *density, false, false);
         for p in &mut buf.px {
             if p[3] <= 0.0 {
                 continue;

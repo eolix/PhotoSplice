@@ -684,6 +684,10 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
                 ss = min(abs(sat), 1.0);
                 var ll = hsl.z;
                 if (light > 0.0) { ll = ll + (1.0 - ll) * light; } else { ll = ll * (1.0 + light); }
+                if (hdr && light > 0.0) {
+                    // 32-bit: the chroma also shrinks by 1 - light about the moved lightness.
+                    return clamp(vec3(ll) + (hsl_to_rgb(hh, ss, ll) - vec3(ll)) * (1.0 - light), vec3(0.0), vec3(1.0));
+                }
                 return clamp(hsl_to_rgb(hh, ss, ll), vec3(0.0), vec3(1.0));
             } else {
                 // Saturation scales about the HSL lightness, held where the smallest channel would

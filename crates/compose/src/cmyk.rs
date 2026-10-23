@@ -803,7 +803,12 @@ mod tests {
 
     /// A 4 × 1 CMYK document with a bottom layer of `base` inks over all of it.
     fn doc(base: [f32; 4]) -> Document {
-        let mut d = Document::new("c", Size::new(4, 1), ColorMode::Cmyk, SampleType::F32);
+        doc_at(base, SampleType::F32)
+    }
+
+    /// [`doc`] at `depth`.
+    fn doc_at(base: [f32; 4], depth: SampleType) -> Document {
+        let mut d = Document::new("c", Size::new(4, 1), ColorMode::Cmyk, depth);
         let mut l = Layer::raster("base", d.pixel_format());
         if let Some(s) = l.surface_mut() {
             s.fill_rect(Rect::new(0, 0, 4, 1), &[base[0], base[1], base[2], base[3], 1.0]);
@@ -979,7 +984,8 @@ mod tests {
     /// replacement (Reference kit inks-hs-colorize: 30 % K alone → (27.5, 9.2, 0, 17.1) %).
     #[test]
     fn colorize_separates_with_full_black_replacement() {
-        let mut d = doc([0.0, 0.0, 0.0, 0.3]);
+        // 16-bit, as the kit (32-bit Colorize lightens differently, and there is no 32-bit CMYK).
+        let mut d = doc_at([0.0, 0.0, 0.0, 0.3], SampleType::U16);
         d.layers.push(hs(200.0, 40.0, 5.0, true));
         assert!(near(inks_at(&d, 0), [0.275, 0.092, 0.0, 0.171], 0.006), "{:?}", inks_at(&d, 0));
         // Paper stays paper.

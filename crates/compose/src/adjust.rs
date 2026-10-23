@@ -155,7 +155,7 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
                 };
                 if *colorize {
                     let s = (*saturation / 100.0).clamp(-1.0, 1.0);
-                    return hue_saturation_in(c, *hue + dh, s, (*lightness / 100.0 + dl).clamp(-1.0, 1.0), true, false);
+                    return hue_saturation_in(c, *hue + dh, s, (*lightness / 100.0 + dl).clamp(-1.0, 1.0), true, depth == Some(SampleType::F32));
                 }
                 // The master's saturation factor times the ranges' (Reference 16-bit master ±50 %
                 // with Reds ∓50 %: unchanged in the core; adding the sliders was 31/255 off).
@@ -185,7 +185,7 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
         }),
         Adjustment::PhotoFilter { color, density, preserve_luminosity } => {
             let linear_doc = depth == Some(SampleType::F32);
-            let m = photo_filter_matrix(*color, *density, *preserve_luminosity && linear_doc);
+            let m = photo_filter_matrix(*color, *density, *preserve_luminosity && linear_doc, linear_doc);
             let set_lum = *preserve_luminosity && !linear_doc;
             map_rgb(buf, |c| {
                 // 32-bit samples are linear already, and may go negative.
@@ -705,9 +705,16 @@ pub fn hue_saturation_in(c: [f32; 3], hue: f32, s: f32, l: f32, colorize: bool, 
     if colorize {
         // Colorize: the hue and saturation as set, on the pixel's HSL lightness moved by the
         // Lightness slider (Photoshop corpus hue-saturation-colorize.psd, rgb16: within 0.5/255).
-        let (_, _, ll) = rgb_to_hsl(c);
-        let ll = if l > 0.0 { ll + (1.0 - ll) * l } else { ll * (1.0 + l) };
-        return hsl_to_rgb(hue.rem_euclid(360.0) / 360.0, s.abs().min(1.0), ll).map(|v| v.clamp(0.0, 1.0));
+        let (_, _, l0) = rgb_to_hsl(c);
+        let ll = if l > 0.0 { l0 + (1.0 - l0) * l } else { l0 * (1.0 + l) };
+        let (h, s) = (hue.rem_euclid(360.0) / 360.0, s.abs().min(1.0));
+        if float && l > 0.0 {
+            // 32-bit: the chroma also shrinks by 1 − l about the moved lightness (Reference
+            // corpus rgb32 hue-saturation-colorize.psd at hue 200, 40 %, +5: grey 0.4735 → 0.310
+            // 0.563 0.690, red → 0.345 0.585 0.706).
+            return hsl_to_rgb(h, s, ll).map(|v| (ll + (v - ll) * (1.0 - l)).clamp(0.0, 1.0));
+        }
+        return hsl_to_rgb(h, s, ll).map(|v| v.clamp(0.0, 1.0));
     }
     hue_saturation_ranged(c, hue, s, l, 0.0, float, false)
 }
@@ -1157,21 +1164,29 @@ pub(crate) fn lut(table: &[f32], v: f32) -> f32 {
     table[i] * (1.0 - f) + table[j] * f
 }
 
-/// Photo Filter's linear-light RGB matrix. Photoshop multiplies the pixel's D50 XYZ, relative to
-/// white, by the filter colour's (mixed in by `density`): a fixed linear map, so it is folded into
-/// one matrix. With `normalize_y` the map keeps luminance Y (32-bit Preserve Luminosity; 8/16-bit
-/// documents instead restore the encoded luminosity like the Luminosity blend mode). Fitted on the
-/// photoshop corpus `photo-filter.psd`: rgb16 within 0.6/255 everywhere.
-pub fn photo_filter_matrix(color: [f32; 3], density: f32, normalize_y: bool) -> [[f32; 3]; 3] {
+/// Linear sRGB → its own D65 XYZ (IEC 61966-2-1, no chromatic adaptation).
+const SRGB_TO_XYZ_D65: [[f32; 3]; 3] = [[0.412_390_8, 0.357_584_3, 0.180_480_8], [0.212_639, 0.715_168_7, 0.072_192_3], [0.019_330_8, 0.119_194_8, 0.950_532_2]];
+/// The inverse of [`SRGB_TO_XYZ_D65`].
+const XYZ_D65_TO_SRGB: [[f32; 3]; 3] = [[3.240_97, -1.537_383_2, -0.498_610_8], [-0.969_243_6, 1.875_967_5, 0.041_555_1], [0.055_630_1, -0.203_977, 1.056_971_5]];
+
+/// Photo Filter's linear-light RGB matrix. Reference multiplies the pixel's XYZ, relative to
+/// white, by the filter colour's D50 XYZ relative to D50 (mixed in by `density`): a fixed linear
+/// map, so it is folded into one matrix. 8/16-bit documents scale D50 XYZ; 32-bit ones (`hdr`)
+/// scale sRGB's own D65 XYZ (no chromatic adaptation), and with `normalize_y` keep luminance Y
+/// (32-bit Preserve Luminosity; 8/16-bit documents instead restore the encoded luminosity like
+/// the Luminosity blend mode). Fitted on the Reference corpus `photo-filter.psd`: rgb16 within
+/// 0.6/255 everywhere; rgb32 the whole matrix within 0.0001 of the one its pixels give.
+pub fn photo_filter_matrix(color: [f32; 3], density: f32, normalize_y: bool, hdr: bool) -> [[f32; 3]; 3] {
     let d = if density.is_finite() { density.clamp(0.0, 1.0) } else { 0.0 };
-    let xyz = mat3_mul(&SRGB_TO_XYZ_D50, color.map(|v| srgb_to_linear(v.clamp(0.0, 1.0))));
+    let xyz = mat3_mul(&SRGB_TO_XYZ_D50, color.map(|v| srgb_to_linear(if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 })));
     let mut s: [f32; 3] = std::array::from_fn(|i| 1.0 - d + d * xyz[i] / D50[i]);
     if normalize_y && s[1] > 1e-6 {
         let y = s[1];
         s = s.map(|v| v / y);
     }
-    // XYZ_D50_TO_SRGB · diag(s) · SRGB_TO_XYZ_D50
-    std::array::from_fn(|r| std::array::from_fn(|c| (0..3).map(|k| XYZ_D50_TO_SRGB[r][k] * s[k] * SRGB_TO_XYZ_D50[k][c]).sum()))
+    let (to, from) = if hdr { (&SRGB_TO_XYZ_D65, &XYZ_D65_TO_SRGB) } else { (&SRGB_TO_XYZ_D50, &XYZ_D50_TO_SRGB) };
+    // from · diag(s) · to
+    std::array::from_fn(|r| std::array::from_fn(|c| (0..3).map(|k| from[r][k] * s[k] * to[k][c]).sum()))
 }
 
 /// Modern Brightness's base curve for `b` in [0, 100] (`x`, output in 0..=1): a line of slope
@@ -1688,6 +1703,31 @@ mod brightness_contrast_tests {
 mod tone_tests {
     use super::*;
     use photosplice_geom::Rect;
+
+    /// Corpus rgb32 hue-saturation-colorize.psd (hue 200, 40 %, +5): in a float document the
+    /// chroma also shrinks by 1 − l about the moved lightness; 16-bit keeps the HSL colour.
+    #[test]
+    fn float_colorize_shrinks_chroma_with_lightness() {
+        for (c, want) in [([0.4735; 3], [0.3099, 0.5632, 0.6898]), ([1.0, 0.0, 0.0], [0.3445, 0.5852, 0.7055])] {
+            let got = hue_saturation_in(c, 200.0, 0.4, 0.05, true, true);
+            assert!((0..3).all(|i| (got[i] - want[i]).abs() < 0.001), "{c:?}: {got:?}");
+        }
+        let got = hue_saturation_in([0.4735; 3], 200.0, 0.4, 0.05, true, false);
+        assert!((got[0] - 0.3).abs() < 0.001 && (got[2] - 0.7).abs() < 0.001, "{got:?}");
+    }
+
+    /// Corpus rgb32 photo-filter.psd (40 %, Preserve Luminosity): the matrix its pixels give,
+    /// scaled in sRGB's D65 XYZ (in D50 XYZ blue → red was 0.095, not 0.128).
+    #[test]
+    fn float_photo_filter_scales_d65_xyz() {
+        let m = photo_filter_matrix([0.966_445_6, 0.761_806_3, 0.0], 0.4, true, true);
+        let want = [[1.0284, 0.0371, 0.1279], [-0.0079, 0.9921, -0.0132], [-0.0045, -0.0306, 0.7533]];
+        for r in 0..3 {
+            for c in 0..3 {
+                assert!((m[r][c] - want[r][c]).abs() < 0.0006, "{m:?}");
+            }
+        }
+    }
 
     /// Corpus rgb32 hue-saturation.psd (hue +40, saturation +25, lightness −10): float documents
     /// keep channels outside 0..1; 8/16-bit clip.
