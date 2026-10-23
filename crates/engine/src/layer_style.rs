@@ -98,7 +98,7 @@ pub fn effect_defaults(kind: &str) -> Value {
         }
         "patternOverlay" => json!({"blend": "Normal", "opacity": 100, "pattern": "", "angle": 0, "scale": 100, "link": true}),
         "bevelEmboss" => {
-            json!({"style": "inner", "technique": "smooth", "depth": 100, "direction": "up", "size": 5, "soften": 0, "angle": 120, "useGlobalLight": true, "altitude": 30, "glossContour": "Linear", "glossAntiAlias": false, "contour": false, "contourName": "Linear", "contourRange": 50, "contourAntiAlias": false})
+            json!({"style": "inner", "technique": "smooth", "depth": 100, "direction": "up", "size": 5, "soften": 0, "angle": 120, "useGlobalLight": true, "altitude": 30, "glossContour": "Linear", "glossAntiAlias": false, "highlightMode": "Screen", "highlightColor": "#ffffff", "highlightOpacity": 75, "shadowMode": "Multiply", "shadowColor": "#000000", "shadowOpacity": 75, "contour": false, "contourName": "Linear", "contourRange": 50, "contourAntiAlias": false})
         }
         "satin" => {
             json!({"blend": "Multiply", "color": "#000000", "opacity": 50, "angle": 19, "distance": 11, "size": 14, "contour": "Linear", "antiAlias": true, "invert": true})
@@ -791,6 +791,18 @@ pub fn overlay_effect(fx: &mut Effect, p: &Value) {
             }
             set_contour(p, "glossContour", &mut bv.gloss_contour);
             set_bool(p, "glossAntiAlias", &mut bv.gloss_anti_alias);
+            // Shading: the highlight's and the shadow's mode, colour and opacity.
+            for (pre, c, color) in [("highlight", &mut bv.highlight, &mut bv.highlight_color), ("shadow", &mut bv.shadow, &mut bv.shadow_color)] {
+                if let Some(x) = p.get(format!("{pre}Mode")).and_then(Value::as_str).and_then(blend_from_str) {
+                    c.blend = x;
+                }
+                if let Some(x) = f_of(p, &format!("{pre}Opacity")) {
+                    c.opacity = (x / 100.0).clamp(0.0, 1.0);
+                }
+                if let Some(x) = color_of(p, &format!("{pre}Color")) {
+                    *color = x;
+                }
+            }
             // The Contour element: `contour` turns it on/off; its curve, Range and
             // Anti-aliased edit the element in place, so an imported curve survives.
             match b_of(p, "contour") {
@@ -805,16 +817,35 @@ pub fn overlay_effect(fx: &mut Effect, p: &Value) {
                 }
                 set_bool(p, "contourAntiAlias", &mut c.anti_alias);
             }
+            // The Texture element: `useTexture: false` turns it off; naming a pattern turns it on
+            // (or swaps the pattern); its Scale, Depth, Invert and Link edit it in place, so an
+            // imported texture keeps its other settings.
+            if b_of(p, "useTexture") == Some(false) {
+                bv.texture = None;
+            }
             if let Some(t) = p.get("texture").and_then(Value::as_str).filter(|t| !t.is_empty()) {
-                bv.texture = Some(photosplice_doc::BevelTexture {
-                    name: t.to_string(),
-                    id: t.to_string(),
-                    scale: (f(p, "textureScale", 100.0) / 100.0).clamp(0.01, 10.0),
-                    depth: (f(p, "textureDepth", 100.0) / 100.0).clamp(-10.0, 10.0),
-                    invert: b(p, "textureInvert", false),
-                    link: b(p, "textureLink", true),
+                let tex = bv.texture.get_or_insert_with(|| photosplice_doc::BevelTexture {
+                    name: String::new(),
+                    id: String::new(),
+                    scale: 1.0,
+                    depth: 1.0,
+                    invert: false,
+                    link: true,
                     phase: (0.0, 0.0),
                 });
+                if tex.id != t && tex.name != t {
+                    (tex.name, tex.id) = (t.to_string(), t.to_string());
+                }
+            }
+            if let Some(tex) = &mut bv.texture {
+                if let Some(x) = f_of(p, "textureScale") {
+                    tex.scale = (x / 100.0).clamp(0.01, 10.0);
+                }
+                if let Some(x) = f_of(p, "textureDepth") {
+                    tex.depth = (x / 100.0).clamp(-10.0, 10.0);
+                }
+                set_bool(p, "textureInvert", &mut tex.invert);
+                set_bool(p, "textureLink", &mut tex.link);
             }
         }
     }
@@ -1023,7 +1054,7 @@ pub fn specs() -> Vec<CommandSpec> {
         style_cmd!(
             "bevelEmboss",
             "Bevel & Emboss…",
-            r##"{"style":"inner|outer|emboss|pillow|stroke","technique":"smooth|chiselHard|chiselSoft","contour":bool,"contourName":name|curve,"contourRange":1..100=50,"contourAntiAlias":bool,"glossContour":name|curve,"glossAntiAlias":bool,"texture":pattern id|name?,"textureScale":1..1000=100,"textureDepth":-1000..1000=100,"textureInvert":bool,"textureLink":bool=true,"depth":1..1000=100,"direction":"up|down","size":px=5,"soften":px,"angle":deg,"altitude":deg,"add":bool}"##
+            r##"{"style":"inner|outer|emboss|pillow|stroke","technique":"smooth|chiselHard|chiselSoft","contour":bool,"contourName":name|curve,"contourRange":1..100=50,"contourAntiAlias":bool,"glossContour":name|curve,"glossAntiAlias":bool,"highlightMode":blend,"highlightColor":"#rrggbb","highlightOpacity":0..100=75,"shadowMode":blend,"shadowColor":"#rrggbb","shadowOpacity":0..100=75,"useTexture":bool,"texture":pattern id|name?,"textureScale":1..1000=100,"textureDepth":-1000..1000=100,"textureInvert":bool,"textureLink":bool=true,"depth":1..1000=100,"direction":"up|down","size":px=5,"soften":px,"angle":deg,"altitude":deg,"add":bool}"##
         ),
         style_cmd!(
             "satin",
@@ -1138,6 +1169,27 @@ mod tests {
         assert!((b.contour.as_ref().unwrap().range - 0.7).abs() < 1e-6);
         let t = b.texture.as_ref().unwrap();
         assert_eq!((t.name.as_str(), t.depth, t.invert), ("Bubbles", -2.0, true));
+    }
+
+    #[test]
+    fn bevel_command_sets_shading_and_edits_the_texture_in_place() {
+        let mut s = session();
+        s.execute("layer.layerStyle.bevelEmboss", json!({"highlightMode": "Overlay", "highlightColor": "#ff8000", "highlightOpacity": 40, "shadowMode": "Color Burn", "shadowColor": "#0000ff", "shadowOpacity": 90, "texture": "Bubbles", "textureScale": 50})).unwrap();
+        let fx = effects(&s);
+        let Effect::BevelEmboss(b) = &fx[0] else { panic!("{fx:?}") };
+        assert_eq!((b.highlight.blend, b.shadow.blend), (BlendMode::Overlay, BlendMode::ColorBurn));
+        assert!((b.highlight.opacity - 0.4).abs() < 1e-6 && (b.shadow.opacity - 0.9).abs() < 1e-6);
+        assert_eq!((b.highlight_color.to_rgba8(), b.shadow_color.to_rgba8()), ([255, 128, 0, 255], [0, 0, 255, 255]));
+        assert_eq!(b.texture.as_ref().map(|t| t.scale), Some(0.5));
+        // Over the loaded effect (the dialog's edits), Depth alone edits the texture in place,
+        // keeping its pattern and scale; `useTexture: false` turns it off.
+        let mut e = fx[0].clone();
+        overlay_effect(&mut e, &json!({"textureDepth": -150}));
+        let Effect::BevelEmboss(b) = &e else { panic!("{e:?}") };
+        let t = b.texture.as_ref().unwrap();
+        assert_eq!((t.name.as_str(), t.scale, t.depth), ("Bubbles", 0.5, -1.5));
+        overlay_effect(&mut e, &json!({"useTexture": false}));
+        assert!(matches!(&e, Effect::BevelEmboss(b) if b.texture.is_none()));
     }
 
     #[test]
