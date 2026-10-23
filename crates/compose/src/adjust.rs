@@ -900,9 +900,10 @@ const VIB_ROWS: [(f32, [f32; 31]); 5] = [
     ),
 ];
 
-/// Luminance weights of Vibrance's Saturation slider (linear light; fitted on the Photoshop
-/// corpus vibrance-0-±50.psd: within 0.8/255 at −50).
-const VIB_LUMA: [f32; 3] = [0.29, 0.71, 0.0];
+/// Luminance weights of Vibrance's Saturation slider (linear light; fitted on the Reference
+/// corpus vibrance-0-±50.psd together: every colour of both within a level; 0.29 / 0.71 left
+/// (255, 0, 88) at +50 three levels off).
+const VIB_LUMA: [f32; 3] = [0.287, 0.713, 0.0];
 
 /// The Vibrance factor over saturation `S` (`0..=1`, [`LUT_SIZE`] samples) for slider `vibrance`
 /// (−100..100), interpolated between the measured sliders. The CPU reads it with [`lut`]; the GPU

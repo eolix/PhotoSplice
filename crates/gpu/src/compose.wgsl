@@ -738,7 +738,7 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
                 let f = lut(0, 1.0 - mn / mx);
                 l = max(mx - (mx - l) * f, vec3(0.0));
             }
-            let y = 0.29 * l.r + 0.71 * l.g;
+            let y = 0.287 * l.r + 0.713 * l.g;
             l = y + (l - y) * p0.x;
             return clamp(vec3(t_encode(l.r, g), t_encode(l.g, g), t_encode(l.b, g)), vec3(0.0), vec3(1.0));
         }
