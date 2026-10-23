@@ -160,6 +160,20 @@ fn hue_saturation_lab_exact(lab: [f32; 3], adj: &Adjustment, eight: bool) -> [f3
     [big_l, a.min(127.0), b.min(127.0)]
 }
 
+/// Legacy Brightness/Contrast on L, sampled like [`ramp`]: brightness in levels, then contrast
+/// about level 127 with its slider in whole 8-bit steps, 255 / (255 − ⌊2.55 · c⌋) (Reference
+/// corpus lab8 brightness-contrast-legacy.psd, +25 / +30: 129 of 131 unclipped L codes exact,
+/// slope 255/179; the RGB rule's pivot 128 and 1 / 0.7 had 76 off).
+fn legacy_l_ramp(brightness: f32, contrast: f32) -> Vec<f32> {
+    const PIVOT: f32 = 127.0 / 255.0;
+    let b = if brightness.is_finite() { brightness / 255.0 } else { 0.0 };
+    let c = if contrast.is_finite() { contrast.clamp(-100.0, 99.0) } else { 0.0 };
+    let q = (2.55 * c.abs()).trunc();
+    let k = if c >= 0.0 { 255.0 / (255.0 - q) } else { (255.0 - q) / 255.0 };
+    let (pre, post) = if c >= 0.0 { (b, 0.0) } else { (0.0, b) };
+    (0..LUT_SIZE).map(|i| (((i as f32 / (LUT_SIZE - 1) as f32) + pre - PIVOT) * k + PIVOT + post).clamp(0.0, 1.0)).collect()
+}
+
 /// `adj`'s curve sampled on a gray ramp (the same function for every channel).
 fn ramp(adj: &Adjustment, transfer: Transfer, depth: photosplice_color::SampleType) -> Vec<f32> {
     let n = LUT_SIZE;
@@ -203,6 +217,7 @@ pub(crate) fn apply(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, dept
             let [l, a, b, _] = tone_luts_depth(adj, Some(depth));
             [l, a, b]
         }
+        Adjustment::BrightnessContrast { brightness, contrast, legacy: true } => [legacy_l_ramp(*brightness, *contrast), ident.clone(), ident],
         Adjustment::BrightnessContrast { .. } => [ramp(adj, transfer, depth), ident.clone(), ident],
         Adjustment::Threshold { .. } => [ident.clone(), ident.clone(), ident],
         _ => {
@@ -249,7 +264,15 @@ pub(crate) fn apply(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, dept
             }
             let l = srgb_to_lab([p[0], p[1], p[2]])[0] / 100.0;
             let t = if *reverse { 1.0 - l } else { l };
-            p[..3].copy_from_slice(&crate::adjust::gradient(stops, t.clamp(0.0, 1.0)));
+            let mut o = crate::adjust::gradient(stops, t.clamp(0.0, 1.0));
+            if depth == photosplice_color::SampleType::U8 {
+                // An 8-bit document cuts the gradient's L, a* and b* to whole codes (Reference
+                // corpus lab8/gradient-map.psd: b* 40.6 gives 40).
+                let lab = srgb_to_lab(o);
+                let cut = |v: f32, scale: f32| (v * scale + 1e-3).floor() / scale;
+                o = lab_to_srgb_unclamped([cut(lab[0], 2.55), cut(lab[1], 1.0), cut(lab[2], 1.0)]);
+            }
+            p[..3].copy_from_slice(&o);
         }
         return;
     }
@@ -258,6 +281,10 @@ pub(crate) fn apply(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, dept
     // to −a* − 1 at 8 bits and to −a* at 16 (Reference corpus lab8 / lab16 invert.psd).
     // Posterize still steps on the 8-bit scale at 16 bits (lab16 posterize-4.psd).
     let ab_span = if matches!(adj, Adjustment::Invert) && depth != photosplice_color::SampleType::U8 { 256.0 } else { 255.0 };
+    // 16-bit Posterize steps on the 8-bit scale but lands on 16-bit levels: neutral a* goes to
+    // 2/3 of 256 − 128 = 42.67, not 42, and the top level is 127 (lab16 posterize-4.psd).
+    let out_span = if matches!(adj, Adjustment::Posterize { .. }) && depth != photosplice_color::SampleType::U8 { 256.0 } else { ab_span };
+    let top = if out_span != ab_span { 127.0 } else { f32::MAX };
     let threshold = match adj {
         Adjustment::Threshold { level } => Some((level * 255.0).round()),
         _ => None,
@@ -273,7 +300,8 @@ pub(crate) fn apply(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, dept
             Some(t) => [if (n[0] * 255.0).round() >= t { 1.0 } else { 0.0 }, 128.0 / 255.0, 128.0 / 255.0],
             None => std::array::from_fn(|i| lut(&luts[i], n[i])),
         };
-        let rgb = lab_to_srgb_unclamped([o[0] * 100.0, o[1] * ab_span - 128.0, o[2] * ab_span - 128.0]);
+        let ab = |v: f32| (v * out_span - 128.0).min(top);
+        let rgb = lab_to_srgb_unclamped([o[0] * 100.0, ab(o[1]), ab(o[2])]);
         p[..3].copy_from_slice(&rgb);
     }
 }
@@ -389,6 +417,47 @@ mod tests {
         let out = run_lab(&range(0, 30.0, 0.0), [50.0, a, b]);
         let (h, r) = square_hue(out[1], out[2]);
         assert!((h - 344.03).abs() < 0.05 && (r - 40.0).abs() < 0.05, "{h} {r}");
+    }
+
+    fn run_at(adj: &Adjustment, lab: [f32; 3], depth: photosplice_color::SampleType) -> [f32; 3] {
+        let mut b = one(lab_to_srgb_unclamped(lab));
+        apply(adj, &mut b, Transfer::Srgb, depth);
+        srgb_to_lab([b.px[0][0], b.px[0][1], b.px[0][2]])
+    }
+
+    /// Reference corpus lab8 brightness-contrast-legacy.psd (+25, +30): L code 139 → 180 and
+    /// 15 → 3, contrast pivoting at 127 with slope 255/179.
+    #[test]
+    fn legacy_brightness_contrast_on_l_pivots_at_127() {
+        let adj = Adjustment::BrightnessContrast { brightness: 25.0, contrast: 30.0, legacy: true };
+        for (code, want) in [(139.0, 180.0), (15.0, 3.0), (21.0, 12.0)] {
+            let out = run_at(&adj, [code / 2.55, 10.0, -20.0], photosplice_color::SampleType::U8);
+            assert!(((out[0] * 2.55).round() - want).abs() < 0.5, "{code}: {out:?}");
+            assert!((out[1] - 10.0).abs() < 0.05 && (out[2] + 20.0).abs() < 0.05, "{out:?}");
+        }
+    }
+
+    /// Reference corpus lab16 posterize-4.psd: neutral a*, b* land on 2/3 of the 16-bit scale,
+    /// and the top level is 127.
+    #[test]
+    fn posterize_16_bit_lands_on_16_bit_levels() {
+        let p4 = Adjustment::Posterize { levels: 4 };
+        near3(run_at(&p4, [0.0, 0.0, 0.0], photosplice_color::SampleType::U16), [0.0, 42.67, 42.67], 0.05);
+        near3(run_at(&p4, [33.33, 68.0, -112.0], photosplice_color::SampleType::U16), [33.33, 127.0, -128.0], 0.05);
+        // 8-bit keeps its own levels.
+        near3(run_at(&p4, [0.0, 0.0, 0.0], photosplice_color::SampleType::U8), [0.0, 42.0, 42.0], 0.05);
+    }
+
+    /// Reference corpus lab8/gradient-map.psd: an 8-bit document cuts the gradient colour to
+    /// whole codes (b* 40.6 → 40).
+    #[test]
+    fn gradient_map_8_bit_cuts_to_whole_codes() {
+        let c = lab_to_srgb_unclamped([54.9, 60.2, 40.6]);
+        let gm = Adjustment::GradientMap { stops: vec![(0.0, c), (1.0, c)], reverse: false, dither: false, ink_stops: Vec::new() };
+        let out = run_at(&gm, [50.0, 0.0, 0.0], photosplice_color::SampleType::U8);
+        near3(out, [(54.9f32 * 2.55).floor() / 2.55, 60.0, 40.0], 0.05);
+        let out = run_at(&gm, [50.0, 0.0, 0.0], photosplice_color::SampleType::U16);
+        near3(out, [54.9, 60.2, 40.6], 0.05);
     }
 
     /// A Lab document keeps colours outside sRGB through its composite, so Invert flips the
