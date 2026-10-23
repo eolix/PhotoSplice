@@ -11,6 +11,7 @@
 //! Photoshop editing data. [`raster_pdf`] writes pages of flattened JPEG images (prints, contact
 //! sheets, artboards).
 
+mod annots;
 pub mod export;
 mod gradient;
 mod images;

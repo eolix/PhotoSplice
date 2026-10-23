@@ -119,7 +119,7 @@ fn array_ids(a: &Array<'_>) -> Vec<Id> {
 /// A PDF text string: UTF-16BE or UTF-8 with a byte-order mark (and UTF-16LE, which some
 /// writers use though the standard doesn't allow it), else PDFDocEncoding (taken as Latin-1,
 /// which it matches for letters). Trailing NULs, which some writers add, are dropped.
-fn text_string(b: &[u8]) -> String {
+pub(super) fn text_string(b: &[u8]) -> String {
     let s = if let Some(rest) = b.strip_prefix(&[0xFE, 0xFF]) {
         String::from_utf16_lossy(&rest.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect::<Vec<_>>())
     } else if let Some(rest) = b.strip_prefix(&[0xFF, 0xFE]) {

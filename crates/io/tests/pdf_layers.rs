@@ -1238,6 +1238,45 @@ fn a_pdfs_images_open_at_their_own_size() {
     assert!(open_image("x.pdf", b"garbage", "", 0).is_err());
 }
 
+/// Annotations: each comment and form field a layer of its own named for it, in an
+/// "Annotations" and a "Form Fields" group above the page; hidden ones left out; a text field's
+/// value with no appearance (NeedAppearances) drawn from its value, as a type layer.
+#[test]
+fn annotations_and_form_fields_open_as_their_own_layers() {
+    let ap = "1 0 0 rg 0 0 40 20 re f";
+    let extra = [
+        // 6: a rectangle comment with its appearance and text.
+        "<< /Type /Annot /Subtype /Square /Rect [100 50 140 70] /Contents (Check this) /AP << /N 7 0 R >> >>".to_string(),
+        format!("<< /Type /XObject /Subtype /Form /BBox [0 0 40 20] /Length {} >>\nstream\n{ap}\nendstream", ap.len()),
+        // 8: a text field with a value and no appearance.
+        "<< /Type /Annot /Subtype /Widget /FT /Tx /T (Name) /V (Ann) /DA (/F1 10 Tf 0 g) /Rect [10 10 90 30] >>".to_string(),
+        // 9: a hidden note.
+        "<< /Type /Annot /Subtype /Square /F 2 /Rect [0 0 20 20] /AP << /N 7 0 R >> >>".to_string(),
+    ];
+    let bytes = pdf_full(
+        "/AcroForm << /Fields [8 0 R] /NeedAppearances true /DR << /Font << /F1 5 0 R >> >> >>",
+        "/Annots [6 0 R 8 0 R 9 0 R]",
+        "0 0 1 rg 0 80 50 20 re f",
+        "",
+        &extra,
+    );
+    let d = open(&bytes);
+    assert_eq!(d.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["Shape", "Annotations", "Form Fields"], "{:?}", kinds(&d));
+    let children = |i: usize| match &d.layers[i].content {
+        LayerContent::Group(g) => g.children.iter().map(|l| l.name.clone()).collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    assert_eq!(children(1), ["Rectangle: Check this"], "the hidden one left out");
+    assert_eq!(children(2), ["Name"]);
+    let LayerContent::Group(g) = &d.layers[2].content else { unreachable!() };
+    let LayerContent::Text(t) = &g.children[0].content else { panic!("the field's value is type: {:?}", kinds(&d)) };
+    assert_eq!(t.text, "Ann");
+    // The comment draws where its rectangle is: red at (120, 40) in the 200 × 100 image.
+    let px = photosplice_compose::flatten(&d);
+    let p = px.px[40 * 200 + 120];
+    assert!(p[0] > 0.9 && p[2] < 0.1 && p[3] > 0.99, "{p:?}");
+}
+
 /// Opens the Reference's own PDFs from the verification kit (`$PHOTOSPLICE_PDF_KIT_OUT`, the
 /// kit's `out/`): each `ps-*-editing.pdf` against the Reference's PSD of the same document, each
 /// `ps-*-page.pdf` (no editing data) against its flat TIFF.

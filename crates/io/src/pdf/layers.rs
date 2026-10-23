@@ -152,8 +152,46 @@ fn stack(page: &Page<'_>, place: &super::Placement, dpi: f32, fmt: PixelFormat, 
     let mut crop = place.clip.to_path(0.1);
     crop.apply_affine(transform);
     builder.push_clip_path(&ClipPath { path: crop, fill: PdfFillRule::NonZero });
-    let mut ctx = Context::new(transform, kurbo::Rect::new(0.0, 0.0, f64::from(w), f64::from(h)), &cache.interpreter_cache, page.xref(), InterpreterSettings::default());
+    let bbox = kurbo::Rect::new(0.0, 0.0, f64::from(w), f64::from(h));
+    // The annotations are drawn after the page, each on its own (`annotations`).
+    let settings = || InterpreterSettings { render_annotations: false, ..InterpreterSettings::default() };
+    let mut ctx = Context::new(transform, bbox, &cache.interpreter_cache, page.xref(), settings());
     interpret_page(page, &mut ctx, &mut builder);
+    // Each annotation as a layer of its own (a group when it draws several), named for it, in
+    // an "Annotations" and a "Form Fields" group above the page (see `super::annots`).
+    let (mut comments, mut fields) = (Vec::new(), Vec::new());
+    for a in super::annots::appearances(page) {
+        let depth = builder.begin_isolated();
+        let to_page = transform * a.transform;
+        let mut clip = a.bbox.to_path(0.1);
+        clip.apply_affine(to_page);
+        builder.push_clip_path(&ClipPath { path: clip, fill: PdfFillRule::NonZero });
+        let data: std::borrow::Cow<'_, [u8]> = match &a.content {
+            super::annots::Content::Stream(st) => st.decoded().unwrap_or_default(),
+            super::annots::Content::Made(v) => std::borrow::Cow::Borrowed(v.as_slice()),
+        };
+        let resources = a.resources.clone().map(hayro::hayro_syntax::page::Resources::new).unwrap_or_else(|| page.resources().clone());
+        let mut actx = Context::new(to_page, bbox, &cache.interpreter_cache, page.xref(), settings());
+        hayro::hayro_interpret::interpret(hayro::hayro_syntax::content::TypedIter::new(&data), &resources, &mut actx, &mut builder);
+        builder.pop_clip();
+        let layer = match <[Layer; 1]>::try_from(builder.end_isolated(depth)) {
+            Ok([mut one]) => {
+                one.name = a.name;
+                one
+            }
+            Err(v) if v.is_empty() => continue,
+            Err(v) => Layer::group(a.name, v),
+        };
+        match a.kind {
+            super::annots::Kind::Comment => comments.push(layer),
+            super::annots::Kind::Field => fields.push(layer),
+        }
+    }
+    for (name, group) in [("Annotations", comments), ("Form Fields", fields)] {
+        if !group.is_empty() {
+            builder.push_layer(Layer::group(name, group));
+        }
+    }
     builder.pop_clip();
     builder.finish()
 }
@@ -391,6 +429,25 @@ impl<'g> LayerBuilder<'g> {
 
     fn bounds(&self) -> Rect {
         Rect::new(0, 0, self.w as i32, self.h as i32)
+    }
+
+    /// Starts collecting what is drawn next apart from the stack; [`Self::end_isolated`] with
+    /// the depth this returns hands it back.
+    fn begin_isolated(&mut self) -> usize {
+        self.flush_all();
+        self.frames.push(Frame { layers: Vec::new(), group: None, mask: None });
+        self.frames.len()
+    }
+
+    fn end_isolated(&mut self, depth: usize) -> Vec<Layer> {
+        self.flush_all();
+        while self.frames.len() > depth {
+            self.close_frame();
+        }
+        if self.frames.len() < depth || self.frames.len() < 2 {
+            return Vec::new();
+        }
+        self.frames.pop().map(|f| f.layers).unwrap_or_default()
     }
 
     fn push_layer(&mut self, layer: Layer) {
