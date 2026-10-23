@@ -1327,3 +1327,24 @@ fn probe_strokes() {
         }
     }
 }
+
+#[test]
+fn outlined_text_is_a_type_layer_with_a_stroke() {
+    use photosplice_doc::Effect;
+    // Mode 2: filled red, outlined blue at 2 pt. Mode 1: an outline only, 1 pt green.
+    let content = "BT /F1 30 Tf 2 Tr 1 0 0 rg 0 0 1 RG 2 w 10 55 Td (Fill) Tj ET BT /F1 30 Tf 1 Tr 0 1 0 RG 1 w 110 55 Td (Line) Tj ET";
+    let bytes = pdf(content, "", &[]);
+    let d = open(&bytes);
+    assert_eq!(kinds(&d), ["text", "text"], "type, not pixels");
+    let stroke = |i: usize| match d.layers[i].effects.items.as_slice() {
+        [Effect::Stroke(s)] => (s.size, s.paint.clone(), d.layers[i].fill_opacity),
+        other => panic!("{other:?}"),
+    };
+    let (w, paint, fill) = stroke(0);
+    assert_eq!((w, fill), (2.0, 1.0));
+    assert_eq!(paint, photosplice_doc::effects::FxPaint::Color(photosplice_color::Color::rgb(0.0, 0.0, 1.0)));
+    let (w, _, fill) = stroke(1);
+    assert_eq!((w, fill), (1.0, 0.0), "an outline only: the glyphs themselves don't show");
+    let diff = looks_like_the_page(&bytes);
+    assert!(diff < 0.02, "{diff}");
+}

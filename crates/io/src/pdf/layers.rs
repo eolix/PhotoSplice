@@ -189,6 +189,14 @@ struct TextAcc {
     clip: Option<u64>,
     /// Where the runs' glyphs reach, unclipped (document pixels).
     ink: Option<kurbo::Rect>,
+    /// The glyphs are filled (PDF text render modes 0 and 2); `false`: outline only (mode 1).
+    filled: bool,
+    /// The outline's width (document pixels) and colour: a Stroke effect, centred.
+    stroke: Option<(f32, Color)>,
+    /// The last run added (glyph count, first glyph's origin), and how many runs there are: the
+    /// stroke of a run that was just filled (mode 2) outlines it.
+    last: (usize, kurbo::Point),
+    runs: usize,
 }
 
 /// How a glyph run joins the text layer being built.
@@ -496,6 +504,19 @@ impl<'g> LayerBuilder<'g> {
         // The glyphs' own extent: the cache was drawn clipped, so its bounds can't tell.
         let content = t.ink.map(|r| Rect::new(r.x0.floor() as i32, r.y0.floor() as i32, r.x1.ceil() as i32, r.y1.ceil() as i32));
         let mut l = Layer::new(if name.trim().is_empty() { "Text".to_string() } else { name }, LayerContent::Text(layer));
+        if let Some((width, c)) = t.stroke {
+            l.effects.items.push(photosplice_doc::Effect::Stroke(photosplice_doc::effects::StrokeFx {
+                common: photosplice_doc::effects::FxCommon::new(BlendMode::Normal, c.alpha),
+                size: width,
+                position: photosplice_doc::effects::StrokePosition::Center,
+                paint: photosplice_doc::effects::FxPaint::Color(Color { alpha: 1.0, ..c }),
+            }));
+            l.effects.enabled = true;
+            // Outline only: the glyphs give the effect its shape and don't show themselves.
+            if !t.filled {
+                l.fill_opacity = 0.0;
+            }
+        }
         l.vector_mask = if t.clip.is_some() { self.vector_mask_for(content) } else { None };
         self.push_layer(l);
     }
@@ -660,7 +681,9 @@ impl<'g> LayerBuilder<'g> {
         }
     }
 
-    fn add_text<'a>(&mut self, run: &GlyphRun<'_, 'a>, props: &DrawProps<'a>, mode: &DrawMode, color: [u8; 4]) {
+    /// Adds a filled run of type (`outline`: an outline-only run, its width and colour, drawn
+    /// filled into the pixels a Stroke effect outlines).
+    fn add_text<'a>(&mut self, run: &GlyphRun<'_, 'a>, props: &DrawProps<'a>, mode: &DrawMode, color: [u8; 4], outline: Option<(f32, Color)>) {
         let glyphs = run.glyphs();
         let Some(first) = glyphs.first() else { return };
         let Glyph::Outline(fo) = &**first else { return };
@@ -696,7 +719,13 @@ impl<'g> LayerBuilder<'g> {
         self.flush_segment();
         // Continue the line, start the paragraph's next line, or start a new layer.
         let join = self.text.as_ref().map_or(Join::New, |t| {
-            let like = same_style(&t.style, &style, font_key) && (t.size_px - size_px).abs() < 0.02 * size_px && (t.angle - angle).abs() < 0.01 && t.clip == clip;
+            // An outlined layer takes no more runs: the next may not be outlined alike.
+            let like = same_style(&t.style, &style, font_key)
+                && (t.size_px - size_px).abs() < 0.02 * size_px
+                && (t.angle - angle).abs() < 0.01
+                && t.clip == clip
+                && t.stroke.is_none()
+                && outline.is_none();
             let d = origin - kurbo::Point::new(t.line.x, t.line.y);
             let (along, across) = (d.dot(u), d.dot(n));
             let left = (origin - kurbo::Point::new(t.origin.x, t.origin.y)).dot(u);
@@ -775,6 +804,10 @@ impl<'g> LayerBuilder<'g> {
             cache: Surface::new(self.fmt),
             clip,
             ink: None,
+            filled: outline.is_none(),
+            stroke: outline,
+            last: (0, kurbo::Point::ZERO),
+            runs: 0,
         });
         acc.text.push_str(&text);
         acc.end = end;
@@ -783,6 +816,34 @@ impl<'g> LayerBuilder<'g> {
         }
         if let Some((rect, rgba)) = pixels {
             over(&mut acc.cache, rect, &rgba);
+        }
+        acc.last = run_key(run, props);
+        acc.runs += 1;
+    }
+
+    /// The stroke of a run of type: the outline of the run just filled (render mode 2), or an
+    /// outline-only run (mode 1), as a Stroke effect on its type layer. `false`, having done
+    /// nothing, when it can't be (the run joined a line of runs that aren't all outlined).
+    fn stroke_text<'a>(&mut self, run: &GlyphRun<'_, 'a>, props: &DrawProps<'a>, sp: &StrokeProps, color: [u8; 4]) -> bool {
+        let k = props.transform.determinant().abs().sqrt();
+        let width = (f64::from(sp.line_width) * k).max(1.0) as f32;
+        let c = Color::rgba(f32::from(color[0]) / 255.0, f32::from(color[1]) / 255.0, f32::from(color[2]) / 255.0, f32::from(color[3]) / 255.0);
+        let key = run_key(run, props);
+        match self.text.as_mut() {
+            // Mode 2: the run this layer just took.
+            Some(t) if t.last == key => {
+                if t.runs == 1 && t.filled && t.stroke.is_none() {
+                    t.stroke = Some((width, c));
+                    true
+                } else {
+                    false
+                }
+            }
+            // Mode 1: an outline only.
+            _ => {
+                self.add_text(run, props, &DrawMode::Fill(PdfFillRule::NonZero), [color[0], color[1], color[2], 255], Some((width, c)));
+                true
+            }
         }
     }
 
@@ -922,13 +983,14 @@ impl<'a> Device<'a> for LayerBuilder<'_> {
         let editable = self.raster_groups == 0
             && !self.full()
             && props.soft_mask.is_none()
-            && matches!(draw_mode, DrawMode::Fill(_))
+            && matches!(draw_mode, DrawMode::Fill(_) | DrawMode::Stroke(_))
             && glyph_run.glyphs().iter().all(|g| matches!(&**g, Glyph::Outline(_)));
-        match &props.paint {
-            Paint::Color(c) if editable => {
+        match (&props.paint, draw_mode) {
+            (Paint::Color(c), DrawMode::Fill(_)) if editable => {
                 let color = c.to_rgba().to_rgba8();
-                self.add_text(glyph_run, &props, draw_mode, color);
+                self.add_text(glyph_run, &props, draw_mode, color, None);
             }
+            (Paint::Color(c), DrawMode::Stroke(sp)) if editable && self.stroke_text(glyph_run, &props, sp, c.to_rgba().to_rgba8()) => {}
             _ if matches!(draw_mode, DrawMode::Invisible) => {}
             _ => {
                 let why = match self.fallback_why(&props.paint, props.soft_mask.is_some(), "text") {
@@ -1014,6 +1076,14 @@ impl<'a> Device<'a> for LayerBuilder<'_> {
         }
         self.close_frame();
     }
+}
+
+/// A run's identity for telling its stroke from another run's: its glyph count and where its
+/// first glyph sits (document pixels).
+fn run_key(run: &GlyphRun<'_, '_>, props: &DrawProps<'_>) -> (usize, kurbo::Point) {
+    let glyphs = run.glyphs();
+    let origin = glyphs.first().map_or(kurbo::Point::ZERO, |g| (props.transform * g.transform()) * kurbo::Point::ZERO);
+    (glyphs.len(), kurbo::Point::new((origin.x * 100.0).round() / 100.0, (origin.y * 100.0).round() / 100.0))
 }
 
 /// Whether `path` is a rectangle (straight, axis-aligned edges) containing `area`: a clip that
