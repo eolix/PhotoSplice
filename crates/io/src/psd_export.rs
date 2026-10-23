@@ -2109,6 +2109,18 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32, c
     // composite (storytold/photocraft@cf83e058).
     let space = photosplice_compose::cmyk_space(doc);
     photosplice_color::convert::with_cmyk_space(space.as_ref(), || ex.emit(&doc.layers, &mut tick));
+    // A document read from a flat PSD (no layer records) that is still only its Background goes
+    // back the same way, the image in the merged data alone (psd-tools 0layers.psd, slices.psd:
+    // they went out with a layer added). Reference writes both forms (its CC 2017 1layer2.psd
+    // keeps the Background as a record), so each file keeps its own.
+    if let ([l], [rec]) = (doc.layers.as_slice(), ex.records.as_slice())
+        && doc.metadata.psd_flat
+        && ex.background == Some(l.id)
+        && l.visible
+        && rec.channels.iter().all(|c| c.id >= 0)
+    {
+        ex.records.clear();
+    }
 
     // Without Maximize Compatibility the merged image is a white placeholder and the composite
     // isn't rendered at all. A document without layer records keeps the real image: its pixels
@@ -2236,9 +2248,9 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32, c
             continue;
         }
         // A kept layer block (one the import could not read, #2700) describes layers the
-        // document doesn't have. The document's own layers are written below, and a file holds
-        // one layer list: a second `Lr16`/`Lr32` would contradict it.
-        if !ex.records.is_empty() && matches!(key, b"Lr16" | b"Lr32" | b"Layr") {
+        // document doesn't have. The document's own layers are written below (none for a lone
+        // Background), and a file holds one layer list: a second `Lr16`/`Lr32` would contradict it.
+        if matches!(key, b"Lr16" | b"Lr32" | b"Layr") {
             continue;
         }
         // Txt2 overrides the type layers in Photoshop: updated for edits, else dropped (rebuilt).
@@ -2431,9 +2443,9 @@ mod tests {
         assert!(document_to_psd(&unlocked).layer_info.unwrap().layers[0].channels.iter().any(|c| c.id == -1));
     }
 
-    /// A flat 1-bit Bitmap file (no layers) opens in Photoshop as its Background; so does it in
-    /// PhotoSplice. In its own mode it goes back flat; written as layers (no native modes), the
-    /// layer is a Background (no transparency channel).
+    /// A flat 1-bit Bitmap file (no layers) opens in Reference as its Background; so does it in
+    /// PhotoSplice, and it goes back flat, in its own mode or (no native modes) as Grayscale: a
+    /// document that is only its Background has no layer records, as Reference writes it.
     #[test]
     fn a_flat_bitmap_file_opens_and_saves_as_a_background() {
         let file = photosplice_psd::testgen::merged_only(Version::Psd, PsdMode::Bitmap, 1, Compression::Raw, 8, 4);
@@ -2442,11 +2454,29 @@ mod tests {
         assert!(bg.name == "Background" && bg.locks.transparency && bg.locks.position, "{:?}", bg.locks);
         for native_modes in [true, false] {
             let out = document_to_psd_with(&doc, &PsdExportOptions { native_modes, ..Default::default() }).0;
-            match out.layer_info {
-                Some(info) => assert!(info.layers[0].channels.iter().all(|c| c.id >= 0)),
-                None => assert!(native_modes, "written as layers without native modes"),
-            }
+            assert!(out.layer_info.is_none(), "flat (native modes: {native_modes})");
+            let back = crate::import("flat.psd", &out.to_bytes().unwrap()).unwrap().document;
+            assert!(back.layers.len() == 1 && back.layers[0].locks.transparency, "opens as its Background again");
         }
+    }
+
+    /// A flat PSD (no layer records) goes back flat while it is still only its Background, as
+    /// Reference wrote it; a layer added makes it layered, and a new document's Background is a
+    /// record (Reference writes both forms: psd-tools slices.psd flat, 1layer2.psd a record).
+    #[test]
+    fn a_flat_file_keeps_its_form() {
+        let file = photosplice_psd::testgen::merged_only(Version::Psd, PsdMode::Rgb, 8, Compression::Raw, 8, 6);
+        let doc = crate::import("flat.psd", &file.to_bytes().unwrap()).unwrap().document;
+        assert!(doc.metadata.psd_flat && doc.layers.len() == 1);
+        let out = document_to_psd(&doc);
+        assert!(out.layer_info.is_none() && out.layer_info_placement == LayerInfoPlacement::Section, "flat again");
+        let back = crate::import("flat.psd", &out.to_bytes().unwrap()).unwrap().document;
+        assert_eq!(back.layers[0].surface().unwrap().read_region(back.bounds()), doc.layers[0].surface().unwrap().read_region(doc.bounds()));
+        let mut layered = doc.clone();
+        layered.layers.push(Layer::raster("Layer 1", layered.pixel_format()));
+        assert_eq!(document_to_psd(&layered).layers().len(), 2);
+        let fresh = Document::with_background("new", photosplice_geom::Size::new(8, 6), ColorMode::Rgb, SampleType::U8, photosplice_doc::Color::WHITE);
+        assert_eq!(document_to_psd(&fresh).layers().len(), 1, "a new document's Background is a record");
     }
 
     #[test]
@@ -2507,8 +2537,9 @@ mod tests {
         let saved = PsdFile::from_bytes(&document_to_psd(&imported.document).to_bytes().unwrap()).unwrap();
         let ours = matches!(saved.layer_info_placement, LayerInfoPlacement::GlobalBlock { key, .. } if key == *b"Lr16");
         let kept = saved.global_blocks.iter().filter(|b| b.key == *b"Lr16").count();
-        assert_eq!((ours, kept), (true, 0), "exactly one Lr16 block: the document's own layers");
-        assert_eq!(saved.layers().len(), 1);
+        // Only the Background: written flat, so no Lr16 at all, and the broken one isn't kept.
+        assert_eq!((ours, kept), (false, 0), "the unreadable Lr16 is not saved again");
+        assert!(saved.layers().is_empty());
     }
 
     #[test]

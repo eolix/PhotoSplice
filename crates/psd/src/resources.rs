@@ -283,6 +283,19 @@ pub fn unicode_names(data: &[u8]) -> Vec<String> {
     out
 }
 
+/// The names in a 1006 resource (Pascal strings: a length byte, then the bytes, read as Latin-1).
+/// Stops at the first entry that runs past the data.
+pub fn pascal_names(data: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while let Some(&len) = data.get(at) {
+        let Some(b) = data.get(at + 1..at + 1 + usize::from(len)) else { break };
+        out.push(b.iter().map(|&c| char::from(c)).collect());
+        at += 1 + usize::from(len);
+    }
+    out
+}
+
 /// Builds the data for a 1057 version info resource, with the writer and reader names a current
 /// Photoshop writes (no NUL terminator). The reader names the oldest version the file is meant
 /// for: Photoshop asks to "update" the type layers of a file whose reader is older than its own
