@@ -1760,7 +1760,9 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photospli
             (7, p, Some(adjust::tone_luts_depth(adj, Some(depth)).iter().take(3).map(|t| to_row(t)).collect()))
         }
         Adjustment::HueSaturation { hue, saturation, lightness, colorize, ranges } => {
-            p[0] = [*hue, saturation / 100.0, lightness / 100.0, if *colorize { 1.0 } else { 0.0 }];
+            // 8-bit Colorize colours with Reference's own hue (compose::adjust::colorize_hue_8bit).
+            let hue = if *colorize && depth == photosplice_color::SampleType::U8 { adjust::colorize_hue_8bit(*hue) } else { *hue };
+            p[0] = [hue, saturation / 100.0, lightness / 100.0, if *colorize { 1.0 } else { 0.0 }];
             // 32-bit documents don't hold the smallest channel at 0 (compose::adjust::hue_saturation_in).
             p[1][1] = if depth == photosplice_color::SampleType::F32 { 1.0 } else { 0.0 };
             if !*colorize && ranges.iter().any(|r| !r.is_neutral()) {

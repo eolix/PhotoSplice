@@ -155,7 +155,8 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
                 };
                 if *colorize {
                     let s = (*saturation / 100.0).clamp(-1.0, 1.0);
-                    return hue_saturation_in(c, *hue + dh, s, (*lightness / 100.0 + dl).clamp(-1.0, 1.0), true, depth == Some(SampleType::F32));
+                    let h = if depth == Some(SampleType::U8) { colorize_hue_8bit(*hue) } else { *hue };
+                    return hue_saturation_in(c, h + dh, s, (*lightness / 100.0 + dl).clamp(-1.0, 1.0), true, depth == Some(SampleType::F32));
                 }
                 // The master's saturation factor times the ranges' (Reference 16-bit master ±50 %
                 // with Reds ∓50 %: unchanged in the core; adding the sliders was 31/255 off).
@@ -692,6 +693,53 @@ pub fn master_and_range_saturation(master: f32, range_excess: f32) -> f32 {
 pub fn saturation_of_excess(e: f32) -> f32 {
     if e > 0.0 { 1.0 - 1.0 / (1.0 + e) } else { e.max(-1.0) }
 }
+
+/// The hue an 8-bit document's Colorize colours with: Reference's own falls a little off the one
+/// set, by an amount fixed for each whole degree (the same at every saturation and lightness,
+/// jumping between neighbouring degrees, up to 3° at 170) and none at 16 or 32 bits. Measured
+/// in Reference at every degree on a grey ramp (temp kit 7: with the shift, every grey of every
+/// hue within a level; without it up to 4.7 levels off). Fractional hues take the nearest degree.
+pub fn colorize_hue_8bit(hue: f32) -> f32 {
+    let at = if hue.is_finite() { hue.round().rem_euclid(360.0) as usize } else { 0 };
+    hue + COLORIZE_8BIT_HUE_SHIFT.get(at).copied().unwrap_or(0.0)
+}
+
+/// [`colorize_hue_8bit`]'s shift in degrees for each whole hue 0..359 (measured: a -3.14 there is
+/// not π).
+#[rustfmt::skip]
+#[allow(clippy::approx_constant)]
+const COLORIZE_8BIT_HUE_SHIFT: [f32; 360] = [
+    0.40, -1.40, 0.04, 0.56, -0.44, 0.38, 0.78, -0.22, 0.44, 0.80, 1.56, 0.56,
+    0.86, 1.22, 0.22, 0.60, 1.04, 1.06, 0.06, 0.70, 1.02, 0.02, 0.46, 0.48,
+    0.80, -0.20, 0.10, 0.44, -0.56, -0.36, 0.00, 0.30, -0.70, -0.38, -0.38, -1.38,
+    -1.08, -0.72, -0.34, -1.34, -1.18, -0.88, -1.88, -1.24, -0.76, -0.76, -1.76, -1.56,
+    -1.14, -2.14, -1.72, -1.14, -2.14, -1.72, -1.32, -0.58, -1.58, -1.32, -0.36, -1.36,
+    0.00, -1.00, 0.36, -0.64, 0.32, 0.58, -0.42, 0.32, 0.72, 1.14, 0.14, 0.72,
+    1.14, 0.14, 0.56, 0.76, 0.76, -0.24, 0.24, 0.88, -0.12, 0.18, 0.34, 0.72,
+    -0.28, 0.08, 0.38, -0.62, -0.62, -0.30, -0.00, -1.00, -0.64, -0.44, -1.44, -1.10,
+    -0.80, -1.80, -1.48, -1.46, -1.02, -2.02, -1.70, -1.06, -2.06, -2.04, -1.60, -1.22,
+    -2.22, -1.86, -1.56, -2.56, -1.80, -1.44, -0.78, -1.78, -1.38, -0.56, -1.56, -1.04,
+    -0.40, -1.40, -2.40, -0.96, -0.44, -1.44, -0.62, -0.22, 0.44, -0.56, -0.20, 0.56,
+    -0.44, -0.14, 0.22, 0.60, -0.40, 0.04, 0.06, -0.94, -0.30, 0.02, -0.98, -0.54,
+    -0.52, -0.20, -1.20, -0.90, -0.56, -1.56, -1.36, -1.00, -0.70, -1.70, -1.38, -1.38,
+    -2.38, -2.08, -1.72, -1.34, -2.34, -2.18, -1.88, -2.88, -2.24, -1.76, -1.76, -2.76,
+    -2.56, -2.14, -3.14, -2.72, -2.14, -1.72, -2.72, -2.32, -1.58, -2.58, -2.32, -1.36,
+    0.00, -1.00, 0.36, 1.32, 0.32, 0.58, 1.30, 0.30, 0.72, 1.14, 1.72, 0.72,
+    1.14, 1.56, 0.56, 0.76, 0.76, 1.24, 0.24, 0.88, 1.18, 0.18, 0.34, 0.72,
+    1.08, 0.08, 0.38, 0.38, -0.62, -0.30, 0.00, 0.36, -0.64, -0.44, -0.10, -1.10,
+    -0.80, -0.48, -0.46, -1.46, -1.02, -0.70, -1.70, -1.06, -1.04, -0.60, -1.60, -1.22,
+    -0.86, -1.86, -1.56, -0.80, -1.80, -1.44, -0.78, -0.38, -1.38, -0.56, -0.04, -1.04,
+    0.40, -0.60, 0.04, -0.96, -0.44, 0.38, -0.62, -0.22, 0.44, 0.80, -0.20, 0.56,
+    0.86, -0.14, 0.22, 0.60, 1.04, 0.04, 0.06, 0.70, -0.30, 0.02, 0.48, 0.48,
+    -0.52, -0.20, 0.10, -0.90, -0.56, -0.36, -0.00, -1.00, -0.70, -0.38, -1.38, -1.38,
+    -1.08, -2.08, -1.72, -1.34, -1.18, -2.18, -1.88, -1.24, -2.24, -1.76, -1.76, -1.56,
+    -2.56, -2.14, -1.72, -2.72, -2.14, -1.72, -1.30, -2.30, -1.58, -1.32, -2.32, -1.36,
+    -0.00, -1.00, -2.00, -0.64, 0.32, -0.68, -0.42, 0.32, 0.74, -0.26, 0.14, 0.72,
+    -0.28, 0.14, 0.56, 0.76, -0.24, -0.24, 0.24, -0.76, -0.12, 0.18, -0.82, -0.66,
+    -0.26, 0.08, -0.92, -0.62, -0.62, -1.62, -1.28, -1.00, -0.64, -1.64, -1.44, -1.10,
+    -2.10, -1.80, -1.48, -1.46, -2.46, -2.02, -1.70, -2.70, -2.06, -2.04, -1.60, -2.60,
+    -2.22, -1.86, -2.86, -2.56, -1.80, -1.44, -2.44, -1.78, -1.38, -2.38, -1.56, -1.04,
+];
 
 /// One Hue/Saturation evaluation: hue shift in degrees, saturation and lightness in -1..=1.
 /// Colorize sets the hue and saturation instead of shifting them; at 0% it leaves only the
@@ -1704,6 +1752,24 @@ mod brightness_contrast_tests {
 mod tone_tests {
     use super::*;
     use photosplice_geom::Rect;
+
+    /// Reference's 8-bit Colorize colours with its own hue, a little off the one set (kit 7: hue
+    /// 200 colours at 201.2°, 170 at 166.9°); 16-bit colours at the hue as set.
+    #[test]
+    fn colorize_8_bit_takes_reference_s_hue() {
+        assert!((colorize_hue_8bit(200.0) - 201.18).abs() < 0.05 && (colorize_hue_8bit(-160.0) - (-160.0 + 1.18)).abs() < 0.05);
+        assert!((colorize_hue_8bit(170.0) - 166.86).abs() < 0.05 && colorize_hue_8bit(f32::NAN).is_nan());
+        let adj = Adjustment::HueSaturation { hue: 200.0, saturation: 40.0, lightness: 0.0, colorize: true, ranges: HueRange::defaults() };
+        let run = |depth| {
+            let mut b = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![[0.4, 0.4, 0.4, 1.0]] };
+            apply_depth(&adj, &mut b, Transfer::Srgb, Some(depth));
+            b.px[0]
+        };
+        let (eight, sixteen) = (run(SampleType::U8), run(SampleType::U16));
+        // The middle (green) channel sits nearer the darkest one at 201.2° than at 200°.
+        assert!(eight[1] < sixteen[1] - 0.004, "{eight:?} {sixteen:?}");
+        assert!((sixteen[1] - hue_saturation_in([0.4; 3], 200.0, 0.4, 0.0, true, false)[1]).abs() < 1e-6);
+    }
 
     /// Corpus rgb32 hue-saturation-colorize.psd (hue 200, 40 %, +5): in a float document the
     /// chroma also shrinks by 1 − l about the moved lightness; 16-bit keeps the HSL colour.
