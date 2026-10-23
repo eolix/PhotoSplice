@@ -34,7 +34,75 @@ pub fn native(adj: &Adjustment) -> bool {
             | Adjustment::Levels { space: ToneSpace::Lab, .. }
             | Adjustment::Curves { space: ToneSpace::Lab, .. }
             | Adjustment::PhotoFilter { .. }
+            | Adjustment::HueSaturation { .. }
     )
+}
+
+/// Hue/Saturation's hue in a Lab document: the place of (a*, b*) along the edge of the square
+/// `max(|a*|, |b*|) = r`, in degrees from the corner (r, r), counterclockwise one corner per 90°
+/// (Reference kit lab-col-*: Colorize at hue h, saturation S sets that square's point for r = S,
+/// e.g. hue 30 → (13, 40), hue 200 at 100 → (−56, −100); lab-hue90 / -hue180 turn (a, b) to (−b, a) and
+/// (−a, −b); hue 30 walks the edge). Returns `(hue, r)`.
+pub fn square_hue(a: f32, b: f32) -> (f32, f32) {
+    let r = a.abs().max(b.abs());
+    if r <= 0.0 || !r.is_finite() {
+        return (0.0, 0.0);
+    }
+    let along = |v: f32| (v + r) / (2.0 * r) * 90.0;
+    let h = if b.abs() >= a.abs() {
+        if b > 0.0 { 90.0 - along(a) } else { 180.0 + along(a) }
+    } else if a < 0.0 {
+        180.0 - along(b)
+    } else {
+        270.0 + along(b)
+    };
+    (h.rem_euclid(360.0), r)
+}
+
+/// The inverse of [`square_hue`]: (a*, b*) at `hue` degrees on the square of half-side `r`.
+pub fn square_ab(hue: f32, r: f32) -> (f32, f32) {
+    let h = if hue.is_finite() { hue.rem_euclid(360.0) } else { 0.0 };
+    let side = ((h / 90.0).floor() as usize).min(3);
+    let t = (h - side as f32 * 90.0) / 90.0 * 2.0 * r;
+    match side {
+        0 => (r - t, r),
+        1 => (-r, r - t),
+        2 => (-r + t, -r),
+        _ => (r, -r + t),
+    }
+}
+
+/// Hue/Saturation on a Lab document's own channels: Lightness moves L (towards white or black),
+/// Hue walks (a*, b*) along their square ([`square_hue`]), Saturation scales them (1 + s below 0,
+/// 255/256 / (1 − s) above, kept within −128..127 at their ratio), and Colorize sets the square's
+/// point for the hue and saturation, whatever the pixel's own colour (Reference kit lab-*: L, a, b
+/// exact to their rounding, except Colorize 60° into a side, one unit off). Colour ranges are
+/// taken on the same hue, not yet measured.
+fn hue_saturation_lab(lab: [f32; 3], adj: &Adjustment, table: Option<&[Vec<f32>; 3]>) -> [f32; 3] {
+    let Adjustment::HueSaturation { hue, saturation, lightness, colorize, .. } = adj else { return lab };
+    let l = (lightness / 100.0).clamp(-1.0, 1.0);
+    let big_l = if l > 0.0 { lab[0] + (100.0 - lab[0]) * l } else { lab[0] * (1.0 + l) };
+    if *colorize {
+        // Whole a*, b* values even in 16-bit documents (Reference kit lab-col-h200-s100: −56, −100).
+        let (a, b) = square_ab(*hue, saturation.abs().min(100.0));
+        return [big_l, a.round(), b.round()];
+    }
+    let (h, r) = square_hue(lab[1], lab[2]);
+    if r <= 0.0 {
+        return [big_l, lab[1], lab[2]];
+    }
+    let (dh, ds) = match table {
+        Some(t) => {
+            let at = h / 360.0;
+            (crate::adjust::lut(&t[0], at), crate::adjust::lut(&t[1], at))
+        }
+        None => (0.0, 0.0),
+    };
+    let s = crate::adjust::master_and_range_saturation(*saturation / 100.0, ds);
+    let k = if s > 0.0 { (255.0 / 256.0) / (1.0 - s).max(1e-4) } else { (1.0 + s).max(0.0) };
+    // Kept within ±128 at their ratio, then within the channels' range (Reference kit lab-sat50).
+    let (a, b) = square_ab(h + hue + dh, (r * k).min(128.0));
+    [big_l, a.min(127.0), b.min(127.0)]
 }
 
 /// `adj`'s curve sampled on a gray ramp (the same function for every channel).
@@ -87,6 +155,17 @@ pub(crate) fn apply(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, dept
             [r.clone(), r.clone(), r]
         }
     };
+    if let Adjustment::HueSaturation { colorize, ranges, .. } = adj {
+        let table = (!*colorize && ranges.iter().any(|r| !r.is_neutral())).then(|| crate::adjust::hue_range_tables(ranges));
+        for p in &mut buf.px {
+            if p[3] <= 0.0 {
+                continue;
+            }
+            let lab = hue_saturation_lab(srgb_to_lab([p[0], p[1], p[2]]), adj, table.as_ref());
+            p[..3].copy_from_slice(&lab_to_srgb_unclamped(lab));
+        }
+        return;
+    }
     if let Adjustment::PhotoFilter { color, density, preserve_luminosity } = adj {
         use photosplice_color::convert::{linear_to_srgb, mat3_mul, srgb_to_linear};
         let m = crate::adjust::photo_filter_matrix(*color, *density, false);
@@ -167,6 +246,65 @@ mod tests {
                 assert!((got[i] - want[i]).abs() < 0.1, "{got:?} vs {want:?}");
             }
         }
+    }
+
+    fn hs(hue: f32, saturation: f32, lightness: f32, colorize: bool) -> Adjustment {
+        Adjustment::HueSaturation { hue, saturation, lightness, colorize, ranges: photosplice_doc::adjust::HueRange::defaults() }
+    }
+
+    fn run_lab(adj: &Adjustment, lab: [f32; 3]) -> [f32; 3] {
+        let mut b = one(lab_to_srgb_unclamped(lab));
+        apply(adj, &mut b, Transfer::Srgb, photosplice_color::SampleType::U16);
+        srgb_to_lab([b.px[0][0], b.px[0][1], b.px[0][2]])
+    }
+
+    fn near3(got: [f32; 3], want: [f32; 3], tol: f32) {
+        assert!((0..3).all(|i| (got[i] - want[i]).abs() < tol), "{got:?} vs {want:?}");
+    }
+
+    #[test]
+    fn square_hue_walks_the_edge_and_back() {
+        assert_eq!(square_hue(40.0, 40.0), (0.0, 40.0));
+        assert_eq!(square_hue(-40.0, 40.0), (90.0, 40.0));
+        assert_eq!(square_hue(-40.0, -40.0), (180.0, 40.0));
+        assert_eq!(square_hue(40.0, -40.0), (270.0, 40.0));
+        assert_eq!(square_hue(0.0, 0.0), (0.0, 0.0));
+        for (a, b) in [(13.0, 40.0), (-40.0, 7.5), (-22.0, -40.0), (40.0, -39.0), (80.81, 69.89), (-0.5, 0.25)] {
+            let (h, r) = square_hue(a, b);
+            let (a2, b2) = square_ab(h, r);
+            assert!((a - a2).abs() < 1e-3 && (b - b2).abs() < 1e-3, "({a}, {b}) → {h}° → ({a2}, {b2})");
+        }
+        // Hostile hues stay on the square.
+        let (a, b) = square_ab(f32::NAN, 10.0);
+        assert!(a.is_finite() && b.is_finite());
+    }
+
+    /// Reference kit lab-col-*: Colorize sets the same whole a*, b* on the square everywhere and
+    /// keeps the pixel's L, moved by Lightness.
+    #[test]
+    fn colorize_sets_the_squares_point() {
+        let lab = [69.39, 80.81, 69.89];
+        near3(run_lab(&hs(0.0, 40.0, 0.0, true), lab), [69.39, 40.0, 40.0], 0.05);
+        near3(run_lab(&hs(30.0, 40.0, 0.0, true), lab), [69.39, 13.0, 40.0], 0.05);
+        near3(run_lab(&hs(200.0, 100.0, 0.0, true), lab), [69.39, -56.0, -100.0], 0.05);
+        near3(run_lab(&hs(200.0, 25.0, 0.0, true), lab), [69.39, -14.0, -25.0], 0.05);
+        near3(run_lab(&hs(0.0, 40.0, -50.0, true), lab), [34.70, 40.0, 40.0], 0.05);
+        near3(run_lab(&hs(0.0, 40.0, 50.0, true), lab), [84.70, 40.0, 40.0], 0.05);
+    }
+
+    /// Reference kit lab-hue*, lab-sat*, lab-light*: the master sliders on L and the square.
+    #[test]
+    fn master_sliders_move_l_and_the_square() {
+        let lab = [54.29, 80.81, 69.89];
+        near3(run_lab(&hs(90.0, 0.0, 0.0, false), lab), [54.29, -69.89, 80.81], 0.05);
+        near3(run_lab(&hs(180.0, 0.0, 0.0, false), lab), [54.29, -80.81, -69.89], 0.05);
+        near3(run_lab(&hs(30.0, 0.0, 0.0, false), lab), [54.29, 37.88, 80.81], 0.05);
+        near3(run_lab(&hs(0.0, -50.0, 0.0, false), lab), [54.29, 40.405, 34.945], 0.05);
+        near3(run_lab(&hs(0.0, 0.0, -30.0, false), lab), [38.0, 80.81, 69.89], 0.05);
+        near3(run_lab(&hs(0.0, 0.0, 30.0, false), lab), [68.0, 80.81, 69.89], 0.05);
+        // Saturation +50 (×1.992) past the range: back to ±128 at the ratio, then 127 at most
+        // (lab-sat50: (−68.67, 82.65) → (−106.28, 127)).
+        near3(run_lab(&hs(0.0, 50.0, 0.0, false), [89.11, -68.67, 82.65]), [89.11, -106.35, 127.0], 0.05);
     }
 
     /// A Lab document keeps colours outside sRGB through its composite, so Invert flips the
