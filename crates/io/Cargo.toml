@@ -39,6 +39,12 @@ krilla = { version = "0.8", default-features = false, features = ["raster-images
 # (with a size cap) so the XML can be checked before it is parsed; pdn.rs inflates Paint.NET's gzip
 # pixel chunks.
 flate2 = { workspace = true }
+# A saved PDF's password and permissions (the Standard security handler: AES-256, AES-128 or RC4
+# by compatibility), pure Rust, MIT OR Apache-2.0.
+aes = "0.9"
+sha2 = "0.11"
+md-5 = "0.11"
+getrandom = "0.4"
 # EXIF (camera, lens, exposure) read from and written for camera raw files.
 photosplice-algo = { workspace = true }
 photosplice-raw = { workspace = true }
@@ -58,6 +64,8 @@ roxmltree = "0.20"
 resvg = { version = "0.45", default-features = false, features = ["text", "system-fonts", "raster-images"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# The browser's crypto.getRandomValues for the keys and salts above.
+getrandom = { version = "0.4", features = ["wasm_js"] }
 resvg = { version = "0.45", default-features = false, features = ["text", "raster-images"] }
 
 [dev-dependencies]

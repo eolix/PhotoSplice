@@ -188,6 +188,8 @@ pub struct ExportOptions {
     pub pdf_discard_editing: bool,
     /// PDF: Save Adobe PDF's Compatibility, Image Compression and Downsampling.
     pub pdf: pdf::export::PdfOptions,
+    /// PDF: Security (passwords and permissions); `None`, unprotected.
+    pub pdf_security: Option<pdf::security::Security>,
     /// PSD: the selected layers, the target (active) layer first, written so the file reopens
     /// with them selected. Empty: the top layer, as in a file just opened.
     pub selected_layers: Vec<photosplice_doc::LayerId>,
@@ -219,6 +221,7 @@ impl Default for ExportOptions {
             psd_maximize_compatibility: true,
             pdf_discard_editing: false,
             pdf: pdf::export::PdfOptions::default(),
+            pdf_security: None,
             selected_layers: Vec::new(),
         }
     }
@@ -470,7 +473,7 @@ fn export_stages(doc: &Document, name_or_ext: &str, opts: &ExportOptions, ctl: &
         return Ok(ExportResult { bytes, warnings });
     }
     if ext == "pdf" {
-        return pdf::export::export_layered_with(doc, !opts.pdf_discard_editing, &opts.pdf);
+        return pdf::export::export_secured(doc, !opts.pdf_discard_editing, &opts.pdf, opts.pdf_security.as_ref());
     }
     let format = photosplice_codecs::from_extension(&ext).ok_or_else(|| IoError::UnknownFormat(name_or_ext.to_string()))?;
     if format == photosplice_codecs::Format::Tiff && opts.tiff_layers && tiff_layers::would_write_layers(doc) {

@@ -21,6 +21,7 @@ mod photoshop;
 
 pub use pages::open_pages;
 mod render;
+pub mod security;
 mod shading;
 mod update;
 
@@ -48,12 +49,29 @@ fn load(bytes: &[u8]) -> Result<hayro::hayro_syntax::Pdf, IoError> {
 /// Reads `bytes`, decrypting with `password` (the empty one opens files that only restrict
 /// printing or editing).
 fn load_with(bytes: &[u8], password: &str) -> Result<hayro::hayro_syntax::Pdf, IoError> {
+    unlock(bytes, password).map(|(pdf, _)| pdf)
+}
+
+/// [`load_with`], and the user password that opened it: `password`, or for an older file
+/// opened with its owner password, the user password that one gives
+/// ([`security::user_password`]), which reopening the bytes needs.
+fn unlock(bytes: &[u8], password: &str) -> Result<(hayro::hayro_syntax::Pdf, String), IoError> {
     use hayro::hayro_syntax::{DecryptionError, LoadPdfError};
-    hayro::hayro_syntax::Pdf::new_with_password(bytes.to_vec(), password).map_err(|e| match e {
-        LoadPdfError::Decryption(DecryptionError::PasswordProtected) => IoError::PdfPassword { given: !password.is_empty() },
-        LoadPdfError::Decryption(e) => IoError::Unsupported(format!("PDF: can't decrypt this file ({e:?})")),
-        e => IoError::Unsupported(format!("PDF: can't read this file ({e:?})")),
-    })
+    let open = |password: &str| {
+        hayro::hayro_syntax::Pdf::new_with_password(bytes.to_vec(), password).map_err(|e| match e {
+            LoadPdfError::Decryption(DecryptionError::PasswordProtected) => IoError::PdfPassword { given: !password.is_empty() },
+            LoadPdfError::Decryption(e) => IoError::Unsupported(format!("PDF: can't decrypt this file ({e:?})")),
+            e => IoError::Unsupported(format!("PDF: can't read this file ({e:?})")),
+        })
+    };
+    match open(password) {
+        Err(IoError::PdfPassword { given: true }) => {
+            let user = security::user_password(bytes, password).ok_or(IoError::PdfPassword { given: true })?;
+            let pdf = open(&user).map_err(|_| IoError::PdfPassword { given: true })?;
+            Ok((pdf, user))
+        }
+        r => r.map(|pdf| (pdf, password.to_string())),
+    }
 }
 
 /// Whether `bytes` are a PDF that needs a password to open.
@@ -352,7 +370,7 @@ fn placement(p: &hayro::hayro_syntax::page::Page<'_>, o: &OpenOptions, warnings:
 /// Opens a page as a document named `name`, as Import PDF does: the chosen box at a resolution,
 /// as layers or as pixels. A page with the Reference's editing data opens as that document instead.
 pub fn open_page_with(name: &str, bytes: &[u8], o: &OpenOptions) -> Result<ImportResult, IoError> {
-    let pdf = load_with(bytes, &o.password)?;
+    let (pdf, password) = unlock(bytes, &o.password)?;
     let pages = pdf.pages();
     let n = pages.len();
     let p = pages.get(o.page).ok_or_else(|| IoError::Unsupported(format!("PDF has {n} pages; there is no page {}", o.page.saturating_add(1))))?;
@@ -369,7 +387,7 @@ pub fn open_page_with(name: &str, bytes: &[u8], o: &OpenOptions) -> Result<Impor
     if o.how == PageAs::Layers {
         let pdf_layers = ocg::page_layers(&pdf, p);
         if !pdf_layers.is_empty()
-            && let Some((document, more)) = layers::import_pdf_layers(name, bytes, &pdf, o.page, &pdf_layers, &place, scale * 72.0)
+            && let Some((document, more)) = layers::import_pdf_layers(name, bytes, &pdf, &password, o.page, &pdf_layers, &place, scale * 72.0)
         {
             warnings.extend(more);
             return Ok(ImportResult { document, warnings, selected: Vec::new(), source_read_only: false, preview_only: false });

@@ -251,7 +251,7 @@ pub(crate) fn import(name: &str, bytes: &[u8]) -> Result<Document> {
 
 /// What a headless save writes beyond the format: JPEG quality, TIFF layers, Targa bits, PSD
 /// previews and the PSD merged image.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct SaveOpts {
     /// Photoshop's 0–12 JPEG scale.
     pub quality: Option<f64>,
@@ -262,6 +262,8 @@ pub(crate) struct SaveOpts {
     /// PDF: Compatibility, Image Compression and Downsampling (`pdfCompatibility`,
     /// `pdfCompression`, `pdfQuality`, `pdfDownsample`).
     pub pdf: photosplice_io::pdf::export::PdfOptions,
+    /// PDF: Security, the passwords and permissions ([`pdf_security`]).
+    pub pdf_security: Option<photosplice_io::pdf::security::Security>,
     /// Targa: 24 or 32 bits per pixel (`"tgaBits"`); unset, 32 with an alpha channel or
     /// transparency, else 24.
     pub tga_bits: Option<photosplice_io::TgaBits>,
@@ -281,6 +283,7 @@ impl Default for SaveOpts {
             tiff_layers: false,
             pdf_discard_editing: false,
             pdf: photosplice_io::pdf::export::PdfOptions::default(),
+            pdf_security: None,
             tga_bits: None,
             dpx_bits: None,
             image_previews: true,
@@ -302,6 +305,7 @@ impl SaveOpts {
             tiff_layers: p.get("tiffLayers").and_then(Value::as_bool).unwrap_or(false),
             pdf_discard_editing: p.get("pdfEditing").and_then(Value::as_bool) == Some(false),
             pdf: pdf_options(p),
+            pdf_security: pdf_security(p, cmd)?,
             tga_bits: tga_bits_param(p, cmd)?,
             dpx_bits: dpx_bits_param(p, cmd)?,
             image_previews: file_handling.image_previews != crate::prefs::Ask::Never,
@@ -348,6 +352,41 @@ fn pdf_options(p: &Value) -> photosplice_io::pdf::export::PdfOptions {
     o
 }
 
+/// The PDF save options' Security from a command's params: `pdfOpenPassword` (Document Open
+/// Password), `pdfPermissionsPassword`, and what the latter allows: `pdfPrinting` ("none", "low",
+/// "high"), `pdfChanges` ("none", "pages", "forms", "comments", "any"), `pdfCopy`,
+/// `pdfScreenReaders`, `pdfPlaintextMetadata`. `None` without a password; a choice that isn't
+/// one is a bad parameter of `cmd`.
+pub fn pdf_security(p: &Value, cmd: &str) -> Result<Option<photosplice_io::pdf::security::Security>> {
+    use photosplice_io::pdf::security::{Changes, Printing, Security};
+    let bad = |msg: String| EngineError::BadParams { cmd: cmd.into(), msg };
+    let text = |k: &str| -> Result<String> {
+        match p.get(k) {
+            None | Some(Value::Null) => Ok(String::new()),
+            Some(Value::String(s)) => Ok(s.clone()),
+            Some(_) => Err(bad(format!("`{k}` must be a string"))),
+        }
+    };
+    let flag = |k: &str, default: bool| -> Result<bool> {
+        match p.get(k) {
+            None | Some(Value::Null) => Ok(default),
+            Some(Value::Bool(b)) => Ok(*b),
+            Some(v) => Err(bad(format!("`{k}` must be true or false, got {v}"))),
+        }
+    };
+    let mut sec = Security { open_password: text("pdfOpenPassword")?, permissions_password: text("pdfPermissionsPassword")?, ..Security::default() };
+    if let Some(v) = p.get("pdfPrinting").filter(|v| !v.is_null()) {
+        sec.printing = v.as_str().and_then(Printing::from_id).ok_or_else(|| bad(format!("`pdfPrinting` must be none, low or high, got {v}")))?;
+    }
+    if let Some(v) = p.get("pdfChanges").filter(|v| !v.is_null()) {
+        sec.changes = v.as_str().and_then(Changes::from_id).ok_or_else(|| bad(format!("`pdfChanges` must be none, pages, forms, comments or any, got {v}")))?;
+    }
+    sec.copy = flag("pdfCopy", sec.copy)?;
+    sec.screen_readers = flag("pdfScreenReaders", sec.screen_readers)?;
+    sec.plaintext_metadata = flag("pdfPlaintextMetadata", sec.plaintext_metadata)?;
+    Ok((!sec.is_none()).then_some(sec))
+}
+
 /// The Targa bits per pixel in `p` (`"tgaBits": 24 | 32`; absent or null: the automatic choice).
 /// Anything else is a bad parameter of command `cmd`. Shared by every save that takes it (the
 /// engine's commands, the app's Save As and control channel, the headless server).
@@ -383,6 +422,7 @@ pub(crate) fn encode(doc: &Document, path: &str, save: impl Into<SaveOpts>) -> R
         tiff_layers: save.tiff_layers,
         pdf_discard_editing: save.pdf_discard_editing,
         pdf: save.pdf,
+        pdf_security: save.pdf_security,
         tga_bits: save.tga_bits,
         image_previews: save.image_previews,
         psd_maximize_compatibility: save.psd_maximize_compatibility,
@@ -1250,7 +1290,7 @@ fn process_outputs<'a>(outputs: impl IntoIterator<Item = (&'a str, String)>, sav
             scratch.add_document(doc, Some(path.to_string()));
             f(&mut scratch)?;
             let d = scratch.active().ok_or(EngineError::NoDocument)?;
-            save_doc(&d.doc, &out, save)?;
+            save_doc(&d.doc, &out, save.clone())?;
             Ok(())
         })();
         match r {
@@ -1540,7 +1580,7 @@ pub fn export_layers_with(s: &Session, p: &Value, mut write: impl FnMut(&str, &[
         only.clipped = false;
         one.layers = vec![only];
         let name = format!("{}_{:04}_{}.{format}", sanitize(&prefix), i, sanitize(&l.name));
-        let (bytes, _warnings) = encode(&one, &name, save)?;
+        let (bytes, _warnings) = encode(&one, &name, save.clone())?;
         write(&name, &bytes)?;
         written.push(name);
     }
@@ -1782,7 +1822,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Save a Copy…",
             &["File"],
             Some("Cmd+Alt+S"),
-            r##"{"path":str (format from the extension),"quality":0..12? (JPEG),"layers":bool=true,"tiffLayers":bool=false (TIFF: keep the layers; flat by default),"tgaBits":24|32? (TGA: 32 writes the alpha channel, or else the transparency, as the alpha; unset, 32 with an alpha channel or transparency, else 24),"dpxBits":8|10|12|16? (DPX: bits per sample; unset, 8 for an 8-bit document, else 16),"pdfEditing":bool=true (PDF: Preserve Photoshop Editing Capabilities),"pdfCompatibility":"1.4|1.5|1.6|1.7|2.0"="1.7","pdfCompression":"zip|jpeg"="zip","pdfQuality":0..12=10 (JPEG),"pdfDownsample":[to ppi, above ppi]?,"pdfLayers":bool=true (each visible top-level layer a PDF layer)}"##,
+            r##"{"path":str (format from the extension),"quality":0..12? (JPEG),"layers":bool=true,"tiffLayers":bool=false (TIFF: keep the layers; flat by default),"tgaBits":24|32? (TGA: 32 writes the alpha channel, or else the transparency, as the alpha; unset, 32 with an alpha channel or transparency, else 24),"dpxBits":8|10|12|16? (DPX: bits per sample; unset, 8 for an 8-bit document, else 16),"pdfEditing":bool=true (PDF: Preserve Photoshop Editing Capabilities),"pdfCompatibility":"1.4|1.5|1.6|1.7|2.0"="1.7","pdfCompression":"zip|jpeg"="zip","pdfQuality":0..12=10 (JPEG),"pdfDownsample":[to ppi, above ppi]?,"pdfLayers":bool=true (each visible top-level layer a PDF layer),"pdfOpenPassword":str? (Document Open Password),"pdfPermissionsPassword":str? (restricts what follows),"pdfPrinting":"none|low|high"="high","pdfChanges":"none|pages|forms|comments|any"="any","pdfCopy":bool=true,"pdfScreenReaders":bool=true,"pdfPlaintextMetadata":bool=false}"##,
             native_doc,
             save_a_copy
         ),

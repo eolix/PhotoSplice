@@ -5,7 +5,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 `packaging/notices/generate.sh` (cargo-about); don't edit it by hand. Other bundled material
 (fonts, icons, lens data, presets) is listed in `THIRD-PARTY-NOTICES.md`.
 
-## Crates (542)
+## Crates (554)
 
 | Crate | Version | Licence |
 |:---|:---|:---|
@@ -21,6 +21,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [accesskit_windows](https://crates.io/crates/accesskit_windows) | 0.32.1 | MIT OR Apache-2.0 |
 | [accesskit_winit](https://crates.io/crates/accesskit_winit) | 0.32.2 | Apache-2.0 |
 | [adler2](https://crates.io/crates/adler2) | 2.0.1 | 0BSD OR MIT OR Apache-2.0 |
+| [aes](https://crates.io/crates/aes) | 0.9.3 | MIT OR Apache-2.0 |
 | [ahash](https://crates.io/crates/ahash) | 0.8.12 | MIT OR Apache-2.0 |
 | [alloc-no-stdlib](https://crates.io/crates/alloc-no-stdlib) | 2.0.4 | BSD-3-Clause |
 | [alloc-stdlib](https://crates.io/crates/alloc-stdlib) | 0.2.4 | BSD-3-Clause |
@@ -54,6 +55,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [bitflags](https://crates.io/crates/bitflags) | 2.13.2 | MIT OR Apache-2.0 |
 | [blake3](https://crates.io/crates/blake3) | 1.8.7 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception |
 | [block](https://crates.io/crates/block) | 0.1.6 | MIT |
+| [block-buffer](https://crates.io/crates/block-buffer) | 0.12.1 | MIT OR Apache-2.0 |
 | [block2](https://crates.io/crates/block2) | 0.5.1 | MIT |
 | [block2](https://crates.io/crates/block2) | 0.6.2 | MIT |
 | [blocking](https://crates.io/crates/blocking) | 1.7.0 | Apache-2.0 OR MIT |
@@ -71,11 +73,13 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [cap-std](https://crates.io/crates/cap-std) | 4.0.3 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | [cfg-if](https://crates.io/crates/cfg-if) | 1.0.5 | MIT OR Apache-2.0 |
 | [chacha20](https://crates.io/crates/chacha20) | 0.10.2 | MIT OR Apache-2.0 |
+| [cipher](https://crates.io/crates/cipher) | 0.5.2 | MIT OR Apache-2.0 |
 | [clipboard-win](https://crates.io/crates/clipboard-win) | 5.4.1 | BSL-1.0 |
 | [codespan-reporting](https://crates.io/crates/codespan-reporting) | 0.13.1 | Apache-2.0 |
 | [color](https://crates.io/crates/color) | 0.3.3 | Apache-2.0 OR MIT |
 | [color_quant](https://crates.io/crates/color_quant) | 1.1.0 | MIT |
 | [concurrent-queue](https://crates.io/crates/concurrent-queue) | 2.5.0 | Apache-2.0 OR MIT |
+| [const-oid](https://crates.io/crates/const-oid) | 0.10.2 | Apache-2.0 OR MIT |
 | [constant_time_eq](https://crates.io/crates/constant_time_eq) | 0.4.2 | CC0-1.0 OR MIT-0 OR Apache-2.0 |
 | [cookie-factory](https://crates.io/crates/cookie-factory) | 0.3.3 | MIT |
 | [core-foundation](https://crates.io/crates/core-foundation) | 0.10.1 | MIT OR Apache-2.0 |
@@ -85,6 +89,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [core-graphics-types](https://crates.io/crates/core-graphics-types) | 0.1.3 | MIT OR Apache-2.0 |
 | [core-graphics2](https://crates.io/crates/core-graphics2) | 0.6.1 | MIT OR Apache-2.0 |
 | [core_maths](https://crates.io/crates/core_maths) | 0.1.1 | MIT |
+| [cpubits](https://crates.io/crates/cpubits) | 0.1.1 | MIT OR Apache-2.0 |
 | [cpufeatures](https://crates.io/crates/cpufeatures) | 0.3.1 | MIT OR Apache-2.0 |
 | [craft-print](https://crates.io/crates/craft-print) | 0.1.0 | MIT OR Apache-2.0 |
 | [craft-ui](https://crates.io/crates/craft-ui) | 0.1.0 | MIT OR Apache-2.0 |
@@ -94,8 +99,10 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [crossbeam-deque](https://crates.io/crates/crossbeam-deque) | 0.8.8 | MIT OR Apache-2.0 |
 | [crossbeam-epoch](https://crates.io/crates/crossbeam-epoch) | 0.9.21 | MIT OR Apache-2.0 |
 | [crossbeam-utils](https://crates.io/crates/crossbeam-utils) | 0.8.23 | MIT OR Apache-2.0 |
+| [crypto-common](https://crates.io/crates/crypto-common) | 0.2.2 | MIT OR Apache-2.0 |
 | [cursor-icon](https://crates.io/crates/cursor-icon) | 1.2.0 | MIT OR Apache-2.0 OR Zlib |
 | [data-url](https://crates.io/crates/data-url) | 0.3.2 | MIT OR Apache-2.0 |
+| [digest](https://crates.io/crates/digest) | 0.11.3 | MIT OR Apache-2.0 |
 | [dispatch](https://crates.io/crates/dispatch) | 0.2.0 | MIT |
 | [dispatch2](https://crates.io/crates/dispatch2) | 0.3.1 | Zlib OR Apache-2.0 OR MIT |
 | [displaydoc](https://crates.io/crates/displaydoc) | 0.2.7 | MIT OR Apache-2.0 |
@@ -190,6 +197,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [heck](https://crates.io/crates/heck) | 0.5.0 | MIT OR Apache-2.0 |
 | [heic-rs](https://crates.io/crates/heic-rs) | 0.1.1 | MIT OR Apache-2.0 |
 | [hex](https://crates.io/crates/hex) | 0.4.3 | MIT OR Apache-2.0 |
+| [hybrid-array](https://crates.io/crates/hybrid-array) | 0.4.15 | MIT OR Apache-2.0 |
 | [icu_collections](https://crates.io/crates/icu_collections) | 2.3.0 | Unicode-3.0 |
 | [icu_locale_core](https://crates.io/crates/icu_locale_core) | 2.3.0 | Unicode-3.0 |
 | [icu_locale_fallback](https://crates.io/crates/icu_locale_fallback) | 2.3.0 | Unicode-3.0 |
@@ -208,6 +216,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [imagesize](https://crates.io/crates/imagesize) | 0.13.0 | MIT |
 | [imagesize](https://crates.io/crates/imagesize) | 0.14.0 | MIT |
 | [indexmap](https://crates.io/crates/indexmap) | 2.14.2 | Apache-2.0 OR MIT |
+| [inout](https://crates.io/crates/inout) | 0.2.5 | MIT OR Apache-2.0 |
 | [io-extras](https://crates.io/crates/io-extras) | 0.19.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | [io-lifetimes](https://crates.io/crates/io-lifetimes) | 2.0.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
 | [io-lifetimes](https://crates.io/crates/io-lifetimes) | 3.0.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT |
@@ -252,6 +261,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [lock_api](https://crates.io/crates/lock_api) | 0.4.14 | MIT OR Apache-2.0 |
 | [log](https://crates.io/crates/log) | 0.4.34 | MIT OR Apache-2.0 |
 | [maybe-owned](https://crates.io/crates/maybe-owned) | 0.3.4 | MIT OR Apache-2.0 |
+| [md-5](https://crates.io/crates/md-5) | 0.11.0 | MIT OR Apache-2.0 |
 | [memchr](https://crates.io/crates/memchr) | 2.8.3 | Unlicense OR MIT |
 | [memmap2](https://crates.io/crates/memmap2) | 0.9.11 | MIT OR Apache-2.0 |
 | [memoffset](https://crates.io/crates/memoffset) | 0.9.1 | MIT |
@@ -378,6 +388,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [serde_json](https://crates.io/crates/serde_json) | 1.0.151 | MIT OR Apache-2.0 |
 | [serde_repr](https://crates.io/crates/serde_repr) | 0.1.21 | MIT OR Apache-2.0 |
 | [serde_spanned](https://crates.io/crates/serde_spanned) | 1.1.1 | MIT OR Apache-2.0 |
+| [sha2](https://crates.io/crates/sha2) | 0.11.1 | MIT OR Apache-2.0 |
 | [signal-hook-registry](https://crates.io/crates/signal-hook-registry) | 1.4.8 | MIT OR Apache-2.0 |
 | [simd-adler32](https://crates.io/crates/simd-adler32) | 0.3.10 | MIT |
 | [simplecss](https://crates.io/crates/simplecss) | 0.2.2 | Apache-2.0 OR MIT |
@@ -431,6 +442,7 @@ full licence texts follow, grouped by text. This file is generated from `Cargo.l
 | [twox-hash](https://crates.io/crates/twox-hash) | 2.1.4 | MIT |
 | [type-map](https://crates.io/crates/type-map) | 0.5.1 | MIT OR Apache-2.0 |
 | [typeid](https://crates.io/crates/typeid) | 1.0.3 | MIT OR Apache-2.0 |
+| [typenum](https://crates.io/crates/typenum) | 1.20.1 | MIT OR Apache-2.0 |
 | [uds_windows](https://crates.io/crates/uds_windows) | 1.2.1 | MIT |
 | [unicode-bidi](https://crates.io/crates/unicode-bidi) | 0.3.18 | MIT OR Apache-2.0 |
 | [unicode-bidi-mirroring](https://crates.io/crates/unicode-bidi-mirroring) | 0.4.0 | MIT OR Apache-2.0 |
@@ -4517,6 +4529,214 @@ limitations under the License.
 
 ### Apache License 2.0
 
+Used by: typenum 1.20.1
+
+```text
+                              Apache License
+                        Version 2.0, January 2004
+                     http://www.apache.org/licenses/
+
+TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+1. Definitions.
+
+   "License" shall mean the terms and conditions for use, reproduction,
+   and distribution as defined by Sections 1 through 9 of this document.
+
+   "Licensor" shall mean the copyright owner or entity authorized by
+   the copyright owner that is granting the License.
+
+   "Legal Entity" shall mean the union of the acting entity and all
+   other entities that control, are controlled by, or are under common
+   control with that entity. For the purposes of this definition,
+   "control" means (i) the power, direct or indirect, to cause the
+   direction or management of such entity, whether by contract or
+   otherwise, or (ii) ownership of fifty percent (50%) or more of the
+   outstanding shares, or (iii) beneficial ownership of such entity.
+
+   "You" (or "Your") shall mean an individual or Legal Entity
+   exercising permissions granted by this License.
+
+   "Source" form shall mean the preferred form for making modifications,
+   including but not limited to software source code, documentation
+   source, and configuration files.
+
+   "Object" form shall mean any form resulting from mechanical
+   transformation or translation of a Source form, including but
+   not limited to compiled object code, generated documentation,
+   and conversions to other media types.
+
+   "Work" shall mean the work of authorship, whether in Source or
+   Object form, made available under the License, as indicated by a
+   copyright notice that is included in or attached to the work
+   (an example is provided in the Appendix below).
+
+   "Derivative Works" shall mean any work, whether in Source or Object
+   form, that is based on (or derived from) the Work and for which the
+   editorial revisions, annotations, elaborations, or other modifications
+   represent, as a whole, an original work of authorship. For the purposes
+   of this License, Derivative Works shall not include works that remain
+   separable from, or merely link (or bind by name) to the interfaces of,
+   the Work and Derivative Works thereof.
+
+   "Contribution" shall mean any work of authorship, including
+   the original version of the Work and any modifications or additions
+   to that Work or Derivative Works thereof, that is intentionally
+   submitted to Licensor for inclusion in the Work by the copyright owner
+   or by an individual or Legal Entity authorized to submit on behalf of
+   the copyright owner. For the purposes of this definition, "submitted"
+   means any form of electronic, verbal, or written communication sent
+   to the Licensor or its representatives, including but not limited to
+   communication on electronic mailing lists, source code control systems,
+   and issue tracking systems that are managed by, or on behalf of, the
+   Licensor for the purpose of discussing and improving the Work, but
+   excluding communication that is conspicuously marked or otherwise
+   designated in writing by the copyright owner as "Not a Contribution."
+
+   "Contributor" shall mean Licensor and any individual or Legal Entity
+   on behalf of whom a Contribution has been received by Licensor and
+   subsequently incorporated within the Work.
+
+2. Grant of Copyright License. Subject to the terms and conditions of
+   this License, each Contributor hereby grants to You a perpetual,
+   worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+   copyright license to reproduce, prepare Derivative Works of,
+   publicly display, publicly perform, sublicense, and distribute the
+   Work and such Derivative Works in Source or Object form.
+
+3. Grant of Patent License. Subject to the terms and conditions of
+   this License, each Contributor hereby grants to You a perpetual,
+   worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+   (except as stated in this section) patent license to make, have made,
+   use, offer to sell, sell, import, and otherwise transfer the Work,
+   where such license applies only to those patent claims licensable
+   by such Contributor that are necessarily infringed by their
+   Contribution(s) alone or by combination of their Contribution(s)
+   with the Work to which such Contribution(s) was submitted. If You
+   institute patent litigation against any entity (including a
+   cross-claim or counterclaim in a lawsuit) alleging that the Work
+   or a Contribution incorporated within the Work constitutes direct
+   or contributory patent infringement, then any patent licenses
+   granted to You under this License for that Work shall terminate
+   as of the date such litigation is filed.
+
+4. Redistribution. You may reproduce and distribute copies of the
+   Work or Derivative Works thereof in any medium, with or without
+   modifications, and in Source or Object form, provided that You
+   meet the following conditions:
+
+   (a) You must give any other recipients of the Work or
+       Derivative Works a copy of this License; and
+
+   (b) You must cause any modified files to carry prominent notices
+       stating that You changed the files; and
+
+   (c) You must retain, in the Source form of any Derivative Works
+       that You distribute, all copyright, patent, trademark, and
+       attribution notices from the Source form of the Work,
+       excluding those notices that do not pertain to any part of
+       the Derivative Works; and
+
+   (d) If the Work includes a "NOTICE" text file as part of its
+       distribution, then any Derivative Works that You distribute must
+       include a readable copy of the attribution notices contained
+       within such NOTICE file, excluding those notices that do not
+       pertain to any part of the Derivative Works, in at least one
+       of the following places: within a NOTICE text file distributed
+       as part of the Derivative Works; within the Source form or
+       documentation, if provided along with the Derivative Works; or,
+       within a display generated by the Derivative Works, if and
+       wherever such third-party notices normally appear. The contents
+       of the NOTICE file are for informational purposes only and
+       do not modify the License. You may add Your own attribution
+       notices within Derivative Works that You distribute, alongside
+       or as an addendum to the NOTICE text from the Work, provided
+       that such additional attribution notices cannot be construed
+       as modifying the License.
+
+   You may add Your own copyright statement to Your modifications and
+   may provide additional or different license terms and conditions
+   for use, reproduction, or distribution of Your modifications, or
+   for any such Derivative Works as a whole, provided Your use,
+   reproduction, and distribution of the Work otherwise complies with
+   the conditions stated in this License.
+
+5. Submission of Contributions. Unless You explicitly state otherwise,
+   any Contribution intentionally submitted for inclusion in the Work
+   by You to the Licensor shall be under the terms and conditions of
+   this License, without any additional terms or conditions.
+   Notwithstanding the above, nothing herein shall supersede or modify
+   the terms of any separate license agreement you may have executed
+   with Licensor regarding such Contributions.
+
+6. Trademarks. This License does not grant permission to use the trade
+   names, trademarks, service marks, or product names of the Licensor,
+   except as required for reasonable and customary use in describing the
+   origin of the Work and reproducing the content of the NOTICE file.
+
+7. Disclaimer of Warranty. Unless required by applicable law or
+   agreed to in writing, Licensor provides the Work (and each
+   Contributor provides its Contributions) on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+   implied, including, without limitation, any warranties or conditions
+   of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+   PARTICULAR PURPOSE. You are solely responsible for determining the
+   appropriateness of using or redistributing the Work and assume any
+   risks associated with Your exercise of permissions under this License.
+
+8. Limitation of Liability. In no event and under no legal theory,
+   whether in tort (including negligence), contract, or otherwise,
+   unless required by applicable law (such as deliberate and grossly
+   negligent acts) or agreed to in writing, shall any Contributor be
+   liable to You for damages, including any direct, indirect, special,
+   incidental, or consequential damages of any character arising as a
+   result of this License or out of the use or inability to use the
+   Work (including but not limited to damages for loss of goodwill,
+   work stoppage, computer failure or malfunction, or any and all
+   other commercial damages or losses), even if such Contributor
+   has been advised of the possibility of such damages.
+
+9. Accepting Warranty or Additional Liability. While redistributing
+   the Work or Derivative Works thereof, You may choose to offer,
+   and charge a fee for, acceptance of support, warranty, indemnity,
+   or other liability obligations and/or rights consistent with this
+   License. However, in accepting such obligations, You may act only
+   on Your own behalf and on Your sole responsibility, not on behalf
+   of any other Contributor, and only if You agree to indemnify,
+   defend, and hold each Contributor harmless for any liability
+   incurred by, or claims asserted against, such Contributor by reason
+   of your accepting any such warranty or additional liability.
+
+END OF TERMS AND CONDITIONS
+
+APPENDIX: How to apply the Apache License to your work.
+
+   To apply the Apache License to your work, attach the following
+   boilerplate notice, with the fields enclosed by brackets "[]"
+   replaced with your own identifying information. (Don't include
+   the brackets!)  The text should be enclosed in the appropriate
+   comment syntax for the file format. We also recommend that a
+   file or class name and description of purpose be included on the
+   same "printed page" as the copyright notice for easier
+   identification within third-party archives.
+
+Copyright 2014 Paho Lurie-Gregg
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+	http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+### Apache License 2.0
+
 Used by: maybe-owned 0.3.4
 
 ```text
@@ -5973,7 +6193,7 @@ limitations under the License.
 
 ### Apache License 2.0
 
-Used by: chacha20 0.10.2, cpufeatures 0.3.1
+Used by: aes 0.9.3, block-buffer 0.12.1, chacha20 0.10.2, cipher 0.5.2, const-oid 0.10.2, cpubits 0.1.1, cpufeatures 0.3.1, crypto-common 0.2.2, digest 0.11.3, hybrid-array 0.4.15, inout 0.2.5, md-5 0.11.0, sha2 0.11.1
 
 ```text
                               Apache License

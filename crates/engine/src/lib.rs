@@ -194,6 +194,9 @@ pub struct SaveOptions {
     /// The Save As screen's settings (`file.export.saveForWebLegacy` params, without a path or
     /// size) when that is what last wrote the file.
     pub web: Option<serde_json::Value>,
+    /// PDF: the passwords and permissions Save As last protected the file with, so File › Save
+    /// keeps them. In memory only, never written to settings.
+    pub pdf_security: Option<photosplice_io::pdf::security::Security>,
 }
 
 /// Per-document editing state.

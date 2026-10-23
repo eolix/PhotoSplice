@@ -112,6 +112,16 @@ pub fn export_layered_with(doc: &Document, editing: bool, opts: &PdfOptions) -> 
     Ok(ExportResult { bytes, warnings })
 }
 
+/// [`export_layered_with`] protected by `security` (the save options' Security) when it sets a
+/// password. Protection that fails is an error: a file meant to be locked is never written open.
+pub fn export_secured(doc: &Document, editing: bool, opts: &PdfOptions, security: Option<&super::security::Security>) -> Result<ExportResult, IoError> {
+    let mut r = export_layered_with(doc, editing, opts)?;
+    if let Some(sec) = security.filter(|s| !s.is_none()) {
+        r.bytes = super::security::encrypt(&r.bytes, sec, opts.compatibility)?;
+    }
+    Ok(r)
+}
+
 /// A PDF of one page per document, each drawn as [`export_layered`] draws its page (Artboards to
 /// PDF, a page per board). No editing data: a Photoshop PDF holds one document.
 pub fn export_pages(docs: &[Document], title: &str) -> Result<ExportResult, IoError> {

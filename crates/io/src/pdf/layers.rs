@@ -59,12 +59,15 @@ pub(crate) fn import_layers(name: &str, page: &Page<'_>, place: &super::Placemen
 /// A page with PDF layers ([`super::ocg`]) as a layered document: what is outside every PDF layer
 /// at the bottom, then a layer group per PDF layer in drawing order, named, shown and locked as
 /// the PDF's default configuration has it. Each is drawn from the file with only that layer on,
-/// so the content of hidden layers comes in too. `page` is the page's index; `None` when a pass
-/// can't be made (the caller then opens the page as one stack).
+/// so the content of hidden layers comes in too. `page` is the page's index, `password` the one
+/// `pdf` opened with; `None` when a pass can't be made (the caller then opens the page as one
+/// stack).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn import_pdf_layers(
     name: &str,
     bytes: &[u8],
     pdf: &hayro::hayro_syntax::Pdf,
+    password: &str,
     page: usize,
     pdf_layers: &[super::ocg::PdfLayer],
     place: &super::Placement,
@@ -76,7 +79,7 @@ pub(crate) fn import_pdf_layers(
     let mut patterns: Vec<photosplice_doc::Pattern> = Vec::new();
     let mut pass = |on: Option<super::ocg::Id>, keep: Keep, warnings: &mut Vec<String>| -> Option<Vec<Layer>> {
         let only = super::ocg::only(bytes, pdf, pdf_layers, on)?;
-        let pdf = hayro::hayro_syntax::Pdf::new(only).ok()?;
+        let pdf = hayro::hayro_syntax::Pdf::new_with_password(only, password).ok()?;
         let pages = pdf.pages();
         let (layers, more, pats) = stack(pages.get(page)?, place, dpi, fmt, keep);
         warnings.extend(more);

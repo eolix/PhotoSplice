@@ -39,15 +39,11 @@ pub(super) struct PdfLayer {
 
 /// The layers the page draws in, in drawing order (bottom first): the first time each is used
 /// by a marked-content sequence (`/OC /name BDC`) or a form or image (`/OC` in its dictionary).
-/// Empty when the file has none, is encrypted, or has more than [`MAX_LAYERS`].
+/// Empty when the file has none or more than [`MAX_LAYERS`].
 pub(super) fn page_layers(pdf: &Pdf, page: &Page<'_>) -> Vec<PdfLayer> {
     let xref = pdf.xref();
     let Some(catalog) = xref.get::<Dict<'_>>(xref.root_id()) else { return Vec::new() };
     let Some(props) = catalog.get::<Dict<'_>>(b"OCProperties") else { return Vec::new() };
-    // The appended catalog would have to be encrypted like the rest.
-    if is_encrypted(pdf) {
-        return Vec::new();
-    }
     let config = props.get::<Dict<'_>>(b"D").unwrap_or_default();
     let refs = |key: &[u8]| -> Vec<Id> { config.get::<Array<'_>>(key).map(|a| array_ids(&a)).unwrap_or_default() };
     let all: Vec<Id> = props.get::<Array<'_>>(b"OCGs").map(|a| array_ids(&a)).unwrap_or_default();
@@ -120,10 +116,6 @@ fn array_ids(a: &Array<'_>) -> Vec<Id> {
     a.raw_iter().filter_map(|o| o.as_obj_ref()).map(|r| (r.obj_number, r.gen_number)).collect()
 }
 
-fn is_encrypted(pdf: &Pdf) -> bool {
-    pdf.data().as_ref().windows(8).any(|w| w == b"/Encrypt")
-}
-
 /// A PDF text string: UTF-16BE or UTF-8 with a byte-order mark (and UTF-16LE, which some
 /// writers use though the standard doesn't allow it), else PDFDocEncoding (taken as Latin-1,
 /// which it matches for letters). Trailing NULs, which some writers add, are dropped.
@@ -164,10 +156,54 @@ pub(super) fn only(bytes: &[u8], pdf: &Pdf, layers: &[PdfLayer], on: Option<Id>)
     let xref_at = out.len();
     let _ = write!(
         out,
-        "xref\n0 1\n0000000000 65535 f \n{NUM} 1\n{at:010} 00000 n \ntrailer\n<< /Size {} /Root {NUM} 0 R /Prev {prev} >>\nstartxref\n{xref_at}\n%%EOF\n",
-        NUM + 1
+        "xref\n0 1\n0000000000 65535 f \n{NUM} 1\n{at:010} 00000 n \ntrailer\n<< /Size {} /Root {NUM} 0 R /Prev {prev}{} >>\nstartxref\n{xref_at}\n%%EOF\n",
+        NUM + 1,
+        encryption(bytes)
     );
     Some(out)
+}
+
+/// A protected file's `/Encrypt` and `/ID` trailer entries (from its newest trailer or
+/// cross-reference stream, which are never enciphered), for the appended trailer: the reader
+/// takes the encryption from the newest one. The appended catalog has no strings or streams, so
+/// it needs no enciphering itself. Empty for a file without them.
+fn encryption(bytes: &[u8]) -> String {
+    let after = |key: &[u8]| -> Option<&[u8]> {
+        let mut end = bytes.len();
+        // The last use followed by what the entry needs (not `/IDTree`, say).
+        loop {
+            let at = bytes.get(..end)?.windows(key.len()).rposition(|w| w == key)?;
+            let rest = bytes.get(at + key.len()..)?;
+            let rest = rest.get(rest.iter().position(|c| !c.is_ascii_whitespace())?..)?;
+            if rest.first().is_some_and(|c| c.is_ascii_digit() || *c == b'[') {
+                return Some(rest);
+            }
+            end = at;
+        }
+    };
+    let mut out = String::new();
+    if let Some(rest) = after(b"/Encrypt") {
+        let words: Vec<&str> = std::str::from_utf8(rest.get(..rest.len().min(40)).unwrap_or_default()).unwrap_or_default().split_whitespace().take(3).collect();
+        if let [n, g, r] = words.as_slice()
+            && n.parse::<u32>().is_ok()
+            && g.parse::<u16>().is_ok()
+            && r.starts_with('R')
+        {
+            out = format!(" /Encrypt {n} {g} R");
+        } else {
+            return String::new();
+        }
+    }
+    if !out.is_empty()
+        && let Some(rest) = after(b"/ID")
+        && rest.first() == Some(&b'[')
+        && let Some(end) = rest.iter().take(1024).position(|&c| c == b']')
+        && let Ok(id) = std::str::from_utf8(rest.get(..=end).unwrap_or_default())
+    {
+        out.push_str(" /ID ");
+        out.push_str(id);
+    }
+    out
 }
 
 /// The offset the last `startxref` points to.

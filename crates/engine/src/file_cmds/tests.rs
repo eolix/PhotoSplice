@@ -1113,6 +1113,37 @@ fn pdf_save_params_parse_and_bad_ones_keep_the_defaults() {
         assert!(o.jpeg_quality.is_none_or(|q| (1..=100).contains(&q)), "{bad}");
     }
 }
+#[test]
+fn pdf_security_params_parse_and_bad_ones_are_errors() {
+    use photosplice_io::pdf::security::{Changes, Printing};
+    assert_eq!(pdf_security(&json!({}), "t").unwrap(), None, "no password: unprotected");
+    assert_eq!(pdf_security(&json!({"pdfPrinting": "none", "pdfOpenPassword": ""}), "t").unwrap(), None);
+    let sec = pdf_security(&json!({"pdfPermissionsPassword": "p", "pdfPrinting": "low", "pdfChanges": "forms", "pdfCopy": false}), "t").unwrap().unwrap();
+    assert_eq!((sec.printing, sec.changes, sec.copy, sec.screen_readers), (Printing::Low, Changes::Forms, false, true));
+    assert!(!format!("{sec:?}").contains("\"p\""), "Debug never shows a password");
+    for bad in [
+        json!({"pdfOpenPassword": 7}),
+        json!({"pdfPermissionsPassword": ["x"]}),
+        json!({"pdfPrinting": "sometimes"}),
+        json!({"pdfChanges": 3}),
+        json!({"pdfCopy": "yes"}),
+        json!({"pdfPlaintextMetadata": 1}),
+    ] {
+        assert!(pdf_security(&bad, "t").is_err(), "{bad}");
+    }
+    // Save a Copy with a password writes a protected PDF.
+    let mut s = session(8, 8, 8);
+    let dir = std::env::temp_dir().join(format!("pc-pdf-sec-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("locked.pdf").to_string_lossy().into_owned();
+    s.execute("file.saveACopy", json!({"path": path, "pdfOpenPassword": "sesame"})).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(photosplice_io::pdf::needs_password(&bytes));
+    assert_eq!(photosplice_io::pdf::page_count_with(&bytes, "sesame").unwrap(), 1);
+    assert!(s.execute("file.saveACopy", json!({"path": path, "pdfPrinting": false})).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `file.revealInFinder` (the document tab's Reveal, UI-217-6) reveals the clicked document's
 /// saved path — the tab menu passes `document`, not just the active one.
 #[test]

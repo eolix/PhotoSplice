@@ -855,6 +855,8 @@ fn web_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, Val
                     ui.label(egui::RichText::new(tl!("Photoshop and PhotoSplice reopen the PDF with its layers. Other applications show its page.")).color(t.text_dim));
                     ui.add_space(6.0);
                     pdf_options_ui(ui, f, app.pdf_options);
+                    let sec = app.session.active().and_then(|st| st.save_options.pdf_security.clone());
+                    pdf_security_ui(ui, f, sec.as_ref());
                 }
                 return;
             }
@@ -993,6 +995,90 @@ fn pdf_options_ui(ui: &mut egui::Ui, f: &mut Map<String, Value>, cur: photosplic
     check(ui, f, "pdfLayers", tl!("Create PDF Layers from Top-Level Layers"), cur.pdf_layers);
 }
 
+/// The PDF save options' Security: a password to open the file, one that restricts printing, changes
+/// and copying, and what those allow. Starts from the document's own (its last Save As). The
+/// passwords' fields are `__` ones, which never leave the dialog (`params` drops them), so they
+/// aren't remembered with its other settings.
+fn pdf_security_ui(ui: &mut egui::Ui, f: &mut Map<String, Value>, cur: Option<&photosplice_io::pdf::security::Security>) {
+    use photosplice_io::pdf::security::{Changes, Printing};
+    let t = crate::theme::Tokens::get(ui.ctx());
+    let d = cur.cloned().unwrap_or_default();
+    for (k, v) in [
+        ("__pdfRequireOpen", json!(!d.open_password.is_empty())),
+        ("__pdfOpenPassword", json!(d.open_password)),
+        ("__pdfRestrict", json!(!d.permissions_password.is_empty())),
+        ("__pdfPermissionsPassword", json!(d.permissions_password)),
+        ("pdfPrinting", json!(d.printing.id())),
+        ("pdfChanges", json!(d.changes.id())),
+        ("pdfCopy", json!(d.copy)),
+        ("pdfScreenReaders", json!(d.screen_readers)),
+        ("pdfPlaintextMetadata", json!(d.plaintext_metadata)),
+    ] {
+        f.entry(k).or_insert(v);
+    }
+    ui.add_space(6.0);
+    crate::widgets::hairline(ui);
+    ui.label(egui::RichText::new(tl!("Security")).font(crate::theme::semibold(12.0)).color(t.text));
+    let password = |ui: &mut egui::Ui, f: &mut Map<String, Value>, key: &str, label: &str| {
+        ui.horizontal(|ui| {
+            ui.add_space(20.0);
+            ui.add_sized(egui::vec2(176.0, 22.0), egui::Label::new(egui::RichText::new(label).color(t.text_dim)));
+            let mut v = s(f, key, "");
+            if ui.add(egui::TextEdit::singleline(&mut v).password(true).desired_width(150.0)).changed() {
+                f.insert(key.into(), json!(v));
+            }
+        });
+    };
+    check(ui, f, "__pdfRequireOpen", tl!("Require a password to open the document"), false);
+    if b(f, "__pdfRequireOpen", false) {
+        password(ui, f, "__pdfOpenPassword", tl!("Document Open Password:"));
+    }
+    check(ui, f, "__pdfRestrict", tl!("Use a password to restrict printing, editing and other tasks"), false);
+    if b(f, "__pdfRestrict", false) {
+        password(ui, f, "__pdfPermissionsPassword", tl!("Permissions Password:"));
+        let row = |ui: &mut egui::Ui, f: &mut Map<String, Value>, label: &str, id: &str, key: &str, opts: &[(&str, &str)]| {
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                ui.add_sized(egui::vec2(176.0, 22.0), egui::Label::new(egui::RichText::new(label).color(t.text_dim)));
+                dropdown_str(ui, id, f, key, opts, 270.0);
+            });
+        };
+        let printing: Vec<(&str, &str)> = Printing::ALL.iter().map(|(_, id, l)| (*id, tl!(l))).collect();
+        row(ui, f, tl!("Printing Allowed:"), "pdf-printing", "pdfPrinting", &printing);
+        let changes: Vec<(&str, &str)> = Changes::ALL.iter().map(|(_, id, l)| (*id, tl!(l))).collect();
+        row(ui, f, tl!("Changes Allowed:"), "pdf-changes", "pdfChanges", &changes);
+        ui.horizontal(|ui| {
+            ui.add_space(20.0);
+            ui.vertical(|ui| {
+                check(ui, f, "pdfCopy", tl!("Enable copying of text, images and other content"), true);
+                check(ui, f, "pdfScreenReaders", tl!("Enable text access of screen reader devices for the visually impaired"), true);
+                check(ui, f, "pdfPlaintextMetadata", tl!("Enable plaintext metadata"), false);
+            });
+        });
+    }
+}
+
+/// The Security the dialog's fields set: `Ok(None)` without a password; an error for a ticked
+/// box without its password, or the same password twice (the permissions one would open the
+/// file with every permission).
+pub(crate) fn pdf_security(f: &Map<String, Value>) -> Result<Option<photosplice_io::pdf::security::Security>, String> {
+    let open = if b(f, "__pdfRequireOpen", false) { s(f, "__pdfOpenPassword", "") } else { String::new() };
+    let perms = if b(f, "__pdfRestrict", false) { s(f, "__pdfPermissionsPassword", "") } else { String::new() };
+    if b(f, "__pdfRequireOpen", false) && open.is_empty() {
+        return Err(tl!("Enter a Document Open Password, or untick Require a password to open the document.").into());
+    }
+    if b(f, "__pdfRestrict", false) && perms.is_empty() {
+        return Err(tl!("Enter a Permissions Password, or untick Use a password to restrict printing, editing and other tasks.").into());
+    }
+    if !open.is_empty() && open == perms {
+        return Err(tl!("The Document Open Password and the Permissions Password can't be the same.").into());
+    }
+    let mut p = params(f);
+    p["pdfOpenPassword"] = json!(open);
+    p["pdfPermissionsPassword"] = json!(perms);
+    photosplice_engine::file_cmds::pdf_security(&p, "file.saveAs").map_err(|e| e.to_string())
+}
+
 /// The PDF options the dialog's fields set (missing ones keep `cur`).
 pub(crate) fn pdf_options(f: &Map<String, Value>, cur: photosplice_io::pdf::export::PdfOptions) -> photosplice_io::pdf::export::PdfOptions {
     use photosplice_io::pdf::export::Compatibility;
@@ -1025,8 +1111,13 @@ fn web_confirm(app: &mut PhotospliceApp, f: &Map<String, Value>) -> Result<Value
     let fmt = s(f, "format", "jpeg");
     if save_as && is_doc_format(&fmt) {
         if fmt == "pdf" {
+            let security = pdf_security(f)?;
             app.pdf_preserve_editing = b(f, "pdfEditing", app.pdf_preserve_editing);
             app.pdf_options = pdf_options(f, app.pdf_options);
+            // The document's own: File › Save keeps it, other documents don't get it.
+            if let Some(st) = app.session.active_mut() {
+                st.save_options.pdf_security = security;
+            }
         }
         // A document format saves the document itself, which takes the new path.
         return match f.get("path").and_then(Value::as_str) {
@@ -1630,6 +1721,29 @@ mod tests {
         assert_eq!(pdf_options(&f, cur).jpeg_quality, Some(51));
         f.insert("pdfQuality".into(), json!("nonsense"));
         assert_eq!(pdf_options(&f, cur).jpeg_quality, Some(84), "unreadable quality: Maximum");
+    }
+
+    #[test]
+    fn pdf_security_fields_need_their_passwords_and_stay_in_the_dialog() {
+        let mut f = Map::new();
+        assert_eq!(pdf_security(&f), Ok(None), "nothing ticked: unprotected");
+        // A password typed, then its box unticked: not used.
+        f.insert("__pdfOpenPassword".into(), json!("a"));
+        assert_eq!(pdf_security(&f), Ok(None));
+        f.insert("__pdfRequireOpen".into(), json!(true));
+        assert_eq!(pdf_security(&f).unwrap().unwrap().open_password, "a");
+        f.insert("__pdfRestrict".into(), json!(true));
+        assert!(pdf_security(&f).is_err(), "restrict without a password");
+        f.insert("__pdfPermissionsPassword".into(), json!("a"));
+        assert!(pdf_security(&f).is_err(), "the same password twice");
+        f.insert("__pdfPermissionsPassword".into(), json!("b"));
+        f.insert("pdfPrinting".into(), json!("none"));
+        let sec = pdf_security(&f).unwrap().unwrap();
+        assert_eq!((sec.permissions_password.as_str(), sec.printing), ("b", photosplice_io::pdf::security::Printing::None));
+        f.insert("__pdfOpenPassword".into(), json!(""));
+        assert!(pdf_security(&f).is_err(), "ticked without a password");
+        // The passwords never reach the command's params (remembered with the dialog).
+        assert!(params(&f).get("__pdfPermissionsPassword").is_none() && !params(&f).to_string().contains("\"b\""));
     }
 
     #[test]

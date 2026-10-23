@@ -265,6 +265,8 @@ pub struct ExportSettings {
     pub pdf_editing: bool,
     /// PDF: Compatibility, Image Compression and Downsampling.
     pub pdf: photosplice_io::pdf::export::PdfOptions,
+    /// PDF: Security (passwords and permissions); the document's own, from its last Save As.
+    pub pdf_security: Option<photosplice_io::pdf::security::Security>,
     /// PSD: the selected layers, the active one first, so the file reopens with them selected
     /// (set by [`PhotospliceApp::write_document`]).
     pub selected_layers: Vec<photosplice_doc::LayerId>,
@@ -293,6 +295,7 @@ impl Default for ExportSettings {
             webp_lossless: true,
             pdf_editing: true,
             pdf: Default::default(),
+            pdf_security: None,
             selected_layers: Vec::new(),
             tga_bits: None,
             image_previews: true,
@@ -324,6 +327,7 @@ impl ExportSettings {
         opts.psd_maximize_compatibility = self.psd_maximize_compatibility;
         opts.pdf_discard_editing = !self.pdf_editing;
         opts.pdf = self.pdf;
+        opts.pdf_security = self.pdf_security.clone();
         opts.selected_layers = self.selected_layers.clone();
         opts
     }
@@ -1618,6 +1622,8 @@ impl PhotospliceApp {
                 settings.webp_quality = Some(q.min(100));
                 settings.webp_lossless = false;
             }
+            // A PDF saved with a password keeps it.
+            settings.pdf_security = st.save_options.pdf_security.clone();
         }
         // Save Adobe PDF's options, as last chosen.
         settings.pdf_editing = self.pdf_preserve_editing;

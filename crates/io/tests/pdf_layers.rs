@@ -1056,6 +1056,61 @@ fn top_level_layers_save_as_pdf_layers_and_reopen_as_themselves() {
     assert!(!String::from_utf8_lossy(&plain).contains("/OCProperties"));
 }
 
+/// The PDF save options' Security: at every compatibility (RC4, 128-bit AES, 256-bit AES), an open
+/// password locks the file, which then opens with it, layers, editing data and all.
+#[test]
+fn a_pdf_saved_with_a_password_opens_with_it() {
+    use photosplice_io::IoError;
+    use photosplice_io::pdf::export::{Compatibility, PdfOptions, export_secured};
+    use photosplice_io::pdf::security::{Changes, Printing, Security};
+    use photosplice_io::pdf::{OpenOptions, open_page_with};
+    let doc = sample();
+    for (c, cfm) in [(Compatibility::Pdf14, None), (Compatibility::Pdf16, Some("/AESV2")), (Compatibility::Pdf17, Some("/AESV3")), (Compatibility::Pdf20, Some("/AESV3"))] {
+        let o = PdfOptions { compatibility: c, ..Default::default() };
+        let sec = Security { open_password: "sesame".into(), permissions_password: "owner".into(), printing: Printing::Low, changes: Changes::None, ..Default::default() };
+        for editing in [false, true] {
+            let bytes = export_secured(&doc, editing, &o, Some(&sec)).unwrap().bytes;
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            assert!(text.contains("/Encrypt") && text.contains("/Filter /Standard"), "{c:?}");
+            assert_eq!(cfm.is_some_and(|m| text.contains(m)), cfm.is_some(), "{c:?}: the cipher of its compatibility");
+            assert!(!text.contains("(Box)") && !text.contains("/FlateDecode\n"), "{c:?}: the layer names are enciphered");
+            assert!(photosplice_io::pdf::needs_password(&bytes), "{c:?}");
+            let with = |pw: &str| open_page_with("p.pdf", &bytes, &OpenOptions { dpi: 72.0, how: PageAs::Layers, password: pw.into(), ..Default::default() });
+            assert!(matches!(with(""), Err(IoError::PdfPassword { given: false })), "{c:?}");
+            assert!(matches!(with("wrong"), Err(IoError::PdfPassword { given: true })), "{c:?}");
+            for pw in ["sesame", "owner"] {
+                let back = with(pw).unwrap().document;
+                assert_eq!(kinds(&back), ["shape", "pixels", "text"], "{c:?}, editing {editing}, password {pw}");
+                assert_eq!(back.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["Box", "Green", "Saved"]);
+                assert!(mean_diff(&doc, &back) < 0.02, "{c:?}, editing {editing}");
+            }
+        }
+    }
+    // A permissions password alone: anyone opens it (the restrictions are the reader's to keep).
+    let sec = Security { permissions_password: "owner".into(), ..Default::default() };
+    let bytes = export_secured(&doc, false, &PdfOptions::default(), Some(&sec)).unwrap().bytes;
+    assert!(String::from_utf8_lossy(&bytes).contains("/Encrypt") && !photosplice_io::pdf::needs_password(&bytes));
+    assert_eq!(kinds(&open_page("o.pdf", &bytes, 0, 72.0, PageAs::Layers).unwrap().document), ["shape", "pixels", "text"]);
+    // Any Unicode password at 256-bit AES; ASCII only below it, where readers disagree.
+    let sec = Security { open_password: "pässwörd ✓".into(), ..Default::default() };
+    let bytes = export_secured(&doc, false, &PdfOptions::default(), Some(&sec)).unwrap().bytes;
+    let back = open_page_with("p.pdf", &bytes, &OpenOptions { dpi: 72.0, how: PageAs::Layers, password: "pässwörd ✓".into(), ..Default::default() }).unwrap();
+    assert_eq!(kinds(&back.document), ["shape", "pixels", "text"]);
+    assert!(export_secured(&doc, false, &PdfOptions { compatibility: Compatibility::Pdf16, ..Default::default() }, Some(&sec)).is_err());
+    // Plaintext metadata: the XMP stays readable, the rest enciphered.
+    let xmp = |plain: bool| {
+        let sec = Security { open_password: "a".into(), plaintext_metadata: plain, ..Default::default() };
+        String::from_utf8_lossy(&export_secured(&doc, false, &PdfOptions::default(), Some(&sec)).unwrap().bytes).contains("<x:xmpmeta")
+    };
+    assert!(!xmp(false));
+    if String::from_utf8_lossy(&export_with(&doc, PdfOptions::default())).contains("<x:xmpmeta") {
+        assert!(xmp(true));
+    }
+    // No password: written as it was.
+    let none = export_secured(&doc, false, &PdfOptions::default(), Some(&Security::default())).unwrap().bytes;
+    assert!(!String::from_utf8_lossy(&none).contains("/Encrypt"));
+}
+
 /// Opens the Reference's own PDFs from the verification kit (`$PHOTOSPLICE_PDF_KIT_OUT`, the
 /// kit's `out/`): each `ps-*-editing.pdf` against the Reference's PSD of the same document, each
 /// `ps-*-page.pdf` (no editing data) against its flat TIFF.
