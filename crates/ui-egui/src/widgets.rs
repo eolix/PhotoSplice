@@ -1323,6 +1323,14 @@ pub fn keep_inside(rect: egui::Rect, bounds: egui::Rect) -> Vec2 {
     if v.x.is_finite() && v.y.is_finite() { v } else { Vec2::ZERO }
 }
 
+/// Inner padding of a large tool dialog's side panels ([`crate::dialogs::FrameSize::Panels`]:
+/// Camera Raw, Filter Gallery, Lens Correction), so their content lines up from one to the next.
+pub const TOOL_PANEL_PAD: Vec2 = vec2(14.0, 12.0);
+/// A tool dialog's footer bar: its height (a button with even room above and below) and how far
+/// its buttons sit from the window's sides.
+pub const TOOL_FOOTER_H: f32 = 52.0;
+pub const TOOL_FOOTER_INSET: f32 = 16.0;
+
 /// Where a large tool dialog (Camera Raw, Lens Correction) sits: centred below the title bar,
 /// at most `max`, with a margin to the window's edges. A dialog over the document, not a takeover.
 pub fn tool_dialog_rect(ctx: &egui::Context, max: Vec2) -> egui::Rect {

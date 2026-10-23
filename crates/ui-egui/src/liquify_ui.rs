@@ -742,7 +742,7 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let mut action: Option<&str> = None;
     let mut events: Vec<ToolEvent> = Vec::new();
     let mut mods = egui::Modifiers::NONE;
-    let size = crate::dialogs::FrameSize::Fixed(rect.size());
+    let size = crate::dialogs::FrameSize::Panels(rect.size());
     crate::dialogs::frame(ctx, egui::Id::new("liquify-dialog"), &heading, size, |ui, size| {
         let Some(d) = app.distort.liquify.as_mut() else { return };
         d.upload(ctx);

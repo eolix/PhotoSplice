@@ -230,7 +230,7 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let rect = widgets::tool_dialog_rect(ctx, DIALOG_MAX);
     let mut action: Option<&str> = None;
     // The dialogs' own frame (title bar, dragging), at a fixed size, like Lens Correction's.
-    let size = crate::dialogs::FrameSize::Fixed(rect.size());
+    let size = crate::dialogs::FrameSize::Panels(rect.size());
     crate::dialogs::frame(ctx, egui::Id::new("awa-dialog"), &heading, size, |ui, size| {
         // Read where the dialog is drawn (its own window, where there are windows).
         let shift = ui.input(|i| i.modifiers.shift);

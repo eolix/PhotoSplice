@@ -402,7 +402,7 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let rect = crate::widgets::tool_dialog_rect(ctx, DIALOG_MAX);
     let mut action: Option<&str> = None;
     // The dialogs' own frame (title bar, dragging, kept below the app's title bar), at a fixed size.
-    let size = crate::dialogs::FrameSize::Fixed(rect.size());
+    let size = crate::dialogs::FrameSize::Panels(rect.size());
     crate::dialogs::frame(ctx, egui::Id::new("lens-correction-dialog"), tl!("Lens Correction"), size, |ui, size| {
         let Some(d) = app.lens.as_mut() else { return };
         if d.dirty {
@@ -413,7 +413,7 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
         // Tool strip.
         let strip = ERect::from_min_max(body.min, pos2(body.left() + STRIP_W, body.bottom()));
         painter.rect_filled(strip, 0.0, t.dock);
-        let mut su = ui.new_child(egui::UiBuilder::new().max_rect(strip.shrink2(vec2(6.0, 10.0))).layout(egui::Layout::top_down(egui::Align::Center)));
+        let mut su = ui.new_child(egui::UiBuilder::new().max_rect(strip.shrink2(vec2(6.0, widgets::TOOL_PANEL_PAD.y))).layout(egui::Layout::top_down(egui::Align::Center)));
         if crate::icons::button(&mut su, "tools-grid-4x4", 28.0, d.show_grid, tl!("Show Grid")).clicked() {
             d.show_grid = !d.show_grid;
         }
@@ -479,8 +479,8 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
             }
         }
         // Zoom control.
-        let zr = ERect::from_min_size(pos2(view.left(), view.bottom() - 26.0), vec2(118.0, 26.0));
-        painter.rect_filled(zr, 0.0, Color32::from_black_alpha(200));
+        let zr = ERect::from_min_size(pos2(view.left() + 8.0, view.bottom() - 26.0 - 8.0), vec2(118.0, 26.0));
+        painter.rect_filled(zr, t.radius_sm, Color32::from_black_alpha(200));
         let mut zu = ui.new_child(egui::UiBuilder::new().max_rect(zr.shrink2(vec2(6.0, 3.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
         // Screen points per document pixel, as the canvas's zoom.
         let pct = k * d.pw as f32 / d.full_w.max(1) as f32;
@@ -495,9 +495,10 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
         let right = ERect::from_min_max(pos2(body.right() - PANEL_W, body.top()), body.max);
         painter.rect_filled(right, 0.0, t.dock);
         painter.line_segment([right.left_top(), right.left_bottom()], Stroke::new(1.0, t.separator));
-        let foot_h = 92.0;
-        let mut pu = ui
-            .new_child(egui::UiBuilder::new().max_rect(ERect::from_min_max(right.min + vec2(14.0, 10.0), pos2(right.right() - 14.0, right.bottom() - foot_h))));
+        let pad = widgets::TOOL_PANEL_PAD;
+        // Footer: Preview, then Reset apart from Cancel and OK, under a line across the panel.
+        let foot = ERect::from_min_max(pos2(right.left(), right.bottom() - 84.0), right.max);
+        let mut pu = ui.new_child(egui::UiBuilder::new().max_rect(ERect::from_min_max(right.min + pad, pos2(right.right() - pad.x, foot.top() - 6.0))));
         pu.horizontal(|ui| {
             for (tab, label) in [(Tab::Auto, tl!("Auto Correction")), (Tab::Custom, tl!("Custom"))] {
                 if ui.selectable_label(d.tab == tab, label).clicked() {
@@ -510,20 +511,25 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
             Tab::Auto => auto_tab(ui, d),
             Tab::Custom => custom_tab(ui, d),
         });
-        let foot = ERect::from_min_max(pos2(right.left() + 14.0, right.bottom() - foot_h + 6.0), right.max - vec2(14.0, 10.0));
-        let mut fu = ui.new_child(egui::UiBuilder::new().max_rect(foot).layout(egui::Layout::top_down_justified(egui::Align::Min)));
+        painter.line_segment([foot.left_top(), foot.right_top()], Stroke::new(1.0, t.separator));
+        let mut fu = ui.new_child(egui::UiBuilder::new().max_rect(foot.shrink2(pad)).layout(egui::Layout::top_down(egui::Align::Min)));
+        fu.spacing_mut().item_spacing.y = 10.0;
         widgets::checkbox(&mut fu, &mut d.preview, tl!("Preview"));
         fu.horizontal(|ui| {
-            if widgets::secondary_button(ui, tl!("Reset"), 90.0).clicked() {
+            if widgets::secondary_button(ui, tl!("Reset"), 84.0).clicked() {
                 d.params = defaults();
                 d.dirty = true;
             }
-            if widgets::secondary_button(ui, tl!("Cancel"), 90.0).clicked() {
-                action = Some("cancel");
-            }
-            if widgets::primary_button(ui, tl!("OK"), 90.0).clicked() {
-                action = Some("ok");
-            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let ok = widgets::DialogButton::new(widgets::ButtonRole::Default, tl!("OK"), 84.0);
+                let cancel = widgets::DialogButton::new(widgets::ButtonRole::Cancel, tl!("Cancel"), 84.0);
+                match widgets::dialog_buttons(ui, &[ok, cancel]) {
+                    Some(widgets::ButtonRole::Default) => action = Some("ok"),
+                    Some(_) => action = Some("cancel"),
+                    None => {}
+                }
+            });
         });
     });
     if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {

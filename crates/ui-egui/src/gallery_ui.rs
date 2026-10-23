@@ -30,6 +30,8 @@ use crate::widgets;
 
 const MID_W: f32 = 300.0;
 const RIGHT_W: f32 = 290.0;
+/// Height of the zoom bar under the preview.
+const ZOOM_BAR_H: f32 = 36.0;
 const THUMB: [usize; 2] = crate::gallery_thumbs::THUMB_PT;
 
 /// One effect layer of the stack.
@@ -702,14 +704,14 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     let rect = widgets::tool_dialog_rect(ctx, DIALOG_MAX);
     let background = app.background_jobs;
     // The dialogs' own frame (title bar, dragging, kept below the app's title bar), at a fixed size.
-    crate::dialogs::frame(ctx, egui::Id::new("gallery-dialog"), &heading, crate::dialogs::FrameSize::Fixed(rect.size()), |ui, size| {
+    crate::dialogs::frame(ctx, egui::Id::new("gallery-dialog"), &heading, crate::dialogs::FrameSize::Panels(rect.size()), |ui, size| {
         let Some(d) = app.distort.gallery.as_mut() else { return };
         d.history.settle(&d.effects, ctx.input(|i| i.pointer.any_down()));
         let (body, _) = ui.allocate_exact_size(size.unwrap_or(rect.size()), Sense::hover());
         let painter = ui.painter().clone();
         let right = ERect::from_min_size(pos2(body.right() - RIGHT_W, body.top()), vec2(RIGHT_W, body.height()));
         let mid = ERect::from_min_size(pos2(right.left() - MID_W, body.top()), vec2(MID_W, body.height()));
-        let area = ERect::from_min_max(body.min, pos2(mid.left(), body.bottom() - 30.0));
+        let area = ERect::from_min_max(body.min, pos2(mid.left(), body.bottom() - ZOOM_BAR_H));
         let zoom_bar = ERect::from_min_max(pos2(body.left(), area.bottom()), pos2(mid.left(), body.bottom()));
 
         // ---- Preview ----
@@ -728,7 +730,12 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
         }
         // ---- Zoom bar ----
         painter.rect_filled(zoom_bar, 0.0, t.dock);
-        let mut zb = ui.new_child(egui::UiBuilder::new().max_rect(zoom_bar.shrink2(vec2(10.0, 3.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        painter.line_segment([zoom_bar.left_top(), zoom_bar.right_top()], Stroke::new(1.0, t.separator));
+        let mut zb = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(zoom_bar.shrink2(vec2(widgets::TOOL_PANEL_PAD.x, 0.0)))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
         let steps = [0.0f32, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0];
         if crate::icons::button(&mut zb, "minus", 22.0, false, tl!("Zoom out")).clicked() {
             d.zoom = steps.iter().rev().copied().find(|&s| s > 0.0 && s < d.zoom.max(0.0) - 1e-3).unwrap_or(0.0);
@@ -754,7 +761,7 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
         painter.rect_filled(mid, 0.0, t.dock);
         painter.line_segment([mid.left_top(), mid.left_bottom()], Stroke::new(1.0, t.separator));
         update_thumbs(d, &mut app.gallery_thumbs, app.services.gallery_thumbs_file.as_deref(), ctx, 6);
-        let mut mu = ui.new_child(egui::UiBuilder::new().max_rect(mid.shrink2(vec2(8.0, 8.0))));
+        let mut mu = ui.new_child(egui::UiBuilder::new().max_rect(mid.shrink2(widgets::TOOL_PANEL_PAD)));
         egui::ScrollArea::vertical().id_salt("gallery-tree").show(&mut mu, |ui| {
             for (ci, cat) in GALLERY_CATEGORIES.iter().enumerate() {
                 let icon = if d.open[ci] { "folder-open" } else { "folder" };
@@ -807,21 +814,24 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
         // ---- Right: buttons, filter settings, effect layers ----
         painter.rect_filled(right, 0.0, t.dock);
         painter.line_segment([right.left_top(), right.left_bottom()], Stroke::new(1.0, t.separator));
-        let inner = right.shrink2(vec2(12.0, 10.0));
+        let inner = right.shrink2(widgets::TOOL_PANEL_PAD);
         let mut ru = ui.new_child(egui::UiBuilder::new().max_rect(inner));
         ru.spacing_mut().item_spacing.y = 6.0;
         ru.horizontal(|ui| {
+            // OK and Cancel share the panel's width between them.
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let w = ((inner.width() - 10.0) / 2.0).floor();
             if let Some(role) = widgets::dialog_buttons(
                 ui,
                 &[
-                    widgets::DialogButton::new(widgets::ButtonRole::Default, tl!("OK"), 120.0),
-                    widgets::DialogButton::new(widgets::ButtonRole::Cancel, tl!("Cancel"), 120.0),
+                    widgets::DialogButton::new(widgets::ButtonRole::Default, tl!("OK"), w),
+                    widgets::DialogButton::new(widgets::ButtonRole::Cancel, tl!("Cancel"), w),
                 ],
             ) {
                 action = Some(if role == widgets::ButtonRole::Default { "ok" } else { "cancel" });
             }
         });
-        ru.add_space(4.0);
+        ru.add_space(6.0);
         let mut cur = d.effects[d.selected].filter;
         let names: Vec<(GalleryFilter, &str)> = GalleryFilter::ALL.iter().map(|f| (*f, f.name())).collect();
         if widgets::dropdown(&mut ru, "gallery-filter", &mut cur, &names, inner.width() - 8.0) {

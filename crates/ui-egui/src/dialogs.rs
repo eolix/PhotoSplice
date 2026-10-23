@@ -10,6 +10,10 @@ use crate::widgets::{ButtonRole, DialogButton, dialog_buttons};
 /// Where this frame's dialogs are on screen (the canvas reads last frame's: it draws first).
 const RECTS: &str = "pc-dialog-rects";
 
+/// Room under a dialog's content beyond the frame's margin, so its button row doesn't sit on the
+/// bottom edge.
+const BOTTOM_PAD: i8 = 8;
+
 fn rects(ctx: &egui::Context) -> Vec<egui::Rect> {
     ctx.data(|m| m.get_temp(egui::Id::new(RECTS))).unwrap_or_default()
 }
@@ -39,11 +43,25 @@ pub fn pan_delta(ctx: &egui::Context, canvas: egui::Rect, hand: bool) -> Option<
 }
 
 /// How a dialog's frame is sized: a width range for the content to fill (the ordinary
-/// dialogs), or a fixed outer size (Camera Raw, Lens Correction).
+/// dialogs), or a fixed outer size.
 #[derive(Clone, Copy, Debug)]
 pub enum FrameSize {
     Width(f32, f32),
+    /// A fixed outer size, the body inside the frame's margins (Import PDF).
     Fixed(egui::Vec2),
+    /// A fixed outer size whose body paints its own panels and footer (Camera Raw, Filter
+    /// Gallery, Lens Correction, Liquify): in a window of its own they run to the window's
+    /// edges, in the main window to an even gutter all round. The body pads its own content.
+    Panels(egui::Vec2),
+}
+
+impl FrameSize {
+    fn outer(self) -> Option<egui::Vec2> {
+        match self {
+            Self::Width(..) => None,
+            Self::Fixed(outer) | Self::Panels(outer) => Some(outer),
+        }
+    }
 }
 
 /// What the dialog loop ([`show`]) adds to a [`frame`].
@@ -67,7 +85,7 @@ struct FrameOpts {
 /// `body` gets the frame's content `Ui` and, for a fixed size, the body's size below the title
 /// bar. The response says whether it should close (Esc is the caller's).
 ///
-/// A large dialog ([`FrameSize::Fixed`]: Camera Raw, Filter Gallery, Lens Correction, Liquify…) is
+/// A large dialog ([`FrameSize::Fixed`], [`FrameSize::Panels`]: Camera Raw, Filter Gallery…) is
 /// a window of its own where the platform has them ([`floating`]): it can leave the main window,
 /// as Reference's large dialogs do. The small ones stay in the main window.
 pub fn frame<R>(
@@ -77,10 +95,10 @@ pub fn frame<R>(
     size: FrameSize,
     body: impl FnOnce(&mut egui::Ui, Option<egui::Vec2>) -> R,
 ) -> FrameResponse<R> {
-    if let FrameSize::Fixed(outer) = size
+    if let Some(outer) = size.outer()
         && !ctx.embed_viewports()
     {
-        return floating(ctx, id, title, outer, body);
+        return floating(ctx, id, title, outer, matches!(size, FrameSize::Panels(_)), body);
     }
     let modal = frame_with(ctx, id, title, size, FrameOpts::default(), body);
     // Esc closes it; a click outside doesn't (Reference keeps the dialog).
@@ -146,6 +164,8 @@ struct FloatOpts {
     /// dialogs read Esc, Enter and their shortcuts there. The dialog loop's dialogs read theirs
     /// in their own window.
     forward_keys: bool,
+    /// The body runs to the window's edges ([`FrameSize::Panels`]) instead of inside a margin.
+    bleed: bool,
 }
 
 /// The size of the main window's content (points), also while drawing in a dialog's own window:
@@ -171,9 +191,10 @@ fn floating<R>(
     id: egui::Id,
     title: &str,
     outer: egui::Vec2,
+    bleed: bool,
     body: impl FnOnce(&mut egui::Ui, Option<egui::Vec2>) -> R,
 ) -> FrameResponse<R> {
-    let opts = FloatOpts { place: id.with("floating-offset"), inactive: false, front: egui::ViewportId::from_hash_of(id), forward_keys: true };
+    let opts = FloatOpts { place: id.with("floating-offset"), inactive: false, front: egui::ViewportId::from_hash_of(id), forward_keys: true, bleed };
     let shown = floating_window(ctx, id, title, FloatSize::Fixed(outer), opts, body);
     FrameResponse { inner: shown.inner, close: shown.close }
 }
@@ -275,11 +296,22 @@ fn floating_window<R>(
                     if resp.drag_started() {
                         vctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                     }
+                    // Panels start right under the strip's separator.
+                    if opts.bleed {
+                        ui.add_space(-ui.spacing().item_spacing.y);
+                    }
                 }
                 if opts.inactive {
                     ui.disable();
                 }
-                let content = egui::Frame::NONE.inner_margin(ui.spacing().menu_margin).show(ui, |ui| match sizing {
+                let margin = if opts.bleed {
+                    egui::Margin::ZERO
+                } else {
+                    let mut m = ui.spacing().menu_margin;
+                    m.bottom = m.bottom.saturating_add(BOTTOM_PAD);
+                    m
+                };
+                let content = egui::Frame::NONE.inner_margin(margin).show(ui, |ui| match sizing {
                     FloatSize::Fixed(_) => {
                         let size = ui.available_size();
                         body.take().map(|body| body(ui, Some(size)))
@@ -367,8 +399,12 @@ fn frame_with<R>(
         let chrome = margin.sum() + egui::vec2(2.0, 2.0);
         let (min_w, max_w) = match size {
             FrameSize::Width(lo, hi) => (lo, hi),
-            FrameSize::Fixed(outer) => ((outer.x - chrome.x).max(1.0), (outer.x - chrome.x).max(1.0)),
+            FrameSize::Fixed(outer) | FrameSize::Panels(outer) => ((outer.x - chrome.x).max(1.0), (outer.x - chrome.x).max(1.0)),
         };
+        // Panels sit an even gutter (the frame's margin) from every edge, the title band's too;
+        // the other bodies get more room above and below.
+        let panels = matches!(size, FrameSize::Panels(_));
+        let (gap, pad) = if panels { (0.0, 0.0) } else { (10.0, f32::from(BOTTOM_PAD)) };
         ui.set_min_width(min_w);
         ui.set_max_width(max_w);
         // Title bar: a strip across the dialog's top in the window title bar's colour, its
@@ -380,15 +416,15 @@ fn frame_with<R>(
         let t = ui.add(egui::Label::new(egui::RichText::new(title).font(crate::theme::semibold(13.0)).color(tk.text)).selectable(false)).rect;
         let frame_top = ui.max_rect().top() - f32::from(margin.top);
         let band_bottom = t.bottom() + 7.0;
-        ui.add_space(band_bottom - t.bottom() + 10.0);
-        let body_size = match size {
-            FrameSize::Width(..) => None,
-            FrameSize::Fixed(outer) => {
-                let used = ui.min_rect().height() + ui.spacing().item_spacing.y;
-                Some(egui::vec2(max_w, (outer.y - chrome.y - used).max(1.0)))
-            }
-        };
+        ui.add_space(band_bottom - t.bottom() + gap);
+        let body_size = size.outer().map(|outer| {
+            let used = ui.min_rect().height() + ui.spacing().item_spacing.y;
+            egui::vec2(max_w, (outer.y - chrome.y - used - pad).max(1.0))
+        });
         let out = body(ui, body_size);
+        if pad > 0.0 {
+            ui.add_space(pad);
+        }
         // Sized after the body: content wider than the frame's maximum widens the dialog, and
         // the band must span what is actually shown.
         let right = ui.max_rect().right().max(ui.min_rect().right());
@@ -782,12 +818,13 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
                 });
             }
             // The frame around the content (Frame::popup's margin and stroke).
-            ui.min_rect().expand(ui.spacing().menu_margin.sum().max_elem() + 2.0)
+            let r = ui.min_rect().expand(ui.spacing().menu_margin.sum().max_elem() + 2.0);
+            egui::Rect::from_min_max(r.min, r.max + egui::vec2(0.0, f32::from(BOTTOM_PAD)))
         };
         // Esc cancels (topmost dialog, no popup open). A click outside does nothing: Reference keeps
         // the dialog, and the pointer may be panning or zooming the canvas under it.
         let close = if floating {
-            let opts = FloatOpts { place: place_id(&d), inactive: !interactive, front, forward_keys: false };
+            let opts = FloatOpts { place: place_id(&d), inactive: !interactive, front, forward_keys: false, bleed: false };
             floating_window(ctx, id, &title, FloatSize::Content(min_w, max_w), opts, draw).close
         } else {
             let opts = FrameOpts { place: Some(place_id(&d)), inactive: !interactive, first: crate::blur_pins::first_place(&d.fields, ctx) };

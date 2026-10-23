@@ -639,7 +639,7 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
     // the dialogs' own frame over the document where the platform has no extra windows (the web
     // build). Modal either way, as in Reference: the main window takes no input meanwhile.
     let mut action = None;
-    let modal = crate::dialogs::frame(ctx, egui::Id::new("camera-raw-dialog"), &heading, crate::dialogs::FrameSize::Fixed(rect.size()), |ui, size| {
+    let modal = crate::dialogs::frame(ctx, egui::Id::new("camera-raw-dialog"), &heading, crate::dialogs::FrameSize::Panels(rect.size()), |ui, size| {
         action = body(app, ui, size.unwrap_or(rect.size()));
     });
     let action = keys(app, ctx).or(action).or_else(|| modal.should_close().then_some("cancel"));
@@ -703,7 +703,7 @@ fn body(app: &mut PhotospliceApp, ui: &mut egui::Ui, size: egui::Vec2) -> Option
     let mut return_action = None;
     let (full, _) = ui.allocate_exact_size(size, Sense::click());
     let painter = ui.painter().clone();
-    let footer_h = 48.0;
+    let footer_h = widgets::TOOL_FOOTER_H;
     let body = ERect::from_min_max(full.min, pos2(full.right(), full.bottom() - footer_h));
     // Preview.
     let view = ERect::from_min_max(body.min, pos2(body.right() - PANEL_W, body.bottom())).shrink(16.0);
@@ -730,12 +730,12 @@ fn body(app: &mut PhotospliceApp, ui: &mut egui::Ui, size: egui::Vec2) -> Option
     let right = ERect::from_min_max(pos2(body.right() - PANEL_W, body.top()), body.max);
     painter.rect_filled(right, 0.0, t.dock);
     painter.line_segment([right.left_top(), right.left_bottom()], Stroke::new(1.0, t.separator));
-    let inner = right.shrink2(vec2(14.0, 10.0));
+    let inner = right.shrink2(widgets::TOOL_PANEL_PAD);
     // Histogram at the top, the panels scrolling below it.
     let head = ERect::from_min_size(inner.min, vec2(inner.width(), HIST_HEADER));
     let mut hu = ui.new_child(egui::UiBuilder::new().max_rect(head));
     histogram(&mut hu, d);
-    painter.line_segment([pos2(right.left(), head.bottom() + 5.0), pos2(right.right(), head.bottom() + 5.0)], Stroke::new(1.0, t.separator));
+    painter.line_segment([pos2(right.left(), head.bottom() + 6.0), pos2(right.right(), head.bottom() + 6.0)], Stroke::new(1.0, t.separator));
     let mut props = ui.new_child(egui::UiBuilder::new().max_rect(ERect::from_min_max(pos2(inner.left(), head.bottom() + 12.0), inner.max)));
     let mut dirty = false;
     let (mut pick, mut auto) = (d.wb_pick, false);
@@ -881,7 +881,10 @@ fn body(app: &mut PhotospliceApp, ui: &mut egui::Ui, size: egui::Vec2) -> Option
     let foot = ERect::from_min_max(pos2(full.left(), full.bottom() - footer_h), full.max);
     painter.rect_filled(foot, 0.0, t.dock);
     painter.line_segment([foot.left_top(), foot.right_top()], Stroke::new(1.0, t.separator));
-    let mut fu = ui.new_child(egui::UiBuilder::new().max_rect(foot.shrink2(vec2(16.0, 9.0))).layout(egui::Layout::right_to_left(egui::Align::Center)));
+    let mut fu = ui.new_child(
+        egui::UiBuilder::new().max_rect(foot.shrink2(vec2(widgets::TOOL_FOOTER_INSET, 0.0))).layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    fu.spacing_mut().item_spacing.x = 10.0;
     // Opening a raw file says Open, as Photoshop does.
     let ok = if d.opened_file.is_some() { tl!("Open") } else { tl!("OK") };
     if let Some(role) = widgets::dialog_buttons(
@@ -890,9 +893,13 @@ fn body(app: &mut PhotospliceApp, ui: &mut egui::Ui, size: egui::Vec2) -> Option
     ) {
         return_action = Some(if role == widgets::ButtonRole::Default { "ok" } else { "cancel" });
     }
-    fu.add_space(12.0);
-    widgets::checkbox(&mut fu, &mut d.show_before, tl!("Before (Y)"));
-    fu.label(egui::RichText::new(format!("{:.0} ms", d.render_ms)).color(t.text_faint));
+    // The view toggles at the other end, clear of OK and Cancel.
+    let mut vu = ui.new_child(
+        egui::UiBuilder::new().max_rect(foot.shrink2(vec2(widgets::TOOL_FOOTER_INSET, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    vu.spacing_mut().item_spacing.x = 14.0;
+    widgets::checkbox(&mut vu, &mut d.show_before, tl!("Before (Y)"));
+    vu.label(egui::RichText::new(format!("{:.0} ms", d.render_ms)).color(t.text_faint));
 
     if !pointer
         && let Some(origin) = d.edit_origin.take()
