@@ -387,20 +387,47 @@ pub fn xmp_with_resolution(xmp: &str, ppi: (f32, f32)) -> Cow<'_, str> {
 /// EXIF keeps the thumbnail in IFD1, the IFD IFD0's next-IFD pointer names. Finder, Android's
 /// gallery and upload pickers show that thumbnail instead of decoding the image, so a copied one
 /// keeps showing the photo as it was before it was edited (#2147, #2373). The pointer is cleared;
-/// nothing else moves, so every other offset in the block stays valid.
+/// nothing else moves, so every other offset in the block stays valid. An IFD1 that holds no
+/// image (the PSD EXIF Reference writes: JPEG thumbnail fields with a length of 0, its preview
+/// living in resource 1036) is kept.
 fn exif_without_thumbnail(exif: &[u8]) -> Option<Vec<u8>> {
     let body = tiff_body(exif);
     let prefix = exif.len() - body.len();
-    let (_, first, count, entry_bytes, big_tiff) = ifd0_entries(body)?;
+    let (order, first, count, entry_bytes, big_tiff) = ifd0_entries(body)?;
     let next = prefix.checked_add(first)?.checked_add(count.checked_mul(entry_bytes)?)?;
     let width = if big_tiff { 8 } else { 4 };
     // In bounds: `ifd0_entries` checked that the whole pointer is present.
     if exif.get(next..next.checked_add(width)?)?.iter().all(|b| *b == 0) {
         return None;
     }
+    if !big_tiff && ifd1_is_empty(order, body, first + count * entry_bytes) == Some(true) {
+        return None;
+    }
     let mut out = exif.to_vec();
     out.get_mut(next..next + width)?.fill(0);
     Some(out)
+}
+
+/// Whether the (classic TIFF) IFD1 that IFD0's pointer at `pointer` names holds no thumbnail
+/// image: neither JPEG thumbnail bytes (0x0202 > 0) nor strips (0x0117 > 0). `None` when it
+/// doesn't parse.
+fn ifd1_is_empty(order: crate::orientation::Order, body: &[u8], pointer: usize) -> Option<bool> {
+    const JPEG_LENGTH: u16 = 0x0202;
+    const STRIP_BYTES: u16 = 0x0117;
+    let ifd = usize::try_from(order.u32(body, pointer)?).ok()?;
+    let count = usize::from(order.u16(body, ifd)?);
+    for i in 0..count {
+        let at = ifd.checked_add(2)?.checked_add(i.checked_mul(12)?)?;
+        let tag = order.u16(body, at)?;
+        if tag == JPEG_LENGTH || tag == STRIP_BYTES {
+            // A LONG or a SHORT (left-justified) count of bytes.
+            let value = if order.u16(body, at + 2)? == 3 { u32::from(order.u16(body, at + 8)?) } else { order.u32(body, at + 8)? };
+            if value > 0 {
+                return Some(false);
+            }
+        }
+    }
+    Some(true)
 }
 
 /// The EXIF to write next to upright pixels at resolution `ppi`: Orientation 1 (see
