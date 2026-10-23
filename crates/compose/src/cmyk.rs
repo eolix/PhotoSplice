@@ -10,10 +10,10 @@
 //!
 //! Adjustments work on the inks too: Levels and Curves through their CMYK records, Invert,
 //! Posterize and Brightness/Contrast through one curve for every ink, Threshold and Gradient Map
-//! on the inks' own lightness ([`ink_lightness`]), Hue/Saturation, Color Balance, Selective
-//! Color and Photo Filter on C, M, Y as an RGB colour with K kept (Hue/Saturation holding each
-//! ink within 0..100 %), Colorize on the inks as a plain RGB colour separated back with full
-//! black replacement. Layer effects, gradients and
+//! on the inks' own lightness ([`ink_lightness`]), Hue/Saturation, Color Balance and Photo
+//! Filter on C, M, Y as an RGB colour with K kept (Hue/Saturation holding each ink within
+//! 0..100 %), Colorize on the inks as a plain RGB colour separated back with full black
+//! replacement, Selective Color on every ink, K included. Layer effects, gradients and
 //! patterns reuse the RGB code twice, on stand-in colours ([`Projection`]): once with C, M, Y's
 //! complements as R, G, B, once with K's in all three, so every separable blend is per ink. A layer this module doesn't composite in CMYK
 //! yet (effects with non-separable modes or a bevel texture, Blend If, the other adjustments)
@@ -371,6 +371,33 @@ fn adjust(a: &Adjustment, buf: &mut CBuf, cx: &Ctx) {
         }
         return;
     }
+    // Selective Color on the inks themselves: each range's weight from the inks as a plain RGB
+    // colour (complements times 1 − K), and its cyan, magenta, yellow and black percentages each
+    // on their own ink, K included (Reference kit inks-selc-neutrals / -blacks: Neutrals Black
+    // +5 % relative takes 30 % K alone to 30.9; Blacks −20 % takes 90 % K to 75.6).
+    if let Adjustment::SelectiveColor { relative, adjustments } = a {
+        use photosplice_color::convert::cmyk_to_rgb_naive;
+        for p in &mut buf.px {
+            let ink = inks(p);
+            let w = crate::adjust::selective_color_weights(cmyk_to_rgb_naive(ink));
+            let mut delta = [0.0f32; 4];
+            for (r, wr) in w.iter().enumerate() {
+                if *wr <= 0.0 {
+                    continue;
+                }
+                let Some(adj) = adjustments.get(r) else { continue };
+                for (i, d) in delta.iter_mut().enumerate() {
+                    let pct = adj[i] / 100.0;
+                    // Absolute moves the ink by the percentage, at most down to none or up to
+                    // full (Reds Cyan −30 % takes 20 % cyan at weight 0.54 down by 10.8).
+                    *d += wr * if *relative { (ink[i] * (1.0 + pct)).clamp(0.0, 1.0) - ink[i] } else { pct.clamp(-ink[i], 1.0 - ink[i]) };
+                }
+            }
+            let out: [f32; 4] = std::array::from_fn(|i| (ink[i] + delta[i]).clamp(0.0, 1.0));
+            p[..4].copy_from_slice(&[1.0 - out[0], 1.0 - out[1], 1.0 - out[2], 1.0 - out[3]]);
+        }
+        return;
+    }
     // Colorize: the inks as a plain RGB colour (the complements times 1 − K, no profile),
     // colorized, and separated back with full black replacement (K = 1 − the largest channel).
     // Reference kit inks-hs-colorize: patches whose complements share an HSL lightness all land
@@ -386,9 +413,9 @@ fn adjust(a: &Adjustment, buf: &mut CBuf, cx: &Ctx) {
         return;
     }
     // Colour adjustments: C, M, Y's complements through the RGB adjustment as an RGB colour, K
-    // untouched (Photoshop corpus cmyk8: K exact in every one; Selective Color within 0.006, the
-    // others carry the residual their RGB versions have; `cmyk_probe` ADJ=1).
-    if matches!(a, Adjustment::HueSaturation { .. } | Adjustment::ColorBalance { .. } | Adjustment::SelectiveColor { .. } | Adjustment::PhotoFilter { .. }) {
+    // untouched (Reference corpus cmyk8: K exact in every one; the others carry the residual
+    // their RGB versions have; `cmyk_probe` ADJ=1).
+    if matches!(a, Adjustment::HueSaturation { .. } | Adjustment::ColorBalance { .. } | Adjustment::PhotoFilter { .. }) {
         let mut rgb = Buffer { rect: buf.rect, px: buf.px.iter().map(|p| [p[0], p[1], p[2], 1.0]).collect() };
         crate::adjust::in_ink_space(|| crate::adjust::apply_depth(a, &mut rgb, cx.transfer, Some(cx.depth)));
         for (p, o) in buf.px.iter_mut().zip(&rgb.px) {
@@ -959,5 +986,28 @@ mod tests {
         let mut d = doc([0.0; 4]);
         d.layers.push(hs(200.0, 40.0, 5.0, true));
         assert!(near(inks_at(&d, 0), [0.0; 4], 1e-4), "{:?}", inks_at(&d, 0));
+    }
+
+    /// Selective Color moves each ink by its own percentage, K by the black one, weighted by the
+    /// range the inks' plain RGB colour falls in (Reference kit inks-selc-*: exact).
+    #[test]
+    fn selective_color_works_on_each_ink() {
+        let sc = |relative: bool, range: usize, a: [f32; 4]| {
+            let mut adjustments = [[0.0f32; 4]; 9];
+            adjustments[range] = a;
+            Layer::new("s", LayerContent::Adjustment(Adjustment::SelectiveColor { relative, adjustments }))
+        };
+        // Blacks −20 % black, relative: 90 % K alone (blacks weight 0.8) → 75.6 %.
+        let mut d = doc([0.0, 0.0, 0.0, 0.9]);
+        d.layers.push(sc(true, 8, [0.0, 0.0, 0.0, -20.0]));
+        assert!(near(inks_at(&d, 0), [0.0, 0.0, 0.0, 0.756], 0.002), "{:?}", inks_at(&d, 0));
+        // Neutrals +20 % cyan / +5 % black, relative: 50 % C + 50 % K → 57.5 % C, 51.9 % K.
+        let mut d = doc([0.5, 0.0, 0.0, 0.5]);
+        d.layers.push(sc(true, 7, [20.0, 0.0, 0.0, 5.0]));
+        assert!(near(inks_at(&d, 0), [0.575, 0.0, 0.0, 0.519], 0.002), "{:?}", inks_at(&d, 0));
+        // Reds −30 % cyan, absolute: a cut stops at no ink (20 % C at reds weight 0.54 → 9.2 %).
+        let mut d = doc([0.2, 0.8, 0.9, 0.1]);
+        d.layers.push(sc(false, 0, [-30.0, 0.0, 0.0, 0.0]));
+        assert!((inks_at(&d, 0)[0] - 0.092).abs() < 0.002, "{:?}", inks_at(&d, 0));
     }
 }
