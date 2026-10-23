@@ -104,6 +104,11 @@ fn lay_out(name: &str, bytes: &[u8], pages: &[usize], o: &OpenOptions) -> Result
     doc.resolution_dpi = dpi;
     for ((p, page), (x, y)) in boards.into_iter().zip(spots) {
         let rect = Rect::new(x, y, x + page.size.width as i32, y + page.size.height as i32);
+        for pat in page.patterns {
+            if !doc.patterns.iter().any(|q| q.id == pat.id) {
+                doc.patterns.push(pat);
+            }
+        }
         let mut layers = page.layers;
         for l in &mut layers {
             shift_layer(l, x, y, rect);
@@ -177,7 +182,14 @@ fn shift_layer(l: &mut Layer, dx: i32, dy: i32, page: Rect) {
             t.transform = a.mul(&t.transform);
             t.cache = t.cache.as_ref().map(|c| shift_surface(c, dx, dy));
         }
-        LayerContent::Fill(_) if l.vector_mask.is_none() => {
+        // A pattern anchored to the canvas moves its origin with the page.
+        LayerContent::Fill(photosplice_doc::Fill::Pattern { phase, link: false, .. }) if l.vector_mask.is_some() => {
+            *phase = (phase.0 + dx as f32, phase.1 + dy as f32);
+        }
+        LayerContent::Fill(fill) if l.vector_mask.is_none() => {
+            if let photosplice_doc::Fill::Pattern { phase, link: false, .. } = fill {
+                *phase = (phase.0 + dx as f32, phase.1 + dy as f32);
+            }
             let (x0, y0, x1, y1) = (f64::from(page.x0), f64::from(page.y0), f64::from(page.x1), f64::from(page.y1));
             l.vector_mask = Some(VectorMask::new(Path::new(vec![Subpath::polygon(&[(x0, y0), (x1, y0), (x1, y1), (x0, y1)])])));
         }

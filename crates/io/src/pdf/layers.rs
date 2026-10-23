@@ -46,9 +46,10 @@ const MAX_LAYERS: usize = 4000;
 /// A page as a layered document, placed by `place`, at `dpi`.
 pub(crate) fn import_layers(name: &str, page: &Page<'_>, place: &super::Placement, dpi: f32) -> (Document, Vec<String>) {
     let mut doc = empty_document(name, place, dpi);
-    let (layers, warnings) = stack(page, place, dpi, doc.pixel_format(), Keep::All);
+    let (layers, warnings, patterns) = stack(page, place, dpi, doc.pixel_format(), Keep::All);
     super::pages::warm_bounds(&layers);
     doc.layers = layers;
+    doc.patterns = patterns;
     if doc.layers.is_empty() {
         doc.layers.push(Layer::raster("Layer 1", doc.pixel_format()));
     }
@@ -72,12 +73,18 @@ pub(crate) fn import_pdf_layers(
     let mut doc = empty_document(name, place, dpi);
     let mut warnings = Vec::new();
     let fmt = doc.pixel_format();
-    let pass = |on: Option<super::ocg::Id>, keep: Keep, warnings: &mut Vec<String>| -> Option<Vec<Layer>> {
+    let mut patterns: Vec<photosplice_doc::Pattern> = Vec::new();
+    let mut pass = |on: Option<super::ocg::Id>, keep: Keep, warnings: &mut Vec<String>| -> Option<Vec<Layer>> {
         let only = super::ocg::only(bytes, pdf, pdf_layers, on)?;
         let pdf = hayro::hayro_syntax::Pdf::new(only).ok()?;
         let pages = pdf.pages();
-        let (layers, more) = stack(pages.get(page)?, place, dpi, fmt, keep);
+        let (layers, more, pats) = stack(pages.get(page)?, place, dpi, fmt, keep);
         warnings.extend(more);
+        for p in pats {
+            if !patterns.iter().any(|q| q.id == p.id) {
+                patterns.push(p);
+            }
+        }
         Some(layers)
     };
     let outside = pass(None, Keep::All, &mut warnings)?;
@@ -97,6 +104,7 @@ pub(crate) fn import_pdf_layers(
         g.locks.all = l.locked;
         doc.layers.push(g);
     }
+    doc.patterns = patterns;
     // The same warning from every pass once.
     warnings.sort();
     warnings.dedup();
@@ -127,8 +135,9 @@ fn empty_document(name: &str, place: &super::Placement, dpi: f32) -> Document {
     doc
 }
 
-/// The page's drawing as a layer stack, bottom first.
-fn stack(page: &Page<'_>, place: &super::Placement, dpi: f32, fmt: PixelFormat, keep: Keep) -> (Vec<Layer>, Vec<String>) {
+/// The page's drawing as a layer stack, bottom first, its warnings, and the patterns its Pattern
+/// Fill layers use.
+fn stack(page: &Page<'_>, place: &super::Placement, dpi: f32, fmt: PixelFormat, keep: Keep) -> (Vec<Layer>, Vec<String>, Vec<photosplice_doc::Pattern>) {
     let (w, h) = (place.w.max(1), place.h.max(1));
     let cache = RenderCache::new();
     let global = GlobalState::new(&cache, &RenderSettings::default());
@@ -251,6 +260,8 @@ pub(crate) struct LayerBuilder<'g> {
     marked: Vec<bool>,
     /// Soft masks made into layer masks, by hayro's cache key.
     masks: HashMap<u128, LayerMask>,
+    /// Tiles of the tiling patterns made into Pattern Fill layers (the document's patterns).
+    patterns: Vec<photosplice_doc::Pattern>,
 }
 
 impl<'g> LayerBuilder<'g> {
@@ -276,10 +287,11 @@ impl<'g> LayerBuilder<'g> {
             keep: Keep::All,
             marked: Vec::new(),
             masks: HashMap::new(),
+            patterns: Vec::new(),
         }
     }
 
-    fn finish(mut self) -> (Vec<Layer>, Vec<String>) {
+    fn finish(mut self) -> (Vec<Layer>, Vec<String>, Vec<photosplice_doc::Pattern>) {
         self.flush_all();
         while self.frames.len() > 1 {
             self.close_frame();
@@ -292,7 +304,7 @@ impl<'g> LayerBuilder<'g> {
             self.warnings.push(format!("PDF: came in as pixels (no editable equivalent): {}", why.join(", ")));
         }
         let layers = self.frames.pop().map(|f| f.layers).unwrap_or_default();
-        (layers, self.warnings)
+        (layers, self.warnings, self.patterns)
     }
 
     /// The soft mask `m` as a layer mask over the page: what it holds where it differs from its
@@ -442,15 +454,36 @@ impl<'g> LayerBuilder<'g> {
             return false;
         }
         let Some(g) = super::shading::gradient(sp, bbox) else { return false };
-        // The mask: the path, intersected with the clips it is under (one fill rule for both).
-        let mut own = bez_to_path(&dev);
+        let Some(mask) = self.fill_mask(&dev, rule) else { return false };
+        self.flush_all();
+        let mut l = Layer::new("Gradient Fill", LayerContent::Fill(Fill::Solid(Color::BLACK)));
+        l.vector_mask = mask;
+        l.blend = to_blend(props.blend_mode);
+        let frame = photosplice_compose::fill_frame(&l, self.bounds());
+        l.content = LayerContent::Fill(super::shading::fill(g, frame));
+        self.push_layer(l);
+        true
+    }
+
+    /// The vector mask of a fill layer filling `dev` (document pixels) by `rule`: the path,
+    /// intersected with the clips it is under (`Some(None)`: it covers the page, no mask). `None`
+    /// when a mask can't hold it (the clips use the other fill rule).
+    fn fill_mask(&self, dev: &BezPath, rule: &PdfFillRule) -> Option<Option<VectorMask>> {
+        let page = kurbo::Rect::new(0.0, 0.0, f64::from(self.w), f64::from(self.h));
+        let mut own = bez_to_path(dev);
         own.fill_rule = fill_rule(*rule);
         let clips = self.vector_mask();
-        if clips.as_ref().is_some_and(|c| c.path.fill_rule != own.fill_rule) {
-            return false;
+        if let Some(c) = &clips
+            && c.path.fill_rule != own.fill_rule
+        {
+            // One outline fills alike by either rule: it takes the clips'.
+            if own.subpaths.len() != 1 {
+                return None;
+            }
+            own.fill_rule = c.path.fill_rule;
         }
-        let mask = match clips {
-            None if covers(&dev, page.inflate(-0.5, -0.5)) => None,
+        Some(match clips {
+            None if covers(dev, page.inflate(-0.5, -0.5)) => None,
             None => Some(VectorMask::new(own)),
             Some(c) => {
                 let mut subpaths = own.subpaths;
@@ -466,13 +499,52 @@ impl<'g> LayerBuilder<'g> {
                 p.fill_rule = own.fill_rule;
                 Some(VectorMask::new(p))
             }
-        };
+        })
+    }
+
+    /// `path` filled with the tiling pattern `t` as a Pattern Fill layer, its tile stored in the
+    /// document's patterns. A repeat of a whole number of pixels is the tile at 100 %; another is
+    /// the tile drawn at the next whole size up and scaled to the repeat, so it doesn't drift
+    /// across the page. `false`, having done nothing, when a pattern fill can't repeat it as the
+    /// PDF does: a rotated or skewed pattern, or one stretched differently across and down.
+    fn pattern_layer(&mut self, path: &BezPath, props: &DrawProps<'_>, rule: &PdfFillRule, t: &hayro::hayro_interpret::pattern::TilingPattern<'_>) -> bool {
+        let m = t.matrix;
+        let [a, b, c, d, _, _] = m.as_coeffs();
+        let (sx, sy) = ((a * f64::from(t.x_step)).abs(), (d * f64::from(t.y_step)).abs());
+        if b.abs() > 1e-6 || c.abs() > 1e-6 || !(1.0..=4096.0).contains(&sx) || !(1.0..=4096.0).contains(&sy) {
+            return false;
+        }
+        let near = |v: f64| (v - v.round()).abs() < 0.02;
+        // Tile pixels per page pixel (a pattern fill's scale is one for both directions).
+        let (w, scale) = if near(sx) && near(sy) { (sx.round(), 1.0) } else { (sx.ceil(), sx / sx.ceil()) };
+        let h = (sy / scale).round();
+        if (h * scale - sy).abs() > 1e-3 * sy || h < 1.0 {
+            return false;
+        }
+        // The tile's top-left corner on the page, and pattern space onto the tile's pixels.
+        let corners = [(t.bbox.x0, t.bbox.y0), (t.bbox.x1, t.bbox.y0), (t.bbox.x0, t.bbox.y1), (t.bbox.x1, t.bbox.y1)].map(|(x, y)| m * kurbo::Point::new(x, y));
+        let o = kurbo::Point::new(corners.iter().map(|p| p.x).fold(f64::INFINITY, f64::min), corners.iter().map(|p| p.y).fold(f64::INFINITY, f64::min));
+        if !(o.x.is_finite() && o.y.is_finite()) {
+            return false;
+        }
+        let tile = KAffine::scale(1.0 / scale) * KAffine::translate((-o.x, -o.y)) * m;
+        let steps = [kurbo::Vec2::new(w, 0.0), kurbo::Vec2::new(0.0, h)];
+        let rgba = super::render::tiling_tile(t, self.global, tile, w as u16, h as u16, steps);
+        let mut dev = path.clone();
+        dev.apply_affine(props.transform);
+        let Some(mask) = self.fill_mask(&dev, rule) else { return false };
+        let mut surface = Surface::new(PixelFormat::RGBA8);
+        let px: Vec<f32> = rgba.iter().map(|v| f32::from(*v) / 255.0).collect();
+        surface.write_region(Rect::new(0, 0, w as i32, h as i32), &px);
+        let pattern = photosplice_doc::Pattern::new(format!("PDF Pattern {}", self.patterns.len() + 1), surface, w as u32, h as u32);
+        let fill = Fill::Pattern { name: pattern.name.clone(), scale: scale as f32, id: pattern.id.clone(), angle: 0.0, link: false, phase: (o.x.rem_euclid(sx) as f32, o.y.rem_euclid(sy) as f32) };
+        if !self.patterns.iter().any(|p| p.id == pattern.id) {
+            self.patterns.push(pattern);
+        }
         self.flush_all();
-        let mut l = Layer::new("Gradient Fill", LayerContent::Fill(Fill::Solid(Color::BLACK)));
+        let mut l = Layer::new("Pattern Fill", LayerContent::Fill(fill));
         l.vector_mask = mask;
         l.blend = to_blend(props.blend_mode);
-        let frame = photosplice_compose::fill_frame(&l, self.bounds());
-        l.content = LayerContent::Fill(super::shading::fill(g, frame));
         self.push_layer(l);
         true
     }
@@ -916,6 +988,12 @@ impl<'a> Device<'a> for LayerBuilder<'_> {
                 let color = c.to_rgba().to_rgba8();
                 self.add_path(path, &props, draw_mode, color);
             }
+            // A tiling pattern a pattern fill can repeat: a Pattern Fill layer.
+            (Paint::Pattern(p), None)
+                if self.raster_groups == 0
+                    && !self.full()
+                    && let (hayro::hayro_interpret::pattern::Pattern::Tiling(t), DrawMode::Fill(rule)) = (&**p, draw_mode)
+                    && self.pattern_layer(path, &props, rule, t) => {}
             // An axial or radial shading a Photoshop gradient can hold: a Gradient Fill layer.
             (Paint::Pattern(p), None)
                 if self.raster_groups == 0

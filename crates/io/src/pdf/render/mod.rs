@@ -5,7 +5,8 @@
 //! for `hayro_interpret`, `kurbo` and `vello_cpu`), the crate-level attributes and docs, and
 //! [`Renderer`] / [`GlobalState`] made reachable from `pdf`, and [`render_into`] clipping to a
 //! rectangle it is given (Import PDF's Crop To) instead of always the crop box, and
-//! `mask::soft_mask_bytes`, a soft mask drawn as bytes for a layer mask.
+//! `mask::soft_mask_bytes`, a soft mask drawn as bytes for a layer mask, and [`tiling_tile`], one
+//! tile of a tiling pattern for a pattern fill.
 #![allow(clippy::all, clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unreachable, clippy::indexing_slicing, missing_docs, dead_code)]
 
 
@@ -42,6 +43,40 @@ mod paint;
 mod path;
 
 pub(crate) use mask::soft_mask_bytes;
+
+/// One tile of the tiling pattern `t` as straight RGBA8 pixels, `w` × `h`: `tile` maps pattern
+/// space to the tile's pixels, and `steps` are the pattern's repeat in those pixels (content
+/// reaching past the tile is drawn wrapped, from the neighbouring repeats).
+pub(crate) fn tiling_tile(t: &hayro::hayro_interpret::pattern::TilingPattern<'_>, global: &GlobalState, tile: Affine, w: u16, h: u16, steps: [hayro::kurbo::Vec2; 2]) -> Vec<u8> {
+    let mut ctx = hayro::vello_cpu::RenderContext::new(w, h);
+    {
+        let mut r = Renderer::new(&mut ctx, global);
+        r.inside_pattern = true;
+        for i in -1..=1 {
+            for j in -1..=1 {
+                let shift = Affine::translate(steps[0] * f64::from(i) + steps[1] * f64::from(j));
+                let _ = t.interpret(&mut r, shift * tile, false);
+            }
+        }
+    }
+    ctx.flush();
+    let mut pixmap = hayro::vello_cpu::Pixmap::new(w, h);
+    ctx.render_with(
+        &mut pixmap,
+        &mut hayro::vello_cpu::Resources::default(),
+        hayro::vello_cpu::RasterizerSettings { target_init: hayro::vello_cpu::TargetInit::Clear(hayro::vello_cpu::color::palette::css::TRANSPARENT), ..Default::default() },
+    );
+    let mut rgba = pixmap.data_as_u8_slice().to_vec();
+    for q in rgba.chunks_exact_mut(4) {
+        let a = u32::from(q[3]);
+        if a > 0 && a < 255 {
+            for c in &mut q[..3] {
+                *c = ((u32::from(*c) * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
+    }
+    rgba
+}
 
 pub(crate) struct GlobalState {
     level: Level,

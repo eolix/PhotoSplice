@@ -263,10 +263,12 @@ fn probe() {
     let Some(path) = std::env::var_os("PHOTOSPLICE_PDF_PROBE") else { return };
     let bytes = std::fs::read(&path).unwrap();
     let dpi = 150.0;
+    // `PHOTOSPLICE_PDF_PROBE_PAGE=n`: another page than the first (0-based).
+    let page = std::env::var("PHOTOSPLICE_PDF_PROBE_PAGE").ok().and_then(|p| p.parse().ok()).unwrap_or(0);
     let t = std::time::Instant::now();
-    let layers = open_page("p.pdf", &bytes, 0, dpi, PageAs::Layers).unwrap();
+    let layers = open_page("p.pdf", &bytes, page, dpi, PageAs::Layers).unwrap();
     let took = t.elapsed();
-    let pixels = open_page("p.pdf", &bytes, 0, dpi, PageAs::Pixels).unwrap().document;
+    let pixels = open_page("p.pdf", &bytes, page, dpi, PageAs::Pixels).unwrap().document;
     let mut count = std::collections::BTreeMap::new();
     let mut fonts = std::collections::BTreeMap::new();
     fn walk(ls: &[photosplice_doc::Layer], count: &mut std::collections::BTreeMap<&'static str, usize>, fonts: &mut std::collections::BTreeMap<String, usize>) {
@@ -1347,4 +1349,28 @@ fn outlined_text_is_a_type_layer_with_a_stroke() {
     assert_eq!((w, fill), (1.0, 0.0), "an outline only: the glyphs themselves don't show");
     let diff = looks_like_the_page(&bytes);
     assert!(diff < 0.02, "{diff}");
+}
+
+/// A 10 × 10 pt tiling pattern (object 6): a red and a blue square on the diagonal.
+fn checker_pattern() -> String {
+    let cell = "1 0 0 rg 0 0 5 5 re f 0 0 1 rg 5 5 5 5 re f";
+    format!("<< /Type /Pattern /PatternType 1 /PaintType 1 /TilingType 1 /BBox [0 0 10 10] /XStep 10 /YStep 10 /Resources << >> /Length {} >>\nstream\n{cell}\nendstream", cell.len())
+}
+
+#[test]
+fn a_tiling_pattern_fill_is_a_pattern_fill_layer() {
+    let bytes = pdf("/Pattern cs /P0 scn 20 10 120 80 re f", "/Pattern << /P0 6 0 R >>", &[checker_pattern()]);
+    let d = open(&bytes);
+    assert_eq!(kinds(&d), ["fill"], "not pixels");
+    let LayerContent::Fill(Fill::Pattern { id, scale, link, .. }) = &d.layers[0].content else { panic!("{:?}", d.layers[0].content) };
+    assert_eq!((*scale, *link), (1.0, false));
+    assert_eq!(d.patterns.len(), 1);
+    assert_eq!(&d.patterns[0].id, id);
+    assert_eq!((d.patterns[0].width, d.patterns[0].height), (10, 10), "the repeat at 72 ppi");
+    assert!(d.layers[0].vector_mask.is_some(), "the rectangle masks it");
+    let diff = looks_like_the_page(&bytes);
+    assert!(diff < 0.01, "{diff}");
+    // A rotated pattern can't be a pattern fill here: it stays pixels.
+    let rotated = checker_pattern().replace("/TilingType 1", "/TilingType 1 /Matrix [0.7071 0.7071 -0.7071 0.7071 0 0]");
+    assert_eq!(kinds(&open(&pdf("/Pattern cs /P0 scn 20 10 120 80 re f", "/Pattern << /P0 6 0 R >>", &[rotated]))), ["pixels"]);
 }
