@@ -1111,6 +1111,99 @@ fn a_pdf_saved_with_a_password_opens_with_it() {
     assert!(!String::from_utf8_lossy(&none).contains("/Encrypt"));
 }
 
+/// The file's text with every Flate stream inflated in place (to search content streams too).
+fn inflated(bytes: &[u8]) -> String {
+    use std::io::Read as _;
+    let mut out = Vec::new();
+    let mut rest = bytes;
+    while let Some(at) = rest.windows(7).position(|w| w == b"stream\n" || w == b"stream\r") {
+        let (head, tail) = rest.split_at(at + 7);
+        out.extend_from_slice(head);
+        let tail = tail.strip_prefix(b"\n").unwrap_or(tail);
+        let end = tail.windows(9).position(|w| w == b"endstream").unwrap_or(tail.len());
+        let mut z = flate2::read::ZlibDecoder::new(&tail[..end]);
+        let mut plain = Vec::new();
+        if z.read_to_end(&mut plain).is_ok() {
+            out.extend_from_slice(&plain);
+        }
+        out.extend_from_slice(b"endstream");
+        rest = &tail[(end + 9).min(tail.len())..];
+    }
+    out.extend_from_slice(rest);
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// PDF/X: each standard's output intent, metadata, trim box and version, its colour (device
+/// CMYK only for X-1a, no device RGB for X-3 and X-4) and transparency (none for the 2003
+/// standards, flattened to one image), and the file still reopens with its layers.
+#[test]
+fn pdf_x_files_carry_what_their_standard_asks() {
+    use photosplice_io::pdf::export::{PdfOptions, export_secured};
+    use photosplice_io::pdf::pdfx::Standard;
+    let mut doc = sample();
+    // Transparency to flatten: a half-opaque layer.
+    doc.layers[1].opacity = 0.5;
+    for (standard, version, header) in [(Standard::X1a2003, "PDF/X-1a:2003", "%PDF-1.4"), (Standard::X32003, "PDF/X-3:2003", "%PDF-1.4"), (Standard::X42010, "PDF/X-4", "%PDF-1.6")] {
+        let o = PdfOptions { standard, ..Default::default() };
+        for editing in [false, true] {
+            let r = export_secured(&doc, editing, &o, None).unwrap();
+            let raw = String::from_utf8_lossy(&r.bytes).into_owned();
+            let text = inflated(&r.bytes);
+            assert!(raw.starts_with(header), "{version}: {}", &raw[..12]);
+            assert!(raw.contains("/S /GTS_PDFX") && raw.contains("/DestOutputProfile") && raw.contains("/OutputIntents"), "{version}");
+            assert!(raw.contains(&format!("/GTS_PDFXVersion ({version})")) && raw.contains("/Trapped /False") && raw.contains("/TrimBox"), "{version}");
+            assert!(raw.contains("<pdf:Trapped>False</pdf:Trapped>") && raw.contains(&format!("GTS_PDFXVersion>{version}<")), "{version}: XMP");
+            assert_eq!(raw.matches("/Type /Metadata").count() + raw.matches("/Type/Metadata").count(), 1, "{version}: one XMP stream");
+            // What the page draws (the editing data's private composite is the Reference's own
+            // layout, outside the page).
+            if !editing {
+                assert!(!text.contains("/DeviceRGB"), "{version}: no device RGB");
+                if standard == Standard::X1a2003 {
+                    assert!(!text.contains("/ICCBased"), "X-1a: device CMYK only");
+                }
+                if standard.flattened() {
+                    assert!(!text.contains("/SMask") && !text.contains("/Transparency") && !text.contains("/CA "), "{version}: no transparency");
+                }
+            }
+            if standard.flattened() {
+                assert!(!raw.contains("/OCProperties"), "{version}: no PDF layers");
+                assert!(r.warnings.iter().any(|w| w.contains("one image")), "{:?}", r.warnings);
+            } else {
+                assert!(raw.contains("/OCProperties"), "X-4 keeps the PDF layers");
+            }
+            let back = open_page("x.pdf", &r.bytes, 0, 72.0, PageAs::Layers).unwrap().document;
+            if editing {
+                assert_eq!(kinds(&back), ["shape", "pixels", "text"], "{version}");
+            } else if !standard.flattened() {
+                assert_eq!(back.layers.len(), 3, "{version}: the PDF layers");
+            }
+            // A flattened page is the composite on white (in coated CMYK for X-1a, which can't
+            // print the sample's pure blue and red as they are).
+            let mut on_white = doc.clone();
+            on_white.layers.insert(0, photosplice_doc::Layer::new("Paper", LayerContent::Fill(Fill::Solid(photosplice_color::Color::rgb(1.0, 1.0, 1.0)))));
+            let (want, limit) = match (editing, standard) {
+                (true, _) => (&doc, 0.02),
+                (false, Standard::X1a2003) => (&on_white, 0.25),
+                (false, Standard::X32003) => (&on_white, 0.03),
+                _ => (&doc, 0.05),
+            };
+            let d = mean_diff(want, &back);
+            assert!(d < limit, "{version}, editing {editing}: {d}");
+        }
+    }
+    // A CMYK document: its CMYK as the printing condition's.
+    let ink = |c: [f32; 4]| photosplice_color::Color { mode: photosplice_color::ColorMode::Cmyk, c, alpha: 1.0 };
+    let cmyk = sample_in(photosplice_color::ColorMode::Cmyk, ink([1.0, 0.0, 0.0, 0.0]), ink([0.0, 0.0, 0.0, 1.0]));
+    for standard in [Standard::X1a2003, Standard::X42010] {
+        let r = export_secured(&cmyk, false, &PdfOptions { standard, ..Default::default() }, None).unwrap();
+        let text = inflated(&r.bytes);
+        assert!(!text.contains("/DeviceRGB") && text.contains("/GTS_PDFX"), "{standard:?}");
+    }
+    // PDF/X has no passwords.
+    let sec = photosplice_io::pdf::security::Security { open_password: "a".into(), ..Default::default() };
+    assert!(export_secured(&doc, false, &PdfOptions { standard: Standard::X42010, ..Default::default() }, Some(&sec)).is_err());
+}
+
 /// Opens the Reference's own PDFs from the verification kit (`$PHOTOSPLICE_PDF_KIT_OUT`, the
 /// kit's `out/`): each `ps-*-editing.pdf` against the Reference's PSD of the same document, each
 /// `ps-*-page.pdf` (no editing data) against its flat TIFF.

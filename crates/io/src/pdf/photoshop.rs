@@ -305,6 +305,13 @@ pub(super) fn attach(pdf: Vec<u8>, doc: &Document, warnings: &mut Vec<String>) -
 
 /// Now as a PDF date (UTC); a fixed date where the platform has no clock.
 fn pdf_date() -> String {
+    let (y, m, d, hh, mm, ss) = now_utc();
+    format!("D:{y:04}{m:02}{d:02}{hh:02}{mm:02}{ss:02}Z")
+}
+
+/// Now in UTC: year, month, day, hours, minutes, seconds (1970-01-01 where the platform has no
+/// clock).
+pub(super) fn now_utc() -> (i64, i64, i64, u64, u64, u64) {
     #[cfg(not(target_arch = "wasm32"))]
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     #[cfg(target_arch = "wasm32")]
@@ -320,6 +327,6 @@ fn pdf_date() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
-    format!("D:{y:04}{m:02}{d:02}{:02}{:02}{:02}Z", rest / 3600, rest % 3600 / 60, rest % 60)
+    (y, m, d, rest / 3600, rest % 3600 / 60, rest % 60)
 }
 

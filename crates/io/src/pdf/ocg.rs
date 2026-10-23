@@ -289,7 +289,7 @@ fn utf16_hex(name: &str) -> String {
 
 /// Removes `key` and the reference after it (`n g R`) from a dictionary's text; returns the
 /// reference. The text is krilla's (no strings in the page or resources dictionaries).
-fn take_ref(dict: &str, key: &str) -> (Option<(i32, i32)>, String) {
+pub(super) fn take_ref(dict: &str, key: &str) -> (Option<(i32, i32)>, String) {
     let mut from = 0;
     while let Some(at) = dict.get(from..).and_then(|d| d.find(key)).map(|i| i + from) {
         let after = at + key.len();

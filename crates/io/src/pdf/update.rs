@@ -111,6 +111,33 @@ impl Update {
         num
     }
 
+    /// An unfiltered stream (XMP metadata, which readers look for as plain text).
+    pub(super) fn raw_stream(&mut self, dict: &str, data: &[u8]) -> usize {
+        let num = self.next;
+        self.next += 1;
+        self.begin(num);
+        let _ = write!(self.out, "<< {dict} /Length {} >>\nstream\n", data.len());
+        self.out.extend_from_slice(data);
+        self.out.extend_from_slice(b"\nendstream\nendobj\n");
+        num
+    }
+
+    /// The object number the trailer's `key` (`/Info`, `/Root`) refers to.
+    pub(super) fn trailer_ref(&self, key: &str) -> Option<usize> {
+        take_number(&self.trailer, key).0
+    }
+
+    /// The catalog's object number and its dictionary.
+    pub(super) fn catalog(&self) -> Result<(usize, String), IoError> {
+        let bad = || IoError::Unsupported("PDF: can't find the document catalog".into());
+        let pdf = Pdf::new(self.out.clone()).map_err(|_| bad())?;
+        let xref = pdf.xref();
+        let root = xref.root_id();
+        let catalog = xref.get::<hayro::hayro_syntax::object::Dict<'_>>(root).ok_or_else(bad)?;
+        let text = std::str::from_utf8(catalog.data()).map_err(|_| bad())?.trim().to_string();
+        Ok((usize::try_from(root.obj_number).map_err(|_| bad())?, text))
+    }
+
     /// Writes object `num` again as `body`.
     pub(super) fn replace(&mut self, num: usize, body: &str) {
         self.begin(num);

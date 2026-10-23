@@ -17,6 +17,7 @@ mod ink;
 mod layers;
 mod ocg;
 mod pages;
+pub mod pdfx;
 mod photoshop;
 
 pub use pages::open_pages;

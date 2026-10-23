@@ -77,11 +77,14 @@ pub struct PdfOptions {
     /// Illustrator show and can hide (Illustrator's "Create Acrobat Layers from Top-Level
     /// Layers"). On by default.
     pub pdf_layers: bool,
+    /// Standard: the PDF/X standard the file conforms to, which fixes its compatibility (see
+    /// [`super::pdfx`]).
+    pub standard: super::pdfx::Standard,
 }
 
 impl Default for PdfOptions {
     fn default() -> Self {
-        PdfOptions { compatibility: Compatibility::default(), jpeg_quality: None, downsample: None, pdf_layers: true }
+        PdfOptions { compatibility: Compatibility::default(), jpeg_quality: None, downsample: None, pdf_layers: true, standard: super::pdfx::Standard::None }
     }
 }
 
@@ -93,9 +96,24 @@ pub fn export_layered(doc: &Document, editing: bool) -> Result<ExportResult, IoE
 
 /// [`export_layered`] with Save Adobe PDF's options.
 pub fn export_layered_with(doc: &Document, editing: bool, opts: &PdfOptions) -> Result<ExportResult, IoError> {
+    use super::pdfx::Standard;
     let mut warnings = Vec::new();
-    let mut pdf = new_pdf(opts)?;
-    let marks = draw_page(&mut pdf, doc, opts, &mut warnings)?;
+    let standard = opts.standard;
+    let mut opts = *opts;
+    opts.compatibility = standard.compatibility(opts.compatibility);
+    // The 2003 standards allow no transparency, nor PDF layers: the page is the composite on
+    // paper white, one image (the layers stay in the editing data).
+    let flat = standard.flattened().then(|| flattened(doc, standard));
+    if flat.is_some() {
+        opts.pdf_layers = false;
+        warnings.push(format!("PDF: {} allows no transparency; the page is saved as one image", standard_label(standard)));
+    }
+    let page = flat.as_ref().unwrap_or(doc);
+    let mut pdf = new_pdf(&opts, Some(doc))?;
+    let marks = draw_page(&mut pdf, page, &opts, &mut warnings)?;
+    if flat.is_some() {
+        warnings.retain(|w| !w.contains("saved as images") && !w.contains("saved as one image (its layers"));
+    }
     let mut bytes = finish(pdf, &doc.name)?;
     if !marks.is_empty() {
         match super::ocg::add_layers(bytes.clone(), &marks) {
@@ -109,14 +127,47 @@ pub fn export_layered_with(doc: &Document, editing: bool, opts: &PdfOptions) -> 
             Err(e) => warnings.push(format!("{e}; saved without Photoshop editing data")),
         }
     }
+    if standard != Standard::None {
+        bytes = super::pdfx::conform(bytes, doc, standard)?;
+    }
     Ok(ExportResult { bytes, warnings })
+}
+
+fn standard_label(s: super::pdfx::Standard) -> &'static str {
+    super::pdfx::Standard::ALL.iter().find(|(x, _, _)| *x == s).map_or("PDF/X", |(_, _, l)| l)
+}
+
+/// `doc`'s composite on paper white as a one-layer document, for a standard without
+/// transparency: in CMYK (device CMYK, the output profile's) for PDF/X-1a, else in its own mode.
+fn flattened(doc: &Document, standard: super::pdfx::Standard) -> Document {
+    use photosplice_color::{ColorMode, PixelFormat, SampleType};
+    let mut tmp = doc.clone();
+    tmp.layers.insert(0, Layer::new("Paper", LayerContent::Fill(Fill::Solid(photosplice_color::Color::rgb(1.0, 1.0, 1.0)))));
+    let cmyk = standard == super::pdfx::Standard::X1a2003;
+    let (mode, fmt) = match (cmyk, super::ink::Ink::of(doc)) {
+        (true, _) => (ColorMode::Cmyk, PixelFormat::CMYKA8),
+        (false, Some(ink)) => (doc.mode, ink.format()),
+        // Lab, Indexed…: RGB.
+        (false, None) => (ColorMode::Rgb, PixelFormat::RGBA8),
+    };
+    let surface = photosplice_compose::flatten_to_surface(&tmp, fmt, None);
+    let mut out = Document::new(&doc.name, doc.size, mode, SampleType::U8);
+    out.resolution_dpi = doc.resolution_dpi;
+    // Device CMYK for X-1a (no ICC-based colour); the document's own profile otherwise.
+    out.icc_profile = if cmyk { None } else { doc.icc_profile.clone().filter(|_| mode == doc.mode) };
+    out.layers.push(Layer::new("Composite", LayerContent::Raster(surface)));
+    out
 }
 
 /// [`export_layered_with`] protected by `security` (the save options' Security) when it sets a
 /// password. Protection that fails is an error: a file meant to be locked is never written open.
 pub fn export_secured(doc: &Document, editing: bool, opts: &PdfOptions, security: Option<&super::security::Security>) -> Result<ExportResult, IoError> {
+    let sec = security.filter(|s| !s.is_none());
+    if sec.is_some() && opts.standard != super::pdfx::Standard::None {
+        return Err(IoError::Unsupported(format!("PDF: a {} file can't have a password", standard_label(opts.standard))));
+    }
     let mut r = export_layered_with(doc, editing, opts)?;
-    if let Some(sec) = security.filter(|s| !s.is_none()) {
+    if let Some(sec) = sec {
         r.bytes = super::security::encrypt(&r.bytes, sec, opts.compatibility)?;
     }
     Ok(r)
@@ -131,7 +182,7 @@ pub fn export_pages(docs: &[Document], title: &str) -> Result<ExportResult, IoEr
     let mut warnings = Vec::new();
     // One page per document: no PDF layers (they would be per page, with each page's names).
     let opts = PdfOptions { pdf_layers: false, ..PdfOptions::default() };
-    let mut pdf = new_pdf(&opts)?;
+    let mut pdf = new_pdf(&opts, None)?;
     for doc in docs {
         draw_page(&mut pdf, doc, &opts, &mut warnings)?;
     }
@@ -139,12 +190,23 @@ pub fn export_pages(docs: &[Document], title: &str) -> Result<ExportResult, IoEr
     Ok(ExportResult { bytes: finish(pdf, title)?, warnings })
 }
 
-fn new_pdf(opts: &PdfOptions) -> Result<krilla::Document, IoError> {
+/// A krilla document for `opts`. Under a PDF/X standard with ICC-based colour (X-3, X-4), no
+/// device colour (RGB and grey as ICC colour, CMYK in `doc`'s printing condition), and no XMP
+/// of krilla's: [`super::pdfx::conform`] writes the standard's.
+fn new_pdf(opts: &PdfOptions, doc: Option<&Document>) -> Result<krilla::Document, IoError> {
     let configuration = krilla::configure::ConfigurationBuilder::new()
         .with_version(opts.compatibility.krilla())
         .finish()
         .map_err(|e| IoError::Unsupported(format!("PDF: can't write PDF {} ({e:?})", opts.compatibility.id())))?;
-    Ok(krilla::Document::new_with(krilla::SerializeSettings { configuration, ..Default::default() }))
+    let mut settings = krilla::SerializeSettings { configuration, ..Default::default() };
+    if opts.standard != super::pdfx::Standard::None {
+        settings.xmp_metadata = false;
+        if opts.standard.icc_colour() {
+            settings.no_device_cs = true;
+            settings.cmyk_profile = doc.and_then(|d| krilla::icc::ICCProfile::new(&super::pdfx::output_profile(d).0));
+        }
+    }
+    Ok(krilla::Document::new_with(settings))
 }
 
 fn finish(mut pdf: krilla::Document, title: &str) -> Result<Vec<u8>, IoError> {

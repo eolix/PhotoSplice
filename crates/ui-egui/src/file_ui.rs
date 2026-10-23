@@ -949,6 +949,7 @@ fn web_body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, Val
 /// Save Adobe PDF's Compatibility, Compression and Downsampling, as Photoshop lays them out.
 fn pdf_options_ui(ui: &mut egui::Ui, f: &mut Map<String, Value>, cur: photosplice_io::pdf::export::PdfOptions) {
     use photosplice_io::pdf::export::Compatibility;
+    use photosplice_io::pdf::pdfx::Standard;
     let t = crate::theme::Tokens::get(ui.ctx());
     // Fields the dialog doesn't have yet start from the last PDF save.
     let (to, above) = cur.downsample.unwrap_or((300.0, 450.0));
@@ -960,16 +961,33 @@ fn pdf_options_ui(ui: &mut egui::Ui, f: &mut Map<String, Value>, cur: photosplic
         ("pdfDownsampleTo", json!(to.round())),
         ("pdfDownsampleAbove", json!(above.round())),
         ("pdfLayers", json!(cur.pdf_layers)),
+        ("pdfStandard", json!(cur.standard.id())),
     ] {
         f.entry(k).or_insert(v);
     }
     let label = |ui: &mut egui::Ui, s: &str| {
         ui.add_sized(egui::vec2(104.0, 22.0), egui::Label::new(egui::RichText::new(s).color(t.text_dim)));
     };
+    let standards: Vec<(&str, &str)> = Standard::ALL.iter().map(|(_, id, l)| (*id, tl!(l))).collect();
+    ui.horizontal(|ui| {
+        label(ui, tl!("Standard:"));
+        dropdown_str(ui, "pdf-standard", f, "pdfStandard", &standards, 190.0);
+    });
+    let standard = Standard::from_id(&s(f, "pdfStandard", "none")).unwrap_or_default();
     let compat: Vec<(&str, &str)> = Compatibility::ALL.iter().map(|(_, id, l)| (*id, tl!(l))).collect();
     ui.horizontal(|ui| {
         label(ui, tl!("Compatibility:"));
-        dropdown_str(ui, "pdf-compat", f, "pdfCompatibility", &compat, 190.0);
+        if standard == Standard::None {
+            dropdown_str(ui, "pdf-compat", f, "pdfCompatibility", &compat, 190.0);
+        } else {
+            // The standard fixes it.
+            let fixed = standard.compatibility(Compatibility::default());
+            let name = Compatibility::ALL.iter().find(|(c, _, _)| *c == fixed).map_or("", |(_, _, l)| tl!(l));
+            ui.add_enabled_ui(false, |ui| {
+                let mut v = fixed.id().to_string();
+                crate::widgets::dropdown(ui, "pdf-compat-fixed", &mut v, &[(fixed.id().to_string(), name)], 190.0);
+            });
+        }
     });
     ui.horizontal(|ui| {
         label(ui, tl!("Compression:"));
@@ -992,7 +1010,9 @@ fn pdf_options_ui(ui: &mut egui::Ui, f: &mut Map<String, Value>, cur: photosplic
             web_number(ui, f, "pdfDownsampleAbove", 1.0..=4800.0, "ppi", 450.0);
         });
     }
-    check(ui, f, "pdfLayers", tl!("Create PDF Layers from Top-Level Layers"), cur.pdf_layers);
+    if !standard.flattened() {
+        check(ui, f, "pdfLayers", tl!("Create PDF Layers from Top-Level Layers"), cur.pdf_layers);
+    }
 }
 
 /// The PDF save options' Security: a password to open the file, one that restricts printing, changes
@@ -1019,6 +1039,10 @@ fn pdf_security_ui(ui: &mut egui::Ui, f: &mut Map<String, Value>, cur: Option<&p
     ui.add_space(6.0);
     crate::widgets::hairline(ui);
     ui.label(egui::RichText::new(tl!("Security")).font(crate::theme::semibold(12.0)).color(t.text));
+    if s(f, "pdfStandard", "none") != "none" {
+        ui.label(egui::RichText::new(tl!("PDF/X files can't have passwords.")).color(t.text_dim));
+        return;
+    }
     let password = |ui: &mut egui::Ui, f: &mut Map<String, Value>, key: &str, label: &str| {
         ui.horizontal(|ui| {
             ui.add_space(20.0);
@@ -1062,6 +1086,10 @@ fn pdf_security_ui(ui: &mut egui::Ui, f: &mut Map<String, Value>, cur: Option<&p
 /// box without its password, or the same password twice (the permissions one would open the
 /// file with every permission).
 pub(crate) fn pdf_security(f: &Map<String, Value>) -> Result<Option<photosplice_io::pdf::security::Security>, String> {
+    // PDF/X has none.
+    if s(f, "pdfStandard", "none") != "none" {
+        return Ok(None);
+    }
     let open = if b(f, "__pdfRequireOpen", false) { s(f, "__pdfOpenPassword", "") } else { String::new() };
     let perms = if b(f, "__pdfRestrict", false) { s(f, "__pdfPermissionsPassword", "") } else { String::new() };
     if b(f, "__pdfRequireOpen", false) && open.is_empty() {
@@ -1088,6 +1116,9 @@ pub(crate) fn pdf_options(f: &Map<String, Value>, cur: photosplice_io::pdf::expo
     }
     if let Some(on) = f.get("pdfLayers").and_then(Value::as_bool) {
         o.pdf_layers = on;
+    }
+    if let Some(st) = f.get("pdfStandard").and_then(Value::as_str).and_then(photosplice_io::pdf::pdfx::Standard::from_id) {
+        o.standard = st;
     }
     let num = |k: &str| f.get(k).and_then(|v| v.as_f64().or_else(|| v.as_str()?.parse().ok())).filter(|v: &f64| v.is_finite());
     match f.get("pdfCompression").and_then(Value::as_str) {
@@ -1704,7 +1735,7 @@ mod tests {
     #[test]
     fn pdf_option_fields_set_the_options_and_keep_the_rest() {
         use photosplice_io::pdf::export::{Compatibility, PdfOptions};
-        let cur = PdfOptions { compatibility: Compatibility::Pdf16, jpeg_quality: Some(50), downsample: None, pdf_layers: true };
+        let cur = PdfOptions { compatibility: Compatibility::Pdf16, jpeg_quality: Some(50), downsample: None, pdf_layers: true, ..Default::default() };
         assert_eq!(pdf_options(&Map::new(), cur), cur, "no fields: as last time");
         let mut f = Map::new();
         f.insert("pdfCompatibility".into(), json!("2.0"));
@@ -1713,7 +1744,10 @@ mod tests {
         f.insert("pdfDownsampleTo".into(), json!(150));
         f.insert("pdfDownsampleAbove".into(), json!(100));
         let o = pdf_options(&f, cur);
-        assert_eq!(o, PdfOptions { compatibility: Compatibility::Pdf20, jpeg_quality: None, downsample: Some((150.0, 150.0)), pdf_layers: true }, "the threshold is never below the target");
+        assert_eq!(o, PdfOptions { compatibility: Compatibility::Pdf20, jpeg_quality: None, downsample: Some((150.0, 150.0)), pdf_layers: true, ..Default::default() }, "the threshold is never below the target");
+        f.insert("pdfStandard".into(), json!("x1a-2003"));
+        assert_eq!(pdf_options(&f, cur).standard, photosplice_io::pdf::pdfx::Standard::X1a2003);
+        f.remove("pdfStandard");
         f.insert("pdfLayers".into(), json!(false));
         assert!(!pdf_options(&f, cur).pdf_layers);
         f.insert("pdfCompression".into(), json!("jpeg"));
@@ -1744,6 +1778,9 @@ mod tests {
         assert!(pdf_security(&f).is_err(), "ticked without a password");
         // The passwords never reach the command's params (remembered with the dialog).
         assert!(params(&f).get("__pdfPermissionsPassword").is_none() && !params(&f).to_string().contains("\"b\""));
+        // PDF/X: no security, whatever was typed.
+        f.insert("pdfStandard".into(), json!("x4-2010"));
+        assert_eq!(pdf_security(&f), Ok(None));
     }
 
     #[test]

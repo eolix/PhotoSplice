@@ -327,7 +327,8 @@ impl From<Option<f64>> for SaveOpts {
 
 /// Save Adobe PDF's options from a command's params: `pdfCompatibility` ("1.4" … "2.0"),
 /// `pdfCompression` ("zip", "jpeg") with `pdfQuality` (Reference's 0–12), `pdfDownsample`
-/// ([to ppi, for images above ppi]). Missing or unreadable ones keep their defaults.
+/// ([to ppi, for images above ppi]), `pdfStandard` (PDF/X: "x1a-2003", "x3-2003", "x4-2010").
+/// Missing or unreadable ones keep their defaults.
 fn pdf_options(p: &Value) -> photosplice_io::pdf::export::PdfOptions {
     use photosplice_io::pdf::export::{Compatibility, PdfOptions};
     let mut o = PdfOptions::default();
@@ -336,6 +337,9 @@ fn pdf_options(p: &Value) -> photosplice_io::pdf::export::PdfOptions {
     }
     if let Some(on) = p.get("pdfLayers").and_then(Value::as_bool) {
         o.pdf_layers = on;
+    }
+    if let Some(st) = p.get("pdfStandard").and_then(Value::as_str).and_then(photosplice_io::pdf::pdfx::Standard::from_id) {
+        o.standard = st;
     }
     if p.get("pdfCompression").and_then(Value::as_str) == Some("jpeg") {
         let q = f64_param(p, "pdfQuality").filter(|q| q.is_finite()).unwrap_or(10.0);
@@ -1822,7 +1826,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Save a Copy…",
             &["File"],
             Some("Cmd+Alt+S"),
-            r##"{"path":str (format from the extension),"quality":0..12? (JPEG),"layers":bool=true,"tiffLayers":bool=false (TIFF: keep the layers; flat by default),"tgaBits":24|32? (TGA: 32 writes the alpha channel, or else the transparency, as the alpha; unset, 32 with an alpha channel or transparency, else 24),"dpxBits":8|10|12|16? (DPX: bits per sample; unset, 8 for an 8-bit document, else 16),"pdfEditing":bool=true (PDF: Preserve Photoshop Editing Capabilities),"pdfCompatibility":"1.4|1.5|1.6|1.7|2.0"="1.7","pdfCompression":"zip|jpeg"="zip","pdfQuality":0..12=10 (JPEG),"pdfDownsample":[to ppi, above ppi]?,"pdfLayers":bool=true (each visible top-level layer a PDF layer),"pdfOpenPassword":str? (Document Open Password),"pdfPermissionsPassword":str? (restricts what follows),"pdfPrinting":"none|low|high"="high","pdfChanges":"none|pages|forms|comments|any"="any","pdfCopy":bool=true,"pdfScreenReaders":bool=true,"pdfPlaintextMetadata":bool=false}"##,
+            r##"{"path":str (format from the extension),"quality":0..12? (JPEG),"layers":bool=true,"tiffLayers":bool=false (TIFF: keep the layers; flat by default),"tgaBits":24|32? (TGA: 32 writes the alpha channel, or else the transparency, as the alpha; unset, 32 with an alpha channel or transparency, else 24),"dpxBits":8|10|12|16? (DPX: bits per sample; unset, 8 for an 8-bit document, else 16),"pdfEditing":bool=true (PDF: Preserve Photoshop Editing Capabilities),"pdfCompatibility":"1.4|1.5|1.6|1.7|2.0"="1.7","pdfCompression":"zip|jpeg"="zip","pdfQuality":0..12=10 (JPEG),"pdfDownsample":[to ppi, above ppi]?,"pdfLayers":bool=true (each visible top-level layer a PDF layer),"pdfStandard":"none|x1a-2003|x3-2003|x4-2010"="none" (PDF/X; fixes the compatibility, no password),"pdfOpenPassword":str? (Document Open Password),"pdfPermissionsPassword":str? (restricts what follows),"pdfPrinting":"none|low|high"="high","pdfChanges":"none|pages|forms|comments|any"="any","pdfCopy":bool=true,"pdfScreenReaders":bool=true,"pdfPlaintextMetadata":bool=false}"##,
             native_doc,
             save_a_copy
         ),
