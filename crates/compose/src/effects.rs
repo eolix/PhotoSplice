@@ -803,19 +803,33 @@ pub fn glow_lut(g: &Glow) -> Option<Vec<f32>> {
     }
 }
 
-/// The bevel's Contour element as a height transfer: the Range picks the top of the height
-/// profile, `contour((h − (1 − range)) / range)`, so the default 50 % spans exactly an inner
-/// bevel (whose height runs from ½ at the edge to 1). Photoshop corpus
-/// bevel-inner-contour-ramp-peak: lit for 4 px from the edge, shaded to 14 px (the size), as
-/// a ramp peak over `h ∈ [½, 1]` gives; the old `min(h / range, 1)` put it all outside the shape.
-pub fn bevel_contour_lut(c: &photosplice_doc::effects::BevelContour) -> Vec<f32> {
+/// The bevel's Contour element as a height transfer over the Range. The height is first taken
+/// as a place `u` on the style's own profile, 0 at its foot and 1 at its top: a Smooth inner bevel
+/// runs from ½ at the edge to 1 (`u = 2h − 1`), a Smooth outer one from 0 to ½ at the edge
+/// (`u = 2h`), Smooth emboss styles and every Chisel profile from 0 to 1 (`u = h`). The Range then
+/// picks the top of it, `contour((u − 1 + 2·range) / (2·range))`, so the default 50 % spans the
+/// whole profile. Reference corpus bevel-inner-contour-ramp-peak: lit for 4 px from the edge,
+/// shaded to 14 px (the size), as a ramp peak over the inner bevel gives;
+/// bevel-pillow-chisel-hard-gloss-and-contour: the contour spans both halves of the pillow, out
+/// past the edge (taken over the inner half only, its bands sat 2 px inside).
+pub fn bevel_contour_lut(c: &photosplice_doc::effects::BevelContour, b: &Bevel) -> Vec<f32> {
     let base = contour_lut(&c.contour);
     let r = if c.range.is_finite() { c.range.clamp(0.01, 1.0) } else { 1.0 };
+    let (scale, offset) = match (b.technique == BevelTechnique::Smooth, bevel_geom(b).paint) {
+        (true, BevelPaint::Inner | BevelPaint::Stroke) => (2.0, -1.0),
+        (true, BevelPaint::Outer) => (2.0, 0.0),
+        _ => (1.0, 0.0),
+    };
+    let at = |v: f32| base.as_ref().map_or(v, |l| lut_at(l, v));
+    // Below the range's foot (a Smooth bevel's corners dip under the edge's ½) the contour goes
+    // on at its starting slope rather than flattening out.
+    let slope = (at(1.0 / 255.0) - at(0.0)) * 255.0;
     let n = 4096;
     (0..n)
         .map(|k| {
-            let v = ((k as f32 / (n - 1) as f32 - (1.0 - r)) / r).clamp(0.0, 1.0);
-            base.as_ref().map_or(v, |l| lut_at(l, v))
+            let u = scale * (k as f32 / (n - 1) as f32) + offset;
+            let v = ((u - 1.0 + 2.0 * r) / (2.0 * r)).min(1.0);
+            if v < 0.0 { at(0.0) + v * slope } else { at(v) }
         })
         .collect()
 }
@@ -1412,7 +1426,7 @@ fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, pattern
     };
     // Contour element: the height profile through the contour over its range.
     if let Some(c) = &b.contour {
-        h = apply_lut_aa(h, Some(bevel_contour_lut(c)), c.anti_alias);
+        h = apply_lut_aa(h, Some(bevel_contour_lut(c, b)), c.anti_alias);
     }
     // Texture element: the pattern's luminance as extra height, scaled so a full-contrast step
     // at 100 % depth slopes like the bevel at its depth.
@@ -2816,6 +2830,27 @@ mod tests {
         let mid: f32 = (16..24).map(|y| m[0].v[y * 40 + 20] + m[1].v[y * 40 + 20]).sum();
         let flat: f32 = (16..24).map(|y| a[0].v[y * 40 + 20] + a[1].v[y * 40 + 20]).sum();
         assert!(mid > flat + 0.5, "{mid} vs {flat}");
+    }
+
+    /// The Contour's Range spans each style's own profile: a Smooth inner bevel's from ½ at the
+    /// edge to 1, a Chisel or emboss profile's from 0 to 1 (Reference corpus
+    /// bevel-pillow-chisel-hard-gloss-and-contour). Below the foot (a Smooth bevel's corners) the
+    /// contour goes on at its starting slope (bevel-inner-contour-ramp-peak: the corner wedge was
+    /// left unshaded, 127/255 off).
+    #[test]
+    fn bevel_contour_range_follows_the_style_profile() {
+        let linear = photosplice_doc::BevelContour { contour: Contour::Linear, range: 0.5, anti_alias: false };
+        let lut_at = |l: &[f32], h: f32| l[(h * (l.len() - 1) as f32).round() as usize];
+        let inner = bevel_contour_lut(&linear, &bevel_of(BevelStyle::InnerBevel, BevelTechnique::Smooth));
+        for (h, v) in [(0.5, 0.0), (0.75, 0.5), (1.0, 1.0), (0.25, -0.5)] {
+            assert!((lut_at(&inner, h) - v).abs() < 1e-3, "smooth inner at {h}: {}", lut_at(&inner, h));
+        }
+        for style in [BevelStyle::PillowEmboss, BevelStyle::Emboss] {
+            let l = bevel_contour_lut(&linear, &bevel_of(style, BevelTechnique::ChiselHard));
+            assert!([0.0, 0.3, 0.7, 1.0].iter().all(|h| (lut_at(&l, *h) - h).abs() < 1e-3), "{style:?}");
+        }
+        let outer = bevel_contour_lut(&linear, &bevel_of(BevelStyle::OuterBevel, BevelTechnique::Smooth));
+        assert!((lut_at(&outer, 0.25) - 0.5).abs() < 1e-3 && (lut_at(&outer, 0.5) - 1.0).abs() < 1e-3);
     }
 
     /// Photoshop corpus bevel-inner-contour-ramp-peak / bevel-inner-gloss-ramp-peak (inner smooth,

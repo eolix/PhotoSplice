@@ -390,7 +390,7 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
             };
             if let Some(c) = &bv.contour {
                 // Contour element: the height through the contour over its range.
-                let lut = photosplice_compose::effects::bevel_contour_lut(c);
+                let lut = photosplice_compose::effects::bevel_contour_lut(c, bv);
                 let mut st = stage(Kernel::MFinish, Some(h), None, [0.0, 0.0, 1.0, 0.0], 0);
                 st.lut = Some(Arc::new(lut));
                 h = b.push(st);
