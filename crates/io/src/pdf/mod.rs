@@ -13,6 +13,7 @@
 
 pub mod export;
 mod gradient;
+mod images;
 mod ink;
 mod layers;
 mod ocg;
@@ -20,6 +21,7 @@ mod pages;
 pub mod pdfx;
 mod photoshop;
 
+pub use images::{PdfImage, image_thumbnail, list_images, open_image};
 pub use pages::open_pages;
 mod render;
 pub mod security;
@@ -291,6 +293,16 @@ impl Pages {
         let (clip, t) = frame(p, crop_to);
         let r = t.transform_rect_bbox(clip);
         Some((r.width() as f32, r.height() as f32))
+    }
+
+    /// The images the pages draw ([`list_images`]).
+    pub fn images(&self) -> Vec<PdfImage> {
+        images::walk_pdf(&self.pdf, None, None).list
+    }
+
+    /// A thumbnail of image `index` fitting `max_side` ([`image_thumbnail`]).
+    pub fn image_thumbnail(&self, index: usize, max_side: u32) -> Option<(u32, u32, Vec<u8>)> {
+        images::thumbnail_of(images::walk_pdf(&self.pdf, Some(index), Some((max_side, max_side))), max_side)
     }
 
     /// Page `page`'s crop box rendered to fit `max_side` pixels: (width, height, straight RGBA).

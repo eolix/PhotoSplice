@@ -160,7 +160,9 @@ pub(super) fn conform(pdf: Vec<u8>, doc: &Document, standard: Standard) -> Resul
     // XMP metadata, matching the Info entries.
     let pdfx = match standard {
         Standard::X42010 => format!("   <pdfxid:GTS_PDFXVersion>{version}</pdfxid:GTS_PDFXVersion>\n"),
-        Standard::X1a2003 => format!("   <pdfx:GTS_PDFXVersion>{version}</pdfx:GTS_PDFXVersion>\n   <pdfx:GTS_PDFXConformance>{version}</pdfx:GTS_PDFXConformance>\n"),
+        Standard::X1a2003 => {
+            format!("   <pdfx:GTS_PDFXVersion>{version}</pdfx:GTS_PDFXVersion>\n   <pdfx:GTS_PDFXConformance>{version}</pdfx:GTS_PDFXConformance>\n")
+        }
         _ => format!("   <pdfx:GTS_PDFXVersion>{version}</pdfx:GTS_PDFXVersion>\n"),
     };
     let mut x = String::new();

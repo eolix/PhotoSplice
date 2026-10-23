@@ -1204,6 +1204,40 @@ fn pdf_x_files_carry_what_their_standard_asks() {
     assert!(export_secured(&doc, false, &PdfOptions { standard: Standard::X42010, ..Default::default() }, Some(&sec)).is_err());
 }
 
+/// Import PDF › Images: each image once, at its own pixel size whatever the page's resolution,
+/// with its transparency.
+#[test]
+fn a_pdfs_images_open_at_their_own_size() {
+    use photosplice_io::pdf::{PdfImage, image_thumbnail, list_images, open_image};
+    let jpeg = |w: u32, h: u32, c: [u8; 3]| {
+        let rgb: Vec<u8> = (0..w * h).flat_map(|_| c).collect();
+        let img = photosplice_codecs::Image::from_u8(w, h, photosplice_codecs::ChannelLayout::Rgb, rgb).unwrap();
+        (w, h, 300.0f32, photosplice_codecs::encode(&img, photosplice_codecs::Format::Jpeg, &photosplice_codecs::EncodeOptions::default()).unwrap())
+    };
+    let pdf = photosplice_io::pdf::raster_pdf(&[jpeg(30, 20, [255, 0, 0]), jpeg(40, 10, [0, 0, 255])]);
+    assert_eq!(list_images(&pdf, "").unwrap(), [PdfImage { page: 0, width: 30, height: 20 }, PdfImage { page: 1, width: 40, height: 10 }]);
+    let doc = open_image("two.pdf", &pdf, "", 1).unwrap().document;
+    assert_eq!((doc.size.width, doc.size.height), (40, 10), "its own pixels, not the page's 300 ppi");
+    let px = photosplice_compose::flatten(&doc);
+    let p = px.px[5 * 40 + 20];
+    assert!(p[2] > 0.9 && p[0] < 0.1 && p[3] > 0.99, "{p:?}");
+    assert!(open_image("two.pdf", &pdf, "", 2).is_err(), "no third image");
+    let (tw, th, rgba) = image_thumbnail(&pdf, "", 0, 8).unwrap();
+    assert_eq!((tw, th, rgba.len()), (8, 5, 8 * 5 * 4));
+    // An image with transparency (a soft mask) keeps it.
+    let mut d = Document::new("t", photosplice_geom::Size::new(20, 20), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+    let mut s = photosplice_raster::Surface::new(d.pixel_format());
+    s.fill_rect(photosplice_geom::Rect::new(0, 0, 20, 20), &[0.0, 1.0, 0.0, 0.5]);
+    d.layers.push(photosplice_doc::Layer::new("Half", LayerContent::Raster(s)));
+    let bytes = photosplice_io::pdf::export::export_layered(&d, false).unwrap().bytes;
+    let img = open_image("t.pdf", &bytes, "", 0).unwrap().document;
+    let a = photosplice_compose::flatten(&img).px[10 * 20 + 10][3];
+    assert!((a - 0.5).abs() < 0.02, "{a}");
+    // Not a PDF: an error.
+    assert!(list_images(b"%PDF-1.4 nonsense", "").is_err() || list_images(b"%PDF-1.4 nonsense", "").unwrap().is_empty());
+    assert!(open_image("x.pdf", b"garbage", "", 0).is_err());
+}
+
 /// Opens the Reference's own PDFs from the verification kit (`$PHOTOSPLICE_PDF_KIT_OUT`, the
 /// kit's `out/`): each `ps-*-editing.pdf` against the Reference's PSD of the same document, each
 /// `ps-*-page.pdf` (no editing data) against its flat TIFF.

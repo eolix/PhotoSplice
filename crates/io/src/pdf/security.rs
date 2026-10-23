@@ -189,7 +189,8 @@ fn bad(why: &str) -> IoError {
 
 /// The 32 bytes a short password is padded with (ISO 32000-2 §7.6.4.3.2).
 const PAD: [u8; 32] = [
-    0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41, 0x64, 0x00, 0x4E, 0x56, 0xFF, 0xFA, 0x01, 0x08, 0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C, 0xA9, 0xFE, 0x64, 0x53, 0x69, 0x7A,
+    0x28, 0xBF, 0x4E, 0x5E, 0x4E, 0x75, 0x8A, 0x41, 0x64, 0x00, 0x4E, 0x56, 0xFF, 0xFA, 0x01, 0x08, 0x2E, 0x2E, 0x00, 0xB6, 0xD0, 0x68, 0x3E, 0x80, 0x2F, 0x0C,
+    0xA9, 0xFE, 0x64, 0x53, 0x69, 0x7A,
 ];
 
 /// Random bytes, fetched from the system a page at a time (every string gets its own IV).
@@ -522,11 +523,7 @@ impl<'a> Lexer<'a> {
             b')' | b'>' => return Err(bad("unbalanced delimiter")),
             _ => {
                 let word = self.regular().to_vec();
-                if word.first().is_some_and(|c| c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.')) {
-                    Tok::Num(word)
-                } else {
-                    Tok::Kw(word)
-                }
+                if word.first().is_some_and(|c| c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.')) { Tok::Num(word) } else { Tok::Kw(word) }
             }
         };
         Ok(Some((tok, start, self.i)))
@@ -1053,7 +1050,14 @@ mod tests {
     fn permissions_follow_the_choices() {
         let open = Security { open_password: "a".into(), ..Default::default() };
         assert_eq!(open.flags(), -4, "no permissions password: everything allowed");
-        let none = Security { permissions_password: "b".into(), printing: Printing::None, changes: Changes::None, copy: false, screen_readers: false, ..Default::default() };
+        let none = Security {
+            permissions_password: "b".into(),
+            printing: Printing::None,
+            changes: Changes::None,
+            copy: false,
+            screen_readers: false,
+            ..Default::default()
+        };
         assert_eq!(none.flags() as u32, 0xFFFF_F0C0);
         let low = Security { printing: Printing::Low, ..none.clone() };
         assert_eq!(low.flags() as u32 & 0x804, 0x004, "low-resolution printing: bit 3 without 12");

@@ -1116,6 +1116,30 @@ fn pdf_save_params_parse_and_bad_ones_keep_the_defaults() {
     }
 }
 #[test]
+fn import_pdf_opens_images_at_their_own_size() {
+    let jpeg = |w: u32, h: u32| {
+        let img = photosplice_codecs::Image::from_u8(w, h, photosplice_codecs::ChannelLayout::Rgb, vec![128; (w * h * 3) as usize]).unwrap();
+        (w, h, 300.0f32, photosplice_codecs::encode(&img, photosplice_codecs::Format::Jpeg, &photosplice_codecs::EncodeOptions::default()).unwrap())
+    };
+    let pdf = photosplice_io::pdf::raster_pdf(&[jpeg(30, 20), jpeg(40, 10)]);
+    let dir = std::env::temp_dir().join(format!("pc-pdf-img-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("two.pdf").to_string_lossy().into_owned();
+    std::fs::write(&path, &pdf).unwrap();
+    let mut s = Session::new();
+    let r = s.execute("file.importPdf", json!({"path": path, "select": "images", "images": [2, 1]})).unwrap();
+    assert_eq!(r["documents"].as_array().unwrap().len(), 2);
+    let st = s.active().unwrap();
+    assert_eq!((st.doc.size.width, st.doc.size.height, st.doc.name.as_str()), (30, 20, "two.pdf (image 1)"));
+    for bad in [json!({"select": "images"}), json!({"select": "images", "images": [0]}), json!({"select": "images", "images": [3]}), json!({"select": 4}), json!({"select": "both"})] {
+        let mut p = bad.clone();
+        p["path"] = json!(path);
+        assert!(s.execute("file.importPdf", p).is_err(), "{bad}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn pdf_security_params_parse_and_bad_ones_are_errors() {
     use photosplice_io::pdf::security::{Changes, Printing};
     assert_eq!(pdf_security(&json!({}), "t").unwrap(), None, "no password: unprotected");

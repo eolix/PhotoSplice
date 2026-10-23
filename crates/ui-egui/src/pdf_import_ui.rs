@@ -3,10 +3,13 @@
 //! each picked page opens as its own document) and the page options: Crop To, resolution, mode,
 //! bit depth, and whether the page opens as pixels (Photoshop's way) or as editable layers.
 //!
+//! Select › Images lists the images the pages draw instead; each picked image opens as a
+//! document of its own at its own size (the page options don't apply).
+//!
 //! OK runs `file.importPdf` with those options and remembers them (preferences `dialogs`), so
 //! the next PDF starts from them. A Photoshop PDF never gets here: it opens as its document.
 
-use photosplice_io::pdf::{CropTo, Pages};
+use photosplice_io::pdf::{CropTo, Pages, PdfImage};
 use serde_json::{Value, json};
 
 use crate::PhotospliceApp;
@@ -37,6 +40,14 @@ pub struct ImportPdf {
     /// `pixels` or `layers`.
     pub open_as: String,
     thumbs: Vec<Option<egui::TextureHandle>>,
+    /// `pages` or `images`: what the list shows and the import opens.
+    pub select: String,
+    /// The images, listed the first time Images is chosen.
+    images: Option<Vec<PdfImage>>,
+    /// Picked images, 0-based, ascending.
+    pub picked_images: Vec<usize>,
+    image_anchor: usize,
+    image_thumbs: Vec<Option<egui::TextureHandle>>,
     /// The password of a protected file, once it opened it (sent with the import, never stored).
     pub password: String,
     /// A protected file's bytes until the right password is typed, and why the last try failed.
@@ -46,6 +57,13 @@ pub struct ImportPdf {
 impl ImportPdf {
     /// `file.importPdf`'s params for the current choices.
     pub fn params(&self) -> Value {
+        if self.select == "images" {
+            let mut p = json!({"path": self.path, "select": "images", "images": self.picked_images.iter().map(|i| i + 1).collect::<Vec<_>>()});
+            if !self.password.is_empty() {
+                p["password"] = json!(self.password);
+            }
+            return p;
+        }
         let mut p = json!({
             "path": self.path,
             "pages": self.selected.iter().map(|p| p + 1).collect::<Vec<_>>(),
@@ -87,34 +105,60 @@ impl ImportPdf {
         json!({"resolution": self.resolution, "cropTo": self.crop_to.id(), "mode": self.mode, "depth": self.depth, "as": self.open_as})
     }
 
-    /// Clicking page `i`, with Cmd/Ctrl (`toggle`) or Shift (`extend`).
-    pub fn click(&mut self, i: usize, toggle: bool, extend: bool) {
-        if i >= self.count {
-            return;
-        }
-        if extend {
-            let (a, b) = (self.anchor.min(i), self.anchor.max(i));
-            for p in a..=b {
-                if !self.selected.contains(&p) {
-                    self.selected.push(p);
-                }
-            }
-        } else if toggle {
-            match self.selected.iter().position(|&p| p == i) {
-                // At least one page stays picked.
-                Some(at) if self.selected.len() > 1 => {
-                    self.selected.remove(at);
-                }
-                Some(_) => {}
-                None => self.selected.push(i),
-            }
-            self.anchor = i;
-        } else {
-            self.selected = vec![i];
-            self.anchor = i;
-        }
-        self.selected.sort_unstable();
+    /// The number of images (0 until they are listed).
+    pub fn image_count(&self) -> usize {
+        self.images.as_ref().map_or(0, Vec::len)
     }
+
+    /// Shows the pages or the images (`images`), listing the images the first time.
+    pub fn choose(&mut self, images: bool) {
+        self.select = if images { "images" } else { "pages" }.into();
+        if images && self.images.is_none() {
+            let list = self.pages.as_ref().map(Pages::images).unwrap_or_default();
+            self.image_thumbs = (0..list.len().min(MAX_THUMBS)).map(|_| None).collect();
+            self.picked_images = if list.is_empty() { Vec::new() } else { vec![0] };
+            self.images = Some(list);
+        }
+    }
+
+    /// Clicking page (or image) `i`, with Cmd/Ctrl (`toggle`) or Shift (`extend`).
+    pub fn click(&mut self, i: usize, toggle: bool, extend: bool) {
+        if self.select == "images" {
+            let n = self.image_count();
+            pick(&mut self.picked_images, &mut self.image_anchor, n, i, toggle, extend);
+        } else {
+            pick(&mut self.selected, &mut self.anchor, self.count, i, toggle, extend);
+        }
+    }
+}
+
+/// A click on item `i` of `count`, as in a file list: alone, Cmd/Ctrl toggles one, Shift adds a
+/// run from the last click. At least one stays picked.
+fn pick(selected: &mut Vec<usize>, anchor: &mut usize, count: usize, i: usize, toggle: bool, extend: bool) {
+    if i >= count {
+        return;
+    }
+    if extend {
+        let (a, b) = ((*anchor).min(i), (*anchor).max(i));
+        for p in a..=b {
+            if !selected.contains(&p) {
+                selected.push(p);
+            }
+        }
+    } else if toggle {
+        match selected.iter().position(|&p| p == i) {
+            Some(at) if selected.len() > 1 => {
+                selected.remove(at);
+            }
+            Some(_) => {}
+            None => selected.push(i),
+        }
+        *anchor = i;
+    } else {
+        *selected = vec![i];
+        *anchor = i;
+    }
+    selected.sort_unstable();
 }
 
 /// Puts up Import PDF for the PDF `bytes` read from `path`, from the last choices.
@@ -136,6 +180,11 @@ pub fn open(app: &mut PhotospliceApp, path: &str, bytes: &[u8]) {
         depth: 8,
         open_as: "layers".into(),
         thumbs: Vec::new(),
+        select: "pages".into(),
+        images: None,
+        picked_images: Vec::new(),
+        image_anchor: 0,
+        image_thumbs: Vec::new(),
         password: String::new(),
         locked,
     };
@@ -183,7 +232,20 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
             // The pages.
             ui.vertical(|ui| {
                 ui.set_width(body.x - side - 16.0);
-                crate::widgets::section_label(ui, tl!("Pages"));
+                if d.locked.is_none() {
+                    ui.horizontal(|ui| {
+                        ui.label(tl!("Select:"));
+                        if ui.radio(d.select != "images", tl!("Pages")).clicked() {
+                            d.choose(false);
+                        }
+                        if ui.radio(d.select == "images", tl!("Images")).clicked() {
+                            d.choose(true);
+                        }
+                    });
+                    ui.add_space(2.0);
+                } else {
+                    crate::widgets::section_label(ui, tl!("Pages"));
+                }
                 if let Some((_, why)) = &d.locked {
                     let why = why.clone();
                     ui.add_space(8.0);
@@ -213,34 +275,43 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
                     return;
                 }
                 let grid_h = body.y - 70.0;
-                egui::ScrollArea::vertical().id_salt("import-pdf-pages").max_height(grid_h).auto_shrink([false, false]).show(ui, |ui| {
+                let images = d.select == "images";
+                let count = if images { d.image_count() } else { d.count };
+                if images && count == 0 {
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new(tl!("This PDF has no images.")).color(tk.text_dim));
+                }
+                egui::ScrollArea::vertical().id_salt(if images { "import-pdf-images" } else { "import-pdf-pages" }).max_height(grid_h).auto_shrink([false, false]).show(ui, |ui| {
                     let cell = egui::vec2(THUMB + 16.0, THUMB + 30.0);
                     let per_row = ((ui.available_width() / cell.x).floor() as usize).max(1);
                     let mut made = false;
-                    for row in 0..d.count.div_ceil(per_row) {
+                    for row in 0..count.div_ceil(per_row) {
                         ui.horizontal(|ui| {
-                            for i in row * per_row..((row + 1) * per_row).min(d.count) {
+                            for i in row * per_row..((row + 1) * per_row).min(count) {
                                 let (rect, resp) = ui.allocate_exact_size(cell, egui::Sense::click());
-                                let picked = d.selected.contains(&i);
+                                let picked = if images { d.picked_images.contains(&i) } else { d.selected.contains(&i) };
                                 if picked {
                                     ui.painter().rect_filled(rect.shrink(2.0), tk.radius_sm, tk.accent_soft);
                                     ui.painter().rect_stroke(rect.shrink(2.0), tk.radius_sm, egui::Stroke::new(1.5, tk.accent), egui::StrokeKind::Inside);
                                 }
                                 let area = egui::Rect::from_min_size(rect.min + egui::vec2(8.0, 6.0), egui::vec2(THUMB, THUMB));
                                 // One thumbnail rendered per frame, as pages scroll into view.
+                                let thumbs = if images { &mut d.image_thumbs } else { &mut d.thumbs };
                                 if ui.is_rect_visible(area)
                                     && !made
-                                    && let (Some(slot), Some(pages)) = (d.thumbs.get_mut(i), d.pages.as_ref())
+                                    && let (Some(slot), Some(pages)) = (thumbs.get_mut(i), d.pages.as_ref())
                                     && slot.is_none()
                                 {
                                     made = true;
                                     let px = (THUMB * ui.ctx().pixels_per_point()).round() as u32;
-                                    if let Some((w, h, rgba)) = pages.thumbnail(i, px) {
+                                    let thumb = if images { pages.image_thumbnail(i, px) } else { pages.thumbnail(i, px) };
+                                    if let Some((w, h, rgba)) = thumb {
                                         let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
-                                        *slot = Some(ui.ctx().load_texture(format!("pdf-page-{i}"), img, egui::TextureOptions::LINEAR));
+                                        let name = if images { format!("pdf-image-{i}") } else { format!("pdf-page-{i}") };
+                                        *slot = Some(ui.ctx().load_texture(name, img, egui::TextureOptions::LINEAR));
                                     }
                                 }
-                                if let Some(Some(tex)) = d.thumbs.get(i) {
+                                if let Some(Some(tex)) = thumbs.get(i) {
                                     let size = tex.size_vec2();
                                     let k = (THUMB / size.x.max(size.y)).min(f32::MAX);
                                     let r = egui::Rect::from_center_size(area.center(), size * k);
@@ -251,10 +322,15 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
                                 } else {
                                     ui.painter().rect_filled(area.shrink(14.0), 0.0, tk.field);
                                 }
+                                // An image: its number and pixel size.
+                                let caption = match d.images.as_ref().and_then(|l| l.get(i)).filter(|_| images) {
+                                    Some(im) => format!("{}  ·  {} × {}", i + 1, im.width, im.height),
+                                    None => format!("{}", i + 1),
+                                };
                                 ui.painter().text(
                                     egui::pos2(rect.center().x, rect.bottom() - 12.0),
                                     egui::Align2::CENTER_CENTER,
-                                    format!("{}", i + 1),
+                                    caption,
                                     egui::FontId::proportional(11.0),
                                     if picked { tk.text } else { tk.text_dim },
                                 );
@@ -273,13 +349,17 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
                         ui.ctx().request_repaint();
                     }
                 });
-                let n = d.selected.len();
-                let picked = crate::i18n::fmt(tl!("{n} of {count} pages selected"), &[("n", &n.to_string()), ("count", &d.count.to_string())]);
+                let picked = if images {
+                    crate::i18n::fmt(tl!("{n} of {count} images selected"), &[("n", &d.picked_images.len().to_string()), ("count", &count.to_string())])
+                } else {
+                    crate::i18n::fmt(tl!("{n} of {count} pages selected"), &[("n", &d.selected.len().to_string()), ("count", &d.count.to_string())])
+                };
                 ui.label(egui::RichText::new(picked).color(tk.text_dim));
             });
-            // The page options.
+            // The page options (images open as they are).
             ui.vertical(|ui| {
                 ui.set_width(side);
+                ui.add_enabled_ui(d.select != "images", |ui| {
                 crate::widgets::section_label(ui, tl!("Page Options"));
                 egui::Grid::new("import-pdf-options").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                     ui.label(tl!("Crop To:"));
@@ -331,6 +411,7 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
                     })
                     .color(tk.text_dim),
                 );
+                });
             });
         });
         ui.add_space(6.0);
@@ -341,7 +422,7 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
         });
     });
     cancel |= modal.should_close();
-    if d.count == 0 {
+    if d.count == 0 || (d.select == "images" && d.picked_images.is_empty()) {
         ok = false;
     }
     // Enter in the password field unlocks; it doesn't import.
@@ -373,6 +454,11 @@ mod tests {
             depth: 8,
             open_as: "pixels".into(),
             thumbs: Vec::new(),
+            select: "pages".into(),
+            images: None,
+            picked_images: Vec::new(),
+            image_anchor: 0,
+            image_thumbs: Vec::new(),
             password: String::new(),
             locked: None,
         }
@@ -396,5 +482,21 @@ mod tests {
         assert_eq!(one.selected, [0], "the last page stays picked");
         assert_eq!(d.params()["pages"], json!([1, 3, 5]));
         assert_eq!(d.params()["cropTo"], "cropBox");
+    }
+
+    #[test]
+    fn images_are_picked_apart_from_pages() {
+        let mut d = dialog(2);
+        d.images = Some(vec![PdfImage { page: 0, width: 30, height: 20 }, PdfImage { page: 1, width: 40, height: 10 }, PdfImage { page: 1, width: 5, height: 5 }]);
+        d.choose(true);
+        d.picked_images = vec![0];
+        d.click(2, false, true);
+        assert_eq!(d.picked_images, [0, 1, 2]);
+        assert_eq!(d.selected, [0], "the pages keep theirs");
+        assert_eq!(d.params(), json!({"path": "a.pdf", "select": "images", "images": [1, 2, 3]}));
+        d.click(7, false, false);
+        assert_eq!(d.picked_images, [0, 1, 2], "no such image");
+        d.choose(false);
+        assert_eq!(d.params()["pages"], json!([1]));
     }
 }

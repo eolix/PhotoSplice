@@ -637,6 +637,12 @@ fn import_pdf(s: &mut Session, p: &Value) -> Result<Value> {
         Err(e @ photosplice_io::IoError::PdfPassword { .. }) => return Err(EngineError::Other(format!("{path}: {e}"))),
         Err(_) => 0,
     };
+    match p.get("select") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(v)) if v == "pages" => {}
+        Some(Value::String(v)) if v == "images" => return import_pdf_images(s, p, &path, &bytes, &password),
+        Some(v) => return Err(bad(format!("\"select\": expected \"pages\" or \"images\", got {v}"))),
+    }
     // `pages` (several, 1-based) or `page`.
     let wanted: Vec<usize> = match p.get("pages") {
         Some(Value::Array(a)) => {
@@ -715,6 +721,41 @@ fn import_pdf(s: &mut Session, p: &Value) -> Result<Value> {
         color = c;
     }
     Ok(json!({"document": opened.last(), "documents": opened, "color": color, "pages": pages, "warnings": warnings}))
+}
+
+/// Import PDF › Images: each of `"images"` (1-based, in the order the pages first draw them)
+/// opens as a document of its own, at its own pixel size.
+fn import_pdf_images(s: &mut Session, p: &Value, path: &str, bytes: &[u8], password: &str) -> Result<Value> {
+    const CMD: &str = "file.importPdf";
+    let bad = |msg: String| EngineError::BadParams { cmd: CMD.into(), msg };
+    let wanted: Vec<usize> = match p.get("images") {
+        Some(Value::Array(a)) => {
+            let v: Vec<usize> = a.iter().filter_map(Value::as_u64).filter(|&n| n >= 1).map(|n| n.min(100_000) as usize).collect();
+            if v.is_empty() || v.len() != a.len() {
+                return Err(bad("\"images\": expected image numbers from 1".into()));
+            }
+            v
+        }
+        _ => return Err(bad("\"images\": expected an array of image numbers".into())),
+    };
+    if wanted.len() > 500 {
+        return Err(bad(format!("{} images at once; open at most 500", wanted.len())));
+    }
+    let mut docs = Vec::new();
+    for n in &wanted {
+        let r = photosplice_io::pdf::open_image(&file_name(path), bytes, password, n - 1).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+        let mut doc = r.document;
+        doc.name = format!("{} (image {n})", file_name(path));
+        docs.push(doc);
+    }
+    let mut opened = Vec::new();
+    let mut color = Value::Null;
+    for doc in docs {
+        let (i, c) = s.open_document(doc, None);
+        opened.push(i);
+        color = c;
+    }
+    Ok(json!({"document": opened.last(), "documents": opened, "color": color, "images": wanted.len()}))
 }
 
 // ---------- place ----------
@@ -1844,7 +1885,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Import PDF",
             &[],
             None,
-            r##"{"path":str,"page":1..=100000=1,"pages":[n…]? (several, each its own document),"resolution":ppi=300,"as":"pixels|layers"="pixels","cropTo":"boundingBox|mediaBox|cropBox|bleedBox|trimBox|artBox"="cropBox","mode":"rgb|grayscale|cmyk|lab"?,"depth":8|16?,"password":str? (a protected file's; never stored),"together":bool=true (several pages: one document, a board per page)}"##,
+            r##"{"path":str,"page":1..=100000=1,"pages":[n…]? (several, each its own document),"resolution":ppi=300,"as":"pixels|layers"="pixels","cropTo":"boundingBox|mediaBox|cropBox|bleedBox|trimBox|artBox"="cropBox","mode":"rgb|grayscale|cmyk|lab"?,"depth":8|16?,"password":str? (a protected file's; never stored),"together":bool=true (several pages: one document, a board per page),"select":"pages|images"="pages","images":[n…]? (select images: these images, 1-based in drawing order, each its own document at its own size)}"##,
             native,
             import_pdf
         ),
