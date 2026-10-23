@@ -817,13 +817,14 @@ pub fn overlay_effect(fx: &mut Effect, p: &Value) {
                 }
                 set_bool(p, "contourAntiAlias", &mut c.anti_alias);
             }
-            // The Texture element: `useTexture: false` turns it off; naming a pattern turns it on
-            // (or swaps the pattern); its Scale, Depth, Invert and Link edit it in place, so an
+            // The Texture element: `useTexture: false` turns it off (whatever pattern is named with
+            // it); naming a pattern turns it on (or swaps the pattern); its Scale, Depth, Invert and Link edit it in place, so an
             // imported texture keeps its other settings.
-            if b_of(p, "useTexture") == Some(false) {
+            let texture_off = b_of(p, "useTexture") == Some(false);
+            if texture_off {
                 bv.texture = None;
             }
-            if let Some(t) = p.get("texture").and_then(Value::as_str).filter(|t| !t.is_empty()) {
+            if let Some(t) = p.get("texture").and_then(Value::as_str).filter(|t| !t.is_empty() && !texture_off) {
                 let tex = bv.texture.get_or_insert_with(|| photosplice_doc::BevelTexture {
                     name: String::new(),
                     id: String::new(),
@@ -1188,7 +1189,7 @@ mod tests {
         let Effect::BevelEmboss(b) = &e else { panic!("{e:?}") };
         let t = b.texture.as_ref().unwrap();
         assert_eq!((t.name.as_str(), t.scale, t.depth), ("Bubbles", 0.5, -1.5));
-        overlay_effect(&mut e, &json!({"useTexture": false}));
+        overlay_effect(&mut e, &json!({"useTexture": false, "texture": "Bubbles"}));
         assert!(matches!(&e, Effect::BevelEmboss(b) if b.texture.is_none()));
     }
 
