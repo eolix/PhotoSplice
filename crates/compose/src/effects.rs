@@ -1382,9 +1382,10 @@ pub fn bevel_geom(b: &Bevel) -> BevelGeom {
 /// Bevel height map in `0..=1`. Smooth: the shape blurred by two box passes of the bevel
 /// width. Chisel: linear ramps of the exact distance to the edge ([`BevelGeom::chisel`] long;
 /// emboss styles straddle the edge). Chisel Soft uses the same profile: on straight edges
-/// Photoshop's Chisel Soft and Hard facets are identical (Photoshop corpus bevel-inner-chisel-*:
+/// Reference's Chisel Soft and Hard facets are identical (Reference corpus bevel-inner-chisel-*:
 /// the same values pixel for pixel across an edge); a blur over it softened them (pixels off
-/// 10-18 % → 8-12 %; what remains are the radial streaks Photoshop's Soft draws on curves).
+/// 10-18 % → 8-12 %; what remains are the radial streaks Reference's Soft draws on curves),
+/// except that an inner Soft bevel drops a step further at the edge ([`chisel_soft_edge`]).
 /// Soften blurs the result.
 fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, patterns: &PreparedPatterns<'_>) -> Map {
     let mut h = if b.technique == BevelTechnique::Smooth {
@@ -1393,6 +1394,7 @@ fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, pattern
         h
     } else {
         let (din, dout) = (dist_inside(shape), dist_outside_smooth(shape));
+        let soft_edge = chisel_soft_edge(b, g);
         let mut h = Map::new(shape.w, shape.h, 0.0);
         for i in 0..h.v.len() {
             // A partly covered edge pixel lies `coverage − ½` inside the edge (outside below ½),
@@ -1400,7 +1402,10 @@ fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, pattern
             // slope across the edge and the shading's differences put a dark or light dotted line
             // along it (keep in sync with `fs_mbevelh`).
             let a = shape.v[i];
-            let (di, dou) = if a > INSIDE_EPS && a < 1.0 - INSIDE_EPS { (a - 0.5, 0.5 - a) } else { (din[i], dout[i]) };
+            let (mut di, dou) = if a > INSIDE_EPS && a < 1.0 - INSIDE_EPS { (a - 0.5, 0.5 - a) } else { (din[i], dout[i]) };
+            if soft_edge {
+                di = chisel_soft_inside(a, di);
+            }
             h.v[i] = bevel_chisel_h(g.paint, g.chisel, di, dou);
         }
         h
@@ -1439,6 +1444,26 @@ pub struct TextureCtx<'a> {
     pub rect: Rect,
     pub patterns: &'a [Pattern],
     pub anchor: (f64, f64),
+}
+
+/// Whether a chiselled bevel's ramp drops a step further at the shape's edge: Chisel Soft on
+/// an inner or stroke bevel (Reference kit soft-inner-s10 / -s20, light overhead: the outermost
+/// row slopes 1.5 × the facet, Chisel Hard's not at all; the other styles keep the plain ramp).
+pub fn chisel_soft_edge(b: &Bevel, g: &BevelGeom) -> bool {
+    b.technique == BevelTechnique::ChiselSoft && matches!(g.paint, BevelPaint::Inner | BevelPaint::Stroke)
+}
+
+/// The inside distance [`bevel_chisel_h`] takes under [`chisel_soft_edge`]: pixels with no
+/// coverage a whole pixel further out, partly covered ones blended towards that (keep in sync
+/// with `fs_mbevelh`).
+pub fn chisel_soft_inside(a: f32, di: f32) -> f32 {
+    if a <= INSIDE_EPS {
+        di - 1.0
+    } else if a < 1.0 - INSIDE_EPS {
+        2.0 * a - 1.5
+    } else {
+        di
+    }
 }
 
 /// Chiselled height from the inside / outside distances and the ramp lengths `[inside,
@@ -2666,9 +2691,9 @@ mod tests {
         assert!(maps.per[0].is_empty());
     }
 
-    /// Chisel Soft draws the same facets as Chisel Hard along straight edges (Photoshop corpus
+    /// Chisel Soft draws the same facets as Chisel Hard along straight edges (Reference corpus
     /// bevel-inner-chisel-hard / -soft: equal pixel for pixel across an edge); a blur used to
-    /// soften them.
+    /// soften them. Only the outermost row differs ([`chisel_soft_edge`]).
     #[test]
     fn chisel_soft_matches_hard_on_straight_edges() {
         let shape = square(64, 10, 54);
@@ -2678,8 +2703,14 @@ mod tests {
             bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES)).0
         };
         let (hard, soft) = (maps(BevelTechnique::ChiselHard), maps(BevelTechnique::ChiselSoft));
+        // The shape's outermost row and column (x or y at 10 or 53) take the steeper edge.
+        let edge = |i: usize| [i % 64, i / 64].iter().any(|v| *v == 10 || *v == 53);
         for (h, s) in hard.iter().zip(&soft) {
-            assert_eq!(h.v, s.v);
+            for (i, (a, b)) in h.v.iter().zip(&s.v).enumerate() {
+                if !edge(i) {
+                    assert_eq!(a, b, "pixel {i}");
+                }
+            }
         }
     }
 
@@ -3204,5 +3235,25 @@ mod tests {
         let lit = maps[0].v[20 * 40 + 12];
         assert!(lit > 0.2, "the edge pixel is on the lit facet: {lit}");
         assert!((px[20 * 40 + 12][0] - 0.5 * lit).abs() < 0.01, "{} vs half of {lit}", px[20 * 40 + 12][0]);
+    }
+
+    /// Chisel Soft's inner bevel drops a step further at the edge: lit from straight above, its
+    /// outermost row slopes 1.5 × the facet (Reference kit soft-inner-s10 / -s20, alt 90°: 0.679
+    /// against 0.445), the rows inside as Chisel Hard's.
+    #[test]
+    fn chisel_soft_inner_edge_row_is_steeper() {
+        let n = 48;
+        let shape = square(n, 10, 38);
+        let slope = |t: BevelTechnique, y: usize| {
+            let mut b = bevel_of(BevelStyle::InnerBevel, t);
+            (b.size, b.altitude) = (10.0, 90.0);
+            let (maps, _) = bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+            let shade = 1.0 - maps[1].v[y * n + 24];
+            (1.0 / (shade * shade) - 1.0).max(0.0).sqrt()
+        };
+        let (soft, hard) = (slope(BevelTechnique::ChiselSoft, 10), slope(BevelTechnique::ChiselHard, 10));
+        assert!((soft / hard - 1.5).abs() < 0.05, "edge row: soft {soft} hard {hard}");
+        let (soft, hard) = (slope(BevelTechnique::ChiselSoft, 14), slope(BevelTechnique::ChiselHard, 14));
+        assert!((soft - hard).abs() < 1e-4, "inside: soft {soft} hard {hard}");
     }
 }

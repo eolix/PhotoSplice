@@ -1339,6 +1339,14 @@ fn fs_mbevelh(in: VOut) -> @location(0) vec4<f32> {
         din = a - 0.5;
         dout = 0.5 - a;
     }
+    // effects::chisel_soft_inside (p0.w: effects::chisel_soft_edge).
+    if (op.p0.w > 0.5) {
+        if (a <= INSIDE_EPS) {
+            din = din - 1.0;
+        } else if (a < 1.0 - INSIDE_EPS) {
+            din = 2.0 * a - 1.5;
+        }
+    }
     let rin = max(op.p0.y, 1e-3);
     let rout = max(op.p0.z, 1e-3);
     var h: f32;

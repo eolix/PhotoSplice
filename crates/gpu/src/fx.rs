@@ -383,7 +383,8 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
                 let reach = size.max(g.chisel[0]).max(g.chisel[1]) + 1.0;
                 let din = b.field(FieldKind::Inside, reach);
                 let dout = b.field(FieldKind::BevelOutside, reach);
-                let mut st = stage(Kernel::MBevelH, Some(din), Some(dout), [paint(g.paint), g.chisel[0], g.chisel[1], 0.0], 0);
+                let soft = f32::from(u8::from(photosplice_compose::effects::chisel_soft_edge(bv, &g)));
+                let mut st = stage(Kernel::MBevelH, Some(din), Some(dout), [paint(g.paint), g.chisel[0], g.chisel[1], soft], 0);
                 st.s = Some(In::Shape);
                 b.push(st)
             };

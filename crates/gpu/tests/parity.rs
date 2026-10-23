@@ -1442,6 +1442,10 @@ fn effect_cases() -> Vec<(&'static str, Vec<Effect>)> {
             vec![Effect::BevelEmboss(Bevel { technique: BevelTechnique::ChiselSoft, ..bevel(BevelStyle::OuterBevel, false, 7.5, 2.0) })],
         ),
         (
+            "bevel inner chisel soft",
+            vec![Effect::BevelEmboss(Bevel { technique: BevelTechnique::ChiselSoft, ..bevel(BevelStyle::InnerBevel, true, 8.0, 0.0) })],
+        ),
+        (
             "bevel pillow chisel hard",
             vec![Effect::BevelEmboss(Bevel { technique: BevelTechnique::ChiselHard, ..bevel(BevelStyle::PillowEmboss, false, 7.0, 0.0) })],
         ),
