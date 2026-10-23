@@ -68,7 +68,9 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-const PASS_TOL: f32 = 2.0 / 255.0;
+// Two levels exactly (8-bit samples two apart) pass: the slack only absorbs float noise in
+// 2/255 itself (cmyk8 hue-saturation: inks two levels off read 0.0078432 > 0.0078431).
+const PASS_TOL: f32 = 2.0 / 255.0 + 1e-6;
 /// Export → re-import must render within one 8-bit step of the imported document.
 const ROUNDTRIP_TOL: f32 = 1.0 / 255.0 + 1e-5;
 
@@ -155,11 +157,11 @@ const MIXED: Source = Source { label: "io corpus", dir: "corpus/psd", group_dept
 
 /// The full psd-tools test set (309 files at the pinned commit; see `xtask/psd-tools-corpus.sha256`):
 /// 234 vs the merged image + 10 vs the thumbnail; floor raised to upstream's 249 (Advanced Blending knockouts).
-const PSD_TOOLS: Source = Source { label: "psd-tools corpus", dir: "corpus/psd-tools", group_depth: 0, pass_floor: 252, roundtrip_floor: 308 };
+const PSD_TOOLS: Source = Source { label: "psd-tools corpus", dir: "corpus/psd-tools", group_depth: 0, pass_floor: 254, roundtrip_floor: 308 };
 
 /// Our Reference-authored oracles (271 files; https://github.com/storytold/photocraft-corpus),
 /// grouped by feature (`smart-filters`, `effects`, `text`, `adjustments/<mode><bits>`).
-const PHOTOSHOP: Source = Source { label: "photoshop oracles", dir: "corpus/photoshop", group_depth: 2, pass_floor: 223, roundtrip_floor: 271 };
+const PHOTOSHOP: Source = Source { label: "photoshop oracles", dir: "corpus/photoshop", group_depth: 2, pass_floor: 224, roundtrip_floor: 271 };
 
 /// The corpus directory; a missing corpus fails the test.
 fn locate(src: &Source) -> PathBuf {
