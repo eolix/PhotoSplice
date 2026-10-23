@@ -9,53 +9,60 @@ use super::*;
 /// the field accepts the whole of `range` (Motion Blur takes -360..=360, so a typed or
 /// remembered 270° stays 270°).
 pub fn angle_dial_row(ui: &mut Ui, label: &str, angle: &mut f32, range: std::ops::RangeInclusive<f32>) -> Response {
+    ui.horizontal(|ui| {
+        let t = Tokens::get(ui.ctx());
+        ui.label(egui::RichText::new(tl!(label)).color(t.text_dim));
+        angle_dial(ui, label, angle, range)
+    })
+    .inner
+}
+
+/// [`angle_dial_row`] without its label, for a row that lays its label out itself (a form's
+/// label column), in a left-to-right row. `label` names the dial for accessibility.
+pub fn angle_dial(ui: &mut Ui, label: &str, angle: &mut f32, range: std::ops::RangeInclusive<f32>) -> Response {
     let t = Tokens::get(ui.ctx());
     // The dial clamps with max/min, not `f32::clamp`, which panics if a malformed spec
     // reverses the range.
     let (lo, hi) = (*range.start(), *range.end());
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(tl!(label)).color(t.text_dim));
-        let (rect, mut dial) = ui.allocate_exact_size(vec2(42.0, 42.0), Sense::click_and_drag());
-        dial.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, ui.is_enabled(), tl!(label)));
-        if (dial.clicked() || dial.dragged())
-            && let Some(pos) = dial.interact_pointer_pos()
-        {
-            let delta = pos - rect.center();
-            if delta.length_sq() > 1.0 {
-                *angle = (-delta.y).atan2(delta.x).to_degrees().round().max(lo).min(hi);
-                dial.mark_changed();
-            }
-        }
-        let painter = ui.painter();
-        let radius = rect.width() / 2.0 - 2.0;
-        painter.circle(rect.center(), radius, t.field, Stroke::new(1.0, t.field_border));
-        let radians = angle.to_radians();
-        let tip = rect.center() + vec2(radians.cos(), -radians.sin()) * (radius - 4.0);
-        painter.line_segment([rect.center(), tip], Stroke::new(2.0, t.accent));
-        painter.circle_filled(rect.center(), 2.0, t.text_dim);
-        if dial.has_focus() {
-            painter.circle_stroke(rect.center(), radius + 2.0, Stroke::new(1.0, t.accent));
-            let step = ui.input(|i| {
-                i.num_presses(egui::Key::ArrowRight) as f32 + i.num_presses(egui::Key::ArrowUp) as f32
-                    - i.num_presses(egui::Key::ArrowLeft) as f32
-                    - i.num_presses(egui::Key::ArrowDown) as f32
-            });
-            if step != 0.0 {
-                // Wrap round the circle only when the range is the dial's own half turn each
-                // way; a wider range (Motion Blur's -360..360) steps on, so 270° goes to 271°.
-                let stepped = if lo >= -180.0 && hi <= 180.0 { (*angle + step + 180.0).rem_euclid(360.0) - 180.0 } else { *angle + step };
-                *angle = stepped.max(lo).min(hi);
-                dial.mark_changed();
-            }
-        }
-        // The dialogs' own number field: it takes the opening focus (#1757), Tab and arrow steps.
-        let field = value_field(ui, angle, range, "°", 64.0);
-        if field.changed() {
+    let (rect, mut dial) = ui.allocate_exact_size(vec2(42.0, 42.0), Sense::click_and_drag());
+    dial.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, ui.is_enabled(), tl!(label)));
+    if (dial.clicked() || dial.dragged())
+        && let Some(pos) = dial.interact_pointer_pos()
+    {
+        let delta = pos - rect.center();
+        if delta.length_sq() > 1.0 {
+            *angle = (-delta.y).atan2(delta.x).to_degrees().round().max(lo).min(hi);
             dial.mark_changed();
         }
-        dial | field
-    })
-    .inner
+    }
+    let painter = ui.painter();
+    let radius = rect.width() / 2.0 - 2.0;
+    painter.circle(rect.center(), radius, t.field, Stroke::new(1.0, t.field_border));
+    let radians = angle.to_radians();
+    let tip = rect.center() + vec2(radians.cos(), -radians.sin()) * (radius - 4.0);
+    painter.line_segment([rect.center(), tip], Stroke::new(2.0, t.accent));
+    painter.circle_filled(rect.center(), 2.0, t.text_dim);
+    if dial.has_focus() {
+        painter.circle_stroke(rect.center(), radius + 2.0, Stroke::new(1.0, t.accent));
+        let step = ui.input(|i| {
+            i.num_presses(egui::Key::ArrowRight) as f32 + i.num_presses(egui::Key::ArrowUp) as f32
+                - i.num_presses(egui::Key::ArrowLeft) as f32
+                - i.num_presses(egui::Key::ArrowDown) as f32
+        });
+        if step != 0.0 {
+            // Wrap round the circle only when the range is the dial's own half turn each
+            // way; a wider range (Motion Blur's -360..360) steps on, so 270° goes to 271°.
+            let stepped = if lo >= -180.0 && hi <= 180.0 { (*angle + step + 180.0).rem_euclid(360.0) - 180.0 } else { *angle + step };
+            *angle = stepped.max(lo).min(hi);
+            dial.mark_changed();
+        }
+    }
+    // The dialogs' own number field: it takes the opening focus (#1757), Tab and arrow steps.
+    let field = value_field(ui, angle, range, "°", 64.0);
+    if field.changed() {
+        dial.mark_changed();
+    }
+    dial | field
 }
 
 #[cfg(test)]

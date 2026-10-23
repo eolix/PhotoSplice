@@ -580,7 +580,7 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
             800.0
         } else if d.kind == DialogKind::LayerStyle {
             // Effect list, parameters, and the Preview swatch column.
-            680.0
+            712.0
         } else if crate::color_picker_ui::owns(&d.fields) {
             min_w = crate::color_picker_ui::WIDTH;
             crate::color_picker_ui::WIDTH

@@ -7,7 +7,7 @@ use crate::theme::{self, Tokens};
 
 mod angle_dial;
 mod color_count;
-pub use angle_dial::angle_dial_row;
+pub use angle_dial::{angle_dial, angle_dial_row};
 pub use color_count::color_count_row;
 mod type_ahead;
 pub use type_ahead::list_open as dropdown_list_open;
@@ -1105,6 +1105,53 @@ pub fn slider_row_prec(
     }
     ui.add_space(4.0);
     r
+}
+
+/// [`slider_row`] on one line, as Reference lays out its Layer Style pages: the label
+/// right-aligned in a `label_w` column (so a page's controls line up), then the slider and the
+/// field. Half the height of the two-line row, for pages with many settings.
+pub fn slider_line(ui: &mut Ui, label: &str, label_w: f32, value: &mut f32, range: std::ops::RangeInclusive<f32>, suffix: &str) -> Response {
+    ui.horizontal(|ui| {
+        let l = form_label(ui, label, label_w);
+        scrub_label_within(ui, &l, f32::INFINITY);
+        let field_w = 74.0;
+        let w = (ui.available_width() - field_w - ui.spacing().item_spacing.x).max(60.0);
+        let s = ui
+            .allocate_ui_with_layout(vec2(w, VALUE_FIELD_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                slider_with(ui, value, range.clone(), None, RowGestures::default())
+            })
+            .inner;
+        let v = value_field_in(ui, value, range, suffix, field_w, 0.0, FieldOpts::default()).0;
+        let mut r = s;
+        if v.changed() {
+            r.mark_changed();
+        }
+        // A scrub of the field or its label is one drag, like the slider's, for history.
+        use egui::response::Flags;
+        r.flags |= v.flags & (Flags::DRAG_STARTED | Flags::DRAGGED | Flags::DRAG_STOPPED);
+        r
+    })
+    .inner
+}
+
+/// A form row's label, right-aligned in a `w` wide column so the controls after it line up
+/// down the page; cut with '…' (full text on hover) when a translation is longer.
+pub fn form_label(ui: &mut Ui, text: &str, w: f32) -> Response {
+    let t = Tokens::get(ui.ctx());
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let galley = crate::tab_strip::elided(ui, tl!(text), font, t.text_dim, w);
+    let elided = galley.elided;
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, galley.size().y), Sense::hover());
+    ui.painter().galley(pos2(rect.right() - galley.size().x, rect.top()), galley, t.text_dim);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, ui.is_enabled(), tl!(text)));
+    if elided { resp.on_hover_text(tl!(text)) } else { resp }
+}
+
+/// The width of a [`form_label`] column that fits every one of `labels`, within `min..=max`.
+pub fn form_label_width(ui: &Ui, labels: impl IntoIterator<Item = &'static str>, min: f32, max: f32) -> f32 {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let widest = labels.into_iter().map(|l| ui.painter().layout_no_wrap(tl!(l).to_string(), font.clone(), Color32::WHITE).size().x).fold(0.0, f32::max);
+    widest.ceil().clamp(min, max.max(min))
 }
 
 /// iOS-style toggle switch.
