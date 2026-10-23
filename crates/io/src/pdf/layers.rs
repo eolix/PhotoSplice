@@ -869,6 +869,11 @@ impl<'a> Device<'a> for LayerBuilder<'_> {
     }
 
     fn push_clip_path(&mut self, clip_path: &ClipPath) {
+        // A shape or type being collected was drawn under the clips before this one: finish it
+        // now, or its mask would take this clip too (a cell's border cut by the text clip that
+        // follows it).
+        self.flush_text();
+        self.flush_shape();
         if let Some(seg) = self.segment.as_mut() {
             Device::push_clip_path(&mut Renderer::new(&mut seg.ctx, self.global), clip_path);
             seg.clips += 1;

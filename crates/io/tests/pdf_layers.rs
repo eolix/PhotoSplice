@@ -1247,3 +1247,83 @@ fn a_clip_that_contains_its_text_or_shape_is_no_mask() {
     assert_eq!(kinds(&d), ["text", "shape"]);
     assert!(d.layers.iter().all(|l| l.vector_mask.is_some()));
 }
+
+/// `PHOTOSPLICE_PDF_OPS=<file>`: page 1's drawing operators with their numeric operands, text
+/// operators left out (how a real file draws its lines and boxes).
+#[test]
+#[ignore]
+fn probe_ops() {
+    let Some(path) = std::env::var_os("PHOTOSPLICE_PDF_OPS") else { return };
+    let pdf = hayro::hayro_syntax::Pdf::new(std::fs::read(&path).unwrap()).unwrap();
+    let pages = pdf.pages();
+    let mut ops = pages[0].operations();
+    let mut n = 0;
+    while let Some(op) = ops.next() {
+        let name = String::from_utf8_lossy(op.operator.as_ref()).into_owned();
+        if matches!(name.as_str(), "Tj" | "TJ" | "'" | "\"" | "Tf" | "Td" | "TD" | "Tm" | "T*" | "BT" | "ET" | "Tc" | "Tw" | "TL" | "Tz" | "Ts" | "Tr") {
+            continue;
+        }
+        let nums: Vec<String> = op.operands().filter_map(|o| o.clone().into_number().map(|v| format!("{:.2}", v.as_f64()))).collect();
+        eprintln!("{name} {}", nums.join(" "));
+        n += 1;
+        if n > 6000 {
+            break;
+        }
+    }
+}
+
+#[test]
+fn a_stroked_rectangle_keeps_its_weight() {
+    // A table cell's border as a report generator writes it: a closed rectangle stroked at 2
+    // units under a 0.75 page transform (1.5 pt), inside a clip of the page's content area.
+    // Then, as such a table goes on, the cell's text clip, 1 unit inside the border: it must not
+    // clip the border drawn before it.
+    let content = "0.75 0 0 -0.75 0 100 cm q 2 2 260 130 re W* n q 0 G 0 J 0 j 10 M 2 w 20 20 m 120 20 l 120 60 l 20 60 l h S Q \
+        q 21 21 98 38 re W* n BT /F1 10 Tf 0 g 1 0 0 -1 25 40 Tm (Code) Tj ET Q Q";
+    let bytes = pdf(&content.replace('\\', ""), "", &[]);
+    let d = open(&bytes);
+    assert_eq!(kinds(&d), ["shape", "text"]);
+    let LayerContent::Shape(sh) = &d.layers[0].content else { panic!() };
+    assert_eq!(sh.stroke.as_ref().map(|s| s.width), Some(1.5));
+    assert!(d.layers[0].vector_mask.is_none(), "the border's own clip contains it; the text's clip isn't its");
+    let flat = photosplice_compose::flatten(&d);
+    // The left edge sits at x = 15 (20 × 0.75) on a 200 × 100 page at 72 ppi: a 1.5 px black line.
+    let row: Vec<f32> = (12..19).map(|x| flat.px[30 * 200 + x][3]).collect();
+    let ink: f32 = row.iter().sum();
+    assert!((ink - 1.5).abs() < 0.05, "its full 1.5 px of coverage: {row:?}");
+    assert!(looks_like_the_page(&bytes) < 0.01);
+}
+
+/// `PHOTOSPLICE_PDF_STROKES=<file>`: page 1's stroked shapes as imported, and the composite across
+/// the left edge of each.
+#[test]
+#[ignore]
+fn probe_strokes() {
+    let Some(path) = std::env::var_os("PHOTOSPLICE_PDF_STROKES") else { return };
+    let bytes = std::fs::read(&path).unwrap();
+    let d = open_page("p.pdf", &bytes, 0, 144.0, PageAs::Layers).unwrap().document;
+    let flat = photosplice_compose::flatten(&d);
+    let w = d.size.width as usize;
+    fn walk<'a>(ls: &'a [photosplice_doc::Layer], out: &mut Vec<&'a photosplice_doc::Layer>) {
+        for l in ls {
+            out.push(l);
+            if let Some(c) = l.children() {
+                walk(c, out);
+            }
+        }
+    }
+    let mut all = Vec::new();
+    walk(&d.layers, &mut all);
+    for (i, l) in all.iter().enumerate() {
+        let LayerContent::Shape(sh) = &l.content else { continue };
+        let Some(st) = &sh.stroke else { continue };
+        let Some((x0, y0, _, y1)) = sh.path.control_bounds() else { continue };
+        let (x, y) = (x0.round() as usize, ((y0 + y1) / 2.0) as usize);
+        let row: Vec<String> = (x.saturating_sub(3)..x + 4).map(|x| format!("{:.2}", flat.px.get(y * w + x).map_or(-1.0, |p| p[3] * (1.0 - p[0])))).collect();
+        let above: Vec<&str> = all.iter().skip(i + 1).filter(|o| o.visible).map(|o| o.name.as_str()).take(3).collect();
+        eprintln!("{} width {} mask {} at ({x},{y}): darkness {row:?}; next layers {above:?}", l.name, st.width, l.vector_mask.is_some());
+        if let Some(m) = &l.vector_mask {
+            eprintln!("    path {:?}; mask {:?} ({} subpaths, ops {:?}, rule {:?})", sh.path.control_bounds(), m.path.control_bounds(), m.path.subpaths.len(), m.path.subpaths.iter().map(|s| s.op).collect::<Vec<_>>(), m.path.fill_rule);
+        }
+    }
+}
