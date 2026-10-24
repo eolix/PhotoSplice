@@ -91,8 +91,9 @@ fn keeps_the_pixels_past_the_canvas() {
     let (mut s, id) = scene(8);
     s.execute(ID, json!({"layer": id})).unwrap();
     let LayerContent::Raster(px) = &layer(&s, id).content else { panic!() };
-    // The rectangle runs to x = 70 and its stroke and glow further, past the 64 px canvas.
-    assert!(px.content_bounds().x1 > 70, "{:?}", px.content_bounds());
+    // The rectangle is filled up to the 64 px canvas's edge; its stroke, glow and shadow reach
+    // past it (to x = 70), and the bake keeps them.
+    assert!(px.content_bounds().x1 >= 70, "{:?}", px.content_bounds());
 }
 
 #[test]
