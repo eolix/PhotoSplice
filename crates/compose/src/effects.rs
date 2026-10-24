@@ -1393,6 +1393,26 @@ pub fn bevel_geom(b: &Bevel) -> BevelGeom {
     }
 }
 
+/// Whether a Smooth bevel's height reaches its top early ([`smooth_top`]): inner and stroke
+/// bevels, whose top is the shape's inside.
+pub fn smooth_top_saturates(b: &Bevel) -> bool {
+    b.technique == BevelTechnique::Smooth && matches!(bevel_geom(b).paint, BevelPaint::Inner | BevelPaint::Stroke)
+}
+
+/// A Smooth inner bevel's height reaches the top 1/256 early, as if the blurred shape counted 256
+/// to the full 255 (Reference corpus bevel-inner-smooth and -a45-alt65-depth300: the shading went
+/// flat a pixel later than Reference's, 2.7 levels off at the end of the ramp, 1.4 with it; pixels
+/// off 1.13 → 0.66 % and 4.46 → 2.69 %). Outer and emboss bevels keep the plain blur (theirs got
+/// worse).
+pub fn smooth_top(v: f32) -> f32 {
+    (v * (256.0 / 255.0)).min(1.0)
+}
+
+/// [`smooth_top`] as a 4096-entry lookup over `0..=1` (the GPU's height stage).
+pub fn smooth_top_lut() -> Vec<f32> {
+    (0..4096).map(|i| smooth_top(i as f32 / 4095.0)).collect()
+}
+
 /// Bevel height map in `0..=1`. Smooth: the shape blurred by two box passes of the bevel
 /// width. Chisel: linear ramps of the exact distance to the edge ([`BevelGeom::chisel`] long;
 /// emboss styles straddle the edge). Chisel Soft uses the same profile: on straight edges
@@ -1405,6 +1425,9 @@ fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, pattern
     let mut h = if b.technique == BevelTechnique::Smooth {
         let mut h = shape.clone();
         tent(&mut h, g.width);
+        if smooth_top_saturates(b) {
+            h.v.iter_mut().for_each(|v| *v = smooth_top(*v));
+        }
         h
     } else {
         let (din, dout) = (dist_inside(shape), dist_outside_smooth(shape));
@@ -2841,6 +2864,25 @@ mod tests {
         let mid: f32 = (16..24).map(|y| m[0].v[y * 40 + 20] + m[1].v[y * 40 + 20]).sum();
         let flat: f32 = (16..24).map(|y| a[0].v[y * 40 + 20] + a[1].v[y * 40 + 20]).sum();
         assert!(mid > flat + 0.5, "{mid} vs {flat}");
+    }
+
+    /// Reference's Smooth inner bevel goes flat at its size (corpus bevel-inner-smooth, size 10:
+    /// pixels 9 and 10 from the edge one level darker than a plain blur gives), as its height
+    /// reaches the top 1/256 early ([`smooth_top`]); outer bevels keep the plain blur.
+    #[test]
+    fn smooth_inner_bevel_goes_flat_at_its_size() {
+        assert_eq!((smooth_top(0.5), smooth_top(255.0 / 256.0), smooth_top(1.0)), (0.5 * 256.0 / 255.0, 1.0, 1.0));
+        let shape = square(64, 8, 56);
+        let l = GlobalLight::default();
+        let pp = PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES);
+        let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::Smooth);
+        b.size = 10.0;
+        assert!(smooth_top_saturates(&b));
+        let (m, _) = bevel_maps(&shape, &b, &l, &no_tex(), &pp);
+        let at = |d: usize| m[0].v[32 * 64 + 8 + d] + m[1].v[32 * 64 + 8 + d];
+        assert!(at(8) > 0.01 && at(10) < 1e-6, "{:?}", (0..12).map(at).collect::<Vec<_>>());
+        b.style = BevelStyle::OuterBevel;
+        assert!(!smooth_top_saturates(&b));
     }
 
     /// Gloss Contour › Anti-aliased reads the shading a third of a pixel away (Reference corpus

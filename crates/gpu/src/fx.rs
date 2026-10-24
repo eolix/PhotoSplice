@@ -377,7 +377,15 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
                 BevelPaint::Inner | BevelPaint::Stroke => 2.0,
             };
             let mut h = if bv.technique == BevelTechnique::Smooth {
-                b.conv(In::Shape, photosplice_compose::effects::tent_kernel(g.width))
+                let h = b.conv(In::Shape, photosplice_compose::effects::tent_kernel(g.width));
+                if photosplice_compose::effects::smooth_top_saturates(bv) {
+                    // compose::effects::smooth_top: the inner bevel's height reaches its top early.
+                    let mut st = stage(Kernel::MFinish, Some(h), None, [0.0, 0.0, 1.0, 0.0], 0);
+                    st.lut = Some(Arc::new(photosplice_compose::effects::smooth_top_lut()));
+                    b.push(st)
+                } else {
+                    h
+                }
             } else {
                 // The fields must reach past the longer ramp (outside: the size and 1.5 px).
                 let reach = size.max(g.chisel[0]).max(g.chisel[1]) + 1.0;
