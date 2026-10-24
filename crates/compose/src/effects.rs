@@ -16,10 +16,9 @@
 //! lower ones. Drop shadows are knocked out through see-through fill, and beneath the whole shape
 //! when the layer's mode lets what's under it show through (see [`shadow_see_through`]).
 //!
-//! Shapes come from the layer's alpha (after its mask). A stroke's outer edge, and precise glows /
-//! chiselled bevels, use an exact Euclidean transform: a 5 × 5 chamfer's level sets are polygons,
-//! which a wide stroke shows as flat facets (#3646). Inside stroke edges and spread / choke keep the
-//! cheaper chamfer. Soft falloffs are two box blurs (a tent).
+//! Shapes come from the layer's alpha (after its mask). Strokes, precise glows, spread / choke and
+//! chiselled bevels measure with a 5 × 5 chamfer, whose polygonal level sets Reference's share.
+//! Soft falloffs are two box blurs (a tent).
 
 use photosplice_color::blend::BlendMode;
 use photosplice_doc::Pattern;
@@ -401,24 +400,6 @@ enum Metric {
     Chamfer,
 }
 
-/// Outside width from which a stroke's outer edge uses the exact Euclidean transform instead of
-/// the fitted 5 × 5 chamfer.
-///
-/// The chamfer's level sets are octagons: measured against a point source, its distance exceeds
-/// the Euclidean radius by up to `0.027 · r` px — 0.48 px at r = 18 (the widest outside stroke any
-/// Photoshop oracle matches with the chamfer) and 1.6 px at r = 60, where a wide stroke's boundary
-/// visibly facets (#3646). Half a pixel of deviation is reached at r ≈ 19, so strokes narrower
-/// than 20 px keep the chamfer, whose sub-pixel edge seeding Photoshop matches at small offsets,
-/// and wider ones stay round.
-pub const STROKE_CHAMFER_MAX: f32 = 20.0;
-
-/// Whether a stroke whose outside edge is `out_w` px wide uses the exact Euclidean transform (round)
-/// rather than the 5 × 5 chamfer's octagon ([`STROKE_CHAMFER_MAX`]). The CPU compositor and the GPU
-/// compositor's `program_with` both call this, so a stroke picks the same field in each.
-pub fn stroke_outside_exact(out_w: f32) -> bool {
-    out_w >= STROKE_CHAMFER_MAX
-}
-
 fn dist_outside_by(s: &Map, m: Metric) -> Vec<f32> {
     if m == Metric::Chamfer {
         // Seeds start at their sub-pixel edge offset (1 − coverage).
@@ -510,9 +491,8 @@ fn dist_outside_smooth(s: &Map) -> Vec<f32> {
 /// Distance from each pixel centre with no coverage in `cov` to the edge of what is covered, the
 /// edge placed inside the anti-aliased pixels from their coverage and the direction the coverage
 /// rises in (the anti-aliased Euclidean distance transform, Gustavson and Strand 2011). Covered
-/// pixels read their own centre's distance to the edge (negative inside). A chisel bevel's
-/// facets follow these distances: Reference's slopes are exactly radial around a disc, where a
-/// nearest-pixel distance tilted them by up to 4° and changed their steepness by 6 %.
+/// pixels read their own centre's distance to the edge (negative inside): within 0.09 px of a
+/// disc's true radius.
 fn aa_edt(cov: &[f32], w: usize, h: usize) -> Vec<f32> {
     const FAR: f32 = 1.0e6;
     let n = w * h;
@@ -786,7 +766,7 @@ pub fn has_anti_aliased_contour(e: &Effect) -> bool {
         Effect::OuterGlow(g) | Effect::InnerGlow(g) => g.anti_alias && glow_lut(g).is_some(),
         Effect::DropShadow(s) | Effect::InnerShadow(s) => s.anti_alias && contour_lut(&s.contour).is_some(),
         Effect::Satin(s) => s.anti_alias && contour_lut(&s.contour).is_some(),
-        Effect::BevelEmboss(b) => b.contour.as_ref().is_some_and(|c| c.anti_alias),
+        Effect::BevelEmboss(b) => b.contour.as_ref().is_some_and(|c| c.anti_alias) || (b.gloss_anti_alias && contour_lut(&b.gloss_contour).is_some()),
         _ => false,
     }
 }
@@ -1125,26 +1105,35 @@ fn paint_fx(
     }
 }
 
-/// The opacity gain of a gradient glow: it is opaque from strength `range²` on (see [`paint_glow`]).
-pub fn glow_gradient_gain(range: f32) -> f32 {
-    let r = if range.is_finite() { range.clamp(0.01, 1.0) } else { 1.0 };
-    1.0 / (r * r)
+/// The opacity gain of a gradient glow over its map (see [`paint_glow`]). A Softer glow is
+/// opaque from 1 / 8.4 of its blurred shape on whatever its Range (temp kit 8 og-grad-*: size 20
+/// at ranges 50 and 100 %, the faint tail 8.2-8.6 × the blur at both; `1 / range²` made a 100 %
+/// glow a quarter as strong, 26 % of pixels off → 1.4 %), so the gain on the ranged map is
+/// `range × 8.4`. A Precise glow is opaque from `range²`.
+pub fn glow_gradient_gain(g: &Glow) -> f32 {
+    let r = if g.range.is_finite() { g.range.clamp(0.01, 1.0) } else { 1.0 };
+    match g.technique {
+        GlowTechnique::Softer => r * 8.4,
+        GlowTechnique::Precise => 1.0 / (r * r),
+    }
 }
 
 /// A glow's paint over its map `m`. A gradient runs along the glow rather than across the
-/// canvas: Photoshop colours the glow where its (ranged, contoured) strength is `v` with the
-/// gradient at `1 - v`, so the first stop hugs the edge, and the glow is opaque from `v = range²`
-/// on (photoshop corpus outer-glow-gradient.psd: 1.4/255 mean, against bands across the canvas;
-/// psd-tools layer_params.psd). Glows have no gradient angle, style or Reverse.
+/// canvas: Reference colours the glow where its (ranged, contoured) strength is `v` with the
+/// gradient at `1 - v`, so the first stop hugs the edge, and its opacity is `v` × the
+/// [`glow_gradient_gain`] (Reference corpus outer-glow-gradient.psd, against bands across the
+/// canvas; psd-tools layer_params.psd). `pos` is the map before the layer knocks it out: under a
+/// see-through fill the edge pixels keep their place at the gradient's start. Glows have no
+/// gradient angle, style or Reverse.
 #[allow(clippy::too_many_arguments)]
-fn paint_glow(dst: &mut Buffer, m: &Map, g: &Glow, shape_bounds: Rect, anchor: (f64, f64), big: Rect, patterns: &PreparedPatterns<'_>) {
+fn paint_glow(dst: &mut Buffer, m: &Map, pos: &Map, g: &Glow, shape_bounds: Rect, anchor: (f64, f64), big: Rect, patterns: &PreparedPatterns<'_>) {
     let FxPaint::Gradient(gradient) = &g.paint else {
         return paint_fx(dst, m, &g.paint, shape_bounds, shape_bounds, anchor, big, g.common.blend, g.common.opacity, patterns);
     };
     let prepared = PreparedGradient::new(gradient);
-    let gain = glow_gradient_gain(g.range);
+    let gain = glow_gradient_gain(g);
     let strength = Map { w: m.w, h: m.h, v: m.v.iter().map(|v| (v * gain).min(1.0)).collect() };
-    paint(dst, &strength, |i| prepared.sample(1.0 - m.v.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0)), g.common.blend, g.common.opacity);
+    paint(dst, &strength, |i| prepared.sample(1.0 - pos.v.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0)), g.common.blend, g.common.opacity);
 }
 
 /// A box width as the blurs use it: at least 1, at most [`MAX_REACH`] (an effect never reaches
@@ -1152,6 +1141,17 @@ fn paint_glow(dst: &mut Buffer, m: &Map, g: &Glow, shape_bounds: Rect, anchor: (
 /// anything, and an unbounded width sizes the kernel and its buffers (#1543).
 fn box_width(w: f32) -> f32 {
     if w.is_nan() { 1.0 } else { w.clamp(1.0, MAX_REACH) }
+}
+
+/// Whether `w` is an even whole box width: such a box has no centre tap, so each pass takes `w`
+/// whole taps, the first one starting half a pixel left of centre and the second half a pixel
+/// right ([`box_ends`]). Two of them make the whole-number tent `1, 2, … w … 2, 1` that ends a
+/// pixel inside the plain centred box's `½, 1, …, 1, ½` pair (Reference corpus
+/// bevel-inner-smooth, size 10, and -a45-alt65-depth300, size 6: the shading goes flat one pixel
+/// past the ramp's last lit pixel, where the centred pair left one pixel of slope).
+fn box_even(w: f32) -> bool {
+    let w = box_width(w);
+    w.fract() == 0.0 && (w as i64) % 2 == 0
 }
 
 /// Normalised weights of a centred box of (fractional) width `w`: tap `i` gets the overlap of
@@ -1166,9 +1166,16 @@ fn box_weights(w: f32) -> Vec<f32> {
 }
 
 /// The 1D kernel of two box passes of width `w` (a tent of half-width ≈ `w`): `(radius, weights)`.
-/// Photoshop's bevel height maps are this blur of the shape (fitted on the corpus: a smooth
-/// inner bevel of size 5 matches within 0.7 % mean, size 41 within 2.6 %).
+/// Reference's bevel height maps are this blur of the shape (fitted on the corpus: a smooth
+/// inner bevel of size 5 matches within 0.7 % mean, size 41 within 2.6 %). Even whole widths
+/// take whole taps ([`box_even`]).
 pub fn tent_kernel(w: f32) -> (i32, Vec<f32>) {
+    if box_even(w) {
+        let n = box_width(w) as i32;
+        let norm = 1.0 / (n * n) as f32;
+        let t = (1 - n..n).map(|i| (n - i.abs()) as f32 * norm).collect();
+        return (n - 1, t);
+    }
     let b = box_weights(w);
     let n = b.len() * 2 - 1;
     let mut t = vec![0.0f32; n];
@@ -1180,21 +1187,28 @@ pub fn tent_kernel(w: f32) -> (i32, Vec<f32>) {
     ((n as i32 - 1) / 2, t)
 }
 
-/// Box geometry for a (fractional) width: (`r`, end-tap weight `f`, 1 / width) — the
-/// [`box_weights`] taps are `r - 1` full ones each side of the centre plus the two end taps at `f`.
-fn box_geom(bw: f32) -> (i64, f64, f64) {
+/// Box geometry of pass `pass` (0 or 1) for a (fractional) width: (`r`, left and right end-tap
+/// weights, 1 / width). The [`box_weights`] taps are `r - 1` full ones each side of the centre
+/// plus the two end taps; an even whole width ([`box_even`]) takes its left end whole on the
+/// first pass and its right end on the second.
+fn box_ends(bw: f32, pass: usize) -> (i64, f64, f64, f64) {
     let bw = box_width(bw);
     let half = bw / 2.0;
     let r = (half - 0.5).ceil().max(0.0) as i64;
     let f = f64::from((half - (r as f32 - 0.5)).clamp(0.0, 1.0));
-    (r, f, 1.0 / f64::from(bw))
+    let (fl, fr) = match (box_even(bw), pass) {
+        (false, _) => (f, f),
+        (true, 0) => (1.0, 0.0),
+        (true, _) => (0.0, 1.0),
+    };
+    (r, fl, fr, 1.0 / f64::from(bw))
 }
 
 /// One box pass over `src` (zero outside it) evaluated at `x0 .. x0 + dst.len()`, as a running
 /// sum (O(1) per sample whatever the width).
-fn box_line(src: &[f64], x0: i64, dst: &mut [f64], bw: f32) {
+fn box_line(src: &[f64], x0: i64, dst: &mut [f64], bw: f32, pass: usize) {
     let n = src.len() as i64;
-    let (r, f, norm) = box_geom(bw);
+    let (r, fl, fr, norm) = box_ends(bw, pass);
     let at = |i: i64| if i >= 0 && i < n { src[i as usize] } else { 0.0 };
     if r == 0 {
         for (k, d) in dst.iter_mut().enumerate() {
@@ -1205,7 +1219,7 @@ fn box_line(src: &[f64], x0: i64, dst: &mut [f64], bw: f32) {
     let mut inner: f64 = (x0 - (r - 1)..=x0 + (r - 1)).map(at).sum();
     for (k, d) in dst.iter_mut().enumerate() {
         let x = x0 + k as i64;
-        *d = (inner + f * (at(x - r) + at(x + r))) * norm;
+        *d = (inner + fl * at(x - r) + fr * at(x + r)) * norm;
         inner += at(x + r) - at(x - r + 1);
     }
 }
@@ -1213,13 +1227,13 @@ fn box_line(src: &[f64], x0: i64, dst: &mut [f64], bw: f32) {
 /// Two box passes along a line, exactly the convolution with [`tent_kernel`] (zero outside): the
 /// first pass is evaluated `r` samples beyond each end so the second sees what lies there.
 fn tent_line(src: &[f32], dst: &mut [f32], bw: f32) {
-    let (r, _, _) = box_geom(bw);
+    let (r, _, _, _) = box_ends(bw, 0);
     let s: Vec<f64> = src.iter().map(|v| f64::from(*v)).collect();
     let mut mid = vec![0.0f64; src.len() + 2 * r as usize];
-    box_line(&s, -r, &mut mid, bw);
+    box_line(&s, -r, &mut mid, bw, 0);
     let mut out = vec![0.0f64; src.len()];
     // `mid[k]` holds position k - r: output position p reads index p + r.
-    box_line(&mid, r, &mut out, bw);
+    box_line(&mid, r, &mut out, bw, 1);
     for (d, v) in dst.iter_mut().zip(out) {
         *d = v as f32;
     }
@@ -1393,34 +1407,70 @@ pub fn bevel_geom(b: &Bevel) -> BevelGeom {
     }
 }
 
+/// Whether a bevel also shades the pixels just past its height's reach (`bevel_maps`' region;
+/// the GPU's `fs_mbevelshade` reads the same 4-neighbours).
+pub fn outer_reaches_past(b: &Bevel, g: &BevelGeom) -> bool {
+    g.paint == BevelPaint::Both || (g.paint == BevelPaint::Outer && b.technique == BevelTechnique::Smooth)
+}
+
+/// Chisel Soft's distances, `(inside, outside)`: chamfer distances to the binary edge, pixels
+/// covered ½ and up counting as inside, from pixel centre to pixel centre less ½ inside and plus
+/// ½ outside (−½ on the other side). Its facets step with the pixels where Chisel Hard's follow
+/// the anti-aliased edge: Reference's Soft draws radial streaks on curves, and its outermost
+/// inner row slopes 1.5 × the facet (Reference kit soft-inner-s10 / -s20).
+fn chisel_soft_distances(s: &Map) -> (Vec<f32>, Vec<f32>) {
+    let seeds = |inside: bool| -> Vec<f32> { s.v.iter().map(|&a| if (a >= 0.5) == inside { 0.0 } else { CHAMFER_INF }).collect() };
+    let (din, _) = chamfer_from(seeds(false), s.w, s.h);
+    let (dout, _) = chamfer_from(seeds(true), s.w, s.h);
+    let din = din.iter().zip(&s.v).map(|(d, &a)| if a >= 0.5 { d - 0.5 } else { -0.5 }).collect();
+    let dout = dout.iter().zip(&s.v).map(|(d, &a)| if a >= 0.5 { -0.5 } else { d + 0.5 }).collect();
+    (din, dout)
+}
+
+/// A chisel pixel's `(inside, outside)` distances for [`bevel_chisel_h`] from the fields and its
+/// coverage `a` (keep in sync with `fs_mbevelh`). Chisel Hard: a partly covered edge pixel lies
+/// `coverage − ½` inside the edge (outside below ½), as the distances around it assume; taken
+/// as fully inside, its height broke the slope across the edge and the shading's differences
+/// put a dark or light dotted line along it. Uncovered pixels (for Chisel Soft, those covered
+/// under ½) lie their outside distance beyond the edge: an inner facet's slope runs on across
+/// the edge, so an edge pixel shades like the facet (Reference corpus bevel-inner-chisel-hard:
+/// up to 15/255 light on diagonal edges when every uncovered pixel stood ½ px out).
+pub fn chisel_distances_at(soft: bool, a: f32, din: f32, dout: f32) -> (f32, f32) {
+    if soft {
+        return if a >= 0.5 { (din, dout) } else { (-dout, dout) };
+    }
+    if a > INSIDE_EPS && a < 1.0 - INSIDE_EPS {
+        (a - 0.5, 0.5 - a)
+    } else if a <= INSIDE_EPS {
+        (-dout, dout)
+    } else {
+        (din, dout)
+    }
+}
+
 /// Bevel height map in `0..=1`. Smooth: the shape blurred by two box passes of the bevel
-/// width. Chisel: linear ramps of the exact distance to the edge ([`BevelGeom::chisel`] long;
-/// emboss styles straddle the edge). Chisel Soft uses the same profile: on straight edges
-/// Reference's Chisel Soft and Hard facets are identical (Reference corpus bevel-inner-chisel-*:
-/// the same values pixel for pixel across an edge); a blur over it softened them (pixels off
-/// 10-18 % → 8-12 %; what remains are the radial streaks Reference's Soft draws on curves),
-/// except that an inner Soft bevel drops a step further at the edge ([`chisel_soft_edge`]).
-/// Soften blurs the result.
+/// width. Chisel: linear ramps of the chamfer distance to the edge ([`BevelGeom::chisel`] long;
+/// emboss styles straddle the edge), as Reference's facets meet where two edges' chamfer
+/// distances do (Reference corpus Chisel Hard, against the anti-aliased Euclidean distance:
+/// inner 4.47 → 0.81 % of pixels off, emboss 3.08 → 0.15 %, outer 4.30 → 1.20 %, pillow
+/// 3.41 → 0.79 %, stroke 2.35 → 0.84 %). Chisel Soft ramps the same profile over the binary
+/// edge's distances ([`chisel_soft_distances`]; Reference corpus Chisel Soft against the Hard
+/// distances: inner 8.90 → 0.64 % of pixels off, emboss 11.74 → 1.37 %, outer 7.30 → 1.08 %,
+/// pillow 11.59 → 1.90 %, stroke 6.17 → 0.78 %, stroke emboss 11.77 → 2.33 %); along a straight,
+/// pixel-aligned edge both draw the same facets.
+/// Soften blurs the shading maps, not the height (`bevel_maps`).
 fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, patterns: &PreparedPatterns<'_>) -> Map {
     let mut h = if b.technique == BevelTechnique::Smooth {
         let mut h = shape.clone();
         tent(&mut h, g.width);
         h
     } else {
-        let (din, dout) = (dist_inside(shape), dist_outside_smooth(shape));
-        let soft_edge = chisel_soft_edge(b, g);
+        let soft = b.technique == BevelTechnique::ChiselSoft;
+        let (din, dout) = if soft { chisel_soft_distances(shape) } else { (dist_inside_by(shape, Metric::Chamfer), dist_outside_by(shape, Metric::Chamfer)) };
         let mut h = Map::new(shape.w, shape.h, 0.0);
-        for i in 0..h.v.len() {
-            // A partly covered edge pixel lies `coverage − ½` inside the edge (outside below ½),
-            // as the distances around it assume; taken as fully inside, its height broke the
-            // slope across the edge and the shading's differences put a dark or light dotted line
-            // along it (keep in sync with `fs_mbevelh`).
-            let a = shape.v[i];
-            let (mut di, dou) = if a > INSIDE_EPS && a < 1.0 - INSIDE_EPS { (a - 0.5, 0.5 - a) } else { (din[i], dout[i]) };
-            if soft_edge {
-                di = chisel_soft_inside(a, di);
-            }
-            h.v[i] = bevel_chisel_h(g.paint, g.chisel, di, dou);
+        for (i, v) in h.v.iter_mut().enumerate() {
+            let (di, dou) = chisel_distances_at(soft, shape.v[i], din[i], dout[i]);
+            *v = bevel_chisel_h(g.paint, g.chisel, di, dou);
         }
         h
     };
@@ -1446,9 +1496,6 @@ fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, pattern
             }
         }
     }
-    if b.soften >= 1.0 {
-        tent(&mut h, b.soften);
-    }
     h
 }
 
@@ -1458,26 +1505,6 @@ pub struct TextureCtx<'a> {
     pub rect: Rect,
     pub patterns: &'a [Pattern],
     pub anchor: (f64, f64),
-}
-
-/// Whether a chiselled bevel's ramp drops a step further at the shape's edge: Chisel Soft on
-/// an inner or stroke bevel (Reference kit soft-inner-s10 / -s20, light overhead: the outermost
-/// row slopes 1.5 × the facet, Chisel Hard's not at all; the other styles keep the plain ramp).
-pub fn chisel_soft_edge(b: &Bevel, g: &BevelGeom) -> bool {
-    b.technique == BevelTechnique::ChiselSoft && matches!(g.paint, BevelPaint::Inner | BevelPaint::Stroke)
-}
-
-/// The inside distance [`bevel_chisel_h`] takes under [`chisel_soft_edge`]: pixels with no
-/// coverage a whole pixel further out, partly covered ones blended towards that (keep in sync
-/// with `fs_mbevelh`).
-pub fn chisel_soft_inside(a: f32, di: f32) -> f32 {
-    if a <= INSIDE_EPS {
-        di - 1.0
-    } else if a < 1.0 - INSIDE_EPS {
-        2.0 * a - 1.5
-    } else {
-        di
-    }
 }
 
 /// Chiselled height from the inside / outside distances and the ramp lengths `[inside,
@@ -1512,11 +1539,12 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
     let (se, ce) = altitude.to_radians().sin_cos();
     let light_v = [ca * ce, -sa * ce, se];
     // Region: 0 = inside (× the shape's alpha), 1 = under the layer's edge and outside.
-    // A pixel is on the bevel where its height is raised. Emboss styles also shade the last pixel
-    // past the blur's reach (a raised 4-neighbour: it still slopes; psd-tools layer_effects'
-    // emboss shadow runs one row past it), outer bevels don't (Photoshop oracle
-    // bevel-outer-smooth).
-    let reach_past = g.paint == BevelPaint::Both;
+    // A pixel is on the bevel where its height is raised. Emboss styles and Smooth outer bevels
+    // also shade the last pixel past the blur's reach (a raised 4-neighbour: it still slopes;
+    // psd-tools layer_effects' emboss shadow runs one row past it, Reference corpus
+    // bevel-outer-smooth and -on-gradient-bg shade the row at the size). Chisel outer bevels
+    // reach that row through their ramp (`BevelGeom::chisel`).
+    let reach_past = outer_reaches_past(b, &g);
     let on_bevel = |x: i64, y: i64| {
         hmap.get(x, y) > BEVEL_H_EPS || (reach_past && [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dy)| hmap.get(x + dx, y + dy) > BEVEL_H_EPS))
     };
@@ -1527,6 +1555,8 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
     let hc = |x: i64, y: i64| hmap.get(x.clamp(0, mw.max(0)), y.clamp(0, mh.max(0)));
     let shade_into = |depth: f32, region_kind: u8| -> (Map, Map) {
         let (mut hi, mut sh) = (Map::new(shape.w, shape.h, 0.0), Map::new(shape.w, shape.h, 0.0));
+        // The shading and the region first, then the gloss over them.
+        let (mut sm, mut rg) = (Map::new(shape.w, shape.h, 0.0), Map::new(shape.w, shape.h, 0.0));
         for y in 0..shape.h as i64 {
             for x in 0..shape.w as i64 {
                 let i = y as usize * shape.w + x as usize;
@@ -1539,11 +1569,32 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
                 let n = [-gx, -gy, 1.0];
                 let len = (n[0] * n[0] + n[1] * n[1] + 1.0).sqrt();
                 let shade = (n[0] * light_v[0] + n[1] * light_v[1] + n[2] * light_v[2]) / len;
-                let region = if region_kind == 0 { shape.v[i] } else { f32::from(shape.v[i] < 1.0 - INSIDE_EPS && on_bevel(x, y)) };
-                let (h, s) = gloss(shade - se, se, gloss_lut.as_deref());
-                hi.v[i] = h * region;
-                sh.v[i] = s * region;
+                let region = match region_kind {
+                    0 => shape.v[i],
+                    1 => f32::from(shape.v[i] < 1.0 - INSIDE_EPS && on_bevel(x, y)),
+                    _ => f32::from(shape.v[i] > INSIDE_EPS),
+                };
+                sm.v[i] = shade;
+                rg.v[i] = region;
             }
+        }
+        // Gloss Contour › Anti-aliased reads the shading a third of a pixel away, as the other
+        // anti-aliased contours read their input; a linear contour has nothing to smooth (Reference corpus bevel-inner-gloss-double-ring-aa:
+        // within 2/255 on 31 616 → 35 557 pixels, worst 55 → 25/255).
+        let sm = if b.gloss_anti_alias && gloss_lut.is_some() { sm.shifted(-CONTOUR_AA_SHIFT, -CONTOUR_AA_SHIFT, 0.0) } else { sm };
+        for i in 0..sm.v.len() {
+            (hi.v[i], sh.v[i]) = gloss(sm.v[i] - se, se, gloss_lut.as_deref());
+        }
+        // Soften blurs the highlight and shadow, after the gloss clamps them (Reference corpus
+        // bevel-inner-smooth-down-soften4: a full shadow's edge rounds off, 23 23 24 26 30 36 for
+        // a blurred height's 23 23 23 23 26 34; pixels off 3.64 % → 0.79 %).
+        if b.soften >= 1.0 {
+            tent(&mut hi, b.soften);
+            tent(&mut sh, b.soften);
+        }
+        for ((h, s), r) in hi.v.iter_mut().zip(sh.v.iter_mut()).zip(&rg.v) {
+            *h *= r;
+            *s *= r;
         }
         (hi, sh)
     };
@@ -1553,17 +1604,12 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
             vec![hi, sh]
         }
         BevelPaint::Both => {
-            // One map per colour over the whole bevel: the inside half where the shape is (× its
-            // alpha), the outside half (pillow: facing the other way) for the rest of each pixel.
-            // A 1 % edge pixel of a pillow emboss takes the outside shading (Photoshop oracle
-            // bevel-pillow-smooth), a 75 % one of an emboss mostly the inside (layer_effects).
-            let (hi, sh) = shade_into(g.depth, 0);
+            // The inside half where the shape is and the outside half (pillow: facing the other
+            // way) under the layer's edge and beyond, each at full strength: the composite blends
+            // the two shaded results by the layer's coverage (see `composite_with_effects`).
+            let (hi, sh) = shade_into(g.depth, 2);
             let (ho, so) = shade_into(if g.pillow { -g.depth } else { g.depth }, 1);
-            let mix = |a: Map, b: Map| -> Map {
-                let v = a.v.iter().zip(&b.v).zip(&shape.v).map(|((x, y), s)| if *s > INSIDE_EPS { *x } else { 0.0 } + y * (1.0 - s.min(1.0))).collect();
-                Map { w: a.w, h: a.h, v }
-            };
-            vec![mix(hi, ho), mix(sh, so)]
+            vec![hi, sh, ho, so]
         }
     };
     (maps, g.paint)
@@ -1579,14 +1625,10 @@ pub struct FxMaps {
     per: Vec<Vec<Map>>,
     bevel_paint: Vec<BevelPaint>,
     din: Option<Vec<f32>>,
-    /// Stroke outside distance below [`STROKE_CHAMFER_MAX`]: the fitted 5 × 5 chamfer.
+    /// Stroke outside distance: the 5 × 5 chamfer ([`build_maps`]).
     dout: Option<Vec<f32>>,
-    /// Stroke outside distance at or above [`STROKE_CHAMFER_MAX`]: the exact Euclidean transform.
-    dout_exact: Option<Vec<f32>>,
     /// Shape layers: chamfer distance outside the vector outline (from local coverage).
     vdout: Option<Vec<f32>>,
-    /// Shape layers: exact Euclidean distance outside the vector outline (from local coverage).
-    vdout_exact: Option<Vec<f32>>,
     /// `shape` joins the alpha with a filled shape's outline (`crate::effect_outline`).
     outline: bool,
     /// Frames of gradient strokes by outside width (bits): see [`stroke_frame`].
@@ -1608,9 +1650,7 @@ impl FxMaps {
         (1 + maps
             + usize::from(self.din.is_some())
             + usize::from(self.dout.is_some())
-            + usize::from(self.dout_exact.is_some())
-            + usize::from(self.vdout.is_some())
-            + usize::from(self.vdout_exact.is_some()))
+            + usize::from(self.vdout.is_some()))
             * n
             * 4
     }
@@ -1683,24 +1723,15 @@ pub(crate) fn build_maps_prepared(
     let shape = Map { w, h, v: shape };
     let items: Vec<&Effect> = layer.effects.items.iter().filter(|e| e.enabled()).collect();
     let has_stroke = items.iter().any(|e| matches!(e, Effect::Stroke(_)));
-    // A stroke's outer edge keeps the 5 × 5 chamfer while its outside width is under
-    // `STROKE_CHAMFER_MAX` — Photoshop matches the chamfer's sub-pixel edge seeding at small
-    // offsets — and uses the exact Euclidean transform at or above it, where the chamfer's octagon
-    // facets a wide stroke (#3646). Inside stroke distances always keep the chamfer. Each outer
-    // field is built only when a stroke of that width is present; the compositor picks per stroke,
-    // so one layer may hold both a narrow and a wide stroke.
-    let out_widths: Vec<f32> =
-        items.iter().filter_map(|e| if let Effect::Stroke(st) = e { Some(stroke_widths(st).1) } else { None }).filter(|w| *w > 0.0).collect();
-    let chamfer_out = out_widths.iter().any(|&w| !stroke_outside_exact(w));
-    let exact_out = out_widths.iter().any(|&w| stroke_outside_exact(w));
-    let (din, dout, dout_exact) = if has_stroke {
-        (
-            Some(dist_inside_by(&shape, Metric::Chamfer)),
-            chamfer_out.then(|| dist_outside_by(&shape, Metric::Chamfer)),
-            exact_out.then(|| dist_outside_by(&shape, Metric::Euclidean)),
-        )
+    // Strokes measure their edges with the 5 × 5 chamfer at every width, its level sets polygons
+    // as Reference's are (temp kit 8 stroke-out-s20 … -s60, Outside Strokes on a disc and a square:
+    // within 4/255 at 40 px, 7/255 at 60; an exact Euclidean transform from 20 px on was up to
+    // 252/255 off, and an ag-psd file's 27 and 38 px strokes 231/255).
+    let out_stroke = items.iter().any(|e| matches!(e, Effect::Stroke(st) if stroke_widths(st).1 > 0.0));
+    let (din, dout) = if has_stroke {
+        (Some(dist_inside_by(&shape, Metric::Chamfer)), out_stroke.then(|| dist_outside_by(&shape, Metric::Chamfer)))
     } else {
-        (None, None, None)
+        (None, None)
     };
     let mut bevel_paint = vec![BevelPaint::Inner; items.len()];
     let per: Vec<Vec<Map>> = items
@@ -1722,7 +1753,7 @@ pub(crate) fn build_maps_prepared(
             {
                 bevel_paint[i] = BevelPaint::Stroke;
                 let stroke = items.iter().find_map(|e| if let Effect::Stroke(st) = e { Some(st) } else { None });
-                match (stroke, &din, dout.as_ref().or(dout_exact.as_ref())) {
+                match (stroke, &din, dout.as_ref()) {
                     (Some(st), Some(di), Some(dou)) => {
                         let (in_w, out_w) = stroke_widths(st);
                         let ring = Map {
@@ -1743,6 +1774,16 @@ pub(crate) fn build_maps_prepared(
                         let union = Map { w, h, v: shape.v.iter().zip(&ring.v).map(|(a, r)| a.max(*r)).collect() };
                         let style = if st.position == StrokePosition::Center { BevelStyle::Emboss } else { BevelStyle::OuterBevel };
                         let mut maps = bevel_maps(&shape, &Bevel { style, ..(*b).clone() }, light, tex, patterns).0;
+                        // The emboss's halves as one map per colour: the inside where the shape is
+                        // (× its alpha), the outside for the rest of each pixel.
+                        if let [hi, sh, ho, so] = maps.as_slice() {
+                            let mix = |a: &Map, o: &Map| Map {
+                                w,
+                                h,
+                                v: a.v.iter().zip(&o.v).zip(&shape.v).map(|((x, y), s)| if *s > INSIDE_EPS { x * s } else { 0.0 } + y * (1.0 - s.min(1.0))).collect(),
+                            };
+                            maps = vec![mix(hi, ho), mix(sh, so)];
+                        }
                         // An outside stroke is shaded in its own colour before it is mixed over the
                         // backdrop ([`composite_with_effects_prepared`]), so the maps run at full
                         // strength wherever the ring reaches; a centre stroke is shaded over the
@@ -1773,15 +1814,9 @@ pub(crate) fn build_maps_prepared(
         })
         .collect();
     let vector_shape = matches!(layer.content, photosplice_doc::LayerContent::Shape(_));
-    // Without an outline (unfilled shapes), estimate the vector outline from local coverage; it
-    // picks the chamfer or the exact transform the same way.
+    // Without an outline (unfilled shapes), estimate the vector outline from local coverage.
     let outline = crate::effect_outline(layer).is_some();
-    let (vdout, vdout_exact) = if has_stroke && vector_shape && !outline {
-        let lc = local_coverage(&shape);
-        (chamfer_out.then(|| dist_outside_by(&lc, Metric::Chamfer)), exact_out.then(|| dist_outside_by(&lc, Metric::Euclidean)))
-    } else {
-        (None, None)
-    };
+    let vdout = (out_stroke && vector_shape && !outline).then(|| dist_outside_by(&local_coverage(&shape), Metric::Chamfer));
     let mut frames: Vec<(u32, Rect)> = Vec::new();
     for e in &items {
         if let Effect::Stroke(st) = e
@@ -1793,7 +1828,7 @@ pub(crate) fn build_maps_prepared(
             }
         }
     }
-    FxMaps { rect, shape, per, bevel_paint, din, dout, dout_exact, vdout, vdout_exact, outline, frames }
+    FxMaps { rect, shape, per, bevel_paint, din, dout, vdout, outline, frames }
 }
 
 /// Far outside any shape (distance fill for cropped distance fields).
@@ -1895,25 +1930,13 @@ pub(crate) fn composite_with_effects_prepared(
     let strokes: Vec<&photosplice_doc::StrokeFx> = items.iter().filter_map(|e| if let Effect::Stroke(s) = e { Some(s) } else { None }).collect();
     let ready = !strokes.is_empty();
     let din = if ready { maps.din.as_ref().map(|a| maps.crop_vec(a, big, 0.0)).unwrap_or_default() } else { Vec::new() };
-    // A stroke's outer edge picks the chamfer or the exact field by its width
-    // ([`stroke_outside_exact`]); both are cropped here, and only the ones a stroke needs exist.
     let crop_out = |v: &Option<Vec<f32>>| v.as_ref().map(|b| maps.crop_vec(b, big, FAR));
-    let (dout, dout_exact, vdout, vdout_exact) =
-        if ready { (crop_out(&maps.dout), crop_out(&maps.dout_exact), crop_out(&maps.vdout), crop_out(&maps.vdout_exact)) } else { (None, None, None, None) };
+    let (dout, vdout) = if ready { (crop_out(&maps.dout), crop_out(&maps.vdout)) } else { (None, None) };
     // Shape layers without a filled outline stroke their vector outline, estimated from local
-    // coverage; every other layer strokes its shape. The width then picks the field.
+    // coverage; every other layer strokes its shape.
     let vector_outline = vector_shape && !maps.outline;
-    // The distance field an outside stroke of width `out_w` measures its band with.
-    let stroke_field = |out_w: f32| -> &[f32] {
-        let exact = stroke_outside_exact(out_w);
-        if vector_outline {
-            (if exact { vdout_exact.as_deref() } else { vdout.as_deref() }).unwrap_or_default()
-        } else if exact {
-            dout_exact.as_deref().unwrap_or_default()
-        } else {
-            dout.as_deref().unwrap_or_default()
-        }
-    };
+    // The distance field an outside stroke measures its band with.
+    let stroke_field: &[f32] = if vector_outline { vdout.as_deref() } else { dout.as_deref() }.unwrap_or_default();
     // Layer Knocks Out Drop Shadow counts the outside strokes as the layer's: a 10 % stroke
     // shows the bare backdrop beneath it, not the shadow (psd-tools masks.psd: the header's
     // stroke row was 0.08 dark).
@@ -1924,7 +1947,7 @@ pub(crate) fn composite_with_effects_prepared(
             if out_w <= 0.0 {
                 continue;
             }
-            let d = stroke_field(out_w);
+            let d = stroke_field;
             for ((kv, a), dv) in k.iter_mut().zip(&shape.v).zip(d) {
                 if *a <= INSIDE_EPS {
                     *kv = kv.max((out_w + 0.5 - dv).clamp(0.0, 1.0));
@@ -1950,11 +1973,14 @@ pub(crate) fn composite_with_effects_prepared(
     }
     for (i, e) in rev() {
         if let Effect::OuterGlow(g) = e {
-            let mut m = fx(i, 0);
+            let pos = fx(i, 0);
+            let mut m = pos.clone();
             // The glow is behind the shape, not painted across its interior when Fill is 0 %.
-            // Preserve the existing anti-aliased edge when the fill is fully opaque.
+            // Preserve the existing anti-aliased edge when the fill is fully opaque. A gradient
+            // keeps its place along the glow there (temp kit 8 og-grad-*: a disc's edge pixels
+            // stay at the gradient's start, not its middle).
             knock_out_exterior(&mut m, &shape, layer.fill_opacity);
-            paint_glow(&mut work, &m, g, sb, anchor, big, patterns);
+            paint_glow(&mut work, &m, &pos, g, sb, anchor, big, patterns);
         }
     }
 
@@ -2015,7 +2041,8 @@ pub(crate) fn composite_with_effects_prepared(
     }
     for (i, e) in rev() {
         if let Effect::InnerGlow(g) = e {
-            paint_glow(&mut lay, &rel(fx(i, 0)), g, sb, anchor, big, patterns);
+            let m = rel(fx(i, 0));
+            paint_glow(&mut lay, &m, &m, g, sb, anchor, big, patterns);
         }
     }
     for (i, e) in rev() {
@@ -2109,7 +2136,7 @@ pub(crate) fn composite_with_effects_prepared(
             // Shape layers: Photoshop strokes the vector outline (estimated from local coverage
             // for unfilled shapes); the stroke never shows through the shape's pixels. Along a
             // filled shape's outline it covers the part of each edge pixel outside the path.
-            let d = stroke_field(out_w);
+            let d = stroke_field;
             let mut share = vec![0.0f32; w * h];
             for (i, sh) in share.iter_mut().enumerate() {
                 let band = (out_w + 0.5 - d[i]).clamp(0.0, 1.0);
@@ -2203,8 +2230,25 @@ pub(crate) fn composite_with_effects_prepared(
             && (maps.bevel_paint[i] == BevelPaint::Both || (maps.bevel_paint[i] == BevelPaint::Stroke && !outside_stroke))
             && !maps.per.get(i).is_none_or(Vec::is_empty)
         {
-            paint_color(&mut work, &fx(i, 0), rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
-            paint_color(&mut work, &fx(i, 1), rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
+            if maps.bevel_paint[i] == BevelPaint::Both {
+                // Each half shades the composited pixel on its own; an edge pixel takes the inside
+                // result for its coverage and the outside one for the rest (temp kit 8 pillow-*:
+                // a half-covered pixel between a black inside and a lit outside is the lit value
+                // × ½, not the colour of the averaged shading). Plain emboss halves shade alike.
+                let mut inside = work.clone();
+                paint_color(&mut inside, &fx(i, 0), rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
+                paint_color(&mut inside, &fx(i, 1), rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
+                paint_color(&mut work, &fx(i, 2), rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
+                paint_color(&mut work, &fx(i, 3), rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
+                for ((o, p), a) in work.px.iter_mut().zip(&inside.px).zip(&shape.v) {
+                    if *a > INSIDE_EPS {
+                        *o = mix_premul(*o, *p, a.min(1.0));
+                    }
+                }
+            } else {
+                paint_color(&mut work, &fx(i, 0), rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
+                paint_color(&mut work, &fx(i, 1), rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
+            }
         }
     }
     // Layer opacity applies to the whole stack.
@@ -2289,26 +2333,24 @@ fn mix_premul(a: [f32; 4], b: [f32; 4], k: f32) -> [f32; 4] {
 pub enum FieldKind {
     /// `dist_outside` of the shape.
     Outside,
-    /// `dist_outside_smooth` of the shape: bevels.
+    /// `dist_outside_smooth` of the shape (anti-aliased Euclidean).
     BevelOutside,
-    /// `dist_inside` of the shape: bevels.
+    /// `dist_inside` of the shape (anti-aliased Euclidean).
     Inside,
-    /// Chamfer distance outside the shape: outside strokes, precise outer glows, and the spread
-    /// of drop shadows and softer outer glows ([`dilate`]).
+    /// Chamfer distance outside the shape: outside strokes, precise outer glows, chisel bevels,
+    /// and the spread of drop shadows and softer outer glows ([`dilate`]).
     StrokeOutside,
     /// Chamfer distance outside `1 - alpha`: the choke of inner shadows and softer inner glows.
     ChokeInside,
-    /// Stroke distance inside the shape: inside strokes, precise inner glows.
+    /// Stroke distance inside the shape: inside strokes, precise inner glows, chisel bevels.
     StrokeInside,
-    /// Exact Euclidean distance outside the shape: a wide raster stroke's outer edge (see
-    /// [`stroke_outside_exact`]). The chamfer's level sets are polygons (an ~8-fold octagon), so a
-    /// wide stroke's outer boundary facets; the shadow / glow spread above keeps the chamfer (#3646).
-    StrokeOutsideExact,
-    /// Stroke distance outside a shape layer's outline (from its local coverage), exact Euclidean.
-    StrokeOutsideVector,
-    /// Chamfer distance outside a shape layer's outline (from its local coverage): a narrow vector
-    /// stroke's outer edge, where the chamfer matches Photoshop (see [`STROKE_CHAMFER_MAX`]).
+    /// Chamfer distance outside a shape layer's outline (from its local coverage): a vector
+    /// stroke's outer edge.
     StrokeOutsideVectorChamfer,
+    /// Chisel Soft's inside distance to the binary edge ([`chisel_soft_distances`]).
+    ChiselSoftInside,
+    /// Chisel Soft's outside distance to the binary edge ([`chisel_soft_distances`]).
+    ChiselSoftOutside,
 }
 
 /// The `kind` distance field of the shape `alpha` (row-major `w × h`). Values past `_reach` pixels
@@ -2322,9 +2364,9 @@ pub fn distance_field(kind: FieldKind, alpha: Vec<f32>, w: usize, h: usize, _rea
         FieldKind::StrokeOutside => dist_outside_by(&s, Metric::Chamfer),
         FieldKind::ChokeInside => dist_outside_by(&s.map(|a| 1.0 - a), Metric::Chamfer),
         FieldKind::StrokeInside => dist_inside_by(&s, Metric::Chamfer),
-        FieldKind::StrokeOutsideExact => dist_outside_by(&s, Metric::Euclidean),
-        FieldKind::StrokeOutsideVector => dist_outside_by(&local_coverage(&s), Metric::Euclidean),
         FieldKind::StrokeOutsideVectorChamfer => dist_outside_by(&local_coverage(&s), Metric::Chamfer),
+        FieldKind::ChiselSoftInside => chisel_soft_distances(&s).0,
+        FieldKind::ChiselSoftOutside => chisel_soft_distances(&s).1,
     }
 }
 
@@ -2444,7 +2486,7 @@ mod tests {
     fn running_sum_tent_matches_the_kernel() {
         let (w, h) = (37usize, 23usize);
         let src: Vec<f32> = (0..w * h).map(|i| ((i * 7919) % 101) as f32 / 100.0).collect();
-        for width in [1.0f32, 2.0, 3.5, 5.0, 8.25, 41.0] {
+        for width in [1.0f32, 2.0, 3.5, 5.0, 6.0, 8.25, 10.0, 41.0] {
             let mut m = Map { w, h, v: src.clone() };
             tent(&mut m, width);
             let mut want = Map { w, h, v: src.clone() };
@@ -2462,8 +2504,13 @@ mod tests {
         let sum: f32 = k.iter().sum();
         assert!((sum - 1.0).abs() < 1e-6);
         assert!((k[4] - 5.0 / 25.0).abs() < 1e-6 && (k[0] - 1.0 / 25.0).abs() < 1e-6);
-        // Fractional widths taper the end taps; width 1 is the identity.
+        // Even whole widths take whole taps (the tent ends at `w - 1`), fractional ones taper the
+        // end taps; width 1 is the identity.
         let (r, k) = tent_kernel(4.0);
+        assert_eq!(r, 3);
+        let want: Vec<f32> = [1.0, 2.0, 3.0, 4.0, 3.0, 2.0, 1.0].iter().map(|v| v / 16.0).collect();
+        assert!(k.iter().zip(&want).all(|(a, b)| (a - b).abs() < 1e-7), "{k:?}");
+        let (r, k) = tent_kernel(4.5);
         assert_eq!(r, 4);
         assert!(k[0] > 0.0 && k[0] < 1.0 / 25.0);
         assert_eq!(tent_kernel(1.0), (0, vec![1.0]));
@@ -2501,6 +2548,7 @@ mod tests {
             altitude: 30.0,
             use_global_light: false,
             gloss_contour: Contour::Linear,
+            gloss_anti_alias: false,
             highlight: photosplice_doc::FxCommon::new(BlendMode::Screen, 0.75),
             highlight_color: photosplice_color::Color::WHITE,
             shadow: photosplice_doc::FxCommon::new(BlendMode::Multiply, 0.75),
@@ -2537,13 +2585,14 @@ mod tests {
         let l = GlobalLight::default();
         let (e, paint) =
             bevel_maps(&shape, &bevel_of(BevelStyle::Emboss, BevelTechnique::Smooth), &l, &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
-        assert_eq!((paint, e.len()), (BevelPaint::Both, 2));
+        // Highlight and shadow of the inside half, then of the outside half.
+        assert_eq!((paint, e.len()), (BevelPaint::Both, 4));
         let at = |m: &Map, x: usize, y: usize| m.v[y * 40 + x];
         // Emboss: the slope across the top edge faces the light on both sides.
-        assert!(at(&e[0], 20, 10) > 0.3 && at(&e[0], 20, 9) > 0.3);
+        assert!(at(&e[0], 20, 10) > 0.3 && at(&e[2], 20, 9) > 0.3);
         let (p, _) =
             bevel_maps(&shape, &bevel_of(BevelStyle::PillowEmboss, BevelTechnique::Smooth), &l, &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
-        assert!(at(&p[0], 20, 10) > 0.3 && at(&p[1], 20, 9) > 0.3, "pillow: outside top edge in shadow");
+        assert!(at(&p[0], 20, 10) > 0.3 && at(&p[3], 20, 9) > 0.3, "pillow: outside top edge in shadow");
     }
 
     #[test]
@@ -2562,8 +2611,9 @@ mod tests {
         let (m, _) = bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
         let reach = tent_kernel(bevel_geom(&b).width).0 as usize;
         let row = 39 + reach + 1; // last shape row + reach + 1: height 0, neighbour above raised
-        assert!(m[1].v[row * 60 + 30] > 0.0, "{}", m[1].v[row * 60 + 30]);
-        assert_eq!(m[1].v[(row + 1) * 60 + 30], 0.0);
+        // The outside half's shadow (map 3).
+        assert!(m[3].v[row * 60 + 30] > 0.0, "{}", m[3].v[row * 60 + 30]);
+        assert_eq!(m[3].v[(row + 1) * 60 + 30], 0.0);
     }
 
     #[test]
@@ -2707,7 +2757,7 @@ mod tests {
 
     /// Chisel Soft draws the same facets as Chisel Hard along straight edges (Reference corpus
     /// bevel-inner-chisel-hard / -soft: equal pixel for pixel across an edge); a blur used to
-    /// soften them. Only the outermost row differs ([`chisel_soft_edge`]).
+    /// soften them. Only the outermost row differs ([`chisel_soft_distances`]).
     #[test]
     fn chisel_soft_matches_hard_on_straight_edges() {
         let shape = square(64, 10, 54);
@@ -2726,6 +2776,82 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Chisel Soft ramps the binary edge's distances: across a pixel-aligned edge the first
+    /// outside row stands 1½ px out where Chisel Hard's stands ½ (so the outermost inner row
+    /// slopes 1.5 × the facet, Reference kit soft-inner-s10), and a pixel covered under ½ counts
+    /// as outside.
+    #[test]
+    fn chisel_soft_ramps_the_binary_edge() {
+        let mut shape = square(32, 8, 24);
+        // A 40 % column just left of the square, on rows 8..24.
+        for y in 8..24 {
+            shape.v[y * 32 + 7] = 0.4;
+        }
+        // Height in pixels of inside distance (× the inside ramp) at (x, y).
+        let h = |t: BevelTechnique, x: usize, y: usize| {
+            let mut b = bevel_of(BevelStyle::InnerBevel, t);
+            b.size = 10.0;
+            let g = bevel_geom(&b);
+            let h = bevel_height(&shape, &b, &g, &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+            h.v[y * 32 + x] * g.chisel[0]
+        };
+        let (soft, hard) = (BevelTechnique::ChiselSoft, BevelTechnique::ChiselHard);
+        // Top edge, column 16: row 7 outside, row 8 the first inside.
+        assert!((h(soft, 16, 7) + 1.5).abs() < 1e-4 && (h(soft, 16, 8) - 0.5).abs() < 1e-4);
+        assert!((h(hard, 16, 7) + 0.5).abs() < 1e-4 && (h(hard, 16, 8) - 0.5).abs() < 1e-4);
+        // The 40 % column: outside for Soft (1½ px from the square's first column's centre), a
+        // partly covered edge for Hard (coverage − ½ in).
+        assert!((h(soft, 7, 16) + 1.5).abs() < 1e-4, "{}", h(soft, 7, 16));
+        assert!((h(hard, 7, 16) + 0.1).abs() < 1e-4, "{}", h(hard, 7, 16));
+    }
+
+    /// An inner chisel's facet runs on across a diagonal edge: a partly covered edge pixel
+    /// shades like the facet behind it (Reference corpus bevel-inner-chisel-hard), not lighter.
+    #[test]
+    fn inner_chisel_edge_pixels_shade_like_their_facet() {
+        let n = 48;
+        let mut shape = Map::new(n, n, 0.0);
+        for y in 0..n {
+            for x in 0..n {
+                let mut cov = 0.0;
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        let (px, py) = (x as f32 + (sx as f32 + 0.5) / 4.0, y as f32 + (sy as f32 + 0.5) / 4.0);
+                        cov += f32::from(px + py < 61.0) / 16.0;
+                    }
+                }
+                shape.v[y * n + x] = cov;
+            }
+        }
+        let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::ChiselHard);
+        b.size = 10.0;
+        let (m, _) = bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        // The maps carry the coverage: compare the shading per unit of it.
+        let shade = |x: usize, y: usize| (m[0].v[y * n + x] - m[1].v[y * n + x]) / shape.v[y * n + x];
+        // Along the diagonal x = y the edge crosses (30, 30) through its middle.
+        let (a, edge, facet) = (shape.v[30 * n + 30], shade(30, 30), shade(27, 27));
+        assert!(a > 0.3 && a < 0.7, "{a}");
+        assert!((edge - facet).abs() < 0.08, "edge {edge}, facet {facet}");
+    }
+
+    /// Chisel ramps follow the chamfer distance, whose level sets are polygons: off a square's
+    /// corner the outer facet ends where the chamfer says, not the Euclidean distance (Reference
+    /// corpus Chisel Hard, see [`bevel_height`]).
+    #[test]
+    fn chisel_ramps_follow_the_chamfer_distance() {
+        let shape = square(64, 20, 44);
+        let mut b = bevel_of(BevelStyle::OuterBevel, BevelTechnique::ChiselHard);
+        b.size = 10.0;
+        let g = bevel_geom(&b);
+        let h = bevel_height(&shape, &b, &g, &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        let (cham, exact) = (dist_outside_by(&shape, Metric::Chamfer), dist_outside_smooth(&shape));
+        // 3 px right and 8 px below the bottom-right corner (pixel 43, 43).
+        let i = (43 + 8) * 64 + 43 + 3;
+        let ramp = |d: f32| (1.0 - d / g.chisel[1]).max(0.0);
+        assert!((h.v[i] - ramp(cham[i])).abs() < 1e-5, "{} vs {}", h.v[i], ramp(cham[i]));
+        assert!((ramp(cham[i]) - ramp(exact[i])).abs() > 0.01, "{} {}", cham[i], exact[i]);
     }
 
     /// An anti-aliased disc: a chiselled bevel's shading follows the curve smoothly. The pixel
@@ -2781,8 +2907,9 @@ mod tests {
         let mut b = bevel_of(BevelStyle::Emboss, BevelTechnique::ChiselHard);
         (b.size, b.angle) = (13.0, 180.0);
         let (m, _) = bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
-        // Light from the left: the right-hand facets are in shadow, inside and outside alike.
-        let sh = |x: usize| m[1].v[25 * n + x];
+        // Light from the left: the right-hand facets are in shadow outside the edge (the outside
+        // half's shadow, map 3).
+        let sh = |x: usize| m[3].v[25 * n + x];
         assert!(sh(42) > 0.2);
         for x in [41, 43, 44] {
             assert!((sh(x) - sh(42)).abs() < 0.02, "x {x}: {} vs {}", sh(x), sh(42));
@@ -2830,6 +2957,89 @@ mod tests {
         let mid: f32 = (16..24).map(|y| m[0].v[y * 40 + 20] + m[1].v[y * 40 + 20]).sum();
         let flat: f32 = (16..24).map(|y| a[0].v[y * 40 + 20] + a[1].v[y * 40 + 20]).sum();
         assert!(mid > flat + 0.5, "{mid} vs {flat}");
+    }
+
+    /// Reference's Smooth bevel goes flat at its size: the last shaded pixel is `size` from the
+    /// edge, the next one is flat (corpus bevel-inner-smooth, size 10, and
+    /// -a45-alt65-depth300, size 6). Even sizes need the whole-tap boxes ([`box_even`]); the
+    /// centred `½, 1, …, 1, ½` pair left one more pixel of slope.
+    #[test]
+    fn smooth_bevel_goes_flat_at_its_size() {
+        let shape = square(64, 8, 56);
+        let l = GlobalLight::default();
+        let pp = PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES);
+        let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::Smooth);
+        for size in [5usize, 6, 10] {
+            b.size = size as f32;
+            let (m, _) = bevel_maps(&shape, &b, &l, &no_tex(), &pp);
+            let at = |d: usize| m[0].v[32 * 64 + 8 + d] + m[1].v[32 * 64 + 8 + d];
+            let row: Vec<f32> = (0..size + 2).map(at).collect();
+            assert!(at(size - 1) > 1e-4 && at(size) < 1e-6, "size {size}: {row:?}");
+        }
+    }
+
+    /// A Smooth outer bevel shades the row at its size outside the edge, where its height has
+    /// just run out but its neighbour's still slopes (Reference corpus bevel-outer-smooth), and
+    /// nothing past it.
+    #[test]
+    fn smooth_outer_bevel_shades_the_row_at_its_size() {
+        let shape = square(64, 20, 44);
+        let l = GlobalLight::default();
+        let pp = PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES);
+        let mut b = bevel_of(BevelStyle::OuterBevel, BevelTechnique::Smooth);
+        b.size = 10.0;
+        let (m, _) = bevel_maps(&shape, &b, &l, &no_tex(), &pp);
+        // Below the shape (rows 44..), on its middle column: row 43 + d is d pixels out.
+        let at = |d: usize| m[0].v[(43 + d) * 64 + 32] + m[1].v[(43 + d) * 64 + 32];
+        assert!(at(10) > 1e-4 && at(11) < 1e-6, "{:?}", (8..13).map(at).collect::<Vec<_>>());
+    }
+
+    /// Soften blurs the shading after the gloss clamps it, not the height: a full shadow's edge
+    /// rounds off (Reference corpus bevel-inner-smooth-down-soften4, whose settings these are),
+    /// where a blurred height kept it flat to the corner.
+    #[test]
+    fn soften_rounds_a_full_shadow() {
+        let shape = square(64, 16, 48);
+        let l = GlobalLight::default();
+        let pp = PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES);
+        let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::Smooth);
+        (b.size, b.depth, b.up, b.use_global_light, b.angle, b.altitude) = (12.0, 1.0, false, false, 120.0, 30.0);
+        let column = |b: &Bevel| -> Vec<f32> {
+            let (m, _) = bevel_maps(&shape, b, &l, &no_tex(), &pp);
+            (0..8).map(|d| m[1].v[(16 + d) * 64 + 32]).collect()
+        };
+        let plain = column(&b);
+        b.soften = 4.0;
+        let soft = column(&b);
+        assert!(plain[..4].iter().all(|v| (v - 1.0).abs() < 1e-6), "{plain:?}");
+        assert!(soft[0] > 0.99 && soft[2] < 0.99 && soft[3] < plain[3] - 0.02, "{soft:?} vs {plain:?}");
+    }
+
+    /// Gloss Contour › Anti-aliased reads the shading a third of a pixel away (Reference corpus
+    /// bevel-inner-gloss-double-ring-aa); with a linear contour it changes nothing, and either
+    /// way such a layer is left to the CPU.
+    #[test]
+    fn gloss_anti_alias_reads_the_shading_a_third_of_a_pixel_away() {
+        let shape = square(48, 8, 40);
+        let l = GlobalLight::default();
+        let pp = PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES);
+        let ring = Contour::Custom {
+            name: "double ring".into(),
+            points: [(0.0, 0.0), (0.25, 1.0), (0.5, 0.16), (0.75, 1.0), (1.0, 0.0)].iter().map(|(i, o)| photosplice_doc::adjust::CurvePoint { input: *i, output: *o }).collect(),
+            corners: Vec::new(),
+        };
+        let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::Smooth);
+        b.size = 12.0;
+        for (contour, differs) in [(ring, true), (Contour::Linear, false)] {
+            b.gloss_contour = contour;
+            b.gloss_anti_alias = false;
+            let (plain, _) = bevel_maps(&shape, &b, &l, &no_tex(), &pp);
+            b.gloss_anti_alias = true;
+            let (aa, _) = bevel_maps(&shape, &b, &l, &no_tex(), &pp);
+            let most = plain[0].v.iter().zip(&aa[0].v).map(|(a, c)| (a - c).abs()).fold(0.0f32, f32::max);
+            assert_eq!(most > 0.01, differs, "{most}");
+            assert_eq!(has_anti_aliased_contour(&Effect::BevelEmboss(b.clone())), differs);
+        }
     }
 
     /// The Contour's Range spans each style's own profile: a Smooth inner bevel's from ½ at the

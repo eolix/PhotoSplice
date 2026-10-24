@@ -368,7 +368,12 @@ impl PsdFile {
         // means they are all alpha / spot channels (psd-tools cmyk-alpha-spot.psd: a spot channel
         // was taken for transparency).
         let extra = usize::from(self.header.channels - color);
-        let names = self.resource(crate::resources::ids::UNICODE_ALPHA_NAMES).map(|r| crate::resources::unicode_names(&r.data));
+        // The Unicode names (1045), else the older Pascal ones (1006): psd-tools cmyk-spot.psd
+        // names its three spot channels in 1006 alone.
+        let names = self
+            .resource(crate::resources::ids::UNICODE_ALPHA_NAMES)
+            .map(|r| crate::resources::unicode_names(&r.data))
+            .or_else(|| self.resource(1006).map(|r| crate::resources::pascal_names(&r.data)));
         let named = names.as_ref().filter(|n| n.len() >= extra).map(|n| n.first().is_some_and(|n| n == crate::resources::TRANSPARENCY_NAME));
         // The name is localised ("透明部分" from a Japanese Reference); its alpha id is 0 in any
         // language (user channels get other ids).

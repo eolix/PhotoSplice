@@ -312,3 +312,20 @@ fn spec_order_density_only_mask_round_trips_as_a_model() {
     assert_eq!(g.layers()[0].decode_channel(-2, 8, Version::Psd).unwrap(), vec![64]);
     assert_eq!(g.to_bytes().unwrap(), b, "byte stability");
 }
+
+/// Extra merged channels named in the older Pascal list (1006) alone are spot / alpha channels,
+/// not transparency, as with the Unicode list (psd-tools cmyk-spot.psd: three spot inks, the
+/// first was read as transparency); a list that starts with "Transparency" still says it is.
+#[test]
+fn pascal_channel_names_say_the_extra_channels_are_not_transparency() {
+    let pascal = |names: &[&str]| names.iter().flat_map(|n| std::iter::once(n.len() as u8).chain(n.bytes())).collect::<Vec<u8>>();
+    assert_eq!(resources::pascal_names(&pascal(&["blue", "fluorescent pink"])), ["blue", "fluorescent pink"]);
+    assert_eq!(resources::pascal_names(&[5, b'a']), Vec::<String>::new(), "a name running past the data stops the list");
+    for (names, alpha) in [(&["blue", "fluorescent pink", "yellow"][..], false), (&["Transparency", "blue", "pink"][..], true)] {
+        let mut f = testgen::merged_only(Version::Psd, ColorMode::Cmyk, 8, Compression::Raw, 4, 4);
+        f.header.channels = 7;
+        f.layer_info = None;
+        f.resources.push(resources::ImageResource::new(1006, pascal(names)));
+        assert_eq!(f.merged_has_alpha(), alpha, "{names:?}");
+    }
+}

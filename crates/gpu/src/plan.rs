@@ -462,6 +462,9 @@ pub const F_ADD_DIFF: u32 = 16384;
 pub const F_BLEND_IF: u32 = 524288;
 /// Blend / Atop / FxMerge of a type layer: coverage mixed at `psblend::TEXT_GAMMA`.
 pub const F_TEXT_GAMMA: u32 = 8192;
+/// Lerp: A towards B by C's alpha, premultiplied, where C covers more than `INSIDE_EPS`
+/// (emboss styles' two shaded halves).
+pub const F_COVER_MIX: u32 = 2097152;
 
 /// A layer's Blend If ranges for `F_BLEND_IF`: Gray, then the colour channels, each as
 /// [this layer, underlying layer]; every range as two floats, `black low × 256 + black high` and
@@ -1451,9 +1454,22 @@ impl<'a> Planner<'a> {
             p.clip = Some(clip);
             let mut m = self.emit(p);
             for (i, b) in late {
+                // Each half shades the composite on its own (maps 0-1 inside, 2-3 outside); the
+                // layer's coverage blends the two results (`composite_with_effects`).
+                let mut inside = self.retain(m);
                 for (k, color, fxc) in [(0, &b.highlight_color, &b.highlight), (1, &b.shadow_color, &b.shadow)] {
+                    inside = self.paint(inside, content, Cov::Map(map(i, k), 0.0), &Paint::Color(color.to_rgb_unclamped()), fxc.blend, fxc.opacity, 0, clip, sb);
+                }
+                for (k, color, fxc) in [(2, &b.highlight_color, &b.highlight), (3, &b.shadow_color, &b.shadow)] {
                     m = self.paint(m, content, Cov::Map(map(i, k), 0.0), &Paint::Color(color.to_rgb_unclamped()), fxc.blend, fxc.opacity, 0, clip, sb);
                 }
+                let mut p = Pass::new(Kernel::Lerp, 0);
+                p.a = Some(m);
+                p.b = Some(inside);
+                p.c = Some(self.retain(content));
+                p.flags = F_COVER_MIX;
+                p.clip = Some(clip);
+                m = self.emit(p);
             }
             let mut p = Pass::new(Kernel::FxMerge, 0);
             p.b = Some(self.retain(m));
@@ -1484,7 +1500,7 @@ impl<'a> Planner<'a> {
 
     fn glow_paint(&self, g: &'a Glow, anchor: (f64, f64)) -> Paint<'a> {
         match &g.paint {
-            FxPaint::Gradient(gradient) => Paint::GlowGradient(gradient, photosplice_compose::effects::glow_gradient_gain(g.range)),
+            FxPaint::Gradient(gradient) => Paint::GlowGradient(gradient, photosplice_compose::effects::glow_gradient_gain(g)),
             p => self.fx_paint(p, anchor),
         }
     }
@@ -1760,7 +1776,9 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photospli
             (7, p, Some(adjust::tone_luts_depth(adj, Some(depth)).iter().take(3).map(|t| to_row(t)).collect()))
         }
         Adjustment::HueSaturation { hue, saturation, lightness, colorize, ranges } => {
-            p[0] = [*hue, saturation / 100.0, lightness / 100.0, if *colorize { 1.0 } else { 0.0 }];
+            // 8-bit Colorize colours with Reference's own hue (compose::adjust::colorize_hue_8bit).
+            let hue = if *colorize && depth == photosplice_color::SampleType::U8 { adjust::colorize_hue_8bit(*hue) } else { *hue };
+            p[0] = [hue, saturation / 100.0, lightness / 100.0, if *colorize { 1.0 } else { 0.0 }];
             // 32-bit documents don't hold the smallest channel at 0 (compose::adjust::hue_saturation_in).
             p[1][1] = if depth == photosplice_color::SampleType::F32 { 1.0 } else { 0.0 };
             if !*colorize && ranges.iter().any(|r| !r.is_neutral()) {
@@ -1771,10 +1789,12 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photospli
                 (8, p, None)
             }
         }
-        // The factor table over saturation (compose::adjust::vibrance_lut) as LUT row 0.
+        // The slider's resolved tables and skin weights (compose::adjust::vibrance_row) as LUT
+        // row 0; p0 = (Saturation factor, transfer, Vibrance on).
         Adjustment::Vibrance { vibrance, saturation } => {
-            p[0] = [1.0 + (saturation / 100.0).clamp(-1.0, 1.0), transfer_exponent(transfer), 0.0, 0.0];
-            (9, p, Some(vec![to_row(&adjust::vibrance_lut(*vibrance))]))
+            let on = vibrance.is_finite() && *vibrance != 0.0;
+            p[0] = [1.0 + (saturation / 100.0).clamp(-1.0, 1.0), transfer_exponent(transfer), if on { 1.0 } else { 0.0 }, 0.0];
+            (9, p, Some(vec![to_row(&adjust::vibrance_row(*vibrance))]))
         }
         Adjustment::ChannelMixer { matrix, monochrome, .. } => {
             // compose::adjust: 32-bit documents cut each percentage to 1/1024, count 255/512 of
@@ -1795,7 +1815,13 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photospli
             for (row, m) in p.iter_mut().zip(m) {
                 *row = [m[0], m[1], m[2], 0.0];
             }
-            p[3] = [if *preserve_luminosity && !linear_doc { 1.0 } else { 0.0 }, transfer_exponent(transfer), 0.0, 0.0];
+            // p3.z: an 8-bit document, whose Preserve Luminosity works in whole levels.
+            p[3] = [
+                if *preserve_luminosity && !linear_doc { 1.0 } else { 0.0 },
+                transfer_exponent(transfer),
+                if depth == photosplice_color::SampleType::U8 { 1.0 } else { 0.0 },
+                0.0,
+            ];
             (11, p, None)
         }
         Adjustment::BlackWhite { weights, tint } => {

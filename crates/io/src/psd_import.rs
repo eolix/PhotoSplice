@@ -1096,6 +1096,7 @@ pub(crate) fn psd_to_document_decoded(
                 bg.locks.position = true;
             }
             doc.layers.push(bg);
+            doc.metadata.psd_flat = true;
         }
     } else {
         if !file.layers().is_empty() {
@@ -1135,6 +1136,7 @@ pub(crate) fn psd_to_document_decoded(
                 drop(img);
                 s.prune();
                 doc.layers.push(flat_background(s));
+                doc.metadata.psd_flat = true;
             }
             // A merged image that failed to decode was reported above.
             Err(_) if matches!(merged, Some(Err(_))) => {}

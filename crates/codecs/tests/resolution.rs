@@ -533,3 +533,18 @@ fn thumbnail_removal_never_panics_on_truncated_exif() {
         }
     }
 }
+
+/// The EXIF Reference writes into a PSD (resource 1058) links an IFD1 with JPEG thumbnail
+/// fields but no thumbnail (length 0; its preview lives in resource 1036): nothing stale to show,
+/// so it is kept as it was.
+#[test]
+fn an_ifd1_without_a_thumbnail_is_kept() {
+    for e in [&LE, &BE] {
+        let mut exif = exif_with_thumbnail(e);
+        let ifd1 = next_ifd(e, &exif) as usize;
+        let length = ifd1 + 2 + 12 + 8;
+        exif[length..length + 4].copy_from_slice(&e.u32(0));
+        assert!(matches!(export_exif(&exif, None), Cow::Borrowed(_)), "untouched");
+        assert_eq!(next_ifd(e, &export_exif(&exif, Some((240.0, 240.0)))), ifd1 as u32);
+    }
+}

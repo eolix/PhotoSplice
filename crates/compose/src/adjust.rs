@@ -155,7 +155,8 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
                 };
                 if *colorize {
                     let s = (*saturation / 100.0).clamp(-1.0, 1.0);
-                    return hue_saturation_in(c, *hue + dh, s, (*lightness / 100.0 + dl).clamp(-1.0, 1.0), true, depth == Some(SampleType::F32));
+                    let h = if depth == Some(SampleType::U8) { colorize_hue_8bit(*hue) } else { *hue };
+                    return hue_saturation_in(c, h + dh, s, (*lightness / 100.0 + dl).clamp(-1.0, 1.0), true, depth == Some(SampleType::F32));
                 }
                 // The master's saturation factor times the ranges' (Reference 16-bit master ±50 %
                 // with Reds ∓50 %: unchanged in the core; adding the sliders was 31/255 off).
@@ -164,9 +165,9 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
             })
         }
         Adjustment::Vibrance { vibrance, saturation } => {
-            let table = vibrance_lut(*vibrance);
             let k = 1.0 + (saturation / 100.0).clamp(-1.0, 1.0);
-            map_rgb(buf, |c| vibrance_px(c, &table, k, transfer))
+            let tables = (vibrance.is_finite() && *vibrance != 0.0).then(|| vibrance_tables(*vibrance));
+            map_rgb(buf, |c| vibrance_measured(c, tables.as_ref(), k, transfer))
         }
         Adjustment::ChannelMixer { matrix, monochrome, .. } if depth == Some(SampleType::F32) => {
             // 32-bit: each source percentage is cut to 1/1024 (toward zero), the constant counts
@@ -190,7 +191,11 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
             map_rgb(buf, |c| {
                 // 32-bit samples are linear already, and may go negative.
                 let f = if linear_doc { mat3_mul(&m, c) } else { mat3_mul(&m, c.map(|v| transfer.decode(v))).map(|v| transfer.encode(v)) };
-                let f = if set_lum { photosplice_color::blend::set_lum(f, photosplice_color::blend::lum(c)) } else { f };
+                let f = match (set_lum, depth) {
+                    (true, Some(SampleType::U8)) => preserve_luminosity_8bit(f, c),
+                    (true, _) => photosplice_color::blend::set_lum(f, photosplice_color::blend::lum(c)),
+                    (false, _) => f,
+                };
                 // 32-bit results aren't clipped (photoshop corpus rgb32 photo-filter.psd: white
                 // filters to 1.19 red).
                 if linear_doc { f } else { f.map(|v| v.clamp(0.0, 1.0)) }
@@ -663,18 +668,29 @@ pub fn range_hue(h: f32) -> f32 {
 /// its factor's excess `k − 1`, lightness as a fraction), sampled at hue `k / (len - 1)` turns of
 /// [`range_hue`]. A range's weight scales the saturation factor's excess, not the slider: +40 %
 /// at half weight is 1 + ½ · (1/0.6 − 1), not 1/0.8 (Reference 16-bit Reds falloffs: 6/255 →
-/// 0.9/255). Ranges add up where they overlap.
+/// 0.9/255). Ranges add up where they overlap, in their order, each sum held where Reference
+/// holds it: the saturation excess at −1 (fully grey), the lightness within ±1, so a range
+/// past an earlier −100 % one adds nothing more to the cut but a later raise still counts
+/// (psd-tools huesaturation_saturation_rgb: −100 % with another −100 % falloff under a +49 %
+/// one, 31 → 18/255; huesaturation_lightness_rgb 7 → 4/255). A range's +100 % is a finite
+/// [`RANGE_SATURATION_MAX`].
 pub fn hue_range_tables(ranges: &[HueRange; 6]) -> [Vec<f32>; 3] {
     let at = |k: usize| {
         let deg = k as f32 / (LUT_SIZE - 1) as f32 * 360.0;
         ranges.iter().filter(|r| !r.is_neutral()).fold([0.0f32; 3], |acc, r| {
             let w = r.weight(deg);
-            [acc[0] + w * r.hue, acc[1] + w * saturation_excess(r.saturation / 100.0), acc[2] + w * r.lightness / 100.0]
+            let ds = saturation_excess(r.saturation / 100.0).min(RANGE_SATURATION_MAX);
+            [acc[0] + w * r.hue, (acc[1] + w * ds).max(-1.0), (acc[2] + w * r.lightness / 100.0).clamp(-1.0, 1.0)]
         })
     };
     let rows: Vec<[f32; 3]> = (0..LUT_SIZE).map(at).collect();
     std::array::from_fn(|i| rows.iter().map(|r| r[i]).collect())
 }
+
+/// The saturation factor excess of a colour range at +100 %: 135, not unbounded (psd-tools
+/// huesaturation_rgb: a +100 % range 9–22 % into its falloff, under a −97 % master, leaves
+/// the ratios of a 135–143 excess at every hue, where 999 kept the colours whole).
+pub const RANGE_SATURATION_MAX: f32 = 135.0;
 
 /// A saturation slider (−1..=1) as its factor's excess `k − 1` ([`hue_saturation_scale`]).
 fn saturation_excess(s: f32) -> f32 {
@@ -691,6 +707,78 @@ pub fn master_and_range_saturation(master: f32, range_excess: f32) -> f32 {
 /// The saturation slider whose factor's excess is `e` (inverse of [`saturation_excess`]).
 pub fn saturation_of_excess(e: f32) -> f32 {
     if e > 0.0 { 1.0 - 1.0 / (1.0 + e) } else { e.max(-1.0) }
+}
+
+/// The hue an 8-bit document's Colorize colours with: Reference's own falls a little off the one
+/// set, by an amount fixed for each whole degree (the same at every saturation and lightness,
+/// jumping between neighbouring degrees, up to 3° at 170) and none at 16 or 32 bits. Measured
+/// in Reference at every degree on a grey ramp (temp kit 7: with the shift, every grey of every
+/// hue within a level; without it up to 4.7 levels off). Fractional hues take the nearest degree.
+pub fn colorize_hue_8bit(hue: f32) -> f32 {
+    let at = if hue.is_finite() { hue.round().rem_euclid(360.0) as usize } else { 0 };
+    hue + COLORIZE_8BIT_HUE_SHIFT.get(at).copied().unwrap_or(0.0)
+}
+
+/// [`colorize_hue_8bit`]'s shift in degrees for each whole hue 0..359 (measured: a -3.14 there is
+/// not π).
+#[rustfmt::skip]
+#[allow(clippy::approx_constant)]
+const COLORIZE_8BIT_HUE_SHIFT: [f32; 360] = [
+    0.40, -1.40, 0.04, 0.56, -0.44, 0.38, 0.78, -0.22, 0.44, 0.80, 1.56, 0.56,
+    0.86, 1.22, 0.22, 0.60, 1.04, 1.06, 0.06, 0.70, 1.02, 0.02, 0.46, 0.48,
+    0.80, -0.20, 0.10, 0.44, -0.56, -0.36, 0.00, 0.30, -0.70, -0.38, -0.38, -1.38,
+    -1.08, -0.72, -0.34, -1.34, -1.18, -0.88, -1.88, -1.24, -0.76, -0.76, -1.76, -1.56,
+    -1.14, -2.14, -1.72, -1.14, -2.14, -1.72, -1.32, -0.58, -1.58, -1.32, -0.36, -1.36,
+    0.00, -1.00, 0.36, -0.64, 0.32, 0.58, -0.42, 0.32, 0.72, 1.14, 0.14, 0.72,
+    1.14, 0.14, 0.56, 0.76, 0.76, -0.24, 0.24, 0.88, -0.12, 0.18, 0.34, 0.72,
+    -0.28, 0.08, 0.38, -0.62, -0.62, -0.30, -0.00, -1.00, -0.64, -0.44, -1.44, -1.10,
+    -0.80, -1.80, -1.48, -1.46, -1.02, -2.02, -1.70, -1.06, -2.06, -2.04, -1.60, -1.22,
+    -2.22, -1.86, -1.56, -2.56, -1.80, -1.44, -0.78, -1.78, -1.38, -0.56, -1.56, -1.04,
+    -0.40, -1.40, -2.40, -0.96, -0.44, -1.44, -0.62, -0.22, 0.44, -0.56, -0.20, 0.56,
+    -0.44, -0.14, 0.22, 0.60, -0.40, 0.04, 0.06, -0.94, -0.30, 0.02, -0.98, -0.54,
+    -0.52, -0.20, -1.20, -0.90, -0.56, -1.56, -1.36, -1.00, -0.70, -1.70, -1.38, -1.38,
+    -2.38, -2.08, -1.72, -1.34, -2.34, -2.18, -1.88, -2.88, -2.24, -1.76, -1.76, -2.76,
+    -2.56, -2.14, -3.14, -2.72, -2.14, -1.72, -2.72, -2.32, -1.58, -2.58, -2.32, -1.36,
+    0.00, -1.00, 0.36, 1.32, 0.32, 0.58, 1.30, 0.30, 0.72, 1.14, 1.72, 0.72,
+    1.14, 1.56, 0.56, 0.76, 0.76, 1.24, 0.24, 0.88, 1.18, 0.18, 0.34, 0.72,
+    1.08, 0.08, 0.38, 0.38, -0.62, -0.30, 0.00, 0.36, -0.64, -0.44, -0.10, -1.10,
+    -0.80, -0.48, -0.46, -1.46, -1.02, -0.70, -1.70, -1.06, -1.04, -0.60, -1.60, -1.22,
+    -0.86, -1.86, -1.56, -0.80, -1.80, -1.44, -0.78, -0.38, -1.38, -0.56, -0.04, -1.04,
+    0.40, -0.60, 0.04, -0.96, -0.44, 0.38, -0.62, -0.22, 0.44, 0.80, -0.20, 0.56,
+    0.86, -0.14, 0.22, 0.60, 1.04, 0.04, 0.06, 0.70, -0.30, 0.02, 0.48, 0.48,
+    -0.52, -0.20, 0.10, -0.90, -0.56, -0.36, -0.00, -1.00, -0.70, -0.38, -1.38, -1.38,
+    -1.08, -2.08, -1.72, -1.34, -1.18, -2.18, -1.88, -1.24, -2.24, -1.76, -1.76, -1.56,
+    -2.56, -2.14, -1.72, -2.72, -2.14, -1.72, -1.30, -2.30, -1.58, -1.32, -2.32, -1.36,
+    -0.00, -1.00, -2.00, -0.64, 0.32, -0.68, -0.42, 0.32, 0.74, -0.26, 0.14, 0.72,
+    -0.28, 0.14, 0.56, 0.76, -0.24, -0.24, 0.24, -0.76, -0.12, 0.18, -0.82, -0.66,
+    -0.26, 0.08, -0.92, -0.62, -0.62, -1.62, -1.28, -1.00, -0.64, -1.64, -1.44, -1.10,
+    -2.10, -1.80, -1.48, -1.46, -2.46, -2.02, -1.70, -2.70, -2.06, -2.04, -1.60, -2.60,
+    -2.22, -1.86, -2.86, -2.56, -1.80, -1.44, -2.44, -1.78, -1.38, -2.38, -1.56, -1.04,
+];
+
+/// Photo Filter's Preserve Luminosity in an 8-bit document, in whole levels as Reference works
+/// there: the filtered colour rounded to levels is moved by the whole number of levels between
+/// the source's luma (rounded half up) and its own (rounded half down), then clipped about that
+/// target (temp kit 8 pf8-*: warming and cooling at 25, 50 and 100 %, 16 632 colours, one 4/255
+/// off; the float `set_lum` left 97 more than 2/255 off, up to 7). 16- and 32-bit documents keep
+/// the float step.
+pub fn preserve_luminosity_8bit(f: [f32; 3], c: [f32; 3]) -> [f32; 3] {
+    let lum = |v: [f64; 3]| 0.3 * v[0] + 0.59 * v[1] + 0.11 * v[2];
+    let f8 = f.map(|v| (f64::from(if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }) * 255.0 + 0.5).floor());
+    let c8 = c.map(|v| f64::from(if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }) * 255.0);
+    let target = (lum(c8) + 0.5 + 1e-6).floor();
+    let d = target - (lum(f8) - 0.5 - 1e-6).ceil();
+    let mut o = f8.map(|v| v + d);
+    let (n, x) = (o[0].min(o[1]).min(o[2]), o[0].max(o[1]).max(o[2]));
+    if n < 0.0 {
+        let k = if target - n > 0.0 { target / (target - n) } else { 0.0 };
+        o = o.map(|v| target + (v - target) * k);
+    }
+    if x > 255.0 {
+        let k = if x - target > 0.0 { (255.0 - target) / (x - target) } else { 0.0 };
+        o = o.map(|v| target + (v - target) * k);
+    }
+    o.map(|v| (v / 255.0) as f32)
 }
 
 /// One Hue/Saturation evaluation: hue shift in degrees, saturation and lightness in -1..=1.
@@ -727,8 +815,8 @@ pub fn hue_saturation_in(c: [f32; 3], hue: f32, s: f32, l: f32, colorize: bool, 
 pub fn hue_saturation_ranged(c: [f32; 3], hue: f32, s: f32, l: f32, range_l: f32, float: bool, ranges: bool) -> [f32; 3] {
     // Hue turns the HSL hue; saturation then scales each channel about the HSL lightness by
     // 1 / (1 − s) (s > 0) or 1 + s, held only where the smallest channel would go below 0: the
-    // largest may overshoot 1 until the lightness step (Photoshop corpus hue-saturation.psd,
-    // rgb16: within 0.9/255; was 17/255 with a clamped HSL saturation).
+    // largest may overshoot 1 (Reference corpus hue-saturation.psd, rgb16: within 0.9/255; was
+    // 17/255 with a clamped HSL saturation).
     let (hh, ss, ll) = rgb_to_hsl(c);
     let mut rgb = hsl_to_rgb((hh + hue / 360.0).rem_euclid(1.0), ss, ll);
     // A range's lightness comes before the saturation step: a raise pulls the channels towards
@@ -740,12 +828,26 @@ pub fn hue_saturation_ranged(c: [f32; 3], hue: f32, s: f32, l: f32, range_l: f32
     } else if range_l < 0.0 {
         rgb = rgb.map(|v| v + (min - v) * -range_l);
     }
-    let mut rgb = hue_saturation_scale(rgb, s, l, float, ranges);
-    if l > 0.0 {
-        rgb = rgb.map(|v| v + (1.0 - v) * l);
-    } else if l < 0.0 {
-        rgb = rgb.map(|v| v * (1.0 + l));
-    }
+    // The master lightness comes before the saturation step too, which then holds the channels
+    // inside 0..1 (the largest only with colour ranges or a cut): the saturation stops where
+    // the lightness step would have put a channel past black or white (psd-tools
+    // huesaturation_rgb: Saturation +100 with Lightness −37 keeps near-white tints 52/255 off
+    // black, and +93 % Reds with Lightness +10 take dark reds to 0, not 26/255; pixels off
+    // 14.1 → 11.7 %). Without a lightness the largest overshoots to the final clip.
+    let light = |rgb: [f32; 3]| {
+        if l > 0.0 {
+            rgb.map(|v| v + (1.0 - v) * l)
+        } else if l < 0.0 {
+            rgb.map(|v| v * (1.0 + l))
+        } else {
+            rgb
+        }
+    };
+    let rgb = if l == 0.0 || (float && !ranges) {
+        light(hue_saturation_scale(rgb, s, l, float, ranges))
+    } else {
+        hue_saturation_scale(light(rgb), s, 0.0, float, ranges || l < 0.0)
+    };
     if float { rgb } else { rgb.map(|v| v.clamp(0.0, 1.0)) }
 }
 
@@ -859,91 +961,262 @@ pub fn color_balance_luts(shadows: &[f32; 3], midtones: &[f32; 3], highlights: &
     })
 }
 
-/// Saturation measured on the Vibrance factor tables ([`VIB_ROWS`]): `1 − min / max` of the
-/// linear-light channels.
-const VIB_S: [f32; 31] = [
-    0.0000, 0.1537, 0.2639, 0.2788, 0.2946, 0.3092, 0.3520, 0.4013, 0.5812, 0.6238, 0.6557, 0.6938, 0.7268, 0.7600, 0.7813, 0.8174,
-    0.8259, 0.8575, 0.8707, 0.9194, 0.9277, 0.9440, 0.9555, 0.9599, 0.9664, 0.9788, 0.9816, 0.9834, 0.9851, 0.9879, 1.0000,
-];
-/// Photoshop's Vibrance factor `f` at each [`VIB_S`], per slider value: the channels move away
-/// from (`f > 1`) or towards (`f < 1`) the brightest one. Measured on the Photoshop corpus
-/// vibrance-*.psd (±50, +100; −100 extrapolated from −50).
-const VIB_ROWS: [(f32, [f32; 31]); 5] = [
-    (
-        -100.0,
-        [
-            0.0000, 0.0000, 0.0446, 0.0476, 0.0000, 0.0000, 0.0572, 0.0879, 0.2644, 0.3087, 0.3490, 0.3844, 0.4095, 0.4552, 0.4771, 0.5165,
-            0.5175, 0.5544, 0.5783, 0.6312, 0.6425, 0.6586, 0.6770, 0.7033, 0.7097, 0.7253, 0.7267, 0.7300, 0.7333, 0.7361, 0.7504,
-        ],
-    ),
-    (
-        -50.0,
-        [
-            0.4032, 0.4565, 0.5223, 0.5238, 0.4948, 0.4978, 0.5286, 0.5440, 0.6322, 0.6544, 0.6745, 0.6922, 0.7047, 0.7276, 0.7385, 0.7582,
-            0.7588, 0.7772, 0.7891, 0.8156, 0.8213, 0.8293, 0.8385, 0.8517, 0.8549, 0.8627, 0.8634, 0.8650, 0.8667, 0.8681, 0.8752,
-        ],
-    ),
-    (0.0, [1.0; 31]),
-    (
-        50.0,
-        [
-            1.0000, 1.0527, 1.0284, 1.0530, 1.0497, 1.0467, 1.0591, 1.0661, 1.0644, 1.0641, 1.0650, 1.0572, 1.0566, 1.0548, 1.0506, 1.0470,
-            1.0453, 1.0416, 1.0387, 1.0274, 1.0253, 1.0198, 1.0169, 1.0146, 1.0130, 1.0081, 1.0073, 1.0069, 1.0058, 1.0052, 1.0000,
-        ],
-    ),
-    (
-        100.0,
-        [
-            1.0000, 1.1051, 1.1126, 1.1312, 1.1472, 1.1385, 1.1552, 1.1775, 1.2064, 1.1945, 1.1942, 1.1764, 1.1668, 1.1551, 1.1465, 1.1309,
-            1.1262, 1.1095, 1.1018, 1.0608, 1.0557, 1.0438, 1.0352, 1.0317, 1.0271, 1.0174, 1.0152, 1.0137, 1.0123, 1.0101, 1.0000,
-        ],
-    ),
+/// Luminance weights of Vibrance's Saturation slider (linear light; fitted on the Reference
+/// corpus vibrance-0-±50.psd together: every colour of both within a level; 0.29 / 0.71 left
+/// (255, 0, 88) at +50 three levels off).
+const VIB_LUMA: [f32; 3] = [0.287, 0.713, 0.0];
+
+/// Brightest-channel levels (8-bit, encoded) of the Vibrance tables' rows.
+const VIB_B: [f32; 7] = [64.0, 96.0, 128.0, 160.0, 192.0, 224.0, 255.0];
+/// The darkest channel's share of the brightest (encoded) in the tables' columns.
+const VIB_KEEP: [f32; 11] = [0.95, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.0];
+/// The slider values the tables were measured at (0 is the identity, between the halves).
+const VIB_V: [f32; 8] = [-100.0, -75.0, -50.0, -25.0, 25.0, 50.0, 75.0, 100.0];
+/// Skin protection's weight by hue (every 10°, HSL hue of the encoded colour): positive Vibrance
+/// blends from [`VIB_PLAIN`] to [`VIB_SKIN`] by it.
+const VIB_SKIN_W: [f32; 36] = [
+    1.0, 1.0, 1.0, 1.0, 0.65, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.26, 0.47, 0.63, 0.79, 0.90,
 ];
 
-/// Luminance weights of Vibrance's Saturation slider (linear light; fitted on the Photoshop
-/// corpus vibrance-0-±50.psd: within 0.8/255 at −50).
-const VIB_LUMA: [f32; 3] = [0.29, 0.71, 0.0];
+/// Vibrance's tables resolved for one slider value: `[plain, skin]`, each (gain of the
+/// brightest channel, darkest share of the output) per brightness row ([`VIB_B`]) and darkest-share
+/// column ([`VIB_KEEP`]), interpolated between the measured sliders ([`VIB_V`]) and the identity at
+/// 0 (gain 1, the column's own share). Skin is the plain table for negative values.
+pub type VibranceTables = [[[[f32; 2]; 11]; 7]; 2];
 
-/// The Vibrance factor over saturation `S` (`0..=1`, [`LUT_SIZE`] samples) for slider `vibrance`
-/// (−100..100), interpolated between the measured sliders. The CPU reads it with [`lut`]; the GPU
-/// uploads it as a LUT row.
-pub fn vibrance_lut(vibrance: f32) -> Vec<f32> {
+/// [`VibranceTables`] for slider `vibrance` (−100..=100).
+pub fn vibrance_tables(vibrance: f32) -> VibranceTables {
     let v = if vibrance.is_finite() { vibrance.clamp(-100.0, 100.0) } else { 0.0 };
-    let row = |r: &[f32; 31], s: f32| {
-        let i = VIB_S.iter().take(VIB_S.len() - 1).rposition(|&k| k <= s).unwrap_or(0);
-        let (s0, s1) = (VIB_S.get(i).copied().unwrap_or(0.0), VIB_S.get(i + 1).copied().unwrap_or(1.0));
-        let (f0, f1) = (r.get(i).copied().unwrap_or(1.0), r.get(i + 1).copied().unwrap_or(1.0));
-        f0 + (f1 - f0) * ((s - s0) / (s1 - s0).max(1e-6)).clamp(0.0, 1.0)
-    };
-    let pair = VIB_ROWS.windows(2).find(|w| matches!(w, [a, b] if v >= a.0 && v <= b.0));
-    (0..LUT_SIZE)
-        .map(|k| {
-            let s = k as f32 / (LUT_SIZE - 1) as f32;
-            match pair {
-                Some([a, b]) => {
-                    let t = (v - a.0) / (b.0 - a.0);
-                    row(&a.1, s) * (1.0 - t) + row(&b.1, s) * t
-                }
-                _ => 1.0,
-            }
+    let pos = VIB_V.iter().position(|&x| x >= v).unwrap_or(VIB_V.len() - 1);
+    std::array::from_fn(|table| {
+        let node = |idx: usize, bi: usize, ki: usize| if table == 1 && idx >= 4 { VIB_SKIN[idx - 4][bi][ki] } else { VIB_PLAIN[idx][bi][ki] };
+        std::array::from_fn(|bi| {
+            std::array::from_fn(|ki| {
+                let ident = [1.0, VIB_KEEP[ki]];
+                let (lo_v, lo) = if pos == 4 && v > 0.0 { (0.0, ident) } else if pos == 0 { (VIB_V[0], node(0, bi, ki)) } else { (VIB_V[pos - 1], node(pos - 1, bi, ki)) };
+                let (hi_v, hi) = if v < 0.0 && pos == 4 { (0.0, ident) } else { (VIB_V[pos], node(pos, bi, ki)) };
+                let t = if hi_v > lo_v { ((v - lo_v) / (hi_v - lo_v)).clamp(0.0, 1.0) } else { 1.0 };
+                [lo[0] + (hi[0] - lo[0]) * t, lo[1] + (hi[1] - lo[1]) * t]
+            })
         })
-        .collect()
+    })
 }
 
-/// Vibrance on one colour, in linear light: the channels move from the brightest by the factor
-/// for their saturation (`table`, see [`vibrance_lut`]), then Saturation blends them with the
-/// luminance by `k` (`1 + saturation`). Photoshop corpus vibrance-*.psd: within 1.5/255 at
-/// ±50, 6/255 at +100 (the old HSL guess was 89/255 off).
-fn vibrance_px(c: [f32; 3], table: &[f32], k: f32, transfer: Transfer) -> [f32; 3] {
-    let mut l = c.map(|v| transfer.decode(v));
-    let (max, min) = (l[0].max(l[1]).max(l[2]), l[0].min(l[1]).min(l[2]));
-    if max > 0.0 {
-        let f = lut(table, 1.0 - min / max);
-        l = l.map(|x| (max - (max - x) * f).max(0.0));
+/// The GPU's copy of [`vibrance_tables`] as one LUT row: the plain gains, plain shares, skin
+/// gains and skin shares (77 each, row-major over brightness then share), then [`VIB_SKIN_W`].
+pub fn vibrance_row(vibrance: f32) -> Vec<f32> {
+    let t = vibrance_tables(vibrance);
+    let mut row = Vec::with_capacity(4 * 77 + 36);
+    for table in &t {
+        for part in 0..2 {
+            row.extend(table.iter().flat_map(|r| r.iter().map(move |c| c[part])));
+        }
+    }
+    row.extend(VIB_SKIN_W);
+    row
+}
+
+/// Bilinear (gain, share) of a resolved table at brightness `b` (8-bit) and darkest share
+/// `keep`: rows every 32 levels from 64 (the last 31), columns 0.95, then every 0.1 from 0.9
+/// down to 0 (keep in sync with the shader's `vib_cell`).
+fn vib_cell(t: &[[[f32; 2]; 11]; 7], b: f32, keep: f32) -> [f32; 2] {
+    let bi = (((b - 64.0) / 32.0).floor().max(0.0) as usize).min(5);
+    let tb = ((b - VIB_B[bi]) / (VIB_B[bi + 1] - VIB_B[bi])).clamp(0.0, 1.0);
+    let keep = keep.clamp(0.0, 0.95);
+    let ki = if keep >= 0.9 { 0 } else { (((0.9 - keep) / 0.1 - 1e-4).ceil().max(1.0) as usize).min(9) };
+    let tk = ((VIB_KEEP[ki] - keep) / (VIB_KEEP[ki] - VIB_KEEP[ki + 1])).clamp(0.0, 1.0);
+    std::array::from_fn(|i| {
+        let top = t[bi][ki][i] * (1.0 - tk) + t[bi][ki + 1][i] * tk;
+        let bot = t[bi + 1][ki][i] * (1.0 - tk) + t[bi + 1][ki + 1][i] * tk;
+        top * (1.0 - tb) + bot * tb
+    })
+}
+
+/// Vibrance as Reference applies it, measured (temp kit 7): in linear light the brightest
+/// channel is scaled by `g` and the others keep their distance to it scaled by `k`, both read
+/// from `tables` ([`vibrance_tables`]) over the colour's brightness and saturation, positive
+/// values held back on skin hues; then Saturation (`sat_k`). Keep in sync with the shader's
+/// Vibrance kernel.
+fn vibrance_measured(c: [f32; 3], tables: Option<&VibranceTables>, sat_k: f32, transfer: Transfer) -> [f32; 3] {
+    let mut l = c.map(|x| transfer.decode(x));
+    let (emax, emin) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
+    if let Some(tables) = tables.filter(|_| emax > 0.0) {
+        let (b, keep) = (emax * 255.0, emin / emax);
+        let w = {
+            let f = rgb_to_hsl(c).0 * 36.0;
+            let i = (f.floor().max(0.0) as usize) % 36;
+            let t = f - f.floor();
+            VIB_SKIN_W[i] * (1.0 - t) + VIB_SKIN_W[(i + 1) % 36] * t
+        };
+        let plain = vib_cell(&tables[0], b, keep);
+        let gk = if w > 0.0 {
+            let skin = vib_cell(&tables[1], b, keep);
+            [plain[0] + (skin[0] - plain[0]) * w, plain[1] + (skin[1] - plain[1]) * w]
+        } else {
+            plain
+        };
+        let lmax = l[0].max(l[1]).max(l[2]);
+        // The output's brightest and darkest channels (encoded) as a gain on the brightest and a
+        // strength on the distances to it in linear light, for a colour of share `share`.
+        let linear = |share: f32| {
+            let omax = (emax * gk[0]).clamp(0.0, 1.0);
+            let omin = (omax * gk[1]).clamp(0.0, omax);
+            let (lo_max, lo_min) = (transfer.decode(omax), transfer.decode(omin));
+            let (in_max, in_min) = (transfer.decode(emax), transfer.decode(emax * share));
+            let k = if in_max - in_min > 1e-9 { (lo_max - lo_min) / (in_max - in_min) } else { 1.0 };
+            [lo_max / in_max.max(1e-9), k]
+        };
+        let [g, k] = if keep > 0.95 {
+            // Nearer grey than the tables reach: the 95 % column's gain and strength, blended to
+            // the identity at grey (greys stay).
+            let at = linear(0.95);
+            let u = ((keep - 0.95) / 0.05).clamp(0.0, 1.0);
+            [at[0] + (1.0 - at[0]) * u, at[1] + (1.0 - at[1]) * u]
+        } else {
+            linear(keep)
+        };
+        // The middle channel on the line between the brightest and darkest in linear light.
+        l = l.map(|x| (g * lmax - k * (lmax - x)).max(0.0));
     }
     let y = VIB_LUMA[0] * l[0] + VIB_LUMA[1] * l[1] + VIB_LUMA[2] * l[2];
-    l.map(|x| transfer.encode(y + (x - y) * k).clamp(0.0, 1.0))
+    l.map(|x| transfer.encode(y + (x - y) * sat_k).clamp(0.0, 1.0))
 }
+
+/// Vibrance as measured in Reference (temp kit 7, a grid of 36 hues x [`VIB_B`] x [`VIB_KEEP`]),
+/// for each of [`VIB_V`]: per brightness row and darkest-share column, the output's brightest
+/// channel over the input's and its darkest share, both encoded. Hues away from skin.
+#[rustfmt::skip]
+#[allow(clippy::approx_constant)] // measured values, not constants
+const VIB_PLAIN: [[[[f32; 2]; 11]; 7]; 8] = [
+    // vibm100
+    [
+        [[0.9219, 1.0000], [0.8594, 1.0000], [0.7812, 0.9800], [0.7656, 0.9184], [0.7812, 0.8600], [0.8125, 0.8077], [0.8438, 0.7593], [0.8906, 0.6842], [0.9375, 0.6167], [0.9688, 0.5484], [1.0000, 0.4844], ],
+        [[0.9167, 1.0000], [0.8646, 0.9880], [0.8021, 0.9740], [0.7917, 0.9211], [0.8021, 0.8701], [0.8438, 0.7901], [0.8854, 0.7176], [0.9167, 0.6591], [0.9583, 0.5870], [0.9792, 0.5426], [1.0000, 0.5000], ],
+        [[0.9375, 1.0000], [0.8828, 0.9912], [0.8281, 0.9623], [0.8203, 0.9238], [0.8359, 0.8692], [0.8672, 0.7928], [0.9062, 0.7241], [0.9375, 0.6500], [0.9688, 0.5887], [0.9844, 0.5476], [1.0000, 0.5156], ],
+        [[0.9438, 1.0000], [0.9062, 0.9931], [0.8687, 0.9568], [0.8625, 0.9130], [0.8750, 0.8571], [0.9000, 0.7917], [0.9250, 0.7230], [0.9563, 0.6536], [0.9750, 0.5962], [0.9937, 0.5472], [1.0000, 0.5250], ],
+        [[0.9583, 1.0000], [0.9323, 0.9944], [0.9062, 0.9655], [0.9010, 0.9191], [0.9115, 0.8571], [0.9323, 0.7877], [0.9479, 0.7198], [0.9688, 0.6505], [0.9844, 0.5926], [0.9948, 0.5497], [1.0000, 0.5312], ],
+        [[0.9777, 1.0000], [0.9643, 0.9907], [0.9509, 0.9624], [0.9509, 0.9155], [0.9554, 0.8551], [0.9643, 0.7917], [0.9732, 0.7202], [0.9866, 0.6471], [0.9911, 0.5946], [0.9955, 0.5561], [1.0000, 0.5357], ],
+        [[1.0000, 0.9961], [1.0000, 0.9922], [1.0000, 0.9647], [1.0000, 0.9176], [1.0000, 0.8588], [1.0000, 0.7922], [1.0000, 0.7176], [1.0000, 0.6510], [1.0000, 0.5922], [1.0000, 0.5569], [1.0000, 0.5373], ],
+    ],
+    // vibm075
+    [
+        [[0.9375, 1.0000], [0.9062, 0.9655], [0.8438, 0.9259], [0.8281, 0.8868], [0.8438, 0.8148], [0.8594, 0.7636], [0.8906, 0.6842], [0.9219, 0.6102], [0.9531, 0.5410], [0.9688, 0.4839], [1.0000, 0.4062], ],
+        [[0.9375, 0.9889], [0.8958, 0.9767], [0.8542, 0.9390], [0.8438, 0.8889], [0.8542, 0.8171], [0.8854, 0.7412], [0.9167, 0.6591], [0.9375, 0.6000], [0.9688, 0.5269], [0.9792, 0.4787], [1.0000, 0.4271], ],
+        [[0.9531, 0.9918], [0.9141, 0.9744], [0.8750, 0.9375], [0.8672, 0.8829], [0.8828, 0.8142], [0.9062, 0.7414], [0.9297, 0.6639], [0.9531, 0.5902], [0.9766, 0.5280], [0.9922, 0.4803], [1.0000, 0.4453], ],
+        [[0.9563, 0.9935], [0.9312, 0.9732], [0.9000, 0.9375], [0.9000, 0.8750], [0.9062, 0.8138], [0.9250, 0.7432], [0.9438, 0.6689], [0.9688, 0.5871], [0.9812, 0.5287], [0.9937, 0.4843], [1.0000, 0.4563], ],
+        [[0.9688, 0.9892], [0.9531, 0.9727], [0.9323, 0.9330], [0.9271, 0.8764], [0.9375, 0.8111], [0.9479, 0.7418], [0.9635, 0.6649], [0.9792, 0.5904], [0.9896, 0.5263], [0.9948, 0.4869], [1.0000, 0.4635], ],
+        [[0.9866, 0.9864], [0.9732, 0.9725], [0.9643, 0.9306], [0.9643, 0.8750], [0.9643, 0.8102], [0.9732, 0.7385], [0.9821, 0.6636], [0.9866, 0.5928], [0.9955, 0.5291], [1.0000, 0.4866], [1.0000, 0.4643], ],
+        [[1.0000, 0.9882], [1.0000, 0.9725], [1.0000, 0.9333], [1.0000, 0.8784], [1.0000, 0.8118], [1.0000, 0.7412], [1.0000, 0.6627], [1.0000, 0.5922], [1.0000, 0.5294], [1.0000, 0.4902], [1.0000, 0.4706], ],
+    ],
+    // vibm050
+    [
+        [[0.9688, 0.9677], [0.9375, 0.9500], [0.9062, 0.8966], [0.8906, 0.8421], [0.8906, 0.7719], [0.9062, 0.6897], [0.9219, 0.6271], [0.9531, 0.5246], [0.9688, 0.4677], [0.9844, 0.3968], [1.0000, 0.3125], ],
+        [[0.9583, 0.9783], [0.9375, 0.9444], [0.9062, 0.8966], [0.9062, 0.8276], [0.9062, 0.7586], [0.9271, 0.6742], [0.9479, 0.5934], [0.9583, 0.5217], [0.9792, 0.4468], [0.9896, 0.3895], [1.0000, 0.3333], ],
+        [[0.9688, 0.9758], [0.9453, 0.9504], [0.9219, 0.8898], [0.9141, 0.8376], [0.9219, 0.7627], [0.9375, 0.6750], [0.9531, 0.5984], [0.9688, 0.5161], [0.9844, 0.4524], [0.9922, 0.4016], [1.0000, 0.3594], ],
+        [[0.9750, 0.9744], [0.9563, 0.9477], [0.9375, 0.8933], [0.9312, 0.8322], [0.9375, 0.7600], [0.9500, 0.6776], [0.9625, 0.5974], [0.9750, 0.5192], [0.9875, 0.4494], [0.9937, 0.4025], [1.0000, 0.3688], ],
+        [[0.9792, 0.9787], [0.9688, 0.9516], [0.9531, 0.8962], [0.9531, 0.8251], [0.9583, 0.7554], [0.9635, 0.6811], [0.9740, 0.5989], [0.9844, 0.5238], [0.9948, 0.4503], [1.0000, 0.4062], [1.0000, 0.3802], ],
+        [[0.9911, 0.9775], [0.9821, 0.9545], [0.9777, 0.8950], [0.9732, 0.8303], [0.9777, 0.7534], [0.9821, 0.6773], [0.9866, 0.5973], [0.9911, 0.5180], [0.9955, 0.4529], [1.0000, 0.4062], [1.0000, 0.3839], ],
+        [[1.0000, 0.9765], [1.0000, 0.9529], [1.0000, 0.8941], [1.0000, 0.8314], [1.0000, 0.7569], [1.0000, 0.6784], [1.0000, 0.5961], [1.0000, 0.5216], [1.0000, 0.4549], [1.0000, 0.4118], [1.0000, 0.3882], ],
+    ],
+    // vibm025
+    [
+        [[0.9844, 0.9683], [0.9688, 0.9355], [0.9531, 0.8525], [0.9531, 0.7705], [0.9531, 0.6885], [0.9531, 0.6066], [0.9688, 0.5161], [0.9688, 0.4355], [0.9844, 0.3651], [0.9844, 0.2698], [1.0000, 0.1875], ],
+        [[0.9792, 0.9681], [0.9688, 0.9247], [0.9583, 0.8478], [0.9479, 0.7692], [0.9583, 0.6848], [0.9583, 0.6087], [0.9688, 0.5161], [0.9792, 0.4255], [0.9896, 0.3474], [0.9896, 0.2842], [1.0000, 0.2188], ],
+        [[0.9844, 0.9683], [0.9688, 0.9274], [0.9609, 0.8537], [0.9609, 0.7724], [0.9609, 0.6911], [0.9688, 0.5968], [0.9766, 0.5120], [0.9844, 0.4286], [0.9922, 0.3543], [1.0000, 0.2891], [1.0000, 0.2422], ],
+        [[0.9875, 0.9620], [0.9750, 0.9295], [0.9688, 0.8516], [0.9688, 0.7677], [0.9688, 0.6903], [0.9750, 0.6026], [0.9812, 0.5159], [0.9875, 0.4304], [0.9937, 0.3522], [1.0000, 0.2937], [1.0000, 0.2562], ],
+        [[0.9896, 0.9632], [0.9844, 0.9259], [0.9792, 0.8511], [0.9792, 0.7660], [0.9792, 0.6862], [0.9844, 0.5979], [0.9896, 0.5105], [0.9948, 0.4293], [0.9948, 0.3560], [1.0000, 0.2969], [1.0000, 0.2656], ],
+        [[0.9955, 0.9641], [0.9911, 0.9279], [0.9866, 0.8507], [0.9866, 0.7738], [0.9911, 0.6847], [0.9911, 0.5991], [0.9955, 0.5112], [0.9955, 0.4305], [1.0000, 0.3571], [1.0000, 0.2991], [1.0000, 0.2723], ],
+        [[1.0000, 0.9647], [1.0000, 0.9294], [1.0000, 0.8510], [1.0000, 0.7725], [1.0000, 0.6863], [1.0000, 0.6000], [1.0000, 0.5137], [1.0000, 0.4314], [1.0000, 0.3569], [1.0000, 0.3059], [1.0000, 0.2784], ],
+    ],
+    // vib025
+    [
+        [[1.0000, 0.9531], [1.0000, 0.8906], [1.0156, 0.7538], [1.0156, 0.6615], [1.0156, 0.5385], [1.0156, 0.4462], [1.0156, 0.3538], [1.0000, 0.2656], [1.0000, 0.1719], [1.0000, 0.0781], [1.0000, 0.0000], ],
+        [[1.0000, 0.9375], [1.0104, 0.8763], [1.0104, 0.7732], [1.0104, 0.6598], [1.0104, 0.5567], [1.0104, 0.4536], [1.0104, 0.3505], [1.0000, 0.2708], [1.0000, 0.1667], [1.0000, 0.0833], [1.0000, 0.0000], ],
+        [[1.0000, 0.9453], [1.0078, 0.8837], [1.0078, 0.7674], [1.0078, 0.6667], [1.0078, 0.5581], [1.0078, 0.4574], [1.0078, 0.3566], [1.0000, 0.2656], [1.0000, 0.1797], [1.0000, 0.0859], [1.0000, 0.0000], ],
+        [[1.0063, 0.9379], [1.0063, 0.8820], [1.0063, 0.7764], [1.0063, 0.6646], [1.0063, 0.5590], [1.0063, 0.4596], [1.0063, 0.3602], [1.0000, 0.2688], [1.0000, 0.1750], [1.0000, 0.0812], [1.0000, 0.0000], ],
+        [[1.0000, 0.9427], [1.0052, 0.8860], [1.0052, 0.7824], [1.0052, 0.6684], [1.0052, 0.5648], [1.0052, 0.4611], [1.0052, 0.3627], [1.0000, 0.2708], [1.0000, 0.1719], [1.0000, 0.0833], [1.0000, 0.0000], ],
+        [[1.0000, 0.9509], [1.0000, 0.8973], [1.0045, 0.7822], [1.0045, 0.6756], [1.0045, 0.5644], [1.0000, 0.4643], [1.0000, 0.3705], [1.0000, 0.2679], [1.0000, 0.1786], [1.0000, 0.0848], [1.0000, 0.0000], ],
+        [[1.0000, 0.9490], [1.0000, 0.8980], [1.0000, 0.7882], [1.0000, 0.6824], [1.0000, 0.5725], [1.0000, 0.4706], [1.0000, 0.3686], [1.0000, 0.2745], [1.0000, 0.1765], [1.0000, 0.0863], [1.0000, 0.0000], ],
+    ],
+    // vib050
+    [
+        [[1.0156, 0.9231], [1.0156, 0.8615], [1.0156, 0.7231], [1.0312, 0.6061], [1.0312, 0.4848], [1.0156, 0.4000], [1.0156, 0.3077], [1.0156, 0.2154], [1.0156, 0.1231], [1.0000, 0.0625], [1.0000, 0.0000], ],
+        [[1.0104, 0.9175], [1.0104, 0.8557], [1.0208, 0.7245], [1.0208, 0.6020], [1.0208, 0.5000], [1.0208, 0.3980], [1.0104, 0.3093], [1.0104, 0.2165], [1.0104, 0.1340], [1.0000, 0.0625], [1.0000, 0.0000], ],
+        [[1.0078, 0.9302], [1.0156, 0.8538], [1.0156, 0.7308], [1.0156, 0.6154], [1.0156, 0.5077], [1.0156, 0.4077], [1.0078, 0.3101], [1.0078, 0.2248], [1.0078, 0.1395], [1.0000, 0.0625], [1.0000, 0.0000], ],
+        [[1.0063, 0.9317], [1.0125, 0.8642], [1.0125, 0.7407], [1.0187, 0.6196], [1.0125, 0.5123], [1.0125, 0.4136], [1.0063, 0.3168], [1.0063, 0.2298], [1.0000, 0.1437], [1.0000, 0.0625], [1.0000, 0.0000], ],
+        [[1.0052, 0.9326], [1.0104, 0.8711], [1.0104, 0.7526], [1.0104, 0.6289], [1.0104, 0.5206], [1.0104, 0.4175], [1.0052, 0.3212], [1.0052, 0.2332], [1.0000, 0.1458], [1.0000, 0.0625], [1.0000, 0.0000], ],
+        [[1.0045, 0.9422], [1.0045, 0.8844], [1.0045, 0.7600], [1.0045, 0.6444], [1.0045, 0.5289], [1.0045, 0.4222], [1.0045, 0.3289], [1.0000, 0.2366], [1.0000, 0.1518], [1.0000, 0.0670], [1.0000, 0.0000], ],
+        [[1.0000, 0.9451], [1.0000, 0.8941], [1.0000, 0.7725], [1.0000, 0.6549], [1.0000, 0.5373], [1.0000, 0.4314], [1.0000, 0.3294], [1.0000, 0.2392], [1.0000, 0.1529], [1.0000, 0.0706], [1.0000, 0.0000], ],
+    ],
+    // vib075
+    [
+        [[1.0156, 0.8923], [1.0156, 0.8154], [1.0312, 0.6364], [1.0312, 0.5303], [1.0312, 0.4091], [1.0312, 0.3182], [1.0312, 0.2273], [1.0156, 0.1538], [1.0156, 0.0923], [1.0000, 0.0312], [1.0000, 0.0000], ],
+        [[1.0104, 0.8969], [1.0208, 0.7959], [1.0312, 0.6566], [1.0312, 0.5253], [1.0312, 0.4242], [1.0312, 0.3232], [1.0208, 0.2347], [1.0104, 0.1649], [1.0104, 0.0928], [1.0000, 0.0417], [1.0000, 0.0000], ],
+        [[1.0078, 0.9147], [1.0234, 0.8168], [1.0312, 0.6667], [1.0312, 0.5455], [1.0234, 0.4351], [1.0234, 0.3359], [1.0156, 0.2538], [1.0078, 0.1705], [1.0078, 0.1008], [1.0000, 0.0391], [1.0000, 0.0000], ],
+        [[1.0125, 0.9136], [1.0187, 0.8344], [1.0250, 0.6890], [1.0250, 0.5610], [1.0187, 0.4479], [1.0187, 0.3497], [1.0125, 0.2593], [1.0063, 0.1801], [1.0063, 0.1056], [1.0000, 0.0437], [1.0000, 0.0000], ],
+        [[1.0052, 0.9275], [1.0104, 0.8557], [1.0156, 0.7179], [1.0156, 0.5795], [1.0156, 0.4615], [1.0104, 0.3608], [1.0104, 0.2680], [1.0052, 0.1865], [1.0052, 0.1088], [1.0000, 0.0417], [1.0000, 0.0000], ],
+        [[1.0045, 0.9378], [1.0045, 0.8756], [1.0089, 0.7345], [1.0089, 0.6018], [1.0089, 0.4779], [1.0045, 0.3733], [1.0045, 0.2800], [1.0045, 0.1911], [1.0000, 0.1161], [1.0000, 0.0446], [1.0000, 0.0000], ],
+        [[1.0000, 0.9451], [1.0000, 0.8902], [1.0000, 0.7569], [1.0000, 0.6275], [1.0000, 0.4980], [1.0000, 0.3843], [1.0000, 0.2824], [1.0000, 0.2000], [1.0000, 0.1216], [1.0000, 0.0510], [1.0000, 0.0000], ],
+    ],
+    // vib100
+    [
+        [[1.0156, 0.8308], [1.0312, 0.7121], [1.0469, 0.5075], [1.0469, 0.3881], [1.0469, 0.2836], [1.0469, 0.1940], [1.0312, 0.1364], [1.0312, 0.0758], [1.0156, 0.0462], [1.0000, 0.0156], [1.0000, 0.0000], ],
+        [[1.0208, 0.8265], [1.0312, 0.7071], [1.0417, 0.5300], [1.0417, 0.4000], [1.0417, 0.3000], [1.0312, 0.2121], [1.0312, 0.1414], [1.0208, 0.0816], [1.0104, 0.0412], [1.0000, 0.0208], [1.0000, 0.0000], ],
+        [[1.0156, 0.8769], [1.0234, 0.7557], [1.0391, 0.5714], [1.0391, 0.4436], [1.0391, 0.3308], [1.0312, 0.2348], [1.0234, 0.1603], [1.0156, 0.1000], [1.0078, 0.0465], [1.0000, 0.0156], [1.0000, 0.0000], ],
+        [[1.0125, 0.8951], [1.0187, 0.7975], [1.0312, 0.6182], [1.0312, 0.4727], [1.0312, 0.3576], [1.0250, 0.2622], [1.0187, 0.1779], [1.0125, 0.1111], [1.0063, 0.0559], [1.0000, 0.0188], [1.0000, 0.0000], ],
+        [[1.0104, 0.9124], [1.0156, 0.8308], [1.0208, 0.6684], [1.0208, 0.5102], [1.0208, 0.3878], [1.0156, 0.2821], [1.0104, 0.1959], [1.0052, 0.1244], [1.0052, 0.0622], [1.0000, 0.0208], [1.0000, 0.0000], ],
+        [[1.0045, 0.9333], [1.0089, 0.8628], [1.0134, 0.7004], [1.0134, 0.5507], [1.0089, 0.4159], [1.0089, 0.3053], [1.0045, 0.2133], [1.0045, 0.1333], [1.0000, 0.0714], [1.0000, 0.0223], [1.0000, 0.0000], ],
+        [[1.0000, 0.9451], [1.0000, 0.8863], [1.0000, 0.7373], [1.0000, 0.5922], [1.0000, 0.4471], [1.0000, 0.3255], [1.0000, 0.2235], [1.0000, 0.1412], [1.0000, 0.0745], [1.0000, 0.0235], [1.0000, 0.0000], ],
+    ],
+];
+
+/// [`VIB_PLAIN`] for skin hues (0–30°), positive sliders only (negative Vibrance doesn't
+/// protect skin).
+#[rustfmt::skip]
+#[allow(clippy::approx_constant)] // measured values, not constants
+const VIB_SKIN: [[[[f32; 2]; 11]; 7]; 4] = [
+    // vib025
+    [
+        [[1.0000, 0.9531], [1.0000, 0.9062], [1.0000, 0.7969], [1.0000, 0.7031], [1.0000, 0.5781], [1.0000, 0.4844], [1.0000, 0.3906], [1.0000, 0.2656], [1.0000, 0.1719], [1.0000, 0.0781], [1.0000, 0.0000], ],
+        [[1.0000, 0.9479], [1.0000, 0.8958], [1.0000, 0.8021], [1.0000, 0.6875], [1.0104, 0.5876], [1.0104, 0.4742], [1.0000, 0.3750], [1.0000, 0.2708], [1.0000, 0.1771], [1.0000, 0.0833], [1.0000, 0.0000], ],
+        [[1.0000, 0.9531], [1.0000, 0.8984], [1.0000, 0.7969], [1.0078, 0.6899], [1.0078, 0.5814], [1.0078, 0.4806], [1.0078, 0.3721], [1.0000, 0.2734], [1.0000, 0.1797], [1.0000, 0.0859], [1.0000, 0.0000], ],
+        [[1.0000, 0.9500], [1.0000, 0.9000], [1.0000, 0.8000], [1.0063, 0.6894], [1.0063, 0.5839], [1.0063, 0.4783], [1.0063, 0.3727], [1.0000, 0.2750], [1.0000, 0.1750], [1.0000, 0.0812], [1.0000, 0.0000], ],
+        [[1.0000, 0.9479], [1.0000, 0.9010], [1.0000, 0.7969], [1.0052, 0.6891], [1.0052, 0.5855], [1.0052, 0.4767], [1.0000, 0.3802], [1.0000, 0.2760], [1.0000, 0.1771], [1.0000, 0.0833], [1.0000, 0.0000], ],
+        [[1.0000, 0.9509], [1.0000, 0.9018], [1.0000, 0.7946], [1.0000, 0.6920], [1.0000, 0.5848], [1.0000, 0.4821], [1.0000, 0.3795], [1.0000, 0.2768], [1.0000, 0.1786], [1.0000, 0.0848], [1.0000, 0.0000], ],
+        [[1.0000, 0.9490], [1.0000, 0.9020], [1.0000, 0.7961], [1.0000, 0.6941], [1.0000, 0.5882], [1.0000, 0.4824], [1.0000, 0.3765], [1.0000, 0.2784], [1.0000, 0.1804], [1.0000, 0.0863], [1.0000, 0.0000], ],
+    ],
+    // vib050
+    [
+        [[1.0000, 0.9531], [1.0156, 0.8923], [1.0156, 0.7692], [1.0156, 0.6769], [1.0156, 0.5538], [1.0156, 0.4462], [1.0156, 0.3385], [1.0156, 0.2308], [1.0000, 0.1406], [1.0000, 0.0625], [1.0000, 0.0000], ],
+        [[1.0000, 0.9479], [1.0104, 0.8866], [1.0104, 0.7835], [1.0104, 0.6701], [1.0104, 0.5670], [1.0104, 0.4433], [1.0104, 0.3299], [1.0104, 0.2371], [1.0000, 0.1458], [1.0000, 0.0625], [1.0000, 0.0000], ],
+        [[1.0000, 0.9531], [1.0078, 0.8915], [1.0078, 0.7829], [1.0156, 0.6692], [1.0156, 0.5538], [1.0078, 0.4496], [1.0078, 0.3411], [1.0078, 0.2326], [1.0000, 0.1484], [1.0000, 0.0625], [1.0000, 0.0000], ],
+        [[1.0063, 0.9441], [1.0063, 0.8944], [1.0063, 0.7826], [1.0125, 0.6728], [1.0125, 0.5556], [1.0063, 0.4472], [1.0063, 0.3416], [1.0063, 0.2422], [1.0000, 0.1500], [1.0000, 0.0625], [1.0000, 0.0000], ],
+        [[1.0000, 0.9479], [1.0052, 0.8964], [1.0052, 0.7876], [1.0052, 0.6736], [1.0052, 0.5596], [1.0052, 0.4508], [1.0052, 0.3472], [1.0052, 0.2435], [1.0000, 0.1510], [1.0000, 0.0677], [1.0000, 0.0000], ],
+        [[1.0000, 0.9509], [1.0000, 0.9018], [1.0045, 0.7867], [1.0045, 0.6800], [1.0045, 0.5644], [1.0045, 0.4533], [1.0045, 0.3467], [1.0000, 0.2455], [1.0000, 0.1562], [1.0000, 0.0670], [1.0000, 0.0000], ],
+        [[1.0000, 0.9490], [1.0000, 0.8980], [1.0000, 0.7922], [1.0000, 0.6824], [1.0000, 0.5686], [1.0000, 0.4588], [1.0000, 0.3490], [1.0000, 0.2510], [1.0000, 0.1569], [1.0000, 0.0706], [1.0000, 0.0000], ],
+    ],
+    // vib075
+    [
+        [[1.0156, 0.9385], [1.0156, 0.8769], [1.0312, 0.7424], [1.0312, 0.6364], [1.0312, 0.5000], [1.0312, 0.3939], [1.0156, 0.2923], [1.0156, 0.1846], [1.0156, 0.1077], [1.0000, 0.0469], [1.0000, 0.0000], ],
+        [[1.0104, 0.9381], [1.0208, 0.8673], [1.0208, 0.7551], [1.0312, 0.6263], [1.0312, 0.5152], [1.0208, 0.3980], [1.0208, 0.2857], [1.0104, 0.1959], [1.0104, 0.1031], [1.0000, 0.0417], [1.0000, 0.0000], ],
+        [[1.0078, 0.9457], [1.0156, 0.8769], [1.0234, 0.7557], [1.0234, 0.6412], [1.0234, 0.5191], [1.0234, 0.3969], [1.0156, 0.2923], [1.0078, 0.1938], [1.0078, 0.1085], [1.0000, 0.0391], [1.0000, 0.0000], ],
+        [[1.0063, 0.9441], [1.0125, 0.8827], [1.0187, 0.7607], [1.0187, 0.6380], [1.0187, 0.5215], [1.0187, 0.3988], [1.0125, 0.2963], [1.0063, 0.1988], [1.0063, 0.1118], [1.0000, 0.0437], [1.0000, 0.0000], ],
+        [[1.0052, 0.9430], [1.0104, 0.8866], [1.0104, 0.7732], [1.0156, 0.6410], [1.0156, 0.5231], [1.0104, 0.4072], [1.0104, 0.2990], [1.0052, 0.2073], [1.0052, 0.1192], [1.0000, 0.0417], [1.0000, 0.0000], ],
+        [[1.0045, 0.9467], [1.0045, 0.8933], [1.0089, 0.7699], [1.0089, 0.6549], [1.0089, 0.5310], [1.0045, 0.4133], [1.0045, 0.3067], [1.0045, 0.2044], [1.0000, 0.1250], [1.0000, 0.0446], [1.0000, 0.0000], ],
+        [[1.0000, 0.9490], [1.0000, 0.8980], [1.0000, 0.7804], [1.0000, 0.6667], [1.0000, 0.5412], [1.0000, 0.4235], [1.0000, 0.3098], [1.0000, 0.2118], [1.0000, 0.1255], [1.0000, 0.0510], [1.0000, 0.0000], ],
+    ],
+    // vib100
+    [
+        [[1.0156, 0.9231], [1.0312, 0.8485], [1.0469, 0.7015], [1.0469, 0.5672], [1.0469, 0.4328], [1.0469, 0.3134], [1.0312, 0.2121], [1.0312, 0.1061], [1.0156, 0.0615], [1.0000, 0.0156], [1.0000, 0.0000], ],
+        [[1.0208, 0.9184], [1.0312, 0.8384], [1.0417, 0.7100], [1.0417, 0.5600], [1.0417, 0.4400], [1.0312, 0.3131], [1.0312, 0.2020], [1.0208, 0.1224], [1.0104, 0.0515], [1.0000, 0.0208], [1.0000, 0.0000], ],
+        [[1.0156, 0.9308], [1.0234, 0.8550], [1.0391, 0.7068], [1.0391, 0.5789], [1.0391, 0.4436], [1.0312, 0.3258], [1.0234, 0.2137], [1.0156, 0.1231], [1.0078, 0.0620], [1.0000, 0.0156], [1.0000, 0.0000], ],
+        [[1.0125, 0.9321], [1.0187, 0.8650], [1.0312, 0.7212], [1.0312, 0.5879], [1.0312, 0.4545], [1.0250, 0.3354], [1.0187, 0.2270], [1.0125, 0.1358], [1.0063, 0.0683], [1.0000, 0.0188], [1.0000, 0.0000], ],
+        [[1.0104, 0.9330], [1.0156, 0.8718], [1.0208, 0.7398], [1.0208, 0.6020], [1.0208, 0.4643], [1.0156, 0.3436], [1.0104, 0.2371], [1.0052, 0.1503], [1.0052, 0.0725], [1.0000, 0.0208], [1.0000, 0.0000], ],
+        [[1.0045, 0.9422], [1.0089, 0.8850], [1.0134, 0.7489], [1.0134, 0.6167], [1.0089, 0.4823], [1.0089, 0.3584], [1.0045, 0.2489], [1.0045, 0.1511], [1.0000, 0.0804], [1.0000, 0.0223], [1.0000, 0.0000], ],
+        [[1.0000, 0.9451], [1.0000, 0.8941], [1.0000, 0.7686], [1.0000, 0.6392], [1.0000, 0.4980], [1.0000, 0.3725], [1.0000, 0.2549], [1.0000, 0.1608], [1.0000, 0.0824], [1.0000, 0.0235], [1.0000, 0.0000], ],
+    ],
+];
 
 /// A colour range's Lightness, applied after the master edits. It moves each channel towards the
 /// pixel's brightest channel when raised and towards its darkest when lowered, not towards white
@@ -1704,6 +1977,24 @@ mod tone_tests {
     use super::*;
     use photosplice_geom::Rect;
 
+    /// Reference's 8-bit Colorize colours with its own hue, a little off the one set (kit 7: hue
+    /// 200 colours at 201.2°, 170 at 166.9°); 16-bit colours at the hue as set.
+    #[test]
+    fn colorize_8_bit_takes_reference_s_hue() {
+        assert!((colorize_hue_8bit(200.0) - 201.18).abs() < 0.05 && (colorize_hue_8bit(-160.0) - (-160.0 + 1.18)).abs() < 0.05);
+        assert!((colorize_hue_8bit(170.0) - 166.86).abs() < 0.05 && colorize_hue_8bit(f32::NAN).is_nan());
+        let adj = Adjustment::HueSaturation { hue: 200.0, saturation: 40.0, lightness: 0.0, colorize: true, ranges: HueRange::defaults() };
+        let run = |depth| {
+            let mut b = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![[0.4, 0.4, 0.4, 1.0]] };
+            apply_depth(&adj, &mut b, Transfer::Srgb, Some(depth));
+            b.px[0]
+        };
+        let (eight, sixteen) = (run(SampleType::U8), run(SampleType::U16));
+        // The middle (green) channel sits nearer the darkest one at 201.2° than at 200°.
+        assert!(eight[1] < sixteen[1] - 0.004, "{eight:?} {sixteen:?}");
+        assert!((sixteen[1] - hue_saturation_in([0.4; 3], 200.0, 0.4, 0.0, true, false)[1]).abs() < 1e-6);
+    }
+
     /// Corpus rgb32 hue-saturation-colorize.psd (hue 200, 40 %, +5): in a float document the
     /// chroma also shrinks by 1 − l about the moved lightness; 16-bit keeps the HSL colour.
     #[test]
@@ -2142,6 +2433,46 @@ mod tone_tests {
                 assert!((b.px[0][i] * 255.0 - want[i]).abs() < tol, "{c:?}: {:?} vs {want:?}", b.px[0].map(|v| v * 255.0));
             }
         }
+    }
+
+    /// 8-bit Preserve Luminosity in whole levels (temp kit 8 pf8-warm-d25): (255, 221, 51)
+    /// filtered to (245, 202, 35) keeps luma 213 as Reference's (255, 217, 72), its blue clipped
+    /// about that target; and a grey filters to a grey of the same level.
+    #[test]
+    fn preserve_luminosity_8bit_works_in_levels() {
+        let lv = |v: [f32; 3]| v.map(|x| x / 255.0);
+        let out = preserve_luminosity_8bit(lv([245.0, 202.0, 35.0]), lv([255.0, 221.0, 51.0])).map(|v| v * 255.0);
+        assert!(out.iter().zip([255.0, 217.0, 72.0]).all(|(a, b)| (a - b).abs() <= 1.0), "{out:?}");
+        let g = preserve_luminosity_8bit(lv([120.0, 120.0, 120.0]), lv([100.0, 100.0, 100.0])).map(|v| v * 255.0);
+        assert!(g.iter().all(|v| (v - 100.0).abs() < 1e-3), "{g:?}");
+    }
+
+    /// Overlapping ranges add in order, the saturation excess held at −1: a second −100 % range
+    /// adds nothing to the first one's, and a later raise still counts; +100 % is
+    /// [`RANGE_SATURATION_MAX`] (psd-tools huesaturation_saturation_rgb, huesaturation_rgb).
+    #[test]
+    fn overlapping_hue_ranges_hold_at_grey() {
+        let mut r = HueRange::defaults();
+        r[0] = HueRange { hue: 0.0, saturation: -100.0, lightness: -80.0, bounds: [100.0, 110.0, 170.0, 180.0] };
+        r[2] = HueRange { hue: 0.0, saturation: -100.0, lightness: -80.0, bounds: [100.0, 110.0, 170.0, 180.0] };
+        r[5] = HueRange { hue: 0.0, saturation: 49.0, lightness: 0.0, bounds: [100.0, 110.0, 170.0, 180.0] };
+        let t = hue_range_tables(&r);
+        let at = |row: usize| lut(&t[row], 140.0 / 360.0);
+        assert!((at(1) - (-1.0 + 0.49 / 0.51)).abs() < 1e-4, "{}", at(1));
+        assert!((at(2) + 1.0).abs() < 1e-6, "{}", at(2));
+        r[5].saturation = 100.0;
+        assert!((lut(&hue_range_tables(&r)[1], 140.0 / 360.0) - (RANGE_SATURATION_MAX - 1.0)).abs() < 1e-2);
+    }
+
+    /// With a lightness the saturation step comes after it and holds the channels inside 0..1
+    /// (psd-tools huesaturation_rgb: Saturation +100, Lightness −37 takes a near-white tint
+    /// (250, 236, 245) to Reference's (180, 255, 52), not to 0 at the darkest).
+    #[test]
+    fn hue_saturation_saturates_after_the_lightness() {
+        let c = [250.0 / 255.0, 236.0 / 255.0, 245.0 / 255.0];
+        let out = hue_saturation_ranged(c, 122.0, 1.0, -0.37, 0.0, false, false).map(|v| v * 255.0);
+        // The darkest and brightest channels (the hue lands within a few degrees).
+        assert!((out[1] - 255.0).abs() < 0.5 && (out[2] - 52.0).abs() < 1.5, "{out:?}");
     }
 
     #[test]

@@ -1082,6 +1082,26 @@ fn glow_gradient_follows_the_shape() {
     assert!(edge[0] > 0.8 && edge[2] < 0.2, "{edge:?}");
 }
 
+// A Softer gradient glow is opaque from 1 / 8.4 of its blur whatever its Range, so a 100 % one is
+// opaque beside the edge (temp kit 8 og-grad-soft-s20-r100); under Fill 0 % a half-covered edge
+// pixel keeps the gradient's start colour, only fainter (og-grad-*: the disc's edge).
+#[test]
+fn gradient_glows_are_opaque_near_the_edge_and_keep_their_place() {
+    let black_to_white = Gradient { stops: vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], ..Gradient::default() };
+    let g = Glow { paint: FxPaint::Gradient(black_to_white), size: 8.0, range: 1.0, ..glow(GlowTechnique::Softer, GlowSource::Edge) };
+    let d = fx_doc(vec![Effect::OuterGlow(g.clone())]);
+    // Just outside: halfway along the gradient (the blur is ½ there), at full strength.
+    let near = px(&d, 9, 20)[0];
+    assert!((near - 0.5).abs() < 0.08, "{near}");
+    let mut d = fx_doc(vec![Effect::OuterGlow(Glow { range: 0.5, ..g })]);
+    let l = d.layers.last_mut().unwrap();
+    l.fill_opacity = 0.0;
+    l.surface_mut().unwrap().fill_rect(Rect::new(10, 10, 11, 30), &[1.0, 0.0, 0.0, 0.5]);
+    // Black at half strength over white; the gradient taken from the knocked-out map was grey.
+    let edge = px(&d, 10, 20)[0];
+    assert!(edge < 0.6, "{edge}");
+}
+
 #[test]
 fn gradient_overlay_follows_angle_and_reverse() {
     let g = Gradient { stops: vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], angle: 0.0, ..Gradient::default() };
@@ -1122,6 +1142,7 @@ fn satin_and_bevel_stay_inside_shape() {
             altitude: 30.0,
             use_global_light: false,
             gloss_contour: photosplice_doc::Contour::Linear,
+            gloss_anti_alias: false,
             highlight: FxCommon::new(photosplice_color::BlendMode::Screen, 0.75),
             highlight_color: Color::WHITE,
             shadow: FxCommon::new(photosplice_color::BlendMode::Multiply, 0.75),
@@ -1298,6 +1319,7 @@ fn bevel_fx(style: photosplice_doc::BevelStyle, soften: f32) -> Effect {
         altitude: 30.0,
         use_global_light: false,
         gloss_contour: photosplice_doc::Contour::Linear,
+        gloss_anti_alias: false,
         highlight: FxCommon::new(photosplice_color::BlendMode::Screen, 0.75),
         highlight_color: Color::WHITE,
         shadow: FxCommon::new(photosplice_color::BlendMode::Multiply, 0.75),
@@ -1451,12 +1473,9 @@ fn shapeless_effect_maps_cover_only_the_band_being_rendered() {
 // ---------- PSD-fidelity effect semantics (fitted on Photoshop composites) ----------
 
 #[test]
-fn stroke_edges_use_the_chamfer_when_narrow_and_the_exact_distance_when_wide() {
-    // #3646: a narrow stroke's outer edge keeps the 5 × 5 chamfer, whose sub-pixel seeding
-    // Photoshop matches at small offsets (see `stroke_outside_exact`); only a wide one — where the
-    // chamfer's octagon facets (see `a_wide_outside_stroke_is_round_not_a_polygon`) — uses the
-    // exact Euclidean transform.
-    // Square 10..30, outside stroke 3: (9, 7) is offset (1, 3) from the corner pixel. Photoshop
+fn stroke_edges_use_the_chamfer() {
+    // A stroke's outer edge measures with the 5 × 5 chamfer and its sub-pixel seeding.
+    // Square 10..30, outside stroke 3: (9, 7) is offset (1, 3) from the corner pixel. Reference
     // measures √5 + 1 = 3.236 there, so coverage is 3 + 1 − 3.236 = 0.764 (the exact distance is
     // 3.162, coverage 0.838).
     let d = fx_doc(vec![stroke(3.0, StrokePosition::Outside)]);
@@ -1468,42 +1487,31 @@ fn stroke_edges_use_the_chamfer_when_narrow_and_the_exact_distance_when_wide() {
 }
 
 #[test]
-fn the_stroke_metric_switches_at_the_fitted_threshold() {
-    // The widest outside stroke any Photoshop oracle matches with the chamfer is 18 px
-    // (ag-psd read-write/strokes): its octagon deviates 0.48 px from a circle there; 20 px keeps
-    // it. Wider strokes (the 60 px #3646 case) are round.
-    assert!(!crate::effects::stroke_outside_exact(18.0));
-    assert!(crate::effects::stroke_outside_exact(crate::effects::STROKE_CHAMFER_MAX));
-    assert!(crate::effects::stroke_outside_exact(60.0));
-}
-
-#[test]
-fn a_wide_outside_stroke_is_round_not_a_polygon() {
-    // A point source dilated by 60 px must stay a circle. The 5 × 5 chamfer's octagonal level set
-    // made the boundary swing ~2.5 px at this radius (~10 px at 245 px) — the "low-poly" #3646.
+fn a_wide_outside_stroke_is_the_chamfer_polygon() {
+    // Reference draws wide strokes with the chamfer too (temp kit 8 stroke-out-s40 / -s60): a
+    // point source stroked 60 px reaches its full width along the axes and the diagonals, where
+    // the chamfer's steps are exact, and falls short between them (about 1.6 px at 13°).
     let mut d = doc_white(170, 170);
     let mut l = solid_layer("dot", Rect::new(85, 85, 86, 86), [1.0, 0.0, 0.0, 1.0]);
     l.effects.items = vec![stroke(60.0, StrokePosition::Outside)];
     d.layers.push(l);
     let buf = render(&d, Rect::new(0, 0, 170, 170));
     let at = |x: i32, y: i32| buf.px[(y as usize) * 170 + x as usize];
-    let (mut lo, mut hi) = (f64::MAX, 0.0f64);
     let stroke_at = |x: i32, y: i32| x >= 0 && y >= 0 && x < 170 && y < 170 && at(x, y)[2] > 0.5 && at(x, y)[0] < 0.5;
-    for k in 0..72 {
-        let th = (k as f64) * std::f64::consts::TAU / 72.0;
-        let (dx, dy) = (th.cos(), th.sin());
-        let mut r = 0.0f64;
-        let mut t = 0.0f64;
+    let reach = |deg: f64| {
+        let (dx, dy) = (deg.to_radians().cos(), deg.to_radians().sin());
+        let (mut r, mut t) = (0.0f64, 0.0f64);
         while t < 84.0 {
-            if stroke_at((85.0 + dx * t).round() as i32, (85.0 + dy * t).round() as i32) {
+            if stroke_at((85.5 + dx * t).floor() as i32, (85.5 + dy * t).floor() as i32) {
                 r = t;
             }
             t += 0.25;
         }
-        lo = lo.min(r);
-        hi = hi.max(r);
-    }
-    assert!(hi - lo <= 2.0, "the 60 px stroke boundary swings {lo}..{hi} px — a polygon, not a circle (#3646)");
+        r
+    };
+    let (axis, diagonal, between) = (reach(0.0), reach(45.0), reach(13.0));
+    assert!((axis - diagonal).abs() <= 1.0, "{axis} {diagonal}");
+    assert!(between < axis - 0.75, "{between} vs {axis}");
 }
 
 #[test]
@@ -1519,6 +1527,28 @@ fn inside_stroke_respects_partial_edge_coverage() {
     assert!(close4(edge, [0.75, 0.75, 1.0, 1.0]), "edge = blue stroke at 25 % over white: {edge:?}");
     let p = px(&d, 13, 20);
     assert!((p[2] - 0.75).abs() < 0.02 && (p[0] - 0.25).abs() < 0.02, "{p:?}");
+}
+
+// Each half of a Pillow Emboss shades the composite on its own and an edge pixel takes them by
+// its coverage (temp kit 8 pillow-smooth-s10-normal: a half-covered pixel between a dark inside
+// and a lit outside is the mean of the two, where the averaged maps gave a darker grey).
+#[test]
+fn pillow_edge_pixels_mix_the_shaded_halves() {
+    let Effect::BevelEmboss(mut b) = bevel_fx(photosplice_doc::BevelStyle::PillowEmboss, 0.0) else { panic!("a bevel") };
+    b.size = 10.0;
+    b.highlight = FxCommon::new(photosplice_color::BlendMode::Normal, 1.0);
+    b.shadow = FxCommon::new(photosplice_color::BlendMode::Normal, 1.0);
+    let mut d = doc_white(64, 64);
+    d.layers[0].surface_mut().unwrap().fill_rect(Rect::new(0, 0, 64, 64), &[0.5, 0.5, 0.5, 1.0]);
+    let mut l = solid_layer("sq", Rect::new(16, 16, 44, 48), [0.5, 0.5, 0.5, 1.0]);
+    l.surface_mut().unwrap().fill_rect(Rect::new(43, 16, 44, 48), &[0.5, 0.5, 0.5, 0.5]);
+    l.effects.items = vec![Effect::BevelEmboss(b)];
+    d.layers.push(l);
+    let (inside, edge, outside) = (px(&d, 42, 32)[0], px(&d, 43, 32)[0], px(&d, 44, 32)[0]);
+    assert!(inside < 0.2 && outside > 0.6, "{inside} {outside}");
+    // Half the dark inside's result and half the lit outside's (the neighbours shade alike).
+    // (0.37 against a mean of 0.39; the averaged maps gave 0.34.)
+    assert!((edge - (inside + outside) / 2.0).abs() < 0.03, "edge {edge}, inside {inside}, outside {outside}");
 }
 
 #[test]
@@ -1538,6 +1568,7 @@ fn emboss_shades_the_composited_layer() {
         altitude: 30.0,
         use_global_light: false,
         gloss_contour: photosplice_doc::Contour::Linear,
+        gloss_anti_alias: false,
         highlight: FxCommon::new(photosplice_color::BlendMode::Normal, 1.0),
         highlight_color: Color::WHITE,
         shadow: FxCommon::new(photosplice_color::BlendMode::Multiply, 0.0),
@@ -2633,6 +2664,7 @@ fn nested_parallel_fx_doc() -> Document {
         altitude: 32.0,
         use_global_light: false,
         gloss_contour: Contour::Linear,
+        gloss_anti_alias: false,
         highlight: FxCommon::new(BlendMode::Screen, 0.75),
         highlight_color: Color::WHITE,
         shadow: FxCommon::new(BlendMode::Multiply, 0.75),
@@ -2698,8 +2730,23 @@ fn photo_filter_matches_photoshop() {
             ([1.0, 1.0, 1.0], [255.0, 255.0, 255.0]),
             ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
         ] {
+            // 8-bit Preserve Luminosity works in whole levels: Reference's rgb8 file (the values
+            // above are its rgb16 one's) has red at (238, 6, 6), green (69, 219, 1), blue
+            // (46, 1, 131), yellow (255, 240, 84), the 128 grey (139, 124, 116) and the 242 one
+            // (255, 239, 230).
+            let ps8 = [
+                ([1.0, 0.0, 0.0], [238.0, 6.0, 6.0]),
+                ([0.0, 1.0, 0.0], [69.0, 219.0, 1.0]),
+                ([0.0, 0.0, 1.0], [46.0, 1.0, 131.0]),
+                ([1.0, 1.0, 0.0], [255.0, 240.0, 84.0]),
+                ([0.5019, 0.5019, 0.5019], [139.0, 124.0, 116.0]),
+                ([0.949, 0.949, 0.949], [255.0, 239.0, 230.0]),
+            ];
+            let ps = ps8.iter().find(|r| depth == SampleType::U8 && r.0 == v).map_or(ps, |r| r.1);
             let got = filter(warming, depth, v);
-            assert!(got.iter().zip(ps).all(|(g, p)| (g - p).abs() <= 1.0), "{depth:?} {v:?}: got {got:?} want {ps:?}");
+            // 8-bit: the filtered colour's own rounding moves the whole-level shift a little.
+            let tol = if depth == SampleType::U8 { 1.5 } else { 1.0 };
+            assert!(got.iter().zip(ps).all(|(g, p)| (g - p).abs() <= tol), "{depth:?} {v:?}: got {got:?} want {ps:?}");
         }
     }
     // The 32-bit file picks the same numbers as linear values (Lab 81.5, 9.41, 82.19). Its fit is
@@ -2796,6 +2843,29 @@ fn vibrance_matches_photoshop() {
     }
 }
 
+/// Vibrance from its measured tables (Reference, temp kit 7 and corpus vibrance-100-0): strong
+/// sliders on a mid green, a skin orange held back, greys untouched.
+#[test]
+fn vibrance_follows_the_measured_tables() {
+    type Case = (f32, [u8; 3], [u8; 3]);
+    let cases: [Case; 6] = [
+        (-100.0, [102, 128, 102], [102, 106, 102]),
+        (-100.0, [64, 128, 64], [88, 111, 88]),
+        (100.0, [64, 128, 64], [31, 132, 31]),
+        (100.0, [240, 162, 34], [240, 161, 10]),
+        (100.0, [128, 128, 128], [128, 128, 128]),
+        (-100.0, [200, 200, 200], [200, 200, 200]),
+    ];
+    for (v, input, want) in cases {
+        let x = input.map(|c| f32::from(c) / 255.0);
+        let mut b = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![[x[0], x[1], x[2], 1.0]] };
+        adjust::apply(&Adjustment::Vibrance { vibrance: v, saturation: 0.0 }, &mut b);
+        for k in 0..3 {
+            assert!((b.px[0][k] * 255.0 - f32::from(want[k])).abs() <= 1.5, "{v} {input:?} → {:?}, Reference {want:?}", b.px[0].map(|c| c * 255.0));
+        }
+    }
+}
+
 #[test]
 fn color_balance_matches_photoshop() {
     // Photoshop corpus cb-*.psd (rgb8), one slider at a time: grey 128 and an orange.
@@ -2876,6 +2946,7 @@ fn stroke_emboss_leaves_the_backdrop_share_alone() {
                 altitude: 30.0,
                 use_global_light: false,
                 gloss_contour: photosplice_doc::Contour::Linear,
+                gloss_anti_alias: false,
                 highlight: FxCommon::new(BlendMode::Screen, 0.75),
                 highlight_color: Color::WHITE,
                 shadow: FxCommon::new(BlendMode::Multiply, 0.75),

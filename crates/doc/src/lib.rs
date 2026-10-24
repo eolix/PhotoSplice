@@ -971,6 +971,9 @@ pub struct Metadata {
     /// Raw PSD global additional-layer-info blocks: (signature, key, data),
     /// e.g. `lnk2` embedded smart-object files, `Patt` patterns, `Txt2`.
     pub psd_global_blocks: Vec<PsdGlobalBlock>,
+    /// The PSD this came from had no layer records (its Background was the merged image alone):
+    /// while the document is still just that Background, it is saved the same way.
+    pub psd_flat: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

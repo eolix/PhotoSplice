@@ -15,6 +15,12 @@
 //! merged composite (Photoshop's rendering) as the oracle; then document →
 //! PSD → document → flatten, compared with the first flatten (our own export
 //! must not change what the document looks like). Prints a per-file table.
+//! CMYK documents are compared in their inks, premultiplied (PASS (inks)): what the file
+//! stores and our export writes, where an RGB comparison would let a level of ink in a dark
+//! colour exceed the tolerance and a rich black pass for a black of K alone. Lab documents
+//! likewise in L, a and b (PASS (Lab)), both composites taken back from their unclipped display
+//! RGB: out of the display gamut a unit of a or b moves RGB by tens of levels (lab8
+//! hue-saturation: 1/255 in b read 57/255 in red).
 //! A panic anywhere is caught and reported as CRASH (Rule 9).
 //!
 //! Oracles: files without layers (Bitmap, Indexed, plain flat files) compare
@@ -65,7 +71,9 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-const PASS_TOL: f32 = 2.0 / 255.0;
+// Two levels exactly (8-bit samples two apart) pass: the slack only absorbs float noise in
+// 2/255 itself (cmyk8 hue-saturation: inks two levels off read 0.0078432 > 0.0078431).
+const PASS_TOL: f32 = 2.0 / 255.0 + 1e-6;
 /// Export → re-import must render within one 8-bit step of the imported document.
 const ROUNDTRIP_TOL: f32 = 1.0 / 255.0 + 1e-5;
 
@@ -152,11 +160,11 @@ const MIXED: Source = Source { label: "io corpus", dir: "corpus/psd", group_dept
 
 /// The full psd-tools test set (309 files at the pinned commit; see `xtask/psd-tools-corpus.sha256`):
 /// 234 vs the merged image + 10 vs the thumbnail; floor raised to upstream's 249 (Advanced Blending knockouts).
-const PSD_TOOLS: Source = Source { label: "psd-tools corpus", dir: "corpus/psd-tools", group_depth: 0, pass_floor: 251, roundtrip_floor: 308 };
+const PSD_TOOLS: Source = Source { label: "psd-tools corpus", dir: "corpus/psd-tools", group_depth: 0, pass_floor: 254, roundtrip_floor: 308 };
 
 /// Our Reference-authored oracles (271 files; https://github.com/storytold/photocraft-corpus),
 /// grouped by feature (`smart-filters`, `effects`, `text`, `adjustments/<mode><bits>`).
-const PHOTOSHOP: Source = Source { label: "photoshop oracles", dir: "corpus/photoshop", group_depth: 2, pass_floor: 219, roundtrip_floor: 271 };
+const PHOTOSHOP: Source = Source { label: "photoshop oracles", dir: "corpus/photoshop", group_depth: 2, pass_floor: 240, roundtrip_floor: 271 };
 
 /// The corpus directory; a missing corpus fails the test.
 fn locate(src: &Source) -> PathBuf {
@@ -272,6 +280,55 @@ enum Outcome {
 
 /// Oracle + round trip for one file. Returns the oracle outcome and whether the export round trip
 /// rendered the same (`None` when it could not run).
+/// A Lab document's composite against the merged image in L, a and b, both taken back from their
+/// (unclipped) display RGB to the 0..1 values the file stores: the largest difference of
+/// premultiplied values (and of alpha), and the share of pixels past the tolerance.
+fn lab_diff(ours: &[[f32; 4]], merged: &[[f32; 4]]) -> (f32, f32) {
+    let lab = |p: &[f32; 4]| {
+        let l = photosplice_color::convert::srgb_to_lab([p[0], p[1], p[2]]);
+        [l[0] / 100.0, (l[1] + 128.0) / 255.0, (l[2] + 128.0) / 255.0]
+    };
+    let (mut worst, mut bad) = (0.0f32, 0usize);
+    for (q, o) in ours.iter().zip(merged) {
+        let (lq, lo) = (lab(q), lab(o));
+        let mut d = (q[3] - o[3]).abs();
+        for c in 0..3 {
+            d = d.max((lq[c] * q[3] - lo[c] * o[3]).abs());
+        }
+        worst = worst.max(d);
+        bad += usize::from(d > PASS_TOL);
+    }
+    (worst, 100.0 * bad as f32 / ours.len().max(1) as f32)
+}
+
+/// A CMYK document's composite against the merged image in inks: the largest difference of
+/// premultiplied ink (and of alpha, when the merged image has transparency; without it Reference
+/// flattened onto paper, no ink), and the share of pixels past the tolerance. `None` when either
+/// side can't be read in inks.
+fn ink_diff(doc: &photosplice_doc::Document, file: &PsdFile, merged_alpha: bool) -> Option<(f32, f32)> {
+    let flat = psd_to_document(&PsdFile { layer_info: None, ..file.clone() }).0;
+    let theirs = flat.layers.first()?.surface()?;
+    let mut ours = Vec::new();
+    photosplice_compose::render_ink_bands::<()>(doc, doc.bounds(), 64, |b| {
+        ours.extend(b.px);
+        Ok(())
+    })
+    .ok()?;
+    let w = doc.size.width as usize;
+    let (mut worst, mut bad) = (0.0f32, 0usize);
+    for (i, q) in ours.iter().enumerate() {
+        let o = theirs.pixel((i % w) as i32, (i / w) as i32);
+        let oa = if merged_alpha { o.get(4).copied().unwrap_or(1.0) } else { 1.0 };
+        let mut d = if merged_alpha { (q[4] - oa).abs() } else { 0.0 };
+        for c in 0..4 {
+            d = d.max((q[c] * q[4] - o.get(c).copied().unwrap_or(0.0) * oa).abs());
+        }
+        worst = worst.max(d);
+        bad += usize::from(d > PASS_TOL);
+    }
+    Some((worst, 100.0 * bad as f32 / ours.len().max(1) as f32))
+}
+
 fn check_file(name: &str, bytes: &[u8]) -> (Outcome, Option<f32>) {
     let known_bad = KNOWN_BAD.iter().any(|(f, _)| name.ends_with(f));
     let file = match PsdFile::from_bytes(bytes) {
@@ -353,11 +410,22 @@ fn check_file(name: &str, bytes: &[u8]) -> (Outcome, Option<f32>) {
             })
             .collect()
     };
-    let m = common::max_diff(&ours, &merged);
-    let bad = ours.iter().zip(&merged).filter(|(a, b)| (0..4).any(|c| (a[c] * a[3] - b[c] * b[3]).abs() > PASS_TOL)).count();
-    let pct = 100.0 * bad as f32 / ours.len().max(1) as f32;
+    // A CMYK document is compared in its inks, what the file stores and our export writes: on
+    // screen a level of ink in a dark colour can move RGB by more than the tolerance (a rich
+    // black and a black of K alone look alike there, but print differently).
+    let inks = (file.header.color_mode == photosplice_psd::ColorMode::Cmyk).then(|| ink_diff(doc, &file, file.merged_has_alpha())).flatten();
+    // So is a Lab document whose adjustments work on L, a and b: out of the display gamut a unit
+    // of a or b can move RGB by tens of levels.
+    let inks = inks.or_else(|| (file.header.color_mode == photosplice_psd::ColorMode::Lab).then(|| lab_diff(&ours, &merged)));
+    let (m, pct) = match inks {
+        Some(d) => d,
+        None => {
+            let bad = ours.iter().zip(&merged).filter(|(a, b)| (0..4).any(|c| (a[c] * a[3] - b[c] * b[3]).abs() > PASS_TOL)).count();
+            (common::max_diff(&ours, &merged), 100.0 * bad as f32 / ours.len().max(1) as f32)
+        }
+    };
     let (outcome, status) = if m <= PASS_TOL {
-        (Outcome::Pass, "PASS")
+        (Outcome::Pass, match (inks.is_some(), file.header.color_mode) { (false, _) => "PASS", (true, photosplice_psd::ColorMode::Lab) => "PASS (Lab)", (true, _) => "PASS (inks)" })
     } else if dissolve_matches(doc, &ours, &merged) {
         (Outcome::Pass, "PASS (dissolve metric)")
     } else {

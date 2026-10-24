@@ -381,9 +381,13 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
             } else {
                 // The fields must reach past the longer ramp (outside: the size and 1.5 px).
                 let reach = size.max(g.chisel[0]).max(g.chisel[1]) + 1.0;
-                let din = b.field(FieldKind::Inside, reach);
-                let dout = b.field(FieldKind::BevelOutside, reach);
-                let soft = f32::from(u8::from(photosplice_compose::effects::chisel_soft_edge(bv, &g)));
+                // The chamfer distances, to the binary edge for Chisel Soft
+                // (compose::effects::bevel_height).
+                let soft = bv.technique == BevelTechnique::ChiselSoft;
+                let (kin, kout) = if soft { (FieldKind::ChiselSoftInside, FieldKind::ChiselSoftOutside) } else { (FieldKind::StrokeInside, FieldKind::StrokeOutside) };
+                let din = b.field(kin, reach);
+                let dout = b.field(kout, reach);
+                let soft = f32::from(u8::from(soft));
                 let mut st = stage(Kernel::MBevelH, Some(din), Some(dout), [paint(g.paint), g.chisel[0], g.chisel[1], soft], 0);
                 st.s = Some(In::Shape);
                 b.push(st)
@@ -408,27 +412,42 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
                 st.pattern = Some(pat.clone());
                 h = b.push(st);
             }
-            if bv.soften >= 1.0 {
-                h = b.conv(h, photosplice_compose::effects::tent_kernel(bv.soften));
-            }
             let (angle, altitude) = if bv.use_global_light { (light.angle, light.altitude) } else { (bv.angle, bv.altitude) };
             let (sa, ca) = angle.to_radians().sin_cos();
             let (se, ce) = altitude.to_radians().sin_cos();
             let lut = contour_lut(&bv.gloss_contour).map(Arc::new);
-            // Region (`fs_mbevelshade`): 0 inside, 1 under the edge and outside, 2 / 3 emboss /
-            // pillow emboss (both halves in one map).
+            // Region (`fs_mbevelshade`): 0 inside (× alpha), 1 under the edge and outside, 4
+            // inside at full strength. Emboss styles: the inside half, then the outside one
+            // (pillow: facing the other way), blended by coverage when painted (`plan`).
             let passes: Vec<(f32, f32)> = match g.paint {
                 BevelPaint::Inner | BevelPaint::Stroke => vec![(g.depth, 0.0)],
                 BevelPaint::Outer => vec![(g.depth, 1.0)],
-                BevelPaint::Both => vec![(g.depth, if g.pillow { 3.0 } else { 2.0 })],
+                BevelPaint::Both => vec![(g.depth, 4.0), (if g.pillow { -g.depth } else { g.depth }, 1.0)],
             };
+            let reach_past = photosplice_compose::effects::outer_reaches_past(bv, &g);
+            // One shading step (`fs_mbevelshade`; p3.x: an outer bevel reaching a pixel past its
+            // height, p3.y: its softened-bevel step, 0 = all in one).
+            let shade = |a: In, bb: Option<In>, depth: f32, region: f32, which: f32, mode: f32| {
+                let mut s = stage(Kernel::MBevelShade, Some(a), bb, [ca * ce, -sa * ce, se, se], 1);
+                s.p1 = [depth, region, which, f32::from(u8::from(lut.is_some()))];
+                s.p3 = [f32::from(u8::from(reach_past && region == 1.0)), mode, 0.0, 0.0];
+                s.lut = lut.clone();
+                s.s = Some(In::Shape);
+                s
+            };
+            let soften = (bv.soften >= 1.0).then(|| photosplice_compose::effects::tent_kernel(bv.soften));
             let mut out = 0;
             for (depth, region) in &passes {
                 for which in [0.0, 1.0] {
-                    let mut s = stage(Kernel::MBevelShade, Some(h), None, [ca * ce, -sa * ce, se, se], 1);
-                    s.p1 = [*depth, *region, which, f32::from(u8::from(lut.is_some()))];
-                    s.lut = lut.clone();
-                    s.s = Some(In::Shape);
+                    let mut s = match &soften {
+                        None => shade(h, None, *depth, *region, which, 0.0),
+                        // Soften blurs the shading, then the region applies (`bevel_maps`).
+                        Some(k) => {
+                            let raw = b.push(shade(h, None, *depth, *region, which, 1.0));
+                            let blurred = b.conv(raw, k.clone());
+                            shade(h, Some(blurred), *depth, *region, which, 2.0)
+                        }
+                    };
                     s.out = Some(out);
                     out += 1;
                     b.stages.push(s);
@@ -440,14 +459,8 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
             // composite_with_effects' stroke bands (maps 0 outside, 1 inside)
             let (in_w, out_w) = stroke_widths(st);
             if out_w > 0.0 {
-                // Narrow strokes keep the fitted chamfer, wide ones the exact transform (#3646);
-                // the CPU picks the same field by the same width (`stroke_outside_exact`).
-                let kind = match (vector_shape, photosplice_compose::effects::stroke_outside_exact(out_w)) {
-                    (true, true) => FieldKind::StrokeOutsideVector,
-                    (true, false) => FieldKind::StrokeOutsideVectorChamfer,
-                    (false, true) => FieldKind::StrokeOutsideExact,
-                    (false, false) => FieldKind::StrokeOutside,
-                };
+                // The chamfer at every width, as the CPU (compose::effects::build_maps).
+                let kind = if vector_shape { FieldKind::StrokeOutsideVectorChamfer } else { FieldKind::StrokeOutside };
                 let d = b.field(kind, out_w);
                 let mut s = stage(Kernel::MStroke, Some(d), None, [out_w, 0.0, 0.0, 0.0], 0);
                 s.out = Some(0);
@@ -537,7 +550,7 @@ pub(crate) fn field(kind: FieldKind, reach: i32, shape: &[f32], region: Rect, ou
 /// threads (wasm) there is nothing to spread over, and bands keep the memory small.
 fn threaded_inside(kind: FieldKind) -> bool {
     !cfg!(target_arch = "wasm32")
-        && matches!(kind, FieldKind::Outside | FieldKind::Inside | FieldKind::BevelOutside | FieldKind::StrokeOutsideExact)
+        && matches!(kind, FieldKind::Outside | FieldKind::Inside | FieldKind::BevelOutside)
 }
 
 /// [`field`] with the halo given (the tests shrink it to see that they notice).
@@ -767,9 +780,9 @@ mod tests {
             FieldKind::ChokeInside,
             FieldKind::StrokeOutside,
             FieldKind::StrokeInside,
-            FieldKind::StrokeOutsideExact,
-            FieldKind::StrokeOutsideVector,
             FieldKind::StrokeOutsideVectorChamfer,
+            FieldKind::ChiselSoftInside,
+            FieldKind::ChiselSoftOutside,
         ] {
             let reach = 9;
             let whole = photosplice_compose::effects::distance_field(kind, shape.clone(), w, h, reach as f32);
@@ -791,35 +804,22 @@ mod tests {
         }
     }
 
-    /// #3646: a stroke's outer edge is the fitted 5 × 5 chamfer while it is narrow and the exact
-    /// Euclidean transform once it is wide — the chamfer's octagon facets a wide stroke. The GPU
-    /// builds it from the field its width picks (`stroke_outside_exact`), while the spread of drop
-    /// shadows and softer outer glows keeps the chamfer field (fitted to Photoshop, #224) — so
-    /// routing a wide stroke through the chamfer, or a shadow through the exact field, fails here.
+    /// A stroke's outer edge is the 5 × 5 chamfer at every width (Reference's wide strokes are
+    /// its polygon, compose::effects::build_maps); a shape layer's outline stroke takes the
+    /// chamfer of its outline, the inside edge and the shadow / softer-glow spread the chamfer too.
     #[test]
-    fn a_stroke_uses_the_chamfer_narrow_and_the_exact_field_wide() {
+    fn strokes_use_the_chamfer_at_every_width() {
         use photosplice_color::{BlendMode, Color};
         use photosplice_doc::{FxCommon, FxPaint, StrokeFx, StrokePosition};
         let light = GlobalLight::default();
         let stroke =
             |size, position| Effect::Stroke(StrokeFx { common: FxCommon::new(BlendMode::Normal, 1.0), size, position, paint: FxPaint::Color(Color::BLACK) });
-        // Narrow (< STROKE_CHAMFER_MAX): the chamfer, exactly as before #3646.
-        let narrow = program(&stroke(6.0, StrokePosition::Outside), &light, false);
-        assert!(narrow.fields.iter().any(|(k, _)| *k == FieldKind::StrokeOutside), "a narrow raster outside stroke keeps the chamfer: {:?}", narrow.fields);
-        assert!(!narrow.fields.iter().any(|(k, _)| *k == FieldKind::StrokeOutsideExact), "…not the exact field: {:?}", narrow.fields);
-        // Wide: the exact transform.
-        let wide = program(&stroke(40.0, StrokePosition::Outside), &light, false);
-        assert!(
-            wide.fields.iter().any(|(k, _)| *k == FieldKind::StrokeOutsideExact),
-            "a wide raster outside stroke needs the exact outer field: {:?}",
-            wide.fields
-        );
-        assert!(!wide.fields.iter().any(|(k, _)| *k == FieldKind::StrokeOutside), "…not the chamfer field: {:?}", wide.fields);
-        // A shape layer's outline stroke follows the same width rule; the inside edge keeps the chamfer.
-        let vector_narrow = program(&stroke(6.0, StrokePosition::Outside), &light, true);
-        assert!(vector_narrow.fields.iter().any(|(k, _)| *k == FieldKind::StrokeOutsideVectorChamfer), "{:?}", vector_narrow.fields);
-        let vector_wide = program(&stroke(40.0, StrokePosition::Outside), &light, true);
-        assert!(vector_wide.fields.iter().any(|(k, _)| *k == FieldKind::StrokeOutsideVector), "{:?}", vector_wide.fields);
+        for size in [6.0, 40.0] {
+            let raster = program(&stroke(size, StrokePosition::Outside), &light, false);
+            assert!(raster.fields.iter().any(|(k, _)| *k == FieldKind::StrokeOutside), "{size}: {:?}", raster.fields);
+            let vector = program(&stroke(size, StrokePosition::Outside), &light, true);
+            assert!(vector.fields.iter().any(|(k, _)| *k == FieldKind::StrokeOutsideVectorChamfer), "{size}: {:?}", vector.fields);
+        }
         let inner = program(&stroke(40.0, StrokePosition::Inside), &light, false);
         assert!(inner.fields.iter().any(|(k, _)| *k == FieldKind::StrokeInside), "{:?}", inner.fields);
         // The shadow / softer-glow spread is unchanged: still the chamfer.
