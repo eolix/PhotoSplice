@@ -426,42 +426,6 @@ fn t_encode(v: f32, g: f32) -> f32 {
     return pow(max(v, 0.0), 1.0 / g);
 }
 
-// compose::adjust::vibrance_lin: Photoshop's Vibrance slider (v in [-1, 1]) as an HSV change in
-// linear light that keeps the hue; b0 = boost fit (c0, c1, p, q), b1 = (r0, ra, rt).
-fn vibrance_lin(c: vec3<f32>, v: f32, b0: vec4<f32>, b1: vec3<f32>) -> vec3<f32> {
-    let mx = max(max(c.r, c.g), c.b);
-    let mn = min(min(c.r, c.g), c.b);
-    if (mx <= 0.0 || mx - mn <= 1e-9) { return c; }
-    let t = 1.0 - mn / mx;
-    let shape = t * (1.0 - t) * (2.0 - t + t * t) * mx * max(1.0 - mx, 0.0);
-    var t2: f32;
-    var v2: f32;
-    if (v < 0.0) {
-        let a = -v;
-        t2 = t * (1.0 - a / 4.0) * (1.0 - a + a * t * (1.0 + t) / 2.0);
-        v2 = mx - a * shape;
-    } else {
-        let d = mx - mn;
-        var h: f32;
-        if (mx == c.r) { h = rem_euclid((c.g - c.b) / d, 6.0); }
-        else if (mx == c.g) { h = (c.b - c.r) / d + 2.0; }
-        else { h = (c.r - c.g) / d + 4.0; }
-        h = h * 60.0;
-        var w = 0.0;
-        if (h <= 30.0) { w = 1.0; }
-        else if (h < 45.0) { w = (45.0 - h) / 15.0; }
-        else if (h >= 300.0) { w = (h - 300.0) / 60.0; }
-        let a = v * (1.0 - w) + 0.64 * pow(v, 1.6) * w;
-        let boost = (b0.x * a + b0.y * a * a) * pow(t, b0.z) * pow(1.0 - t, b0.w)
-            * exp((b1.x + b1.y * a + b1.z * (1.0 - t)) * max(1.0 - mx, 0.0));
-        t2 = min(t * (1.0 + boost), 1.0);
-        v2 = mx + v / 4.0 * shape;
-    }
-    let m2 = v2 * (1.0 - t2);
-    let k = (v2 - m2) / (mx - mn);
-    return vec3(m2) + (c - vec3(mn)) * k;
-}
-
 fn rgb_to_hsl(c: vec3<f32>) -> vec3<f32> {
     let mx = max(max(c.r, c.g), c.b);
     let mn = min(min(c.r, c.g), c.b);
@@ -726,21 +690,6 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
             // 32-bit documents keep channels outside 0..1 (adjust::hue_saturation_ranged).
             if (p1.y > 0.5) { return rgb; }
             return clamp(rgb, vec3(0.0), vec3(1.0));
-        }
-        case 9: {                                                              // Vibrance
-            // compose::adjust::vibrance_px: in linear light, channels move from the brightest by
-            // the factor for their saturation (LUT row 0), then blend with the luminance by p0.x.
-            let g = p0.y;
-            var l = vec3(t_decode(c.r, g), t_decode(c.g, g), t_decode(c.b, g));
-            let mx = max(l.r, max(l.g, l.b));
-            let mn = min(l.r, min(l.g, l.b));
-            if (mx > 0.0) {
-                let f = lut(0, 1.0 - mn / mx);
-                l = max(mx - (mx - l) * f, vec3(0.0));
-            }
-            let y = 0.287 * l.r + 0.713 * l.g;
-            l = y + (l - y) * p0.x;
-            return clamp(vec3(t_encode(l.r, g), t_encode(l.g, g), t_encode(l.b, g)), vec3(0.0), vec3(1.0));
         }
         case 10: {                                                             // Channel mixer (32-bit unclipped)
             let lo = select(0.0, -F32_MAX, hdr);

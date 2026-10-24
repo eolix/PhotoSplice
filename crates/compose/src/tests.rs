@@ -2800,6 +2800,29 @@ fn vibrance_matches_photoshop() {
     }
 }
 
+/// Vibrance from its measured tables (Reference, temp kit 7 and corpus vibrance-100-0): strong
+/// sliders on a mid green, a skin orange held back, greys untouched.
+#[test]
+fn vibrance_follows_the_measured_tables() {
+    type Case = (f32, [u8; 3], [u8; 3]);
+    let cases: [Case; 6] = [
+        (-100.0, [102, 128, 102], [102, 106, 102]),
+        (-100.0, [64, 128, 64], [88, 111, 88]),
+        (100.0, [64, 128, 64], [31, 132, 31]),
+        (100.0, [240, 162, 34], [240, 161, 10]),
+        (100.0, [128, 128, 128], [128, 128, 128]),
+        (-100.0, [200, 200, 200], [200, 200, 200]),
+    ];
+    for (v, input, want) in cases {
+        let x = input.map(|c| f32::from(c) / 255.0);
+        let mut b = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![[x[0], x[1], x[2], 1.0]] };
+        adjust::apply(&Adjustment::Vibrance { vibrance: v, saturation: 0.0 }, &mut b);
+        for k in 0..3 {
+            assert!((b.px[0][k] * 255.0 - f32::from(want[k])).abs() <= 1.5, "{v} {input:?} → {:?}, Reference {want:?}", b.px[0].map(|c| c * 255.0));
+        }
+    }
+}
+
 #[test]
 fn color_balance_matches_photoshop() {
     // Photoshop corpus cb-*.psd (rgb8), one slider at a time: grey 128 and an orange.
