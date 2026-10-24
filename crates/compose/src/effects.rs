@@ -1105,17 +1105,15 @@ fn paint_fx(
     }
 }
 
-/// The opacity gain of a gradient glow over its map (see [`paint_glow`]). A Softer glow is
-/// opaque from 1 / 8.4 of its blurred shape whatever its size and Range (temp kits 8 and 9
-/// og-grad-*: sizes 10, 20 and 40 at ranges 25, 50 and 100 %, all within 3.2/255 at 8.4, 4.7 at
-/// 8.2 or 8.4 at 8.6; `1 / range²` made a 100 % glow a quarter as strong), so the gain on the
-/// ranged map is `range × 8.4`. A Precise glow is opaque from `range²`.
+/// The opacity gain of a gradient glow over its map (see [`paint_glow`]): opaque from 1 / 8.4 of
+/// its blurred shape (Softer) or of its ramp (Precise) whatever its size and Range, so the gain on
+/// the ranged map is `range × 8.4` (temp kits 8 and 9 og-grad-*: Softer sizes 10, 20 and 40 at
+/// ranges 25, 50 and 100 %, all within 3.2/255 at 8.4, 4.7 at 8.2 or 8.4 at 8.6; Precise size 20
+/// at 50 %, 7.3 → 0.9 % of pixels off against `1 / range²`, which also made a 100 % Softer glow a
+/// quarter as strong).
 pub fn glow_gradient_gain(g: &Glow) -> f32 {
     let r = if g.range.is_finite() { g.range.clamp(0.01, 1.0) } else { 1.0 };
-    match g.technique {
-        GlowTechnique::Softer => r * 8.4,
-        GlowTechnique::Precise => 1.0 / (r * r),
-    }
+    r * 8.4
 }
 
 /// A glow's paint over its map `m`. A gradient runs along the glow rather than across the
