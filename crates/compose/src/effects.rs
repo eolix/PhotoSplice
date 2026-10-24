@@ -1154,6 +1154,17 @@ fn box_width(w: f32) -> f32 {
     if w.is_nan() { 1.0 } else { w.clamp(1.0, MAX_REACH) }
 }
 
+/// Whether `w` is an even whole box width: such a box has no centre tap, so each pass takes `w`
+/// whole taps, the first one starting half a pixel left of centre and the second half a pixel
+/// right ([`box_ends`]). Two of them make the whole-number tent `1, 2, … w … 2, 1` that ends a
+/// pixel inside the plain centred box's `½, 1, …, 1, ½` pair (Reference corpus
+/// bevel-inner-smooth, size 10, and -a45-alt65-depth300, size 6: the shading goes flat one pixel
+/// past the ramp's last lit pixel, where the centred pair left one pixel of slope).
+fn box_even(w: f32) -> bool {
+    let w = box_width(w);
+    w.fract() == 0.0 && (w as i64) % 2 == 0
+}
+
 /// Normalised weights of a centred box of (fractional) width `w`: tap `i` gets the overlap of
 /// `[i - 0.5, i + 0.5]` with `[-w/2, w/2]`.
 fn box_weights(w: f32) -> Vec<f32> {
@@ -1166,9 +1177,16 @@ fn box_weights(w: f32) -> Vec<f32> {
 }
 
 /// The 1D kernel of two box passes of width `w` (a tent of half-width ≈ `w`): `(radius, weights)`.
-/// Photoshop's bevel height maps are this blur of the shape (fitted on the corpus: a smooth
-/// inner bevel of size 5 matches within 0.7 % mean, size 41 within 2.6 %).
+/// Reference's bevel height maps are this blur of the shape (fitted on the corpus: a smooth
+/// inner bevel of size 5 matches within 0.7 % mean, size 41 within 2.6 %). Even whole widths
+/// take whole taps ([`box_even`]).
 pub fn tent_kernel(w: f32) -> (i32, Vec<f32>) {
+    if box_even(w) {
+        let n = box_width(w) as i32;
+        let norm = 1.0 / (n * n) as f32;
+        let t = (1 - n..n).map(|i| (n - i.abs()) as f32 * norm).collect();
+        return (n - 1, t);
+    }
     let b = box_weights(w);
     let n = b.len() * 2 - 1;
     let mut t = vec![0.0f32; n];
@@ -1180,21 +1198,28 @@ pub fn tent_kernel(w: f32) -> (i32, Vec<f32>) {
     ((n as i32 - 1) / 2, t)
 }
 
-/// Box geometry for a (fractional) width: (`r`, end-tap weight `f`, 1 / width) — the
-/// [`box_weights`] taps are `r - 1` full ones each side of the centre plus the two end taps at `f`.
-fn box_geom(bw: f32) -> (i64, f64, f64) {
+/// Box geometry of pass `pass` (0 or 1) for a (fractional) width: (`r`, left and right end-tap
+/// weights, 1 / width). The [`box_weights`] taps are `r - 1` full ones each side of the centre
+/// plus the two end taps; an even whole width ([`box_even`]) takes its left end whole on the
+/// first pass and its right end on the second.
+fn box_ends(bw: f32, pass: usize) -> (i64, f64, f64, f64) {
     let bw = box_width(bw);
     let half = bw / 2.0;
     let r = (half - 0.5).ceil().max(0.0) as i64;
     let f = f64::from((half - (r as f32 - 0.5)).clamp(0.0, 1.0));
-    (r, f, 1.0 / f64::from(bw))
+    let (fl, fr) = match (box_even(bw), pass) {
+        (false, _) => (f, f),
+        (true, 0) => (1.0, 0.0),
+        (true, _) => (0.0, 1.0),
+    };
+    (r, fl, fr, 1.0 / f64::from(bw))
 }
 
 /// One box pass over `src` (zero outside it) evaluated at `x0 .. x0 + dst.len()`, as a running
 /// sum (O(1) per sample whatever the width).
-fn box_line(src: &[f64], x0: i64, dst: &mut [f64], bw: f32) {
+fn box_line(src: &[f64], x0: i64, dst: &mut [f64], bw: f32, pass: usize) {
     let n = src.len() as i64;
-    let (r, f, norm) = box_geom(bw);
+    let (r, fl, fr, norm) = box_ends(bw, pass);
     let at = |i: i64| if i >= 0 && i < n { src[i as usize] } else { 0.0 };
     if r == 0 {
         for (k, d) in dst.iter_mut().enumerate() {
@@ -1205,7 +1230,7 @@ fn box_line(src: &[f64], x0: i64, dst: &mut [f64], bw: f32) {
     let mut inner: f64 = (x0 - (r - 1)..=x0 + (r - 1)).map(at).sum();
     for (k, d) in dst.iter_mut().enumerate() {
         let x = x0 + k as i64;
-        *d = (inner + f * (at(x - r) + at(x + r))) * norm;
+        *d = (inner + fl * at(x - r) + fr * at(x + r)) * norm;
         inner += at(x + r) - at(x - r + 1);
     }
 }
@@ -1213,13 +1238,13 @@ fn box_line(src: &[f64], x0: i64, dst: &mut [f64], bw: f32) {
 /// Two box passes along a line, exactly the convolution with [`tent_kernel`] (zero outside): the
 /// first pass is evaluated `r` samples beyond each end so the second sees what lies there.
 fn tent_line(src: &[f32], dst: &mut [f32], bw: f32) {
-    let (r, _, _) = box_geom(bw);
+    let (r, _, _, _) = box_ends(bw, 0);
     let s: Vec<f64> = src.iter().map(|v| f64::from(*v)).collect();
     let mut mid = vec![0.0f64; src.len() + 2 * r as usize];
-    box_line(&s, -r, &mut mid, bw);
+    box_line(&s, -r, &mut mid, bw, 0);
     let mut out = vec![0.0f64; src.len()];
     // `mid[k]` holds position k - r: output position p reads index p + r.
-    box_line(&mid, r, &mut out, bw);
+    box_line(&mid, r, &mut out, bw, 1);
     for (d, v) in dst.iter_mut().zip(out) {
         *d = v as f32;
     }
@@ -1393,26 +1418,6 @@ pub fn bevel_geom(b: &Bevel) -> BevelGeom {
     }
 }
 
-/// Whether a Smooth bevel's height reaches its top early ([`smooth_top`]): inner and stroke
-/// bevels, whose top is the shape's inside.
-pub fn smooth_top_saturates(b: &Bevel) -> bool {
-    b.technique == BevelTechnique::Smooth && matches!(bevel_geom(b).paint, BevelPaint::Inner | BevelPaint::Stroke)
-}
-
-/// A Smooth inner bevel's height reaches the top 1/256 early, as if the blurred shape counted 256
-/// to the full 255 (Reference corpus bevel-inner-smooth and -a45-alt65-depth300: the shading went
-/// flat a pixel later than Reference's, 2.7 levels off at the end of the ramp, 1.4 with it; pixels
-/// off 1.13 → 0.66 % and 4.46 → 2.69 %). Outer and emboss bevels keep the plain blur (theirs got
-/// worse).
-pub fn smooth_top(v: f32) -> f32 {
-    (v * (256.0 / 255.0)).min(1.0)
-}
-
-/// [`smooth_top`] as a 4096-entry lookup over `0..=1` (the GPU's height stage).
-pub fn smooth_top_lut() -> Vec<f32> {
-    (0..4096).map(|i| smooth_top(i as f32 / 4095.0)).collect()
-}
-
 /// Bevel height map in `0..=1`. Smooth: the shape blurred by two box passes of the bevel
 /// width. Chisel: linear ramps of the exact distance to the edge ([`BevelGeom::chisel`] long;
 /// emboss styles straddle the edge). Chisel Soft uses the same profile: on straight edges
@@ -1425,9 +1430,6 @@ fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, pattern
     let mut h = if b.technique == BevelTechnique::Smooth {
         let mut h = shape.clone();
         tent(&mut h, g.width);
-        if smooth_top_saturates(b) {
-            h.v.iter_mut().for_each(|v| *v = smooth_top(*v));
-        }
         h
     } else {
         let (din, dout) = (dist_inside(shape), dist_outside_smooth(shape));
@@ -2477,7 +2479,7 @@ mod tests {
     fn running_sum_tent_matches_the_kernel() {
         let (w, h) = (37usize, 23usize);
         let src: Vec<f32> = (0..w * h).map(|i| ((i * 7919) % 101) as f32 / 100.0).collect();
-        for width in [1.0f32, 2.0, 3.5, 5.0, 8.25, 41.0] {
+        for width in [1.0f32, 2.0, 3.5, 5.0, 6.0, 8.25, 10.0, 41.0] {
             let mut m = Map { w, h, v: src.clone() };
             tent(&mut m, width);
             let mut want = Map { w, h, v: src.clone() };
@@ -2495,8 +2497,13 @@ mod tests {
         let sum: f32 = k.iter().sum();
         assert!((sum - 1.0).abs() < 1e-6);
         assert!((k[4] - 5.0 / 25.0).abs() < 1e-6 && (k[0] - 1.0 / 25.0).abs() < 1e-6);
-        // Fractional widths taper the end taps; width 1 is the identity.
+        // Even whole widths take whole taps (the tent ends at `w - 1`), fractional ones taper the
+        // end taps; width 1 is the identity.
         let (r, k) = tent_kernel(4.0);
+        assert_eq!(r, 3);
+        let want: Vec<f32> = [1.0, 2.0, 3.0, 4.0, 3.0, 2.0, 1.0].iter().map(|v| v / 16.0).collect();
+        assert!(k.iter().zip(&want).all(|(a, b)| (a - b).abs() < 1e-7), "{k:?}");
+        let (r, k) = tent_kernel(4.5);
         assert_eq!(r, 4);
         assert!(k[0] > 0.0 && k[0] < 1.0 / 25.0);
         assert_eq!(tent_kernel(1.0), (0, vec![1.0]));
@@ -2866,23 +2873,23 @@ mod tests {
         assert!(mid > flat + 0.5, "{mid} vs {flat}");
     }
 
-    /// Reference's Smooth inner bevel goes flat at its size (corpus bevel-inner-smooth, size 10:
-    /// pixels 9 and 10 from the edge one level darker than a plain blur gives), as its height
-    /// reaches the top 1/256 early ([`smooth_top`]); outer bevels keep the plain blur.
+    /// Reference's Smooth bevel goes flat at its size: the last shaded pixel is `size` from the
+    /// edge, the next one is flat (corpus bevel-inner-smooth, size 10, and
+    /// -a45-alt65-depth300, size 6). Even sizes need the whole-tap boxes ([`box_even`]); the
+    /// centred `½, 1, …, 1, ½` pair left one more pixel of slope.
     #[test]
-    fn smooth_inner_bevel_goes_flat_at_its_size() {
-        assert_eq!((smooth_top(0.5), smooth_top(255.0 / 256.0), smooth_top(1.0)), (0.5 * 256.0 / 255.0, 1.0, 1.0));
+    fn smooth_bevel_goes_flat_at_its_size() {
         let shape = square(64, 8, 56);
         let l = GlobalLight::default();
         let pp = PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES);
         let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::Smooth);
-        b.size = 10.0;
-        assert!(smooth_top_saturates(&b));
-        let (m, _) = bevel_maps(&shape, &b, &l, &no_tex(), &pp);
-        let at = |d: usize| m[0].v[32 * 64 + 8 + d] + m[1].v[32 * 64 + 8 + d];
-        assert!(at(8) > 0.01 && at(10) < 1e-6, "{:?}", (0..12).map(at).collect::<Vec<_>>());
-        b.style = BevelStyle::OuterBevel;
-        assert!(!smooth_top_saturates(&b));
+        for size in [5usize, 6, 10] {
+            b.size = size as f32;
+            let (m, _) = bevel_maps(&shape, &b, &l, &no_tex(), &pp);
+            let at = |d: usize| m[0].v[32 * 64 + 8 + d] + m[1].v[32 * 64 + 8 + d];
+            let row: Vec<f32> = (0..size + 2).map(at).collect();
+            assert!(at(size - 1) > 1e-4 && at(size) < 1e-6, "size {size}: {row:?}");
+        }
     }
 
     /// Gloss Contour › Anti-aliased reads the shading a third of a pixel away (Reference corpus
