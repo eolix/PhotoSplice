@@ -1105,26 +1105,35 @@ fn paint_fx(
     }
 }
 
-/// The opacity gain of a gradient glow: it is opaque from strength `range²` on (see [`paint_glow`]).
-pub fn glow_gradient_gain(range: f32) -> f32 {
-    let r = if range.is_finite() { range.clamp(0.01, 1.0) } else { 1.0 };
-    1.0 / (r * r)
+/// The opacity gain of a gradient glow over its map (see [`paint_glow`]). A Softer glow is
+/// opaque from 1 / 8.4 of its blurred shape on whatever its Range (temp kit 8 og-grad-*: size 20
+/// at ranges 50 and 100 %, the faint tail 8.2-8.6 × the blur at both; `1 / range²` made a 100 %
+/// glow a quarter as strong, 26 % of pixels off → 1.4 %), so the gain on the ranged map is
+/// `range × 8.4`. A Precise glow is opaque from `range²`.
+pub fn glow_gradient_gain(g: &Glow) -> f32 {
+    let r = if g.range.is_finite() { g.range.clamp(0.01, 1.0) } else { 1.0 };
+    match g.technique {
+        GlowTechnique::Softer => r * 8.4,
+        GlowTechnique::Precise => 1.0 / (r * r),
+    }
 }
 
 /// A glow's paint over its map `m`. A gradient runs along the glow rather than across the
-/// canvas: Photoshop colours the glow where its (ranged, contoured) strength is `v` with the
-/// gradient at `1 - v`, so the first stop hugs the edge, and the glow is opaque from `v = range²`
-/// on (photoshop corpus outer-glow-gradient.psd: 1.4/255 mean, against bands across the canvas;
-/// psd-tools layer_params.psd). Glows have no gradient angle, style or Reverse.
+/// canvas: Reference colours the glow where its (ranged, contoured) strength is `v` with the
+/// gradient at `1 - v`, so the first stop hugs the edge, and its opacity is `v` × the
+/// [`glow_gradient_gain`] (Reference corpus outer-glow-gradient.psd, against bands across the
+/// canvas; psd-tools layer_params.psd). `pos` is the map before the layer knocks it out: under a
+/// see-through fill the edge pixels keep their place at the gradient's start. Glows have no
+/// gradient angle, style or Reverse.
 #[allow(clippy::too_many_arguments)]
-fn paint_glow(dst: &mut Buffer, m: &Map, g: &Glow, shape_bounds: Rect, anchor: (f64, f64), big: Rect, patterns: &PreparedPatterns<'_>) {
+fn paint_glow(dst: &mut Buffer, m: &Map, pos: &Map, g: &Glow, shape_bounds: Rect, anchor: (f64, f64), big: Rect, patterns: &PreparedPatterns<'_>) {
     let FxPaint::Gradient(gradient) = &g.paint else {
         return paint_fx(dst, m, &g.paint, shape_bounds, shape_bounds, anchor, big, g.common.blend, g.common.opacity, patterns);
     };
     let prepared = PreparedGradient::new(gradient);
-    let gain = glow_gradient_gain(g.range);
+    let gain = glow_gradient_gain(g);
     let strength = Map { w: m.w, h: m.h, v: m.v.iter().map(|v| (v * gain).min(1.0)).collect() };
-    paint(dst, &strength, |i| prepared.sample(1.0 - m.v.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0)), g.common.blend, g.common.opacity);
+    paint(dst, &strength, |i| prepared.sample(1.0 - pos.v.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0)), g.common.blend, g.common.opacity);
 }
 
 /// A box width as the blurs use it: at least 1, at most [`MAX_REACH`] (an effect never reaches
@@ -1955,11 +1964,14 @@ pub(crate) fn composite_with_effects_prepared(
     }
     for (i, e) in rev() {
         if let Effect::OuterGlow(g) = e {
-            let mut m = fx(i, 0);
+            let pos = fx(i, 0);
+            let mut m = pos.clone();
             // The glow is behind the shape, not painted across its interior when Fill is 0 %.
-            // Preserve the existing anti-aliased edge when the fill is fully opaque.
+            // Preserve the existing anti-aliased edge when the fill is fully opaque. A gradient
+            // keeps its place along the glow there (temp kit 8 og-grad-*: a disc's edge pixels
+            // stay at the gradient's start, not its middle).
             knock_out_exterior(&mut m, &shape, layer.fill_opacity);
-            paint_glow(&mut work, &m, g, sb, anchor, big, patterns);
+            paint_glow(&mut work, &m, &pos, g, sb, anchor, big, patterns);
         }
     }
 
@@ -2020,7 +2032,8 @@ pub(crate) fn composite_with_effects_prepared(
     }
     for (i, e) in rev() {
         if let Effect::InnerGlow(g) = e {
-            paint_glow(&mut lay, &rel(fx(i, 0)), g, sb, anchor, big, patterns);
+            let m = rel(fx(i, 0));
+            paint_glow(&mut lay, &m, &m, g, sb, anchor, big, patterns);
         }
     }
     for (i, e) in rev() {

@@ -1082,6 +1082,26 @@ fn glow_gradient_follows_the_shape() {
     assert!(edge[0] > 0.8 && edge[2] < 0.2, "{edge:?}");
 }
 
+// A Softer gradient glow is opaque from 1 / 8.4 of its blur whatever its Range, so a 100 % one is
+// opaque beside the edge (temp kit 8 og-grad-soft-s20-r100); under Fill 0 % a half-covered edge
+// pixel keeps the gradient's start colour, only fainter (og-grad-*: the disc's edge).
+#[test]
+fn gradient_glows_are_opaque_near_the_edge_and_keep_their_place() {
+    let black_to_white = Gradient { stops: vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], ..Gradient::default() };
+    let g = Glow { paint: FxPaint::Gradient(black_to_white), size: 8.0, range: 1.0, ..glow(GlowTechnique::Softer, GlowSource::Edge) };
+    let d = fx_doc(vec![Effect::OuterGlow(g.clone())]);
+    // Just outside: halfway along the gradient (the blur is ½ there), at full strength.
+    let near = px(&d, 9, 20)[0];
+    assert!((near - 0.5).abs() < 0.08, "{near}");
+    let mut d = fx_doc(vec![Effect::OuterGlow(Glow { range: 0.5, ..g })]);
+    let l = d.layers.last_mut().unwrap();
+    l.fill_opacity = 0.0;
+    l.surface_mut().unwrap().fill_rect(Rect::new(10, 10, 11, 30), &[1.0, 0.0, 0.0, 0.5]);
+    // Black at half strength over white; the gradient taken from the knocked-out map was grey.
+    let edge = px(&d, 10, 20)[0];
+    assert!(edge < 0.6, "{edge}");
+}
+
 #[test]
 fn gradient_overlay_follows_angle_and_reverse() {
     let g = Gradient { stops: vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], angle: 0.0, ..Gradient::default() };

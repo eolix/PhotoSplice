@@ -1172,6 +1172,8 @@ fn fs_fxpaint(in: VOut) -> @location(0) vec4<f32> {
     let inside_shape = a > INSIDE_EPS;
     var m = 1.0;
     if (op.kind == 0) { m = map_value(d, op.p2.w); }
+    // A gradient glow keeps its place along the gradient where the layer knocks it out.
+    let raw = m;
     if ((op.flags & F_KNOCKOUT) != 0u) { m = m * (1.0 - a * op.p4.w); }
     if ((op.flags & F_STROKE_KNOCK) != 0u && !inside_shape) { m = m * (1.0 - clamp(textureLoad(tex_c, p, 0).a, 0.0, 1.0)); }
     if ((op.flags & F_GATE) != 0u && !inside_shape) { m = 0.0; }
@@ -1187,7 +1189,7 @@ fn fs_fxpaint(in: VOut) -> @location(0) vec4<f32> {
         // effects::paint_glow: the gradient at 1 - strength, opaque from strength 1 / gain (p0.x).
         let k = min(m * op.p0.x, 1.0) * op.opacity;
         if (k <= 0.0) { return dst; }
-        let t = 1.0 - clamp(m, 0.0, 1.0);
+        let t = 1.0 - clamp(select(raw, m, (op.flags & F_REL) != 0u), 0.0, 1.0);
         return composite_fill(op.mode, dst, vec4(lut(0, t), lut(1, t), lut(2, t), lut(3, t)), 1.0, k, false);
     }
     let k = m * op.opacity;

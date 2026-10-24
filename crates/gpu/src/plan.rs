@@ -1484,7 +1484,7 @@ impl<'a> Planner<'a> {
 
     fn glow_paint(&self, g: &'a Glow, anchor: (f64, f64)) -> Paint<'a> {
         match &g.paint {
-            FxPaint::Gradient(gradient) => Paint::GlowGradient(gradient, photosplice_compose::effects::glow_gradient_gain(g.range)),
+            FxPaint::Gradient(gradient) => Paint::GlowGradient(gradient, photosplice_compose::effects::glow_gradient_gain(g)),
             p => self.fx_paint(p, anchor),
         }
     }
