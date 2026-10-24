@@ -1453,12 +1453,9 @@ fn shapeless_effect_maps_cover_only_the_band_being_rendered() {
 // ---------- PSD-fidelity effect semantics (fitted on Photoshop composites) ----------
 
 #[test]
-fn stroke_edges_use_the_chamfer_when_narrow_and_the_exact_distance_when_wide() {
-    // #3646: a narrow stroke's outer edge keeps the 5 × 5 chamfer, whose sub-pixel seeding
-    // Photoshop matches at small offsets (see `stroke_outside_exact`); only a wide one — where the
-    // chamfer's octagon facets (see `a_wide_outside_stroke_is_round_not_a_polygon`) — uses the
-    // exact Euclidean transform.
-    // Square 10..30, outside stroke 3: (9, 7) is offset (1, 3) from the corner pixel. Photoshop
+fn stroke_edges_use_the_chamfer() {
+    // A stroke's outer edge measures with the 5 × 5 chamfer and its sub-pixel seeding.
+    // Square 10..30, outside stroke 3: (9, 7) is offset (1, 3) from the corner pixel. Reference
     // measures √5 + 1 = 3.236 there, so coverage is 3 + 1 − 3.236 = 0.764 (the exact distance is
     // 3.162, coverage 0.838).
     let d = fx_doc(vec![stroke(3.0, StrokePosition::Outside)]);
@@ -1470,42 +1467,31 @@ fn stroke_edges_use_the_chamfer_when_narrow_and_the_exact_distance_when_wide() {
 }
 
 #[test]
-fn the_stroke_metric_switches_at_the_fitted_threshold() {
-    // The widest outside stroke any Photoshop oracle matches with the chamfer is 18 px
-    // (ag-psd read-write/strokes): its octagon deviates 0.48 px from a circle there; 20 px keeps
-    // it. Wider strokes (the 60 px #3646 case) are round.
-    assert!(!crate::effects::stroke_outside_exact(18.0));
-    assert!(crate::effects::stroke_outside_exact(crate::effects::STROKE_CHAMFER_MAX));
-    assert!(crate::effects::stroke_outside_exact(60.0));
-}
-
-#[test]
-fn a_wide_outside_stroke_is_round_not_a_polygon() {
-    // A point source dilated by 60 px must stay a circle. The 5 × 5 chamfer's octagonal level set
-    // made the boundary swing ~2.5 px at this radius (~10 px at 245 px) — the "low-poly" #3646.
+fn a_wide_outside_stroke_is_the_chamfer_polygon() {
+    // Reference draws wide strokes with the chamfer too (temp kit 8 stroke-out-s40 / -s60): a
+    // point source stroked 60 px reaches its full width along the axes and the diagonals, where
+    // the chamfer's steps are exact, and falls short between them (about 1.6 px at 13°).
     let mut d = doc_white(170, 170);
     let mut l = solid_layer("dot", Rect::new(85, 85, 86, 86), [1.0, 0.0, 0.0, 1.0]);
     l.effects.items = vec![stroke(60.0, StrokePosition::Outside)];
     d.layers.push(l);
     let buf = render(&d, Rect::new(0, 0, 170, 170));
     let at = |x: i32, y: i32| buf.px[(y as usize) * 170 + x as usize];
-    let (mut lo, mut hi) = (f64::MAX, 0.0f64);
     let stroke_at = |x: i32, y: i32| x >= 0 && y >= 0 && x < 170 && y < 170 && at(x, y)[2] > 0.5 && at(x, y)[0] < 0.5;
-    for k in 0..72 {
-        let th = (k as f64) * std::f64::consts::TAU / 72.0;
-        let (dx, dy) = (th.cos(), th.sin());
-        let mut r = 0.0f64;
-        let mut t = 0.0f64;
+    let reach = |deg: f64| {
+        let (dx, dy) = (deg.to_radians().cos(), deg.to_radians().sin());
+        let (mut r, mut t) = (0.0f64, 0.0f64);
         while t < 84.0 {
-            if stroke_at((85.0 + dx * t).round() as i32, (85.0 + dy * t).round() as i32) {
+            if stroke_at((85.5 + dx * t).floor() as i32, (85.5 + dy * t).floor() as i32) {
                 r = t;
             }
             t += 0.25;
         }
-        lo = lo.min(r);
-        hi = hi.max(r);
-    }
-    assert!(hi - lo <= 2.0, "the 60 px stroke boundary swings {lo}..{hi} px — a polygon, not a circle (#3646)");
+        r
+    };
+    let (axis, diagonal, between) = (reach(0.0), reach(45.0), reach(13.0));
+    assert!((axis - diagonal).abs() <= 1.0, "{axis} {diagonal}");
+    assert!(between < axis - 0.75, "{between} vs {axis}");
 }
 
 #[test]
