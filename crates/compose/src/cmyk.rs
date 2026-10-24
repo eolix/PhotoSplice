@@ -407,7 +407,14 @@ fn adjust(a: &Adjustment, buf: &mut CBuf, cx: &Ctx) {
         let mut rgb = Buffer { rect: buf.rect, px: buf.px.iter().map(|p| { let c = cmyk_to_rgb_naive(inks(p)); [c[0], c[1], c[2], 1.0] }).collect() };
         crate::adjust::apply_depth(a, &mut rgb, cx.transfer, Some(cx.depth));
         for (p, o) in buf.px.iter_mut().zip(&rgb.px) {
-            let k = rgb_to_cmyk_naive([o[0], o[1], o[2]]);
+            let mut k = rgb_to_cmyk_naive([o[0], o[1], o[2]]);
+            // Under 75 % black the coloured inks shrink with the light left: C, M, Y are the
+            // chroma over max(1 − K, ¼), not over 1 − K (Reference kit inks-hs-colorize: 100 %
+            // K comes out C 16 M 5, 90 % K C 46 M 16, where the plain separation gave 57 / 19).
+            let scale = ((1.0 - k[3]) / 0.25).min(1.0);
+            for v in &mut k[..3] {
+                *v *= scale;
+            }
             p[..4].copy_from_slice(&[1.0 - k[0], 1.0 - k[1], 1.0 - k[2], 1.0 - k[3]]);
         }
         return;
@@ -1014,6 +1021,11 @@ mod tests {
         let mut d = doc([0.0; 4]);
         d.layers.push(hs(200.0, 40.0, 5.0, true));
         assert!(near(inks_at(&d, 0), [0.0; 4], 1e-4), "{:?}", inks_at(&d, 0));
+        // Past 75 % black the coloured inks shrink with the light left (Reference kit
+        // inks-hs-colorize, hue −160, 40 %, +5: 100 % K → C 16.0 M 5.3 K 93.0).
+        let mut d = doc_at([0.0, 0.0, 0.0, 1.0], SampleType::U16);
+        d.layers.push(hs(-160.0, 40.0, 5.0, true));
+        assert!(near(inks_at(&d, 0), [0.160, 0.053, 0.0, 0.930], 0.006), "{:?}", inks_at(&d, 0));
     }
 
     /// Photo Filter goes through the profile: without Preserve Luminosity a 70 % K grey comes back
