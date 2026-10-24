@@ -1347,27 +1347,21 @@ fn fs_mfinish(in: VOut) -> @location(0) vec4<f32> {
 
 // Chiselled bevel height from A = dist_inside, B = dist_outside (`effects::bevel_chisel_h`)
 // over shape S (`layer_tex`): p0 = (paint (0 outer, 1 both / emboss, 2 inner), inside ramp,
-// outside ramp). A partly covered edge pixel lies `coverage − ½` inside the edge.
+// outside ramp, Chisel Soft); the distances per pixel as `effects::chisel_distances_at`.
 @fragment
 fn fs_mbevelh(in: VOut) -> @location(0) vec4<f32> {
     let p = local(in.pos);
     var din = textureLoad(tex_a, p, 0).r;
     var dout = textureLoad(tex_b, p, 0).r;
     let a = textureLoad(layer_tex, p, 0).r;
-    if (a > INSIDE_EPS && a < 1.0 - INSIDE_EPS) {
+    if (op.p0.w > 0.5) {
+        if (a < 0.5) { din = -dout; }
+    } else if (a > INSIDE_EPS && a < 1.0 - INSIDE_EPS) {
         din = a - 0.5;
         dout = 0.5 - a;
     } else if (a <= INSIDE_EPS) {
-        // Uncovered pixels lie their outside distance beyond the edge (effects::bevel_height).
+        // Uncovered pixels lie their outside distance beyond the edge.
         din = -dout;
-    }
-    // effects::chisel_soft_inside (p0.w: effects::chisel_soft_edge).
-    if (op.p0.w > 0.5) {
-        if (a <= INSIDE_EPS) {
-            din = din - 1.0;
-        } else if (a < 1.0 - INSIDE_EPS) {
-            din = 2.0 * a - 1.5;
-        }
     }
     let rin = max(op.p0.y, 1e-3);
     let rout = max(op.p0.z, 1e-3);

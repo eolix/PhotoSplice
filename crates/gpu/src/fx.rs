@@ -381,10 +381,13 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
             } else {
                 // The fields must reach past the longer ramp (outside: the size and 1.5 px).
                 let reach = size.max(g.chisel[0]).max(g.chisel[1]) + 1.0;
-                // The chamfer distances (compose::effects::bevel_height).
-                let din = b.field(FieldKind::StrokeInside, reach);
-                let dout = b.field(FieldKind::StrokeOutside, reach);
-                let soft = f32::from(u8::from(photosplice_compose::effects::chisel_soft_edge(bv, &g)));
+                // The chamfer distances, to the binary edge for Chisel Soft
+                // (compose::effects::bevel_height).
+                let soft = bv.technique == BevelTechnique::ChiselSoft;
+                let (kin, kout) = if soft { (FieldKind::ChiselSoftInside, FieldKind::ChiselSoftOutside) } else { (FieldKind::StrokeInside, FieldKind::StrokeOutside) };
+                let din = b.field(kin, reach);
+                let dout = b.field(kout, reach);
+                let soft = f32::from(u8::from(soft));
                 let mut st = stage(Kernel::MBevelH, Some(din), Some(dout), [paint(g.paint), g.chisel[0], g.chisel[1], soft], 0);
                 st.s = Some(In::Shape);
                 b.push(st)
@@ -795,6 +798,8 @@ mod tests {
             FieldKind::StrokeOutsideExact,
             FieldKind::StrokeOutsideVector,
             FieldKind::StrokeOutsideVectorChamfer,
+            FieldKind::ChiselSoftInside,
+            FieldKind::ChiselSoftOutside,
         ] {
             let reach = 9;
             let whole = photosplice_compose::effects::distance_field(kind, shape.clone(), w, h, reach as f32);
