@@ -416,12 +416,13 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
             let (sa, ca) = angle.to_radians().sin_cos();
             let (se, ce) = altitude.to_radians().sin_cos();
             let lut = contour_lut(&bv.gloss_contour).map(Arc::new);
-            // Region (`fs_mbevelshade`): 0 inside, 1 under the edge and outside, 2 / 3 emboss /
-            // pillow emboss (both halves in one map).
+            // Region (`fs_mbevelshade`): 0 inside (× alpha), 1 under the edge and outside, 4
+            // inside at full strength. Emboss styles: the inside half, then the outside one
+            // (pillow: facing the other way), blended by coverage when painted (`plan`).
             let passes: Vec<(f32, f32)> = match g.paint {
                 BevelPaint::Inner | BevelPaint::Stroke => vec![(g.depth, 0.0)],
                 BevelPaint::Outer => vec![(g.depth, 1.0)],
-                BevelPaint::Both => vec![(g.depth, if g.pillow { 3.0 } else { 2.0 })],
+                BevelPaint::Both => vec![(g.depth, 4.0), (if g.pillow { -g.depth } else { g.depth }, 1.0)],
             };
             let reach_past = photosplice_compose::effects::outer_reaches_past(bv, &g);
             // One shading step (`fs_mbevelshade`; p3.x: an outer bevel reaching a pixel past its
@@ -429,7 +430,7 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
             let shade = |a: In, bb: Option<In>, depth: f32, region: f32, which: f32, mode: f32| {
                 let mut s = stage(Kernel::MBevelShade, Some(a), bb, [ca * ce, -sa * ce, se, se], 1);
                 s.p1 = [depth, region, which, f32::from(u8::from(lut.is_some()))];
-                s.p3 = [f32::from(u8::from(reach_past && g.paint == BevelPaint::Outer)), mode, 0.0, 0.0];
+                s.p3 = [f32::from(u8::from(reach_past && region == 1.0)), mode, 0.0, 0.0];
                 s.lut = lut.clone();
                 s.s = Some(In::Shape);
                 s
@@ -441,20 +442,10 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
                     let mut s = match &soften {
                         None => shade(h, None, *depth, *region, which, 0.0),
                         // Soften blurs the shading, then the region applies (`bevel_maps`).
-                        Some(k) if *region < 1.5 => {
+                        Some(k) => {
                             let raw = b.push(shade(h, None, *depth, *region, which, 1.0));
                             let blurred = b.conv(raw, k.clone());
                             shade(h, Some(blurred), *depth, *region, which, 2.0)
-                        }
-                        Some(k) => {
-                            let od = if *region > 2.5 { -*depth } else { *depth };
-                            let raw_in = b.push(shade(h, None, *depth, *region, which, 1.0));
-                            let raw_out = b.push(shade(h, None, od, *region, which, 1.0));
-                            let (bin, bout) = (b.conv(raw_in, k.clone()), b.conv(raw_out, k.clone()));
-                            let outer = b.push(shade(h, Some(bout), od, *region, which, 2.0));
-                            let mut s = shade(bin, Some(outer), *depth, *region, which, 3.0);
-                            s.radius = 0;
-                            s
                         }
                     };
                     s.out = Some(out);

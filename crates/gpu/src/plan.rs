@@ -462,6 +462,9 @@ pub const F_ADD_DIFF: u32 = 16384;
 pub const F_BLEND_IF: u32 = 524288;
 /// Blend / Atop / FxMerge of a type layer: coverage mixed at `psblend::TEXT_GAMMA`.
 pub const F_TEXT_GAMMA: u32 = 8192;
+/// Lerp: A towards B by C's alpha, premultiplied, where C covers more than `INSIDE_EPS`
+/// (emboss styles' two shaded halves).
+pub const F_COVER_MIX: u32 = 2097152;
 
 /// A layer's Blend If ranges for `F_BLEND_IF`: Gray, then the colour channels, each as
 /// [this layer, underlying layer]; every range as two floats, `black low × 256 + black high` and
@@ -1451,9 +1454,22 @@ impl<'a> Planner<'a> {
             p.clip = Some(clip);
             let mut m = self.emit(p);
             for (i, b) in late {
+                // Each half shades the composite on its own (maps 0-1 inside, 2-3 outside); the
+                // layer's coverage blends the two results (`composite_with_effects`).
+                let mut inside = self.retain(m);
                 for (k, color, fxc) in [(0, &b.highlight_color, &b.highlight), (1, &b.shadow_color, &b.shadow)] {
+                    inside = self.paint(inside, content, Cov::Map(map(i, k), 0.0), &Paint::Color(color.to_rgb_unclamped()), fxc.blend, fxc.opacity, 0, clip, sb);
+                }
+                for (k, color, fxc) in [(2, &b.highlight_color, &b.highlight), (3, &b.shadow_color, &b.shadow)] {
                     m = self.paint(m, content, Cov::Map(map(i, k), 0.0), &Paint::Color(color.to_rgb_unclamped()), fxc.blend, fxc.opacity, 0, clip, sb);
                 }
+                let mut p = Pass::new(Kernel::Lerp, 0);
+                p.a = Some(m);
+                p.b = Some(inside);
+                p.c = Some(self.retain(content));
+                p.flags = F_COVER_MIX;
+                p.clip = Some(clip);
+                m = self.emit(p);
             }
             let mut p = Pass::new(Kernel::FxMerge, 0);
             p.b = Some(self.retain(m));

@@ -1529,6 +1529,28 @@ fn inside_stroke_respects_partial_edge_coverage() {
     assert!((p[2] - 0.75).abs() < 0.02 && (p[0] - 0.25).abs() < 0.02, "{p:?}");
 }
 
+// Each half of a Pillow Emboss shades the composite on its own and an edge pixel takes them by
+// its coverage (temp kit 8 pillow-smooth-s10-normal: a half-covered pixel between a dark inside
+// and a lit outside is the mean of the two, where the averaged maps gave a darker grey).
+#[test]
+fn pillow_edge_pixels_mix_the_shaded_halves() {
+    let Effect::BevelEmboss(mut b) = bevel_fx(photosplice_doc::BevelStyle::PillowEmboss, 0.0) else { panic!("a bevel") };
+    b.size = 10.0;
+    b.highlight = FxCommon::new(photosplice_color::BlendMode::Normal, 1.0);
+    b.shadow = FxCommon::new(photosplice_color::BlendMode::Normal, 1.0);
+    let mut d = doc_white(64, 64);
+    d.layers[0].surface_mut().unwrap().fill_rect(Rect::new(0, 0, 64, 64), &[0.5, 0.5, 0.5, 1.0]);
+    let mut l = solid_layer("sq", Rect::new(16, 16, 44, 48), [0.5, 0.5, 0.5, 1.0]);
+    l.surface_mut().unwrap().fill_rect(Rect::new(43, 16, 44, 48), &[0.5, 0.5, 0.5, 0.5]);
+    l.effects.items = vec![Effect::BevelEmboss(b)];
+    d.layers.push(l);
+    let (inside, edge, outside) = (px(&d, 42, 32)[0], px(&d, 43, 32)[0], px(&d, 44, 32)[0]);
+    assert!(inside < 0.2 && outside > 0.6, "{inside} {outside}");
+    // Half the dark inside's result and half the lit outside's (the neighbours shade alike).
+    // (0.37 against a mean of 0.39; the averaged maps gave 0.34.)
+    assert!((edge - (inside + outside) / 2.0).abs() < 0.03, "edge {edge}, inside {inside}, outside {outside}");
+}
+
 #[test]
 fn emboss_shades_the_composited_layer() {
     // Emboss styles paint over the layer as composited (for type: mixed at the text gamma), so a

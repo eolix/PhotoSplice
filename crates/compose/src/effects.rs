@@ -1569,7 +1569,11 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
                 let n = [-gx, -gy, 1.0];
                 let len = (n[0] * n[0] + n[1] * n[1] + 1.0).sqrt();
                 let shade = (n[0] * light_v[0] + n[1] * light_v[1] + n[2] * light_v[2]) / len;
-                let region = if region_kind == 0 { shape.v[i] } else { f32::from(shape.v[i] < 1.0 - INSIDE_EPS && on_bevel(x, y)) };
+                let region = match region_kind {
+                    0 => shape.v[i],
+                    1 => f32::from(shape.v[i] < 1.0 - INSIDE_EPS && on_bevel(x, y)),
+                    _ => f32::from(shape.v[i] > INSIDE_EPS),
+                };
                 sm.v[i] = shade;
                 rg.v[i] = region;
             }
@@ -1600,17 +1604,12 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
             vec![hi, sh]
         }
         BevelPaint::Both => {
-            // One map per colour over the whole bevel: the inside half where the shape is (× its
-            // alpha), the outside half (pillow: facing the other way) for the rest of each pixel.
-            // A 1 % edge pixel of a pillow emboss takes the outside shading (Photoshop oracle
-            // bevel-pillow-smooth), a 75 % one of an emboss mostly the inside (layer_effects).
-            let (hi, sh) = shade_into(g.depth, 0);
+            // The inside half where the shape is and the outside half (pillow: facing the other
+            // way) under the layer's edge and beyond, each at full strength: the composite blends
+            // the two shaded results by the layer's coverage (see `composite_with_effects`).
+            let (hi, sh) = shade_into(g.depth, 2);
             let (ho, so) = shade_into(if g.pillow { -g.depth } else { g.depth }, 1);
-            let mix = |a: Map, b: Map| -> Map {
-                let v = a.v.iter().zip(&b.v).zip(&shape.v).map(|((x, y), s)| if *s > INSIDE_EPS { *x } else { 0.0 } + y * (1.0 - s.min(1.0))).collect();
-                Map { w: a.w, h: a.h, v }
-            };
-            vec![mix(hi, ho), mix(sh, so)]
+            vec![hi, sh, ho, so]
         }
     };
     (maps, g.paint)
@@ -1775,6 +1774,16 @@ pub(crate) fn build_maps_prepared(
                         let union = Map { w, h, v: shape.v.iter().zip(&ring.v).map(|(a, r)| a.max(*r)).collect() };
                         let style = if st.position == StrokePosition::Center { BevelStyle::Emboss } else { BevelStyle::OuterBevel };
                         let mut maps = bevel_maps(&shape, &Bevel { style, ..(*b).clone() }, light, tex, patterns).0;
+                        // The emboss's halves as one map per colour: the inside where the shape is
+                        // (× its alpha), the outside for the rest of each pixel.
+                        if let [hi, sh, ho, so] = maps.as_slice() {
+                            let mix = |a: &Map, o: &Map| Map {
+                                w,
+                                h,
+                                v: a.v.iter().zip(&o.v).zip(&shape.v).map(|((x, y), s)| if *s > INSIDE_EPS { x * s } else { 0.0 } + y * (1.0 - s.min(1.0))).collect(),
+                            };
+                            maps = vec![mix(hi, ho), mix(sh, so)];
+                        }
                         // An outside stroke is shaded in its own colour before it is mixed over the
                         // backdrop ([`composite_with_effects_prepared`]), so the maps run at full
                         // strength wherever the ring reaches; a centre stroke is shaded over the
@@ -2221,8 +2230,25 @@ pub(crate) fn composite_with_effects_prepared(
             && (maps.bevel_paint[i] == BevelPaint::Both || (maps.bevel_paint[i] == BevelPaint::Stroke && !outside_stroke))
             && !maps.per.get(i).is_none_or(Vec::is_empty)
         {
-            paint_color(&mut work, &fx(i, 0), rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
-            paint_color(&mut work, &fx(i, 1), rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
+            if maps.bevel_paint[i] == BevelPaint::Both {
+                // Each half shades the composited pixel on its own; an edge pixel takes the inside
+                // result for its coverage and the outside one for the rest (temp kit 8 pillow-*:
+                // a half-covered pixel between a black inside and a lit outside is the lit value
+                // × ½, not the colour of the averaged shading). Plain emboss halves shade alike.
+                let mut inside = work.clone();
+                paint_color(&mut inside, &fx(i, 0), rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
+                paint_color(&mut inside, &fx(i, 1), rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
+                paint_color(&mut work, &fx(i, 2), rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
+                paint_color(&mut work, &fx(i, 3), rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
+                for ((o, p), a) in work.px.iter_mut().zip(&inside.px).zip(&shape.v) {
+                    if *a > INSIDE_EPS {
+                        *o = mix_premul(*o, *p, a.min(1.0));
+                    }
+                }
+            } else {
+                paint_color(&mut work, &fx(i, 0), rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
+                paint_color(&mut work, &fx(i, 1), rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
+            }
         }
     }
     // Layer opacity applies to the whole stack.
@@ -2559,13 +2585,14 @@ mod tests {
         let l = GlobalLight::default();
         let (e, paint) =
             bevel_maps(&shape, &bevel_of(BevelStyle::Emboss, BevelTechnique::Smooth), &l, &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
-        assert_eq!((paint, e.len()), (BevelPaint::Both, 2));
+        // Highlight and shadow of the inside half, then of the outside half.
+        assert_eq!((paint, e.len()), (BevelPaint::Both, 4));
         let at = |m: &Map, x: usize, y: usize| m.v[y * 40 + x];
         // Emboss: the slope across the top edge faces the light on both sides.
-        assert!(at(&e[0], 20, 10) > 0.3 && at(&e[0], 20, 9) > 0.3);
+        assert!(at(&e[0], 20, 10) > 0.3 && at(&e[2], 20, 9) > 0.3);
         let (p, _) =
             bevel_maps(&shape, &bevel_of(BevelStyle::PillowEmboss, BevelTechnique::Smooth), &l, &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
-        assert!(at(&p[0], 20, 10) > 0.3 && at(&p[1], 20, 9) > 0.3, "pillow: outside top edge in shadow");
+        assert!(at(&p[0], 20, 10) > 0.3 && at(&p[3], 20, 9) > 0.3, "pillow: outside top edge in shadow");
     }
 
     #[test]
@@ -2584,8 +2611,9 @@ mod tests {
         let (m, _) = bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
         let reach = tent_kernel(bevel_geom(&b).width).0 as usize;
         let row = 39 + reach + 1; // last shape row + reach + 1: height 0, neighbour above raised
-        assert!(m[1].v[row * 60 + 30] > 0.0, "{}", m[1].v[row * 60 + 30]);
-        assert_eq!(m[1].v[(row + 1) * 60 + 30], 0.0);
+        // The outside half's shadow (map 3).
+        assert!(m[3].v[row * 60 + 30] > 0.0, "{}", m[3].v[row * 60 + 30]);
+        assert_eq!(m[3].v[(row + 1) * 60 + 30], 0.0);
     }
 
     #[test]
@@ -2879,8 +2907,9 @@ mod tests {
         let mut b = bevel_of(BevelStyle::Emboss, BevelTechnique::ChiselHard);
         (b.size, b.angle) = (13.0, 180.0);
         let (m, _) = bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
-        // Light from the left: the right-hand facets are in shadow, inside and outside alike.
-        let sh = |x: usize| m[1].v[25 * n + x];
+        // Light from the left: the right-hand facets are in shadow outside the edge (the outside
+        // half's shadow, map 3).
+        let sh = |x: usize| m[3].v[25 * n + x];
         assert!(sh(42) > 0.2);
         for x in [41, 43, 44] {
             assert!((sh(x) - sh(42)).abs() < 0.02, "x {x}: {} vs {}", sh(x), sh(42));
