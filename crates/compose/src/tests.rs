@@ -2688,8 +2688,23 @@ fn photo_filter_matches_photoshop() {
             ([1.0, 1.0, 1.0], [255.0, 255.0, 255.0]),
             ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
         ] {
+            // 8-bit Preserve Luminosity works in whole levels: Reference's rgb8 file (the values
+            // above are its rgb16 one's) has red at (238, 6, 6), green (69, 219, 1), blue
+            // (46, 1, 131), yellow (255, 240, 84), the 128 grey (139, 124, 116) and the 242 one
+            // (255, 239, 230).
+            let ps8 = [
+                ([1.0, 0.0, 0.0], [238.0, 6.0, 6.0]),
+                ([0.0, 1.0, 0.0], [69.0, 219.0, 1.0]),
+                ([0.0, 0.0, 1.0], [46.0, 1.0, 131.0]),
+                ([1.0, 1.0, 0.0], [255.0, 240.0, 84.0]),
+                ([0.5019, 0.5019, 0.5019], [139.0, 124.0, 116.0]),
+                ([0.949, 0.949, 0.949], [255.0, 239.0, 230.0]),
+            ];
+            let ps = ps8.iter().find(|r| depth == SampleType::U8 && r.0 == v).map_or(ps, |r| r.1);
             let got = filter(warming, depth, v);
-            assert!(got.iter().zip(ps).all(|(g, p)| (g - p).abs() <= 1.0), "{depth:?} {v:?}: got {got:?} want {ps:?}");
+            // 8-bit: the filtered colour's own rounding moves the whole-level shift a little.
+            let tol = if depth == SampleType::U8 { 1.5 } else { 1.0 };
+            assert!(got.iter().zip(ps).all(|(g, p)| (g - p).abs() <= tol), "{depth:?} {v:?}: got {got:?} want {ps:?}");
         }
     }
     // The 32-bit file picks the same numbers as linear values (Lab 81.5, 9.41, 82.19). Its fit is

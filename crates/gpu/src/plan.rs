@@ -1799,7 +1799,13 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photospli
             for (row, m) in p.iter_mut().zip(m) {
                 *row = [m[0], m[1], m[2], 0.0];
             }
-            p[3] = [if *preserve_luminosity && !linear_doc { 1.0 } else { 0.0 }, transfer_exponent(transfer), 0.0, 0.0];
+            // p3.z: an 8-bit document, whose Preserve Luminosity works in whole levels.
+            p[3] = [
+                if *preserve_luminosity && !linear_doc { 1.0 } else { 0.0 },
+                transfer_exponent(transfer),
+                if depth == photosplice_color::SampleType::U8 { 1.0 } else { 0.0 },
+                0.0,
+            ];
             (11, p, None)
         }
         Adjustment::BlackWhite { weights, tint } => {

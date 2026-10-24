@@ -191,7 +191,11 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
             map_rgb(buf, |c| {
                 // 32-bit samples are linear already, and may go negative.
                 let f = if linear_doc { mat3_mul(&m, c) } else { mat3_mul(&m, c.map(|v| transfer.decode(v))).map(|v| transfer.encode(v)) };
-                let f = if set_lum { photosplice_color::blend::set_lum(f, photosplice_color::blend::lum(c)) } else { f };
+                let f = match (set_lum, depth) {
+                    (true, Some(SampleType::U8)) => preserve_luminosity_8bit(f, c),
+                    (true, _) => photosplice_color::blend::set_lum(f, photosplice_color::blend::lum(c)),
+                    (false, _) => f,
+                };
                 // 32-bit results aren't clipped (photoshop corpus rgb32 photo-filter.psd: white
                 // filters to 1.19 red).
                 if linear_doc { f } else { f.map(|v| v.clamp(0.0, 1.0)) }
@@ -751,6 +755,31 @@ const COLORIZE_8BIT_HUE_SHIFT: [f32; 360] = [
     -2.10, -1.80, -1.48, -1.46, -2.46, -2.02, -1.70, -2.70, -2.06, -2.04, -1.60, -2.60,
     -2.22, -1.86, -2.86, -2.56, -1.80, -1.44, -2.44, -1.78, -1.38, -2.38, -1.56, -1.04,
 ];
+
+/// Photo Filter's Preserve Luminosity in an 8-bit document, in whole levels as Reference works
+/// there: the filtered colour rounded to levels is moved by the whole number of levels between
+/// the source's luma (rounded half up) and its own (rounded half down), then clipped about that
+/// target (temp kit 8 pf8-*: warming and cooling at 25, 50 and 100 %, 16 632 colours, one 4/255
+/// off; the float `set_lum` left 97 more than 2/255 off, up to 7). 16- and 32-bit documents keep
+/// the float step.
+pub fn preserve_luminosity_8bit(f: [f32; 3], c: [f32; 3]) -> [f32; 3] {
+    let lum = |v: [f64; 3]| 0.3 * v[0] + 0.59 * v[1] + 0.11 * v[2];
+    let f8 = f.map(|v| (f64::from(if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }) * 255.0 + 0.5).floor());
+    let c8 = c.map(|v| f64::from(if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }) * 255.0);
+    let target = (lum(c8) + 0.5 + 1e-6).floor();
+    let d = target - (lum(f8) - 0.5 - 1e-6).ceil();
+    let mut o = f8.map(|v| v + d);
+    let (n, x) = (o[0].min(o[1]).min(o[2]), o[0].max(o[1]).max(o[2]));
+    if n < 0.0 {
+        let k = if target - n > 0.0 { target / (target - n) } else { 0.0 };
+        o = o.map(|v| target + (v - target) * k);
+    }
+    if x > 255.0 {
+        let k = if x - target > 0.0 { (255.0 - target) / (x - target) } else { 0.0 };
+        o = o.map(|v| target + (v - target) * k);
+    }
+    o.map(|v| (v / 255.0) as f32)
+}
 
 /// One Hue/Saturation evaluation: hue shift in degrees, saturation and lightness in -1..=1.
 /// Colorize sets the hue and saturation instead of shifting them; at 0% it leaves only the
@@ -2404,6 +2433,18 @@ mod tone_tests {
                 assert!((b.px[0][i] * 255.0 - want[i]).abs() < tol, "{c:?}: {:?} vs {want:?}", b.px[0].map(|v| v * 255.0));
             }
         }
+    }
+
+    /// 8-bit Preserve Luminosity in whole levels (temp kit 8 pf8-warm-d25): (255, 221, 51)
+    /// filtered to (245, 202, 35) keeps luma 213 as Reference's (255, 217, 72), its blue clipped
+    /// about that target; and a grey filters to a grey of the same level.
+    #[test]
+    fn preserve_luminosity_8bit_works_in_levels() {
+        let lv = |v: [f32; 3]| v.map(|x| x / 255.0);
+        let out = preserve_luminosity_8bit(lv([245.0, 202.0, 35.0]), lv([255.0, 221.0, 51.0])).map(|v| v * 255.0);
+        assert!(out.iter().zip([255.0, 217.0, 72.0]).all(|(a, b)| (a - b).abs() <= 1.0), "{out:?}");
+        let g = preserve_luminosity_8bit(lv([120.0, 120.0, 120.0]), lv([100.0, 100.0, 100.0])).map(|v| v * 255.0);
+        assert!(g.iter().all(|v| (v - 100.0).abs() < 1e-3), "{g:?}");
     }
 
     /// Overlapping ranges add in order, the saturation excess held at −1: a second −100 % range
