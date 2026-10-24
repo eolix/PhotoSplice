@@ -251,19 +251,19 @@ fn set_lum(c: vec3<f32>, l: f32, top: f32) -> vec3<f32> { return clip_color(c + 
 fn preserve_luminosity_8bit(f: vec3<f32>, c: vec3<f32>) -> vec3<f32> {
     let f8 = floor(clamp(f, vec3(0.0), vec3(1.0)) * 255.0 + 0.5);
     let c8 = clamp(c, vec3(0.0), vec3(1.0)) * 255.0;
-    let target = floor(lum(c8) + 0.5 + 1e-3);
-    var o = f8 + (target - ceil(lum(f8) - 0.5 - 1e-3));
+    let lum_target = floor(lum(c8) + 0.5 + 1e-3);
+    var o = f8 + (lum_target - ceil(lum(f8) - 0.5 - 1e-3));
     let n = min(o.r, min(o.g, o.b));
     let x = max(o.r, max(o.g, o.b));
     if (n < 0.0) {
         var k = 0.0;
-        if (target - n > 0.0) { k = target / (target - n); }
-        o = target + (o - target) * k;
+        if (lum_target - n > 0.0) { k = lum_target / (lum_target - n); }
+        o = lum_target + (o - lum_target) * k;
     }
     if (x > 255.0) {
         var k = 0.0;
-        if (x - target > 0.0) { k = (255.0 - target) / (x - target); }
-        o = target + (o - target) * k;
+        if (x - lum_target > 0.0) { k = (255.0 - lum_target) / (x - lum_target); }
+        o = lum_target + (o - lum_target) * k;
     }
     return o / 255.0;
 }
