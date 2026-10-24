@@ -97,14 +97,11 @@ fn gpu() -> Option<Gpu> {
         eprintln!("skipping GPU parity tests: adapter can't render Rgba32Float");
         return None;
     }
-    let comp = match Compositor::try_new_with_format(&device, wgpu::TextureFormat::Rgba32Float) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("skipping GPU parity tests: {e}");
-            return None;
-        }
-    };
-    let mut paged = Compositor::try_new_with_format(&device, wgpu::TextureFormat::Rgba32Float).ok()?;
+    // The adapter can render the format, so a compositor that fails to build is a bug (a shader
+    // that doesn't compile), not a reason to skip: skipping hid one for every test.
+    let comp = Compositor::try_new_with_format(&device, wgpu::TextureFormat::Rgba32Float).unwrap_or_else(|e| panic!("the GPU compositor doesn't build: {e}"));
+    let mut paged =
+        Compositor::try_new_with_format(&device, wgpu::TextureFormat::Rgba32Float).unwrap_or_else(|e| panic!("the GPU compositor doesn't build: {e}"));
     paged.set_texture_limit(PAGED_LIMIT);
     Some(Gpu { device, queue, comp, paged, _lock: lock })
 }
