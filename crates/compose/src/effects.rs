@@ -1418,6 +1418,12 @@ pub fn bevel_geom(b: &Bevel) -> BevelGeom {
     }
 }
 
+/// Whether a bevel also shades the pixels just past its height's reach (`bevel_maps`' region;
+/// the GPU's `fs_mbevelshade` reads the same 4-neighbours).
+pub fn outer_reaches_past(b: &Bevel, g: &BevelGeom) -> bool {
+    g.paint == BevelPaint::Both || (g.paint == BevelPaint::Outer && b.technique == BevelTechnique::Smooth)
+}
+
 /// Bevel height map in `0..=1`. Smooth: the shape blurred by two box passes of the bevel
 /// width. Chisel: linear ramps of the exact distance to the edge ([`BevelGeom::chisel`] long;
 /// emboss styles straddle the edge). Chisel Soft uses the same profile: on straight edges
@@ -1534,11 +1540,12 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
     let (se, ce) = altitude.to_radians().sin_cos();
     let light_v = [ca * ce, -sa * ce, se];
     // Region: 0 = inside (× the shape's alpha), 1 = under the layer's edge and outside.
-    // A pixel is on the bevel where its height is raised. Emboss styles also shade the last pixel
-    // past the blur's reach (a raised 4-neighbour: it still slopes; psd-tools layer_effects'
-    // emboss shadow runs one row past it), outer bevels don't (Photoshop oracle
-    // bevel-outer-smooth).
-    let reach_past = g.paint == BevelPaint::Both;
+    // A pixel is on the bevel where its height is raised. Emboss styles and Smooth outer bevels
+    // also shade the last pixel past the blur's reach (a raised 4-neighbour: it still slopes;
+    // psd-tools layer_effects' emboss shadow runs one row past it, Reference corpus
+    // bevel-outer-smooth and -on-gradient-bg shade the row at the size). Chisel outer bevels
+    // reach that row through their ramp (`BevelGeom::chisel`).
+    let reach_past = outer_reaches_past(b, &g);
     let on_bevel = |x: i64, y: i64| {
         hmap.get(x, y) > BEVEL_H_EPS || (reach_past && [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dy)| hmap.get(x + dx, y + dy) > BEVEL_H_EPS))
     };
@@ -2896,6 +2903,22 @@ mod tests {
             let row: Vec<f32> = (0..size + 2).map(at).collect();
             assert!(at(size - 1) > 1e-4 && at(size) < 1e-6, "size {size}: {row:?}");
         }
+    }
+
+    /// A Smooth outer bevel shades the row at its size outside the edge, where its height has
+    /// just run out but its neighbour's still slopes (Reference corpus bevel-outer-smooth), and
+    /// nothing past it.
+    #[test]
+    fn smooth_outer_bevel_shades_the_row_at_its_size() {
+        let shape = square(64, 20, 44);
+        let l = GlobalLight::default();
+        let pp = PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES);
+        let mut b = bevel_of(BevelStyle::OuterBevel, BevelTechnique::Smooth);
+        b.size = 10.0;
+        let (m, _) = bevel_maps(&shape, &b, &l, &no_tex(), &pp);
+        // Below the shape (rows 44..), on its middle column: row 43 + d is d pixels out.
+        let at = |d: usize| m[0].v[(43 + d) * 64 + 32] + m[1].v[(43 + d) * 64 + 32];
+        assert!(at(10) > 1e-4 && at(11) < 1e-6, "{:?}", (8..13).map(at).collect::<Vec<_>>());
     }
 
     /// Soften blurs the shading after the gloss clamps it, not the height: a full shadow's edge

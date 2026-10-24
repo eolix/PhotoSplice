@@ -1403,7 +1403,8 @@ fn fs_mbevelshade(in: VOut) -> @location(0) vec4<f32> {
     // effects::bevel_maps' on_bevel: the height above BEVEL_H_EPS (emboss styles: or a
     // 4-neighbour's).
     var hmax = ra(p);
-    // p3.x: an outer chisel bevel, which also reaches one pixel past its ramp.
+    // p3.x: a Smooth outer bevel, which also reaches one pixel past its height
+    // (effects::outer_reaches_past).
     if (op.p1.y > 1.5 || op.p3.x > 0.5) {
         hmax = max(max(hmax, max(ra(p + vec2(1, 0)), ra(p - vec2(1, 0)))), max(ra(p + vec2(0, 1)), ra(p - vec2(0, 1))));
     }
