@@ -1106,10 +1106,10 @@ fn paint_fx(
 }
 
 /// The opacity gain of a gradient glow over its map (see [`paint_glow`]). A Softer glow is
-/// opaque from 1 / 8.4 of its blurred shape on whatever its Range (temp kit 8 og-grad-*: size 20
-/// at ranges 50 and 100 %, the faint tail 8.2-8.6 × the blur at both; `1 / range²` made a 100 %
-/// glow a quarter as strong, 26 % of pixels off → 1.4 %), so the gain on the ranged map is
-/// `range × 8.4`. A Precise glow is opaque from `range²`.
+/// opaque from 1 / 8.4 of its blurred shape whatever its size and Range (temp kits 8 and 9
+/// og-grad-*: sizes 10, 20 and 40 at ranges 25, 50 and 100 %, all within 3.2/255 at 8.4, 4.7 at
+/// 8.2 or 8.4 at 8.6; `1 / range²` made a 100 % glow a quarter as strong), so the gain on the
+/// ranged map is `range × 8.4`. A Precise glow is opaque from `range²`.
 pub fn glow_gradient_gain(g: &Glow) -> f32 {
     let r = if g.range.is_finite() { g.range.clamp(0.01, 1.0) } else { 1.0 };
     match g.technique {
@@ -1122,17 +1122,18 @@ pub fn glow_gradient_gain(g: &Glow) -> f32 {
 /// canvas: Reference colours the glow where its (ranged, contoured) strength is `v` with the
 /// gradient at `1 - v`, so the first stop hugs the edge, and its opacity is `v` × the
 /// [`glow_gradient_gain`] (Reference corpus outer-glow-gradient.psd, against bands across the
-/// canvas; psd-tools layer_params.psd). `pos` is the map before the layer knocks it out: under a
-/// see-through fill the edge pixels keep their place at the gradient's start. Glows have no
-/// gradient angle, style or Reverse.
+/// canvas; psd-tools layer_params.psd). `pos` is the map before the layer knocks it out (under a
+/// see-through fill the edge pixels keep their place at the gradient's start) and `keep` what
+/// the knock-out leaves of each pixel, applied after the gain. Glows have no gradient angle,
+/// style or Reverse.
 #[allow(clippy::too_many_arguments)]
-fn paint_glow(dst: &mut Buffer, m: &Map, pos: &Map, g: &Glow, shape_bounds: Rect, anchor: (f64, f64), big: Rect, patterns: &PreparedPatterns<'_>) {
+fn paint_glow(dst: &mut Buffer, m: &Map, pos: &Map, keep: &Map, g: &Glow, shape_bounds: Rect, anchor: (f64, f64), big: Rect, patterns: &PreparedPatterns<'_>) {
     let FxPaint::Gradient(gradient) = &g.paint else {
         return paint_fx(dst, m, &g.paint, shape_bounds, shape_bounds, anchor, big, g.common.blend, g.common.opacity, patterns);
     };
     let prepared = PreparedGradient::new(gradient);
     let gain = glow_gradient_gain(g);
-    let strength = Map { w: m.w, h: m.h, v: m.v.iter().map(|v| (v * gain).min(1.0)).collect() };
+    let strength = Map { w: m.w, h: m.h, v: pos.v.iter().zip(&keep.v).map(|(v, k)| (v * gain).min(1.0) * k).collect() };
     paint(dst, &strength, |i| prepared.sample(1.0 - pos.v.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0)), g.common.blend, g.common.opacity);
 }
 
@@ -1985,7 +1986,12 @@ pub(crate) fn composite_with_effects_prepared(
             // keeps its place along the glow there (temp kit 8 og-grad-*: a disc's edge pixels
             // stay at the gradient's start, not its middle).
             knock_out_exterior(&mut m, &shape, layer.fill_opacity);
-            paint_glow(&mut work, &m, &pos, g, sb, anchor, big, patterns);
+            // What the knock-out leaves of each pixel: a gradient glow takes it on its opacity,
+            // after the gain (temp kit 9 og-grad-*: a disc's 36 % edge pixel under Fill 0 % keeps
+            // 64 % of the glow; knocked out before the gain, the glow came back whole).
+            let mut keep = Map::new(m.w, m.h, 1.0);
+            knock_out_exterior(&mut keep, &shape, layer.fill_opacity);
+            paint_glow(&mut work, &m, &pos, &keep, g, sb, anchor, big, patterns);
         }
     }
 
@@ -2047,7 +2053,8 @@ pub(crate) fn composite_with_effects_prepared(
     for (i, e) in rev() {
         if let Effect::InnerGlow(g) = e {
             let m = rel(fx(i, 0));
-            paint_glow(&mut lay, &m, &m, g, sb, anchor, big, patterns);
+            let keep = Map::new(m.w, m.h, 1.0);
+            paint_glow(&mut lay, &m, &m, &keep, g, sb, anchor, big, patterns);
         }
     }
     for (i, e) in rev() {

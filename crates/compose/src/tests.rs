@@ -1097,9 +1097,11 @@ fn gradient_glows_are_opaque_near_the_edge_and_keep_their_place() {
     let l = d.layers.last_mut().unwrap();
     l.fill_opacity = 0.0;
     l.surface_mut().unwrap().fill_rect(Rect::new(10, 10, 11, 30), &[1.0, 0.0, 0.0, 0.5]);
-    // Black at half strength over white; the gradient taken from the knocked-out map was grey.
+    // Black at half strength over white: the knock-out leaves half the glow after its gain
+    // (taken before it, the glow came back whole), and the gradient taken from the knocked-out
+    // map was grey.
     let edge = px(&d, 10, 20)[0];
-    assert!(edge < 0.6, "{edge}");
+    assert!((edge - 0.5).abs() < 0.05, "{edge}");
 }
 
 #[test]
