@@ -424,7 +424,7 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
                 BevelPaint::Outer => vec![(g.depth, 1.0)],
                 BevelPaint::Both => vec![(g.depth, 4.0), (if g.pillow { -g.depth } else { g.depth }, 1.0)],
             };
-            let reach_past = photosplice_compose::effects::outer_reaches_past(bv, &g);
+            let reach_past = photosplice_compose::effects::outer_reaches_past(&g);
             // One shading step (`fs_mbevelshade`; p3.x: an outer bevel reaching a pixel past its
             // height, p3.y: its softened-bevel step, 0 = all in one).
             let shade = |a: In, bb: Option<In>, depth: f32, region: f32, which: f32, mode: f32| {

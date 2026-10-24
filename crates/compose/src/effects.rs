@@ -1409,8 +1409,8 @@ pub fn bevel_geom(b: &Bevel) -> BevelGeom {
 
 /// Whether a bevel also shades the pixels just past its height's reach (`bevel_maps`' region;
 /// the GPU's `fs_mbevelshade` reads the same 4-neighbours).
-pub fn outer_reaches_past(b: &Bevel, g: &BevelGeom) -> bool {
-    g.paint == BevelPaint::Both || (g.paint == BevelPaint::Outer && b.technique == BevelTechnique::Smooth)
+pub fn outer_reaches_past(g: &BevelGeom) -> bool {
+    g.paint == BevelPaint::Both || g.paint == BevelPaint::Outer
 }
 
 /// Chisel Soft's distances, `(inside, outside)`: chamfer distances to the binary edge, pixels
@@ -1539,12 +1539,12 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
     let (se, ce) = altitude.to_radians().sin_cos();
     let light_v = [ca * ce, -sa * ce, se];
     // Region: 0 = inside (× the shape's alpha), 1 = under the layer's edge and outside.
-    // A pixel is on the bevel where its height is raised. Emboss styles and Smooth outer bevels
-    // also shade the last pixel past the blur's reach (a raised 4-neighbour: it still slopes;
+    // A pixel is on the bevel where its height is raised. Emboss styles and outer bevels also
+    // shade the last pixel past the height's reach (a raised 4-neighbour: it still slopes;
     // psd-tools layer_effects' emboss shadow runs one row past it, Reference corpus
-    // bevel-outer-smooth and -on-gradient-bg shade the row at the size). Chisel outer bevels
-    // reach that row through their ramp (`BevelGeom::chisel`).
-    let reach_past = outer_reaches_past(b, &g);
+    // bevel-outer-smooth and -on-gradient-bg shade the row at the size, and a chisel's facet
+    // fades out one pixel further along a slanted edge: kit hard-outer-* 104 → 31/255).
+    let reach_past = outer_reaches_past(&g);
     let on_bevel = |x: i64, y: i64| {
         hmap.get(x, y) > BEVEL_H_EPS || (reach_past && [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dy)| hmap.get(x + dx, y + dy) > BEVEL_H_EPS))
     };
@@ -2992,6 +2992,22 @@ mod tests {
         // Below the shape (rows 44..), on its middle column: row 43 + d is d pixels out.
         let at = |d: usize| m[0].v[(43 + d) * 64 + 32] + m[1].v[(43 + d) * 64 + 32];
         assert!(at(10) > 1e-4 && at(11) < 1e-6, "{:?}", (8..13).map(at).collect::<Vec<_>>());
+    }
+
+    /// An outer chisel shades the pixel just past its ramp too (its 4-neighbour is raised):
+    /// along a slanted edge its facet fades out a pixel further (Reference kit hard-outer-*).
+    #[test]
+    fn outer_chisel_shades_the_pixel_past_its_ramp() {
+        let shape = square(64, 20, 44);
+        let mut b = bevel_of(BevelStyle::OuterBevel, BevelTechnique::ChiselHard);
+        b.size = 10.0;
+        let (m, _) = bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        let h = bevel_height(&shape, &b, &bevel_geom(&b), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        // Below the shape, middle column: the last raised row, then the one past it.
+        let col = |y: usize| y * 64 + 32;
+        let last = (44..64).take_while(|&y| h.v[col(y)] > BEVEL_H_EPS).last().unwrap_or(44);
+        let at = |y: usize| m[0].v[col(y)] + m[1].v[col(y)];
+        assert!(at(last + 1) > 1e-4 && at(last + 2) < 1e-6, "{:?}", (last - 1..last + 3).map(at).collect::<Vec<_>>());
     }
 
     /// Soften blurs the shading after the gloss clamps it, not the height: a full shadow's edge
