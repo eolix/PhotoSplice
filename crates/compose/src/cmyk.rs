@@ -10,10 +10,10 @@
 //!
 //! Adjustments work on the inks too: Levels and Curves through their CMYK records, Invert,
 //! Posterize and Brightness/Contrast through one curve for every ink, Threshold and Gradient Map
-//! on the inks' own lightness ([`ink_lightness`]), Hue/Saturation, Color Balance and Photo
-//! Filter on C, M, Y as an RGB colour with K kept (Hue/Saturation holding each ink within
-//! 0..100 %), Colorize on the inks as a plain RGB colour separated back with full black
-//! replacement, Selective Color on every ink, K included. Layer effects, gradients and
+//! on the inks' own lightness ([`ink_lightness`]), Hue/Saturation and Color Balance on C, M, Y
+//! as an RGB colour with K kept (Hue/Saturation holding each ink within 0..100 %), Photo Filter
+//! through the profile's Lab, Colorize on the inks as a plain RGB colour separated back with
+//! full black replacement, Selective Color on every ink, K included. Layer effects, gradients and
 //! patterns reuse the RGB code twice, on stand-in colours ([`Projection`]): once with C, M, Y's
 //! complements as R, G, B, once with K's in all three, so every separable blend is per ink. A layer this module doesn't composite in CMYK
 //! yet (effects with non-separable modes or a bevel texture, Blend If, the other adjustments)
@@ -415,7 +415,29 @@ fn adjust(a: &Adjustment, buf: &mut CBuf, cx: &Ctx) {
     // Colour adjustments: C, M, Y's complements through the RGB adjustment as an RGB colour, K
     // untouched (Reference corpus cmyk8: K exact in every one; the others carry the residual
     // their RGB versions have; `cmyk_probe` ADJ=1).
-    if matches!(a, Adjustment::HueSaturation { .. } | Adjustment::ColorBalance { .. } | Adjustment::PhotoFilter { .. }) {
+    // Photo Filter: the inks' colour through the profile to Lab, its D50 XYZ scaled by the
+    // filter, and separated back (black rebuilt as the profile does). Preserve Luminosity then
+    // keeps the source's K and moves C, M, Y's complements together to the source's luma
+    // (0.30 / 0.59 / 0.11, clipped as the Luminosity mode does). Reference kit inks-pf-*: warming
+    // 50 % with and without it, cooling 25 %, 192 patches; the complements filtered as an RGB
+    // colour took 80 % cyan to 54 % and left a 70 % K grey's K alone without it.
+    if let Adjustment::PhotoFilter { color, density, preserve_luminosity } = a {
+        use photosplice_color::convert::{cmyk_to_lab, lab_to_cmyk, lab_to_xyz, xyz_to_lab};
+        let scale = crate::adjust::photo_filter_scale(*color, *density);
+        for p in &mut buf.px {
+            let ink = inks(p);
+            let xyz = lab_to_xyz(cmyk_to_lab(ink));
+            let mut out = lab_to_cmyk(xyz_to_lab(std::array::from_fn(|i| xyz[i] * scale[i])));
+            if *preserve_luminosity {
+                let src = [1.0 - ink[0], 1.0 - ink[1], 1.0 - ink[2]];
+                let f = photosplice_color::blend::set_lum([1.0 - out[0], 1.0 - out[1], 1.0 - out[2]], photosplice_color::blend::lum(src));
+                out = [1.0 - f[0], 1.0 - f[1], 1.0 - f[2], ink[3]];
+            }
+            p[..4].copy_from_slice(&std::array::from_fn::<f32, 4, _>(|i| 1.0 - out[i].clamp(0.0, 1.0)));
+        }
+        return;
+    }
+    if matches!(a, Adjustment::HueSaturation { .. } | Adjustment::ColorBalance { .. }) {
         let mut rgb = Buffer { rect: buf.rect, px: buf.px.iter().map(|p| [p[0], p[1], p[2], 1.0]).collect() };
         crate::adjust::in_ink_space(|| crate::adjust::apply_depth(a, &mut rgb, cx.transfer, Some(cx.depth)));
         for (p, o) in buf.px.iter_mut().zip(&rgb.px) {
@@ -992,6 +1014,33 @@ mod tests {
         let mut d = doc([0.0; 4]);
         d.layers.push(hs(200.0, 40.0, 5.0, true));
         assert!(near(inks_at(&d, 0), [0.0; 4], 1e-4), "{:?}", inks_at(&d, 0));
+    }
+
+    /// Photo Filter goes through the profile: without Preserve Luminosity a 70 % K grey comes back
+    /// warm, separated as the profile does (SWOP rebuilds its black from C, M and Y); with it, the
+    /// source's K stays and C, M, Y's complements move back to the source's luma together, so the
+    /// grey (and paper) are unchanged and pure cyan's magenta and yellow rise alike (Reference kit
+    /// inks-pf-warm-d50 / -nolum: 70 % K → 52 57 60 29 without, unchanged with it).
+    #[test]
+    fn photo_filter_goes_through_the_profile() {
+        let pf = |lum: bool| Layer::new("p", LayerContent::Adjustment(Adjustment::PhotoFilter { color: [236.0 / 255.0, 138.0 / 255.0, 0.0], density: 0.5, preserve_luminosity: lum }));
+        let mut d = doc_at([0.0, 0.0, 0.0, 0.7], SampleType::U16);
+        d.layers.push(pf(false));
+        let o = inks_at(&d, 0);
+        // Warm: yellow over magenta over cyan (how much black the profile rebuilds is its own).
+        assert!(o[0] > 0.02 && o[1] > o[0] && o[2] > o[1], "{o:?}");
+        for base in [[0.0, 0.0, 0.0, 0.7], [0.0; 4]] {
+            let mut d = doc_at(base, SampleType::U16);
+            d.layers.push(pf(true));
+            assert!(near(inks_at(&d, 0), base, 1e-3), "{base:?}: {:?}", inks_at(&d, 0));
+        }
+        let mut d = doc_at([1.0, 0.0, 0.0, 0.0], SampleType::U16);
+        let mut nolum = d.clone();
+        nolum.layers.push(pf(false));
+        d.layers.push(pf(true));
+        let (a, b) = (inks_at(&d, 0), inks_at(&nolum, 0));
+        assert!((a[3] - 0.0).abs() < 1e-4 && a[0] < b[0], "{a:?} vs {b:?}");
+        assert!(((b[1] - a[1]) - (b[2] - a[2])).abs() < 0.01, "C, M, Y move together: {a:?} vs {b:?}");
     }
 
     /// Selective Color moves each ink by its own percentage, K by the black one, weighted by the

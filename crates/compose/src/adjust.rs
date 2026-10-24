@@ -1449,6 +1449,14 @@ const XYZ_D65_TO_SRGB: [[f32; 3]; 3] = [[3.240_97, -1.537_383_2, -0.498_610_8], 
 /// (32-bit Preserve Luminosity; 8/16-bit documents instead restore the encoded luminosity like
 /// the Luminosity blend mode). Fitted on the Reference corpus `photo-filter.psd`: rgb16 within
 /// 0.6/255 everywhere; rgb32 the whole matrix within 0.0001 of the one its pixels give.
+/// Photo Filter's per-component scale of D50 XYZ (relative to white), the diagonal
+/// [`photo_filter_matrix`] wraps between sRGB and XYZ.
+pub fn photo_filter_scale(color: [f32; 3], density: f32) -> [f32; 3] {
+    let d = if density.is_finite() { density.clamp(0.0, 1.0) } else { 0.0 };
+    let xyz = mat3_mul(&SRGB_TO_XYZ_D50, color.map(|v| srgb_to_linear(if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 })));
+    std::array::from_fn(|i| 1.0 - d + d * xyz[i] / D50[i])
+}
+
 pub fn photo_filter_matrix(color: [f32; 3], density: f32, normalize_y: bool, hdr: bool) -> [[f32; 3]; 3] {
     let d = if density.is_finite() { density.clamp(0.0, 1.0) } else { 0.0 };
     let xyz = mat3_mul(&SRGB_TO_XYZ_D50, color.map(|v| srgb_to_linear(if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 })));
