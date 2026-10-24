@@ -1046,7 +1046,7 @@ impl<'a> Planner<'a> {
     fn adjust(&mut self, adj: &Adjustment, src: Slot) -> Result<Slot, Unsupported> {
         // Lab documents: on L, a, b, or on the clipped screen colour (compose::lab); both on the CPU.
         if !adjustment_on_gpu(adj, self.cx.mode) || self.cx.mode == photosplice_color::ColorMode::Lab {
-            return Err(Unsupported(format!("{} on CMYK/Lab channels or from measured tables (evaluated on the CPU)", adj.label())));
+            return Err(Unsupported(format!("{} on CMYK/Lab channels (evaluated on the CPU)", adj.label())));
         }
         if let Adjustment::GradientMap { stops, .. } = adj {
             check_gradient_stops(stops)?;
@@ -1690,8 +1690,7 @@ pub fn adjustment_on_gpu(adj: &Adjustment, mode: photosplice_color::ColorMode) -
         photosplice_color::ColorMode::Cmyk => cmyk_channel_adjustment(adj),
         _ => false,
     };
-    // Vibrance reads its measured tables per pixel (compose::adjust::vibrance_measured): CPU only.
-    !tone_in_space && !own_channels && !matches!(adj, Adjustment::Vibrance { .. })
+    !tone_in_space && !own_channels
 }
 
 /// A tone transfer as the shader's `t_decode`/`t_encode` exponent (0: the sRGB curve).
@@ -1774,6 +1773,13 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photospli
                 (8, p, None)
             }
         }
+        // The slider's resolved tables and skin weights (compose::adjust::vibrance_row) as LUT
+        // row 0; p0 = (Saturation factor, transfer, Vibrance on).
+        Adjustment::Vibrance { vibrance, saturation } => {
+            let on = vibrance.is_finite() && *vibrance != 0.0;
+            p[0] = [1.0 + (saturation / 100.0).clamp(-1.0, 1.0), transfer_exponent(transfer), if on { 1.0 } else { 0.0 }, 0.0];
+            (9, p, Some(vec![to_row(&adjust::vibrance_row(*vibrance))]))
+        }
         Adjustment::ChannelMixer { matrix, monochrome, .. } => {
             // compose::adjust: 32-bit documents cut each percentage to 1/1024, count 255/512 of
             // the constant and don't clip (the shader checks F_HDR).
@@ -1841,8 +1847,7 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photospli
             (16, p, Some(rows))
         }
         // Identity on the CPU too (not evaluated there).
-        // Vibrance never reaches the GPU ([`adjustment_on_gpu`]).
-        Adjustment::ColorLookup { .. } | Adjustment::Unsupported { .. } | Adjustment::Vibrance { .. } => (0, p, None),
+        Adjustment::ColorLookup { .. } | Adjustment::Unsupported { .. } => (0, p, None),
     }
 }
 
@@ -1984,8 +1989,6 @@ mod tests {
         let hue = |colorize| Adjustment::HueSaturation { hue: 30.0, saturation: 10.0, lightness: 0.0, colorize, ranges: ranges.clone() };
         assert!(!adjustment_on_gpu(&hue(false), ColorMode::Cmyk) && adjustment_on_gpu(&hue(true), ColorMode::Cmyk));
         assert!(adjustment_on_gpu(&hue(false), ColorMode::Rgb));
-        // Vibrance reads measured tables per pixel: the CPU in every mode.
-        assert!(!adjustment_on_gpu(&Adjustment::Vibrance { vibrance: 30.0, saturation: 0.0 }, ColorMode::Rgb));
         // Screen-colour adjustments stay on the GPU in Lab documents.
         assert!(adjustment_on_gpu(&Adjustment::Exposure { exposure: 1.0, offset: 0.0, gamma: 1.0 }, ColorMode::Lab));
     }

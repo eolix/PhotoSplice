@@ -166,7 +166,8 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
         }
         Adjustment::Vibrance { vibrance, saturation } => {
             let k = 1.0 + (saturation / 100.0).clamp(-1.0, 1.0);
-            map_rgb(buf, |c| vibrance_measured(c, *vibrance, k, transfer))
+            let tables = (vibrance.is_finite() && *vibrance != 0.0).then(|| vibrance_tables(*vibrance));
+            map_rgb(buf, |c| vibrance_measured(c, tables.as_ref(), k, transfer))
         }
         Adjustment::ChannelMixer { matrix, monochrome, .. } if depth == Some(SampleType::F32) => {
             // 32-bit: each source percentage is cut to 1/1024 (toward zero), the constant counts
@@ -924,60 +925,87 @@ const VIB_SKIN_W: [f32; 36] = [
     0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.26, 0.47, 0.63, 0.79, 0.90,
 ];
 
-/// Bilinear (g, k) of one slider's table at brightness `b` (8-bit) and darkest share `keep`.
+/// Vibrance's tables resolved for one slider value: `[plain, skin]`, each (gain of the
+/// brightest channel, darkest share of the output) per brightness row ([`VIB_B`]) and darkest-share
+/// column ([`VIB_KEEP`]), interpolated between the measured sliders ([`VIB_V`]) and the identity at
+/// 0 (gain 1, the column's own share). Skin is the plain table for negative values.
+pub type VibranceTables = [[[[f32; 2]; 11]; 7]; 2];
+
+/// [`VibranceTables`] for slider `vibrance` (−100..=100).
+pub fn vibrance_tables(vibrance: f32) -> VibranceTables {
+    let v = if vibrance.is_finite() { vibrance.clamp(-100.0, 100.0) } else { 0.0 };
+    let pos = VIB_V.iter().position(|&x| x >= v).unwrap_or(VIB_V.len() - 1);
+    std::array::from_fn(|table| {
+        let node = |idx: usize, bi: usize, ki: usize| if table == 1 && idx >= 4 { VIB_SKIN[idx - 4][bi][ki] } else { VIB_PLAIN[idx][bi][ki] };
+        std::array::from_fn(|bi| {
+            std::array::from_fn(|ki| {
+                let ident = [1.0, VIB_KEEP[ki]];
+                let (lo_v, lo) = if pos == 4 && v > 0.0 { (0.0, ident) } else if pos == 0 { (VIB_V[0], node(0, bi, ki)) } else { (VIB_V[pos - 1], node(pos - 1, bi, ki)) };
+                let (hi_v, hi) = if v < 0.0 && pos == 4 { (0.0, ident) } else { (VIB_V[pos], node(pos, bi, ki)) };
+                let t = if hi_v > lo_v { ((v - lo_v) / (hi_v - lo_v)).clamp(0.0, 1.0) } else { 1.0 };
+                [lo[0] + (hi[0] - lo[0]) * t, lo[1] + (hi[1] - lo[1]) * t]
+            })
+        })
+    })
+}
+
+/// The GPU's copy of [`vibrance_tables`] as one LUT row: the plain gains, plain shares, skin
+/// gains and skin shares (77 each, row-major over brightness then share), then [`VIB_SKIN_W`].
+pub fn vibrance_row(vibrance: f32) -> Vec<f32> {
+    let t = vibrance_tables(vibrance);
+    let mut row = Vec::with_capacity(4 * 77 + 36);
+    for table in &t {
+        for part in 0..2 {
+            row.extend(table.iter().flat_map(|r| r.iter().map(move |c| c[part])));
+        }
+    }
+    row.extend(VIB_SKIN_W);
+    row
+}
+
+/// Bilinear (gain, share) of a resolved table at brightness `b` (8-bit) and darkest share
+/// `keep`: rows every 32 levels from 64 (the last 31), columns 0.95, then every 0.1 from 0.9
+/// down to 0 (keep in sync with the shader's `vib_cell`).
 fn vib_cell(t: &[[[f32; 2]; 11]; 7], b: f32, keep: f32) -> [f32; 2] {
-    let bi = VIB_B.iter().take(VIB_B.len() - 1).rposition(|&x| x <= b).unwrap_or(0);
+    let bi = (((b - 64.0) / 32.0).floor().max(0.0) as usize).min(5);
     let tb = ((b - VIB_B[bi]) / (VIB_B[bi + 1] - VIB_B[bi])).clamp(0.0, 1.0);
     let keep = keep.clamp(0.0, 0.95);
-    // Columns run from 0.95 down to 0: the first pair whose lower end `keep` reaches.
-    let ki = (0..VIB_KEEP.len() - 1).find(|&i| keep >= VIB_KEEP[i + 1]).unwrap_or(VIB_KEEP.len() - 2);
+    let ki = if keep >= 0.9 { 0 } else { (((0.9 - keep) / 0.1 - 1e-4).ceil().max(1.0) as usize).min(9) };
     let tk = ((VIB_KEEP[ki] - keep) / (VIB_KEEP[ki] - VIB_KEEP[ki + 1])).clamp(0.0, 1.0);
-    let at = |r: usize, c: usize| t[r][c];
     std::array::from_fn(|i| {
-        let top = at(bi, ki)[i] * (1.0 - tk) + at(bi, ki + 1)[i] * tk;
-        let bot = at(bi + 1, ki)[i] * (1.0 - tk) + at(bi + 1, ki + 1)[i] * tk;
+        let top = t[bi][ki][i] * (1.0 - tk) + t[bi][ki + 1][i] * tk;
+        let bot = t[bi + 1][ki][i] * (1.0 - tk) + t[bi + 1][ki + 1][i] * tk;
         top * (1.0 - tb) + bot * tb
     })
 }
 
 /// Vibrance as Reference applies it, measured (temp kit 7): in linear light the brightest
 /// channel is scaled by `g` and the others keep their distance to it scaled by `k`, both read
-/// from tables over the colour's brightness and saturation for the slider (interpolated between
-/// the measured ones), positive values held back on skin hues; then Saturation (`sat_k`).
-fn vibrance_measured(c: [f32; 3], vibrance: f32, sat_k: f32, transfer: Transfer) -> [f32; 3] {
-    let v = if vibrance.is_finite() { vibrance.clamp(-100.0, 100.0) } else { 0.0 };
+/// from `tables` ([`vibrance_tables`]) over the colour's brightness and saturation, positive
+/// values held back on skin hues; then Saturation (`sat_k`). Keep in sync with the shader's
+/// Vibrance kernel.
+fn vibrance_measured(c: [f32; 3], tables: Option<&VibranceTables>, sat_k: f32, transfer: Transfer) -> [f32; 3] {
     let mut l = c.map(|x| transfer.decode(x));
     let (emax, emin) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
-    if v != 0.0 && emax > 0.0 {
-        let b = emax * 255.0;
-        let keep = emin / emax;
-        let hue = rgb_to_hsl(c).0 * 360.0;
+    if let Some(tables) = tables.filter(|_| emax > 0.0) {
+        let (b, keep) = (emax * 255.0, emin / emax);
         let w = {
-            let f = hue / 10.0;
-            let i = (f.floor() as usize) % 36;
+            let f = rgb_to_hsl(c).0 * 36.0;
+            let i = (f.floor().max(0.0) as usize) % 36;
             let t = f - f.floor();
             VIB_SKIN_W[i] * (1.0 - t) + VIB_SKIN_W[(i + 1) % 36] * t
         };
-        let gk = |idx: usize| {
-            let plain = vib_cell(&VIB_PLAIN[idx], b, keep);
-            if idx >= 4 && w > 0.0 {
-                let skin = vib_cell(&VIB_SKIN[idx - 4], b, keep);
-                [plain[0] + (skin[0] - plain[0]) * w, plain[1] + (skin[1] - plain[1]) * w]
-            } else {
-                plain
-            }
+        let plain = vib_cell(&tables[0], b, keep);
+        let gk = if w > 0.0 {
+            let skin = vib_cell(&tables[1], b, keep);
+            [plain[0] + (skin[0] - plain[0]) * w, plain[1] + (skin[1] - plain[1]) * w]
+        } else {
+            plain
         };
-        // Between the measured sliders (the identity at 0: gain 1, the colour's own share).
-        let ident = [1.0, keep.min(0.95)];
-        let pos = VIB_V.iter().position(|&x| x >= v).unwrap_or(7);
-        let (lo_v, lo) = if pos == 4 && v > 0.0 { (0.0, ident) } else if pos == 0 { (VIB_V[0], gk(0)) } else { (VIB_V[pos - 1], gk(pos - 1)) };
-        let (hi_v, hi) = if v < 0.0 && pos == 4 { (0.0, ident) } else { (VIB_V[pos], gk(pos)) };
-        let t = if hi_v > lo_v { ((v - lo_v) / (hi_v - lo_v)).clamp(0.0, 1.0) } else { 1.0 };
-        let gk = [lo[0] + (hi[0] - lo[0]) * t, lo[1] + (hi[1] - lo[1]) * t];
-        let (lmax, lmin) = (l[0].max(l[1]).max(l[2]), l[0].min(l[1]).min(l[2]));
+        let lmax = l[0].max(l[1]).max(l[2]);
         // The output's brightest and darkest channels (encoded) as a gain on the brightest and a
         // strength on the distances to it in linear light, for a colour of share `share`.
-        let linear = |gk: [f32; 2], share: f32| {
+        let linear = |share: f32| {
             let omax = (emax * gk[0]).clamp(0.0, 1.0);
             let omin = (omax * gk[1]).clamp(0.0, omax);
             let (lo_max, lo_min) = (transfer.decode(omax), transfer.decode(omin));
@@ -988,15 +1016,14 @@ fn vibrance_measured(c: [f32; 3], vibrance: f32, sat_k: f32, transfer: Transfer)
         let [g, k] = if keep > 0.95 {
             // Nearer grey than the tables reach: the 95 % column's gain and strength, blended to
             // the identity at grey (greys stay).
-            let at = linear(gk, 0.95);
+            let at = linear(0.95);
             let u = ((keep - 0.95) / 0.05).clamp(0.0, 1.0);
             [at[0] + (1.0 - at[0]) * u, at[1] + (1.0 - at[1]) * u]
         } else {
-            linear(gk, keep)
+            linear(keep)
         };
         // The middle channel on the line between the brightest and darkest in linear light.
         l = l.map(|x| (g * lmax - k * (lmax - x)).max(0.0));
-        let _ = lmin;
     }
     let y = VIB_LUMA[0] * l[0] + VIB_LUMA[1] * l[1] + VIB_LUMA[2] * l[2];
     l.map(|x| transfer.encode(y + (x - y) * sat_k).clamp(0.0, 1.0))

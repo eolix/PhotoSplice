@@ -426,6 +426,28 @@ fn t_encode(v: f32, g: f32) -> f32 {
     return pow(max(v, 0.0), 1.0 / g);
 }
 
+// compose::adjust::vib_cell: bilinear (gain, share) of the resolved Vibrance table whose gains
+// start at `og` and shares at `os` in LUT row 0 (77 each, rows every 32 levels from 64, the last
+// 31; columns 0.95, then every 0.1 from 0.9 down to 0).
+fn vib_at(i: i32) -> f32 { return textureLoad(lut_tex, vec2(i, 0), 0).r; }
+fn vib_cell(og: i32, os: i32, b: f32, keep0: f32) -> vec2<f32> {
+    let bi = min(i32(max(floor((b - 64.0) / 32.0), 0.0)), 5);
+    let b0 = 64.0 + 32.0 * f32(bi);
+    let b1 = select(b0 + 32.0, 255.0, bi == 5);
+    let tb = clamp((b - b0) / (b1 - b0), 0.0, 1.0);
+    let keep = clamp(keep0, 0.0, 0.95);
+    var ki = 0;
+    if (keep < 0.9) { ki = min(i32(max(ceil((0.9 - keep) / 0.1 - 1e-4), 1.0)), 9); }
+    let k0 = select(0.9 - 0.1 * f32(ki - 1), 0.95, ki == 0);
+    let k1 = 0.9 - 0.1 * f32(ki);
+    let tk = clamp((k0 - keep) / (k0 - k1), 0.0, 1.0);
+    let a = bi * 11 + ki;
+    let c = (bi + 1) * 11 + ki;
+    let g = mix(mix(vib_at(og + a), vib_at(og + a + 1), tk), mix(vib_at(og + c), vib_at(og + c + 1), tk), tb);
+    let s = mix(mix(vib_at(os + a), vib_at(os + a + 1), tk), mix(vib_at(os + c), vib_at(os + c + 1), tk), tb);
+    return vec2(g, s);
+}
+
 fn rgb_to_hsl(c: vec3<f32>) -> vec3<f32> {
     let mx = max(max(c.r, c.g), c.b);
     let mn = min(min(c.r, c.g), c.b);
@@ -690,6 +712,45 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
             // 32-bit documents keep channels outside 0..1 (adjust::hue_saturation_ranged).
             if (p1.y > 0.5) { return rgb; }
             return clamp(rgb, vec3(0.0), vec3(1.0));
+        }
+        case 9: {                                                              // Vibrance
+            // compose::adjust::vibrance_measured: from the slider's resolved tables (LUT row 0),
+            // the brightest channel's gain and the distances' strength in linear light, skin hues
+            // blended in by weight; then Saturation by p0.x about 0.287 R + 0.713 G.
+            let g = p0.y;
+            var l = vec3(t_decode(c.r, g), t_decode(c.g, g), t_decode(c.b, g));
+            let emax = max(c.r, max(c.g, c.b));
+            let emin = min(c.r, min(c.g, c.b));
+            if (p0.z > 0.5 && emax > 0.0) {
+                let b = emax * 255.0;
+                let keep = emin / emax;
+                let f = rgb_to_hsl(c).x * 36.0;
+                let wi = i32(floor(max(f, 0.0))) % 36;
+                let w = mix(vib_at(308 + wi), vib_at(308 + (wi + 1) % 36), f - floor(f));
+                var gk = vib_cell(0, 77, b, keep);
+                if (w > 0.0) { gk = mix(gk, vib_cell(154, 231, b, keep), w); }
+                let lmax = max(l.r, max(l.g, l.b));
+                let omax = clamp(emax * gk.x, 0.0, 1.0);
+                let omin = clamp(omax * gk.y, 0.0, omax);
+                let lo_max = t_decode(omax, g);
+                let lo_min = t_decode(omin, g);
+                let share = min(keep, 0.95);
+                let in_max = t_decode(emax, g);
+                let in_min = t_decode(emax * share, g);
+                var k = 1.0;
+                if (in_max - in_min > 1e-9) { k = (lo_max - lo_min) / (in_max - in_min); }
+                var gain = lo_max / max(in_max, 1e-9);
+                if (keep > 0.95) {
+                    // Nearer grey than the tables reach: blended to the identity at grey.
+                    let u = clamp((keep - 0.95) / 0.05, 0.0, 1.0);
+                    gain = mix(gain, 1.0, u);
+                    k = mix(k, 1.0, u);
+                }
+                l = max(gain * lmax - k * (lmax - l), vec3(0.0));
+            }
+            let y = 0.287 * l.r + 0.713 * l.g;
+            l = y + (l - y) * p0.x;
+            return clamp(vec3(t_encode(l.r, g), t_encode(l.g, g), t_encode(l.b, g)), vec3(0.0), vec3(1.0));
         }
         case 10: {                                                             // Channel mixer (32-bit unclipped)
             let lo = select(0.0, -F32_MAX, hdr);
