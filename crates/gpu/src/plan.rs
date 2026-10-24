@@ -1312,9 +1312,12 @@ impl<'a> Planner<'a> {
             }
         }
         let bevel_paint = |b: &photosplice_doc::Bevel| photosplice_compose::effects::bevel_geom(b).paint;
+        // A Pillow Emboss composes as an inner bevel inside (its maps 0-1) and an outer one
+        // outside (2-3); the other emboss styles shade the composite (compose::effects).
+        let pillow = |b: &photosplice_doc::Bevel| b.style == photosplice_doc::BevelStyle::PillowEmboss;
         for &(i, e) in &rev {
             if let Effect::BevelEmboss(b) = e
-                && bevel_paint(b) == photosplice_compose::effects::BevelPaint::Inner
+                && (bevel_paint(b) == photosplice_compose::effects::BevelPaint::Inner || pillow(b))
             {
                 l = self.paint(
                     l,
@@ -1391,10 +1394,10 @@ impl<'a> Planner<'a> {
         }
         for &(i, e) in &rev {
             if let Effect::BevelEmboss(b) = e
-                && bevel_paint(b) == photosplice_compose::effects::BevelPaint::Outer
+                && (bevel_paint(b) == photosplice_compose::effects::BevelPaint::Outer || pillow(b))
             {
                 // Knocked out under a see-through fill, as the CPU does (and as outer glows are).
-                let k = 0;
+                let k = if pillow(b) { 2 } else { 0 };
                 let see_through = 1.0 - layer.fill_opacity.clamp(0.0, 1.0);
                 w = self.paint_k(
                     w,
@@ -1427,7 +1430,7 @@ impl<'a> Planner<'a> {
         let late: Vec<(usize, &'a photosplice_doc::Bevel)> = rev
             .iter()
             .filter_map(|&(i, e)| if let Effect::BevelEmboss(b) = e { Some((i, b)) } else { None })
-            .filter(|(_, b)| bevel_paint(b) == photosplice_compose::effects::BevelPaint::Both)
+            .filter(|(_, b)| bevel_paint(b) == photosplice_compose::effects::BevelPaint::Both && !pillow(b))
             .collect();
         let merged = if late.is_empty() {
             let mut p = Pass::new(Kernel::FxMerge, 0);

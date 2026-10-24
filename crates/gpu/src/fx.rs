@@ -418,11 +418,12 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
             let lut = contour_lut(&bv.gloss_contour).map(Arc::new);
             // Region (`fs_mbevelshade`): 0 inside (× alpha), 1 under the edge and outside, 4
             // inside at full strength. Emboss styles: the inside half, then the outside one
-            // (pillow: facing the other way), blended by coverage when painted (`plan`).
+            // (pillow: facing the other way, its inside × alpha), composed when painted (`plan`).
             let passes: Vec<(f32, f32)> = match g.paint {
                 BevelPaint::Inner | BevelPaint::Stroke => vec![(g.depth, 0.0)],
                 BevelPaint::Outer => vec![(g.depth, 1.0)],
-                BevelPaint::Both => vec![(g.depth, 4.0), (if g.pillow { -g.depth } else { g.depth }, 1.0)],
+                // A pillow's inside is shaded × alpha like an inner bevel's (painted into the layer).
+                BevelPaint::Both => vec![(g.depth, if g.pillow { 0.0 } else { 4.0 }), (if g.pillow { -g.depth } else { g.depth }, 1.0)],
             };
             let reach_past = photosplice_compose::effects::outer_reaches_past(&g);
             // One shading step (`fs_mbevelshade`; p3.x: an outer bevel reaching a pixel past its

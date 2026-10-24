@@ -1531,9 +1531,10 @@ fn inside_stroke_respects_partial_edge_coverage() {
     assert!((p[2] - 0.75).abs() < 0.02 && (p[0] - 0.25).abs() < 0.02, "{p:?}");
 }
 
-// Each half of a Pillow Emboss shades the composite on its own and an edge pixel takes them by
-// its coverage (temp kit 8 pillow-smooth-s10-normal: a half-covered pixel between a dark inside
-// and a lit outside is the mean of the two, where the averaged maps gave a darker grey).
+// A Pillow Emboss's inside shades the layer and its outside the backdrop, as an inner and an
+// outer bevel do, so an edge pixel takes them by its coverage (temp kit 8
+// pillow-smooth-s10-normal: a half-covered pixel between a dark inside and a lit outside is the
+// mean of the two, where the averaged maps gave a darker grey).
 #[test]
 fn pillow_edge_pixels_mix_the_shaded_halves() {
     let Effect::BevelEmboss(mut b) = bevel_fx(photosplice_doc::BevelStyle::PillowEmboss, 0.0) else { panic!("a bevel") };

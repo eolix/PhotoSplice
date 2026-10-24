@@ -1611,9 +1611,10 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
         }
         BevelPaint::Both => {
             // The inside half where the shape is and the outside half (pillow: facing the other
-            // way) under the layer's edge and beyond, each at full strength: the composite blends
-            // the two shaded results by the layer's coverage (see `composite_with_effects`).
-            let (hi, sh) = shade_into(g.depth, 2);
+            // way) under the layer's edge and beyond. An emboss's inside is at full strength (the
+            // composite blends the two shaded results by coverage), a pillow's × alpha (it is
+            // painted into the layer like an inner bevel's; see `composite_with_effects`).
+            let (hi, sh) = shade_into(g.depth, if g.pillow { 0 } else { 2 });
             let (ho, so) = shade_into(if g.pillow { -g.depth } else { g.depth }, 1);
             vec![hi, sh, ho, so]
         }
@@ -2120,8 +2121,11 @@ pub(crate) fn composite_with_effects_prepared(
     }
     for (i, e) in rev() {
         if let Effect::BevelEmboss(b) = e
-            && maps.bevel_paint[i] == BevelPaint::Inner
+            && (maps.bevel_paint[i] == BevelPaint::Inner || (maps.bevel_paint[i] == BevelPaint::Both && b.style == BevelStyle::PillowEmboss))
         {
+            // A Pillow Emboss's inside shades the layer like an inner bevel, its outside the
+            // backdrop like an outer bevel (temp kit 9 col-pillow-*: a coloured layer over white,
+            // 16-30/255 → within 1.7 when shading the composite as Emboss does).
             let (hi, sh) = (rel(fx(i, 0)), rel(fx(i, 1)));
             paint_color(&mut lay, &hi, rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
             paint_color(&mut lay, &sh, rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
@@ -2212,12 +2216,13 @@ pub(crate) fn composite_with_effects_prepared(
     }
     for (i, e) in rev() {
         if let Effect::BevelEmboss(b) = e
-            && maps.bevel_paint[i] == BevelPaint::Outer
+            && (maps.bevel_paint[i] == BevelPaint::Outer || (maps.bevel_paint[i] == BevelPaint::Both && b.style == BevelStyle::PillowEmboss))
         {
             // Beneath the layer like a glow: a see-through fill shows the bare backdrop under its
             // shape, not the bevel (Reference kit hard-outer-s20 at Fill 0 %: an edge pixel half
             // covered shades half as much; it was shaded in full, up to 0.43 off).
-            let (mut hi, mut sh) = (fx(i, 0), fx(i, 1));
+            let k = if maps.bevel_paint[i] == BevelPaint::Both { 2 } else { 0 };
+            let (mut hi, mut sh) = (fx(i, k), fx(i, k + 1));
             knock_out_exterior(&mut hi, &shape, layer.fill_opacity);
             knock_out_exterior(&mut sh, &shape, layer.fill_opacity);
             paint_color(&mut work, &hi, rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
@@ -2239,7 +2244,7 @@ pub(crate) fn composite_with_effects_prepared(
     // to 6/255 dark (psd-tools layer_effects Emboss: 7.8 → 5.7/255).
     for (i, e) in rev() {
         if let Effect::BevelEmboss(b) = e
-            && (maps.bevel_paint[i] == BevelPaint::Both || (maps.bevel_paint[i] == BevelPaint::Stroke && !outside_stroke))
+            && ((maps.bevel_paint[i] == BevelPaint::Both && b.style != BevelStyle::PillowEmboss) || (maps.bevel_paint[i] == BevelPaint::Stroke && !outside_stroke))
             && !maps.per.get(i).is_none_or(Vec::is_empty)
         {
             if maps.bevel_paint[i] == BevelPaint::Both {
