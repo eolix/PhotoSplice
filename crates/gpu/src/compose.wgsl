@@ -1357,6 +1357,9 @@ fn fs_mbevelh(in: VOut) -> @location(0) vec4<f32> {
     if (a > INSIDE_EPS && a < 1.0 - INSIDE_EPS) {
         din = a - 0.5;
         dout = 0.5 - a;
+    } else if (a <= INSIDE_EPS) {
+        // Uncovered pixels lie their outside distance beyond the edge (effects::bevel_height).
+        din = -dout;
     }
     // effects::chisel_soft_inside (p0.w: effects::chisel_soft_edge).
     if (op.p0.w > 0.5) {

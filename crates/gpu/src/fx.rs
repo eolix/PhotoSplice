@@ -381,8 +381,9 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
             } else {
                 // The fields must reach past the longer ramp (outside: the size and 1.5 px).
                 let reach = size.max(g.chisel[0]).max(g.chisel[1]) + 1.0;
-                let din = b.field(FieldKind::Inside, reach);
-                let dout = b.field(FieldKind::BevelOutside, reach);
+                // The chamfer distances (compose::effects::bevel_height).
+                let din = b.field(FieldKind::StrokeInside, reach);
+                let dout = b.field(FieldKind::StrokeOutside, reach);
                 let soft = f32::from(u8::from(photosplice_compose::effects::chisel_soft_edge(bv, &g)));
                 let mut st = stage(Kernel::MBevelH, Some(din), Some(dout), [paint(g.paint), g.chisel[0], g.chisel[1], soft], 0);
                 st.s = Some(In::Shape);

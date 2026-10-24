@@ -510,9 +510,8 @@ fn dist_outside_smooth(s: &Map) -> Vec<f32> {
 /// Distance from each pixel centre with no coverage in `cov` to the edge of what is covered, the
 /// edge placed inside the anti-aliased pixels from their coverage and the direction the coverage
 /// rises in (the anti-aliased Euclidean distance transform, Gustavson and Strand 2011). Covered
-/// pixels read their own centre's distance to the edge (negative inside). A chisel bevel's
-/// facets follow these distances: Reference's slopes are exactly radial around a disc, where a
-/// nearest-pixel distance tilted them by up to 4° and changed their steepness by 6 %.
+/// pixels read their own centre's distance to the edge (negative inside): within 0.09 px of a
+/// disc's true radius.
 fn aa_edt(cov: &[f32], w: usize, h: usize) -> Vec<f32> {
     const FAR: f32 = 1.0e6;
     let n = w * h;
@@ -1425,8 +1424,12 @@ pub fn outer_reaches_past(b: &Bevel, g: &BevelGeom) -> bool {
 }
 
 /// Bevel height map in `0..=1`. Smooth: the shape blurred by two box passes of the bevel
-/// width. Chisel: linear ramps of the exact distance to the edge ([`BevelGeom::chisel`] long;
-/// emboss styles straddle the edge). Chisel Soft uses the same profile: on straight edges
+/// width. Chisel: linear ramps of the chamfer distance to the edge ([`BevelGeom::chisel`] long;
+/// emboss styles straddle the edge), as Reference's facets meet where two edges' chamfer
+/// distances do (Reference corpus Chisel Hard, against the anti-aliased Euclidean distance:
+/// inner 4.47 → 0.81 % of pixels off, emboss 3.08 → 0.15 %, outer 4.30 → 1.20 %, pillow
+/// 3.41 → 0.79 %, stroke 2.35 → 0.84 %; Chisel Soft 0.3-0.5 % better). Chisel Soft uses the
+/// same profile: on straight edges
 /// Reference's Chisel Soft and Hard facets are identical (Reference corpus bevel-inner-chisel-*:
 /// the same values pixel for pixel across an edge); a blur over it softened them (pixels off
 /// 10-18 % → 8-12 %; what remains are the radial streaks Reference's Soft draws on curves),
@@ -1438,16 +1441,25 @@ fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, pattern
         tent(&mut h, g.width);
         h
     } else {
-        let (din, dout) = (dist_inside(shape), dist_outside_smooth(shape));
+        let (din, dout) = (dist_inside_by(shape, Metric::Chamfer), dist_outside_by(shape, Metric::Chamfer));
         let soft_edge = chisel_soft_edge(b, g);
         let mut h = Map::new(shape.w, shape.h, 0.0);
         for i in 0..h.v.len() {
             // A partly covered edge pixel lies `coverage − ½` inside the edge (outside below ½),
             // as the distances around it assume; taken as fully inside, its height broke the
             // slope across the edge and the shading's differences put a dark or light dotted line
-            // along it (keep in sync with `fs_mbevelh`).
+            // along it. An uncovered pixel lies its outside distance beyond the edge: an inner
+            // facet's slope runs on across the edge, so an edge pixel shades like the facet
+            // (Reference corpus bevel-inner-chisel-hard: up to 15/255 light on diagonal edges
+            // when every uncovered pixel stood ½ px out). Keep in sync with `fs_mbevelh`.
             let a = shape.v[i];
-            let (mut di, dou) = if a > INSIDE_EPS && a < 1.0 - INSIDE_EPS { (a - 0.5, 0.5 - a) } else { (din[i], dout[i]) };
+            let (mut di, dou) = if a > INSIDE_EPS && a < 1.0 - INSIDE_EPS {
+                (a - 0.5, 0.5 - a)
+            } else if a <= INSIDE_EPS {
+                (-dout[i], dout[i])
+            } else {
+                (din[i], dout[i])
+            };
             if soft_edge {
                 di = chisel_soft_inside(a, di);
             }
@@ -2337,16 +2349,16 @@ fn mix_premul(a: [f32; 4], b: [f32; 4], k: f32) -> [f32; 4] {
 pub enum FieldKind {
     /// `dist_outside` of the shape.
     Outside,
-    /// `dist_outside_smooth` of the shape: bevels.
+    /// `dist_outside_smooth` of the shape (anti-aliased Euclidean).
     BevelOutside,
-    /// `dist_inside` of the shape: bevels.
+    /// `dist_inside` of the shape (anti-aliased Euclidean).
     Inside,
-    /// Chamfer distance outside the shape: outside strokes, precise outer glows, and the spread
-    /// of drop shadows and softer outer glows ([`dilate`]).
+    /// Chamfer distance outside the shape: outside strokes, precise outer glows, chisel bevels,
+    /// and the spread of drop shadows and softer outer glows ([`dilate`]).
     StrokeOutside,
     /// Chamfer distance outside `1 - alpha`: the choke of inner shadows and softer inner glows.
     ChokeInside,
-    /// Stroke distance inside the shape: inside strokes, precise inner glows.
+    /// Stroke distance inside the shape: inside strokes, precise inner glows, chisel bevels.
     StrokeInside,
     /// Exact Euclidean distance outside the shape: a wide raster stroke's outer edge (see
     /// [`stroke_outside_exact`]). The chamfer's level sets are polygons (an ~8-fold octagon), so a
@@ -2780,6 +2792,53 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// An inner chisel's facet runs on across a diagonal edge: a partly covered edge pixel
+    /// shades like the facet behind it (Reference corpus bevel-inner-chisel-hard), not lighter.
+    #[test]
+    fn inner_chisel_edge_pixels_shade_like_their_facet() {
+        let n = 48;
+        let mut shape = Map::new(n, n, 0.0);
+        for y in 0..n {
+            for x in 0..n {
+                let mut cov = 0.0;
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        let (px, py) = (x as f32 + (sx as f32 + 0.5) / 4.0, y as f32 + (sy as f32 + 0.5) / 4.0);
+                        cov += f32::from(px + py < 61.0) / 16.0;
+                    }
+                }
+                shape.v[y * n + x] = cov;
+            }
+        }
+        let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::ChiselHard);
+        b.size = 10.0;
+        let (m, _) = bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        // The maps carry the coverage: compare the shading per unit of it.
+        let shade = |x: usize, y: usize| (m[0].v[y * n + x] - m[1].v[y * n + x]) / shape.v[y * n + x];
+        // Along the diagonal x = y the edge crosses (30, 30) through its middle.
+        let (a, edge, facet) = (shape.v[30 * n + 30], shade(30, 30), shade(27, 27));
+        assert!(a > 0.3 && a < 0.7, "{a}");
+        assert!((edge - facet).abs() < 0.08, "edge {edge}, facet {facet}");
+    }
+
+    /// Chisel ramps follow the chamfer distance, whose level sets are polygons: off a square's
+    /// corner the outer facet ends where the chamfer says, not the Euclidean distance (Reference
+    /// corpus Chisel Hard, see [`bevel_height`]).
+    #[test]
+    fn chisel_ramps_follow_the_chamfer_distance() {
+        let shape = square(64, 20, 44);
+        let mut b = bevel_of(BevelStyle::OuterBevel, BevelTechnique::ChiselHard);
+        b.size = 10.0;
+        let g = bevel_geom(&b);
+        let h = bevel_height(&shape, &b, &g, &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        let (cham, exact) = (dist_outside_by(&shape, Metric::Chamfer), dist_outside_smooth(&shape));
+        // 3 px right and 8 px below the bottom-right corner (pixel 43, 43).
+        let i = (43 + 8) * 64 + 43 + 3;
+        let ramp = |d: f32| (1.0 - d / g.chisel[1]).max(0.0);
+        assert!((h.v[i] - ramp(cham[i])).abs() < 1e-5, "{} vs {}", h.v[i], ramp(cham[i]));
+        assert!((ramp(cham[i]) - ramp(exact[i])).abs() > 0.01, "{} {}", cham[i], exact[i]);
     }
 
     /// An anti-aliased disc: a chiselled bevel's shading follows the curve smoothly. The pixel
