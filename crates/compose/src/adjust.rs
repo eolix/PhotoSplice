@@ -664,18 +664,29 @@ pub fn range_hue(h: f32) -> f32 {
 /// its factor's excess `k − 1`, lightness as a fraction), sampled at hue `k / (len - 1)` turns of
 /// [`range_hue`]. A range's weight scales the saturation factor's excess, not the slider: +40 %
 /// at half weight is 1 + ½ · (1/0.6 − 1), not 1/0.8 (Reference 16-bit Reds falloffs: 6/255 →
-/// 0.9/255). Ranges add up where they overlap.
+/// 0.9/255). Ranges add up where they overlap, in their order, each sum held where Reference
+/// holds it: the saturation excess at −1 (fully grey), the lightness within ±1, so a range
+/// past an earlier −100 % one adds nothing more to the cut but a later raise still counts
+/// (psd-tools huesaturation_saturation_rgb: −100 % with another −100 % falloff under a +49 %
+/// one, 31 → 18/255; huesaturation_lightness_rgb 7 → 4/255). A range's +100 % is a finite
+/// [`RANGE_SATURATION_MAX`].
 pub fn hue_range_tables(ranges: &[HueRange; 6]) -> [Vec<f32>; 3] {
     let at = |k: usize| {
         let deg = k as f32 / (LUT_SIZE - 1) as f32 * 360.0;
         ranges.iter().filter(|r| !r.is_neutral()).fold([0.0f32; 3], |acc, r| {
             let w = r.weight(deg);
-            [acc[0] + w * r.hue, acc[1] + w * saturation_excess(r.saturation / 100.0), acc[2] + w * r.lightness / 100.0]
+            let ds = saturation_excess(r.saturation / 100.0).min(RANGE_SATURATION_MAX);
+            [acc[0] + w * r.hue, (acc[1] + w * ds).max(-1.0), (acc[2] + w * r.lightness / 100.0).clamp(-1.0, 1.0)]
         })
     };
     let rows: Vec<[f32; 3]> = (0..LUT_SIZE).map(at).collect();
     std::array::from_fn(|i| rows.iter().map(|r| r[i]).collect())
 }
+
+/// The saturation factor excess of a colour range at +100 %: 135, not unbounded (psd-tools
+/// huesaturation_rgb: a +100 % range 9–22 % into its falloff, under a −97 % master, leaves
+/// the ratios of a 135–143 excess at every hue, where 999 kept the colours whole).
+pub const RANGE_SATURATION_MAX: f32 = 135.0;
 
 /// A saturation slider (−1..=1) as its factor's excess `k − 1` ([`hue_saturation_scale`]).
 fn saturation_excess(s: f32) -> f32 {
@@ -775,8 +786,8 @@ pub fn hue_saturation_in(c: [f32; 3], hue: f32, s: f32, l: f32, colorize: bool, 
 pub fn hue_saturation_ranged(c: [f32; 3], hue: f32, s: f32, l: f32, range_l: f32, float: bool, ranges: bool) -> [f32; 3] {
     // Hue turns the HSL hue; saturation then scales each channel about the HSL lightness by
     // 1 / (1 − s) (s > 0) or 1 + s, held only where the smallest channel would go below 0: the
-    // largest may overshoot 1 until the lightness step (Photoshop corpus hue-saturation.psd,
-    // rgb16: within 0.9/255; was 17/255 with a clamped HSL saturation).
+    // largest may overshoot 1 (Reference corpus hue-saturation.psd, rgb16: within 0.9/255; was
+    // 17/255 with a clamped HSL saturation).
     let (hh, ss, ll) = rgb_to_hsl(c);
     let mut rgb = hsl_to_rgb((hh + hue / 360.0).rem_euclid(1.0), ss, ll);
     // A range's lightness comes before the saturation step: a raise pulls the channels towards
@@ -788,12 +799,26 @@ pub fn hue_saturation_ranged(c: [f32; 3], hue: f32, s: f32, l: f32, range_l: f32
     } else if range_l < 0.0 {
         rgb = rgb.map(|v| v + (min - v) * -range_l);
     }
-    let mut rgb = hue_saturation_scale(rgb, s, l, float, ranges);
-    if l > 0.0 {
-        rgb = rgb.map(|v| v + (1.0 - v) * l);
-    } else if l < 0.0 {
-        rgb = rgb.map(|v| v * (1.0 + l));
-    }
+    // The master lightness comes before the saturation step too, which then holds the channels
+    // inside 0..1 (the largest only with colour ranges or a cut): the saturation stops where
+    // the lightness step would have put a channel past black or white (psd-tools
+    // huesaturation_rgb: Saturation +100 with Lightness −37 keeps near-white tints 52/255 off
+    // black, and +93 % Reds with Lightness +10 take dark reds to 0, not 26/255; pixels off
+    // 14.1 → 11.7 %). Without a lightness the largest overshoots to the final clip.
+    let light = |rgb: [f32; 3]| {
+        if l > 0.0 {
+            rgb.map(|v| v + (1.0 - v) * l)
+        } else if l < 0.0 {
+            rgb.map(|v| v * (1.0 + l))
+        } else {
+            rgb
+        }
+    };
+    let rgb = if l == 0.0 || (float && !ranges) {
+        light(hue_saturation_scale(rgb, s, l, float, ranges))
+    } else {
+        hue_saturation_scale(light(rgb), s, 0.0, float, ranges || l < 0.0)
+    };
     if float { rgb } else { rgb.map(|v| v.clamp(0.0, 1.0)) }
 }
 
@@ -2379,6 +2404,34 @@ mod tone_tests {
                 assert!((b.px[0][i] * 255.0 - want[i]).abs() < tol, "{c:?}: {:?} vs {want:?}", b.px[0].map(|v| v * 255.0));
             }
         }
+    }
+
+    /// Overlapping ranges add in order, the saturation excess held at −1: a second −100 % range
+    /// adds nothing to the first one's, and a later raise still counts; +100 % is
+    /// [`RANGE_SATURATION_MAX`] (psd-tools huesaturation_saturation_rgb, huesaturation_rgb).
+    #[test]
+    fn overlapping_hue_ranges_hold_at_grey() {
+        let mut r = HueRange::defaults();
+        r[0] = HueRange { hue: 0.0, saturation: -100.0, lightness: -80.0, bounds: [100.0, 110.0, 170.0, 180.0] };
+        r[2] = HueRange { hue: 0.0, saturation: -100.0, lightness: -80.0, bounds: [100.0, 110.0, 170.0, 180.0] };
+        r[5] = HueRange { hue: 0.0, saturation: 49.0, lightness: 0.0, bounds: [100.0, 110.0, 170.0, 180.0] };
+        let t = hue_range_tables(&r);
+        let at = |row: usize| lut(&t[row], 140.0 / 360.0);
+        assert!((at(1) - (-1.0 + 0.49 / 0.51)).abs() < 1e-4, "{}", at(1));
+        assert!((at(2) + 1.0).abs() < 1e-6, "{}", at(2));
+        r[5].saturation = 100.0;
+        assert!((lut(&hue_range_tables(&r)[1], 140.0 / 360.0) - (RANGE_SATURATION_MAX - 1.0)).abs() < 1e-2);
+    }
+
+    /// With a lightness the saturation step comes after it and holds the channels inside 0..1
+    /// (psd-tools huesaturation_rgb: Saturation +100, Lightness −37 takes a near-white tint
+    /// (250, 236, 245) to Reference's (180, 255, 52), not to 0 at the darkest).
+    #[test]
+    fn hue_saturation_saturates_after_the_lightness() {
+        let c = [250.0 / 255.0, 236.0 / 255.0, 245.0 / 255.0];
+        let out = hue_saturation_ranged(c, 122.0, 1.0, -0.37, 0.0, false, false).map(|v| v * 255.0);
+        // The darkest and brightest channels (the hue lands within a few degrees).
+        assert!((out[1] - 255.0).abs() < 0.5 && (out[2] - 52.0).abs() < 1.5, "{out:?}");
     }
 
     #[test]

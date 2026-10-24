@@ -690,6 +690,15 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
                 } else if (rl < 0.0) {
                     rgb = rgb + (lo - rgb) * -rl;
                 }
+                // The master lightness towards white or black: before the saturation step when
+                // set (but for 32-bit without ranges), which then also holds the largest channel
+                // at 1 under ranges or a cut (adjust::hue_saturation_ranged).
+                let ml = clamp(p0.z, -1.0, 1.0);
+                let first = ml != 0.0 && !(p1.y > 0.5 && p1.x < 0.5);
+                if (first) {
+                    if (ml > 0.0) { rgb = rgb + (1.0 - rgb) * ml; } else if (ml < 0.0) { rgb = rgb * (1.0 + ml); }
+                }
+                let hold_white = p1.x > 0.5 || (first && ml < 0.0);
                 let mx = max(rgb.r, max(rgb.g, rgb.b));
                 let mn = min(rgb.r, min(rgb.g, rgb.b));
                 let mid = (mx + mn) * 0.5;
@@ -698,16 +707,12 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
                     k = 1.0 / max(1.0 - sat, 1e-6);
                     if (p1.y < 0.5 && mn < mid) { k = min(k, mid / (mid - mn)); }
                     // With colour ranges, nor the largest above 1 (adjust::hue_saturation_scale).
-                    if (p1.y < 0.5 && p1.x > 0.5 && mx > mid) { k = min(max(k, 1.0), max((1.0 - mid) / (mx - mid), 1.0)); }
+                    if (p1.y < 0.5 && hold_white && mx > mid) { k = min(max(k, 1.0), max((1.0 - mid) / (mx - mid), 1.0)); }
                 }
                 rgb = mid + (rgb - mid) * k;
-            }
-            // The master lightness towards white or black.
-            let ml = clamp(p0.z, -1.0, 1.0);
-            if (ml > 0.0) {
-                rgb = rgb + (1.0 - rgb) * ml;
-            } else if (ml < 0.0) {
-                rgb = rgb * (1.0 + ml);
+                if (!first) {
+                    if (ml > 0.0) { rgb = rgb + (1.0 - rgb) * ml; } else if (ml < 0.0) { rgb = rgb * (1.0 + ml); }
+                }
             }
             // 32-bit documents keep channels outside 0..1 (adjust::hue_saturation_ranged).
             if (p1.y > 0.5) { return rgb; }
@@ -1379,11 +1384,22 @@ fn fs_mbevelh(in: VOut) -> @location(0) vec4<f32> {
 }
 
 // Bevel shading of the blurred height map A over shape S (`layer_tex`): p0 = light vector,
-// sin(altitude); p1 = (depth, outer, shadow (else highlight), contour (LUT row 0)).
+// sin(altitude); p1 = (depth, outer, shadow (else highlight), contour (LUT row 0)). Softened
+// bevels (`bevel_maps`: Soften blurs the shading before the region) take three steps, by p3.y:
+// 1 the shading alone (region 1), 2 the region over B, the blurred shading (for emboss styles
+// the outside half's, × 1 − alpha), 3 an emboss's halves summed: A the blurred inside shading,
+// B step 2's outside half.
 @fragment
 fn fs_mbevelshade(in: VOut) -> @location(0) vec4<f32> {
     let p = local(in.pos);
     let s = textureLoad(layer_tex, p, 0).r;
+    let mode = i32(op.p3.y + 0.5);
+    if (mode == 1) { return mout(bevel_part(p, op.p1.x, 1.0)); }
+    if (mode == 3) {
+        var inner = 0.0;
+        if (s > INSIDE_EPS) { inner = textureLoad(tex_a, p, 0).r * s; }
+        return mout(inner + textureLoad(tex_b, p, 0).r);
+    }
     // effects::bevel_maps' on_bevel: the height above BEVEL_H_EPS (emboss styles: or a
     // 4-neighbour's).
     var hmax = ra(p);
@@ -1392,6 +1408,12 @@ fn fs_mbevelshade(in: VOut) -> @location(0) vec4<f32> {
         hmax = max(max(hmax, max(ra(p + vec2(1, 0)), ra(p - vec2(1, 0)))), max(ra(p + vec2(0, 1)), ra(p - vec2(0, 1))));
     }
     let outside = select(0.0, 1.0, s < 1.0 - INSIDE_EPS && hmax > 1e-5);
+    if (mode == 2) {
+        let v = textureLoad(tex_b, p, 0).r;
+        if (op.p1.y < 0.5) { return mout(v * s); }
+        if (op.p1.y < 1.5) { return mout(v * outside); }
+        return mout(v * outside * (1.0 - min(s, 1.0)));
+    }
     // p1.y: 0 inside (× alpha), 1 under the edge and outside (outer bevel), 2 / 3 emboss / pillow
     // emboss (inside where the shape is, plus the outside half, flipped for pillow, × 1 − alpha).
     if (op.p1.y < 0.5) { return mout(bevel_part(p, op.p1.x, s)); }

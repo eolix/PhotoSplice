@@ -594,6 +594,15 @@ fn hue_ranges() -> [HueRange; 6] {
     r
 }
 
+/// Overlapping ranges past the holds: two −100 % ones and a +100 % one over a long falloff.
+fn hue_ranges_stacked() -> [HueRange; 6] {
+    let mut r = HueRange::defaults();
+    r[0] = HueRange { hue: 0.0, saturation: -100.0, lightness: 60.0, bounds: [100.0, 110.0, 160.0, 170.0] };
+    r[2] = HueRange { hue: 15.0, saturation: -100.0, lightness: 70.0, bounds: [-160.0, 0.0, 30.0, 170.0] };
+    r[5] = HueRange { hue: -20.0, saturation: 100.0, lightness: 0.0, bounds: [80.0, 130.0, 150.0, 170.0] };
+    r
+}
+
 fn adjustments() -> Vec<Adjustment> {
     let lc = |a: f32, b: f32, g: f32| LevelsChannel { in_black: a, in_white: b, gamma: g, out_black: 0.05, out_white: 0.95 };
     let pts = |v: &[(f32, f32)]| v.iter().map(|&(input, output)| CurvePoint { input, output }).collect::<Vec<_>>();
@@ -621,6 +630,8 @@ fn adjustments() -> Vec<Adjustment> {
         Adjustment::HueSaturation { hue: 200.0, saturation: 50.0, lightness: 20.0, colorize: true, ranges: HueRange::defaults() },
         Adjustment::HueSaturation { hue: 30.0, saturation: 0.0, lightness: -15.0, colorize: true, ranges: HueRange::defaults() },
         Adjustment::HueSaturation { hue: -10.0, saturation: 10.0, lightness: 5.0, colorize: false, ranges: hue_ranges() },
+        Adjustment::HueSaturation { hue: 25.0, saturation: -40.0, lightness: 20.0, colorize: false, ranges: hue_ranges_stacked() },
+        Adjustment::HueSaturation { hue: 120.0, saturation: 100.0, lightness: -37.0, colorize: false, ranges: HueRange::defaults() },
         Adjustment::ChannelMixer { matrix: [[0.5, 0.3, 0.2, 0.0], [0.1, 0.8, 0.1, 0.05], [0.0, 0.2, 0.9, -0.05]], monochrome: false, cmyk: None },
         Adjustment::ChannelMixer { matrix: [[0.4, 0.4, 0.2, 0.0], [0.0; 4], [0.0; 4]], monochrome: true, cmyk: None },
         Adjustment::PhotoFilter { color: [0.9, 0.6, 0.2], density: 0.4, preserve_luminosity: true },
@@ -1433,6 +1444,7 @@ fn effect_cases() -> Vec<(&'static str, Vec<Effect>)> {
         ("inner glow precise center", vec![Effect::InnerGlow(glow(pat_paint.clone(), GlowTechnique::Precise, 5.0, 0.0, GlowSource::Center))]),
         ("bevel inner", vec![Effect::BevelEmboss(bevel(BevelStyle::InnerBevel, true, 7.0, 2.0))]),
         ("bevel outer", vec![Effect::BevelEmboss(bevel(BevelStyle::OuterBevel, true, 6.0, 0.0))]),
+        ("bevel outer softened", vec![Effect::BevelEmboss(bevel(BevelStyle::OuterBevel, false, 6.0, 3.0))]),
         ("bevel emboss down", vec![Effect::BevelEmboss(bevel(BevelStyle::Emboss, false, 8.0, 1.0))]),
         ("bevel pillow", vec![Effect::BevelEmboss(bevel(BevelStyle::PillowEmboss, true, 5.0, 4.0))]),
         (

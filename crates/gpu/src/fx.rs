@@ -408,9 +408,6 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
                 st.pattern = Some(pat.clone());
                 h = b.push(st);
             }
-            if bv.soften >= 1.0 {
-                h = b.conv(h, photosplice_compose::effects::tent_kernel(bv.soften));
-            }
             let (angle, altitude) = if bv.use_global_light { (light.angle, light.altitude) } else { (bv.angle, bv.altitude) };
             let (sa, ca) = angle.to_radians().sin_cos();
             let (se, ce) = altitude.to_radians().sin_cos();
@@ -422,13 +419,38 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
                 BevelPaint::Outer => vec![(g.depth, 1.0)],
                 BevelPaint::Both => vec![(g.depth, if g.pillow { 3.0 } else { 2.0 })],
             };
+            // One shading step (`fs_mbevelshade`; p3.y: its softened-bevel step, 0 = all in one).
+            let shade = |a: In, bb: Option<In>, depth: f32, region: f32, which: f32, mode: f32| {
+                let mut s = stage(Kernel::MBevelShade, Some(a), bb, [ca * ce, -sa * ce, se, se], 1);
+                s.p1 = [depth, region, which, f32::from(u8::from(lut.is_some()))];
+                s.p3 = [0.0, mode, 0.0, 0.0];
+                s.lut = lut.clone();
+                s.s = Some(In::Shape);
+                s
+            };
+            let soften = (bv.soften >= 1.0).then(|| photosplice_compose::effects::tent_kernel(bv.soften));
             let mut out = 0;
             for (depth, region) in &passes {
                 for which in [0.0, 1.0] {
-                    let mut s = stage(Kernel::MBevelShade, Some(h), None, [ca * ce, -sa * ce, se, se], 1);
-                    s.p1 = [*depth, *region, which, f32::from(u8::from(lut.is_some()))];
-                    s.lut = lut.clone();
-                    s.s = Some(In::Shape);
+                    let mut s = match &soften {
+                        None => shade(h, None, *depth, *region, which, 0.0),
+                        // Soften blurs the shading, then the region applies (`bevel_maps`).
+                        Some(k) if *region < 1.5 => {
+                            let raw = b.push(shade(h, None, *depth, *region, which, 1.0));
+                            let blurred = b.conv(raw, k.clone());
+                            shade(h, Some(blurred), *depth, *region, which, 2.0)
+                        }
+                        Some(k) => {
+                            let od = if *region > 2.5 { -*depth } else { *depth };
+                            let raw_in = b.push(shade(h, None, *depth, *region, which, 1.0));
+                            let raw_out = b.push(shade(h, None, od, *region, which, 1.0));
+                            let (bin, bout) = (b.conv(raw_in, k.clone()), b.conv(raw_out, k.clone()));
+                            let outer = b.push(shade(h, Some(bout), od, *region, which, 2.0));
+                            let mut s = shade(bin, Some(outer), *depth, *region, which, 3.0);
+                            s.radius = 0;
+                            s
+                        }
+                    };
                     s.out = Some(out);
                     out += 1;
                     b.stages.push(s);

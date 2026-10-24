@@ -1425,7 +1425,7 @@ pub fn bevel_geom(b: &Bevel) -> BevelGeom {
 /// the same values pixel for pixel across an edge); a blur over it softened them (pixels off
 /// 10-18 % → 8-12 %; what remains are the radial streaks Reference's Soft draws on curves),
 /// except that an inner Soft bevel drops a step further at the edge ([`chisel_soft_edge`]).
-/// Soften blurs the result.
+/// Soften blurs the shading maps, not the height (`bevel_maps`).
 fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, patterns: &PreparedPatterns<'_>) -> Map {
     let mut h = if b.technique == BevelTechnique::Smooth {
         let mut h = shape.clone();
@@ -1470,9 +1470,6 @@ fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, pattern
                 h.v[y * h.w + x] += k * if t.invert { 1.0 - l } else { l };
             }
         }
-    }
-    if b.soften >= 1.0 {
-        tent(&mut h, b.soften);
     }
     h
 }
@@ -1576,9 +1573,18 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
         // within 2/255 on 31 616 → 35 557 pixels, worst 55 → 25/255).
         let sm = if b.gloss_anti_alias && gloss_lut.is_some() { sm.shifted(-CONTOUR_AA_SHIFT, -CONTOUR_AA_SHIFT, 0.0) } else { sm };
         for i in 0..sm.v.len() {
-            let (h, s) = gloss(sm.v[i] - se, se, gloss_lut.as_deref());
-            hi.v[i] = h * rg.v[i];
-            sh.v[i] = s * rg.v[i];
+            (hi.v[i], sh.v[i]) = gloss(sm.v[i] - se, se, gloss_lut.as_deref());
+        }
+        // Soften blurs the highlight and shadow, after the gloss clamps them (Reference corpus
+        // bevel-inner-smooth-down-soften4: a full shadow's edge rounds off, 23 23 24 26 30 36 for
+        // a blurred height's 23 23 23 23 26 34; pixels off 3.64 % → 0.79 %).
+        if b.soften >= 1.0 {
+            tent(&mut hi, b.soften);
+            tent(&mut sh, b.soften);
+        }
+        for ((h, s), r) in hi.v.iter_mut().zip(sh.v.iter_mut()).zip(&rg.v) {
+            *h *= r;
+            *s *= r;
         }
         (hi, sh)
     };
@@ -2890,6 +2896,27 @@ mod tests {
             let row: Vec<f32> = (0..size + 2).map(at).collect();
             assert!(at(size - 1) > 1e-4 && at(size) < 1e-6, "size {size}: {row:?}");
         }
+    }
+
+    /// Soften blurs the shading after the gloss clamps it, not the height: a full shadow's edge
+    /// rounds off (Reference corpus bevel-inner-smooth-down-soften4, whose settings these are),
+    /// where a blurred height kept it flat to the corner.
+    #[test]
+    fn soften_rounds_a_full_shadow() {
+        let shape = square(64, 16, 48);
+        let l = GlobalLight::default();
+        let pp = PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES);
+        let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::Smooth);
+        (b.size, b.depth, b.up, b.use_global_light, b.angle, b.altitude) = (12.0, 1.0, false, false, 120.0, 30.0);
+        let column = |b: &Bevel| -> Vec<f32> {
+            let (m, _) = bevel_maps(&shape, b, &l, &no_tex(), &pp);
+            (0..8).map(|d| m[1].v[(16 + d) * 64 + 32]).collect()
+        };
+        let plain = column(&b);
+        b.soften = 4.0;
+        let soft = column(&b);
+        assert!(plain[..4].iter().all(|v| (v - 1.0).abs() < 1e-6), "{plain:?}");
+        assert!(soft[0] > 0.99 && soft[2] < 0.99 && soft[3] < plain[3] - 0.02, "{soft:?} vs {plain:?}");
     }
 
     /// Gloss Contour › Anti-aliased reads the shading a third of a pixel away (Reference corpus
