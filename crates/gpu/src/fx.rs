@@ -435,7 +435,13 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
                 s.s = Some(In::Shape);
                 s
             };
-            let soften = (bv.soften >= 1.0).then(|| photosplice_compose::effects::tent_kernel(bv.soften));
+            // Soften: a Smooth bevel's shading blurred, a chiselled one's height
+            // (compose::effects::bevel_maps / bevel_height).
+            let smooth = bv.technique == BevelTechnique::Smooth;
+            if bv.soften >= 1.0 && !smooth {
+                h = b.conv(h, photosplice_compose::effects::tent_kernel(bv.soften));
+            }
+            let soften = (bv.soften >= 1.0 && smooth).then(|| photosplice_compose::effects::tent_kernel(bv.soften));
             let mut out = 0;
             for (depth, region) in &passes {
                 for which in [0.0, 1.0] {

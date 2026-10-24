@@ -1458,7 +1458,7 @@ pub fn chisel_distances_at(soft: bool, a: f32, din: f32, dout: f32) -> (f32, f32
 /// distances: inner 8.90 → 0.64 % of pixels off, emboss 11.74 → 1.37 %, outer 7.30 → 1.08 %,
 /// pillow 11.59 → 1.90 %, stroke 6.17 → 0.78 %, stroke emboss 11.77 → 2.33 %); along a straight,
 /// pixel-aligned edge both draw the same facets.
-/// Soften blurs the shading maps, not the height (`bevel_maps`).
+/// Soften blurs a Smooth bevel's shading maps (`bevel_maps`) and a chiselled one's height.
 fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, patterns: &PreparedPatterns<'_>) -> Map {
     let mut h = if b.technique == BevelTechnique::Smooth {
         let mut h = shape.clone();
@@ -1495,6 +1495,11 @@ fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, pattern
                 h.v[y * h.w + x] += k * if t.invert { 1.0 - l } else { l };
             }
         }
+    }
+    // A chiselled bevel's Soften blurs its height (Reference kit hard- / soft-inner-s20-soften4:
+    // worst 70 → 18-28/255 against blurring its shading as a Smooth bevel's is).
+    if b.soften >= 1.0 && b.technique != BevelTechnique::Smooth {
+        tent(&mut h, b.soften);
     }
     h
 }
@@ -1588,7 +1593,7 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
         // Soften blurs the highlight and shadow, after the gloss clamps them (Reference corpus
         // bevel-inner-smooth-down-soften4: a full shadow's edge rounds off, 23 23 24 26 30 36 for
         // a blurred height's 23 23 23 23 26 34; pixels off 3.64 % → 0.79 %).
-        if b.soften >= 1.0 {
+        if b.soften >= 1.0 && b.technique == BevelTechnique::Smooth {
             tent(&mut hi, b.soften);
             tent(&mut sh, b.soften);
         }
@@ -3008,6 +3013,20 @@ mod tests {
         let last = (44..64).take_while(|&y| h.v[col(y)] > BEVEL_H_EPS).last().unwrap_or(44);
         let at = |y: usize| m[0].v[col(y)] + m[1].v[col(y)];
         assert!(at(last + 1) > 1e-4 && at(last + 2) < 1e-6, "{:?}", (last - 1..last + 3).map(at).collect::<Vec<_>>());
+    }
+
+    /// A chiselled bevel's Soften blurs its height (Reference kit hard-inner-s20-soften4).
+    #[test]
+    fn chisel_soften_blurs_the_height() {
+        let shape = square(64, 12, 52);
+        let pp = PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES);
+        let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::ChiselHard);
+        b.size = 10.0;
+        let mut want = bevel_height(&shape, &b, &bevel_geom(&b), &no_tex(), &pp);
+        tent(&mut want, 4.0);
+        b.soften = 4.0;
+        let got = bevel_height(&shape, &b, &bevel_geom(&b), &no_tex(), &pp);
+        assert!(got.v.iter().zip(&want.v).all(|(a, b)| (a - b).abs() < 1e-6));
     }
 
     /// Soften blurs the shading after the gloss clamps it, not the height: a full shadow's edge
