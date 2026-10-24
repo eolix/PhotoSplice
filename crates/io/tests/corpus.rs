@@ -17,7 +17,10 @@
 //! must not change what the document looks like). Prints a per-file table.
 //! CMYK documents are compared in their inks, premultiplied (PASS (inks)): what the file
 //! stores and our export writes, where an RGB comparison would let a level of ink in a dark
-//! colour exceed the tolerance and a rich black pass for a black of K alone.
+//! colour exceed the tolerance and a rich black pass for a black of K alone. Lab documents
+//! likewise in L, a and b (PASS (Lab)), both composites taken back from their unclipped display
+//! RGB: out of the display gamut a unit of a or b moves RGB by tens of levels (lab8
+//! hue-saturation: 1/255 in b read 57/255 in red).
 //! A panic anywhere is caught and reported as CRASH (Rule 9).
 //!
 //! Oracles: files without layers (Bitmap, Indexed, plain flat files) compare
@@ -161,7 +164,7 @@ const PSD_TOOLS: Source = Source { label: "psd-tools corpus", dir: "corpus/psd-t
 
 /// Our Reference-authored oracles (271 files; https://github.com/storytold/photocraft-corpus),
 /// grouped by feature (`smart-filters`, `effects`, `text`, `adjustments/<mode><bits>`).
-const PHOTOSHOP: Source = Source { label: "photoshop oracles", dir: "corpus/photoshop", group_depth: 2, pass_floor: 236, roundtrip_floor: 271 };
+const PHOTOSHOP: Source = Source { label: "photoshop oracles", dir: "corpus/photoshop", group_depth: 2, pass_floor: 239, roundtrip_floor: 271 };
 
 /// The corpus directory; a missing corpus fails the test.
 fn locate(src: &Source) -> PathBuf {
@@ -277,6 +280,27 @@ enum Outcome {
 
 /// Oracle + round trip for one file. Returns the oracle outcome and whether the export round trip
 /// rendered the same (`None` when it could not run).
+/// A Lab document's composite against the merged image in L, a and b, both taken back from their
+/// (unclipped) display RGB to the 0..1 values the file stores: the largest difference of
+/// premultiplied values (and of alpha), and the share of pixels past the tolerance.
+fn lab_diff(ours: &[[f32; 4]], merged: &[[f32; 4]]) -> (f32, f32) {
+    let lab = |p: &[f32; 4]| {
+        let l = photosplice_color::convert::srgb_to_lab([p[0], p[1], p[2]]);
+        [l[0] / 100.0, (l[1] + 128.0) / 255.0, (l[2] + 128.0) / 255.0]
+    };
+    let (mut worst, mut bad) = (0.0f32, 0usize);
+    for (q, o) in ours.iter().zip(merged) {
+        let (lq, lo) = (lab(q), lab(o));
+        let mut d = (q[3] - o[3]).abs();
+        for c in 0..3 {
+            d = d.max((lq[c] * q[3] - lo[c] * o[3]).abs());
+        }
+        worst = worst.max(d);
+        bad += usize::from(d > PASS_TOL);
+    }
+    (worst, 100.0 * bad as f32 / ours.len().max(1) as f32)
+}
+
 /// A CMYK document's composite against the merged image in inks: the largest difference of
 /// premultiplied ink (and of alpha, when the merged image has transparency; without it Reference
 /// flattened onto paper, no ink), and the share of pixels past the tolerance. `None` when either
@@ -390,6 +414,9 @@ fn check_file(name: &str, bytes: &[u8]) -> (Outcome, Option<f32>) {
     // screen a level of ink in a dark colour can move RGB by more than the tolerance (a rich
     // black and a black of K alone look alike there, but print differently).
     let inks = (file.header.color_mode == photosplice_psd::ColorMode::Cmyk).then(|| ink_diff(doc, &file, file.merged_has_alpha())).flatten();
+    // So is a Lab document whose adjustments work on L, a and b: out of the display gamut a unit
+    // of a or b can move RGB by tens of levels.
+    let inks = inks.or_else(|| (file.header.color_mode == photosplice_psd::ColorMode::Lab).then(|| lab_diff(&ours, &merged)));
     let (m, pct) = match inks {
         Some(d) => d,
         None => {
@@ -398,7 +425,7 @@ fn check_file(name: &str, bytes: &[u8]) -> (Outcome, Option<f32>) {
         }
     };
     let (outcome, status) = if m <= PASS_TOL {
-        (Outcome::Pass, if inks.is_some() { "PASS (inks)" } else { "PASS" })
+        (Outcome::Pass, match (inks.is_some(), file.header.color_mode) { (false, _) => "PASS", (true, photosplice_psd::ColorMode::Lab) => "PASS (Lab)", (true, _) => "PASS (inks)" })
     } else if dissolve_matches(doc, &ours, &merged) {
         (Outcome::Pass, "PASS (dissolve metric)")
     } else {
