@@ -809,7 +809,7 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
             let g = clamp(mn + (mid - mn) * w[secondary] / 100.0 + (mx - mid) * w[primary] / 100.0, 0.0, 1.0);
             if (p1.z > 0.5) {
                 if (hdr) { return set_lum(p2.rgb, g, F32_MAX); }                // 32-bit: nothing clips at 1
-                return clamp(set_lum(p2.rgb, g, 1.0), vec3(0.0), vec3(1.0));   // Color blend of the tint
+                return clamp(set_lum(p2.rgb, g + p2.w, 1.0), vec3(0.0), vec3(1.0)); // Color blend of the tint
             }
             return vec3(g);
         }
@@ -1195,9 +1195,14 @@ fn fs_fxpaint(in: VOut) -> @location(0) vec4<f32> {
     // neutral and blend it at full coverage); one call keeps a single blend_rgb copy inlined.
     if (i32(op.p2.z) == 4) {
         // effects::paint_glow: the gradient at 1 - strength, opaque from strength 1 / gain (p0.x).
-        let k = min(m * op.p0.x, 1.0) * op.opacity;
+        // compose::effects::paint_glow: the gain on the map before the knock-out (relative to the
+        // layer's alpha for inner glows), then what the knock-out leaves.
+        let base = select(raw, m, (op.flags & F_REL) != 0u);
+        var keep = 1.0;
+        if ((op.flags & F_KNOCKOUT) != 0u) { keep = 1.0 - a * op.p4.w; }
+        let k = min(base * op.p0.x, 1.0) * keep * op.opacity;
         if (k <= 0.0) { return dst; }
-        let t = 1.0 - clamp(select(raw, m, (op.flags & F_REL) != 0u), 0.0, 1.0);
+        let t = 1.0 - clamp(base, 0.0, 1.0);
         return composite_fill(op.mode, dst, vec4(lut(0, t), lut(1, t), lut(2, t), lut(3, t)), 1.0, k, false);
     }
     let k = m * op.opacity;

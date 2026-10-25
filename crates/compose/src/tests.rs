@@ -1097,9 +1097,11 @@ fn gradient_glows_are_opaque_near_the_edge_and_keep_their_place() {
     let l = d.layers.last_mut().unwrap();
     l.fill_opacity = 0.0;
     l.surface_mut().unwrap().fill_rect(Rect::new(10, 10, 11, 30), &[1.0, 0.0, 0.0, 0.5]);
-    // Black at half strength over white; the gradient taken from the knocked-out map was grey.
+    // Black at half strength over white: the knock-out leaves half the glow after its gain
+    // (taken before it, the glow came back whole), and the gradient taken from the knocked-out
+    // map was grey.
     let edge = px(&d, 10, 20)[0];
-    assert!(edge < 0.6, "{edge}");
+    assert!((edge - 0.5).abs() < 0.05, "{edge}");
 }
 
 #[test]
@@ -1529,9 +1531,10 @@ fn inside_stroke_respects_partial_edge_coverage() {
     assert!((p[2] - 0.75).abs() < 0.02 && (p[0] - 0.25).abs() < 0.02, "{p:?}");
 }
 
-// Each half of a Pillow Emboss shades the composite on its own and an edge pixel takes them by
-// its coverage (temp kit 8 pillow-smooth-s10-normal: a half-covered pixel between a dark inside
-// and a lit outside is the mean of the two, where the averaged maps gave a darker grey).
+// A Pillow Emboss's inside shades the layer and its outside the backdrop, as an inner and an
+// outer bevel do, so an edge pixel takes them by its coverage (temp kit 8
+// pillow-smooth-s10-normal: a half-covered pixel between a dark inside and a lit outside is the
+// mean of the two, where the averaged maps gave a darker grey).
 #[test]
 fn pillow_edge_pixels_mix_the_shaded_halves() {
     let Effect::BevelEmboss(mut b) = bevel_fx(photosplice_doc::BevelStyle::PillowEmboss, 0.0) else { panic!("a bevel") };
@@ -3485,4 +3488,22 @@ fn concurrent_effect_identity_misses_compute_once() {
         assert!(ids.iter().all(|id| *id == ids[0]));
     });
     assert_eq!(keys.built.load(std::sync::atomic::Ordering::Relaxed), 1, "concurrent cache misses must compute one memoized identity");
+}
+
+/// Reference corpus ag-psd gradient-mode: an aligned gradient spans a pixel layer's mostly
+/// covered pixels, not its faint anti-aliased edge rows (17 % and 13 % there).
+#[test]
+fn effect_frame_skips_faint_edge_rows() {
+    let mut l = solid_layer("disc", Rect::new(10, 20, 50, 60), [1.0, 0.0, 0.0, 1.0]);
+    let s = l.surface_mut().unwrap();
+    s.fill_rect(Rect::new(10, 19, 50, 20), &[1.0, 0.0, 0.0, 0.17]);
+    s.fill_rect(Rect::new(10, 60, 50, 61), &[1.0, 0.0, 0.0, 0.13]);
+    s.fill_rect(Rect::new(50, 20, 51, 60), &[1.0, 0.0, 0.0, 0.6]);
+    let canvas = Rect::new(0, 0, 100, 100);
+    assert_eq!(layer_bounds(&l, canvas), Rect::new(10, 19, 51, 61));
+    // The 60 % column counts; the faint rows don't.
+    assert_eq!(effect_frame(&l, canvas), Rect::new(10, 20, 51, 60));
+    // Wholly faint layers lose at most two rows and columns a side.
+    let faint = solid_layer("faint", Rect::new(0, 0, 20, 20), [0.0, 0.0, 0.0, 0.1]);
+    assert_eq!(effect_frame(&faint, canvas), Rect::new(2, 2, 18, 18));
 }

@@ -418,13 +418,14 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
             let lut = contour_lut(&bv.gloss_contour).map(Arc::new);
             // Region (`fs_mbevelshade`): 0 inside (× alpha), 1 under the edge and outside, 4
             // inside at full strength. Emboss styles: the inside half, then the outside one
-            // (pillow: facing the other way), blended by coverage when painted (`plan`).
+            // (pillow: facing the other way, its inside × alpha), composed when painted (`plan`).
             let passes: Vec<(f32, f32)> = match g.paint {
                 BevelPaint::Inner | BevelPaint::Stroke => vec![(g.depth, 0.0)],
                 BevelPaint::Outer => vec![(g.depth, 1.0)],
-                BevelPaint::Both => vec![(g.depth, 4.0), (if g.pillow { -g.depth } else { g.depth }, 1.0)],
+                // A pillow's inside is shaded × alpha like an inner bevel's (painted into the layer).
+                BevelPaint::Both => vec![(g.depth, if g.pillow { 0.0 } else { 4.0 }), (if g.pillow { -g.depth } else { g.depth }, 1.0)],
             };
-            let reach_past = photosplice_compose::effects::outer_reaches_past(bv, &g);
+            let reach_past = photosplice_compose::effects::outer_reaches_past(&g);
             // One shading step (`fs_mbevelshade`; p3.x: an outer bevel reaching a pixel past its
             // height, p3.y: its softened-bevel step, 0 = all in one).
             let shade = |a: In, bb: Option<In>, depth: f32, region: f32, which: f32, mode: f32| {
@@ -435,7 +436,13 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
                 s.s = Some(In::Shape);
                 s
             };
-            let soften = (bv.soften >= 1.0).then(|| photosplice_compose::effects::tent_kernel(bv.soften));
+            // Soften: a Smooth bevel's shading blurred, a chiselled one's height
+            // (compose::effects::bevel_maps / bevel_height).
+            let smooth = bv.technique == BevelTechnique::Smooth;
+            if bv.soften >= 1.0 && !smooth {
+                h = b.conv(h, photosplice_compose::effects::tent_kernel(bv.soften));
+            }
+            let soften = (bv.soften >= 1.0 && smooth).then(|| photosplice_compose::effects::tent_kernel(bv.soften));
             let mut out = 0;
             for (depth, region) in &passes {
                 for which in [0.0, 1.0] {

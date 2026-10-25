@@ -1,14 +1,15 @@
-//! Photoshop gradient appearance → dense linear stops.
+//! Reference gradient appearance → dense linear stops.
 //!
-//! Photoshop interpolates gradient colours with a *Smoothness* setting (0–100 %) and, since the
+//! Reference interpolates gradient colours with a *Smoothness* setting (0–100 %) and, since the
 //! 2023 releases, an interpolation *method* (Smooth / Perceptual / Linear / Classic). The compositors
-//! interpolate stops linearly in sRGB, so on import we sample Photoshop's curve into dense stops.
-//! The model was fitted to Photoshop's own composites in the test corpus (clean-room, from
+//! interpolate stops linearly in sRGB, so on import we sample Reference's curve into dense stops.
+//! The model was fitted to Reference's own composites in the test corpus (clean-room, from
 //! pixels): Smoothness blends linear interpolation with a Catmull-Rom spline through the stop
-//! colours (end tangents at half the chord slope); Perceptual interpolates in Oklab, Linear in
-//! linear light, Classic in sRGB. Stop midpoints remap each segment piecewise-linearly.
-//! Smooth (Photoshop's default since 2024) goes straight across each segment in Oklab with its own
-//! easing, measured on Photoshop 27.11 (scripted gradients, sampled every 8 px on three colour
+//! colours (uniform tangents whatever the stops' spacing, the ends at half the end segment's
+//! difference); Perceptual interpolates in Oklab, Linear in linear light, Classic in sRGB. Stop
+//! midpoints remap each segment piecewise-linearly.
+//! Smooth (Reference's default since 2024) goes straight across each segment in Oklab with its own
+//! easing, measured on Reference 27.11 (scripted gradients, sampled every 8 px on three colour
 //! pairs: the same curve for each pair, and Smoothness doesn't change it). The curve fits no simple
 //! formula, so it is kept as the measured table [`SMOOTH_EASE`].
 
@@ -131,16 +132,17 @@ fn eval(stops: &[(f32, [f32; 3])], mids: &[f32], smooth: f32, t: f32, m: Method)
         let e = smooth_ease(u);
         return std::array::from_fn(|c| p0[c] + (p1[c] - p0[c]) * e);
     }
-    // Catmull-Rom tangents per unit t; the ends use half the chord slope.
+    // Catmull-Rom tangents per stop, whatever the stops' spacing: half the difference of the
+    // neighbouring stops' colours, at the ends half that of the end segment (Reference kit 10
+    // ov-bw-quarter, grey at 25 % between black and white: 74 at 16 % where tangents per unit
+    // position gave 84; evenly spaced stops come out the same either way).
     let tangent = |k: usize| -> [f32; 3] {
         let (a, b) = match k {
             0 => (0, 1),
             k if k == n - 1 => (n - 2, n - 1),
             k => (k - 1, k + 1),
         };
-        let d = (stops[b].0 - stops[a].0).max(1e-6);
-        let half = if k == 0 || k == n - 1 { 0.5 } else { 1.0 };
-        std::array::from_fn(|c| (stops[b].1[c] - stops[a].1[c]) / d * half)
+        std::array::from_fn(|c| (stops[b].1[c] - stops[a].1[c]) * 0.5)
     };
     let (m0, m1) = (tangent(i), tangent(i + 1));
     let (u2, u3) = (u * u, u * u * u);
@@ -151,7 +153,7 @@ fn eval(stops: &[(f32, [f32; 3])], mids: &[f32], smooth: f32, t: f32, m: Method)
         // 80 → 60 → 160 holds 60 before the middle stop, where the spline dips to 57).
         // Catmull-Rom tangents can overshoot neighbouring stops, turning even a flat segment into
         // a dip. A NaN or infinite stop leaves the bounds unusable (clamp would panic), so skip it.
-        let spline = h00 * p0[c] + h10 * h * m0[c] + h01 * p1[c] + h11 * h * m1[c];
+        let spline = h00 * p0[c] + h10 * m0[c] + h01 * p1[c] + h11 * m1[c];
         let (lo, hi) = (p0[c].min(p1[c]), p0[c].max(p1[c]));
         let spline = if lo.is_finite() && hi.is_finite() { spline.clamp(lo, hi) } else { spline };
         linear + (spline - linear) * smooth
@@ -276,6 +278,18 @@ mod tests {
             assert!(b >= 60.0 - 1e-3, "{t}: {b}");
         }
         assert!((at(&s, 0.2)[2] * 255.0 - 68.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn unevenly_spaced_stops_ease_per_segment() {
+        // Reference kit 10 ov-bw-quarter: black, grey 128 at 25 %, white, 100 % smoothness, as a
+        // linear overlay 256 px wide (Reference's values at x 40, 64, 160, 200).
+        let g = |v: f32| Color::rgb(v / 255.0, v / 255.0, v / 255.0);
+        let s = bake(vec![(0.0, g(0.0)), (0.25, g(128.0)), (1.0, g(255.0))], &[0.5, 0.5], 1.0, Method::Classic);
+        for (x, want) in [(40.0f32, 74.0f32), (64.0, 128.0), (160.0, 200.0), (200.0, 227.0)] {
+            let got = at(&s, (x + 0.5) / 256.0)[0] * 255.0;
+            assert!((got - want).abs() < 2.5, "x {x}: {got} vs {want}");
+        }
     }
 
     #[test]

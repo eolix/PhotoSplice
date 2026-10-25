@@ -13,7 +13,9 @@ fn gpu() -> Option<(wgpu::Device, wgpu::Queue, photosplice_gpu::Compositor)> {
     if photosplice_gpu::Compositor::preferred_acc_format(&adapter) != wgpu::TextureFormat::Rgba32Float {
         return None;
     }
-    let comp = photosplice_gpu::Compositor::try_new_with_format(&device, wgpu::TextureFormat::Rgba32Float).ok()?;
+    // The adapter can render the format: a compositor that doesn't build is a bug, not a skip.
+    let comp = photosplice_gpu::Compositor::try_new_with_format(&device, wgpu::TextureFormat::Rgba32Float)
+        .unwrap_or_else(|e| panic!("the GPU compositor doesn't build: {e}"));
     Some((device, queue, comp))
 }
 

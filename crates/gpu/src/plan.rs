@@ -1069,7 +1069,7 @@ impl<'a> Planner<'a> {
     fn effects(&mut self, layer: &'a Layer, clipped: &[&'a Layer], backdrop: Slot, atop: bool) -> Result<Slot, Unsupported> {
         let canvas = self.cx.canvas;
         let region = bounds::effect_region(layer, canvas);
-        let sb = photosplice_compose::paint_bounds(layer).unwrap_or_else(|| bounds::layer_bounds(layer, canvas));
+        let sb = photosplice_compose::effect_frame(layer, canvas);
         let clip = if bounds::transparent_outside(layer) { region } else { canvas };
         // A stroked shape's vector stroke goes above its clipped layers and interior effects
         // (compose::split_parts): the fill and the stroke unmasked, the masks applied after.
@@ -1312,9 +1312,12 @@ impl<'a> Planner<'a> {
             }
         }
         let bevel_paint = |b: &photosplice_doc::Bevel| photosplice_compose::effects::bevel_geom(b).paint;
+        // A Pillow Emboss composes as an inner bevel inside (its maps 0-1) and an outer one
+        // outside (2-3); the other emboss styles shade the composite (compose::effects).
+        let pillow = |b: &photosplice_doc::Bevel| b.style == photosplice_doc::BevelStyle::PillowEmboss;
         for &(i, e) in &rev {
             if let Effect::BevelEmboss(b) = e
-                && bevel_paint(b) == photosplice_compose::effects::BevelPaint::Inner
+                && (bevel_paint(b) == photosplice_compose::effects::BevelPaint::Inner || pillow(b))
             {
                 l = self.paint(
                     l,
@@ -1391,10 +1394,10 @@ impl<'a> Planner<'a> {
         }
         for &(i, e) in &rev {
             if let Effect::BevelEmboss(b) = e
-                && bevel_paint(b) == photosplice_compose::effects::BevelPaint::Outer
+                && (bevel_paint(b) == photosplice_compose::effects::BevelPaint::Outer || pillow(b))
             {
                 // Knocked out under a see-through fill, as the CPU does (and as outer glows are).
-                let k = 0;
+                let k = if pillow(b) { 2 } else { 0 };
                 let see_through = 1.0 - layer.fill_opacity.clamp(0.0, 1.0);
                 w = self.paint_k(
                     w,
@@ -1427,7 +1430,7 @@ impl<'a> Planner<'a> {
         let late: Vec<(usize, &'a photosplice_doc::Bevel)> = rev
             .iter()
             .filter_map(|&(i, e)| if let Effect::BevelEmboss(b) = e { Some((i, b)) } else { None })
-            .filter(|(_, b)| bevel_paint(b) == photosplice_compose::effects::BevelPaint::Both)
+            .filter(|(_, b)| bevel_paint(b) == photosplice_compose::effects::BevelPaint::Both && !pillow(b))
             .collect();
         let merged = if late.is_empty() {
             let mut p = Pass::new(Kernel::FxMerge, 0);
@@ -1827,8 +1830,9 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photospli
         Adjustment::BlackWhite { weights, tint } => {
             p[0] = [weights[0], weights[1], weights[2], weights[3]];
             p[1] = [weights[4], weights[5], if tint.is_some() { 1.0 } else { 0.0 }, 0.0];
+            // p2.w: the luminance an 8-bit tint loses to whole levels (adjust::tint_lum_offset).
             if let Some(t) = tint {
-                p[2] = [t[0], t[1], t[2], 0.0];
+                p[2] = [t[0], t[1], t[2], adjust::tint_lum_offset(*t, Some(depth))];
             }
             (12, p, None)
         }

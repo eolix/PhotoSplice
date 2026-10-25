@@ -1105,34 +1105,33 @@ fn paint_fx(
     }
 }
 
-/// The opacity gain of a gradient glow over its map (see [`paint_glow`]). A Softer glow is
-/// opaque from 1 / 8.4 of its blurred shape on whatever its Range (temp kit 8 og-grad-*: size 20
-/// at ranges 50 and 100 %, the faint tail 8.2-8.6 × the blur at both; `1 / range²` made a 100 %
-/// glow a quarter as strong, 26 % of pixels off → 1.4 %), so the gain on the ranged map is
-/// `range × 8.4`. A Precise glow is opaque from `range²`.
+/// The opacity gain of a gradient glow over its map (see [`paint_glow`]): opaque from 1 / 8.4 of
+/// its blurred shape (Softer) or of its ramp (Precise) whatever its size and Range, so the gain on
+/// the ranged map is `range × 8.4` (temp kits 8 and 9 og-grad-*: Softer sizes 10, 20 and 40 at
+/// ranges 25, 50 and 100 %, all within 3.2/255 at 8.4, 4.7 at 8.2 or 8.4 at 8.6; Precise size 20
+/// at 50 %, 7.3 → 0.9 % of pixels off against `1 / range²`, which also made a 100 % Softer glow a
+/// quarter as strong).
 pub fn glow_gradient_gain(g: &Glow) -> f32 {
     let r = if g.range.is_finite() { g.range.clamp(0.01, 1.0) } else { 1.0 };
-    match g.technique {
-        GlowTechnique::Softer => r * 8.4,
-        GlowTechnique::Precise => 1.0 / (r * r),
-    }
+    r * 8.4
 }
 
 /// A glow's paint over its map `m`. A gradient runs along the glow rather than across the
 /// canvas: Reference colours the glow where its (ranged, contoured) strength is `v` with the
 /// gradient at `1 - v`, so the first stop hugs the edge, and its opacity is `v` × the
 /// [`glow_gradient_gain`] (Reference corpus outer-glow-gradient.psd, against bands across the
-/// canvas; psd-tools layer_params.psd). `pos` is the map before the layer knocks it out: under a
-/// see-through fill the edge pixels keep their place at the gradient's start. Glows have no
-/// gradient angle, style or Reverse.
+/// canvas; psd-tools layer_params.psd). `pos` is the map before the layer knocks it out (under a
+/// see-through fill the edge pixels keep their place at the gradient's start) and `keep` what
+/// the knock-out leaves of each pixel, applied after the gain. Glows have no gradient angle,
+/// style or Reverse.
 #[allow(clippy::too_many_arguments)]
-fn paint_glow(dst: &mut Buffer, m: &Map, pos: &Map, g: &Glow, shape_bounds: Rect, anchor: (f64, f64), big: Rect, patterns: &PreparedPatterns<'_>) {
+fn paint_glow(dst: &mut Buffer, m: &Map, pos: &Map, keep: &Map, g: &Glow, shape_bounds: Rect, anchor: (f64, f64), big: Rect, patterns: &PreparedPatterns<'_>) {
     let FxPaint::Gradient(gradient) = &g.paint else {
         return paint_fx(dst, m, &g.paint, shape_bounds, shape_bounds, anchor, big, g.common.blend, g.common.opacity, patterns);
     };
     let prepared = PreparedGradient::new(gradient);
     let gain = glow_gradient_gain(g);
-    let strength = Map { w: m.w, h: m.h, v: m.v.iter().map(|v| (v * gain).min(1.0)).collect() };
+    let strength = Map { w: m.w, h: m.h, v: pos.v.iter().zip(&keep.v).map(|(v, k)| (v * gain).min(1.0) * k).collect() };
     paint(dst, &strength, |i| prepared.sample(1.0 - pos.v.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0)), g.common.blend, g.common.opacity);
 }
 
@@ -1409,8 +1408,8 @@ pub fn bevel_geom(b: &Bevel) -> BevelGeom {
 
 /// Whether a bevel also shades the pixels just past its height's reach (`bevel_maps`' region;
 /// the GPU's `fs_mbevelshade` reads the same 4-neighbours).
-pub fn outer_reaches_past(b: &Bevel, g: &BevelGeom) -> bool {
-    g.paint == BevelPaint::Both || (g.paint == BevelPaint::Outer && b.technique == BevelTechnique::Smooth)
+pub fn outer_reaches_past(g: &BevelGeom) -> bool {
+    g.paint == BevelPaint::Both || g.paint == BevelPaint::Outer
 }
 
 /// Chisel Soft's distances, `(inside, outside)`: chamfer distances to the binary edge, pixels
@@ -1458,7 +1457,7 @@ pub fn chisel_distances_at(soft: bool, a: f32, din: f32, dout: f32) -> (f32, f32
 /// distances: inner 8.90 → 0.64 % of pixels off, emboss 11.74 → 1.37 %, outer 7.30 → 1.08 %,
 /// pillow 11.59 → 1.90 %, stroke 6.17 → 0.78 %, stroke emboss 11.77 → 2.33 %); along a straight,
 /// pixel-aligned edge both draw the same facets.
-/// Soften blurs the shading maps, not the height (`bevel_maps`).
+/// Soften blurs a Smooth bevel's shading maps (`bevel_maps`) and a chiselled one's height.
 fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, patterns: &PreparedPatterns<'_>) -> Map {
     let mut h = if b.technique == BevelTechnique::Smooth {
         let mut h = shape.clone();
@@ -1495,6 +1494,11 @@ fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, pattern
                 h.v[y * h.w + x] += k * if t.invert { 1.0 - l } else { l };
             }
         }
+    }
+    // A chiselled bevel's Soften blurs its height (Reference kit hard- / soft-inner-s20-soften4:
+    // worst 70 → 18-28/255 against blurring its shading as a Smooth bevel's is).
+    if b.soften >= 1.0 && b.technique != BevelTechnique::Smooth {
+        tent(&mut h, b.soften);
     }
     h
 }
@@ -1539,12 +1543,12 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
     let (se, ce) = altitude.to_radians().sin_cos();
     let light_v = [ca * ce, -sa * ce, se];
     // Region: 0 = inside (× the shape's alpha), 1 = under the layer's edge and outside.
-    // A pixel is on the bevel where its height is raised. Emboss styles and Smooth outer bevels
-    // also shade the last pixel past the blur's reach (a raised 4-neighbour: it still slopes;
+    // A pixel is on the bevel where its height is raised. Emboss styles and outer bevels also
+    // shade the last pixel past the height's reach (a raised 4-neighbour: it still slopes;
     // psd-tools layer_effects' emboss shadow runs one row past it, Reference corpus
-    // bevel-outer-smooth and -on-gradient-bg shade the row at the size). Chisel outer bevels
-    // reach that row through their ramp (`BevelGeom::chisel`).
-    let reach_past = outer_reaches_past(b, &g);
+    // bevel-outer-smooth and -on-gradient-bg shade the row at the size, and a chisel's facet
+    // fades out one pixel further along a slanted edge: kit hard-outer-* 104 → 31/255).
+    let reach_past = outer_reaches_past(&g);
     let on_bevel = |x: i64, y: i64| {
         hmap.get(x, y) > BEVEL_H_EPS || (reach_past && [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dy)| hmap.get(x + dx, y + dy) > BEVEL_H_EPS))
     };
@@ -1588,7 +1592,7 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
         // Soften blurs the highlight and shadow, after the gloss clamps them (Reference corpus
         // bevel-inner-smooth-down-soften4: a full shadow's edge rounds off, 23 23 24 26 30 36 for
         // a blurred height's 23 23 23 23 26 34; pixels off 3.64 % → 0.79 %).
-        if b.soften >= 1.0 {
+        if b.soften >= 1.0 && b.technique == BevelTechnique::Smooth {
             tent(&mut hi, b.soften);
             tent(&mut sh, b.soften);
         }
@@ -1605,9 +1609,10 @@ fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, pat
         }
         BevelPaint::Both => {
             // The inside half where the shape is and the outside half (pillow: facing the other
-            // way) under the layer's edge and beyond, each at full strength: the composite blends
-            // the two shaded results by the layer's coverage (see `composite_with_effects`).
-            let (hi, sh) = shade_into(g.depth, 2);
+            // way) under the layer's edge and beyond. An emboss's inside is at full strength (the
+            // composite blends the two shaded results by coverage), a pillow's × alpha (it is
+            // painted into the layer like an inner bevel's; see `composite_with_effects`).
+            let (hi, sh) = shade_into(g.depth, if g.pillow { 0 } else { 2 });
             let (ho, so) = shade_into(if g.pillow { -g.depth } else { g.depth }, 1);
             vec![hi, sh, ho, so]
         }
@@ -1980,7 +1985,12 @@ pub(crate) fn composite_with_effects_prepared(
             // keeps its place along the glow there (temp kit 8 og-grad-*: a disc's edge pixels
             // stay at the gradient's start, not its middle).
             knock_out_exterior(&mut m, &shape, layer.fill_opacity);
-            paint_glow(&mut work, &m, &pos, g, sb, anchor, big, patterns);
+            // What the knock-out leaves of each pixel: a gradient glow takes it on its opacity,
+            // after the gain (temp kit 9 og-grad-*: a disc's 36 % edge pixel under Fill 0 % keeps
+            // 64 % of the glow; knocked out before the gain, the glow came back whole).
+            let mut keep = Map::new(m.w, m.h, 1.0);
+            knock_out_exterior(&mut keep, &shape, layer.fill_opacity);
+            paint_glow(&mut work, &m, &pos, &keep, g, sb, anchor, big, patterns);
         }
     }
 
@@ -2042,7 +2052,8 @@ pub(crate) fn composite_with_effects_prepared(
     for (i, e) in rev() {
         if let Effect::InnerGlow(g) = e {
             let m = rel(fx(i, 0));
-            paint_glow(&mut lay, &m, &m, g, sb, anchor, big, patterns);
+            let keep = Map::new(m.w, m.h, 1.0);
+            paint_glow(&mut lay, &m, &m, &keep, g, sb, anchor, big, patterns);
         }
     }
     for (i, e) in rev() {
@@ -2108,8 +2119,11 @@ pub(crate) fn composite_with_effects_prepared(
     }
     for (i, e) in rev() {
         if let Effect::BevelEmboss(b) = e
-            && maps.bevel_paint[i] == BevelPaint::Inner
+            && (maps.bevel_paint[i] == BevelPaint::Inner || (maps.bevel_paint[i] == BevelPaint::Both && b.style == BevelStyle::PillowEmboss))
         {
+            // A Pillow Emboss's inside shades the layer like an inner bevel, its outside the
+            // backdrop like an outer bevel (temp kit 9 col-pillow-*: a coloured layer over white,
+            // 16-30/255 → within 1.7 when shading the composite as Emboss does).
             let (hi, sh) = (rel(fx(i, 0)), rel(fx(i, 1)));
             paint_color(&mut lay, &hi, rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
             paint_color(&mut lay, &sh, rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
@@ -2200,12 +2214,13 @@ pub(crate) fn composite_with_effects_prepared(
     }
     for (i, e) in rev() {
         if let Effect::BevelEmboss(b) = e
-            && maps.bevel_paint[i] == BevelPaint::Outer
+            && (maps.bevel_paint[i] == BevelPaint::Outer || (maps.bevel_paint[i] == BevelPaint::Both && b.style == BevelStyle::PillowEmboss))
         {
             // Beneath the layer like a glow: a see-through fill shows the bare backdrop under its
             // shape, not the bevel (Reference kit hard-outer-s20 at Fill 0 %: an edge pixel half
             // covered shades half as much; it was shaded in full, up to 0.43 off).
-            let (mut hi, mut sh) = (fx(i, 0), fx(i, 1));
+            let k = if maps.bevel_paint[i] == BevelPaint::Both { 2 } else { 0 };
+            let (mut hi, mut sh) = (fx(i, k), fx(i, k + 1));
             knock_out_exterior(&mut hi, &shape, layer.fill_opacity);
             knock_out_exterior(&mut sh, &shape, layer.fill_opacity);
             paint_color(&mut work, &hi, rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
@@ -2227,7 +2242,7 @@ pub(crate) fn composite_with_effects_prepared(
     // to 6/255 dark (psd-tools layer_effects Emboss: 7.8 → 5.7/255).
     for (i, e) in rev() {
         if let Effect::BevelEmboss(b) = e
-            && (maps.bevel_paint[i] == BevelPaint::Both || (maps.bevel_paint[i] == BevelPaint::Stroke && !outside_stroke))
+            && ((maps.bevel_paint[i] == BevelPaint::Both && b.style != BevelStyle::PillowEmboss) || (maps.bevel_paint[i] == BevelPaint::Stroke && !outside_stroke))
             && !maps.per.get(i).is_none_or(Vec::is_empty)
         {
             if maps.bevel_paint[i] == BevelPaint::Both {
@@ -2992,6 +3007,36 @@ mod tests {
         // Below the shape (rows 44..), on its middle column: row 43 + d is d pixels out.
         let at = |d: usize| m[0].v[(43 + d) * 64 + 32] + m[1].v[(43 + d) * 64 + 32];
         assert!(at(10) > 1e-4 && at(11) < 1e-6, "{:?}", (8..13).map(at).collect::<Vec<_>>());
+    }
+
+    /// An outer chisel shades the pixel just past its ramp too (its 4-neighbour is raised):
+    /// along a slanted edge its facet fades out a pixel further (Reference kit hard-outer-*).
+    #[test]
+    fn outer_chisel_shades_the_pixel_past_its_ramp() {
+        let shape = square(64, 20, 44);
+        let mut b = bevel_of(BevelStyle::OuterBevel, BevelTechnique::ChiselHard);
+        b.size = 10.0;
+        let (m, _) = bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        let h = bevel_height(&shape, &b, &bevel_geom(&b), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        // Below the shape, middle column: the last raised row, then the one past it.
+        let col = |y: usize| y * 64 + 32;
+        let last = (44..64).take_while(|&y| h.v[col(y)] > BEVEL_H_EPS).last().unwrap_or(44);
+        let at = |y: usize| m[0].v[col(y)] + m[1].v[col(y)];
+        assert!(at(last + 1) > 1e-4 && at(last + 2) < 1e-6, "{:?}", (last - 1..last + 3).map(at).collect::<Vec<_>>());
+    }
+
+    /// A chiselled bevel's Soften blurs its height (Reference kit hard-inner-s20-soften4).
+    #[test]
+    fn chisel_soften_blurs_the_height() {
+        let shape = square(64, 12, 52);
+        let pp = PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES);
+        let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::ChiselHard);
+        b.size = 10.0;
+        let mut want = bevel_height(&shape, &b, &bevel_geom(&b), &no_tex(), &pp);
+        tent(&mut want, 4.0);
+        b.soften = 4.0;
+        let got = bevel_height(&shape, &b, &bevel_geom(&b), &no_tex(), &pp);
+        assert!(got.v.iter().zip(&want.v).all(|(a, b)| (a - b).abs() < 1e-6));
     }
 
     /// Soften blurs the shading after the gloss clamps it, not the height: a full shadow's edge

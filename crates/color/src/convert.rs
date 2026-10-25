@@ -21,6 +21,8 @@ use photosplice_cms::{Builtin, ColorSpace, Intent, Profile, Transform};
 pub struct CmykSpace {
     to_srgb: Transform,
     from_srgb: Transform,
+    to_lab: Transform,
+    from_lab: Transform,
     /// Content hash of the profile (cache keys of converted pixels).
     pub id: u64,
 }
@@ -55,7 +57,10 @@ impl CmykSpace {
         let srgb = Builtin::Srgb.profile();
         let to_srgb = Transform::new(&p, srgb, Intent::RelativeColorimetric, true).ok()?;
         let from_srgb = Transform::new(srgb, &p, Intent::RelativeColorimetric, true).ok()?;
-        Some(Arc::new(CmykSpace { to_srgb, from_srgb, id: p.content_hash() }))
+        let lab = Builtin::LabD50.profile();
+        let to_lab = Transform::new(&p, lab, Intent::RelativeColorimetric, true).ok()?;
+        let from_lab = Transform::new(lab, &p, Intent::RelativeColorimetric, true).ok()?;
+        Some(Arc::new(CmykSpace { to_srgb, from_srgb, to_lab, from_lab, id: p.content_hash() }))
     }
 }
 
@@ -143,6 +148,75 @@ pub fn rgb_to_cmyk(rgb: [f32; 3]) -> [f32; 4] {
         t.eval_fast(&v, &mut o);
     }
     o
+}
+
+fn cmyk_to_lab_transform() -> Option<&'static Transform> {
+    static T: OnceLock<Option<Transform>> = OnceLock::new();
+    T.get_or_init(|| Transform::new(Builtin::CoatedCmyk.profile(), Builtin::LabD50.profile(), Intent::RelativeColorimetric, false).ok()).as_ref()
+}
+
+fn lab_to_cmyk_transform() -> Option<&'static Transform> {
+    static T: OnceLock<Option<Transform>> = OnceLock::new();
+    T.get_or_init(|| Transform::new(Builtin::LabD50.profile(), Builtin::CoatedCmyk.profile(), Intent::RelativeColorimetric, false).ok()).as_ref()
+}
+
+/// Colour-managed CMYK → CIE L*a*b* (D50) through the active document CMYK profile (else the
+/// built-in coated CMYK), relative colorimetric: no sRGB gamut on the way, unlike
+/// [`cmyk_to_rgb`].
+pub fn cmyk_to_lab(c: [f32; 4]) -> [f32; 3] {
+    let mut o = [0.0f32; 3];
+    let active = ACTIVE_CMYK.with(|a| match &*a.borrow() {
+        Some(s) => {
+            s.to_lab.eval_fast(&c, &mut o);
+            true
+        }
+        None => false,
+    });
+    if !active {
+        let Some(t) = cmyk_to_lab_transform() else {
+            return srgb_to_lab(cmyk_to_rgb_naive(c));
+        };
+        t.eval_fast(&c, &mut o);
+    }
+    [o[0] * 100.0, o[1] * 255.0 - 128.0, o[2] * 255.0 - 128.0]
+}
+
+/// Colour-managed CIE L*a*b* (D50) → CMYK through the active document CMYK profile (else the
+/// built-in coated CMYK), relative colorimetric: the inverse of [`cmyk_to_lab`].
+pub fn lab_to_cmyk(lab: [f32; 3]) -> [f32; 4] {
+    let v = [(lab[0] / 100.0).clamp(0.0, 1.0), ((lab[1] + 128.0) / 255.0).clamp(0.0, 1.0), ((lab[2] + 128.0) / 255.0).clamp(0.0, 1.0)];
+    let mut o = [0.0f32; 4];
+    let active = ACTIVE_CMYK.with(|a| match &*a.borrow() {
+        Some(s) => {
+            s.from_lab.eval_fast(&v, &mut o);
+            true
+        }
+        None => false,
+    });
+    if !active {
+        let Some(t) = lab_to_cmyk_transform() else {
+            return rgb_to_cmyk_naive(lab_to_srgb(lab));
+        };
+        t.eval_fast(&v, &mut o);
+    }
+    o
+}
+
+/// CIE L*a*b* (D50) → D50 XYZ.
+pub fn lab_to_xyz(lab: [f32; 3]) -> [f32; 3] {
+    let [l, a, b] = lab;
+    let fy = (l + 16.0) / 116.0;
+    let fx = fy + a / 500.0;
+    let fz = fy - b / 200.0;
+    let finv = |t: f32| if t > 6.0 / 29.0 { t * t * t } else { 3.0 * (6.0f32 / 29.0).powi(2) * (t - 4.0 / 29.0) };
+    [finv(fx) * D50[0], finv(fy) * D50[1], finv(fz) * D50[2]]
+}
+
+/// D50 XYZ → CIE L*a*b* (D50).
+pub fn xyz_to_lab(xyz: [f32; 3]) -> [f32; 3] {
+    let f = |t: f32| if t > (6.0f32 / 29.0).powi(3) { t.cbrt() } else { t / (3.0 * (6.0f32 / 29.0).powi(2)) + 4.0 / 29.0 };
+    let (fx, fy, fz) = (f(xyz[0] / D50[0]), f(xyz[1] / D50[1]), f(xyz[2] / D50[2]));
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
 }
 
 /// sRGB transfer function: encoded → linear.
