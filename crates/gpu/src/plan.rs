@@ -1830,8 +1830,9 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photospli
         Adjustment::BlackWhite { weights, tint } => {
             p[0] = [weights[0], weights[1], weights[2], weights[3]];
             p[1] = [weights[4], weights[5], if tint.is_some() { 1.0 } else { 0.0 }, 0.0];
+            // p2.w: the luminance an 8-bit tint loses to whole levels (adjust::tint_lum_offset).
             if let Some(t) = tint {
-                p[2] = [t[0], t[1], t[2], 0.0];
+                p[2] = [t[0], t[1], t[2], adjust::tint_lum_offset(*t, Some(depth))];
             }
             (12, p, None)
         }

@@ -809,7 +809,7 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
             let g = clamp(mn + (mid - mn) * w[secondary] / 100.0 + (mx - mid) * w[primary] / 100.0, 0.0, 1.0);
             if (p1.z > 0.5) {
                 if (hdr) { return set_lum(p2.rgb, g, F32_MAX); }                // 32-bit: nothing clips at 1
-                return clamp(set_lum(p2.rgb, g, 1.0), vec3(0.0), vec3(1.0));   // Color blend of the tint
+                return clamp(set_lum(p2.rgb, g + p2.w, 1.0), vec3(0.0), vec3(1.0)); // Color blend of the tint
             }
             return vec3(g);
         }

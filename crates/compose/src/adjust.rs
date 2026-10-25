@@ -211,7 +211,7 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
                     // 32-bit documents nothing clips at 1, as with the blend mode there (photoshop
                     // corpus rgb32 black-white-tint.psd: white tints to 1.05, 1.00, 0.87).
                     Some(t) if hdr => photosplice_color::blend::blend_rgb_within(photosplice_color::blend::BlendMode::Color, [g; 3], *t, f32::MAX),
-                    Some(t) => photosplice_color::blend::set_lum(*t, g).map(|v| v.clamp(0.0, 1.0)),
+                    Some(t) => photosplice_color::blend::set_lum(*t, g + tint_lum_offset(*t, depth)).map(|v| v.clamp(0.0, 1.0)),
                     None => [g; 3],
                 }
             })
@@ -755,6 +755,20 @@ const COLORIZE_8BIT_HUE_SHIFT: [f32; 360] = [
     -2.10, -1.80, -1.48, -1.46, -2.46, -2.02, -1.70, -2.70, -2.06, -2.04, -1.60, -2.60,
     -2.22, -1.86, -2.86, -2.56, -1.80, -1.44, -2.44, -1.78, -1.38, -2.38, -1.56, -1.04,
 ];
+
+/// What a Black & White tint's luminance loses in an 8-bit document, where Reference takes it in
+/// whole levels (rounded down): the tint moves by the grey's levels less those, so it lands up
+/// to a level brighter than the float `set_lum` (Reference corpus rgb8 black-white-tint.psd:
+/// tint 225, 211, 179, luminance 211.68 taken as 211, grey 192 → 206, 192, 160 where the float
+/// step gave 205, 191, 159, and grey 242 clips to 255, 242, 213; the 16-bit file matches the
+/// float step). 0 at other depths.
+pub fn tint_lum_offset(t: [f32; 3], depth: Option<SampleType>) -> f32 {
+    if depth != Some(SampleType::U8) {
+        return 0.0;
+    }
+    let l = photosplice_color::blend::lum(t.map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }));
+    l - (l * 255.0 + 1e-3).floor() / 255.0
+}
 
 /// Photo Filter's Preserve Luminosity in an 8-bit document, in whole levels as Reference works
 /// there: the filtered colour rounded to levels is moved by the whole number of levels between
@@ -2637,6 +2651,25 @@ mod tone_tests {
             for (i, w) in want.iter().enumerate() {
                 let got = b.px[0][i] * 255.0;
                 assert!((got - *w as f32).abs() <= 2.5, "tint {tint:?} grey {grey} channel {i}: {got} vs {w}");
+            }
+        }
+    }
+
+    /// Reference corpus rgb8 black-white-tint.psd: an 8-bit tint takes its luminance in whole
+    /// levels, a level brighter than 16 bits (which match the float step).
+    #[test]
+    fn black_white_tint_in_8_bits_uses_whole_levels() {
+        let weights = [40.0, 60.0, 40.0, 60.0, 20.0, 80.0];
+        let tint = Some([225.0f32, 211.0, 179.0].map(|v| v / 255.0));
+        let measured: [(u8, [u8; 3], [u8; 3]); 3] = [(192, [206, 192, 160], [205, 191, 159]), (242, [255, 242, 213], [255, 241, 210]), (247, [255, 247, 230], [255, 247, 227])];
+        for (grey, eight, sixteen) in measured {
+            for (depth, want) in [(SampleType::U8, eight), (SampleType::U16, sixteen)] {
+                let mut b = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![[grey as f32 / 255.0, grey as f32 / 255.0, grey as f32 / 255.0, 1.0]] };
+                apply_depth(&Adjustment::BlackWhite { weights, tint }, &mut b, Transfer::Srgb, Some(depth));
+                for (i, w) in want.iter().enumerate() {
+                    let got = b.px[0][i] * 255.0;
+                    assert!((got - f32::from(*w)).abs() <= 1.0, "{depth:?} grey {grey} channel {i}: {got} vs {w}");
+                }
             }
         }
     }
