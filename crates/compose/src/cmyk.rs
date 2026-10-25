@@ -606,7 +606,7 @@ fn plain(l: &Layer, clipped: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
                 // The RGB effects pipeline, drawn per ink in two projected passes: the content
                 // and backdrop as their stand-ins, effect colours as theirs ([`project_color`]).
                 let maps = crate::effect_maps(l, cx);
-                let bounds = crate::paint_bounds(l).unwrap_or_else(|| crate::layer_bounds(l, cx.canvas));
+                let bounds = crate::effect_frame(l, cx.canvas);
                 let content_in = |p: Projection| Buffer {
                     rect,
                     px: src.px.iter().map(|q| if p == Projection::Cmy { [q[0], q[1], q[2], q[4]] } else { [q[3], q[3], q[3], q[4]] }).collect(),

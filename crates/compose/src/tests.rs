@@ -3489,3 +3489,21 @@ fn concurrent_effect_identity_misses_compute_once() {
     });
     assert_eq!(keys.built.load(std::sync::atomic::Ordering::Relaxed), 1, "concurrent cache misses must compute one memoized identity");
 }
+
+/// Reference corpus ag-psd gradient-mode: an aligned gradient spans a pixel layer's mostly
+/// covered pixels, not its faint anti-aliased edge rows (17 % and 13 % there).
+#[test]
+fn effect_frame_skips_faint_edge_rows() {
+    let mut l = solid_layer("disc", Rect::new(10, 20, 50, 60), [1.0, 0.0, 0.0, 1.0]);
+    let s = l.surface_mut().unwrap();
+    s.fill_rect(Rect::new(10, 19, 50, 20), &[1.0, 0.0, 0.0, 0.17]);
+    s.fill_rect(Rect::new(10, 60, 50, 61), &[1.0, 0.0, 0.0, 0.13]);
+    s.fill_rect(Rect::new(50, 20, 51, 60), &[1.0, 0.0, 0.0, 0.6]);
+    let canvas = Rect::new(0, 0, 100, 100);
+    assert_eq!(layer_bounds(&l, canvas), Rect::new(10, 19, 51, 61));
+    // The 60 % column counts; the faint rows don't.
+    assert_eq!(effect_frame(&l, canvas), Rect::new(10, 20, 51, 60));
+    // Wholly faint layers lose at most two rows and columns a side.
+    let faint = solid_layer("faint", Rect::new(0, 0, 20, 20), [0.0, 0.0, 0.0, 0.1]);
+    assert_eq!(effect_frame(&faint, canvas), Rect::new(2, 2, 18, 18));
+}

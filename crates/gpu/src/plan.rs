@@ -1069,7 +1069,7 @@ impl<'a> Planner<'a> {
     fn effects(&mut self, layer: &'a Layer, clipped: &[&'a Layer], backdrop: Slot, atop: bool) -> Result<Slot, Unsupported> {
         let canvas = self.cx.canvas;
         let region = bounds::effect_region(layer, canvas);
-        let sb = photosplice_compose::paint_bounds(layer).unwrap_or_else(|| bounds::layer_bounds(layer, canvas));
+        let sb = photosplice_compose::effect_frame(layer, canvas);
         let clip = if bounds::transparent_outside(layer) { region } else { canvas };
         // A stroked shape's vector stroke goes above its clipped layers and interior effects
         // (compose::split_parts): the fill and the stroke unmasked, the masks applied after.

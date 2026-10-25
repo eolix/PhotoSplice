@@ -988,6 +988,68 @@ fn effect_shape(layer: &Layer, rect: Rect, cx: &Ctx) -> Vec<f32> {
     out
 }
 
+/// The frame layer-effect gradients and linked patterns are laid out in: [`paint_bounds`], else
+/// the layer's bounds, a pixel layer's without the faint rows and columns at its anti-aliased
+/// edges ([`EFFECT_FRAME_ALPHA`]). Reference spans an aligned gradient over the pixels that are
+/// mostly covered (ag-psd gradient-mode: a 90° Perceptual overlay on a disc whose top and bottom
+/// rows are 17 % and 13 % covered runs between the rows inside them, 3.3/255 off → 1.0).
+pub fn effect_frame(layer: &Layer, canvas: Rect) -> Rect {
+    if let Some(p) = paint_bounds(layer) {
+        return p;
+    }
+    let b = layer_bounds(layer, canvas);
+    match &layer.content {
+        LayerContent::Raster(s) if !b.is_empty() && !shapeless(layer) => trim_faint_edges(s, b),
+        _ => b,
+    }
+}
+
+/// Edge alpha below which a pixel layer's outermost rows and columns don't count towards the
+/// frame its effect gradients span: half covered (the corpus only shows that 17 % doesn't count).
+pub const EFFECT_FRAME_ALPHA: f32 = 0.5;
+
+/// `b` without up to [`MAX_FAINT_TRIM`] rows and columns on each side whose alpha stays below
+/// [`EFFECT_FRAME_ALPHA`]. A layer without alpha keeps its bounds.
+fn trim_faint_edges(s: &Surface, b: Rect) -> Rect {
+    let fmt = s.format();
+    if !fmt.alpha {
+        return b;
+    }
+    let a = fmt.channels() - 1;
+    let mut px = vec![0.0f32; fmt.channels()];
+    let mut faint = |xs: std::ops::Range<i32>, ys: std::ops::Range<i32>| {
+        for y in ys {
+            for x in xs.clone() {
+                s.read_pixel(x, y, &mut px);
+                if px.get(a).copied().unwrap_or(1.0) >= EFFECT_FRAME_ALPHA {
+                    return false;
+                }
+            }
+        }
+        true
+    };
+    let mut r = b;
+    for _ in 0..MAX_FAINT_TRIM {
+        if r.height() > 1 && faint(r.x0..r.x1, r.y0..r.y0 + 1) {
+            r.y0 += 1;
+        }
+        if r.height() > 1 && faint(r.x0..r.x1, r.y1 - 1..r.y1) {
+            r.y1 -= 1;
+        }
+        if r.width() > 1 && faint(r.x0..r.x0 + 1, r.y0..r.y1) {
+            r.x0 += 1;
+        }
+        if r.width() > 1 && faint(r.x1 - 1..r.x1, r.y0..r.y1) {
+            r.x1 -= 1;
+        }
+    }
+    r
+}
+
+/// The most rows or columns [`trim_faint_edges`] takes off each side: an anti-aliased edge is a
+/// pixel or two, and a faint layer then costs four short scans rather than a full one.
+const MAX_FAINT_TRIM: usize = 2;
+
 /// The frame layer-effect gradients and linked patterns are laid out in, when it isn't the
 /// layer's pixel bounds: a shape layer's path bounds, truncated to whole pixels. Its rendered
 /// pixels can extend past the path (transparent anti-aliasing margin), which Photoshop ignores:
@@ -1643,7 +1705,7 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
             &content,
             backdrop,
             &maps,
-            paint_bounds(layer).unwrap_or_else(|| layer_bounds(layer, cx.canvas)),
+            effect_frame(layer, cx.canvas),
             cx.canvas,
             cx.patterns,
             vstroke,
@@ -1984,7 +2046,7 @@ fn cached_effect_maps(layer: &Layer, region: Rect, key: u64, cx: &Ctx) -> std::s
 }
 
 fn texture_ctx<'a>(layer: &Layer, region: Rect, cx: &Ctx<'a>) -> effects::TextureCtx<'a> {
-    let sb = paint_bounds(layer).unwrap_or_else(|| layer_bounds(layer, cx.canvas));
+    let sb = effect_frame(layer, cx.canvas);
     effects::TextureCtx { rect: region, patterns: cx.patterns.source(), anchor: layer.effects.reference.unwrap_or((f64::from(sb.x0), f64::from(sb.y0))) }
 }
 
@@ -2044,7 +2106,7 @@ fn composite_atop_any(layer: &Layer, base: &mut Buffer, cx: &Ctx) {
             &content,
             &mut opaque,
             &maps,
-            paint_bounds(layer).unwrap_or_else(|| layer_bounds(layer, cx.canvas)),
+            effect_frame(layer, cx.canvas),
             cx.canvas,
             cx.patterns,
             vstroke,
