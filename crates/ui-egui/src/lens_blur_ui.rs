@@ -29,6 +29,14 @@ const ZOOM_BAR_H: f32 = 34.0;
 const DIALOG_MAX: egui::Vec2 = vec2(1400.0, 900.0);
 const VIEW: ViewOpts = ViewOpts { open_fitted: true, keep_clicks: false };
 
+/// A remembered alpha channel the document no longer has opens as no depth map (None), rather
+/// than as a source the preview can't read.
+pub(crate) fn defaults(app: &PhotospliceApp, f: &mut Map<String, Value>) {
+    if depth_source(f) == "channel" && channel_index(app, f).is_none() {
+        f.insert("depthMap".into(), json!("none"));
+    }
+}
+
 /// Whether the dialog with fields `f` is Lens Blur's.
 pub(crate) fn owns(f: &Map<String, Value>) -> bool {
     f.contains_key("__filter") && f.get("__command").and_then(Value::as_str) == Some(COMMAND)
@@ -145,7 +153,7 @@ fn settings(app: &PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, Value>)
     });
 
     group(ui, Some(tl!("Depth Map")), |ui| {
-        let mut source = source_key(f);
+        let mut source = source_key(app, f);
         let channels = alpha_channels(app);
         let mut opts = vec![("none".to_string(), tl!("None").to_string()), ("transparency".to_string(), tl!("Transparency").to_string())];
         if has_mask(app) || source == "layerMask" {
@@ -260,10 +268,22 @@ const CHANNEL_KEY: &str = "channel:";
 
 /// The depth source as the Source dropdown names it: `depthMap`, or [`CHANNEL_KEY`] and the
 /// channel's index for an alpha channel.
-fn source_key(f: &Map<String, Value>) -> String {
+fn source_key(app: &PhotospliceApp, f: &Map<String, Value>) -> String {
     match depth_source(f) {
-        "channel" => format!("{CHANNEL_KEY}{}", f.get("depthChannel").and_then(Value::as_u64).unwrap_or(0)),
+        "channel" => channel_index(app, f).map_or_else(|| "none".to_string(), |i| format!("{CHANNEL_KEY}{i}")),
         other => other.to_string(),
+    }
+}
+
+/// The document channel `depthChannel` names, as the engine reads it: an index among the extra
+/// channels (the first when not given) or a name (the first with it, from a recorded filter).
+fn channel_index(app: &PhotospliceApp, f: &Map<String, Value>) -> Option<usize> {
+    let channels = &app.session.active()?.doc.channels;
+    match f.get("depthChannel") {
+        None => (!channels.is_empty()).then_some(0),
+        Some(Value::Number(n)) => usize::try_from(n.as_u64()?).ok().filter(|i| *i < channels.len()),
+        Some(Value::String(name)) => channels.iter().position(|c| c.name == *name),
+        Some(_) => None,
     }
 }
 
@@ -318,10 +338,7 @@ fn depth_at(app: &PhotospliceApp, f: &Map<String, Value>, x: f32, y: f32) -> Opt
             *surface.pixel(px, py).last()?
         }
         "layerMask" => *layer.mask.as_ref()?.surface.pixel(px, py).first()?,
-        "channel" => {
-            let i = usize::try_from(f.get("depthChannel").and_then(Value::as_u64).unwrap_or(0)).ok()?;
-            *st.doc.channels.get(i)?.surface.pixel(px, py).first()?
-        }
+        "channel" => *st.doc.channels.get(channel_index(app, f)?)?.surface.pixel(px, py).first()?,
         _ => return None,
     };
     let d = d.clamp(0.0, 1.0);
@@ -407,15 +424,48 @@ mod tests {
         // The dropdown's key round-trips to the command's params.
         set_source(&mut f, "channel:1");
         assert_eq!((f["depthMap"].clone(), f["depthChannel"].clone()), (json!("channel"), json!(1)));
-        assert_eq!(source_key(&f), "channel:1");
+        assert_eq!(source_key(&app, &f), "channel:1");
         assert_eq!(depth_at(&app, &f, 5.0, 5.0), Some(1.0));
         set_source(&mut f, "channel:0");
         assert_eq!(depth_at(&app, &f, 5.0, 5.0), Some(0.0));
         // A channel that is gone gives nothing to read.
         f.insert("depthChannel".into(), json!(7));
         assert_eq!(depth_at(&app, &f, 5.0, 5.0), None);
+        // A recorded filter may name its channel.
+        f.insert("depthChannel".into(), json!("Sky"));
+        assert_eq!(source_key(&app, &f), "channel:1");
+        assert_eq!(depth_at(&app, &f, 5.0, 5.0), Some(1.0));
+        f.insert("depthChannel".into(), json!("Nowhere"));
+        assert_eq!(source_key(&app, &f), "none", "a missing channel shows as no depth map");
         set_source(&mut f, "transparency");
-        assert_eq!(source_key(&f), "transparency");
+        assert_eq!(source_key(&app, &f), "transparency");
+    }
+
+    #[test]
+    fn a_remembered_channel_that_is_gone_opens_as_none() {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 40, "height": 20})).unwrap();
+        app.run("channel.new", json!({"name": "Depth", "fill": "black"})).unwrap();
+        app.run("channel.new", json!({"name": "Sky", "fill": "white"})).unwrap();
+        let mut f = json!({"depthMap": "channel", "depthChannel": 1}).as_object().cloned().unwrap();
+        defaults(&app, &mut f);
+        assert_eq!(f["depthMap"], json!("channel"), "still there: kept");
+        app.run("channel.delete", json!({"channel": "Sky"})).unwrap();
+        defaults(&app, &mut f);
+        assert_eq!(f["depthMap"], json!("none"));
+        // Hostile values never panic and fall back to None too.
+        for bad in [json!(u64::MAX), json!(-1), json!(true), json!("Sky")] {
+            let mut f = json!({"depthMap": "channel", "depthChannel": bad}).as_object().cloned().unwrap();
+            defaults(&app, &mut f);
+            assert_eq!(f["depthMap"], json!("none"), "{bad}");
+        }
+        // Through the dialog: remembered values pass through `defaults` when it opens.
+        app.session.prefs.edit(|p| p.dialogs.insert(COMMAND.into(), json!({"depthMap": "channel", "depthChannel": 0, "radius": 30})));
+        let (_, f) = lens_blur_dialog(&mut app);
+        assert_eq!((f["depthMap"].clone(), f["radius"].clone()), (json!("channel"), json!(30)), "the channel is still there");
+        app.session.prefs.edit(|p| p.dialogs.insert(COMMAND.into(), json!({"depthMap": "channel", "depthChannel": 1, "radius": 30})));
+        let (_, f) = lens_blur_dialog(&mut app);
+        assert_eq!((f["depthMap"].clone(), f["radius"].clone()), (json!("none"), json!(30)), "the deleted one opens as None");
     }
 
     #[test]

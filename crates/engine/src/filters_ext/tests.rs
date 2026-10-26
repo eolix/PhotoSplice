@@ -234,12 +234,50 @@ fn lens_blur_uses_an_alpha_channel_as_depth() {
     // The black one (index 0) is depth 0: the same focal distance blurs it all.
     s.execute("filter.blur.lensBlur", json!({"radius": 6, "depthMap": "channel", "depthChannel": 0, "focalDistance": 255})).unwrap();
     assert_ne!(pixels(&s), before);
-    // A channel the document doesn't have is an error, not a panic or a silent full blur.
+    // By name too (scripts keep working when channels are reordered).
     let blurred = pixels(&s);
-    for bad in [json!(2), json!(u64::MAX)] {
+    s.undo();
+    s.execute("filter.blur.lensBlur", json!({"radius": 6, "depthMap": "channel", "depthChannel": "Near", "focalDistance": 255})).unwrap();
+    assert_eq!(pixels(&s), blurred, "the same channel as index 0");
+    s.undo();
+    s.execute("filter.blur.lensBlur", json!({"radius": 6, "depthMap": "channel", "depthChannel": "Far", "focalDistance": 255})).unwrap();
+    assert_eq!(pixels(&s), before, "the same channel as index 1");
+    s.undo();
+    s.execute("filter.blur.lensBlur", json!({"radius": 6, "depthMap": "channel", "focalDistance": 255})).unwrap();
+    assert_eq!(pixels(&s), blurred, "the first channel when none is named");
+    // A channel the document doesn't have is an error, not a panic or a silent full blur.
+    for bad in [json!(2), json!(u64::MAX), json!(1u64 << 32), json!("Nowhere"), json!(-1), json!(1.5), json!(true), json!([0])] {
         assert!(s.execute("filter.blur.lensBlur", json!({"radius": 6, "depthMap": "channel", "depthChannel": bad})).is_err());
     }
     assert_eq!(pixels(&s), blurred);
+}
+
+#[test]
+fn lens_blur_is_not_offered_on_a_smart_object() {
+    let mut s = session();
+    s.execute("channel.new", json!({"name": "Depth", "fill": "white"})).unwrap();
+    s.active_mut().unwrap().channel_view.target = crate::channel_cmds::ChannelTarget::Composite;
+    let pixel_layer = s.active().unwrap().active_layer.unwrap();
+    s.execute("layer.new.layer", json!({})).unwrap();
+    s.execute("edit.fill", json!({"color": "#808080"})).unwrap();
+    s.execute("layer.smartObjects.convertToSmartObject", json!({})).unwrap();
+    // A smart filter re-renders from its params alone: a depth map from the document would be lost.
+    let reason = s.disabled_reason("filter.blur.lensBlur").expect("greyed out on a smart object");
+    assert!(reason.contains("smart object"), "{reason}");
+    assert!(s.execute("filter.blur.lensBlur", json!({"radius": 6})).is_err());
+    let smart = s.active().unwrap().active_layer.unwrap();
+    let filters = |s: &Session| match &s.active().unwrap().doc.layer(smart).unwrap().content {
+        photosplice_doc::LayerContent::Smart(sm) => sm.smart_filters.len(),
+        _ => panic!("still a smart object"),
+    };
+    assert_eq!(filters(&s), 0, "no smart filter added");
+    // Named by `"layer"` from another active layer: refused too.
+    s.select_layer(pixel_layer).unwrap();
+    assert!(s.execute("filter.blur.lensBlur", json!({"radius": 6, "layer": smart.0})).is_err());
+    assert_eq!(filters(&s), 0);
+    // Pixel layers still take it.
+    assert!(s.disabled_reason("filter.blur.lensBlur").is_none());
+    s.execute("filter.blur.lensBlur", json!({"radius": 6, "depthMap": "channel"})).unwrap();
 }
 
 #[test]

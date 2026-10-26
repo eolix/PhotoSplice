@@ -381,6 +381,16 @@ fn every_filter_live_on_pixels_asks_on_a_type_layer() {
     assert!(asked > 40, "{asked} filters");
 }
 
+/// Lens Blur isn't a smart filter (as in Reference): on a type layer it asks to rasterize only.
+#[test]
+fn lens_blur_on_a_type_layer_offers_only_rasterize() {
+    let app = app_with(Kind::Type);
+    assert!(crate::menus::is_enabled(&app, "filter.blur.lensBlur"));
+    let (_, smart) = crate::rasterize_prompt::filter_needs(&app, "filter.blur.lensBlur").expect("asks first");
+    assert!(!smart, "no Convert to Smart Object");
+    assert!(crate::rasterize_prompt::filter_needs(&app, "filter.blur.gaussianBlur").unwrap().1, "other filters still offer it");
+}
+
 /// Vanishing Point edits pixels only: its prompt offers Rasterize, not Convert to Smart Object.
 #[test]
 fn vanishing_point_offers_only_rasterize() {

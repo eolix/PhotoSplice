@@ -457,19 +457,20 @@ pub(crate) fn resolve(s: &Session, fp: &mut FilterParams, p: &Value) -> Result<(
     Ok(())
 }
 
-/// Lens Blur's depth read from the document's alpha channel `depthChannel` (its index in the
-/// Channels panel's extra channels, from 0), as Reference's Depth Map Source lists them.
+/// Lens Blur's depth read from the document's alpha channel `depthChannel`: its index among the
+/// Channels panel's extra channels (from 0, the first when not given) or its name, as Reference's
+/// Depth Map Source lists them.
 fn resolve_depth_channel(s: &Session, depth_map: &mut Option<Arc<algo::Image>>, p: &Value) -> Result<()> {
     if depth_map.is_some() {
         return Ok(());
     }
     let doc = &s.active().ok_or(EngineError::NoDocument)?.doc;
-    let index = p.get("depthChannel").and_then(Value::as_u64).unwrap_or(0);
-    let channel = usize::try_from(index).ok().and_then(|i| doc.channels.get(i)).ok_or_else(|| EngineError::BadParams {
+    let channel = p.get("depthChannel").cloned().unwrap_or(json!(0));
+    let surface = crate::edit_menu_cmds::channel_mask(doc, &channel).ok_or_else(|| EngineError::BadParams {
         cmd: "filter.blur.lensBlur".into(),
-        msg: format!("there is no alpha channel {index} to read depth from (the document has {})", doc.channels.len()),
+        msg: format!("there is no alpha channel {channel} to read depth from (the document has {})", doc.channels.len()),
     })?;
-    *depth_map = Some(Arc::new(algo::Image::read(&channel.surface, doc.bounds())));
+    *depth_map = Some(Arc::new(algo::Image::read(surface, doc.bounds())));
     Ok(())
 }
 
@@ -496,6 +497,23 @@ pub(crate) fn resolve_map_path(fp: &mut FilterParams, p: &Value) -> Result<()> {
     }
     Ok(())
 }
+
+/// Lens Blur isn't offered on a smart object, as in Reference: a smart filter re-renders from its
+/// params alone, so a depth map read from the document (the layer mask, an alpha channel) would
+/// be lost. Its layer mask and the document's channels can still be filtered.
+fn lens_blur_enabled(s: &Session) -> std::result::Result<(), String> {
+    crate::filters::has_filterable_layer(s)?;
+    if crate::channel_cmds::edits_channel(s) {
+        return Ok(());
+    }
+    match crate::active_layer_of(s).map(|l| &l.content) {
+        Ok(photosplice_doc::LayerContent::Smart(_)) => Err(LENS_BLUR_ON_SMART_OBJECT.into()),
+        _ => Ok(()),
+    }
+}
+
+/// Why Lens Blur refuses a smart object ([`lens_blur_enabled`]).
+pub(crate) const LENS_BLUR_ON_SMART_OBJECT: &str = "Lens Blur can't be applied to a smart object: rasterize the layer first";
 
 /// Resolves inputs read from the target layer itself: the layer mask as Lens Blur depth.
 pub(crate) fn resolve_in_layer(fp: &mut FilterParams, layer: &Layer, bounds: Rect) {
@@ -676,12 +694,16 @@ pub fn specs() -> Vec<CommandSpec> {
             ["Filter", "Blur"],
             r##"{"radius":0.1..100=3,"threshold":0.1..100=25,"quality":"high|medium|low","mode":"normal|edgeOnly|overlayEdge"}"##
         ),
-        cmd!(
-            "filter.blur.lensBlur",
-            "Lens Blur…",
-            ["Filter", "Blur"],
-            r##"{"radius":0..100=15,"shape":"hexagon|triangle|square|pentagon|heptagon|octagon","bladeCurvature":0..100=0,"rotation":0..360=0,"depthMap":"none|transparency|layerMask|channel","depthChannel":u32=0,"focalDistance":0..255=0,"invert":bool,"brightness":0..100=0,"threshold":0..255=255,"noise":0..100=0,"distribution":"uniform|gaussian","monochromatic":bool,"seed":u32=0}"##
-        ),
+        CommandSpec {
+            id: "filter.blur.lensBlur",
+            label: "Lens Blur…",
+            menu: &["Filter", "Blur"],
+            shortcut: None,
+            params: r##"{"radius":0..100=15,"shape":"hexagon|triangle|square|pentagon|heptagon|octagon","bladeCurvature":0..100=0,"rotation":0..360=0,"depthMap":"none|transparency|layerMask|channel","depthChannel":index|name?,"focalDistance":0..255=0,"invert":bool,"brightness":0..100=0,"threshold":0..255=255,"noise":0..100=0,"distribution":"uniform|gaussian","monochromatic":bool,"seed":u32=0}"##,
+            enabled: lens_blur_enabled,
+            run: |s, p| crate::filters::run_filter(s, "filter.blur.lensBlur", p),
+            journal: true,
+        },
         cmd!(
             "filter.blur.shapeBlur",
             "Shape Blur…",

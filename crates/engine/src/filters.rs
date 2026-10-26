@@ -291,6 +291,10 @@ pub(crate) fn run_filter(s: &mut Session, id: &str, p: &Value) -> Result<Value> 
             crate::filters_ext::resolve_in_layer(&mut fp, l, bounds);
             let surf = match &mut l.content {
                 LayerContent::Raster(surf) => surf,
+                // A layer named by `"layer"` is checked here; the active one by `enabled` too.
+                LayerContent::Smart(_) if matches!(fp, FilterParams::LensBlur { .. }) => {
+                    return Err(EngineError::Other(crate::filters_ext::LENS_BLUR_ON_SMART_OBJECT.into()));
+                }
                 LayerContent::Smart(_) => {
                     // Non-destructive: record the filter and re-render the smart object from its source.
                     let sf =
