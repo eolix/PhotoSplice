@@ -322,10 +322,11 @@ fn can_caf(s: &Session) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// Mask surface (gray) of an alpha channel by index or name.
-fn channel_mask<'a>(doc: &'a Document, v: &Value) -> Option<&'a Surface> {
+/// Mask surface (gray) of an alpha channel by index or name (the first with that name).
+pub(crate) fn channel_mask<'a>(doc: &'a Document, v: &Value) -> Option<&'a Surface> {
     match v {
-        Value::Number(n) => doc.channels.get(n.as_u64()? as usize).map(|c| &c.surface),
+        // A huge index must not wrap to a real channel where usize is 32 bits (wasm).
+        Value::Number(n) => doc.channels.get(usize::try_from(n.as_u64()?).ok()?).map(|c| &c.surface),
         Value::String(name) => doc.channels.iter().find(|c| c.name == *name).map(|c| &c.surface),
         _ => None,
     }

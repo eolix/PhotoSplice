@@ -182,6 +182,8 @@ pub enum DepthSource {
     None,
     Transparency,
     LayerMask,
+    /// One of the document's alpha channels, supplied by the caller as the depth map.
+    Channel,
 }
 
 /// Built-in Shape Blur kernels.

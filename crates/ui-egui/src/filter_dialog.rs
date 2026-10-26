@@ -398,6 +398,9 @@ fn apply_command_defaults(app: &PhotospliceApp, command: &str, fields: &mut Map<
     if command == "edit.assignProfile" {
         assign_profile_defaults(app, fields);
     }
+    if command == crate::lens_blur_ui::COMMAND {
+        crate::lens_blur_ui::defaults(app, fields);
+    }
 }
 
 /// Assign Profile offers only the profiles the document's colour mode can take (#4951): the

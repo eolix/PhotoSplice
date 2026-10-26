@@ -1354,8 +1354,10 @@ mod tests {
         let size = egui::vec2(1280.0, 800.0);
         let mut h = dialog_harness(size, "filter.blur.gaussianBlur");
         let centred = h.get_by_label("Gaussian Blur").rect();
-        // Drag the title bar up and to the left.
-        let (from, by) = (centred.center(), egui::vec2(-240.0, -150.0));
+        // Drag the title bar up and to the left, staying inside the window: the dialog's square
+        // preview makes it tall, so it opens only ~60 points below the top bound. Whole points per
+        // step: the dialog's place is rounded every frame.
+        let (from, by) = (centred.center(), egui::vec2(-240.0, -48.0));
         h.event(egui::Event::PointerMoved(from));
         h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
         for k in 1..=6 {

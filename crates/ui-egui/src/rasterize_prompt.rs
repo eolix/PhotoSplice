@@ -127,7 +127,7 @@ pub fn open(app: &mut PhotospliceApp, kind: Kind, layer: photosplice_doc::LayerI
 
 /// The active type layer when `id` is a filter that only needs it rasterized: the engine greys it
 /// for not being a pixel layer, and the layer is not locked. The flag says whether the filter also
-/// runs on a Smart Object, as a smart filter (Vanishing Point doesn't).
+/// runs on a Smart Object, as a smart filter (Vanishing Point and Lens Blur don't).
 pub fn filter_needs(app: &PhotospliceApp, id: &str) -> Option<(photosplice_doc::LayerId, bool)> {
     if !id.starts_with("filter.") {
         return None;
@@ -150,7 +150,9 @@ pub fn filter_needs(app: &PhotospliceApp, id: &str) -> Option<(photosplice_doc::
     // wording ("Vanishing Point needs a pixel layer (…)", "active layer is a Type layer, not a pixel
     // layer"). Any other reason (a job running) keeps the item grey.
     let reason = app.session.disabled_reason(id)?;
-    (reason.contains("active layer is a Type layer") && reason.contains("pixel layer")).then(|| (layer, reason.starts_with("filters need a pixel layer")))
+    // Lens Blur shares that reason but isn't offered on a Smart Object either.
+    let smart = reason.starts_with("filters need a pixel layer") && id != crate::lens_blur_ui::COMMAND;
+    (reason.contains("active layer is a Type layer") && reason.contains("pixel layer")).then_some((layer, smart))
 }
 
 /// A filter chosen on a type layer: open the prompt instead and return its answer to the caller.
