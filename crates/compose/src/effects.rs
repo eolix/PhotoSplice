@@ -771,15 +771,18 @@ pub fn has_anti_aliased_contour(e: &Effect) -> bool {
     }
 }
 
-/// A glow's coverage transfer: its contour applied over the Range (Photoshop maps a Softer
+/// A glow's coverage transfer: its contour applied over the Range (Reference maps a Softer
 /// glow's coverage `v` through `contour(min(v / range, 1))`, so the default 50 % doubles a
-/// blurred edge's 0.5 to full strength). A Precise glow's ramp takes the contour as it is
-/// (Photoshop corpus outer-glow-precise-spread40.psd: 94/255 → 20/255 with Range 50 %).
-/// `None` = identity.
+/// blurred edge's 0.5 to full strength). A Precise glow's ramp counts half as much, as if it
+/// started from the blurred edge's 0.5: at 50 % it is taken as it is (Reference corpus
+/// outer-glow-precise-spread40.psd: 94/255 → 20/255), at 100 % it is halved (temp kit 13
+/// map-prec-*: a white glow over black reads 121, 60 where the full ramp gave 241, 120, sizes 5
+/// to 60). `None` = identity.
 pub fn glow_lut(g: &Glow) -> Option<Vec<f32>> {
+    let range = if g.range.is_finite() { g.range.clamp(0.01, 1.0) } else { 1.0 };
     match g.technique {
-        GlowTechnique::Precise => contour_lut(&g.contour),
-        GlowTechnique::Softer => ranged_lut(&g.contour, g.range),
+        GlowTechnique::Precise => ranged_lut(&g.contour, 2.0 * range),
+        GlowTechnique::Softer => ranged_lut(&g.contour, range),
     }
 }
 
@@ -825,11 +828,12 @@ pub fn gloss(k: f32, se: f32, lut: Option<&[f32]>) -> (f32, f32) {
     ((2.0 * c - 1.0).max(0.0), (1.0 - 2.0 * c).max(0.0))
 }
 
-/// A contour applied over a Range (`contour(min(v / range, 1))`); `None` = identity.
+/// A contour applied over a Range (`contour(min(v / range, 1))`, `range` in `0.01..=2`: past 1
+/// the coverage is scaled down); `None` = identity.
 pub fn ranged_lut(contour: &Contour, range: f32) -> Option<Vec<f32>> {
     let base = contour_lut(contour);
-    let range = if range.is_finite() { range.clamp(0.01, 1.0) } else { 1.0 };
-    if range >= 0.999 {
+    let range = if range.is_finite() { range.clamp(0.01, 2.0) } else { 1.0 };
+    if (range - 1.0).abs() < 1e-3 {
         return base;
     }
     let n = 4096;
@@ -3239,6 +3243,13 @@ mod tests {
         for (d, ps) in [(2, 47.0f32), (4, 93.0), (6, 140.0), (8, 186.0), (10, 232.0)] {
             let got = 255.0 * (1.0 - at(&m, 20 - d));
             assert!((got - ps).abs() <= 1.5, "outer precise at {d} px: {got} vs Photoshop {ps}");
+        }
+        // Range 100 % halves the ramp (temp kit 13 map-prec-s20: 121, 60 where range 50 % reads
+        // 241, 120).
+        let half = glow_map(&shape, &Glow { range: 1.0, ..glow(GlowTechnique::Precise, 10.0, 0.0, GlowSource::Edge) }, false, (0, 0));
+        let full = glow_map(&shape, &Glow { range: 0.5, ..glow(GlowTechnique::Precise, 10.0, 0.0, GlowSource::Edge) }, false, (0, 0));
+        for x in 8..20 {
+            assert!((at(&half, x) - 0.5 * at(&full, x)).abs() < 1e-3, "range 100 % at {x}: {} vs {}", at(&half, x), at(&full, x));
         }
         // Spread 40 %: solid for the first 4 px.
         let m = glow_map(&shape, &glow(GlowTechnique::Precise, 10.0, 0.4, GlowSource::Edge), false, (0, 0));
