@@ -2,9 +2,10 @@
 //!
 //! Photoshop shows a preview of the filtered result *inside* its filter dialogs. This draws one
 //! from the same proxy preview the canvas already shows (`filter_dialog::preview_document`): a
-//! cropped region of the filtered proxy with − / + zoom and a percentage readout, drag to pan, a
-//! click to centre the view on a document point, and press-and-hold to compare with the unfiltered
-//! image. The proxy is drawn scaled by its reduction factor, so 100% is one *document* pixel per
+//! square region of the filtered proxy with − / + zoom (out until the whole image shows) and a
+//! percentage readout, drag to pan, a click to centre the view on a document point, and
+//! press-and-hold to compare with the unfiltered image. Lens Blur's large dialog draws the same
+//! view ([`view`]) at its own size. The proxy is drawn scaled by its reduction factor, so 100% is one *document* pixel per
 //! point whatever the proxy factor. The Preview checkbox keeps toggling the on-canvas live result
 //! (`canvas::ensure_filter_preview`), unchanged.
 
@@ -16,26 +17,68 @@ use crate::PhotospliceApp;
 use crate::filter_dialog::FilterPreviewKey;
 use crate::theme::Tokens;
 
-/// Zoom bounds, as a fraction of document scale: 100% shows one document pixel per point.
+/// Zoom bounds, as a fraction of document scale: 100% shows one document pixel per point. Zooming
+/// out goes further than [`MIN_ZOOM`] when the whole image needs it ([`fit_zoom`]).
 const MIN_ZOOM: f32 = 0.125;
 const MAX_ZOOM: f32 = 8.0;
 const DEFAULT_ZOOM: f32 = 1.0;
-/// The preview region's height in points; its width follows the dialog.
-const PREVIEW_H: f32 = 150.0;
+/// The square preview's side in points: as wide as the dialog up to [`PREVIEW_MAX`], smaller in a
+/// short window so the parameters keep [`PARAMS_MIN`] of room.
+const PREVIEW_MAX: f32 = 420.0;
+const PREVIEW_MIN: f32 = 150.0;
+const PARAMS_MIN: f32 = 160.0;
+/// The zoom row under the preview and its spacing.
+const ZOOM_ROW_H: f32 = 32.0;
 /// Private dialog fields holding the preview's view (stripped from the command's params).
 const ZOOM_FIELD: &str = "__pvZoom";
 const CENTER_X_FIELD: &str = "__pvCx";
 const CENTER_Y_FIELD: &str = "__pvCy";
 
-/// Draw the filter dialog's in-dialog preview window below its parameters (its `fields` `f`). A
-/// no-op for dialogs without a preview and for Select and Mask, which has its own view.
+/// How a dialog's preview view behaves.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ViewOpts {
+    /// Opens showing the whole image, following the view's size until zoomed (Lens Blur); the
+    /// schema dialogs open at 100%, as in Reference.
+    pub open_fitted: bool,
+    /// A plain click doesn't centre the view: the dialog reads [`Shown::clicked`] (Lens Blur's Set
+    /// Focal Point).
+    pub keep_clicks: bool,
+}
+
+/// What [`view`] reports to its dialog.
+pub(crate) struct Shown {
+    /// The document point a plain click landed on this frame.
+    pub clicked: Option<(f32, f32)>,
+    /// The zoom that shows the whole image in the view.
+    pub fit: f32,
+}
+
+/// Draw the filter dialog's in-dialog preview window below its parameters (its `fields` `f`): a
+/// square, as Reference's. A no-op for dialogs without a preview and for Select and Mask, which
+/// has its own view.
 pub(crate) fn window(app: &PhotospliceApp, dialog: u64, ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     if !shows(f) {
         return;
     }
-    let Some(cmd) = f.get("__command").and_then(Value::as_str).map(str::to_owned) else { return };
-    let Some(idx) = app.session.active_index() else { return };
-    let Some(st) = app.session.documents().get(idx) else { return };
+    let width = ui.available_width().max(PREVIEW_MIN);
+    let side = preview_side(ui.ctx()).min(width);
+    let (row, _) = ui.allocate_exact_size(vec2(width, side), Sense::hover());
+    let rect = Rect::from_center_size(row.center(), vec2(side, side));
+    let Some(shown) = view(app, dialog, ui, f, rect, ViewOpts::default()) else { return };
+    ui.horizontal(|ui| {
+        ui.add_space((rect.left() - row.left() - ui.spacing().item_spacing.x).max(0.0));
+        zoom_controls(ui, f, shown.fit, ViewOpts::default());
+    });
+}
+
+/// Draw the dialog's preview of the filtered result in `rect`: a view of the proxy the canvas
+/// already computed for `dialog`, drag to pan, a click to centre the view on a document point
+/// (unless the dialog keeps clicks), press-and-hold to compare with the unfiltered image. `None`
+/// when there is nothing to show (no document, an empty image).
+pub(crate) fn view(app: &PhotospliceApp, dialog: u64, ui: &mut egui::Ui, f: &mut Map<String, Value>, rect: Rect, opts: ViewOpts) -> Option<Shown> {
+    let cmd = f.get("__command").and_then(Value::as_str).map(str::to_owned)?;
+    let idx = app.session.active_index()?;
+    let st = app.session.documents().get(idx)?;
     let (doc_id, revision) = (st.doc.id, st.revision);
 
     // The filtered proxy the canvas already computed for this dialog, when there is one. Matching
@@ -48,7 +91,8 @@ pub(crate) fn window(app: &PhotospliceApp, dialog: u64, ui: &mut egui::Ui, f: &m
     // The proxy factor the preview runs at (the filtered key's when it exists, else the request's).
     let base_k = filtered.as_ref().map(|(k, _)| k.k).unwrap_or_else(|| {
         let params = app.with_mask_target(&cmd, crate::filter_dialog::params_of(f));
-        crate::filter_dialog::preview_factor(&cmd, &params, crate::proxy::preview_factor(&st.doc, crate::proxy::reduced_previews(app)))
+        let k = crate::filter_dialog::preview_factor(&cmd, &params, crate::proxy::preview_factor(&st.doc, crate::proxy::reduced_previews(app)));
+        crate::lens_blur_ui::preview_factor(f, &st.doc, k)
     });
 
     let t = Tokens::get(ui.ctx());
@@ -83,23 +127,22 @@ pub(crate) fn window(app: &PhotospliceApp, dialog: u64, ui: &mut egui::Ui, f: &m
     let filt = cache.filtered.as_ref().map(|c| (c.tex.clone(), c.size));
     ui.ctx().data_mut(|d| d.insert_temp(cache_id, cache));
 
-    let Some([img_w, img_h]) = filt.as_ref().map(|(_, s)| *s).or_else(|| orig.as_ref().map(|(_, s)| *s)) else { return };
+    let [img_w, img_h] = filt.as_ref().map(|(_, s)| *s).or_else(|| orig.as_ref().map(|(_, s)| *s))?;
     if img_w == 0 || img_h == 0 {
-        return;
+        return None;
     }
     // The proxy is the document reduced by `base_k`, so the view works in *document* pixels: at
     // 100% one document pixel covers one point, whatever the proxy factor (#3769).
     let doc = document_size([img_w, img_h], base_k);
+    let fit = fit_zoom(rect.size(), doc);
 
     // View state, sanitised: a corrupt field must not divide by zero or draw off the texture.
-    let mut zoom = f.get(ZOOM_FIELD).and_then(Value::as_f64).map(|v| v as f32).filter(|z| z.is_finite() && *z > 0.0).unwrap_or(DEFAULT_ZOOM);
-    zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+    let zoom = zoom_of(f, fit, opts);
     let mut cx = f.get(CENTER_X_FIELD).and_then(Value::as_f64).map(|v| v as f32).filter(|v| v.is_finite()).unwrap_or(doc.x / 2.0);
     let mut cy = f.get(CENTER_Y_FIELD).and_then(Value::as_f64).map(|v| v as f32).filter(|v| v.is_finite()).unwrap_or(doc.y / 2.0);
     (cx, cy) = clamp_center(cx, cy, doc.x, doc.y);
 
-    let width = ui.available_width().max(140.0);
-    let (rect, response) = ui.allocate_exact_size(vec2(width, PREVIEW_H), Sense::click_and_drag());
+    let response = ui.interact(rect, egui::Id::new(("filter-preview-view", dialog)), Sense::click_and_drag());
     let (x0, y0, sw, sh) = source_rect(cx, cy, zoom, rect.size(), doc);
     let (dest, uv) = placement(rect, (x0, y0, sw, sh), zoom, doc);
 
@@ -120,26 +163,66 @@ pub(crate) fn window(app: &PhotospliceApp, dialog: u64, ui: &mut egui::Ui, f: &m
         cx -= d.x / zoom;
         cy -= d.y / zoom;
     }
+    let mut clicked = None;
     if response.clicked()
         && let Some(p) = response.interact_pointer_pos()
     {
-        (cx, cy) = point_to_source(p - rect.min, x0, y0, zoom, doc);
+        let at = point_to_source(p - rect.min, x0, y0, zoom, doc);
+        clicked = Some(at);
+        if !opts.keep_clicks {
+            (cx, cy) = at;
+        }
     }
     (cx, cy) = clamp_center(cx, cy, doc.x, doc.y);
-
-    ui.horizontal(|ui| {
-        if crate::icons::button(ui, "minus", 22.0, false, tl!("Zoom out")).clicked() {
-            zoom = step_zoom(zoom, false);
-        }
-        ui.label(egui::RichText::new(format!("{}%", crate::widgets::fmt_num(zoom as f64 * 100.0))).color(t.text_dim));
-        if crate::icons::button(ui, "plus", 22.0, false, tl!("Zoom in")).clicked() {
-            zoom = step_zoom(zoom, true);
-        }
-    });
-
-    f.insert(ZOOM_FIELD.into(), json!(zoom.clamp(MIN_ZOOM, MAX_ZOOM)));
     f.insert(CENTER_X_FIELD.into(), json!(cx));
     f.insert(CENTER_Y_FIELD.into(), json!(cy));
+    // A fitted view stays fitted (following the view's size) until it is zoomed.
+    if !opts.open_fitted || f.contains_key(ZOOM_FIELD) {
+        f.insert(ZOOM_FIELD.into(), json!(zoom));
+    }
+    Some(Shown { clicked, fit })
+}
+
+/// The − / + zoom buttons and the percentage between them, for a view whose whole image shows at
+/// `fit`.
+pub(crate) fn zoom_controls(ui: &mut egui::Ui, f: &mut Map<String, Value>, fit: f32, opts: ViewOpts) {
+    let t = Tokens::get(ui.ctx());
+    let zoom = zoom_of(f, fit, opts);
+    let mut next = None;
+    if crate::icons::button(ui, "minus", 22.0, false, tl!("Zoom out")).clicked() {
+        next = Some(step_zoom(zoom, false, fit));
+    }
+    ui.label(egui::RichText::new(format!("{}%", crate::widgets::fmt_num(zoom as f64 * 100.0))).color(t.text_dim));
+    if crate::icons::button(ui, "plus", 22.0, false, tl!("Zoom in")).clicked() {
+        next = Some(step_zoom(zoom, true, fit));
+    }
+    if let Some(z) = next {
+        f.insert(ZOOM_FIELD.into(), json!(z));
+    }
+}
+
+/// The view's zoom: the stored one, sanitised and clamped, or where the view opens.
+fn zoom_of(f: &Map<String, Value>, fit: f32, opts: ViewOpts) -> f32 {
+    let opening = if opts.open_fitted { fit } else { DEFAULT_ZOOM };
+    let z = f.get(ZOOM_FIELD).and_then(Value::as_f64).map(|v| v as f32).filter(|z| z.is_finite() && *z > 0.0).unwrap_or(opening);
+    z.clamp(min_zoom(fit), MAX_ZOOM)
+}
+
+/// The zoom at which an image of `doc` document pixels fits a `region`: a degenerate size fits at
+/// 100%.
+fn fit_zoom(region: Vec2, doc: Vec2) -> f32 {
+    let fit = (region.x / doc.x).min(region.y / doc.y);
+    if fit.is_finite() && fit > 0.0 { fit.min(MAX_ZOOM) } else { DEFAULT_ZOOM }
+}
+
+/// The furthest the view zooms out: [`MIN_ZOOM`], or further when the whole image needs it.
+fn min_zoom(fit: f32) -> f32 {
+    if fit.is_finite() && fit > 0.0 { fit.min(MIN_ZOOM) } else { MIN_ZOOM }
+}
+
+/// The preview's side for the window: fits under the dialog's chrome and parameters.
+fn preview_side(ctx: &egui::Context) -> f32 {
+    (ctx.content_rect().height() - crate::dialogs::DIALOG_CHROME - PARAMS_MIN - ZOOM_ROW_H).clamp(PREVIEW_MIN, PREVIEW_MAX)
 }
 
 /// The zoom levels the − / + buttons step through, like the Filter Gallery's.
@@ -147,8 +230,8 @@ const ZOOM_STEPS: [f32; 7] = [0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0];
 
 /// The vertical space the preview window takes below the parameters: the image, the zoom row and
 /// their spacing. `0` when the dialog has no preview (so the caller reserves nothing).
-pub(crate) fn reserved_height(f: &Map<String, Value>) -> f32 {
-    if shows(f) { PREVIEW_H + 32.0 } else { 0.0 }
+pub(crate) fn reserved_height(ctx: &egui::Context, f: &Map<String, Value>) -> f32 {
+    if shows(f) { preview_side(ctx) + ZOOM_ROW_H } else { 0.0 }
 }
 
 /// Whether the dialog with fields `f` gets the preview window: Filter menu dialogs with a Preview
@@ -158,12 +241,18 @@ fn shows(f: &Map<String, Value>) -> bool {
     f.contains_key("__preview") && !crate::select_mask_view::owns(f) && f.get("__command").and_then(Value::as_str).is_some_and(|c| c.starts_with("filter."))
 }
 
-/// The next zoom level up or down from `zoom`, clamped to [`ZOOM_STEPS`]' ends.
-fn step_zoom(zoom: f32, up: bool) -> f32 {
+/// The next zoom level up or down from `zoom`: [`ZOOM_STEPS`] and the level that shows the whole
+/// image (`fit`), clamped to their ends.
+fn step_zoom(zoom: f32, up: bool, fit: f32) -> f32 {
+    let mut levels: Vec<f32> = ZOOM_STEPS.to_vec();
+    if fit.is_finite() && fit > 0.0 && fit <= MAX_ZOOM && levels.iter().all(|s| (s - fit).abs() > 1e-3) {
+        levels.push(fit);
+        levels.sort_by(f32::total_cmp);
+    }
     if up {
-        ZOOM_STEPS.iter().copied().find(|s| *s > zoom + 1e-3).unwrap_or(MAX_ZOOM)
+        levels.iter().copied().find(|s| *s > zoom + 1e-3).unwrap_or(MAX_ZOOM)
     } else {
-        ZOOM_STEPS.iter().rev().copied().find(|s| *s < zoom - 1e-3).unwrap_or(MIN_ZOOM)
+        levels.iter().rev().copied().find(|s| *s < zoom - 1e-3).unwrap_or(min_zoom(fit))
     }
 }
 
@@ -370,24 +459,66 @@ mod tests {
 
     #[test]
     fn zoom_steps_walk_the_levels_and_stay_in_bounds() {
-        assert_eq!(step_zoom(1.0, true), 2.0);
-        assert_eq!(step_zoom(1.0, false), 0.5);
-        assert_eq!(step_zoom(0.9, true), 1.0);
-        assert_eq!(step_zoom(1.1, false), 1.0);
-        assert_eq!(step_zoom(MAX_ZOOM, true), MAX_ZOOM, "clamped at the top");
-        assert_eq!(step_zoom(MIN_ZOOM, false), MIN_ZOOM, "clamped at the bottom");
-        assert_eq!(step_zoom(0.0, true), MIN_ZOOM, "a corrupt zoom recovers upward");
-        assert_eq!(step_zoom(f32::NAN, false), MIN_ZOOM);
+        assert_eq!(step_zoom(1.0, true, 1.0), 2.0);
+        assert_eq!(step_zoom(1.0, false, 1.0), 0.5);
+        assert_eq!(step_zoom(0.9, true, 1.0), 1.0);
+        assert_eq!(step_zoom(1.1, false, 1.0), 1.0);
+        assert_eq!(step_zoom(MAX_ZOOM, true, 1.0), MAX_ZOOM, "clamped at the top");
+        assert_eq!(step_zoom(MIN_ZOOM, false, 1.0), MIN_ZOOM, "clamped at the bottom");
+        assert_eq!(step_zoom(0.0, true, 1.0), MIN_ZOOM, "a corrupt zoom recovers upward");
+        assert_eq!(step_zoom(f32::NAN, false, 1.0), MIN_ZOOM);
+        assert_eq!(step_zoom(MIN_ZOOM, false, f32::NAN), MIN_ZOOM, "a corrupt fit is ignored");
+    }
+
+    #[test]
+    fn zooming_out_reaches_the_whole_image() {
+        // A 6000×4000 photo in a 400-point square fits at 1/15: past the 12.5% step.
+        let fit = fit_zoom(vec2(400.0, 400.0), vec2(6000.0, 4000.0));
+        assert!((fit - 400.0 / 6000.0).abs() < 1e-6);
+        assert_eq!(step_zoom(MIN_ZOOM, false, fit), fit, "one more step shows it all");
+        assert_eq!(step_zoom(fit, false, fit), fit, "and stops there");
+        assert_eq!(step_zoom(fit, true, fit), MIN_ZOOM);
+        // A fit between two steps is a level of its own.
+        assert_eq!(step_zoom(0.5, false, 0.3), 0.3);
+        assert_eq!(step_zoom(0.3, false, 0.3), 0.25);
+        // The fitted view shows the whole image, centred.
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 400.0));
+        let doc = vec2(6000.0, 4000.0);
+        let (dest, uv) = placement(rect, source_rect(3000.0, 2000.0, fit, rect.size(), doc), fit, doc);
+        assert!((uv.min - pos2(0.0, 0.0)).length() < 1e-5 && (uv.max - pos2(1.0, 1.0)).length() < 1e-5, "{uv:?}");
+        assert!(rect.expand(1e-3).contains_rect(dest) && (dest.width() - 400.0).abs() < 1e-3);
+        // Degenerate sizes fit at 100% rather than dividing by zero.
+        assert_eq!(fit_zoom(vec2(400.0, 400.0), vec2(0.0, 0.0)), DEFAULT_ZOOM);
+    }
+
+    #[test]
+    fn a_fitted_view_follows_its_size_until_zoomed() {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 800, "height": 400})).unwrap();
+        let id = crate::filter_dialog::open(&mut app, "filter.blur.gaussianBlur").unwrap();
+        let mut f = app.ui.dialogs.last().unwrap().fields.clone();
+        let opts = ViewOpts { open_fitted: true, keep_clicks: false };
+        let ctx = egui::Context::default();
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 200.0));
+        let mut fit = 0.0;
+        ctx.run_ui(Default::default(), |ui| fit = view(&app, id, ui, &mut f, rect, opts).unwrap().fit).textures_delta.clear();
+        assert_eq!(fit, 0.25);
+        assert!(!f.contains_key(ZOOM_FIELD), "still fitted");
+        assert_eq!(zoom_of(&f, fit, opts), 0.25);
+        assert_eq!(zoom_of(&f, fit, ViewOpts::default()), 1.0, "the schema dialogs open at 100%");
+        f.insert(ZOOM_FIELD.into(), json!(1.0));
+        assert_eq!(zoom_of(&f, fit, opts), 1.0, "zoomed: no longer fitted");
     }
 
     #[test]
     fn only_filter_dialogs_get_the_preview_window() {
         let fields = |cmd: &str| json!({"__preview": true, "__command": cmd}).as_object().cloned().unwrap();
         assert!(shows(&fields("filter.blur.gaussianBlur")));
-        assert!(reserved_height(&fields("filter.blur.gaussianBlur")) > 0.0);
+        let ctx = egui::Context::default();
+        assert!(reserved_height(&ctx, &fields("filter.blur.gaussianBlur")) > 0.0);
         // Photoshop's Rotate Canvas and adjustment dialogs have no preview window.
         assert!(!shows(&fields("image.rotation.arbitrary")));
-        assert_eq!(reserved_height(&fields("image.rotation.arbitrary")), 0.0);
+        assert_eq!(reserved_height(&ctx, &fields("image.rotation.arbitrary")), 0.0);
         assert!(!shows(&fields("adjust.levels")));
         // No Preview checkbox or no command: no window.
         assert!(!shows(json!({"__command": "filter.blur.gaussianBlur"}).as_object().unwrap()));

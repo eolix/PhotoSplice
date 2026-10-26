@@ -486,7 +486,7 @@ pub fn free_press(ctx: &egui::Context, canvas: egui::Rect) -> Option<egui::Pos2>
 
 /// Height of a dialog's title, rule, button row and frame margins (points), around a body that
 /// scrolls.
-const DIALOG_CHROME: f32 = 150.0;
+pub(crate) const DIALOG_CHROME: f32 = 150.0;
 
 /// Draw a dialog body that opens on its first number, selected, as Photoshop's value dialogs do:
 /// typing replaces it and Enter applies it (#1757). Once per dialog `id`, on the first laid-out
@@ -695,7 +695,7 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
                     // Long parameter lists (Flame, Lighting Effects) scroll, so the title and the
                     // OK / Cancel buttons stay inside a small window.
                     // The preview window below the parameters reserves its own space (#3769).
-                    let room = (ctx.content_rect().height() - DIALOG_CHROME - crate::filter_preview_ui::reserved_height(&fields)).max(120.0);
+                    let room = (ctx.content_rect().height() - DIALOG_CHROME - crate::filter_preview_ui::reserved_height(ctx, &fields)).max(120.0);
                     let body = |ui: &mut egui::Ui, fields: &mut serde_json::Map<String, Value>| {
                         egui::ScrollArea::vertical().id_salt(id.with("body")).max_height(room).show(ui, |ui| crate::filter_dialog::body(ui, fields));
                         // The in-dialog preview window (full size) sits under the scrolling
@@ -823,7 +823,11 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
         };
         // Esc cancels (topmost dialog, no popup open). A click outside does nothing: Reference keeps
         // the dialog, and the pointer may be panning or zooming the canvas under it.
-        let close = if floating {
+        let close = if crate::lens_blur_ui::owns(&d.fields) {
+            // Lens Blur: a large dialog in a window of its own, with its own OK / Cancel.
+            outcome = crate::lens_blur_ui::show(app, ctx, d.id, &title, &mut fields, interactive);
+            false
+        } else if floating {
             let opts = FloatOpts { place: place_id(&d), inactive: !interactive, front, forward_keys: false, bleed: false };
             floating_window(ctx, id, &title, FloatSize::Content(min_w, max_w), opts, draw).close
         } else {
