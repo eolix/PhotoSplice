@@ -277,6 +277,7 @@ pub fn params_for(id: &str, p: &Value) -> Option<FilterParams> {
             depth: match s(p, "depthMap", "none") {
                 "transparency" => DepthSource::Transparency,
                 "layerMask" => DepthSource::LayerMask,
+                "channel" => DepthSource::Channel,
                 _ => DepthSource::None,
             },
             focal_distance: f(p, "focalDistance", 0.0).clamp(0.0, 255.0),
@@ -431,6 +432,9 @@ fn map_from_document(doc: &Document, layer: Option<u64>) -> Option<algo::Image> 
 /// Resolves inputs that live outside the target layer: Displace's map (`mapPath`, or
 /// `mapDocument` index with optional `mapLayer` id).
 pub(crate) fn resolve(s: &Session, fp: &mut FilterParams, p: &Value) -> Result<()> {
+    if let FilterParams::LensBlur { depth: DepthSource::Channel, depth_map, .. } = fp {
+        return resolve_depth_channel(s, depth_map, p);
+    }
     let FilterParams::Displace { map, .. } = fp else { return Ok(()) };
     if map.is_some() {
         return Ok(());
@@ -450,6 +454,22 @@ pub(crate) fn resolve(s: &Session, fp: &mut FilterParams, p: &Value) -> Result<(
         return Err(EngineError::Other("Displace needs a displacement map: pass `mapPath` or `mapDocument`".into()));
     };
     *map = Some(Arc::new(img.ok_or_else(|| EngineError::Other("the displacement map is empty".into()))?));
+    Ok(())
+}
+
+/// Lens Blur's depth read from the document's alpha channel `depthChannel` (its index in the
+/// Channels panel's extra channels, from 0), as Reference's Depth Map Source lists them.
+fn resolve_depth_channel(s: &Session, depth_map: &mut Option<Arc<algo::Image>>, p: &Value) -> Result<()> {
+    if depth_map.is_some() {
+        return Ok(());
+    }
+    let doc = &s.active().ok_or(EngineError::NoDocument)?.doc;
+    let index = p.get("depthChannel").and_then(Value::as_u64).unwrap_or(0);
+    let channel = usize::try_from(index).ok().and_then(|i| doc.channels.get(i)).ok_or_else(|| EngineError::BadParams {
+        cmd: "filter.blur.lensBlur".into(),
+        msg: format!("there is no alpha channel {index} to read depth from (the document has {})", doc.channels.len()),
+    })?;
+    *depth_map = Some(Arc::new(algo::Image::read(&channel.surface, doc.bounds())));
     Ok(())
 }
 
@@ -660,7 +680,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "filter.blur.lensBlur",
             "Lens Blur…",
             ["Filter", "Blur"],
-            r##"{"radius":0..100=15,"shape":"hexagon|triangle|square|pentagon|heptagon|octagon","bladeCurvature":0..100=0,"rotation":0..360=0,"depthMap":"none|transparency|layerMask","focalDistance":0..255=0,"invert":bool,"brightness":0..100=0,"threshold":0..255=255,"noise":0..100=0,"distribution":"uniform|gaussian","monochromatic":bool,"seed":u32=0}"##
+            r##"{"radius":0..100=15,"shape":"hexagon|triangle|square|pentagon|heptagon|octagon","bladeCurvature":0..100=0,"rotation":0..360=0,"depthMap":"none|transparency|layerMask|channel","depthChannel":u32=0,"focalDistance":0..255=0,"invert":bool,"brightness":0..100=0,"threshold":0..255=255,"noise":0..100=0,"distribution":"uniform|gaussian","monochromatic":bool,"seed":u32=0}"##
         ),
         cmd!(
             "filter.blur.shapeBlur",

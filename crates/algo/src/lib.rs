@@ -481,7 +481,8 @@ pub enum FilterParams {
         distribution: Distribution,
         monochromatic: bool,
         seed: u32,
-        /// Depth for [`DepthSource::LayerMask`] (channel 0, document coordinates), supplied by the caller.
+        /// Depth for [`DepthSource::LayerMask`] and [`DepthSource::Channel`] (channel 0, document
+        /// coordinates), supplied by the caller.
         #[serde(skip)]
         depth_map: Option<std::sync::Arc<Image>>,
     },

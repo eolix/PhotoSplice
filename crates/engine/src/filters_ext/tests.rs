@@ -221,6 +221,28 @@ fn lens_blur_uses_the_layer_mask_as_depth() {
 }
 
 #[test]
+fn lens_blur_uses_an_alpha_channel_as_depth() {
+    let mut s = session();
+    s.execute("channel.new", json!({"name": "Near", "fill": "black"})).unwrap();
+    s.execute("channel.new", json!({"name": "Far", "fill": "white"})).unwrap();
+    // Creating a channel targets it: filter the layer again.
+    s.active_mut().unwrap().channel_view.target = crate::channel_cmds::ChannelTarget::Composite;
+    let before = pixels(&s);
+    // The white channel (index 1) is depth 1 everywhere: focal distance 255 keeps it all sharp.
+    s.execute("filter.blur.lensBlur", json!({"radius": 6, "depthMap": "channel", "depthChannel": 1, "focalDistance": 255})).unwrap();
+    assert_eq!(pixels(&s), before);
+    // The black one (index 0) is depth 0: the same focal distance blurs it all.
+    s.execute("filter.blur.lensBlur", json!({"radius": 6, "depthMap": "channel", "depthChannel": 0, "focalDistance": 255})).unwrap();
+    assert_ne!(pixels(&s), before);
+    // A channel the document doesn't have is an error, not a panic or a silent full blur.
+    let blurred = pixels(&s);
+    for bad in [json!(2), json!(u64::MAX)] {
+        assert!(s.execute("filter.blur.lensBlur", json!({"radius": 6, "depthMap": "channel", "depthChannel": bad})).is_err());
+    }
+    assert_eq!(pixels(&s), blurred);
+}
+
+#[test]
 fn params_map_to_algorithm_units() {
     assert_eq!(params_for("filter.pixelate.crystallize", &json!({"cellSize": 1})), Some(FilterParams::Crystallize { cell_size: 3.0, seed: 0 }));
     assert_eq!(

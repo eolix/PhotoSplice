@@ -1,6 +1,7 @@
 //! Filter › Blur › Lens Blur…: Reference's large dialog. A big preview on the left with its zoom
 //! under it; OK / Cancel, Preview (Faster or More Accurate), Depth Map (source, Set Focal Point,
-//! Blur Focal Distance, Invert), Iris (shape, radius, blade curvature, rotation), Specular
+//! Blur Focal Distance, Invert; the source is the layer's transparency, its mask or an alpha
+//! channel), Iris (shape, radius, blade curvature, rotation), Specular
 //! Highlights and Noise on the right.
 //!
 //! It is the schema filter dialog for `filter.blur.lensBlur` (`filter_dialog::open`) drawn in a
@@ -144,15 +145,18 @@ fn settings(app: &PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, Value>)
     });
 
     group(ui, Some(tl!("Depth Map")), |ui| {
-        let mut source = depth_source(f).to_string();
-        let mut opts = vec![("none".to_string(), tl!("None")), ("transparency".to_string(), tl!("Transparency"))];
+        let mut source = source_key(f);
+        let channels = alpha_channels(app);
+        let mut opts = vec![("none".to_string(), tl!("None").to_string()), ("transparency".to_string(), tl!("Transparency").to_string())];
         if has_mask(app) || source == "layerMask" {
-            opts.push(("layerMask".to_string(), tl!("Layer Mask")));
+            opts.push(("layerMask".to_string(), tl!("Layer Mask").to_string()));
         }
+        opts.extend(channels.iter().map(|(i, name)| (format!("{CHANNEL_KEY}{i}"), name.clone())));
+        let opts: Vec<(String, &str)> = opts.iter().map(|(k, l)| (k.clone(), l.as_str())).collect();
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(format!("{}:", tl!("Source"))).color(Tokens::get(ui.ctx()).text_dim));
             if widgets::dropdown(ui, "lens-blur-source", &mut source, &opts, ui.available_width()) {
-                f.insert("depthMap".into(), json!(source));
+                set_source(f, &source);
             }
         });
         ui.add_enabled_ui(source != "none", |ui| {
@@ -251,13 +255,46 @@ fn depth_source(f: &Map<String, Value>) -> &str {
     f.get("depthMap").and_then(Value::as_str).unwrap_or("none")
 }
 
+/// The Source dropdown's key for an alpha channel: this prefix and the channel's index.
+const CHANNEL_KEY: &str = "channel:";
+
+/// The depth source as the Source dropdown names it: `depthMap`, or [`CHANNEL_KEY`] and the
+/// channel's index for an alpha channel.
+fn source_key(f: &Map<String, Value>) -> String {
+    match depth_source(f) {
+        "channel" => format!("{CHANNEL_KEY}{}", f.get("depthChannel").and_then(Value::as_u64).unwrap_or(0)),
+        other => other.to_string(),
+    }
+}
+
+/// Sets the params for a Source dropdown `key` ([`source_key`]).
+fn set_source(f: &mut Map<String, Value>, key: &str) {
+    match key.strip_prefix(CHANNEL_KEY).and_then(|i| i.parse::<u64>().ok()) {
+        Some(i) => {
+            f.insert("depthMap".into(), json!("channel"));
+            f.insert("depthChannel".into(), json!(i));
+        }
+        None => {
+            f.insert("depthMap".into(), json!(key));
+        }
+    }
+}
+
+/// The document's alpha channels (not spot colours), with their index among its extra channels:
+/// Reference's Depth Map Source lists them after the layer's own sources.
+fn alpha_channels(app: &PhotospliceApp) -> Vec<(usize, String)> {
+    let Some(st) = app.session.active() else { return Vec::new() };
+    st.doc.channels.iter().enumerate().filter(|(_, c)| c.spot.is_none()).map(|(i, c)| (i, c.name.clone())).collect()
+}
+
 /// Whether the layer the filter applies to has a layer mask (Lens Blur's Layer Mask depth).
 fn has_mask(app: &PhotospliceApp) -> bool {
     app.session.active().and_then(|st| st.doc.layer(st.active_layer?)).is_some_and(|l| l.mask.is_some())
 }
 
 /// The depth (0..=1, after Invert) the filter reads at document point `(x, y)`, as the focal
-/// distance that keeps that point sharp: the layer's opacity (Transparency) or its mask. `None`
+/// distance that keeps that point sharp: the layer's opacity (Transparency), its mask or an alpha
+/// channel. `None`
 /// without a depth source or with nothing to read it from.
 fn depth_at(app: &PhotospliceApp, f: &Map<String, Value>, x: f32, y: f32) -> Option<f32> {
     let st = app.session.active()?;
@@ -281,6 +318,10 @@ fn depth_at(app: &PhotospliceApp, f: &Map<String, Value>, x: f32, y: f32) -> Opt
             *surface.pixel(px, py).last()?
         }
         "layerMask" => *layer.mask.as_ref()?.surface.pixel(px, py).first()?,
+        "channel" => {
+            let i = usize::try_from(f.get("depthChannel").and_then(Value::as_u64).unwrap_or(0)).ok()?;
+            *st.doc.channels.get(i)?.surface.pixel(px, py).first()?
+        }
         _ => return None,
     };
     let d = d.clamp(0.0, 1.0);
@@ -353,6 +394,28 @@ mod tests {
         // No mask: nothing to read.
         f.insert("depthMap".into(), json!("layerMask"));
         assert_eq!(depth_at(&app, &f, 5.0, 5.0), None);
+    }
+
+    #[test]
+    fn alpha_channels_are_depth_sources() {
+        let mut app = PhotospliceApp::new(photosplice_engine::Session::new(), crate::Services::default());
+        app.run("file.new", json!({"width": 40, "height": 20})).unwrap();
+        app.run("channel.new", json!({"name": "Depth", "fill": "black"})).unwrap();
+        app.run("channel.new", json!({"name": "Sky", "fill": "white"})).unwrap();
+        assert_eq!(alpha_channels(&app), vec![(0, "Depth".to_string()), (1, "Sky".to_string())]);
+        let (_, mut f) = lens_blur_dialog(&mut app);
+        // The dropdown's key round-trips to the command's params.
+        set_source(&mut f, "channel:1");
+        assert_eq!((f["depthMap"].clone(), f["depthChannel"].clone()), (json!("channel"), json!(1)));
+        assert_eq!(source_key(&f), "channel:1");
+        assert_eq!(depth_at(&app, &f, 5.0, 5.0), Some(1.0));
+        set_source(&mut f, "channel:0");
+        assert_eq!(depth_at(&app, &f, 5.0, 5.0), Some(0.0));
+        // A channel that is gone gives nothing to read.
+        f.insert("depthChannel".into(), json!(7));
+        assert_eq!(depth_at(&app, &f, 5.0, 5.0), None);
+        set_source(&mut f, "transparency");
+        assert_eq!(source_key(&f), "transparency");
     }
 
     #[test]
