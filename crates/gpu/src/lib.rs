@@ -139,8 +139,8 @@ enum TexKind {
     Rgba8Direct,
     /// Other 8-bit formats converted to RGBA8.
     Rgba8,
-    /// 16/32-bit formats converted to RGBA16F (16-bit ones where [`Rgba16Unorm`](TexKind::Rgba16Unorm)
-    /// isn't available).
+    /// 16-bit formats converted to RGBA16F where [`Rgba16Unorm`](TexKind::Rgba16Unorm) isn't
+    /// available, and other 16-bit models.
     Rgba16F,
     /// 16-bit RGB and grayscale content with its samples as they are (needs
     /// `TEXTURE_FORMAT_16BIT_NORM`, [`optional_features`]): half floats round a 16-bit sample by
@@ -148,7 +148,8 @@ enum TexKind {
     /// posterize_16bits_rgb: 1 % of pixels a band off on the GPU).
     Rgba16Unorm,
     /// Lab content as RGBA32F, keeping colours outside sRGB (`to_rgba_unclamped`), as the CPU
-    /// compositor does.
+    /// compositor does, and 32-bit content as it is: half floats would round an HDR sample by
+    /// up to 1/2048 of its value, enough to flip a 32-bit Threshold or Posterize at its cut.
     Rgba32F,
     /// GRAY8 masks copied verbatim.
     R8Direct,
@@ -161,7 +162,7 @@ impl TexKind {
         use photosplice_color::ColorMode;
         let gray_or_rgb = matches!(f.mode, ColorMode::Rgb | ColorMode::Grayscale | ColorMode::Bitmap | ColorMode::Duotone);
         match role {
-            Role::Content | Role::Stroke if f.mode == ColorMode::Lab => TexKind::Rgba32F,
+            Role::Content | Role::Stroke if f.mode == ColorMode::Lab || f.sample == SampleType::F32 => TexKind::Rgba32F,
             Role::Content | Role::Stroke if f == PixelFormat::RGBA8 => TexKind::Rgba8Direct,
             Role::Content | Role::Stroke if f.sample == SampleType::U8 => TexKind::Rgba8,
             Role::Content | Role::Stroke if unorm16 && f.sample == SampleType::U16 && gray_or_rgb => TexKind::Rgba16Unorm,
@@ -2274,7 +2275,12 @@ fn convert_tile(surface: &Surface, tile: Option<&Arc<Tile>>, kind: TexKind, c: T
     let fmt = surface.format();
     let ch = fmt.channels();
     if let (Some(t), TexKind::Rgba16F) = (tile, kind)
-        && let Some(out) = rgb_gray16_to_f16(&fmt, t.bytes()).or_else(|| rgb_gray32_to_f16(&fmt, t.bytes()))
+        && let Some(out) = rgb_gray16_to_f16(&fmt, t.bytes())
+    {
+        return out;
+    }
+    if let (Some(t), TexKind::Rgba32F) = (tile, kind)
+        && let Some(out) = rgb_gray32_to_f32(&fmt, t.bytes())
     {
         return out;
     }
@@ -2376,11 +2382,11 @@ fn rgb_gray16_to_f16(fmt: &PixelFormat, bytes: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// RGBA16F texels of a 32-bit float RGB or grayscale tile, straight from its samples: the same
+/// RGBA32F texels of a 32-bit float RGB or grayscale tile, straight from its samples: the same
 /// bytes as the general path without decoding the tile into a float buffer and converting it
 /// pixel by pixel (a brush dab on a 32-bit layer re-uploads the tiles it touched). `None` for
 /// other formats.
-fn rgb_gray32_to_f16(fmt: &PixelFormat, bytes: &[u8]) -> Option<Vec<u8>> {
+fn rgb_gray32_to_f32(fmt: &PixelFormat, bytes: &[u8]) -> Option<Vec<u8>> {
     use photosplice_color::ColorMode;
     if fmt.sample != SampleType::F32 {
         return None;
@@ -2390,14 +2396,11 @@ fn rgb_gray32_to_f16(fmt: &PixelFormat, bytes: &[u8]) -> Option<Vec<u8>> {
         ColorMode::Grayscale | ColorMode::Bitmap | ColorMode::Duotone => true,
         _ => return None,
     };
-    let one = f32_to_f16(1.0).to_le_bytes();
+    let one = 1.0f32.to_le_bytes();
     let ch = fmt.channels();
-    let mut out = Vec::with_capacity((TILE_SIZE * TILE_SIZE) as usize * 8);
+    let mut out = Vec::with_capacity((TILE_SIZE * TILE_SIZE) as usize * 16);
     for px in bytes.chunks_exact(ch * 4) {
-        let h = |i: usize| -> [u8; 2] {
-            let v = px.get(i * 4..i * 4 + 4).map_or(0.0, |b| f32::from_ne_bytes([b[0], b[1], b[2], b[3]]));
-            f32_to_f16(v).to_le_bytes()
-        };
+        let h = |i: usize| -> [u8; 4] { px.get(i * 4..i * 4 + 4).map_or(0.0, |b| f32::from_ne_bytes([b[0], b[1], b[2], b[3]])).to_le_bytes() };
         let (r, g, b) = if gray {
             let v = h(0);
             (v, v, v)
@@ -2690,7 +2693,7 @@ mod tests {
             (PixelFormat::RGBA8, TexKind::Rgba8Direct),
             (PixelFormat { alpha: false, ..PixelFormat::RGBA8 }, TexKind::Rgba8),
             (PixelFormat::RGBA16, TexKind::Rgba16F),
-            (PixelFormat::RGBA32F, TexKind::Rgba16F),
+            (PixelFormat::RGBA32F, TexKind::Rgba32F),
             (PixelFormat::GRAY8, TexKind::R8Direct),
             (PixelFormat { sample: SampleType::U16, ..PixelFormat::GRAY8 }, TexKind::R32F),
         ] {
@@ -2734,8 +2737,9 @@ mod tests {
         assert_eq!((converted, n), (CONVERT_BATCH + 5, CONVERT_BATCH + 5));
     }
 
-    /// The 16-bit and 32-bit float RGB/gray fast paths give exactly the general path's half
-    /// floats (32-bit samples above 1 and below 0 included).
+    /// The 16-bit RGB/gray fast path gives exactly the general path's half floats, and the
+    /// 32-bit one the general path's floats (samples above 1 and below 0 included: HDR content
+    /// reaches the GPU as it is).
     #[test]
     fn sixteen_and_thirty_two_bit_fast_paths_match_the_general_one() {
         for fmt in [
@@ -2751,21 +2755,28 @@ mod tests {
             let mut s = Surface::new(fmt);
             let r = Rect::new(0, 0, TILE_SIZE, TILE_SIZE);
             let n = (TILE_SIZE * TILE_SIZE) as usize * fmt.channels();
-            let hdr = if fmt.sample == SampleType::F32 { 4.0 } else { 1.0 };
+            let float = fmt.sample == SampleType::F32;
+            let hdr = if float { 4.0 } else { 1.0 };
             let data: Vec<f32> = (0..n).map(|i| (i as u32).wrapping_mul(2_654_435_761) as f32 / u32::MAX as f32 * hdr - (hdr - 1.0) / 4.0).collect();
             s.write_region(r, &data);
             let t = s.tile(TileCoord::new(0, 0)).expect("written").clone();
-            let fast = rgb_gray16_to_f16(&fmt, t.bytes()).or_else(|| rgb_gray32_to_f16(&fmt, t.bytes())).expect("fast path");
             let raw = s.read_region(r);
-            let general: Vec<u8> =
-                raw.chunks_exact(fmt.channels()).flat_map(|px| photosplice_raster::to_rgba(&fmt, px).map(|x| f32_to_f16(x).to_le_bytes())).flatten().collect();
-            assert_eq!(fast, general, "{fmt:?}");
-            assert_eq!(convert_tile(&s, Some(&t), TexKind::Rgba16F, TileCoord::new(0, 0)), general, "{fmt:?}");
+            let rgba = raw.chunks_exact(fmt.channels()).map(|px| photosplice_raster::to_rgba(&fmt, px));
+            let (fast, general, kind) = if float {
+                (rgb_gray32_to_f32(&fmt, t.bytes()), rgba.flat_map(|v| v.map(f32::to_le_bytes)).flatten().collect::<Vec<u8>>(), TexKind::Rgba32F)
+            } else {
+                (rgb_gray16_to_f16(&fmt, t.bytes()), rgba.flat_map(|v| v.map(|x| f32_to_f16(x).to_le_bytes())).flatten().collect::<Vec<u8>>(), TexKind::Rgba16F)
+            };
+            assert_eq!(fast.expect("fast path"), general, "{fmt:?}");
+            assert_eq!(convert_tile(&s, Some(&t), kind, TileCoord::new(0, 0)), general, "{fmt:?}");
+            if float {
+                assert_eq!(TexKind::for_surface(Role::Content, fmt, true), TexKind::Rgba32F, "{fmt:?}");
+            }
         }
         assert!(rgb_gray16_to_f16(&PixelFormat::RGBA8, &[]).is_none());
         assert!(rgb_gray16_to_f16(&PixelFormat { sample: SampleType::U16, ..PixelFormat::CMYKA8 }, &[]).is_none());
-        assert!(rgb_gray32_to_f16(&PixelFormat::RGBA16, &[]).is_none());
-        assert!(rgb_gray32_to_f16(&PixelFormat { sample: SampleType::F32, ..PixelFormat::CMYKA8 }, &[]).is_none());
+        assert!(rgb_gray32_to_f32(&PixelFormat::RGBA16, &[]).is_none());
+        assert!(rgb_gray32_to_f32(&PixelFormat { sample: SampleType::F32, ..PixelFormat::CMYKA8 }, &[]).is_none());
     }
 
     /// 16-bit unorm texels are the tile's own samples (the fast path) and agree with the
@@ -2802,7 +2813,7 @@ mod tests {
         assert!(rgb_gray16_to_unorm(&PixelFormat { sample: SampleType::U16, ..PixelFormat::CMYKA8 }, &[]).is_none());
         assert_eq!(TexKind::for_surface(Role::Content, PixelFormat::RGBA16, true), TexKind::Rgba16Unorm);
         assert_eq!(TexKind::for_surface(Role::Content, PixelFormat::RGBA16, false), TexKind::Rgba16F);
-        assert_eq!(TexKind::for_surface(Role::Content, PixelFormat::RGBA32F, true), TexKind::Rgba16F);
+        assert_eq!(TexKind::for_surface(Role::Content, PixelFormat::RGBA32F, false), TexKind::Rgba32F);
         assert_eq!(TexKind::for_surface(Role::Mask, PixelFormat { sample: SampleType::U16, ..PixelFormat::GRAY8 }, true), TexKind::R32F);
     }
 

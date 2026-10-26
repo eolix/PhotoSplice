@@ -2702,3 +2702,33 @@ fn sixteen_bit_threshold_and_posterize_cut_like_the_cpu() {
         check(&mut g, &doc, &format!("16-bit {adj:?}"));
     }
 }
+
+/// 32-bit layers reach the GPU as their own floats, so a 32-bit Threshold or Posterize cuts where
+/// the CPU does, beside HDR values above 1 too (as half floats, samples within 1/2048 of a cut
+/// fell on the wrong side).
+#[test]
+fn thirty_two_bit_threshold_and_posterize_cut_like_the_cpu() {
+    let Some(mut g) = gpu() else { return };
+    let (w, h) = (256u32, 26u32);
+    let mut d = Document::new("32-bit cuts", Size::new(w, h), ColorMode::Rgb, SampleType::F32);
+    let mut l = Layer::raster("ramp", PixelFormat::RGBA32F);
+    let mut data = Vec::with_capacity((w * h * 4) as usize);
+    for i in 0..w * h {
+        // A fine ramp (steps of 1/250 000) across 0.5 and 128/255: grey in rows 0..12, coloured
+        // with an HDR red below.
+        let v = 0.4935 + (i % (w * 13)) as f32 * 4e-6;
+        if i < w * 13 {
+            data.extend_from_slice(&[v, v, v, 1.0]);
+        } else {
+            // Luminance 0.7015 v + 0.1475: across both cuts too.
+            data.extend_from_slice(&[v * 2.5, 0.25 - v * 0.25, v * 0.9, 1.0]);
+        }
+    }
+    l.surface_mut().unwrap().write_region(Rect::new(0, 0, w as i32, h as i32), &data);
+    d.layers.push(l);
+    for adj in [Adjustment::Threshold { level: 0.5 }, Adjustment::Threshold { level: 128.0 / 255.0 }, Adjustment::Posterize { levels: 4 }, Adjustment::Posterize { levels: 3 }] {
+        let mut doc = d.clone();
+        doc.layers.push(Layer::new("adj", LayerContent::Adjustment(adj.clone())));
+        check(&mut g, &doc, &format!("32-bit {adj:?}"));
+    }
+}
