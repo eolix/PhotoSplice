@@ -1750,6 +1750,8 @@ pub(crate) fn ensure_filter_preview(app: &mut PhotospliceApp, idx: usize, ctx: &
     let st = app.session.documents().get(idx)?;
     // Filters whose features don't scale with a proxy preview at full resolution (#2063).
     let k = crate::filter_dialog::preview_factor(&cmd, &params, crate::proxy::preview_factor(&st.doc, crate::proxy::reduced_previews(app)));
+    // Lens Blur's Faster preview runs on a reduced copy.
+    let k = crate::lens_blur_ui::preview_factor(&d.fields, &st.doc, k);
     let request = crate::filter_dialog::FilterPreviewKey {
         doc: st.doc.id,
         revision: st.revision,

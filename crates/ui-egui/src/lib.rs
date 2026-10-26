@@ -39,6 +39,7 @@ pub mod bundled;
 pub(crate) mod cam_preview;
 mod cam_transform;
 pub mod camera_raw_ui;
+pub(crate) mod lens_blur_ui;
 pub mod lens_ui;
 pub mod magnetic_ui;
 pub mod canvas;
