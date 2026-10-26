@@ -691,6 +691,15 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
                 ss = min(abs(sat), 1.0);
                 var ll = hsl.z;
                 if (light > 0.0) { ll = ll + (1.0 - ll) * light; } else { ll = ll * (1.0 + light); }
+                if (p1.z > 0.5) {
+                    // 8 bits: whole levels (compose::adjust::colorize_lightness_8bit).
+                    let q = round(clamp(c, vec3(0.0), vec3(1.0)) * 255.0);
+                    let l0 = floor((max(q.r, max(q.g, q.b)) + min(q.r, min(q.g, q.b))) / 2.0);
+                    let k = abs(p1.w);
+                    var v = l0 * (255.0 - k) / 255.0;
+                    if (p1.w > 0.0) { v = l0 + (255.0 - l0) * k / 255.0; }
+                    ll = floor(v + 0.5) / 255.0;
+                }
                 if (hdr && light > 0.0) {
                     // 32-bit: the chroma also shrinks by 1 - light about the moved lightness.
                     return clamp(vec3(ll) + (hsl_to_rgb(hh, ss, ll) - vec3(ll)) * (1.0 - light), vec3(0.0), vec3(1.0));

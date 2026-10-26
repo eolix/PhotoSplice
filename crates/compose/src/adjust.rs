@@ -155,6 +155,13 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
                 };
                 if *colorize {
                     let s = (*saturation / 100.0).clamp(-1.0, 1.0);
+                    // An 8-bit RGB document's lightness in whole levels; CMYK's complements keep
+                    // the float step (temp kit 9 cmyk8-colorize-*: whole levels put 0.2 % of the
+                    // inks past 2/255).
+                    if depth == Some(SampleType::U8) && !INK_SPACE.with(|i| i.get()) {
+                        let h = (colorize_hue_8bit(*hue) + dh).rem_euclid(360.0) / 360.0;
+                        return hsl_to_rgb(h, s.abs().min(1.0), colorize_lightness_8bit(c, *lightness)).map(|v| v.clamp(0.0, 1.0));
+                    }
                     let h = if depth == Some(SampleType::U8) { colorize_hue_8bit(*hue) } else { *hue };
                     return hue_saturation_in(c, h + dh, s, (*lightness / 100.0 + dl).clamp(-1.0, 1.0), true, depth == Some(SampleType::F32));
                 }
@@ -717,6 +724,21 @@ pub fn saturation_of_excess(e: f32) -> f32 {
 pub fn colorize_hue_8bit(hue: f32) -> f32 {
     let at = if hue.is_finite() { hue.round().rem_euclid(360.0) as usize } else { 0 };
     hue + COLORIZE_8BIT_HUE_SHIFT.get(at).copied().unwrap_or(0.0)
+}
+
+/// The lightness an 8-bit document's Colorize colours at, in whole levels as Reference works
+/// there: the pixel's HSL lightness rounded down to a level, moved by the slider's whole levels
+/// (`|lightness|` % of 255, truncated) towards white or black, rounded half up (temp kit 11
+/// clz8-*: seven settings on ramps of every level in grey and three colour bands, all 6 144
+/// pixels' lightness exact; the float step was off by a level on 947 of them).
+pub fn colorize_lightness_8bit(c: [f32; 3], lightness: f32) -> f32 {
+    let q = |v: f32| (f64::from(if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }) * 255.0).round();
+    let [r, g, b] = c.map(q);
+    let l0 = ((r.max(g).max(b) + r.min(g).min(b)) / 2.0).floor();
+    let l = if lightness.is_finite() { f64::from(lightness).clamp(-100.0, 100.0) } else { 0.0 };
+    let k = (l.abs() * 255.0 / 100.0 + 1e-9).floor();
+    let v = if l > 0.0 { l0 + (255.0 - l0) * k / 255.0 } else { l0 * (255.0 - k) / 255.0 };
+    ((v + 0.5).floor() / 255.0) as f32
 }
 
 /// [`colorize_hue_8bit`]'s shift in degrees for each whole hue 0..359 (measured: a -3.14 there is
@@ -1998,6 +2020,35 @@ mod brightness_contrast_tests {
 mod tone_tests {
     use super::*;
     use photosplice_geom::Rect;
+
+    /// Reference kit 11 clz8-*: an 8-bit Colorize's lightness moves in whole levels (the script's
+    /// hue −118 was stored as 0).
+    #[test]
+    fn colorize_8_bit_moves_lightness_in_whole_levels() {
+        // (hue, saturation, lightness), source, Reference's result
+        type Row = ((f32, f32, f32), [u8; 3], [u8; 3]);
+        let measured: [Row; 5] = [
+            ((0.0, 45.0, 14.0), [62, 62, 62], [127, 49, 49]),
+            ((0.0, 45.0, 14.0), [125, 62, 0], [127, 49, 49]),
+            ((31.0, 100.0, -47.0), [16, 16, 16], [18, 9, 0]),
+            ((31.0, 100.0, -47.0), [31, 31, 31], [34, 18, 0]),
+            ((31.0, 100.0, -47.0), [238, 238, 238], [255, 132, 0]),
+        ];
+        for ((hue, saturation, lightness), src, want) in measured {
+            let adj = Adjustment::HueSaturation { hue, saturation, lightness, colorize: true, ranges: HueRange::defaults() };
+            let mut b = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![[src[0] as f32 / 255.0, src[1] as f32 / 255.0, src[2] as f32 / 255.0, 1.0]] };
+            apply_depth(&adj, &mut b, Transfer::Srgb, Some(SampleType::U8));
+            for (i, w) in want.iter().enumerate() {
+                let got = b.px[0][i] * 255.0;
+                assert!((got - f32::from(*w)).abs() <= 1.0, "{hue}/{saturation}/{lightness} {src:?} channel {i}: {got} vs {w}");
+            }
+        }
+        // Absurd sliders stay in range.
+        for l in [f32::NAN, f32::INFINITY, -1e9] {
+            let v = colorize_lightness_8bit([0.5; 3], l);
+            assert!((0.0..=1.0).contains(&v), "{l}: {v}");
+        }
+    }
 
     /// Reference's 8-bit Colorize colours with its own hue, a little off the one set (kit 7: hue
     /// 200 colours at 201.2°, 170 at 166.9°); 16-bit colours at the hue as set.

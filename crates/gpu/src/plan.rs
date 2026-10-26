@@ -1056,7 +1056,11 @@ impl<'a> Planner<'a> {
         }
         let mut p = Pass::new(Kernel::Adjust, 0);
         p.a = Some(src);
-        let (kind, params, lut) = adjustment_program(adj, self.cx.transfer, self.cx.depth);
+        let (kind, mut params, lut) = adjustment_program(adj, self.cx.transfer, self.cx.depth);
+        // A CMYK document's Colorize keeps the float lightness (compose::cmyk, INK_SPACE).
+        if kind == 8 && self.cx.mode == photosplice_color::ColorMode::Cmyk {
+            params[1][2] = 0.0;
+        }
         p.adjust_kind = kind;
         p.params = params;
         p.lut = lut;
@@ -1784,6 +1788,13 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photospli
             p[0] = [hue, saturation / 100.0, lightness / 100.0, if *colorize { 1.0 } else { 0.0 }];
             // 32-bit documents don't hold the smallest channel at 0 (compose::adjust::hue_saturation_in).
             p[1][1] = if depth == photosplice_color::SampleType::F32 { 1.0 } else { 0.0 };
+            // p1.z: 8-bit Colorize in whole levels (compose::adjust::colorize_lightness_8bit);
+            // p1.w: the slider's whole levels, signed.
+            if *colorize && depth == photosplice_color::SampleType::U8 {
+                let l = if lightness.is_finite() { lightness.clamp(-100.0, 100.0) } else { 0.0 };
+                p[1][2] = 1.0;
+                p[1][3] = (f64::from(l.abs()) * 255.0 / 100.0 + 1e-9).floor() as f32 * l.signum();
+            }
             if !*colorize && ranges.iter().any(|r| !r.is_neutral()) {
                 // Range edits: hue-indexed rows (shift, saturation, lightness), as on the CPU.
                 p[1][0] = 1.0;

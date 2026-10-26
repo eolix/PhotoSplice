@@ -405,7 +405,7 @@ fn adjust(a: &Adjustment, buf: &mut CBuf, cx: &Ctx) {
     if let Adjustment::HueSaturation { colorize: true, .. } = a {
         use photosplice_color::convert::{cmyk_to_rgb_naive, rgb_to_cmyk_naive};
         let mut rgb = Buffer { rect: buf.rect, px: buf.px.iter().map(|p| { let c = cmyk_to_rgb_naive(inks(p)); [c[0], c[1], c[2], 1.0] }).collect() };
-        crate::adjust::apply_depth(a, &mut rgb, cx.transfer, Some(cx.depth));
+        crate::adjust::in_ink_space(|| crate::adjust::apply_depth(a, &mut rgb, cx.transfer, Some(cx.depth)));
         for (p, o) in buf.px.iter_mut().zip(&rgb.px) {
             let mut k = rgb_to_cmyk_naive([o[0], o[1], o[2]]);
             // Under 75 % black the coloured inks shrink with the light left: C, M, Y are the
