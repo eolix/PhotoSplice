@@ -1507,7 +1507,7 @@ impl<'a> Planner<'a> {
 
     fn glow_paint(&self, g: &'a Glow, anchor: (f64, f64)) -> Paint<'a> {
         match &g.paint {
-            FxPaint::Gradient(gradient) => Paint::GlowGradient(gradient, photosplice_compose::effects::glow_gradient_gain(g)),
+            FxPaint::Gradient(gradient) => Paint::GlowGradient(photosplice_compose::effects::glow_gradient(g, gradient), photosplice_compose::effects::glow_gradient_gain(g)),
             p => self.fx_paint(p, anchor),
         }
     }
@@ -1615,8 +1615,8 @@ enum Paint<'a> {
     None,
     Color([f32; 3]),
     Gradient(&'a Gradient),
-    /// A glow's gradient with its opacity gain (`effects::paint_glow`).
-    GlowGradient(&'a Gradient, f32),
+    /// A glow's gradient (`effects::glow_gradient`) with its opacity gain (`effects::paint_glow`).
+    GlowGradient(std::borrow::Cow<'a, Gradient>, f32),
     Pattern(&'a Pattern, Placement),
 }
 

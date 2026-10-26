@@ -35,6 +35,19 @@ pub struct Gradient {
     pub align: bool,
     /// Centre offset as a fraction of the bounds.
     pub offset: (f32, f32),
+    /// The colour stops the gradient had before an import baked its smoothness or method into
+    /// dense linear `stops`; 0 when `stops` are its own. Reference's glows sample a gradient of
+    /// more than two stops differently from a two-stop one, and a baked two-stop gradient has
+    /// as many stops as a baked five-stop one.
+    #[serde(default)]
+    pub color_stops: u16,
+}
+
+impl Gradient {
+    /// The colour stops the gradient was made with ([`Gradient::color_stops`], else `stops`).
+    pub fn color_stop_count(&self) -> usize {
+        if self.color_stops > 0 { usize::from(self.color_stops) } else { self.stops.len() }
+    }
 }
 
 impl Default for Gradient {
@@ -48,6 +61,7 @@ impl Default for Gradient {
             reverse: false,
             align: true,
             offset: (0.0, 0.0),
+            color_stops: 0,
         }
     }
 }

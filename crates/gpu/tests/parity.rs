@@ -1332,6 +1332,7 @@ fn gradient() -> Gradient {
         reverse: false,
         align: true,
         offset: (0.1, -0.05),
+        color_stops: 0,
     }
 }
 

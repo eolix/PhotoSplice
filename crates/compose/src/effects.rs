@@ -1116,6 +1116,46 @@ pub fn glow_gradient_gain(g: &Glow) -> f32 {
     r * 8.4
 }
 
+/// The gradient a glow colours with. A gradient of more than two colour stops is sampled at
+/// `K = 2 · ⌊size · range⌋` points, at the centres of `K` equal steps, then interpolated
+/// linearly between them and held past the first and last, read a level further along: the
+/// gradient's corners round over and its ends never show (temp kit 12, Smoothness 0 on a
+/// concave L and a disc: red-yellow-blue at size 10 peaks at 244, 230, 11, not yellow, and where
+/// the glow is saturated stays 0.5/K along, green 26, 13 and 7 at sizes 10, 20 and 40; ranges
+/// 25 and 75 % follow the span, an odd K would land a sample on the peak; red-yellow-blue against
+/// black-white at the same pixels reads 1/255 further on). Two-stop gradients are sampled as
+/// they are (black-white saturates at 1/255). Ink and Lab stops are left as they are.
+pub fn glow_gradient<'a>(g: &Glow, gradient: &'a Gradient) -> std::borrow::Cow<'a, Gradient> {
+    use std::borrow::Cow;
+    if gradient.color_stop_count() <= 2 || !gradient.stops.iter().all(|(_, c)| c.mode == photosplice_color::ColorMode::Rgb) {
+        return Cow::Borrowed(gradient);
+    }
+    let range = if g.range.is_finite() { g.range.clamp(0.01, 1.0) } else { 1.0 };
+    let size = if g.size.is_finite() { g.size.clamp(0.0, MAX_REACH) } else { 0.0 };
+    let k = ((size * range).floor() * 2.0).clamp(2.0, 2.0 * MAX_REACH) as usize;
+    let prepared = PreparedGradient::new(gradient);
+    let samples: Vec<[f32; 4]> = (0..k).map(|j| prepared.sample((j as f32 + 0.5) / k as f32)).collect();
+    let Some(last) = samples.last().copied() else { return Cow::Borrowed(gradient) };
+    let shift = 1.0 / 255.0;
+    // The sampled gradient at `u` (sample `j` sits at (j + ½) / K).
+    let at = |u: f32| -> [f32; 4] {
+        let x = (u * k as f32 - 0.5).clamp(0.0, (k - 1) as f32);
+        let i = (x.floor() as usize).min(k - 1);
+        let (a, b) = (samples.get(i).copied().unwrap_or(last), samples.get(i + 1).copied().unwrap_or(last));
+        let f = x - i as f32;
+        std::array::from_fn(|c| a[c] + (b[c] - a[c]) * f)
+    };
+    let mut points = vec![(0.0, at(shift))];
+    points.extend(samples.iter().enumerate().map(|(j, c)| ((j as f32 + 0.5) / k as f32 - shift, *c)).filter(|(t, _)| *t > 0.0 && *t < 1.0));
+    points.push((1.0, last));
+    Cow::Owned(Gradient {
+        stops: points.iter().map(|(t, c)| (*t, photosplice_doc::Color::rgb(c[0], c[1], c[2]))).collect(),
+        opacity_stops: points.iter().map(|(t, c)| (*t, c[3])).collect(),
+        color_stops: 0,
+        ..gradient.clone()
+    })
+}
+
 /// A glow's paint over its map `m`. A gradient runs along the glow rather than across the
 /// canvas: Reference colours the glow where its (ranged, contoured) strength is `v` with the
 /// gradient at `1 - v`, so the first stop hugs the edge, and its opacity is `v` × the
@@ -1129,7 +1169,8 @@ fn paint_glow(dst: &mut Buffer, m: &Map, pos: &Map, keep: &Map, g: &Glow, shape_
     let FxPaint::Gradient(gradient) = &g.paint else {
         return paint_fx(dst, m, &g.paint, shape_bounds, shape_bounds, anchor, big, g.common.blend, g.common.opacity, patterns);
     };
-    let prepared = PreparedGradient::new(gradient);
+    let gradient = glow_gradient(g, gradient);
+    let prepared = PreparedGradient::new(&gradient);
     let gain = glow_gradient_gain(g);
     let strength = Map { w: m.w, h: m.h, v: pos.v.iter().zip(&keep.v).map(|(v, k)| (v * gain).min(1.0) * k).collect() };
     paint(dst, &strength, |i| prepared.sample(1.0 - pos.v.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0)), g.common.blend, g.common.opacity);
