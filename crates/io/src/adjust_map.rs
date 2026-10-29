@@ -376,6 +376,33 @@ fn write_gradient_map_inks(stops: &[(f32, [f32; 4])], reverse: bool, dither: boo
     v
 }
 
+/// Rewrites the RGB colour structures of a version 1 `grdm` block as written by
+/// [`write_gradient_map`] in a Grayscale (space 8, 10000 = black) or Lab (space 7, hundredths)
+/// document's space.
+fn patch_gradient_map_colors(v: &mut [u8], channels: Channels) {
+    let name_len = be32(v, 4).unwrap_or(0) as usize;
+    let count_at = 8 + name_len * 2;
+    let n = usize::from(be16(v, count_at).unwrap_or(0));
+    let mut at = count_at + 2;
+    for _ in 0..n {
+        let Some(rec) = v.get_mut(at + 8..at + 18) else { break };
+        let rgb = [0, 1, 2].map(|k| f32::from(u16::from_be_bytes([rec[2 + 2 * k], rec[3 + 2 * k]])) / 65535.0);
+        let (space, c): (u16, [u16; 4]) = match channels {
+            Channels::Gray => (8, [((1.0 - photosplice_color::convert::rgb_to_gray(rgb)) * 10000.0).round().clamp(0.0, 10000.0) as u16, 0, 0, 0]),
+            _ => {
+                let lab = photosplice_color::convert::srgb_to_lab(rgb);
+                let ab = |x: f32| (x * 100.0).round().clamp(-12800.0, 12700.0) as i16 as u16;
+                (7, [(lab[0] * 100.0).round().clamp(0.0, 10000.0) as u16, ab(lab[1]), ab(lab[2]), 0])
+            }
+        };
+        rec[..2].copy_from_slice(&space.to_be_bytes());
+        for (k, x) in c.iter().enumerate() {
+            rec[2 + 2 * k..4 + 2 * k].copy_from_slice(&x.to_be_bytes());
+        }
+        at += 20;
+    }
+}
+
 /// Points an imported `grdm` block at `target` when only Reverse and/or Dither differ (the
 /// stops parse unchanged): patches those two bytes and returns `true`, so the file's own stops
 /// (in whatever colour space it stored them), smoothness and method survive the save. `false`
@@ -435,7 +462,10 @@ fn write_gradient_map(stops: &[(f32, [f32; 3])], reverse: bool, dither: bool) ->
     for x in [0u16, 0, 0, 0, 0x8000, 0x8000, 0x8000, 0x8000] {
         put16(&mut v, x);
     }
-    put16(&mut v, 0);
+    // Four bytes after the colour limits, as Reference writes them (its own version 1 and 3
+    // blocks end in four zero bytes): with two, Reference refuses the whole file ("the open
+    // options are incorrect"; round-trip kit 1, every Gradient Map PhotoSplice wrote).
+    v.extend_from_slice(&0u32.to_be_bytes());
     v
 }
 
@@ -678,11 +708,46 @@ fn levels_write(v: &mut Vec<u8>, c: &LevelsChannel) {
 /// written as CMYK records (Photoshop reads a CMYK file's mixer that way).
 pub fn write_in(adj: &Adjustment, channels: Channels) -> Vec<([u8; 4], Vec<u8>)> {
     match adj {
+        // Reference flags a Lab document's Brightness/Contrast as working on L (`Lab `, and the
+        // `brit` block's last byte); unflagged, it reapplies it as an RGB one (Reference corpus
+        // lab8/brightness-contrast.psd saved by us: every pixel off).
+        Adjustment::BrightnessContrast { brightness, contrast, legacy } if channels == Channels::Lab => brightness_contrast_blocks(*brightness, *contrast, *legacy, true),
+        // A Grayscale or Lab document's Gradient Map holds its stops in the document's space,
+        // as Reference writes them: RGB stops it converts through its own profiles (Reference
+        // corpus gray8/gradient-map.psd saved by us: every pixel 23/255 off; lab8 2.9/255).
+        Adjustment::GradientMap { ink_stops, .. } if ink_stops.len() < 2 && matches!(channels, Channels::Gray | Channels::Lab) => {
+            let mut blocks = write(adj);
+            for (key, data) in &mut blocks {
+                if key == b"grdm" {
+                    patch_gradient_map_colors(data, channels);
+                }
+            }
+            blocks
+        }
         Adjustment::ChannelMixer { matrix, monochrome: false, cmyk: None } if channels == Channels::Cmyk => {
             write(&Adjustment::ChannelMixer { matrix: *matrix, monochrome: false, cmyk: Some(photosplice_doc::adjust::cmyk_mixer_records(matrix)) })
         }
         _ => write(adj),
     }
+}
+
+/// Brightness/Contrast as `brit` (the legacy fields) and its `CgEd` descriptor; `lab` marks a
+/// Lab document's (applied to L).
+fn brightness_contrast_blocks(brightness: f32, contrast: f32, legacy: bool, lab: bool) -> Vec<([u8; 4], Vec<u8>)> {
+    let mut v = Vec::new();
+    v.extend_from_slice(&clamp_i16(brightness).to_be_bytes());
+    v.extend_from_slice(&clamp_i16(contrast).to_be_bytes());
+    put16(&mut v, 127);
+    v.push(u8::from(lab));
+    let d = Descriptor::new("null")
+        .with("Vrsn", Value::Integer(1))
+        .with("Brgh", Value::Integer(brightness.round() as i32))
+        .with("Cntr", Value::Integer(contrast.round() as i32))
+        .with("means", Value::Integer(127))
+        .with("Lab ", Value::Boolean(lab))
+        .with("useLegacy", Value::Boolean(legacy))
+        .with("Auto", Value::Boolean(false));
+    vec![(*b"brit", v), (*b"CgEd", VersionedDescriptor::new(d).to_bytes())]
 }
 
 pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
@@ -699,21 +764,7 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
             put16(&mut v, 0);
             return vec![(*b"post", v)];
         }
-        Adjustment::BrightnessContrast { brightness, contrast, legacy } => {
-            v.extend_from_slice(&clamp_i16(*brightness).to_be_bytes());
-            v.extend_from_slice(&clamp_i16(*contrast).to_be_bytes());
-            put16(&mut v, 127);
-            v.push(0);
-            let d = Descriptor::new("null")
-                .with("Vrsn", Value::Integer(1))
-                .with("Brgh", Value::Integer(brightness.round() as i32))
-                .with("Cntr", Value::Integer(contrast.round() as i32))
-                .with("means", Value::Integer(127))
-                .with("Lab ", Value::Boolean(false))
-                .with("useLegacy", Value::Boolean(*legacy))
-                .with("Auto", Value::Boolean(false));
-            return vec![(*b"brit", v), (*b"CgEd", VersionedDescriptor::new(d).to_bytes())];
-        }
+        Adjustment::BrightnessContrast { brightness, contrast, legacy } => return brightness_contrast_blocks(*brightness, *contrast, *legacy, false),
         Adjustment::HueSaturation { hue, saturation, lightness, colorize, ranges } => {
             put16(&mut v, 2);
             v.push(u8::from(*colorize));
@@ -854,11 +905,16 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
             return vec![(*b"blwh", VersionedDescriptor::new(d).to_bytes())];
         }
         Adjustment::PhotoFilter { color, density, preserve_luminosity } => {
-            // Version 2: an RGB colour structure keeps the colour at 16 bits.
+            // Version 2 with a Lab colour structure (L and a, b in hundredths), as Reference
+            // writes it: an RGB one is read in the document's RGB, which a 32-bit document
+            // keeps linear (Reference corpus rgb32/photo-filter.psd saved by us: the warming
+            // filter came back yellower, 93 % of pixels up to 17/255 off).
             put16(&mut v, 2);
-            put16(&mut v, 0);
-            for x in color {
-                put16(&mut v, (x.clamp(0.0, 1.0) * 65535.0).round() as u16);
+            put16(&mut v, 7);
+            let lab = photosplice_color::convert::srgb_to_lab(color.map(|x| if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 }));
+            put16(&mut v, (lab[0] * 100.0).round().clamp(0.0, 10000.0) as u16);
+            for x in [lab[1], lab[2]] {
+                put16(&mut v, (x * 100.0).round().clamp(-12800.0, 12700.0) as i16 as u16);
             }
             put16(&mut v, 0);
             v.extend_from_slice(&((density.clamp(0.0, 1.0) * 100.0).round() as u32).to_be_bytes());
@@ -906,6 +962,51 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Grayscale or Lab document's Gradient Map is written with its stops in the document's
+    /// space (Gray 8, Lab 7), and they read back as the colours they were.
+    #[test]
+    fn gradient_map_stops_take_the_document_space() {
+        let stops = vec![(0.0, [0.0; 3]), (0.5, [0.6; 3]), (1.0, [1.0; 3])];
+        let a = Adjustment::GradientMap { stops: stops.clone(), reverse: false, dither: false, ink_stops: Vec::new() };
+        for (channels, space) in [(Channels::Gray, 8u16), (Channels::Lab, 7)] {
+            let [(key, data)] = write_in(&a, channels).try_into().unwrap();
+            assert_eq!(&key, b"grdm");
+            let first = 8 + be32(&data, 4).unwrap() as usize * 2 + 2;
+            for k in 0..3 {
+                assert_eq!(be16(&data, first + k * 20 + 8), Some(space), "{channels:?} stop {k}");
+            }
+            let Adjustment::GradientMap { stops: back, .. } = parse(b"grdm", &data, None, channels) else { panic!("{channels:?}") };
+            let at = |s: &[(f32, [f32; 3])], t: f32| s.iter().min_by(|x, y| (x.0 - t).abs().total_cmp(&(y.0 - t).abs())).unwrap().1;
+            for (t, c) in &stops {
+                let b = at(&back, *t);
+                assert!(b.iter().zip(c).all(|(x, y)| (x - y).abs() < 0.5 / 255.0), "{channels:?} at {t}: {b:?} vs {c:?}");
+            }
+        }
+        // An RGB document keeps RGB stops.
+        let [(_, rgb)] = write_in(&a, Channels::Rgb).try_into().unwrap();
+        assert_eq!(be16(&rgb, 8 + be32(&rgb, 4).unwrap() as usize * 2 + 2 + 8), Some(0));
+    }
+
+    /// A Lab document's Brightness/Contrast is written flagged as Lab, in its descriptor and its
+    /// `brit` block, and reads back as written; an RGB one isn't flagged.
+    #[test]
+    fn lab_brightness_contrast_is_flagged() {
+        let a = Adjustment::BrightnessContrast { brightness: 25.0, contrast: 30.0, legacy: false };
+        let lab_flag = |blocks: &[([u8; 4], Vec<u8>)]| {
+            let brit = blocks.iter().find(|(k, _)| k == b"brit").map(|(_, d)| d.clone()).unwrap();
+            let cged = blocks.iter().find(|(k, _)| k == b"CgEd").map(|(_, d)| d.clone()).unwrap();
+            let d = VersionedDescriptor::from_bytes(&cged).unwrap().descriptor;
+            (brit[6], d.get("Lab ").cloned(), cged)
+        };
+        let blocks = write_in(&a, Channels::Lab);
+        let (byte, flag, cged) = lab_flag(&blocks);
+        assert_eq!((byte, flag), (1, Some(Value::Boolean(true))));
+        let brit = &blocks.iter().find(|(k, _)| k == b"brit").unwrap().1;
+        assert_eq!(parse(b"brit", brit, Some(&cged), Channels::Lab), a);
+        let (byte, flag, _) = lab_flag(&write_in(&a, Channels::Rgb));
+        assert_eq!((byte, flag), (0, Some(Value::Boolean(false))));
+    }
 
     /// A CMYK document's Channel Mixer keeps its four records (C, M, Y, K out, each from C, M,
     /// Y, K and a constant) and writes them back as they were.
@@ -993,7 +1094,9 @@ mod tests {
         // Smoothness 100 % (4096) bends a three-stop ramp.
         let three = vec![(0.0, [0.0; 3]), (0.25, [1.0, 0.0, 0.0]), (0.75, [0.0, 0.0, 1.0]), (1.0, [1.0; 3])];
         let mut smooth = write_gradient_map(&three, false, false);
-        let at = smooth.len() - 2 - 16 - 2 - 4 - 2 - 2 - 4 - 2 - 2 - 2;
+        // Smoothness, counted back from the end: the 4-byte tail, colour limits, colour model,
+        // roughness, vector colour, transparency, seed, mode, length.
+        let at = smooth.len() - 4 - 16 - 2 - 4 - 2 - 2 - 4 - 2 - 2 - 2;
         smooth[at..at + 2].copy_from_slice(&4096u16.to_be_bytes());
         let (a, b) = (at_t(&write_gradient_map(&three, false, false), 0.4), at_t(&smooth, 0.4));
         assert!((0..3).any(|k| (a[k] - b[k]).abs() > 1e-3), "{a:?} {b:?}");
@@ -1354,7 +1457,11 @@ mod tests {
         let Adjustment::PhotoFilter { color, density, preserve_luminosity: true } = a else { panic!("{a:?}") };
         assert_eq!(color, [1.0, 32768.0 / 65535.0, 0.0]);
         assert_eq!(density, 0.4);
-        assert_eq!(write(&a)[0].1, v2, "version 2 RGB is written back byte-exact");
+        // Written back as Reference writes it: version 2 with a Lab colour structure.
+        let w = &write(&a)[0].1;
+        assert_eq!((&w[..4], &w[12..]), (&[0u8, 2, 0, 7][..], &v2[12..]), "{w:?}");
+        let Adjustment::PhotoFilter { color: back, .. } = parse(b"phfl", w, None, Channels::Rgb) else { panic!() };
+        assert!(back.iter().zip(color).all(|(b, c)| (b - c).abs() < 0.5 / 255.0), "{back:?}");
         // Older PhotoSplice files used only one padding byte (18 bytes); keep importing them,
         // but never produce that Photoshop-incompatible length again.
         assert_eq!(parse(b"phfl", &v2[..18], None, Channels::Rgb), a);
@@ -1371,7 +1478,7 @@ mod tests {
                 else {
                     panic!("written phfl must parse")
                 };
-                assert!(color.iter().zip([0.8, 0.4, 0.2]).all(|(got, expected)| (got - expected).abs() <= 1.0 / 65535.0));
+                assert!(color.iter().zip([0.8, 0.4, 0.2]).all(|(got, expected)| (got - expected).abs() <= 0.5 / 255.0), "{color:?}");
                 assert!((read_density - density).abs() < 0.00001);
                 assert_eq!(read_preserve, preserve_luminosity);
             }
@@ -1421,7 +1528,7 @@ mod tests {
         let w = write(&a);
         assert_eq!(&w[0].1[..2], &[0, 2]);
         let Adjustment::PhotoFilter { color: back, .. } = parse(b"phfl", &w[0].1, None, Channels::Rgb) else { panic!() };
-        assert!(back.iter().zip(color).all(|(b, c)| (b - c).abs() <= 1.0 / 65535.0));
+        assert!(back.iter().zip(color).all(|(b, c)| (b - c).abs() <= 0.5 / 255.0), "{back:?}");
     }
 
     /// A version 3 Photo Filter block: version, three u32 XYZ components, density, flag, pad.

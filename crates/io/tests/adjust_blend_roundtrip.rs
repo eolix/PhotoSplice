@@ -76,8 +76,10 @@ fn adjustments() -> Vec<(Adjustment, bool)> {
         (Adjustment::ColorBalance { shadows: [60.0, 0.0, 0.0], midtones: [0.0; 3], highlights: [0.0, 0.0, 40.0], preserve_luminosity: false }, true),
         (Adjustment::BlackWhite { weights: [40.0, 60.0, 40.0, 60.0, 20.0, 80.0], tint: None }, true),
         (Adjustment::BlackWhite { weights: [70.0, 20.0, 50.0, -10.0, 90.0, 130.0], tint: Some([0.9, 0.7, 0.5]) }, true),
-        (Adjustment::PhotoFilter { color: [q16(60620), q16(35455), q16(0)], density: 0.4, preserve_luminosity: true }, true),
-        (Adjustment::PhotoFilter { color: [q16(0), q16(39321), q16(65535)], density: 0.3, preserve_luminosity: false }, true),
+        // Written with a Lab colour structure (as Reference writes it): the colour comes back
+        // within a hundredth of a Lab unit, so it renders the same rather than comparing equal.
+        (Adjustment::PhotoFilter { color: [q16(60620), q16(35455), q16(0)], density: 0.4, preserve_luminosity: true }, false),
+        (Adjustment::PhotoFilter { color: [q16(0), q16(39321), q16(65535)], density: 0.3, preserve_luminosity: false }, false),
         (Adjustment::ChannelMixer { matrix: [[0.5, 0.3, 0.2, 0.0], [0.1, 0.8, 0.1, 0.05], [0.0, 0.2, 0.9, -0.05]], monochrome: false, cmyk: None }, true),
         (Adjustment::ChannelMixer { matrix: [[0.4, 0.4, 0.2, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]], monochrome: true, cmyk: None }, true),
         (Adjustment::ColorLookup { name: "Look.cube".into(), lut: Some(Arc::new(lut.data)), size: 5, tetrahedral: false, dither: false }, true),

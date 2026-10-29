@@ -2131,3 +2131,29 @@ fn hyphenless_postscript_names_split_trailing_styles() {
         assert_eq!((r.family.as_str(), r.weight, r.italic), (family, weight, italic), "{ps}");
     }
 }
+
+/// A face keeps the font kind its PSD `FontSet` gave it when the type is written again (0 for
+/// an OpenType CFF face; written as TrueType it resolved to another font in Reference), and a
+/// font change drops it.
+#[test]
+fn psd_font_kind_round_trips_with_its_face() {
+    let kinds = |tysh: &[u8]| -> Vec<(String, i64)> {
+        let e = crate::psd::engine_data(&crate::psd::parse_tysh(tysh).unwrap().text).unwrap();
+        e.path(&["ResourceDict", "FontSet"])
+            .and_then(crate::engine_data::Value::as_array)
+            .unwrap()
+            .iter()
+            .map(|f| (f.get("Name").and_then(crate::engine_data::Value::as_str).unwrap_or("").to_string(), f.get("FontType").and_then(crate::engine_data::Value::as_i64).unwrap_or(-1)))
+            .collect()
+    };
+    let style = CharStyle { font_family: "Myriad Pro".into(), postscript_name: Some("MyriadPro-Regular".into()), font_type: Some(("MyriadPro-Regular".into(), 0)), ..Default::default() };
+    let t = styled("Type", style);
+    let tysh = crate::psd::build_tysh(&t, 72.0, None);
+    assert!(kinds(&tysh).contains(&("MyriadPro-Regular".into(), 0)), "{:?}", kinds(&tysh));
+    let back = crate::psd::text_layer_from_tysh(&tysh, 72.0).unwrap();
+    assert_eq!(back.runs[0].style.font_type, Some(("MyriadPro-Regular".into(), 0)));
+    // Another face now: its kind is unknown, so it is written as TrueType.
+    let mut changed = back.clone();
+    changed.runs[0].style.postscript_name = Some("ArialMT".into());
+    assert!(kinds(&crate::psd::build_tysh(&changed, 72.0, None)).contains(&("ArialMT".into(), 1)));
+}

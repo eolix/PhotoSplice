@@ -2556,7 +2556,7 @@ mod tests {
             let data =
                 records.iter().flat_map(|r| r.blocks.iter()).find(|b| b.key == *b"phfl").map(|b| b.data.as_slice()).expect("Photo Filter adjustment data");
             assert_eq!(data.len(), 20, "PSD layer block length includes four-byte padding");
-            assert_eq!(&data[0..2], &[0, 2], "version 2 RGB Photo Filter");
+            assert_eq!(&data[0..4], &[0, 2, 0, 7], "version 2 Photo Filter, Lab colour structure");
             assert_eq!(&data[17..], &[0, 0, 0], "three padding bytes after the 17-byte payload");
         };
 
@@ -2566,7 +2566,8 @@ mod tests {
         let parsed = PsdFile::from_bytes(&encoded).unwrap();
         assert_phfl(&parsed);
         let (restored, _) = crate::psd_import::psd_to_document(&parsed);
-        assert!(restored.layers.iter().any(|l| l.content == LayerContent::Adjustment(adjustment.clone())));
+        // The colour comes back within a hundredth of a Lab unit.
+        assert!(restored.layers.iter().any(|l| matches!(&l.content, LayerContent::Adjustment(photosplice_doc::Adjustment::PhotoFilter { color: c, density: 0.14, preserve_luminosity: true }) if c.iter().zip(color).all(|(a, b)| (a - b).abs() < 0.5 / 255.0))));
 
         // Importing a legacy 18-byte block must still work; saving it again should repair it
         // even when the adjustment values have not changed (normally raw blocks are reused).
@@ -2598,7 +2599,7 @@ mod tests {
             records.iter().flat_map(|r| r.blocks.iter()).find(|b| b.key == *b"phfl").map(|b| b.data.clone()).expect("Photo Filter adjustment data")
         };
         assert_eq!(phfl(&doc), v3);
-        // Once edited it is written as version 2 (RGB), and the colour survives.
+        // Once edited it is written as version 2 (Lab), and the colour survives.
         let edited = photosplice_doc::Adjustment::PhotoFilter { color, density: 0.5, preserve_luminosity: true };
         if let Some(l) = doc.layers.last_mut() {
             l.content = LayerContent::Adjustment(edited.clone());
@@ -2607,7 +2608,7 @@ mod tests {
         assert_eq!(&saved[..2], &[0, 2]);
         let reread = crate::adjust_map::parse(b"phfl", &saved, None, crate::adjust_map::Channels::Rgb);
         let photosplice_doc::Adjustment::PhotoFilter { color: back, density, .. } = reread else { panic!("{reread:?}") };
-        assert!(back.iter().zip(color).all(|(b, c)| (b - c).abs() <= 1.0 / 65535.0), "{back:?} vs {color:?}");
+        assert!(back.iter().zip(color).all(|(b, c)| (b - c).abs() <= 0.5 / 255.0), "{back:?} vs {color:?}");
         assert_eq!(density, 0.5);
     }
 
