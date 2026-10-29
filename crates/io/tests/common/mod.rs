@@ -279,6 +279,15 @@ pub fn assert_layers_eq(a: &Layer, b: &Layer, path: &str) {
                 assert_layers_eq(p, q, &ctx);
             }
         }
+        // A Photo Filter's colour goes through a Lab colour structure (hundredths, as Reference
+        // writes it): back within half a level.
+        (
+            LayerContent::Adjustment(Adjustment::PhotoFilter { color: c1, density: d1, preserve_luminosity: p1 }),
+            LayerContent::Adjustment(Adjustment::PhotoFilter { color: c2, density: d2, preserve_luminosity: p2 }),
+        ) => {
+            assert!(c1.iter().zip(c2).all(|(x, y)| (x - y).abs() < 0.5 / 255.0), "{ctx}: photo filter colour {c1:?} vs {c2:?}");
+            assert_eq!((d1, p1), (d2, p2), "{ctx}: photo filter");
+        }
         (LayerContent::Adjustment(x), LayerContent::Adjustment(y)) => assert_eq!(x, y, "{ctx}: adjustment"),
         (LayerContent::Fill(Fill::Solid(x)), LayerContent::Fill(Fill::Solid(y))) => color_close(x, y, &ctx),
         (LayerContent::Fill(x), LayerContent::Fill(y)) => assert_eq!(x, y, "{ctx}: fill"),
