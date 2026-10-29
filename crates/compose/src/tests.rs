@@ -3507,3 +3507,32 @@ fn effect_frame_skips_faint_edge_rows() {
     let faint = solid_layer("faint", Rect::new(0, 0, 20, 20), [0.0, 0.0, 0.0, 0.1]);
     assert_eq!(effect_frame(&faint, canvas), Rect::new(2, 2, 18, 18));
 }
+
+/// Reference kit 12: a glow samples a gradient of more than two stops at 2 · ⌊size · range⌋
+/// step centres, so red-yellow-blue at size 10 (K = 10) rounds its yellow peak over and holds
+/// its first sample where the glow saturates; two-stop gradients, baked or not, stay as they are.
+#[test]
+fn glows_sample_long_gradients_in_steps() {
+    use crate::effects::{glow_gradient, sample_gradient};
+    let ryb = Gradient { stops: vec![(0.0, Color::rgb(1.0, 0.0, 0.0)), (0.5, Color::rgb(1.0, 1.0, 0.0)), (1.0, Color::rgb(0.0, 0.0, 1.0))], ..Gradient::default() };
+    let g = Glow { paint: FxPaint::Gradient(ryb.clone()), size: 10.0, range: 0.5, ..glow(GlowTechnique::Softer, GlowSource::Edge) };
+    let sampled = glow_gradient(&g, &ryb);
+    let lv = |t: f32| sample_gradient(&sampled, t).map(|v| v * 255.0);
+    // The peak: halfway between the samples at 0.45 and 0.55 (Reference: 244, 230, 11).
+    let peak = lv(0.5 - 1.0 / 255.0);
+    assert!((peak[0] - 242.25).abs() < 0.5 && (peak[1] - 229.5).abs() < 0.5 && (peak[2] - 12.75).abs() < 0.5, "{peak:?}");
+    // Saturated: the first sample, 5 % along (Reference: green 26).
+    let start = lv(0.0);
+    assert!((start[0] - 255.0).abs() < 0.5 && (start[1] - 25.5).abs() < 0.5 && start[2].abs() < 0.5, "{start:?}");
+    // Two stops, and a smoothed two-stop gradient baked to many: unchanged.
+    let bw = Gradient { stops: vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], ..Gradient::default() };
+    assert!(matches!(glow_gradient(&g, &bw), std::borrow::Cow::Borrowed(_)));
+    let baked = Gradient { stops: (0..=96).map(|i| (i as f32 / 96.0, Color::rgb(i as f32 / 96.0, i as f32 / 96.0, i as f32 / 96.0))).collect(), color_stops: 2, ..Gradient::default() };
+    assert!(matches!(glow_gradient(&g, &baked), std::borrow::Cow::Borrowed(_)));
+    // Absurd sizes and ranges stay finite.
+    for (size, range) in [(f32::NAN, 0.5), (f32::INFINITY, f32::NAN), (0.0, 0.0), (1e9, 1.0)] {
+        let odd = Glow { size, range, ..g.clone() };
+        let s = glow_gradient(&odd, &ryb);
+        assert!(s.stops.len() >= 2 && s.stops.iter().all(|(t, c)| t.is_finite() && c.c.iter().all(|v| v.is_finite())), "{size} {range}");
+    }
+}

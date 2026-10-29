@@ -145,6 +145,8 @@ fn common(d: &Descriptor, blend: BlendMode, opacity: f32) -> FxCommon {
 
 fn gradient_from(d: &Descriptor) -> Gradient {
     let (stops, opacity_stops) = get_desc(d, "Grad").map(|g| crate::blocks::gradient_stops_with(g, crate::blocks::gradient_method(d))).unwrap_or_default();
+    // A baked gradient keeps the count of its own colour stops (glows sample by it).
+    let color_stops = get_desc(d, "Grad").map(crate::blocks::gradient_stops_raw).filter(|r| !r.noise && r.stops.len() != stops.len()).map_or(0, |r| u16::try_from(r.stops.len()).unwrap_or(u16::MAX));
     let off = get_desc(d, "Ofst");
     Gradient {
         stops: if stops.is_empty() { Gradient::default().stops } else { stops },
@@ -155,6 +157,7 @@ fn gradient_from(d: &Descriptor) -> Gradient {
         reverse: bool_of(d, "Rvrs"),
         align: !matches!(d.get("Algn"), Some(Value::Boolean(false))),
         offset: off.map_or((0.0, 0.0), |o| (pct(o, "Hrzn", 0.0), pct(o, "Vrtc", 0.0))),
+        color_stops,
     }
 }
 
@@ -1094,6 +1097,29 @@ mod tests {
         let glow = parse_glow(&Descriptor::new("OrGl").with("Grad", Value::Descriptor(grad)), false);
         let FxPaint::Gradient(g) = glow.paint else { panic!("{:?}", glow.paint) };
         assert_eq!(g.opacity_stops, vec![(0.0, 1.0), (1.0, 0.0)]);
+    }
+
+    /// A gradient baked to dense stops remembers how many colour stops it had (glows sample a
+    /// two-stop gradient differently from a longer one); an unbaked one doesn't need to.
+    #[test]
+    fn baked_gradients_keep_their_colour_stop_count() {
+        let enumv = |t: &str, v: &str| Value::Enumerated { type_id: Id::new(t), value: Id::new(v) };
+        let rgb = |v: f64| Value::Descriptor(Descriptor::new("RGBC").with("Rd  ", Value::Double(v)).with("Grn ", Value::Double(v)).with("Bl  ", Value::Double(v)));
+        let stop = |l: i32, v: f64| {
+            Value::Descriptor(Descriptor::new("Clrt").with("Clr ", rgb(v)).with("Type", enumv("Clry", "UsrS")).with("Lctn", Value::Integer(l)).with("Mdpn", Value::Integer(50)))
+        };
+        let grad = |smooth: f64| {
+            Descriptor::new("Grdn").with("GrdF", enumv("GrdF", "CstS")).with("Intr", Value::Double(smooth)).with("Clrs", Value::List(vec![stop(0, 0.0), stop(4096, 255.0)]))
+        };
+        let parse = |smooth: f64| {
+            let glow = parse_glow(&Descriptor::new("OrGl").with("Grad", Value::Descriptor(grad(smooth))), false);
+            let FxPaint::Gradient(g) = glow.paint else { panic!("{:?}", glow.paint) };
+            g
+        };
+        let smooth = parse(4096.0);
+        assert!(smooth.stops.len() > 2 && smooth.color_stops == 2 && smooth.color_stop_count() == 2, "{} {}", smooth.stops.len(), smooth.color_stops);
+        let plain = parse(0.0);
+        assert_eq!((plain.stops.len(), plain.color_stops, plain.color_stop_count()), (2, 0, 2));
     }
 
     /// A gradient overlay whose opacity is edited keeps its gradient definition verbatim (gray

@@ -89,6 +89,7 @@ fn perturbed_char() -> CharStyle {
         font_family: "\u{1}".into(),
         font_style: "\u{1}".into(),
         postscript_name: Some("\u{1}".into()),
+        font_type: Some(("\u{1}".into(), 9)),
         weight: 1,
         italic: true,
         size_pt: -1.0,

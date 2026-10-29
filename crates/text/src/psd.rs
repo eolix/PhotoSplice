@@ -1218,6 +1218,19 @@ fn apply_engine_data(layer: &mut TextLayer, e: &E, txt: Option<&str>, k: f32) {
         })
         .collect();
     layer.runs = sdata.iter().zip(&bases).zip(slens).map(|((d, base), len)| TextRun { len, style: char_style(Some(base), d, &fonts, k) }).collect();
+    // Each named face keeps the kind its FontSet entry gives it.
+    let set = res.and_then(|r| r.get("FontSet")).and_then(E::as_array).unwrap_or(&[]);
+    for r in &mut layer.runs {
+        if let Some(ps) = &r.style.postscript_name {
+            r.style.font_type = set
+                .iter()
+                .find(|f| f.get("Name").and_then(E::as_str) == Some(ps.as_str()))
+                .and_then(|f| f.get("FontType"))
+                .and_then(E::as_i64)
+                .and_then(|t| u8::try_from(t).ok())
+                .map(|t| (ps.clone(), t));
+        }
+    }
     layer.runs = kerning_from_pairs(&layer.text, layer.char_runs(), &incoming);
 
     // Shape.
@@ -1593,7 +1606,12 @@ fn utf16_len(s: &str) -> i64 {
 }
 
 pub(crate) fn font_entry(name: &str) -> E {
-    E::Dict(vec![("Name".into(), E::String(name.into())), ("Script".into(), E::Int(0)), ("FontType".into(), E::Int(1)), ("Synthetic".into(), E::Int(0))])
+    font_entry_of(name, 1)
+}
+
+/// A `FontSet` entry for `name` of font kind `kind` ([`CharStyle::font_type`]).
+pub(crate) fn font_entry_of(name: &str, kind: u8) -> E {
+    E::Dict(vec![("Name".into(), E::String(name.into())), ("Script".into(), E::Int(0)), ("FontType".into(), E::Int(i64::from(kind))), ("Synthetic".into(), E::Int(0))])
 }
 
 /// The `Txt2` auto-kern mode of a style: 0 manual, 1 metrics, 2 optical — the values
@@ -1868,7 +1886,13 @@ pub fn build_engine_data(layer: &TextLayer, template: Option<E>, dpi: f32) -> E 
     let fontset = E::Array(
         fonts
             .iter()
-            .map(|f| old_fonts.iter().find(|o| o.get("Name").and_then(E::as_str) == Some(f.as_str())).cloned().unwrap_or_else(|| font_entry(f)))
+            .map(|f| {
+                old_fonts.iter().find(|o| o.get("Name").and_then(E::as_str) == Some(f.as_str())).cloned().unwrap_or_else(|| {
+                    // A face named by a run takes the kind the run was read with.
+                    let kind = layer.runs.iter().find_map(|r| r.style.font_type.as_ref().filter(|(ps, _)| ps == f && postscript_for(&r.style) == *f).map(|(_, t)| *t));
+                    font_entry_of(f, kind.unwrap_or(1))
+                })
+            })
             .collect(),
     );
 

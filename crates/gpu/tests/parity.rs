@@ -89,7 +89,9 @@ fn gpu() -> Option<Gpu> {
             return None;
         }
     };
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
+    // The features the app requests (16-bit unorm layers where the adapter has them).
+    let desc = wgpu::DeviceDescriptor { required_features: photosplice_gpu::optional_features(&adapter), ..Default::default() };
+    let (device, queue) = pollster::block_on(adapter.request_device(&desc)).ok()?;
     eprintln!("GPU parity backend: {:?}", adapter.get_info().backend);
     // Exact parity needs 32-bit float targets. Adapters without them (e.g. GL software
     // rasterizers) use the CPU compositor in the app, so there is nothing to compare there.
@@ -1332,6 +1334,7 @@ fn gradient() -> Gradient {
         reverse: false,
         align: true,
         offset: (0.1, -0.05),
+        color_stops: 0,
     }
 }
 
@@ -2670,4 +2673,62 @@ fn pass_through_clipping_base_with_an_adjustment() {
     d.layers.push(clip);
     let e = photosplice_gpu::plan(&d).unwrap_err();
     assert!(e.0.contains("clipped to"), "{e}");
+}
+
+/// 16-bit layers reach the GPU as their own samples where the device has 16-bit unorm textures,
+/// so 16-bit Threshold and Posterize cut where the CPU does (as half floats, samples near the cut
+/// flipped: psd-tools posterize_16bits_rgb had 1 % of pixels a band off).
+#[test]
+fn sixteen_bit_threshold_and_posterize_cut_like_the_cpu() {
+    let Some(mut g) = gpu() else { return };
+    if !g.device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM) {
+        eprintln!("skipping: no 16-bit unorm textures");
+        return;
+    }
+    // Every 16-bit sample from 0.45 to 0.55 of the range, in grey and in colour.
+    let (w, h) = (256u32, 26u32);
+    let mut d = Document::new("16-bit cuts", Size::new(w, h), ColorMode::Rgb, SampleType::U16);
+    let mut l = Layer::raster("ramp", PixelFormat::RGBA16);
+    let mut data = Vec::with_capacity((w * h * 4) as usize);
+    for i in 0..w * h {
+        let v = (29491 + i) as f32 / 65535.0;
+        data.extend_from_slice(&[v, if i % 2 == 0 { v } else { 1.0 - v }, v * 0.97, 1.0]);
+    }
+    l.surface_mut().unwrap().write_region(Rect::new(0, 0, w as i32, h as i32), &data);
+    d.layers.push(l);
+    for adj in [Adjustment::Threshold { level: 0.5 }, Adjustment::Threshold { level: 128.0 / 255.0 }, Adjustment::Posterize { levels: 4 }, Adjustment::Posterize { levels: 7 }] {
+        let mut doc = d.clone();
+        doc.layers.push(Layer::new("adj", LayerContent::Adjustment(adj.clone())));
+        check(&mut g, &doc, &format!("16-bit {adj:?}"));
+    }
+}
+
+/// 32-bit layers reach the GPU as their own floats, so a 32-bit Threshold or Posterize cuts where
+/// the CPU does, beside HDR values above 1 too (as half floats, samples within 1/2048 of a cut
+/// fell on the wrong side).
+#[test]
+fn thirty_two_bit_threshold_and_posterize_cut_like_the_cpu() {
+    let Some(mut g) = gpu() else { return };
+    let (w, h) = (256u32, 26u32);
+    let mut d = Document::new("32-bit cuts", Size::new(w, h), ColorMode::Rgb, SampleType::F32);
+    let mut l = Layer::raster("ramp", PixelFormat::RGBA32F);
+    let mut data = Vec::with_capacity((w * h * 4) as usize);
+    for i in 0..w * h {
+        // A fine ramp (steps of 1/250 000) across 0.5 and 128/255: grey in rows 0..12, coloured
+        // with an HDR red below.
+        let v = 0.4935 + (i % (w * 13)) as f32 * 4e-6;
+        if i < w * 13 {
+            data.extend_from_slice(&[v, v, v, 1.0]);
+        } else {
+            // Luminance 0.7015 v + 0.1475: across both cuts too.
+            data.extend_from_slice(&[v * 2.5, 0.25 - v * 0.25, v * 0.9, 1.0]);
+        }
+    }
+    l.surface_mut().unwrap().write_region(Rect::new(0, 0, w as i32, h as i32), &data);
+    d.layers.push(l);
+    for adj in [Adjustment::Threshold { level: 0.5 }, Adjustment::Threshold { level: 128.0 / 255.0 }, Adjustment::Posterize { levels: 4 }, Adjustment::Posterize { levels: 3 }] {
+        let mut doc = d.clone();
+        doc.layers.push(Layer::new("adj", LayerContent::Adjustment(adj.clone())));
+        check(&mut g, &doc, &format!("32-bit {adj:?}"));
+    }
 }

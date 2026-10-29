@@ -21,7 +21,9 @@ fn main() {
         return;
     };
     let format = photosplice_gpu::Compositor::preferred_acc_format(&adapter);
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("device");
+    // The features the app requests (photosplice_gpu::optional_features).
+    let desc = wgpu::DeviceDescriptor { required_features: photosplice_gpu::optional_features(&adapter), ..Default::default() };
+    let (device, queue) = pollster::block_on(adapter.request_device(&desc)).expect("device");
     let mut comp = photosplice_gpu::Compositor::try_new_with_format(&device, format).expect("compositor");
     let gpu = photosplice_gpu::render_to_vec(&mut comp, &device, &queue, &doc, doc.bounds()).expect("GPU render");
 

@@ -176,9 +176,9 @@ note = "EXR: corpus/exr (the OpenEXR deep test images, pinned) is read by codecs
 [[item]]
 id = "FILE-216-4"
 target = "Exports re-open in a third-party oracle editor"
-status = "missing"
+status = "partial"
 issue = 216
-note = "The round trip is our export -> our import"
+note = "Measured by hand in Reference (2026-10): the 271 Reference oracles saved by PhotoSplice reopen with the original's composite and layer tree; with the writer generating every block, Gradient Map (refused), Lab Brightness/Contrast, 32-bit Photo Filter and Gray/Lab Gradient Map stops were fixed (e0761071). Not automated: the corpus round trip is still our export -> our import. Open: text without the document's Txt2 names a variable font's default instance; 8-bit Lab Gradient Map 2.9/255"
 
 [[item]]
 id = "FILE-216-5"

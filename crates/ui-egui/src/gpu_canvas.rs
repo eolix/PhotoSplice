@@ -891,7 +891,9 @@ pub fn wgpu_setup() -> egui_wgpu::WgpuSetup {
 
 /// Make `setup` request the adapter's own texture and buffer size limits instead of egui's
 /// default 8192 px cap (which sent every document wider or taller than 8192 px to the CPU
-/// compositor). Everything else (features, the WebGL2 base limits on GL) stays egui's default.
+/// compositor), and the optional features the compositor uses when the adapter has them
+/// (`photosplice_gpu::optional_features`: 16-bit layers at full precision). Everything else (the
+/// WebGL2 base limits on GL) stays egui's default.
 pub fn use_adapter_limits(setup: &mut egui_wgpu::WgpuSetup) {
     use_adapter_limits_with(setup, |_| {});
 }
@@ -902,7 +904,12 @@ pub fn use_adapter_limits_with(setup: &mut egui_wgpu::WgpuSetup, on_adapter: imp
     if let egui_wgpu::WgpuSetup::CreateNew(create) = setup {
         create.device_descriptor = std::sync::Arc::new(move |adapter| {
             on_adapter(adapter);
-            wgpu::DeviceDescriptor { label: Some("photosplice wgpu device"), required_limits: device_limits(adapter), ..Default::default() }
+            wgpu::DeviceDescriptor {
+                label: Some("photosplice wgpu device"),
+                required_features: photosplice_gpu::optional_features(adapter),
+                required_limits: device_limits(adapter),
+                ..Default::default()
+            }
         });
     }
 }

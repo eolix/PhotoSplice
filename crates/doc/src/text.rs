@@ -94,6 +94,13 @@ pub struct CharStyle {
     pub font_style: String,
     /// PostScript name from a PSD (`ArialMT`), used to find the exact face when present.
     pub postscript_name: Option<String>,
+    /// The kind a PSD's `FontSet` gives the face it names, with that PostScript name (Reference
+    /// writes 0 for OpenType CFF faces like MyriadPro-Regular, 1 for TrueType like ArialMT, 2 for
+    /// CJK CID faces, 3 for Type 1). Written back while `postscript_name` is still that name:
+    /// Reference looks the name up among fonts of that kind (as TrueType,
+    /// SourceSerifRoman-Regular resolved to a variable font's instance). A font change leaves it
+    /// stale and so unused; `None`: written as TrueType.
+    pub font_type: Option<(String, u8)>,
     /// CSS-style weight, 100–900.
     pub weight: u16,
     pub italic: bool,
@@ -141,6 +148,7 @@ impl Default for CharStyle {
             font_family: String::new(),
             font_style: String::new(),
             postscript_name: None,
+            font_type: None,
             weight: 400,
             italic: false,
             size_pt: 12.0,
