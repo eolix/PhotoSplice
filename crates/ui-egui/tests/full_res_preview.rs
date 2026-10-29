@@ -81,7 +81,8 @@ fn low_res(h: &mut Harness, on: bool) {
     h.run_steps(4);
 }
 
-/// Luma along a 300 px row near the canvas's top-left corner (clear of centred dialogs).
+/// Luma along a 150 px row near the canvas's top-left corner, clear of centred dialogs (the
+/// filter dialogs' larger previews reach to within ~300 px of the canvas's left edge).
 fn row(h: &mut Harness) -> Vec<i32> {
     h.run_steps(4);
     let canvas = {
@@ -93,7 +94,7 @@ fn row(h: &mut Harness) -> Vec<i32> {
     // submitted work still finishes, so wait for it again instead of failing.
     let img = (0..3).find_map(|_| h.render().ok()).expect("render");
     let (x0, y) = (canvas.min.x as u32 + 20, canvas.min.y as u32 + 40);
-    (x0..x0 + 300)
+    (x0..x0 + 150)
         .map(|x| {
             let p = img.get_pixel(x, y).0;
             (i32::from(p[0]) * 3 + i32::from(p[1]) * 6 + i32::from(p[2])) / 10

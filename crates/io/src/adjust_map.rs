@@ -1291,8 +1291,15 @@ mod tests {
         rt(Adjustment::BlackWhite { weights: [40.0, 60.0, 40.0, 60.0, 20.0, 80.0], tint: None });
         rt(Adjustment::BlackWhite { weights: [-200.0, 300.0, 0.0, 10.0, 90.0, 30.0], tint: Some([0.9, 0.7, 0.5]) });
         let q = |v: u16| f32::from(v) / 65535.0;
-        rt(Adjustment::PhotoFilter { color: [q(60000), q(30000), q(0)], density: 0.25, preserve_luminosity: true });
-        rt(Adjustment::PhotoFilter { color: [q(0), q(40000), q(65535)], density: 1.0, preserve_luminosity: false });
+        // Photo Filter colours go through a Lab colour structure (hundredths): back within
+        // half a level, the rest exact.
+        for (color, density, preserve_luminosity) in [([q(60000), q(30000), q(0)], 0.25, true), ([q(0), q(40000), q(65535)], 1.0, false)] {
+            let a = Adjustment::PhotoFilter { color, density, preserve_luminosity };
+            let [(key, data)] = write(&a).try_into().unwrap();
+            let Adjustment::PhotoFilter { color: c, density: d, preserve_luminosity: p } = parse(&key, &data, None, Channels::Rgb) else { panic!("{a:?}") };
+            assert!(c.iter().zip(color).all(|(x, y)| (x - y).abs() < 0.5 / 255.0), "{c:?} vs {color:?}");
+            assert_eq!((d, p), (density, preserve_luminosity));
+        }
         rt(Adjustment::ChannelMixer { matrix: [[0.5, 0.3, 0.2, 0.0], [0.1, 0.8, 0.1, 0.05], [0.0, 0.2, 0.9, -0.05]], monochrome: false, cmyk: None });
         rt(Adjustment::ChannelMixer { matrix: [[0.4, 0.4, 0.2, 0.1], [0.0, 1.0, 0.0, 0.0], [-2.0, 0.0, 2.0, 0.0]], monochrome: true, cmyk: None });
         let id = photosplice_cms::lutfile::LutFile::identity(5);

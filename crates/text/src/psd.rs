@@ -1218,7 +1218,8 @@ fn apply_engine_data(layer: &mut TextLayer, e: &E, txt: Option<&str>, k: f32) {
         })
         .collect();
     layer.runs = sdata.iter().zip(&bases).zip(slens).map(|((d, base), len)| TextRun { len, style: char_style(Some(base), d, &fonts, k) }).collect();
-    // Each named face keeps the kind its FontSet entry gives it.
+    // Each named face keeps the kind its FontSet entry gives it, when it isn't the TrueType the
+    // writer assumes anyway (so a face we wrote reads back as it was).
     let set = res.and_then(|r| r.get("FontSet")).and_then(E::as_array).unwrap_or(&[]);
     for r in &mut layer.runs {
         if let Some(ps) = &r.style.postscript_name {
@@ -1228,6 +1229,7 @@ fn apply_engine_data(layer: &mut TextLayer, e: &E, txt: Option<&str>, k: f32) {
                 .and_then(|f| f.get("FontType"))
                 .and_then(E::as_i64)
                 .and_then(|t| u8::try_from(t).ok())
+                .filter(|t| *t != 1)
                 .map(|t| (ps.clone(), t));
         }
     }
