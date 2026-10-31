@@ -544,7 +544,17 @@ pub fn write_lfx2(master: bool, items: &[Effect]) -> Vec<u8> {
 /// order. `numModifyingFX` is recomputed. Returns the data and whether a kind has several
 /// instances, in which case Photoshop stores the block as `lmfx`.
 pub fn write_lfx2_onto(template: Option<&[u8]>, master: bool, items: &[Effect]) -> (Vec<u8>, bool) {
-    let fresh = lfx2_descriptor(master, items);
+    write_lfx2_onto_at(template, master, items, 72.0)
+}
+
+/// [`write_lfx2_onto`] for a document of `dpi`: a block written from scratch carries the
+/// effects scale Reference writes, the resolution over 72 (208.33 % at 150 dpi). Reference sizes
+/// effects by that scale over its own: 100 % in a 150 dpi file drew every effect at 48 % of its
+/// size (psd-tools layer_effects saved by us: its bevel and stroke 33/255 off).
+pub fn write_lfx2_onto_at(template: Option<&[u8]>, master: bool, items: &[Effect], dpi: f64) -> (Vec<u8>, bool) {
+    let mut fresh = lfx2_descriptor(master, items);
+    let scale = if dpi.is_finite() && dpi > 0.0 { dpi / 72.0 * 100.0 } else { 100.0 };
+    set_key(&mut fresh, "Scl ", Value::UnitFloat { unit: *b"#Prc", value: scale });
     let multi = KINDS.iter().any(|(single, multi)| !multi.is_empty() && instances(&fresh, single, multi).len() > 1);
     let base = template.and_then(|t| VersionedDescriptor::parse_prefix(t.get(4..)?).ok()).map(|(v, _)| v.descriptor);
     let d = match base {
@@ -799,6 +809,28 @@ pub fn parse_lrfx(data: &[u8]) -> Option<(bool, Vec<Effect>)> {
 #[allow(clippy::unreachable)] // clippy.toml exempts unwrap/expect/panic in tests, not unreachable!
 mod tests {
     use super::*;
+
+    /// A block written from scratch carries the document's effects scale (resolution / 72); a
+    /// file's own block keeps the scale it had.
+    #[test]
+    fn written_effects_carry_the_documents_scale() {
+        let scale = |data: &[u8]| match VersionedDescriptor::parse_prefix(&data[4..]).unwrap().0.descriptor.get("Scl ") {
+            Some(Value::UnitFloat { value, .. }) => *value,
+            other => panic!("{other:?}"),
+        };
+        let items = vec![Effect::default_drop_shadow()];
+        let (at150, _) = write_lfx2_onto_at(None, true, &items, 150.0);
+        assert!((scale(&at150) - 208.333).abs() < 0.01, "{}", scale(&at150));
+        let (at72, _) = write_lfx2_onto_at(None, true, &items, 72.0);
+        assert!((scale(&at72) - 100.0).abs() < 1e-6);
+        // A file's block keeps its scale, whatever the document's resolution now.
+        let (kept, _) = write_lfx2_onto_at(Some(&at150), true, &items, 300.0);
+        assert!((scale(&kept) - 208.333).abs() < 0.01, "{}", scale(&kept));
+        // Hostile resolutions fall back to 100 %.
+        for dpi in [0.0, -5.0, f64::NAN, f64::INFINITY] {
+            assert!((scale(&write_lfx2_onto_at(None, true, &items, dpi).0) - 100.0).abs() < 1e-6, "{dpi}");
+        }
+    }
 
     fn sample_effects() -> Vec<Effect> {
         let g = Gradient {

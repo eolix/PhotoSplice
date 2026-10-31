@@ -198,6 +198,10 @@ pub fn bake(stops: Vec<(f32, Color)>, midpoints: &[f32], smoothness: f32, method
     // Classic interpolates in the stops' own model: Lab stops (Lab documents) blend in L*a*b*, which the
     // compositors' sRGB interpolation can't reproduce (psd-tools 4x4_16bit_lab).
     let lab = method == Method::Classic && stops.iter().all(|(_, c)| c.mode == ColorMode::Lab);
+    // Gray stops (Grayscale and Duotone documents) stay gray: written back as RGB, Reference takes
+    // them through the document's gray profile (psd-tools 4x4_8bit_grayscale saved by us: every
+    // pixel 22/255 darker).
+    let gray = !lab && stops.iter().all(|(_, c)| c.mode == ColorMode::Grayscale);
     if stops.len() < 2 || (smoothness <= 0.0 && method == Method::Classic && plain_mids && !lab) {
         return stops;
     }
@@ -218,6 +222,9 @@ pub fn bake(stops: Vec<(f32, Color)>, midpoints: &[f32], smoothness: f32, method
                 return (t, Color { mode: ColorMode::Lab, c: [v[0].clamp(0.0, 1.0), v[1].clamp(0.0, 1.0), v[2].clamp(0.0, 1.0), 0.0], alpha: alpha(t) });
             }
             let rgb = out_of_space(method, v);
+            if gray {
+                return (t, Color { mode: ColorMode::Grayscale, c: [rgb[0].clamp(0.0, 1.0), 0.0, 0.0, 0.0], alpha: alpha(t) });
+            }
             (t, Color::rgba(rgb[0], rgb[1], rgb[2], alpha(t)))
         })
         .collect();
@@ -341,6 +348,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Gray stops bake to gray stops (Grayscale and Duotone documents write them back as gray).
+    #[test]
+    fn gray_stops_stay_gray() {
+        let s = bake(vec![(0.0, Color::gray(0.2)), (1.0, Color::gray(0.9))], &[0.5], 1.0, Method::Classic);
+        assert!(s.len() > 2 && s.iter().all(|(_, c)| c.mode == ColorMode::Grayscale), "{s:?}");
+        let mid = s.iter().find(|(t, _)| (t - 0.5).abs() < 1e-6).map(|(_, c)| c.c[0]).unwrap();
+        assert!((mid - 0.55).abs() < 1e-3, "{mid}");
+        // Mixed with an RGB stop, they bake to RGB as before.
+        let mixed = bake(vec![(0.0, Color::gray(0.2)), (1.0, Color::rgb(1.0, 0.0, 0.0))], &[0.5], 1.0, Method::Classic);
+        assert!(mixed.iter().all(|(_, c)| c.mode == ColorMode::Rgb));
     }
 
     #[test]

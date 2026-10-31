@@ -41,12 +41,16 @@ fn op_to_psd(op: PathOp) -> i16 {
     }
 }
 
-/// Path records → model path in document pixels (`w`×`h` canvas).
+/// Path records → model path in document pixels (`w`×`h` canvas). The fill rule is the one its
+/// components' length records give (Reference fills a self-crossing star solid under 2, with a
+/// hole under 1); records without one (older writers' 0) read as non-zero.
 pub fn path_from_records(p: &PathData, w: u32, h: u32) -> Path {
     let (w, h) = (f64::from(w), f64::from(h));
     let pt = |q: (f64, f64)| Point::new(q.0 * w, q.1 * h);
-    let subpaths = p
-        .subpaths()
+    let subs = p.subpaths();
+    let even_odd = subs.iter().any(|s| s.winding == 1) && !subs.iter().any(|s| s.winding == 2);
+    let fill_rule = if even_odd { FillRule::EvenOdd } else { FillRule::NonZero };
+    let subpaths = subs
         .into_iter()
         .map(|s| Subpath {
             closed: s.closed,
@@ -54,7 +58,7 @@ pub fn path_from_records(p: &PathData, w: u32, h: u32) -> Path {
             knots: s.knots.iter().map(|k| Knot { anchor: pt(k.anchor), in_ctrl: pt(k.pre), out_ctrl: pt(k.post), smooth: k.linked }).collect(),
         })
         .collect();
-    Path { subpaths, fill_rule: FillRule::NonZero, inverted: p.initial_fill() }
+    Path { subpaths, fill_rule, inverted: p.initial_fill() }
 }
 
 /// Model path → path records.
@@ -64,9 +68,16 @@ pub fn path_to_records(p: &Path, w: u32, h: u32) -> PathData {
     let subs: Vec<PsdSubpath> = p
         .subpaths
         .iter()
-        .map(|s| PsdSubpath {
+        .enumerate()
+        .map(|(i, s)| PsdSubpath {
             closed: s.closed,
             operation: op_to_psd(s.op),
+            // Each component states the rule; subpaths continuing one carry 0, as Reference writes.
+            winding: match (s.op, p.fill_rule) {
+                (PathOp::Join, _) if i > 0 => 0,
+                (_, FillRule::EvenOdd) => 1,
+                (_, FillRule::NonZero) => 2,
+            },
             knots: s.knots.iter().map(|k| PsdKnot { linked: k.smooth, pre: fr(k.in_ctrl), anchor: fr(k.anchor), post: fr(k.out_ctrl) }).collect(),
         })
         .collect();
@@ -142,6 +153,29 @@ pub fn vmsk_bytes(path: &Path, flags: u32, w: u32, h: u32) -> Vec<u8> {
         first.op = PathOp::Combine;
     }
     VectorMaskBlock { version: 3, flags, path: path_to_records(&p, w, h) }.to_bytes()
+}
+
+/// A shape layer's `vsms`/`vmsk` block for `path`. An inverted shape is written as Reference
+/// writes one, with a leading subtract (and the later operations as their duals, undoing
+/// [`layer_path_from_records`]) rather than the invert flag: Reference reads both as the same
+/// coverage but strokes a flag-inverted shape on the other side of its edge.
+pub fn shape_path_bytes(path: &Path, w: u32, h: u32) -> Vec<u8> {
+    if !path.inverted || path.subpaths.is_empty() {
+        return vmsk_bytes(path, 0, w, h);
+    }
+    let mut p = path.clone();
+    p.inverted = false;
+    for s in p.subpaths.iter_mut().skip(1) {
+        s.op = match s.op {
+            PathOp::Combine => PathOp::Subtract,
+            PathOp::Subtract => PathOp::Combine,
+            op => op,
+        };
+    }
+    if let Some(first) = p.subpaths.first_mut() {
+        first.op = PathOp::Subtract;
+    }
+    VectorMaskBlock { version: 3, flags: 0, path: path_to_records(&p, w, h) }.to_bytes()
 }
 
 /// A layer's vector mask from its `vmsk`/`vsms` block. A vector mask without subpaths reveals
@@ -530,7 +564,7 @@ pub fn shape_blocks(sh: &ShapeLayer, raw: &mut Vec<([u8; 4], Vec<u8>)>, w: u32, 
             // The layer's own raw copy may still be valid (psd_raw is the principal block).
             let data = match &sh.psd_raw {
                 Some(r) if keep(r) => r.to_vec(),
-                _ => vmsk_bytes(&sh.path, 0, w, h),
+                _ => shape_path_bytes(&sh.path, w, h),
             };
             // A shape in the CS6 form (fill in `vscg`, or a new shape) keeps its path under
             // `vsms`, as Photoshop writes it; legacy shapes (top-level fill) under `vmsk`.
@@ -630,10 +664,35 @@ mod tests {
         assert_eq!(op_from_psd(7), PathOp::Combine);
     }
 
+    /// ag-psd winding-non-zero.psd: a self-crossing star Reference fills solid stores 2 in its
+    /// length record; it shows the centre as a hole under 1. Continuing subpaths store 0.
+    #[test]
+    fn fill_rule_round_trips_through_the_length_records() {
+        for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+            let mut p = sample_path();
+            p.fill_rule = rule;
+            if let Some(s) = p.subpaths.get_mut(1) {
+                s.op = PathOp::Join;
+            }
+            let rec = path_to_records(&p, 64, 64);
+            let words: Vec<u16> = rec.subpaths().iter().map(|s| s.winding).collect();
+            let first = if rule == FillRule::NonZero { 2 } else { 1 };
+            assert_eq!(words.first(), Some(&first));
+            assert!(words.iter().skip(1).all(|&w| w == 0), "{words:?}");
+            assert_eq!(path_from_records(&rec, 64, 64), p);
+        }
+        // Records without a rule (0 throughout) read as non-zero.
+        let mut rec = path_to_records(&sample_path(), 64, 64);
+        let subs: Vec<PsdSubpath> = rec.subpaths().into_iter().map(|s| PsdSubpath { winding: 0, ..s }).collect();
+        rec = PathData::from_subpaths(&subs, false);
+        assert_eq!(path_from_records(&rec, 64, 64).fill_rule, FillRule::NonZero);
+    }
+
     fn vmsk_with(initial_fill: bool, ops: &[i16]) -> Vec<u8> {
         let square = |x: f64| PsdSubpath {
             closed: true,
             operation: 0,
+            winding: 1,
             knots: [(x, 0.25), (x + 0.25, 0.25), (x + 0.25, 0.5), (x, 0.5)].iter().map(|&p| PsdKnot { linked: false, pre: p, anchor: p, post: p }).collect(),
         };
         let subs: Vec<PsdSubpath> = ops.iter().enumerate().map(|(i, &op)| PsdSubpath { operation: op, ..square(0.1 * i as f64) }).collect();
@@ -675,6 +734,22 @@ mod tests {
         lead.subpaths[0].op = PathOp::Subtract;
         let back = path_from_vmsk(&vmsk_bytes(&lead, 0, 64, 64), 64, 64).unwrap().0;
         assert!(!back.inverted, "a stored leading subtract is drawn as combine by the model");
+    }
+
+    #[test]
+    fn inverted_shapes_are_written_with_a_leading_subtract() {
+        // As Reference stores a shape whose first component subtracts: op 2 first, no flag.
+        let src = vmsk_with(false, &[2, -1, 1]);
+        let (p, _) = path_from_vmsk(&src, 100, 100).unwrap();
+        assert!(p.inverted);
+        let b = shape_path_bytes(&p, 100, 100);
+        let blk = VectorMaskBlock::from_bytes(&b).unwrap();
+        assert_eq!(blk.flags & VectorMaskBlock::FLAG_INVERT, 0);
+        assert_eq!(blk.path.subpaths().iter().map(|s| s.operation).collect::<Vec<_>>(), [2, -1, 1]);
+        assert_eq!(path_from_vmsk(&b, 100, 100).unwrap().0, p);
+        // A plain shape is unchanged.
+        let plain = sample_path();
+        assert_eq!(shape_path_bytes(&plain, 64, 64), vmsk_bytes(&plain, 0, 64, 64));
     }
 
     #[test]

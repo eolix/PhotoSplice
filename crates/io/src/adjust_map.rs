@@ -724,6 +724,12 @@ pub fn write_in(adj: &Adjustment, channels: Channels) -> Vec<([u8; 4], Vec<u8>)>
             }
             blocks
         }
+        // A Grayscale document's Curves has one channel curve (the model copies it to all three).
+        Adjustment::Curves { master, per_channel, space, black, pencil } if channels == Channels::Gray => {
+            let line = vec![CurvePoint { input: 0.0, output: 0.0 }, CurvePoint { input: 1.0, output: 1.0 }];
+            let [g, _, _] = per_channel;
+            write(&Adjustment::Curves { master: master.clone(), per_channel: [g.clone(), line.clone(), line], space: *space, black: black.clone(), pencil: *pencil })
+        }
         Adjustment::ChannelMixer { matrix, monochrome: false, cmyk: None } if channels == Channels::Cmyk => {
             write(&Adjustment::ChannelMixer { matrix: *matrix, monochrome: false, cmyk: Some(photosplice_doc::adjust::cmyk_mixer_records(matrix)) })
         }
@@ -811,18 +817,40 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
             v.push(u8::from(*pencil));
             put16(&mut v, 1);
             let ink = *space == ToneSpace::Cmyk && black.len() >= 2;
-            v.extend_from_slice(&(if ink { 0b11111u32 } else { 0b1111 }).to_be_bytes());
-            for c in std::iter::once(master).chain(per_channel.iter()).chain(ink.then_some(black)) {
-                if *pencil {
+            let all: Vec<&Vec<CurvePoint>> = std::iter::once(master).chain(per_channel.iter()).chain(ink.then_some(black)).collect();
+            if *pencil {
+                v.extend_from_slice(&(if ink { 0b11111u32 } else { 0b1111 }).to_be_bytes());
+                for c in all {
                     v.extend(curve_map_outputs(c).iter().map(|&o| u8::try_from(q255(o)).unwrap_or(u8::MAX)));
-                    continue;
                 }
-                put16(&mut v, c.len().min(19) as u16);
-                for p in c.iter().take(19) {
-                    put16(&mut v, q255(p.output));
-                    put16(&mut v, q255(p.input));
-                }
+                return vec![(*b"curv", v)];
             }
+            // As Reference writes them: only the curves that do something, flagged in the bitmap,
+            // then the same curves again in a 'Crv ' section keyed by channel. It refuses a CMYK
+            // block of all five curves, with or without that section, or a minimal one without it.
+            let identity = |c: &[CurvePoint]| c.len() == 2 && c.iter().zip([0, 255]).all(|(p, e)| q255(p.input) == e && q255(p.output) == e);
+            let edited: Vec<(u16, &Vec<CurvePoint>)> = (0u16..).zip(all).filter(|(_, c)| !identity(c)).collect();
+            let points = |v: &mut Vec<u8>, c: &[CurvePoint]| {
+                put16(v, c.len().min(19) as u16);
+                for p in c.iter().take(19) {
+                    put16(v, q255(p.output));
+                    put16(v, q255(p.input));
+                }
+            };
+            v.extend_from_slice(&edited.iter().fold(0u32, |bits, (i, _)| bits | 1 << i).to_be_bytes());
+            for (_, c) in &edited {
+                points(&mut v, c);
+            }
+            v.extend_from_slice(b"Crv ");
+            put16(&mut v, 4);
+            v.extend_from_slice(&(edited.len() as u32).to_be_bytes());
+            for (i, c) in &edited {
+                put16(&mut v, *i);
+                points(&mut v, c);
+            }
+            // Zero-padded to four bytes, as Reference writes it; it refuses the block padded to
+            // two (psd-tools curves_rgb and curves_grayscale saved by us).
+            v.resize(v.len().next_multiple_of(4), 0);
             return vec![(*b"curv", v)];
         }
         Adjustment::SelectiveColor { relative, adjustments } => {
@@ -837,8 +865,17 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
             return vec![(*b"selc", v)];
         }
         Adjustment::ColorLookup { name, lut, size, dither, .. } => {
-            // A lookup without a usable table (none chosen yet, or a bad size) renders as the
-            // identity, so it is written as a 2³ identity cube rather than dropped.
+            put16(&mut v, 1);
+            // No table chosen yet: the empty descriptor Reference writes for a fresh Color
+            // Lookup layer (it refuses one with a stand-in cube and an empty profile).
+            if lut.is_none() || *size == 0 {
+                let mut d = Descriptor::new("null");
+                d.name = photosplice_psd::descriptor::UnicodeString::new_nul("");
+                v.extend_from_slice(&VersionedDescriptor::new(d).to_bytes());
+                return vec![(*b"clrL", v)];
+            }
+            // A table with a bad size renders as the identity, so it is written as a 2³
+            // identity cube rather than dropped.
             let n = *size as usize;
             let cube = lut.as_deref().zip(photosplice_doc::adjust::lut3d_len(*size)).and_then(|(table, len)| table.get(..len)).filter(|_| n <= 256);
             let (file, dither) = match cube {
@@ -861,12 +898,12 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
                 .with("tableOrder", en("colorLookupOrder", "bgrOrder"))
                 .with("LUT3DFileData", Value::RawData(photosplice_cms::lutfile::write_cube(&file).into_bytes()))
                 .with("LUT3DFileName", text(name));
-            put16(&mut v, 1);
             v.extend_from_slice(&VersionedDescriptor::new(d).to_bytes());
             return vec![(*b"clrL", v)];
         }
         Adjustment::GradientMap { ink_stops, reverse, dither, .. } if ink_stops.len() >= 2 => {
-            return vec![(*b"grdm", write_gradient_map_inks(ink_stops, *reverse, *dither))];
+            let inks = crate::blocks::thin_stops(ink_stops, crate::blocks::MAX_GRADIENT_STOPS, |c| *c);
+            return vec![(*b"grdm", write_gradient_map_inks(&inks, *reverse, *dither))];
         }
         Adjustment::GradientMap { stops, reverse, dither, .. } => {
             // Photoshop needs two stops; fewer are written as the gradient they render as
@@ -874,7 +911,8 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
             let stops = match stops.as_slice() {
                 [] => vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])],
                 [(_, c)] => vec![(0.0, *c), (1.0, *c)],
-                s => s.to_vec(),
+                // More than Reference takes (it trims a Gradient Map's): thinned.
+                s => crate::blocks::thin_stops(s, crate::blocks::MAX_GRADIENT_STOPS, |c| [c[0], c[1], c[2], 0.0]),
             };
             return vec![(*b"grdm", write_gradient_map(&stops, *reverse, *dither))];
         }
@@ -1571,6 +1609,28 @@ mod tests {
         VersionedDescriptor::new(d).to_bytes()
     }
 
+    /// psd-tools curves_rgb / curves_cmyk / curves_grayscale: Reference's blocks (only the edited
+    /// curves, then the 'Crv ' section, zero-padded to four bytes) come back byte for byte.
+    /// Reference refuses a CMYK block of all five curves, and one padded to two bytes.
+    #[test]
+    fn curves_golden_blocks() {
+        let hex = |s: &str| (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect::<Vec<u8>>();
+        for (channels, block) in [
+            (Channels::Rgb, "0000010000000900040003001a0054003700aa00ab00ff00ff000300000000006e00a700a600ff43727620000400000002000000040003001a0054003700aa00ab00ff00ff0003000300000000006e00a700a600ff000000"),
+            (Channels::Cmyk, "0000010000000b00020000000000ff009f0003000000000064008200ff00ff0004000000000036005800dd00c600ff00ff43727620000400000003000000020000000000ff009f00010003000000000064008200ff00ff00030004000000000036005800dd00c600ff00ff00"),
+            (Channels::Cmyk, "0000010000000e00020000009500ff00ff00040000000000ff0078003600a700ff00ff00040000000000410038007800aa00ff00ff43727620000400000003000100020000009500ff00ff000200040000000000ff0078003600a700ff00ff000300040000000000410038007800aa00ff00ff00"),
+            (Channels::Gray, "0000010000000200020000000000ff009f43727620000400000001000100020000000000ff009f00"),
+            (Channels::Gray, "0000010000000043727620000400000000000000"),
+        ] {
+            let block = hex(block);
+            let a = parse(b"curv", &block, None, channels);
+            let out = write_in(&a, channels);
+            let [(key, data)] = &out[..] else { panic!("{out:?}") };
+            assert_eq!(key, b"curv");
+            assert_eq!(*data, block, "{a:?}");
+        }
+    }
+
     #[test]
     fn vibrance_golden_block() {
         let d = vdesc(Descriptor::new("null").with("vibrance", Value::Integer(-40)).with("Strt", Value::Integer(25)));
@@ -1619,13 +1679,21 @@ mod tests {
                 assert!((s.0 - w.0).abs() < 1e-6 && (0..3).all(|k| (s.1[k] - w.1[k]).abs() < 1e-4), "{s:?} vs {w:?}");
             }
         }
-        // A colour lookup without a (usable) table becomes an identity cube, without dither.
-        for lut in [None, Some(std::sync::Arc::new(vec![0.5; 7]))] {
+        // A colour lookup with a bad table becomes an identity cube, without dither.
+        {
+            let lut = Some(std::sync::Arc::new(vec![0.5; 7]));
             let b = write(&Adjustment::ColorLookup { name: "L".into(), lut, size: 3, tetrahedral: false, dither: true });
             let back = parse(&b[0].0, &b[0].1, None, Channels::Rgb);
             let Adjustment::ColorLookup { lut: Some(t), size: 2, dither: false, name, .. } = back else { panic!("{back:?}") };
             assert_eq!(name, "L");
             assert_eq!(*t, photosplice_cms::lutfile::LutFile::identity(2).data);
+        }
+        // One without a table is written as Reference writes a fresh Color Lookup layer.
+        for (lut, size) in [(None, 3), (Some(std::sync::Arc::new(vec![0.5; 81])), 0)] {
+            let b = write(&Adjustment::ColorLookup { name: "L".into(), lut, size, tetrahedral: false, dither: true });
+            let fresh = [0, 1, 0, 0, 0, 16, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, b'n', b'u', b'l', b'l', 0, 0, 0, 0];
+            assert_eq!(b, vec![(*b"clrL", fresh.to_vec())]);
+            assert!(matches!(parse(b"clrL", &b[0].1, None, Channels::Rgb), Adjustment::ColorLookup { lut: None, size: 0, .. }));
         }
         // Every kind except a malformed Unsupported key has an encoding.
         assert!(write(&Adjustment::Unsupported { psd_key: "abc".into(), raw: vec![] }).is_empty());

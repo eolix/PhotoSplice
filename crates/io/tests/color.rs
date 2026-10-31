@@ -239,6 +239,8 @@ fn gradient_maps_with_cmyk_lab_gray_stops_import_and_keep_their_space() {
     for depth in SampleType::ALL {
         for (mode, stops) in [(ColorMode::Cmyk, (cmyk_stop, paper)), (ColorMode::Lab, (lab_dark, lab_red)), (ColorMode::Grayscale, (gray_white, gray_black))] {
             let block = grdm_block(stops.0, stops.1);
+            // As saved: zero-padded to four bytes inside the block, as Reference writes blocks.
+            let padded = [block.clone(), vec![0; block.len().next_multiple_of(4) - block.len()]].concat();
             let mut doc = Document::new("map", photosplice_geom::Size::new(4, 2), mode, depth);
             if mode == ColorMode::Cmyk {
                 doc.icc_profile = Some(profile.to_bytes());
@@ -275,7 +277,7 @@ fn gradient_maps_with_cmyk_lab_gray_stops_import_and_keep_their_space() {
             assert!(max_diff(&with_map, &photosplice_compose::flatten(&hidden).px) > 0.01, "{mode:?} {depth:?}");
             // Saving again keeps the block (and so the stops' colour space) byte for byte...
             let again = export(&back, "x.psd", &ExportOptions::default()).unwrap().bytes;
-            assert_eq!(saved_grdm(&again), block, "{mode:?} {depth:?}");
+            assert_eq!(saved_grdm(&again), padded, "{mode:?} {depth:?}");
             // ...and so does toggling Reverse and Dither, which only flip their flags.
             if let LayerContent::Adjustment(Adjustment::GradientMap { reverse, dither, .. }) = &mut back.layers[1].content {
                 *reverse = true;
@@ -284,7 +286,7 @@ fn gradient_maps_with_cmyk_lab_gray_stops_import_and_keep_their_space() {
             let flipped_file = export(&back, "x.psd", &ExportOptions::default()).unwrap().bytes;
             let flipped = saved_grdm(&flipped_file);
             assert_eq!(&flipped[2..4], &[1, 1]);
-            assert_eq!(flipped[4..], block[4..], "{mode:?} {depth:?}: stops keep their colour space");
+            assert_eq!(flipped[4..], padded[4..], "{mode:?} {depth:?}: stops keep their colour space");
             let reopened = import("x.psd", &flipped_file).unwrap().document;
             assert_eq!(reopened.layers[1].content, back.layers[1].content);
         }

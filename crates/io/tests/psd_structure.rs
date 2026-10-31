@@ -66,7 +66,9 @@ fn assert_structurally_equal(a: &PsdFile, b: &PsdFile) {
         assert_eq!(ra.fill_opacity(), rb.fill_opacity(), "{n}: fill");
         assert_eq!(ra.is_visible(), rb.is_visible(), "{n}: visible");
         assert_eq!(ra.clipping, rb.clipping, "{n}: clipping");
-        assert_eq!(ra.block(b"lfx2").map(|x| &x.data), rb.block(b"lfx2").map(|x| &x.data), "{n}: lfx2");
+        // Saved blocks are zero-padded to four bytes inside their length, as Reference writes them.
+        let unpadded = |d: &[u8]| d[..d.len() - d.iter().rev().take(3).take_while(|&&x| x == 0).count()].to_vec();
+        assert_eq!(ra.block(b"lfx2").map(|x| unpadded(&x.data)), rb.block(b"lfx2").map(|x| unpadded(&x.data)), "{n}: lfx2");
         if ra.section_type().is_folder() {
             continue;
         }

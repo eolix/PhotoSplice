@@ -411,6 +411,32 @@ pub(crate) fn gradient_desc(stops: &[(f32, Color)], opacity: &[(f32, f32)]) -> D
     gradient_desc_with(stops, opacity, &[])
 }
 
+/// The most colour (or opacity) stops written in a gradient: Reference refuses a gradient fill
+/// with more and takes the layer as plain pixels (psd-tools noise-gradient-* saved with the 1024
+/// stops of a generated noise ramp), and trims a Gradient Map's ("too many color stops"; 128
+/// opened, 200 did not).
+pub(crate) const MAX_GRADIENT_STOPS: usize = 100;
+
+/// `stops` (sorted) cut to at most `max` by repeatedly dropping the inner stop whose removal
+/// changes the ramp least (its distance from the line between its neighbours, in any channel
+/// `value` gives), so the ends and the sharpest turns stay.
+pub(crate) fn thin_stops<T: Clone>(stops: &[(f32, T)], max: usize, value: impl Fn(&T) -> [f32; 4]) -> Vec<(f32, T)> {
+    let mut v = stops.to_vec();
+    let max = max.max(2);
+    while v.len() > max {
+        let cost = |i: usize| -> f32 {
+            let (Some(a), Some(b), Some(c)) = (v.get(i - 1), v.get(i), v.get(i + 1)) else { return f32::MAX };
+            let span = (c.0 - a.0).max(1e-6);
+            let u = ((b.0 - a.0) / span).clamp(0.0, 1.0);
+            let (pa, pb, pc) = (value(&a.1), value(&b.1), value(&c.1));
+            (0..4).map(|k| (pa[k] + (pc[k] - pa[k]) * u - pb[k]).abs()).fold(0.0, f32::max)
+        };
+        let Some(i) = (1..v.len() - 1).min_by(|x, y| cost(*x).total_cmp(&cost(*y))) else { break };
+        v.remove(i);
+    }
+    v
+}
+
 /// [`gradient_desc`] with colour midpoints (one per segment between the sorted stops; each is
 /// stored on the stop that ends its segment, as [`gradient_stops_with`] reads it).
 pub(crate) fn gradient_desc_with(stops: &[(f32, Color)], opacity: &[(f32, f32)], mids: &[f32]) -> Descriptor {
@@ -418,6 +444,24 @@ pub(crate) fn gradient_desc_with(stops: &[(f32, Color)], opacity: &[(f32, f32)],
     if !mids.is_empty() {
         stops.sort_by(|a, b| a.0.total_cmp(&b.0));
     }
+    // More stops than Reference takes (a generated noise ramp): thinned, midpoints dropped (the
+    // dense stops carry the shape).
+    let mids = if stops.len() > MAX_GRADIENT_STOPS {
+        stops.sort_by(|a, b| a.0.total_cmp(&b.0));
+        stops = thin_stops(&stops, MAX_GRADIENT_STOPS, |c| [c.c[0], c.c[1], c.c[2], c.c[3]]);
+        &[][..]
+    } else {
+        mids
+    };
+    let opacity_thinned;
+    let opacity = if opacity.len() > MAX_GRADIENT_STOPS {
+        let mut o = opacity.to_vec();
+        o.sort_by(|a, b| a.0.total_cmp(&b.0));
+        opacity_thinned = thin_stops(&o, MAX_GRADIENT_STOPS, |a| [*a, 0.0, 0.0, 0.0]);
+        &opacity_thinned[..]
+    } else {
+        opacity
+    };
     let clrs = stops
         .iter()
         .enumerate()
@@ -919,6 +963,31 @@ pub fn effects_enabled(lfx2: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A gradient with more stops than Reference takes (a generated noise ramp) is written with
+    /// at most [`super::MAX_GRADIENT_STOPS`], its ends kept and its shape close.
+    #[test]
+    fn gradients_are_written_with_at_most_the_stops_reference_takes() {
+        use photosplice_color::Color;
+        use photosplice_psd::descriptor::Value;
+        let ramp = |t: f32| [(t * 37.0).sin() * 0.5 + 0.5, t, 1.0 - t];
+        let stops: Vec<(f32, Color)> = (0..1024).map(|i| i as f32 / 1023.0).map(|t| (t, { let [r, g, b] = ramp(t); Color::rgb(r, g, b) })).collect();
+        let d = super::gradient_desc(&stops, &[]);
+        let Some(Value::List(clrs)) = d.get("Clrs") else { panic!("{d:?}") };
+        assert_eq!(clrs.len(), super::MAX_GRADIENT_STOPS);
+        let thin = super::thin_stops(&stops, super::MAX_GRADIENT_STOPS, |c| [c.c[0], c.c[1], c.c[2], 0.0]);
+        assert_eq!((thin[0].0, thin[thin.len() - 1].0), (0.0, 1.0), "the ends stay");
+        // Between the kept stops the ramp stays close to the original.
+        for (t, c) in stops.iter().step_by(7) {
+            let i = thin.windows(2).position(|w| w[0].0 <= *t && *t <= w[1].0).unwrap();
+            let (a, b) = (&thin[i], &thin[i + 1]);
+            let u = (t - a.0) / (b.0 - a.0).max(1e-6);
+            let lerp = (0..3).map(|k| a.1.c[k] + (b.1.c[k] - a.1.c[k]) * u);
+            assert!(lerp.zip(c.c).all(|(x, y)| (x - y).abs() < 0.06), "at {t}");
+        }
+        // Few stops are left alone.
+        assert_eq!(super::thin_stops(&stops[..5], 100, |c| [c.c[0], 0.0, 0.0, 0.0]).len(), 5);
+    }
+
     /// Reference 27.11 stores a gradient's method as the enum `gradientsInterpolationMethod`: a
     /// black→white Linear gradient is at 188 of 255 halfway (measured upstream), where Classic
     /// gives 128 (storytold/photocraft@9237a8bd).

@@ -697,7 +697,7 @@ impl Ex {
             Some(true) if lmfx.is_some() => None,
             _ => (!fx.items.is_empty()).then(|| {
                 let template = lmfx.as_ref().or(fx.psd_raw.as_ref()).map(|d| d.as_slice());
-                let (d, multi) = crate::effects_map::write_lfx2_onto(template, fx.enabled, &fx.items);
+                let (d, multi) = crate::effects_map::write_lfx2_onto_at(template, fx.enabled, &fx.items, f64::from(self.dpi));
                 (if multi { *b"lmfx" } else { key }, d)
             }),
         };
@@ -714,12 +714,13 @@ impl Ex {
                 }
             }
         }
-        // Layer-level blocks keep their pad byte inside the length, as Photoshop writes them:
-        // readers such as psd-tools do not skip a pad after an odd length, so a regenerated
-        // odd-length `lfx2` misaligned every block after it (#200).
+        // Layer-level blocks keep their zero padding inside the length, to four bytes, as
+        // Reference writes every one: readers such as psd-tools do not skip a pad after an odd
+        // length, so a regenerated odd-length `lfx2` misaligned every block after it (#200), and
+        // Reference refuses a `curv` padded to two (psd-tools curves_rgb saved by us).
         for b in &mut blocks {
-            if b.data.len() % 2 == 1 && b.padding.is_none() {
-                b.data.push(0);
+            if b.padding.is_none() {
+                b.data.resize(b.data.len().next_multiple_of(4), 0);
             }
         }
         if !l.blend.has_psd_equivalent() {
