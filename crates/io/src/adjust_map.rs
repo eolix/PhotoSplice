@@ -667,6 +667,10 @@ fn parse_black_white(d: &[u8]) -> Option<Adjustment> {
 /// and decodes to #EC8A00); reading them as absolute XYZ gives #FFE03A and #F18600.
 const PHFL_XYZ_ONE: f32 = 32768.0;
 
+/// How far past 0..1 a Photo Filter colour may sit in extended sRGB: Lab's whole range lands
+/// within about ±3 of it.
+const PHFL_RGB_REACH: f32 = 4.0;
+
 fn parse_photo_filter(d: &[u8]) -> Option<Adjustment> {
     let (color, at) = match be16(d, 0)? {
         2 => {
@@ -675,7 +679,16 @@ fn parse_photo_filter(d: &[u8]) -> Option<Adjustment> {
                 return None;
             }
             let c = [be16(d, 4)?, be16(d, 6)?, be16(d, 8)?, be16(d, 10)?];
-            (crate::channel_map::decode_color(space, c).to_rgb(), 12)
+            // A Lab colour stays as stored, outside sRGB if it is (Reference's Warming Filter (85)
+            // is L 67.06, a 32, b 120): the compositors clip it, as Reference renders it, and the
+            // writer gives the same Lab back. Clipped here, a re-save turned b 120 into 72.9.
+            let rgb = if space == 7 {
+                let lab = [f32::from(c[0]) / 100.0, f32::from(c[1] as i16) / 100.0, f32::from(c[2] as i16) / 100.0];
+                photosplice_color::convert::lab_to_srgb_unclamped(lab)
+            } else {
+                crate::channel_map::decode_color(space, c).to_rgb()
+            };
+            (rgb, 12)
         }
         3 => {
             let rel = [be32(d, 2)?, be32(d, 6)?, be32(d, 10)?].map(|v| v as f32 / PHFL_XYZ_ONE);
@@ -693,7 +706,9 @@ fn parse_photo_filter(d: &[u8]) -> Option<Adjustment> {
     };
     let density = (be32(d, at)? as f32 / 100.0).clamp(0.0, 1.0);
     let preserve_luminosity = *d.get(at + 4)? != 0;
-    Some(Adjustment::PhotoFilter { color: color.map(|v| v.clamp(0.0, 1.0)), density, preserve_luminosity })
+    // Finite and within what a Lab colour reaches in extended sRGB; the compositors clip to 0..1.
+    let color = color.map(|v| if v.is_finite() { v.clamp(-PHFL_RGB_REACH, 1.0 + PHFL_RGB_REACH) } else { 0.0 });
+    Some(Adjustment::PhotoFilter { color, density, preserve_luminosity })
 }
 
 /// `mixr` (Adobe spec, "Channel Mixer"): version (1), monochrome (u16), then one 10-byte record
@@ -1001,7 +1016,8 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
             // filter came back yellower, 93 % of pixels up to 17/255 off).
             put16(&mut v, 2);
             put16(&mut v, 7);
-            let lab = photosplice_color::convert::srgb_to_lab(color.map(|x| if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 }));
+            // Unclipped: a Lab colour read outside sRGB is written back as it was.
+            let lab = photosplice_color::convert::srgb_to_lab(color.map(|x| if x.is_finite() { x.clamp(-PHFL_RGB_REACH, 1.0 + PHFL_RGB_REACH) } else { 0.0 }));
             put16(&mut v, (lab[0] * 100.0).round().clamp(0.0, 10000.0) as u16);
             for x in [lab[1], lab[2]] {
                 put16(&mut v, (x * 100.0).round().clamp(-12800.0, 12700.0) as i16 as u16);
@@ -1778,6 +1794,18 @@ mod tests {
 
     fn vdesc(d: Descriptor) -> Vec<u8> {
         VersionedDescriptor::new(d).to_bytes()
+    }
+
+    /// psd-tools fill_adjustments.psd: Reference's Warming Filter (85) stores Lab 67.06 / 32 / 120,
+    /// outside sRGB. It reads back as the same block, and renders clipped as Reference draws it.
+    #[test]
+    fn photo_filter_lab_outside_srgb_round_trips() {
+        let block = [0, 2, 0, 7, 0x1a, 0x32, 0x0c, 0x80, 0x2e, 0xe0, 0, 0, 0, 0, 0, 0x19, 1, 0, 0, 0];
+        let a = parse(b"phfl", &block, None, Channels::Rgb);
+        let Adjustment::PhotoFilter { color, density, preserve_luminosity: true } = &a else { panic!("{a:?}") };
+        assert!(color[2] < 0.0 && (density - 0.25).abs() < 1e-6, "{color:?}");
+        let [(key, data)] = &write(&a)[..] else { panic!() };
+        assert_eq!((key, &data[..]), (b"phfl", &block[..]));
     }
 
     /// psd-tools curves_rgb / curves_cmyk / curves_grayscale: Reference's blocks (only the edited
