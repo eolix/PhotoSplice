@@ -139,6 +139,19 @@ pub fn label(key: &[u8; 4]) -> &'static str {
     }
 }
 
+/// Keys of a Brightness/Contrast `CgEd` descriptor: the ones [`write`] emits plus Reference's
+/// preset bookkeeping.
+const BRIT_CGED_KEYS: [&str; 9] = ["Vrsn", "Brgh", "Cntr", "means", "Lab ", "useLegacy", "Auto", "presetKind", "presetFileName"];
+
+/// Whether a `brit` layer's `CgEd` descriptor holds settings Brightness/Contrast has no place
+/// for. Reference 2026's Light adjustment (Exposure, Contrast, Highlights, Shadows, Whites,
+/// Blacks) is stored under the `brit` key; read as Brightness/Contrast it kept only Contrast and
+/// lost the rest without a word, so such a layer stays [`Adjustment::Unsupported`].
+pub fn is_extended_brit(cged: Option<&[u8]>) -> bool {
+    cged.and_then(|c| VersionedDescriptor::parse_prefix(c).ok())
+        .is_some_and(|(v, _)| v.descriptor.items.iter().any(|(k, _)| !BRIT_CGED_KEYS.iter().any(|n| k.is(n))))
+}
+
 /// Why [`parse`] keeps a block as [`Adjustment::Unsupported`], when there is more to say than
 /// "it could not be read" (so far: Color Lookup).
 pub fn unreadable_reason(key: &[u8; 4], data: &[u8]) -> Option<String> {
@@ -209,6 +222,8 @@ fn parse_any(key: &[u8; 4], data: &[u8], cged: Option<&[u8]>) -> Adjustment {
         b"nvrt" => Some(Adjustment::Invert),
         b"thrs" => be16(data, 0).map(|v| Adjustment::Threshold { level: f32::from(v) / 255.0 }),
         b"post" => be16(data, 0).map(|v| Adjustment::Posterize { levels: u32::from(v) }),
+        // Kept raw (with its `CgEd`, which the PSD writer keeps while the layer is unchanged).
+        b"brit" if is_extended_brit(cged) => None,
         b"brit" => {
             let modern = cged.and_then(|c| VersionedDescriptor::parse_prefix(c).ok()).and_then(|(v, _)| {
                 let d = v.descriptor;
@@ -233,8 +248,10 @@ fn parse_any(key: &[u8; 4], data: &[u8], cged: Option<&[u8]>) -> Adjustment {
                     *r = HueRange { hue: h, saturation: s, lightness: l, bounds: HueRange::canonical_bounds([a, b, c, d]) };
                 }
             }
+            let hue = f32::from(bei16(data, base)?);
             Some(Adjustment::HueSaturation {
-                hue: f32::from(bei16(data, base)?),
+                // Reference stores the colorize hue signed (200 as -160); the model keeps 0..360.
+                hue: if colorize { hue.rem_euclid(360.0) } else { hue },
                 saturation: f32::from(bei16(data, base + 2)?),
                 lightness: f32::from(bei16(data, base + 4)?),
                 colorize,
@@ -409,6 +426,10 @@ fn patch_gradient_map_colors(v: &mut [u8], channels: Channels) {
 /// leaves `data` untouched.
 pub(crate) fn retarget_gradient_map(data: &mut [u8], target: &Adjustment, channels: Channels) -> bool {
     let Adjustment::GradientMap { stops, reverse, dither, ink_stops } = target else { return false };
+    // An older build's unaligned block is regenerated, not patched.
+    if is_unpadded_legacy_gradient_map(data) {
+        return false;
+    }
     // CMYK ink stops (a CMYK document's map) must be unchanged too: they are what is written.
     let same_stops = matches!(parse(b"grdm", data, None, channels), Adjustment::GradientMap { stops: s, ink_stops: k, .. } if s == *stops && k == *ink_stops);
     match (same_stops, data.get_mut(2..4)) {
@@ -419,6 +440,23 @@ pub(crate) fn retarget_gradient_map(data: &mut [u8], target: &Adjustment, channe
         }
         _ => false,
     }
+}
+
+/// `true` for a `grdm` block exactly as older PhotoSplice builds wrote it: [`write_gradient_map`]'s
+/// layout ending in two zero bytes after the colour limits instead of four, which makes Reference
+/// refuse the file. Matched on the fixed name and tail, so blocks written in any document space
+/// are found; Reference's own blocks (and other writers'), whatever their length, are not.
+pub(crate) fn is_unpadded_legacy_gradient_map(data: &[u8]) -> bool {
+    if data.len().is_multiple_of(4) || be16(data, 0) != Some(1) {
+        return false;
+    }
+    // The fixed head ("Custom" and its NUL, 7 UTF-16 units), the stops, then the fixed tail.
+    let empty = write_gradient_map(&[], false, false);
+    let head = 4 + 4 + 7 * 2;
+    let (Some(name), Some(tail)) = (empty.get(4..head), empty.get(head + 2..empty.len().saturating_sub(2))) else { return false };
+    let Some(n) = be16(data, head) else { return false };
+    let tail_at = head + 2 + usize::from(n) * 20;
+    data.get(4..head) == Some(name) && data.get(tail_at..) == Some(tail)
 }
 
 /// `grdm` version 1 for [`Adjustment::GradientMap`] (Classic interpolation, Smoothness 0, so
@@ -537,6 +575,14 @@ fn read_lookup(d: &[u8]) -> Result<Adjustment, String> {
         _ => ("x.cube", "CUBE"),
     };
     let lut = photosplice_cms::lutfile::parse(ext, bytes).map_err(|e| format!("its {format} LUT can't be read ({e})"))?;
+    // The model's table samples 0..1 inputs: a custom domain stays raw rather than render wrong
+    // and be rewritten with the default domain.
+    if !lut.domain_is_default() {
+        return Err(format!(
+            "its LUT has a non-default input domain (DOMAIN_MIN {:?}, DOMAIN_MAX {:?}), which is not supported yet",
+            lut.domain_min, lut.domain_max
+        ));
+    }
     Ok(Adjustment::ColorLookup { name, size: lut.size as u32, lut: Some(std::sync::Arc::new(lut.data)), tetrahedral: false, dither })
 }
 
@@ -775,10 +821,16 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
             put16(&mut v, 2);
             v.push(u8::from(*colorize));
             v.push(0);
-            for _ in 0..2 {
-                for x in [hue, saturation, lightness] {
-                    v.extend_from_slice(&clamp_i16(*x).to_be_bytes());
-                }
+            // The colorize triplet, then the master triplet. The inactive one gets Reference's
+            // defaults; the colorize hue (0..360 in the model) is stored signed, -180..180.
+            let (colorize_hsl, master) = if *colorize {
+                let h = hue.rem_euclid(360.0);
+                ([if h > 180.0 { h - 360.0 } else { h }, *saturation, *lightness], [0.0; 3])
+            } else {
+                ([30.0, 25.0, 0.0], [*hue, *saturation, *lightness])
+            };
+            for x in colorize_hsl.into_iter().chain(master) {
+                v.extend_from_slice(&clamp_i16(x).to_be_bytes());
             }
             // Six hue ranges (reds, yellows, greens, cyans, blues, magentas): range values in
             // 0..360, then the range's hue, saturation and lightness.
@@ -1273,6 +1325,125 @@ mod tests {
         let cged = blocks.iter().find(|b| &b.0 == b"CgEd").map(|b| &b.1[..]);
         let back = parse(&blocks[0].0, &blocks[0].1, cged, Channels::Rgb);
         assert_eq!(back, a);
+    }
+
+    /// Reference keeps the colorize triplet at byte 4 and the master triplet at byte 10, and fills
+    /// the inactive one with its defaults: colorize (30, 25, 0), master (0, 0, 0). The colorize hue
+    /// is stored signed (200 -> -160).
+    #[test]
+    fn hue2_writes_each_triplet_in_its_own_slot() {
+        let triplets = |a: &Adjustment| -> Vec<i16> {
+            let blocks = write(a);
+            (0..6).map(|i| bei16(&blocks[0].1, 4 + 2 * i).unwrap_or(i16::MIN)).collect()
+        };
+        let on = Adjustment::HueSaturation { hue: 200.0, saturation: 40.0, lightness: 10.0, colorize: true, ranges: HueRange::defaults() };
+        assert_eq!(triplets(&on), [-160, 40, 10, 0, 0, 0]);
+        let off = Adjustment::HueSaturation { hue: -30.0, saturation: 20.0, lightness: 5.0, colorize: false, ranges: HueRange::defaults() };
+        assert_eq!(triplets(&off), [30, 25, 0, -30, 20, 5]);
+    }
+
+    /// Reference 2026's Light layer is a `brit` block whose `CgEd` descriptor carries more than
+    /// Brightness/Contrast: it stays unsupported and both blocks are saved back byte for byte.
+    /// Synthetic block: the extra key names are placeholders.
+    #[test]
+    fn light_adjustment_is_kept_verbatim() {
+        use photosplice_doc::{ColorMode, Document, Layer, LayerContent, SampleType};
+        use photosplice_psd::PsdFile;
+        let brit = vec![0, 0, 0xff, 0xfe, 0, 127, 0, 0];
+        let d = Descriptor::new("null")
+            .with("Vrsn", Value::Integer(1))
+            .with("Brgh", Value::Integer(0))
+            .with("Cntr", Value::Integer(-2))
+            .with("Exps", Value::Double(-2.3))
+            .with("Hghl", Value::Integer(-64))
+            .with("useLegacy", Value::Boolean(false));
+        // Padded to 4 inside its length, as Reference writes layer blocks.
+        let mut cged = VersionedDescriptor::new(d).to_bytes();
+        cged.resize(cged.len().next_multiple_of(4), 0);
+        let adjustment = parse(b"brit", &brit, Some(&cged), Channels::Rgb);
+        assert_eq!(adjustment, Adjustment::Unsupported { psd_key: "brit".into(), raw: brit.clone() });
+        let mut doc = Document::with_background("Light", photosplice_geom::Size::new(8, 8), ColorMode::Rgb, SampleType::U8, photosplice_doc::Color::WHITE);
+        let mut layer = Layer::new("Light 1", LayerContent::Adjustment(adjustment));
+        layer.psd_blocks = vec![(*b"brit", std::sync::Arc::new(brit.clone())), (*b"CgEd", std::sync::Arc::new(cged.clone()))];
+        doc.layers.push(layer);
+        let block = |file: &PsdFile, key: &[u8; 4]| {
+            let records = &file.layer_info.as_ref().unwrap().layers;
+            records.iter().flat_map(|r| r.blocks.iter()).find(|b| b.key == *key).map(|b| b.data.clone())
+        };
+        let file = PsdFile::from_bytes(&crate::psd_export::document_to_psd(&doc).to_bytes().unwrap()).unwrap();
+        let (restored, warnings) = crate::psd_import::psd_to_document(&file);
+        assert!(warnings.iter().any(|w| w.contains("\"Light 1\"")), "{warnings:?}");
+        // Saved again unchanged, both blocks are written back byte for byte.
+        let again = PsdFile::from_bytes(&crate::psd_export::document_to_psd(&restored).to_bytes().unwrap()).unwrap();
+        assert_eq!(block(&again, b"brit").as_deref(), Some(&brit[..]));
+        assert_eq!(block(&again, b"CgEd").as_deref(), Some(&cged[..]));
+        // A plain Brightness/Contrast descriptor (ours, Lab or not) still reads as Brightness/Contrast.
+        for lab in [false, true] {
+            let plain = brightness_contrast_blocks(5.0, -2.0, false, lab);
+            assert!(!is_extended_brit(Some(&plain[1].1)));
+        }
+    }
+
+    fn cube_lookup_block(cube: &[u8]) -> Vec<u8> {
+        let en = |t: &str, val: &str| Value::Enumerated { type_id: photosplice_psd::descriptor::Id::new(t), value: photosplice_psd::descriptor::Id::new(val) };
+        let desc = Descriptor::new("null")
+            .with("LUTFormat", en("LUTFormatType", "LUTFormatCUBE"))
+            .with("LUT3DFileName", Value::Text(photosplice_psd::descriptor::UnicodeString::new_nul("domain.cube")))
+            .with("LUT3DFileData", Value::RawData(cube.to_vec()));
+        let mut block = vec![0, 1];
+        block.extend(VersionedDescriptor::new(desc).to_bytes());
+        block
+    }
+
+    fn identity_cube(domain: &str) -> Vec<u8> {
+        format!("{domain}LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n").into_bytes()
+    }
+
+    #[test]
+    fn color_lookup_custom_domains_are_kept_unsupported() {
+        let domains = ["DOMAIN_MIN 0 0 0\nDOMAIN_MAX 0.5 0.5 0.5\n", "DOMAIN_MIN 0 0.25 0\nDOMAIN_MAX 1 0.75 1\n", "LUT_3D_INPUT_RANGE 0 0.5\n"];
+        for domain in domains {
+            let raw = cube_lookup_block(&identity_cube(domain));
+            let Adjustment::Unsupported { psd_key, raw: kept } = parse(b"clrL", &raw, None, Channels::Rgb) else {
+                panic!("custom LUT domain was applied instead of kept unsupported: {domain}")
+            };
+            assert_eq!(psd_key, "clrL");
+            assert_eq!(kept, raw);
+            let reason = unreadable_reason(b"clrL", &raw).expect("custom domain has an explanation");
+            assert!(reason.contains("DOMAIN_MIN") && reason.contains("DOMAIN_MAX"), "{reason}");
+            assert!(reason.to_ascii_lowercase().contains("not supported"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn color_lookup_default_domains_stay_supported() {
+        for domain in ["", "DOMAIN_MIN 0 0 0\nDOMAIN_MAX 1 1 1\n"] {
+            let raw = cube_lookup_block(&identity_cube(domain));
+            assert!(matches!(parse(b"clrL", &raw, None, Channels::Rgb), Adjustment::ColorLookup { size: 2, .. }));
+            assert_eq!(unreadable_reason(b"clrL", &raw), None);
+        }
+    }
+
+    /// Only an older build's own unaligned `grdm` is matched: not today's block, nor one with
+    /// another tail or name, in any document space.
+    #[test]
+    fn legacy_gradient_map_detection_matches_only_old_output() {
+        let stops = vec![(0.0, [0.1, 0.2, 0.3]), (1.0, [1.0; 3])];
+        let a = Adjustment::GradientMap { stops, reverse: true, dither: false, ink_stops: Vec::new() };
+        for channels in [Channels::Rgb, Channels::Gray, Channels::Lab] {
+            let [(_, data)] = write_in(&a, channels).try_into().unwrap();
+            assert!(!is_unpadded_legacy_gradient_map(&data), "{channels:?}");
+            let old = &data[..data.len() - 2];
+            assert!(is_unpadded_legacy_gradient_map(old), "{channels:?}");
+            let mut renamed = old.to_vec();
+            renamed[9] = b'D';
+            assert!(!is_unpadded_legacy_gradient_map(&renamed), "{channels:?}");
+            let mut tail = old.to_vec();
+            *tail.last_mut().unwrap() = 1;
+            assert!(!is_unpadded_legacy_gradient_map(&tail), "{channels:?}");
+        }
+        assert!(!is_unpadded_legacy_gradient_map(&[0, 1, 0]));
+        assert!(!is_unpadded_legacy_gradient_map(&[]));
     }
 
     #[test]

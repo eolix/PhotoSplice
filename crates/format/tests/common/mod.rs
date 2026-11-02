@@ -160,6 +160,8 @@ pub fn rich_doc(mode: ColorMode, depth: SampleType) -> Document {
             align_edges: false,
             cache: Some(cache.clone()),
             psd_raw: Some(blob(10, 30)),
+            density: 1.0,
+            feather: 0.0,
         }),
     );
     shape.label = LabelColor::Green;

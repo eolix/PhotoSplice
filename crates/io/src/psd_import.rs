@@ -53,6 +53,9 @@ pub(crate) struct Ctx<'a> {
     pub cc: usize,
     pub cmyk: bool,
     pub warnings: Vec<String>,
+    /// The import lost source data that cannot be written back to PSD/PSB: a save must not
+    /// replace the damaged original (storytold/photocraft@aa1a77b9).
+    pub unsafe_for_editing: bool,
     /// Document resolution (type sizes are converted to points with it).
     pub dpi: f32,
     /// The parsed `Txt2` block (type settings EngineData lacks, e.g. optical kerning).
@@ -90,9 +93,20 @@ fn selected_real_mask(rec: &LayerRecord) -> Option<photosplice_psd::RealMask> {
     rec.layer_mask()?.real
 }
 
+/// The (density, feather) a shape layer's mask parameters give its path, which is its vector
+/// mask: (1, 0) without them.
+fn shape_mask_params(rec: &LayerRecord) -> (f32, f32) {
+    let p = rec.layer_mask().and_then(|m| m.parameters);
+    let density = p.and_then(|p| p.vector_density).map_or(1.0, |d| f32::from(d) / 255.0);
+    let feather = p.and_then(|p| p.vector_feather).filter(|f| f.is_finite()).map_or(0.0, |f| (f as f32).clamp(0.0, 1000.0));
+    (density, feather)
+}
+
 /// The fill of a plain shape layer (fill block + vector path, no stroke) to import as a fill layer
 /// with a vector mask: when its mask parameters give the vector mask a density below 100 % or a
-/// feather, or when it stores no pixels and fills with a pattern.
+/// feather (`.1` true), or when it fills with a pattern. A soft one renders exactly as before the
+/// shape model had a density and feather (the compositor's vector mask, the fill unquantized:
+/// psd-tools layer_mask_data.psd); stroked soft shapes stay shapes with that density and feather.
 fn soft_shape_fill(rec: &LayerRecord, has_vector: bool, fill_key: Option<&[u8; 4]>) -> Option<(photosplice_doc::Fill, bool)> {
     if !has_vector || rec.block(b"vstk").is_some() || rec.block(b"vscg").is_some() {
         return None;
@@ -150,6 +164,12 @@ impl Ctx<'_> {
         self.warnings.push(s.into());
     }
 
+    /// [`Self::warn`] for source data the import could not read (see `unsafe_for_editing`).
+    fn warn_unreadable_data(&mut self, s: impl Into<String>) {
+        self.unsafe_for_editing = true;
+        self.warn(s);
+    }
+
     /// Source id, transform, (Distort/Perspective) projective placement and warp of a placed
     /// layer that has only a `PlLd` block, as CS2 and older write it. `PlLd` stores the placed
     /// corners but not the source size, which comes from the embedded file
@@ -186,7 +206,7 @@ impl Ctx<'_> {
         match rec.decode_channel(id, self.file.header.depth, self.file.header.version) {
             Ok(p) => Some(p),
             Err(e) => {
-                self.warn(format!("layer \"{name}\": channel {id} could not be decoded ({e}); treated as empty"));
+                self.warn_unreadable_data(format!("layer \"{name}\": channel {id} could not be decoded ({e}); treated as empty"));
                 None
             }
         }
@@ -219,7 +239,7 @@ impl Ctx<'_> {
             let mut planes: Vec<Option<Vec<u8>>> = Vec::with_capacity(decoded.len());
             for (&id, p) in ids.iter().zip(decoded) {
                 if p.is_none() && rec.channel(id).is_some() {
-                    self.warn(format!("layer \"{name}\": channel {id} could not be decoded; treated as empty"));
+                    self.warn_unreadable_data(format!("layer \"{name}\": channel {id} could not be decoded; treated as empty"));
                 }
                 planes.push(p);
             }
@@ -488,9 +508,13 @@ impl Ctx<'_> {
             let mut sh = ShapeLayer { fill, cache: Some(self.record_surface(rec, &name)), psd_raw: vector_key.and_then(principal), ..Default::default() };
             let lookup = |k: &[u8; 4]| rec.block(k).map(|b| b.data.clone());
             crate::vector_map::shape_from_blocks(&mut sh, &lookup, self.file.header.width, self.file.header.height, self.dpi);
+            (sh.density, sh.feather) = shape_mask_params(rec);
             // No stored pixels (32-bit documents, files saved without layer pixels): render the
-            // shape from its path and fill, as Photoshop does when it opens the file.
-            if (rec.rect.is_empty() || rec.rect.size().is_err()) && (!sh.path.subpaths.is_empty() || sh.path.inverted) {
+            // shape from its path and fill, as Reference does when it opens the file. A soft
+            // shape's stored pixels hold the shape alone, without the fill its density and feather
+            // show beyond the path: render it too.
+            let soft = sh.has_soft_mask() && sh.fill.is_some();
+            if soft || ((rec.rect.is_empty() || rec.rect.size().is_err()) && (!sh.path.subpaths.is_empty() || sh.path.inverted)) {
                 let canvas = Rect::new(0, 0, self.file.header.width as i32, self.file.header.height as i32);
                 sh.cache = Some(photosplice_vector::render_shape(&sh, self.fmt, canvas));
             }
@@ -509,6 +533,15 @@ impl Ctx<'_> {
                     LayerContent::Raster(self.record_surface(rec, &name))
                 }
             }
+        } else if let Some(k) = unknown_adjustment_key(rec) {
+            // An adjustment type no mapper knows: kept verbatim like an unreadable one, not
+            // opened as an empty pixel layer without a word (storytold/photocraft#6575).
+            let key = String::from_utf8_lossy(&k).into_owned();
+            self.warn(format!(
+                "layer \"{name}\": its adjustment settings could not be read (unknown adjustment type \"{key}\"); the layer is kept as saved but has no effect"
+            ));
+            let raw = rec.block(&k).map(|b| b.data.clone()).unwrap_or_default();
+            LayerContent::Adjustment(photosplice_doc::Adjustment::Unsupported { psd_key: key, raw })
         } else {
             LayerContent::Raster(self.record_surface(rec, &name))
         };
@@ -587,7 +620,9 @@ impl Ctx<'_> {
                     let sd = rec.section_divider();
                     let expanded = sd.is_none_or(|s| s.kind != photosplice_psd::SectionType::ClosedFolder);
                     let artboard = crate::comps_map::ARTBOARD_KEYS.iter().find_map(|k| rec.block(k)).and_then(|b| crate::comps_map::parse_artboard(&b.data));
-                    let mut l = Layer::new(rec.name(), LayerContent::Group(Group { children, expanded, artboard, divider_blocks }));
+                    // A Reference Frame's stroke: `vstk` on the frame group, in a shape's layout.
+                    let frame_stroke = rec.block(b"vstk").and_then(|b| crate::vector_map::parse_vstk(&b.data, self.dpi)).and_then(|v| v.stroke);
+                    let mut l = Layer::new(rec.name(), LayerContent::Group(Group { children, expanded, artboard, divider_blocks, frame_stroke }));
                     l.psd_blocks = preserved_blocks(rec);
                     self.apply_common(&mut l, rec, sd.and_then(|s| s.blend_mode));
                     self.apply_vector_mask(&mut l, rec);
@@ -647,6 +682,84 @@ pub(crate) fn group_depth(file: &PsdFile) -> usize {
     depth
 }
 
+/// Whether `file` stores its spot planes the way earlier builds wrote them: straight (the maximum
+/// = solid ink), the opposite of Reference, which stores 0 = solid ink in every PSD it saves
+/// (storytold/photocraft@b92ac6fa, measured in Reference 27.11). Their files are recognised by
+/// three things together:
+///
+/// - DisplayInfo (1077) marks at least one spot channel;
+/// - the version info (1057) is byte for byte what those builds wrote: writer "Adobe Photoshop"
+///   with reader "Adobe Photoshop CS6", both NUL-terminated (PhotoSplice 0.9.18, PhotoCraft
+///   0.1.0 to 0.7.0), reader "Adobe Photoshop 2020" without a NUL (PhotoSplice since), or
+///   "Adobe Photoshop 2026" without a NUL (PhotoCraft 0.8.2 to 0.11.1), either merged-data flag;
+/// - there is no Alpha Identifiers resource (1053), or one numbered as those builds numbered a
+///   new document's channels: the merged transparency's 0 first, then ids from 1 up to the
+///   channel count. Reference numbers its channels from 3 up (27.11; its corpus files list 3, 2
+///   or 6, 7, 8), and so does a save now. A Reference file that an earlier build opened and
+///   saved kept Reference's 1053 and its planes as Reference stored them, so it is read in
+///   Reference's polarity too.
+///
+/// Keeping these files' ink is the only reason this exists: deleting it (and its one caller)
+/// reads every file in Reference's polarity, at the cost of inverting the spot ink of PSDs saved
+/// by those builds.
+pub(crate) fn earlier_spot_planes(file: &PsdFile) -> bool {
+    use photosplice_psd::descriptor::UnicodeString;
+    use photosplice_psd::resources::VersionInfo;
+
+    let marks_spot = file.resource(crate::channel_map::DISPLAY_INFO).is_some_and(|r| crate::channel_map::display_info_marks_spot(&r.data));
+    if !marks_spot {
+        return false;
+    }
+    if let Some(r) = file.resource(ids::ALPHA_IDS) {
+        let ids: Vec<u32> = r.data.chunks_exact(4).map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let user = ids.strip_prefix(&[0]).unwrap_or(&ids);
+        let mut seen = std::collections::HashSet::new();
+        let ours = r.data.len() % 4 == 0 && user.iter().all(|&i| i >= 1 && usize::try_from(i).is_ok_and(|i| i <= user.len()) && seen.insert(i));
+        if !ours {
+            return false;
+        }
+    }
+    let Some(r) = file.resource(ids::VERSION_INFO) else { return false };
+    // Byte for byte: a resource with anything after the fields is someone else's.
+    let Ok(v) = VersionInfo::from_bytes(&r.data) else { return false };
+    if v.to_bytes() != r.data {
+        return false;
+    }
+    let writers = [
+        (UnicodeString::new_nul("Adobe Photoshop"), UnicodeString::new_nul("Adobe Photoshop CS6")),
+        (UnicodeString::new("Adobe Photoshop"), UnicodeString::new("Adobe Photoshop 2020")),
+        (UnicodeString::new("Adobe Photoshop"), UnicodeString::new("Adobe Photoshop 2026")),
+    ];
+    v.version == 1 && v.file_version == 1 && writers.iter().any(|(writer, reader)| v.writer == *writer && v.reader == *reader)
+}
+
+/// Additional-layer-information keys (Adobe PSD spec, plus `cust`, `vowv` and `SoLE` seen in
+/// Reference's files) that are not an adjustment of their own: names, ids, locks, effects,
+/// masks, metadata, and the fill, type, placed and shape content read before.
+const LAYER_INFO_KEYS: [&[u8; 4]; 50] = [
+    b"luni", b"lyid", b"lnsr", b"lsct", b"lsdk", b"lspf", b"lclr", b"iOpa", b"clbl", b"infx", b"knko", b"tsly", b"lmgm", b"vmgm", b"brst", b"shmd", b"fxrp",
+    b"lfx2", b"lfxs", b"lmfx", b"lrFX", b"lyvr", b"sn2P", b"cust", b"CgEd", b"vmsk", b"vsms", b"vogk", b"vowv", b"vstk", b"vscg", b"artb", b"artd", b"abdd",
+    b"FMsk", b"PxSc", b"PxSD", b"cinf", b"ffxi", b"shpa", b"anFX", b"SoCo", b"GdFl", b"PtFl", b"TySh", b"tySh", b"SoLd", b"SoLE", b"PlLd", b"plLd",
+];
+
+/// The key of an adjustment layer whose type no mapper knows (storytold/photocraft#6575), e.g.
+/// Reference 4's `hue ` or a type newer than PhotoSplice. Reference writes every adjustment
+/// layer without pixels and with "pixel data irrelevant" set (every one in the corpus; pixel,
+/// type and smart layers never have it). Such a record that is not a group and carries exactly
+/// one block that is neither a known layer-information key nor a known adjustment is that
+/// adjustment. More than one candidate is a guess, so the layer stays an (empty) pixel layer;
+/// either way no pixels can be lost and the block is saved back verbatim.
+fn unknown_adjustment_key(rec: &LayerRecord) -> Option<[u8; 4]> {
+    let marked = rec.flags.bit4_useful() && rec.flags.pixel_data_irrelevant();
+    if !marked || !rec.rect.is_empty() || rec.block(b"lsct").is_some() || rec.block(b"lsdk").is_some() {
+        return None;
+    }
+    let mut unknown = rec.blocks.iter().filter(|b| !LAYER_INFO_KEYS.contains(&&b.key) && !ADJUSTMENT_KEYS.contains(&&b.key));
+    let only = unknown.next()?;
+    // A key that isn't four printable ASCII bytes names no adjustment (nor saves back as one).
+    (unknown.next().is_none() && only.key.iter().all(|c| c.is_ascii_graphic() || *c == b' ')).then_some(only.key)
+}
+
 fn preserved_blocks(rec: &LayerRecord) -> Vec<([u8; 4], Arc<Vec<u8>>)> {
     rec.blocks.iter().filter(|b| !REGENERATED.contains(&&b.key)).map(|b| (b.key, Arc::new(b.data.clone()))).collect()
 }
@@ -654,10 +767,6 @@ fn preserved_blocks(rec: &LayerRecord) -> Vec<([u8; 4], Arc<Vec<u8>>)> {
 /// A group's end divider's blocks, its layer id (`lyid`) included: export reuses it.
 fn divider_preserved(rec: &LayerRecord) -> Vec<([u8; 4], Arc<Vec<u8>>)> {
     rec.blocks.iter().filter(|b| &b.key == b"lyid" || !REGENERATED.contains(&&b.key)).map(|b| (b.key, Arc::new(b.data.clone()))).collect()
-}
-
-fn be_to_ne_plane(plane: &[u8], s: SampleType, n: usize) -> Vec<u8> {
-    interleave(&[Some(plane)], &[zero_sample(s)], n, s, &[false])
 }
 
 /// Plane `i` of a decoded merged image whose planes are `plane` bytes each, or `None` when it is
@@ -845,6 +954,16 @@ pub(crate) fn psd_to_document_decoded(
     ctl: &photosplice_raster::Interrupt,
     decoded: Option<photosplice_psd::Result<Vec<u8>>>,
 ) -> Option<(Document, Vec<String>)> {
+    psd_to_document_decoded_integrity(file, ctl, decoded).map(|(document, warnings, _)| (document, warnings))
+}
+
+/// [`psd_to_document_decoded`], also reporting whether channel, layer or merged-image data that
+/// could not be read was discarded: such a document must not be saved over its source.
+pub(crate) fn psd_to_document_decoded_integrity(
+    file: &PsdFile,
+    ctl: &photosplice_raster::Interrupt,
+    decoded: Option<photosplice_psd::Result<Vec<u8>>>,
+) -> Option<(Document, Vec<String>, bool)> {
     let h = &file.header;
     let mut warnings = Vec::new();
     let mode = doc_mode(h.color_mode).unwrap_or_else(|| {
@@ -927,6 +1046,7 @@ pub(crate) fn psd_to_document_decoded(
             id => doc.metadata.psd_resources.push((id, String::from_utf8_lossy(&r.name).into_owned(), Arc::new(r.data.clone()))),
         }
     }
+    crate::guides_map::apply_colors(&mut doc);
     for b in &file.global_blocks {
         doc.metadata.psd_global_blocks.push((b.signature, b.key, Arc::new(b.data.clone())));
     }
@@ -939,6 +1059,7 @@ pub(crate) fn psd_to_document_decoded(
     // A 16/32-bit file whose layer block can't be parsed would otherwise open as a flattened
     // file without a word (#2700). The raw block is kept, but a PSD save writes the document's
     // own layers in its place (see `psd_export`).
+    let unsafe_for_editing = file.unreadable_layer_block().is_some();
     if let Some((b, e)) = file.unreadable_layer_block() {
         warnings.push(format!(
             "the layers ({} block) could not be read ({e}); only the merged image was opened. Saving as PSD replaces the unreadable layer data",
@@ -963,6 +1084,7 @@ pub(crate) fn psd_to_document_decoded(
         cc,
         cmyk: fmt.mode == ColorMode::Cmyk,
         warnings,
+        unsafe_for_editing,
         dpi: doc.resolution_dpi,
         txt2: file.global_blocks.iter().find(|b| &b.key == b"Txt2").and_then(|b| photosplice_text::psd::parse_txt2(&b.data)),
         filter_effects: Vec::new(),
@@ -1005,9 +1127,9 @@ pub(crate) fn psd_to_document_decoded(
         }
         ctl.progress(0.1);
         if let Err(e) = &m {
-            cx.warn(format!("merged image could not be decoded: {e}"));
+            cx.warn_unreadable_data(format!("merged image could not be decoded: {e}"));
             if can_recover_layers(file) {
-                cx.warn("extra alpha/spot channels in the merged image could not be recovered");
+                cx.warn_unreadable_data("extra alpha/spot channels in the merged image could not be recovered");
             }
         }
         Some(m)
@@ -1019,11 +1141,17 @@ pub(crate) fn psd_to_document_decoded(
     };
 
     if h.color_mode == PsdMode::Duotone && !file.color_mode_data.is_empty() {
-        // The duotone ink block is undocumented (the spec says to treat the image as gray and
-        // keep the block): kept raw and written back; the image shows as its gray plate.
-        doc.duotone =
-            Some(photosplice_doc::Duotone { inks: vec![photosplice_doc::DuotoneInk::new("Black", [0.0; 3])], psd_raw: Some(file.color_mode_data.clone()) });
-        cx.warn("duotone inks are not interpreted (shown as grayscale)");
+        // The inks (`duotone_map`); the block is also kept raw, written back while they stay
+        // unedited. An ink whose colour is unknown (a colour book without its Lab equivalent)
+        // would show black and darken the image: the gray plate is shown instead.
+        let mut unknown = false;
+        let alternate = file.resource(crate::duotone_map::ALTERNATE_DUOTONE_COLORS).map(|r| r.data.as_slice());
+        let inks = crate::duotone_map::parse(&file.color_mode_data, alternate, &mut unknown).filter(|_| !unknown);
+        if inks.is_none() {
+            cx.warn("duotone inks are not interpreted (shown as grayscale)");
+        }
+        let inks = inks.unwrap_or_else(|| vec![photosplice_doc::DuotoneInk::new("Black", [0.0; 3])]);
+        doc.duotone = Some(photosplice_doc::Duotone { inks, psd_raw: Some(file.color_mode_data.clone()) });
     }
     if multichannel {
         // Ink channels only (no layers); see `multichannel_map`.
@@ -1140,7 +1268,7 @@ pub(crate) fn psd_to_document_decoded(
             }
             // A merged image that failed to decode was reported above.
             Err(_) if matches!(merged, Some(Err(_))) => {}
-            Err(e) => cx.warn(format!("the image could not be read: {e}")),
+            Err(e) => cx.warn_unreadable_data(format!("the image could not be read: {e}")),
         }
     }
 
@@ -1160,10 +1288,30 @@ pub(crate) fn psd_to_document_decoded(
                     || names.len() == usize::from(h.channels).saturating_sub(cc)),
         );
         let names = names.get(skip..).unwrap_or_default();
+        // Which planes hold spot ink in Reference's polarity (0 = solid ink): the DisplayInfo
+        // records the channel options are read from below, the transparency's first when `skip`
+        // is 1. A file from an earlier build stores them straight and is read as it was written.
+        let legacy = earlier_spot_planes(file);
+        let reference_spots = if legacy {
+            Vec::new()
+        } else if let Some(r) = file.resource(crate::channel_map::DISPLAY_INFO) {
+            crate::channel_map::spot_flags(&r.data, true, skip)
+        } else if let Some(r) = file.resource(crate::channel_map::DISPLAY_INFO_OLD) {
+            crate::channel_map::spot_flags(&r.data, false, skip)
+        } else {
+            Vec::new()
+        };
+        if legacy {
+            // Its 1053 numbers the channels as those builds did, which is how the file was told
+            // apart: a save numbers them afresh, so the file it writes is read in Reference's
+            // polarity.
+            doc.metadata.psd_resources.retain(|(id, ..)| *id != ids::ALPHA_IDS);
+        }
         for (k, idx) in (first..usize::from(h.channels)).enumerate() {
             let Some(p) = merged_plane(all, idx, plane) else { break };
             let mut s = Surface::new(cx.mask_fmt);
-            s.write_interleaved(canvas, &be_to_ne_plane(p, depth, n));
+            let spot = reference_spots.get(k).copied().unwrap_or(false);
+            s.write_interleaved(canvas, &interleave(&[Some(p)], &[zero_sample(depth)], n, depth, &[spot]));
             s.prune();
             let name = names.get(k).cloned().unwrap_or_else(|| format!("Alpha {}", k + 1));
             doc.channels.push(AlphaChannel::new(name, s));
@@ -1199,7 +1347,7 @@ pub(crate) fn psd_to_document_decoded(
         return None;
     }
     ctl.progress(1.0);
-    Some((doc, cx.warnings))
+    Some((doc, cx.warnings, cx.unsafe_for_editing))
 }
 
 #[cfg(test)]
@@ -1250,5 +1398,192 @@ mod tests {
         assert_eq!(merged_plane(&all, 1, 2), Some(&[3u8, 4][..]));
         assert_eq!(merged_plane(&all, 2, 2), None);
         assert_eq!(merged_plane(&all, usize::MAX, 2), None);
+    }
+
+    use photosplice_psd::descriptor::UnicodeString;
+    use photosplice_psd::resources::VersionInfo;
+    use photosplice_psd::{ImageData, ImageResource};
+
+    /// Resource 1057's data.
+    fn version_info(writer: UnicodeString, reader: UnicodeString, has_real_merged_data: bool) -> Vec<u8> {
+        VersionInfo { version: 1, has_real_merged_data, writer, reader, file_version: 1 }.to_bytes()
+    }
+
+    /// The 1057 PhotoSplice 0.9.18 (and PhotoCraft 0.1.0 to 0.7.0) wrote: CS6's names, NUL-terminated.
+    fn version_info_cs6(has_real_merged_data: bool) -> Vec<u8> {
+        version_info(UnicodeString::new_nul("Adobe Photoshop"), UnicodeString::new_nul("Adobe Photoshop CS6"), has_real_merged_data)
+    }
+
+    /// The 1057 PhotoSplice writes since: 2020's bytes, no NUL.
+    fn version_info_2020(has_real_merged_data: bool) -> Vec<u8> {
+        photosplice_psd::resources::version_info_resource(has_real_merged_data).data
+    }
+
+    /// An opaque 4 × 1 RGB document with the Reference spot oracles' channels in their order:
+    /// "Spot A", "Alpha 1" and "Spot B", each holding 100, 25, 75 and 0 % in four columns.
+    fn channels_document(depth: SampleType) -> Document {
+        let mut doc = Document::with_background("old", Size::new(4, 1), ColorMode::Rgb, depth, photosplice_color::Color::rgb(1.0, 1.0, 1.0));
+        let gray = PixelFormat::new(ColorMode::Grayscale, depth, false);
+        let canvas = doc.bounds();
+        let channel = |name: &str, spot: Option<(photosplice_color::Color, f32)>| {
+            let mut s = Surface::new(gray);
+            s.write_region(canvas, &[1.0, 0.25, 0.75, 0.0]);
+            AlphaChannel { spot, ..AlphaChannel::new(name, s) }
+        };
+        doc.channels.push(channel("Spot A", Some((photosplice_color::Color::rgb(0.0, 0.627, 1.0), 0.0))));
+        doc.channels.push(channel("Alpha 1", None));
+        doc.channels.push(channel("Spot B", Some((photosplice_color::Color::rgb(1.0, 0.0, 0.627), 0.5))));
+        doc
+    }
+
+    /// Each channel's values on an 8-bit scale.
+    fn ink(doc: &Document) -> Vec<Vec<u8>> {
+        doc.channels.iter().map(|c| c.surface.read_region(doc.bounds()).iter().map(|v| (v * 255.0).round() as u8).collect()).collect()
+    }
+
+    fn spots(doc: &Document) -> Vec<bool> {
+        doc.channels.iter().map(|c| c.spot.is_some()).collect()
+    }
+
+    /// The extra planes after the three colour planes of an opaque 4 × 1 8-bit file.
+    fn extra_planes(file: &PsdFile) -> Vec<u8> {
+        file.decode_merged().unwrap().get(12..).unwrap().to_vec()
+    }
+
+    /// `doc` (opaque, 8 or 16-bit) saved the way earlier builds saved it: spot planes straight
+    /// (the maximum = solid ink), `ids` as resource 1053 (none: removed) and `version_info` as
+    /// resource 1057. `padded` lays DisplayInfo out in the 14-byte records of 0.9.18.
+    fn as_earlier_build_saved(doc: &Document, ids: Option<&[u32]>, version_info: Vec<u8>, padded: bool) -> Vec<u8> {
+        let mut file = crate::psd_export::document_to_psd(doc);
+        assert!(!file.merged_has_alpha());
+        file.resources.retain(|r| r.id != ids::ALPHA_IDS);
+        if let Some(ids) = ids {
+            file.resources.push(ImageResource::new(ids::ALPHA_IDS, ids.iter().flat_map(|i| i.to_be_bytes()).collect()));
+        }
+        for r in &mut file.resources {
+            match r.id {
+                ids::VERSION_INFO => r.data = version_info.clone(),
+                crate::channel_map::DISPLAY_INFO if padded => {
+                    let (version, records) = r.data.split_at(4);
+                    r.data = version.iter().copied().chain(records.chunks(13).flat_map(|rec| rec.iter().copied().chain([0]))).collect();
+                }
+                _ => {}
+            }
+        }
+        let mut planes = file.decode_merged().unwrap();
+        let plane = planes.len() / usize::from(file.header.channels);
+        for (k, c) in doc.channels.iter().enumerate() {
+            if c.spot.is_some() {
+                // At 8 and 16 bits the complement of a sample is that of each of its bytes.
+                planes[(3 + k) * plane..(4 + k) * plane].iter_mut().for_each(|b| *b = !*b);
+            }
+        }
+        file.image_data = ImageData::encode(Compression::Raw, &planes, &file.header).unwrap();
+        file.to_bytes().unwrap()
+    }
+
+    /// A PSD stores spot ink as Reference's own PSDs do (0 = solid ink: the 100, 25, 75 and 0 %
+    /// columns are 0, 191, 64, 255) and an alpha channel straight (255 = selected), and numbers
+    /// the channels 3, 4, 5 in 1053 as Reference 27.11 does (storytold/photocraft@b92ac6fa).
+    /// Opening it gives the same ink back.
+    #[test]
+    fn psd_stores_spot_ink_as_reference_does() {
+        let doc = channels_document(SampleType::U8);
+        let file = PsdFile::from_bytes(&crate::psd_export::document_to_psd(&doc).to_bytes().unwrap()).unwrap();
+        assert_eq!(extra_planes(&file), [0, 191, 64, 255, 255, 64, 191, 0, 0, 191, 64, 255], "spot, alpha, spot");
+        let ids: Vec<u32> = file.resource(ids::ALPHA_IDS).unwrap().data.chunks_exact(4).map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]])).collect();
+        assert_eq!(ids, [3, 4, 5]);
+        assert!(!earlier_spot_planes(&file));
+        let back = crate::import("x.psd", &file.to_bytes().unwrap()).unwrap().document;
+        assert_eq!(ink(&back), ink(&doc));
+        assert_eq!(spots(&back), spots(&doc));
+    }
+
+    /// What a case is called, its 1053 and 1057, and whether its DisplayInfo records are padded.
+    type EarlierCase = (&'static str, Option<&'static [u32]>, Vec<u8>, bool);
+    /// What a case is called, its 1053 and its 1057.
+    type OtherCase = (&'static str, Option<&'static [u32]>, Option<Vec<u8>>);
+
+    /// PSDs that earlier builds saved with spot channels store them straight. They open with the
+    /// ink they had in those builds, whichever 1057 and 1053 numbering they carry. Saved again,
+    /// they get Reference's polarity and numbering, and reopen with the same ink. (0.9.18's
+    /// padded records misread every channel's options after the first, here Spot B's kind, as
+    /// that build always did; its ink is kept.)
+    #[test]
+    fn spot_planes_from_earlier_builds_keep_their_ink() {
+        for depth in [SampleType::U8, SampleType::U16] {
+            let doc = channels_document(depth);
+            let cases: [EarlierCase; 6] = [
+                ("0.9.18", None, version_info_cs6(true), true),
+                ("0.9.18, 13-byte records", None, version_info_cs6(true), false),
+                ("without 1053", None, version_info_2020(true), false),
+                ("1053 from 1", Some(&[1, 2, 3]), version_info_2020(true), false),
+                ("1053 from 1, Maximize Compatibility off", Some(&[1, 2, 3]), version_info_2020(false), false),
+                ("PhotoCraft 0.8.2 on", None, version_info(UnicodeString::new("Adobe Photoshop"), UnicodeString::new("Adobe Photoshop 2026"), true), false),
+            ];
+            for (what, ids, version_info, padded) in cases {
+                let bytes = as_earlier_build_saved(&doc, ids, version_info, padded);
+                assert!(earlier_spot_planes(&PsdFile::from_bytes(&bytes).unwrap()), "{what}");
+                let opened = crate::import("old.psd", &bytes).unwrap().document;
+                assert_eq!(ink(&opened), ink(&doc), "{depth:?} {what}: the ink earlier builds opened");
+                assert!(spots(&opened)[0], "{depth:?} {what}");
+                if !padded {
+                    assert_eq!(spots(&opened), spots(&doc), "{depth:?} {what}");
+                }
+                let saved = crate::export(&opened, "old.psd", &crate::ExportOptions::default()).unwrap();
+                let file = PsdFile::from_bytes(&saved.bytes).unwrap();
+                assert!(!earlier_spot_planes(&file), "{what}");
+                let again = crate::import("again.psd", &saved.bytes).unwrap().document;
+                assert_eq!(ink(&again), ink(&doc), "{depth:?} {what}: saved again");
+                assert_eq!(spots(&again), spots(&opened), "{depth:?} {what}: saved again");
+            }
+        }
+    }
+
+    /// A file with spots that no earlier build wrote is read in Reference's polarity (0 = solid
+    /// ink): Reference's own numbering in 1053 (psd-tools cmyk-alpha-spot.psd lists 3, 2), or
+    /// another writer's 1057 (psd-tools cmyk-spot.psd names psd-tools), no 1057, CS6's names
+    /// without the NUL, or bytes after the 1057 fields.
+    #[test]
+    fn other_files_use_reference_polarity() {
+        let doc = channels_document(SampleType::U8);
+        let mut trailing = version_info_2020(true);
+        trailing.extend([0, 0]);
+        let cases: [OtherCase; 6] = [
+            ("Reference numbering", Some(&[3, 4, 5]), Some(version_info_2020(true))),
+            ("Reference numbering 3, 2", Some(&[3, 2, 6]), Some(version_info_2020(true))),
+            ("psd-tools", None, Some(version_info(UnicodeString::new("psd-tools 1.10.0"), UnicodeString::new("psd-tools 1.10.0"), true))),
+            ("no 1057", None, None),
+            ("CS6 without a NUL", None, Some(version_info(UnicodeString::new("Adobe Photoshop"), UnicodeString::new("Adobe Photoshop CS6"), true))),
+            ("bytes after the 1057 fields", None, Some(trailing)),
+        ];
+        for (what, ids, info) in cases {
+            // Reference's polarity, as a save writes it.
+            let mut file = crate::psd_export::document_to_psd(&doc);
+            file.resources.retain(|r| r.id != ids::ALPHA_IDS && r.id != ids::VERSION_INFO);
+            if let Some(ids) = ids {
+                file.resources.push(ImageResource::new(ids::ALPHA_IDS, ids.iter().flat_map(|i| i.to_be_bytes()).collect()));
+            }
+            file.resources.extend(info.map(|d| ImageResource::new(ids::VERSION_INFO, d)));
+            let bytes = file.to_bytes().unwrap();
+            assert!(!earlier_spot_planes(&PsdFile::from_bytes(&bytes).unwrap()), "{what}");
+            let opened = crate::import("x.psd", &bytes).unwrap().document;
+            assert_eq!(ink(&opened), ink(&doc), "{what}");
+            assert_eq!(spots(&opened), spots(&doc), "{what}");
+        }
+    }
+
+    /// The rule needs a spot in DisplayInfo besides an earlier build's 1057 and 1053.
+    #[test]
+    fn the_earlier_build_rule_needs_a_spot() {
+        let mut doc = channels_document(SampleType::U8);
+        let old = PsdFile::from_bytes(&as_earlier_build_saved(&doc, None, version_info_2020(true), false)).unwrap();
+        assert!(earlier_spot_planes(&old));
+        let mut no_info = old.clone();
+        no_info.resources.retain(|r| r.id != crate::channel_map::DISPLAY_INFO);
+        assert!(!earlier_spot_planes(&no_info), "no DisplayInfo");
+        doc.channels.retain(|c| c.spot.is_none());
+        let alpha_only = PsdFile::from_bytes(&as_earlier_build_saved(&doc, None, version_info_2020(true), false)).unwrap();
+        assert!(!earlier_spot_planes(&alpha_only), "alpha channels only");
     }
 }

@@ -298,10 +298,20 @@ pub fn parse_vstk(data: &[u8], dpi: f32) -> Option<VstkInfo> {
         _ => Vec::new(),
     };
     let paint = get_desc(&d, "strokeStyleContent").and_then(content_fill).unwrap_or(Fill::Solid(photosplice_color::Color::BLACK));
+    let mut opacity = num(d.get("strokeStyleOpacity")).map_or(1.0, |v| v as f32 / 100.0);
+    // A translucent colour (its alpha in `pcAl`) was folded into the opacity Reference reads
+    // ([`vstk_bytes`]): unfold it, so the stroke keeps both.
+    if let Fill::Solid(c) = &paint
+        && c.alpha.is_finite()
+        && c.alpha > 1e-6
+        && (c.alpha - 1.0).abs() > 1e-6
+    {
+        opacity = (opacity / c.alpha).clamp(0.0, 1.0);
+    }
     let stroke = ShapeStroke {
         width: unit_px(d.get("strokeStyleLineWidth"), dpi).unwrap_or(1.0) as f32,
         paint,
-        opacity: num(d.get("strokeStyleOpacity")).map_or(1.0, |v| v as f32 / 100.0),
+        opacity,
         align,
         cap,
         join,
@@ -316,10 +326,26 @@ fn en(ty: &str, v: &str) -> Value {
     Value::Enumerated { type_id: Id::new(ty), value: Id::new(v) }
 }
 
+/// Reference's stroke colour has no alpha: a translucent solid colour's alpha is folded into
+/// `strokeStyleOpacity`, so Reference draws the stroke as we do.
+fn fold_stroke_color_alpha(s: &ShapeStroke) -> ShapeStroke {
+    let mut out = s.clone();
+    if let Fill::Solid(c) = &mut out.paint
+        && c.alpha.is_finite()
+        && (c.alpha - 1.0).abs() > 1e-6
+    {
+        out.opacity = (out.opacity * c.alpha).clamp(0.0, 1.0);
+        c.alpha = 1.0;
+    }
+    out
+}
+
 pub fn vstk_bytes(stroke: Option<&ShapeStroke>, fill_enabled: bool, dpi: f32) -> Vec<u8> {
     let default = ShapeStroke::default();
-    let s = stroke.unwrap_or(&default);
-    let (_, content) = fill_to_desc(&s.paint);
+    let folded = stroke.map(fold_stroke_color_alpha);
+    let s = folded.as_ref().unwrap_or(&default);
+    // The colour keeps its alpha as `pcAl` so a read can unfold the opacity ([`parse_vstk`]).
+    let (_, content) = fill_to_desc(stroke.map_or(&s.paint, |st| &st.paint));
     let class = match s.paint {
         Fill::Solid(_) => "solidColorLayer",
         Fill::Gradient { .. } => "gradientLayer",
@@ -441,7 +467,21 @@ const VSTK_UNMODELLED: [&str; 3] = ["strokeStyleBlendMode", "strokeStyleScaleLoc
 pub fn vstk_bytes_onto(stroke: Option<&ShapeStroke>, fill_enabled: bool, dpi: f32, old: Option<&[u8]>) -> Vec<u8> {
     let fresh = vstk_bytes(stroke, fill_enabled, dpi);
     match (old.and_then(parse_prefix_versioned), parse_prefix_versioned(&fresh)) {
-        (Some(base), Some(new)) => VersionedDescriptor::new(crate::blocks::merge_descriptor(&base, new, &VSTK_UNMODELLED)).to_bytes(),
+        (Some(base), Some(new)) => {
+            let mut merged = crate::blocks::merge_descriptor(&base, new, &VSTK_UNMODELLED);
+            // An opaque colour over a file's translucent one: the file's `pcAl` must not survive.
+            let opaque = !matches!(stroke.map(|s| &s.paint), Some(Fill::Solid(c)) if (c.alpha - 1.0).abs() > 1e-6);
+            if opaque {
+                for (k, v) in &mut merged.items {
+                    if k.is("strokeStyleContent")
+                        && let Value::Descriptor(content) = v
+                    {
+                        crate::blocks::clear_pc_alpha(content);
+                    }
+                }
+            }
+            VersionedDescriptor::new(merged).to_bytes()
+        }
         _ => fresh,
     }
 }
@@ -842,6 +882,26 @@ mod tests {
         // Another kind of shape: written fresh.
         let ellipse = LiveShape::Ellipse { rect: [0.0, 0.0, 10.0, 10.0] };
         assert_eq!(vogk_bytes_onto(&ellipse, 72.0, Some(&old)), vogk_bytes(&ellipse, 72.0));
+    }
+
+    #[test]
+    fn vstk_folds_color_alpha_into_stroke_opacity() {
+        let s = ShapeStroke { width: 2.0, paint: Fill::Solid(Color::rgba(0.0, 0.0, 1.0, 0.4)), opacity: 0.5, ..ShapeStroke::default() };
+        let bytes = vstk_bytes(Some(&s), true, 72.0);
+        let raw = crate::blocks::parse_prefix_versioned(&bytes).unwrap();
+        let file_opacity = crate::blocks::num(raw.get("strokeStyleOpacity")).unwrap() as f32 / 100.0;
+        assert!((file_opacity - 0.2).abs() < 1e-4, "Reference sees the product in strokeStyleOpacity");
+        let got = parse_vstk(&bytes, 72.0).unwrap().stroke.unwrap();
+        assert!((got.opacity - 0.5).abs() < 1e-4);
+        let Fill::Solid(c) = got.paint else { panic!("solid") };
+        assert!((c.alpha - 0.4).abs() < 1e-5);
+        assert!((c.to_rgb()[2] - 1.0).abs() < 1e-3);
+        // Made opaque and merged onto that file: neither the old alpha nor the folded opacity stays.
+        let opaque = ShapeStroke { paint: Fill::Solid(Color::rgb(0.0, 0.0, 1.0)), ..s };
+        let merged = parse_vstk(&vstk_bytes_onto(Some(&opaque), true, 72.0, Some(&bytes)), 72.0).unwrap().stroke.unwrap();
+        let Fill::Solid(c) = merged.paint else { panic!("solid") };
+        assert_eq!(c.alpha, 1.0);
+        assert!((merged.opacity - 0.5).abs() < 1e-4);
     }
 
     #[test]

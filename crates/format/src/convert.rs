@@ -462,7 +462,7 @@ impl Loader<'_> {
                 for (k, h) in divider_blocks {
                     blocks.push((key4(k)?, self.fetch.blob(h)?));
                 }
-                LayerContent::Group(Group { artboard: artboard.clone(), children, expanded: *expanded, divider_blocks: blocks })
+                LayerContent::Group(Group { artboard: artboard.clone(), children, expanded: *expanded, divider_blocks: blocks, frame_stroke: None })
             }
             ContentM::Adjustment { adjustment } => LayerContent::Adjustment(adjustment.clone()),
             ContentM::Fill { fill } => LayerContent::Fill(fill.clone()),
@@ -492,6 +492,8 @@ impl Loader<'_> {
                 align_edges: false,
                 cache: self.opt_surface(cache)?,
                 psd_raw: self.opt_blob(psd_raw)?,
+                density: 1.0,
+                feather: 0.0,
             }),
             ContentM::Smart { contents_id, source, transform, smart_filters, cache, psd_raw, filters_enabled, filter_mask, warp, stack_mode, perspective } => {
                 LayerContent::Smart(SmartObject {

@@ -19,6 +19,15 @@ fn vertical(text: &str, family: &str, size_pt: f32) -> TextLayer {
     }
 }
 
+/// [`vertical`] with its roman text rotated along the column (PSD `BaselineDirection` 2).
+fn rotated(text: &str, family: &str, size_pt: f32) -> TextLayer {
+    let mut t = vertical(text, family, size_pt);
+    for r in &mut t.runs {
+        r.style.rotate_roman = true;
+    }
+    t
+}
+
 /// An engine with an installed Japanese font registered, and that font's family.
 fn cjk_engine() -> Option<(TextEngine, String)> {
     #[cfg(not(target_arch = "wasm32"))]
@@ -53,7 +62,7 @@ fn classes_follow_vertical_orientation() {
 #[test]
 fn latin_is_rotated_and_runs_down_columns_right_to_left() {
     let mut e = TextEngine::new();
-    let l = e.layout(&vertical("abc\nde", "Inter", 20.0), 72.0);
+    let l = e.layout(&rotated("abc\nde", "Inter", 20.0), 72.0);
     assert!(l.vertical);
     assert_eq!(l.lines.len(), 2);
     assert!(l.glyphs.iter().all(|g| g.orient == GlyphOrient::Rotated));
@@ -67,16 +76,37 @@ fn latin_is_rotated_and_runs_down_columns_right_to_left() {
     // Rotated text is centred on the column through the anchor (x = 0): its baseline sits left.
     assert!(a.x < 0.0 && a.x > -10.0, "{a:?}");
     // Bounds: one column for "abc" is taller than wide.
-    let one = e.layout(&vertical("abcdef", "Inter", 20.0), 72.0);
+    let one = e.layout(&rotated("abcdef", "Inter", 20.0), 72.0);
     let [x0, y0, x1, y1] = one.bounds().unwrap();
     assert!((y1 - y0) > 2.0 * (x1 - x0), "{:?}", one.bounds());
     assert!((x0 + 10.0).abs() < 1e-3 && (x1 - 10.0).abs() < 1e-3 && y0.abs() < 1e-3);
 }
 
+/// Reference's Vertical Type tool sets roman text upright, one character per em down the column
+/// (`BaselineDirection` 1): a word is a stack of letters, not the word turned on its side.
+#[test]
+fn latin_stands_upright_one_per_em_by_default() {
+    let mut e = TextEngine::new();
+    let l = e.layout(&vertical("VERTICAL", "Inter", 36.0), 72.0);
+    assert!(l.vertical);
+    assert!(l.glyphs.iter().all(|g| g.orient == GlyphOrient::Upright), "{:?}", l.glyphs);
+    // One em (36 px) per character down a single column.
+    let steps: Vec<f32> = l.glyphs.windows(2).map(|w| w[1].y - w[0].y).collect();
+    assert!(steps.iter().all(|d| (d - 36.0).abs() < 0.5), "{steps:?}");
+    // One column, each letter centred on it by its own width (an "I" sits right of a "V").
+    assert!(l.glyphs.iter().all(|g| g.x < 0.0 && g.x > -18.0), "one column: {:?}", l.glyphs);
+    // Rendered: a narrow stack about 8 em tall, much taller than the rotated word.
+    let at = Affine::translate(200.0, 40.0);
+    let (_, up) = e.render(&TextLayer { transform: at, ..vertical("VERTICAL", "Inter", 36.0) }, 72.0, PixelFormat::RGBA8);
+    let (_, turned) = e.render(&TextLayer { transform: at, ..rotated("VERTICAL", "Inter", 36.0) }, 72.0, PixelFormat::RGBA8);
+    assert!(up.rect.width() < 40 && up.rect.height() > 7 * 36, "{:?}", up.rect);
+    assert!(up.rect.height() > turned.rect.height() + 50, "{:?} vs {:?}", up.rect, turned.rect);
+}
+
 #[test]
 fn rotated_render_ink_is_taller_than_wide() {
     let mut e = TextEngine::new();
-    let horizontal = TextLayer { orientation: Orientation::Horizontal, ..vertical("Vertical", "Inter", 30.0) };
+    let horizontal = TextLayer { orientation: Orientation::Horizontal, ..rotated("Vertical", "Inter", 30.0) };
     let (_, h) = e.render(&TextLayer { transform: Affine::translate(100.0, 50.0), ..horizontal.clone() }, 72.0, PixelFormat::RGBA8);
     let (_, v) = e.render(&TextLayer { transform: Affine::translate(100.0, 50.0), orientation: Orientation::Vertical, ..horizontal }, 72.0, PixelFormat::RGBA8);
     assert!(h.rect.width() > h.rect.height());
@@ -109,7 +139,7 @@ fn caret_hit_test_and_arrow_geometry_follow_columns() {
 #[test]
 fn box_text_wraps_columns_within_the_box_height() {
     let mut e = TextEngine::new();
-    let t = TextLayer { shape: TextShape::Box { x: 10.0, y: 20.0, width: 200.0, height: 60.0 }, ..vertical("ab cd ef gh ij kl mn op", "Inter", 20.0) };
+    let t = TextLayer { shape: TextShape::Box { x: 10.0, y: 20.0, width: 200.0, height: 60.0 }, ..rotated("ab cd ef gh ij kl mn op", "Inter", 20.0) };
     let l = e.layout(&t, 72.0);
     assert!(l.lines.len() >= 3, "{}", l.lines.len());
     let [x0, y0, x1, y1] = l.bounds().unwrap();
@@ -163,8 +193,11 @@ fn cjk_is_upright_centred_with_vertical_alternates() {
     } else {
         assert_eq!(dash.orient, GlyphOrient::Rotated);
     }
-    // Latin inside vertical CJK runs rotated.
-    assert_eq!(g[9].orient, GlyphOrient::Rotated);
+    // Latin inside vertical CJK stands upright (Reference's Vertical Type tool), or rotated when
+    // its style says so.
+    assert_eq!(g[9].orient, GlyphOrient::Upright);
+    let r = e.layout(&rotated(text, &fam, 40.0), 72.0);
+    assert_eq!(r.glyphs[9].orient, GlyphOrient::Rotated);
     // Punctuation squeeze: 、「 takes 1.5 em down the column, ト、 keeps full cells.
     let s = e.layout(&vertical("ト、「東", &fam, 40.0), 72.0);
     let cx: Vec<f32> = s.clusters.iter().map(|c| c.x).collect();

@@ -14,12 +14,14 @@ use crate::warp::{Placement, Warp};
 
 /// Faux-italic slant in degrees (Photoshop-like).
 pub const FAUX_ITALIC_DEG: f32 = 12.0;
-/// Faux-bold dilation radius as a fraction of the font size, and its floor in pixels: Reference
-/// thickens strokes only slightly (fitted on `layer_effects.psd` at 62.5 px and
-/// `faux-bold-italic-runs.psd` at 20 px, both about 0.2 px a side); the run widens mostly through
-/// its advances ([`FAUX_BOLD_ADVANCE`]).
-pub const FAUX_BOLD_RADIUS: f32 = 0.003;
-pub const FAUX_BOLD_MIN_RADIUS_PX: f32 = 0.2;
+/// Faux-bold outline growth a side, as a fraction of the font size, and its floor in pixels:
+/// Reference thickens strokes only slightly; the run widens mostly through its advances
+/// ([`FAUX_BOLD_ADVANCE`]). Fitted on `layer_effects.psd` at 62.5 px and
+/// `faux-bold-italic-runs.psd` at 20 px, about 0.4 px a side for the thickened outline (alpha
+/// error over ink 0.051 → 0.029 against Reference's pixels; the 0.2 px of the old fit was for
+/// eight stamped copies, whose summed coverage saturated the edges).
+pub const FAUX_BOLD_RADIUS: f32 = 0.006;
+pub const FAUX_BOLD_MIN_RADIUS_PX: f32 = 0.4;
 /// Dilation radius (fraction of the font size) standing in for a bold face the family lacks.
 const SYNTHETIC_BOLD_RADIUS: f32 = 0.018;
 /// Faux bold widens every glyph's advance by this fraction of the font size (55/2048 em, from
@@ -36,6 +38,32 @@ const STRONG_GAMMA: f32 = 0.58;
 const SNAP_X_PX: f32 = 31.0;
 /// Largest raster we produce (pixels), as a guard against absurd sizes.
 const MAX_PIXELS: u64 = 256 * 1024 * 1024;
+/// Peak working bytes one rasterization may keep live. [`MAX_PIXELS`] does not bound them: the
+/// accumulator and the output surface are both `stride` deep, so a CMYK render at f32 reserves
+/// several times what a grey one at 8 bits does for the same pixels. 1 GiB where `usize` is 32
+/// bits, so the wasm build keeps room for the document.
+const MAX_RASTER_BYTES: u64 = if cfg!(target_pointer_width = "64") { 4 << 30 } else { 1 << 30 };
+
+/// Whether a `w` x `h` render's peak working bytes fit `max_bytes`: the f32 accumulator and the
+/// output surface (both `stride` deep), plus a colour's coverage accumulator and the coverage its
+/// `finish` builds beside it. `false` when the arithmetic overflows, so an absurd size is refused
+/// rather than wrapping.
+fn fits_raster_budget(w: usize, h: usize, stride: usize, sample: SampleType, max_bytes: u64) -> bool {
+    let f32s = size_of::<f32>() as u64;
+    let peak = (w as u64).checked_mul(h as u64).and_then(|px| {
+        let deep = px.checked_mul(stride as u64)?.checked_mul(f32s + sample.bytes() as u64)?;
+        deep.checked_add(px.checked_mul(2 * f32s)?)
+    });
+    peak.is_some_and(|b| b <= max_bytes)
+}
+
+/// A zeroed buffer, or `None` when its bytes cannot be reserved.
+fn zeroed(len: usize) -> Option<Vec<f32>> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(len).ok()?;
+    v.resize(len, 0.0);
+    Some(v)
+}
 
 /// Rendered text: pixels in document space plus the covered rectangle.
 pub struct Rendered {
@@ -212,35 +240,48 @@ fn draw(layout: &TextLayout, transform: &Xform, sink: &mut impl LineSink, only_c
         } else {
             None
         };
-        let bold = st.faux_bold || face.embolden;
-        let r = if face.embolden && !st.faux_bold {
-            face.size_px * SYNTHETIC_BOLD_RADIUS
-        } else {
-            (face.size_px * FAUX_BOLD_RADIUS).max(FAUX_BOLD_MIN_RADIUS_PX)
-        } as f64;
-        let offsets: &[(f64, f64)] =
-            if bold { &[(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (0.7, 0.7), (-0.7, -0.7), (0.7, -0.7), (-0.7, 0.7)] } else { &[(0.0, 0.0)] };
-        for &(ox, oy) in offsets {
-            let local = glyph.mul(&Xform([1.0, 0.0, 0.0, 1.0, ox * r, oy * r]));
-            let settings = DrawSettings::unhinted(Size::new(face.size_px), LocationRef::new(&coords));
-            match (segs, bend) {
-                (Some(segs), _) => {
-                    let mut pen = Pen::new(&mut *sink, transform.mul(&local));
-                    replay(segs, &mut pen);
+        let settings = || DrawSettings::unhinted(Size::new(face.size_px), LocationRef::new(&coords));
+        // Faux bold thickens the outline (font px, before faux italic and scaling, so those apply
+        // to the bold shape as to a real bold face) rather than stamping offset copies: copies
+        // summed into one coverage saturate the antialiased edges, and at large sizes they leave
+        // stair-step notches on corners and curves.
+        let mut bold = None;
+        if st.faux_bold || face.embolden {
+            let r = if face.embolden && !st.faux_bold { face.size_px * SYNTHETIC_BOLD_RADIUS } else { (face.size_px * FAUX_BOLD_RADIUS).max(FAUX_BOLD_MIN_RADIUS_PX) };
+            let mut shape = crate::embolden::Outline::default();
+            match segs {
+                Some(segs) => replay(segs, &mut shape),
+                None => {
+                    if outline.draw(settings(), &mut shape).is_err() {
+                        continue;
+                    }
+                }
+            }
+            shape.embolden(f64::from(r));
+            bold = Some(shape);
+        }
+        match (bold.as_ref(), segs, bend) {
+            (Some(shape), _, Some(w)) if segs.is_none() => {
+                let mut ws = WarpSink { inner: &mut *sink, warp: w, post: *transform };
+                shape.replay(&mut Pen::new(&mut ws, glyph));
+            }
+            (Some(shape), _, _) => shape.replay(&mut Pen::new(&mut *sink, transform.mul(&glyph))),
+            (None, Some(segs), _) => {
+                let mut pen = Pen::new(&mut *sink, transform.mul(&glyph));
+                replay(segs, &mut pen);
+                skrifa::outline::OutlinePen::close(&mut pen);
+            }
+            (None, None, Some(w)) => {
+                let mut ws = WarpSink { inner: &mut *sink, warp: w, post: *transform };
+                let mut pen = Pen::new(&mut ws, glyph);
+                if outline.draw(settings(), &mut pen).is_ok() {
                     skrifa::outline::OutlinePen::close(&mut pen);
                 }
-                (None, Some(w)) => {
-                    let mut ws = WarpSink { inner: &mut *sink, warp: w, post: *transform };
-                    let mut pen = Pen::new(&mut ws, local);
-                    if outline.draw(settings, &mut pen).is_ok() {
-                        skrifa::outline::OutlinePen::close(&mut pen);
-                    }
-                }
-                (None, None) => {
-                    let mut pen = Pen::new(&mut *sink, transform.mul(&local));
-                    if outline.draw(settings, &mut pen).is_ok() {
-                        skrifa::outline::OutlinePen::close(&mut pen);
-                    }
+            }
+            (None, None, None) => {
+                let mut pen = Pen::new(&mut *sink, transform.mul(&glyph));
+                if outline.draw(settings(), &mut pen).is_ok() {
+                    skrifa::outline::OutlinePen::close(&mut pen);
                 }
             }
         }
@@ -367,13 +408,15 @@ pub fn rasterize_warped(layout: &TextLayout, transform: &Affine, format: PixelFo
     let rect = ink_rect_fitted(layout, transform, warp, fit, &mut hinted);
     let (w, h) = (rect.width() as usize, rect.height() as usize);
     let mut surface = Surface::new(format);
-    if w == 0 || h == 0 || (w as u64) * (h as u64) > MAX_PIXELS {
-        return Rendered { surface, rect: Rect::new(0, 0, 0, 0) };
-    }
     let n = format.mode.color_channels();
     let stride = n + 1;
+    if w == 0 || h == 0 || (w as u64) * (h as u64) > MAX_PIXELS || !fits_raster_budget(w, h, stride, format.sample, MAX_RASTER_BYTES) {
+        return Rendered { surface, rect: Rect::new(0, 0, 0, 0) };
+    }
     // Premultiplied accumulation.
-    let mut acc = vec![0.0f32; w * h * stride];
+    let Some(mut acc) = zeroed(w * h * stride) else {
+        return Rendered { surface, rect: Rect::new(0, 0, 0, 0) };
+    };
     let xf = Xform([1.0, 0.0, 0.0, 1.0, -rect.x0 as f64, -rect.y0 as f64]).mul(&Xform(transform.m));
     let mut colors: Vec<Color> = Vec::new();
     for st in &layout.styles {
@@ -382,10 +425,14 @@ pub fn rasterize_warped(layout: &TextLayout, transform: &Affine, format: PixelFo
         }
     }
     for c in &colors {
-        let mut cov = Coverage::new(w, h);
+        let Some(mut cov) = Coverage::try_new(w, h) else {
+            return Rendered { surface, rect: Rect::new(0, 0, 0, 0) };
+        };
         // A whole-pixel offset: grid fitting in `xf` space is grid fitting in the document.
         draw(layout, &xf, &mut cov, Some(c), warp, fit, &mut hinted);
-        let cov = cov.finish();
+        let Some(cov) = cov.finish() else {
+            return Rendered { surface, rect: Rect::new(0, 0, 0, 0) };
+        };
         let comps = color_in(&format, c);
         let a = c.alpha.clamp(0.0, 1.0);
         for (i, &cv) in cov.iter().enumerate() {
@@ -514,8 +561,25 @@ pub fn outlines(layout: &TextLayout, transform: &Affine, warp: Option<&Warp>) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_PIXELS, rect_from_bounds};
+    use super::{MAX_PIXELS, fits_raster_budget, rect_from_bounds, zeroed};
+    use photosplice_color::SampleType;
     use photosplice_geom::Rect;
+
+    /// The pixel cap says nothing about bytes, so the peak is admitted from the channel depth of
+    /// the accumulator and surface and the sample size. A 100 x 100 grey+alpha render at 8-bit
+    /// keeps 2 x (4 + 1) + 2 x 4 = 18 bytes a pixel live.
+    #[test]
+    fn the_byte_budget_follows_channels_and_depth() {
+        let px = 100 * 100;
+        assert!(fits_raster_budget(100, 100, 2, SampleType::U8, px * 18));
+        assert!(!fits_raster_budget(100, 100, 2, SampleType::U8, px * 18 - 1), "the allowance is exact");
+        assert!(!fits_raster_budget(100, 100, 5, SampleType::U8, px * 18), "CMYK is deeper");
+        assert!(!fits_raster_budget(100, 100, 2, SampleType::F32, px * 18), "f32 output is wider");
+        // A size whose peak overflows is refused rather than wrapping to a small number.
+        assert!(!fits_raster_budget(usize::MAX, usize::MAX, 5, SampleType::F32, u64::MAX));
+        // Nothing is reserved for a buffer that cannot be served.
+        assert!(zeroed(usize::MAX).is_none());
+    }
 
     #[test]
     fn bounds_are_clipped_without_overflow_and_oversized_rectangles_rejected() {

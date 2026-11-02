@@ -51,3 +51,52 @@ fn layer_blocks_are_four_byte_aligned() {
         }
     }
 }
+
+/// A file saved by an older build carries a `grdm` 2 bytes short of Reference's layout (it
+/// refuses the file); saving it again, with the stops unchanged or only Reverse toggled, writes
+/// the block Reference reads, in every document space.
+#[test]
+fn legacy_unaligned_gradient_map_is_repaired_on_resave() {
+    use photosplice_doc::Adjustment;
+    let stops = vec![(0.0, [0.04, 0.1, 0.18]), (0.5, [0.4, 0.2, 0.1]), (1.0, [1.0; 3])];
+    for mode in [ColorMode::Rgb, ColorMode::Cmyk, ColorMode::Grayscale, ColorMode::Lab] {
+        let mut doc = Document::new("gradient", Size::new(16, 16), mode, SampleType::U8);
+        let map = Adjustment::GradientMap { stops: stops.clone(), reverse: false, dither: false, ink_stops: Vec::new() };
+        doc.layers.push(Layer::new("Gradient Map", LayerContent::Adjustment(map)));
+        let mut file = PsdFile::from_bytes(&export(&doc, "gradient.psd", &ExportOptions::default()).expect("export").bytes).expect("reparse");
+        let legacy = file.layers_mut().iter_mut().find_map(|layer| layer.block_mut(b"grdm")).expect("Gradient Map block");
+        let aligned = legacy.data.len();
+        legacy.data.truncate(aligned - 2);
+        let legacy = file.to_bytes().expect("legacy file");
+        for reverse in [false, true] {
+            let mut reopened = import("gradient.psd", &legacy).expect("import").document;
+            let Some(LayerContent::Adjustment(Adjustment::GradientMap { reverse: r, .. })) = reopened.layers.iter_mut().map(|l| &mut l.content).last() else {
+                panic!("no Gradient Map layer")
+            };
+            *r = reverse;
+            let expected = reopened.layers.last().map(|l| l.content.clone());
+            let bytes = export(&reopened, "gradient.psd", &ExportOptions::default()).expect("re-save").bytes;
+            let file = PsdFile::from_bytes(&bytes).expect("reparse");
+            let block = file.layers().iter().find_map(|layer| layer.block(b"grdm")).expect("Gradient Map block");
+            // (A Lab map's stops are baked on import, so its regenerated block has more of them.)
+            assert_eq!(block.data.len() % 4, 0, "{mode:?} reverse {reverse}: re-saved grdm is {} bytes", block.data.len());
+            if mode != ColorMode::Lab {
+                assert_eq!(block.data.len(), aligned, "{mode:?} reverse {reverse}");
+            }
+            let again = import("gradient.psd", &bytes).expect("reopen").document;
+            let again = again.layers.last().map(|l| l.content.clone());
+            match (&again, &expected) {
+                // Lab stops are stored in hundredths: the regenerated block reads back within that.
+                (
+                    Some(LayerContent::Adjustment(Adjustment::GradientMap { stops: a, reverse: ra, .. })),
+                    Some(LayerContent::Adjustment(Adjustment::GradientMap { stops: b, reverse: rb, .. })),
+                ) if mode == ColorMode::Lab => {
+                    assert_eq!((a.len(), ra), (b.len(), rb), "{mode:?} reverse {reverse}");
+                    let close = a.iter().zip(b).all(|(x, y)| (x.0 - y.0).abs() < 1e-4 && x.1.iter().zip(&y.1).all(|(p, q)| (p - q).abs() < 2e-3));
+                    assert!(close, "{mode:?} reverse {reverse}: Gradient Map changed on re-save");
+                }
+                _ => assert_eq!(again, expected, "{mode:?} reverse {reverse}: Gradient Map changed on re-save"),
+            }
+        }
+    }
+}

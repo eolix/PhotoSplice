@@ -589,3 +589,47 @@ fn thin_antialiased_edges_still_count_toward_bounds() {
     let c = r.render(Rect::new(0, 0, 102, 10));
     assert!(c[100] > 5e-5 && c[101] == 0.0, "{} {}", c[100], c[101]);
 }
+
+#[test]
+fn tile_bands_and_band_tiles_near_i32_max_do_not_overflow() {
+    let r = Rect::new(0, i32::MAX - 10, 10, i32::MAX);
+    let bands = tile_bands(r);
+    assert_eq!(bands, vec![r]);
+
+    let band = Rect::new(i32::MAX - 10, 0, i32::MAX, 2);
+    let data = vec![1.0f32; (band.width() * band.height()) as usize];
+    let tiles = band_tiles(band, &data, 1, |p| p[0] > 0.0);
+    assert_eq!(tiles.len(), 1);
+    assert_eq!(tiles[0].0, band);
+}
+
+#[test]
+fn soft_fills_show_beyond_the_path_and_keep_aligned_strokes_crisp() {
+    let square = Path::new(vec![Subpath::polygon(&[(10.0, 10.0), (30.0, 10.0), (30.0, 30.0), (10.0, 30.0)])]);
+    let clip = Rect::new(0, 0, 40, 40);
+    for align in [StrokeAlign::Inside, StrokeAlign::Outside] {
+        let sh = ShapeLayer {
+            path: square.clone(),
+            fill: Some(Fill::Solid(Color::rgb(0.0, 0.0, 0.0))),
+            stroke: Some(ShapeStroke { width: 2.0, align, paint: Fill::Solid(Color::rgb(1.0, 0.0, 0.0)), ..ShapeStroke::default() }),
+            density: 0.5,
+            ..ShapeLayer::default()
+        };
+        let c = CompiledShape::new(&sh, DEFAULT_TOLERANCE, clip);
+        assert_eq!(c.bounds(), Some(Rect::new(i32::MIN / 4, i32::MIN / 4, i32::MAX / 4, i32::MAX / 4)), "{align:?}");
+        let rgba = c.render_rgba(clip);
+        let at = |x: usize, y: usize| rgba[y * 40 + x];
+        // Beyond the path and the stroke: the fill at half density; inside: opaque black.
+        assert!((at(2, 2)[3] - 0.5).abs() < 1e-4 && at(2, 2)[0] == 0.0, "{align:?}: {:?}", at(2, 2));
+        assert!((at(20, 20)[3] - 1.0).abs() < 1e-4 && at(20, 20)[0] == 0.0);
+        // The stroke stays opaque red on its side of the path.
+        let s = if align == StrokeAlign::Inside { at(10, 20) } else { at(9, 20) };
+        assert!(s[0] > 0.999 && s[3] > 0.999, "{align:?}: {s:?}");
+    }
+    // Hostile density and feather render as the defaults or nearest valid values.
+    for (density, feather) in [(f32::NAN, f32::NAN), (-1.0, -5.0), (7.0, f32::INFINITY)] {
+        let sh = ShapeLayer { path: square.clone(), fill: Some(Fill::Solid(Color::rgb(0.0, 0.0, 0.0))), density, feather, ..ShapeLayer::default() };
+        let rgba = CompiledShape::new(&sh, DEFAULT_TOLERANCE, clip).render_rgba(clip);
+        assert!(rgba.iter().all(|p| p.iter().all(|v| v.is_finite())), "{density} {feather}");
+    }
+}

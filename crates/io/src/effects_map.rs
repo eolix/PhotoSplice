@@ -69,9 +69,15 @@ const BLEND_LONG_NAMES: [(BlendMode, &str); 17] = [
     (BlendMode::Luminosity, "luminosity"),
 ];
 
-/// A blend-mode enum from either its four-character code or its long string ID.
+/// A blend-mode enum from its four-character code, its long string ID, or the layer record's key:
+/// Reference 2026 writes `vLit`, `lddg`, `lbrn`… as an effect's `Md  ` for some modes.
 pub(crate) fn blend_from_id(v: &[u8]) -> Option<BlendMode> {
-    BLEND_NAMES.iter().chain(&BLEND_LONG_NAMES).find(|(_, n)| n.as_bytes() == v).map(|(m, _)| *m)
+    BLEND_NAMES
+        .iter()
+        .chain(&BLEND_LONG_NAMES)
+        .find(|(_, n)| n.as_bytes() == v)
+        .map(|(m, _)| *m)
+        .or_else(|| <[u8; 4]>::try_from(v).ok().and_then(BlendMode::from_psd_key))
 }
 
 pub(crate) fn blend_of(d: &Descriptor, key: &str, default: BlendMode) -> BlendMode {
@@ -122,14 +128,48 @@ fn contour(d: &Descriptor, key: &str) -> Contour {
     let linear = points.len() == 2 && points[0].input == 0.0 && points[0].output == 0.0 && points[1].input == 1.0 && points[1].output == 1.0;
     if points.is_empty() || (linear && (name.is_empty() || name == "Linear")) { Contour::Linear } else { Contour::Custom { name, points, corners } }
 }
+/// The most points Reference reads in an effect's contour (`ShpC` › `Crv `): a layer whose effects
+/// carry a longer one fails to load ("A problem was encountered reading layer … program error"),
+/// and Reference then drops all of its effects; 16 loads.
+const PSD_CONTOUR_POINTS: usize = 16;
+
+/// Indices of the contour points a PSD keeps, in order: all of them up to [`PSD_CONTOUR_POINTS`],
+/// else both ends and then, one at a time, the point farthest (in output) from the line between
+/// the kept points around it, so peaks and valleys (Ring - Double's two rings) survive.
+fn psd_contour_points(points: &[CurvePoint]) -> Vec<usize> {
+    if points.len() <= PSD_CONTOUR_POINTS {
+        return (0..points.len()).collect();
+    }
+    let mut kept = vec![0, points.len() - 1];
+    while kept.len() < PSD_CONTOUR_POINTS {
+        let mut farthest: Option<(f32, usize)> = None;
+        for pair in kept.windows(2) {
+            let &[a, b] = pair else { continue };
+            let (Some(pa), Some(pb)) = (points.get(a), points.get(b)) else { continue };
+            let span = pb.input - pa.input;
+            for (i, p) in points.iter().enumerate().take(b).skip(a + 1) {
+                // Only equal inputs (a vertical step) have no span: inputs a few ulps apart still do.
+                let t = if span != 0.0 && span.is_finite() { (p.input - pa.input) / span } else { 0.0 };
+                let off = (p.output - (pa.output + t * (pb.output - pa.output))).abs();
+                if off.is_finite() && farthest.is_none_or(|(f, _)| off > f) {
+                    farthest = Some((off, i));
+                }
+            }
+        }
+        let Some((_, i)) = farthest else { break };
+        kept.insert(kept.partition_point(|&k| k < i), i);
+    }
+    kept
+}
+
 fn contour_value(c: &Contour) -> Value {
     let (name, points) = match c {
         Contour::Linear => ("Linear".to_string(), vec![CurvePoint { input: 0.0, output: 0.0 }, CurvePoint { input: 1.0, output: 1.0 }]),
         Contour::Custom { name, points, .. } => (name.clone(), points.clone()),
     };
-    let pts = points
-        .iter()
-        .enumerate()
+    let pts = psd_contour_points(&points)
+        .into_iter()
+        .filter_map(|i| points.get(i).map(|p| (i, p)))
         .map(|(i, p)| {
             let d = Descriptor::new("CrPt").with("Hrzn", Value::Double(f64::from(p.input * 255.0))).with("Vrtc", Value::Double(f64::from(p.output * 255.0)));
             // Photoshop writes no `Cnty` (continuity) on smooth points; a corner carries `Cnty` false.
@@ -666,7 +706,10 @@ fn merge_kind(i: usize, base: &Descriptor, fresh: &Descriptor, items: &[Effect])
                     // (colour model, noise gradient, name, interpolation).
                     let file = parse_one(single, o);
                     let file_stops = file.as_ref().and_then(gradient_stops);
-                    let same_gradient = file_stops.is_some() && file_stops == model.get(k).and_then(|e| gradient_stops(e));
+                    let model_stops = model.get(k).and_then(|e| gradient_stops(e));
+                    let same_gradient = file_stops.is_some() && file_stops == model_stops;
+                    // A regenerated gradient is written baked (Classic): the file's method goes.
+                    let n = if model_stops.is_some() && !same_gradient { crate::blocks::with_baked_method(o, n) } else { n };
                     let keep: &[&str] = match (placeholder(o), same_gradient) {
                         (true, _) => &[],
                         (false, true) => &["showInDialog", "Grad"],
@@ -809,6 +852,65 @@ pub fn parse_lrfx(data: &[u8]) -> Option<(bool, Vec<Effect>)> {
 #[allow(clippy::unreachable)] // clippy.toml exempts unwrap/expect/panic in tests, not unreachable!
 mod tests {
     use super::*;
+
+    fn crv(v: &Value) -> Vec<(f64, f64)> {
+        let Value::Descriptor(d) = v else { panic!("ShpC") };
+        let Some(Value::List(pts)) = d.get("Crv ") else { panic!("Crv ") };
+        pts.iter()
+            .map(|p| {
+                let Value::Descriptor(p) = p else { panic!("CrPt") };
+                let n = |k: &str| match p.get(k) {
+                    Some(Value::Double(x)) => *x,
+                    _ => panic!("{k}"),
+                };
+                (n("Hrzn"), n("Vrtc"))
+            })
+            .collect()
+    }
+
+    /// Reference drops every effect of a layer whose contour has more than 16 points. A 29-point
+    /// contour with two rings is written as 16 points that keep both ends and both peaks; up to 16
+    /// points are written as they are.
+    #[test]
+    fn psd_contours_keep_at_most_16_points_and_their_peaks() {
+        let points: Vec<CurvePoint> = (0..29)
+            .map(|i| {
+                let x = i as f32 / 28.0;
+                // Rings at x = 0.25 and 0.75, small wiggles between.
+                let y = (1.0 - ((x - 0.25).abs() * 8.0)).max(0.0).max(1.0 - (x - 0.75).abs() * 8.0) + if i % 2 == 0 { 0.0 } else { 0.01 };
+                CurvePoint { input: x, output: y.clamp(0.0, 1.0) }
+            })
+            .collect();
+        let c = Contour::Custom { name: "Two rings".into(), points: points.clone(), corners: vec![false; 29] };
+        let out = crv(&contour_value(&c));
+        assert_eq!(out.len(), 16);
+        assert_eq!(out.first().copied(), Some((0.0, f64::from(points[0].output) * 255.0)));
+        assert_eq!(out.last().map(|p| p.0), Some(255.0));
+        let peak = |x: f32| out.iter().any(|p| ((p.0 / 255.0) as f32 - x).abs() < 0.03 && p.1 > 240.0);
+        assert!(peak(0.25) && peak(0.75), "both rings kept: {out:?}");
+        assert!(out.windows(2).all(|w| w[0].0 < w[1].0), "in order: {out:?}");
+
+        let short = Contour::Custom { name: "Short".into(), points: points[..16].to_vec(), corners: vec![false; 16] };
+        assert_eq!(crv(&contour_value(&short)).len(), 16);
+    }
+
+    /// Inputs closer than `f32::EPSILON` but distinct are still a span: a point on the straight line
+    /// between two such inputs isn't mistaken for a bend and kept in place of a genuine one.
+    #[test]
+    fn a_point_on_a_tiny_straight_span_is_not_a_bend() {
+        let p = |input: f32, output: f32| CurvePoint { input, output };
+        // Three distinct inputs a few ulps apart near 0.5, on a straight rise from 0 to 1.
+        let (a, b) = (0.5_f32, f32::from_bits(0.5_f32.to_bits() + 2));
+        let mid = f32::from_bits(0.5_f32.to_bits() + 1);
+        let mut points = vec![p(0.0, 0.0), p(0.2, 0.0)];
+        points.extend([p(a, 0.0), p(mid, 0.5), p(b, 1.0)]);
+        // Fourteen gentle bends after it, each one a real (if small) peak.
+        points.extend((0..14).map(|k| p(0.55 + k as f32 * 0.03, if k % 2 == 0 { 1.0 } else { 0.9 })));
+        points.push(p(1.0, 1.0));
+        let kept = psd_contour_points(&points);
+        assert_eq!(kept.len(), 16);
+        assert!(!kept.contains(&3), "the point on the tiny straight span was kept over a real bend: {kept:?}");
+    }
 
     /// A block written from scratch carries the document's effects scale (resolution / 72); a
     /// file's own block keeps the scale it had.
@@ -978,6 +1080,129 @@ mod tests {
         for (_, n) in BLEND_NAMES {
             assert!(s.insert(n));
         }
+    }
+
+    /// A Gradient Overlay `lfx2` laid out as Reference writes it: one black colour, opacity
+    /// 100 → 0 % with the opacity midpoint `mid` (%), Smoothness `intr` (0..4096) and the method
+    /// enum `gs99` (Reference 25.1's key in layer effects; codes `Gcls`, `Lnr `, `Perc`).
+    fn overlay_lfx2(mid: i32, intr: f64, method: &str) -> Vec<u8> {
+        let black = || Descriptor::new("RGBC").with("Rd  ", Value::Double(0.0)).with("Grn ", Value::Double(0.0)).with("Bl  ", Value::Double(0.0));
+        let clr = |loc: i32| {
+            Value::Descriptor(
+                Descriptor::new("Clrt")
+                    .with("Clr ", Value::Descriptor(black()))
+                    .with("Type", Value::Enumerated { type_id: Id::new("Clry"), value: Id::new("UsrS") })
+                    .with("Lctn", Value::Integer(loc))
+                    .with("Mdpn", Value::Integer(50)),
+            )
+        };
+        let trn = |loc: i32, op: f32, mid: i32| {
+            Value::Descriptor(Descriptor::new("TrnS").with("Opct", unit(b"#Prc", op)).with("Lctn", Value::Integer(loc)).with("Mdpn", Value::Integer(mid)))
+        };
+        let grad = Descriptor::new("Grdn")
+            .with("GrdF", Value::Enumerated { type_id: Id::new("GrdF"), value: Id::new("CstS") })
+            .with("Intr", Value::Double(intr))
+            .with("Clrs", Value::List(vec![clr(0), clr(4096)]))
+            .with("Trns", Value::List(vec![trn(0, 100.0, 50), trn(4096, 0.0, mid)]));
+        let fx = Descriptor::new("GrFl")
+            .with("enab", Value::Boolean(true))
+            .with("Grad", Value::Descriptor(grad))
+            .with("Angl", unit(b"#Ang", 0.0))
+            .with("gs99", Value::Enumerated { type_id: Id::new("gradientInterpolationMethodType"), value: Id::new(method) });
+        let d = Descriptor::new("null").with("masterFXSwitch", Value::Boolean(true)).with("GrFl", Value::Descriptor(fx));
+        let mut data = 0u32.to_be_bytes().to_vec();
+        data.extend(VersionedDescriptor { version: 16, descriptor: d }.to_bytes());
+        data
+    }
+
+    fn overlay_opacity(data: &[u8]) -> Vec<(f32, f32)> {
+        let (_, fx) = parse_lfx2(data).unwrap();
+        let Some(Effect::GradientOverlay { gradient, .. }) = fx.first() else { panic!("overlay: {fx:?}") };
+        gradient.opacity_stops.clone()
+    }
+
+    fn opacity_at(o: &[(f32, f32)], t: f32) -> f32 {
+        let i = o.windows(2).position(|w| t >= w[0].0 && t <= w[1].0).unwrap();
+        o[i].1 + (o[i + 1].1 - o[i].1) * (t - o[i].0) / (o[i + 1].0 - o[i].0)
+    }
+
+    /// The overlay's transparency follows Smoothness, the opacity midpoints and the method like a
+    /// gradient fill layer's (Reference 25.1 renders both identically; the values are its
+    /// composites at t = 0.25 and 0.5).
+    #[test]
+    fn gradient_overlay_opacity_follows_smoothness_midpoint_and_method() {
+        let at = |mid, intr, method: &str, t| opacity_at(&overlay_opacity(&overlay_lfx2(mid, intr, method)), t);
+        // Plain Classic stays the linear fade it is stored as.
+        assert_eq!(overlay_opacity(&overlay_lfx2(50, 0.0, "Gcls")), vec![(0.0, 1.0), (1.0, 0.0)]);
+        // Midpoint 25 %: half transparent a quarter of the way.
+        assert!((at(25, 0.0, "Gcls", 0.25) - 0.5).abs() < 0.01);
+        // Smoothness 100 % eases the ends (Reference: 0.796 at a quarter).
+        assert!((at(50, 4096.0, "Gcls", 0.25) - 0.796).abs() < 0.015);
+        // The method bends the transparency ramp too, not only the colours (Reference at the
+        // middle: 0.631 Linear, 0.255 Perceptual).
+        assert!((at(50, 0.0, "Lnr ", 0.5) - 0.631).abs() < 0.015);
+        assert!((at(50, 0.0, "Perc", 0.5) - 0.255).abs() < 0.015);
+        assert!((at(25, 4096.0, "Perc", 0.25) - 0.255).abs() < 0.015);
+    }
+
+    /// A regenerated `lfx2` carries the baked ramp as plain (Classic, Smoothness 0) stops, so it
+    /// reads back unchanged: written fresh, or merged onto the file's block (whose Perceptual
+    /// method is then written as Classic, or it would bend the baked ramp again on every open).
+    #[test]
+    fn baked_overlay_opacity_round_trips() {
+        let data = overlay_lfx2(25, 4096.0, "Perc");
+        let (master, fx) = parse_lfx2(&data).unwrap();
+        let a = overlay_opacity(&data);
+        assert!(a.len() > 2);
+        let close = |b: &[(f32, f32)]| {
+            assert_eq!(a.len(), b.len());
+            for (x, y) in a.iter().zip(b) {
+                assert!((x.0 - y.0).abs() < 1e-3 && (x.1 - y.1).abs() < 1e-4, "{x:?} vs {y:?}");
+            }
+        };
+        close(&overlay_opacity(&write_lfx2(master, &fx)));
+        // Edited (the colours), merged onto the file's own block.
+        let mut edited = fx.clone();
+        if let Some(Effect::GradientOverlay { gradient, .. }) = edited.first_mut() {
+            gradient.stops = vec![(0.0, Color::rgb(1.0, 0.0, 0.0)), (1.0, Color::rgb(1.0, 0.0, 0.0))];
+        }
+        let (merged, _) = write_lfx2_onto(Some(&data), master, &edited);
+        close(&overlay_opacity(&merged));
+        let d = VersionedDescriptor::parse_prefix(&merged[4..]).unwrap().0.descriptor;
+        assert_eq!(get_desc(&d, "GrFl").and_then(|g| enum_of(g, "gs99")), Some(&b"Gcls"[..]));
+        // Unedited, the file's gradient and method stay.
+        let (kept, _) = write_lfx2_onto(Some(&data), master, &fx);
+        let d = VersionedDescriptor::parse_prefix(&kept[4..]).unwrap().0.descriptor;
+        assert_eq!(get_desc(&d, "GrFl").and_then(|g| enum_of(g, "gs99")), Some(&b"Perc"[..]));
+    }
+
+    #[test]
+    fn layer_record_blend_keys_parse() {
+        for (key, mode) in [
+            (b"vLit", BlendMode::VividLight),
+            (b"lLit", BlendMode::LinearLight),
+            (b"pLit", BlendMode::PinLight),
+            (b"hMix", BlendMode::HardMix),
+            (b"lbrn", BlendMode::LinearBurn),
+            (b"lddg", BlendMode::LinearDodge),
+            (b"dkCl", BlendMode::DarkerColor),
+            (b"lgCl", BlendMode::LighterColor),
+            (b"fsub", BlendMode::Subtract),
+            (b"fdiv", BlendMode::Divide),
+        ] {
+            assert_eq!(blend_from_id(key), Some(mode), "{}", String::from_utf8_lossy(key));
+        }
+        assert_eq!(blend_from_id(b"zzzz"), None);
+        // A Color Overlay in Vivid Light stored as `vLit`, not left as Normal.
+        let key = |v: &str| Value::Enumerated { type_id: Id::new("BlnM"), value: Id::new(v) };
+        let d = Descriptor::new("null")
+            .with("masterFXSwitch", Value::Boolean(true))
+            .with("SoFi", Value::Descriptor(Descriptor::new("SoFi").with("enab", Value::Boolean(true)).with("Md  ", key("vLit"))));
+        let mut data = 0u32.to_be_bytes().to_vec();
+        data.extend(VersionedDescriptor { version: 16, descriptor: d }.to_bytes());
+        let (_, fx) = parse_lfx2(&data).unwrap();
+        let modes: Vec<BlendMode> = fx.iter().filter_map(|e| if let Effect::ColorOverlay { common, .. } = e { Some(common.blend) } else { None }).collect();
+        assert_eq!(modes, vec![BlendMode::VividLight]);
     }
 
     #[test]

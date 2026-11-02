@@ -59,6 +59,14 @@ fn hdr_adjustments_preserve_range_and_cpu_parity() {
             black: Vec::new(),
             pencil: false,
         },
+        // An edited curve continues past 0..1 along its end segments (Reference's `[[0,0],[255,128]]`).
+        Adjustment::Curves {
+            master: vec![CurvePoint { input: 0.0, output: 0.0 }, CurvePoint { input: 1.0, output: 128.0 / 255.0 }],
+            per_channel: std::array::from_fn(|_| identity.clone()),
+            space: Default::default(),
+            black: Vec::new(),
+            pencil: false,
+        },
         // 32-bit Photoshop rules: unclipped, legacy pivot 127, the mixer's 1/1024 steps and halved constant.
         Adjustment::BrightnessContrast { brightness: 25.0, contrast: 30.0, legacy: true },
         Adjustment::BrightnessContrast { brightness: -20.0, contrast: -30.0, legacy: true },
@@ -67,6 +75,7 @@ fn hdr_adjustments_preserve_range_and_cpu_parity() {
         Adjustment::PhotoFilter { color: [0.97, 0.76, 0.0], density: 0.4, preserve_luminosity: true },
         Adjustment::PhotoFilter { color: [0.2, 0.6, 0.9], density: 0.3, preserve_luminosity: false },
         Adjustment::BlackWhite { weights: [70.0, 20.0, 50.0, 10.0, 90.0, 30.0], tint: Some([0.9, 0.7, 0.5]) },
+        Adjustment::BlackWhite { weights: [40.0, 60.0, 40.0, 60.0, 20.0, 80.0], tint: None },
         Adjustment::HueSaturation { hue: 40.0, saturation: 25.0, lightness: -10.0, colorize: false, ranges: photosplice_doc::adjust::HueRange::defaults() },
     ] {
         let mut d = Document::new("HDR adjustments", Size::new(3, 1), ColorMode::Rgb, SampleType::F32);
@@ -567,6 +576,42 @@ fn special_eight_fill_matches_cpu() {
     }
 }
 
+/// The same for adjustment layers: the GPU's adjustment mix takes Fill inside the special eight's
+/// blend, as compose's adjustment branch does (compose::adjustment_fill), with Opacity on top,
+/// on its own and clipped to a layer.
+#[test]
+fn special_eight_fill_on_adjustment_layers_matches_cpu() {
+    let Some(mut g) = gpu() else { return };
+    let special = [
+        BlendMode::ColorBurn,
+        BlendMode::LinearBurn,
+        BlendMode::ColorDodge,
+        BlendMode::LinearDodge,
+        BlendMode::VividLight,
+        BlendMode::LinearLight,
+        BlendMode::HardMix,
+        BlendMode::Difference,
+    ];
+    for mode in special {
+        for fill in [0.3, 0.6] {
+            for clipped in [false, true] {
+                let mut d = base_doc(64, 48);
+                d.layers[0] = noise_layer("bg", PixelFormat::RGBA8, Rect::from_xywh(0, 0, 64, 48), 5, 1.0);
+                if clipped {
+                    d.layers.push(noise_layer("base", PixelFormat::RGBA8, Rect::new(4, 3, 60, 45), 7, 0.0));
+                }
+                let mut l = Layer::new("invert", LayerContent::Adjustment(Adjustment::Invert));
+                l.blend = mode;
+                l.opacity = 0.7;
+                l.fill_opacity = fill;
+                l.clipped = clipped;
+                d.layers.push(l);
+                check(&mut g, &d, &format!("adjustment {mode:?} fill {fill} clipped {clipped}"));
+            }
+        }
+    }
+}
+
 #[test]
 fn xor_rounding_on_half_float_targets() {
     let Some((_adapter, device, queue, _lock)) = any_device() else { return };
@@ -669,6 +714,29 @@ fn lookup(n: usize, tetrahedral: bool, dither: bool) -> Adjustment {
         }
     }
     Adjustment::ColorLookup { name: "test".into(), lut: Some(std::sync::Arc::new(t)), size: n as u32, tetrahedral, dither }
+}
+
+/// 32-bit Hue/Saturation on colours at and above HSL lightness 1 and with a negative channel,
+/// where the HSL saturation divides by zero: the GPU scales the chroma as the CPU does
+/// (compose::adjust::hue_saturation_ranged), finite and unclipped.
+#[test]
+fn hdr_hue_saturation_bright_colours() {
+    let Some(mut g) = gpu() else { return };
+    let mut d = Document::new("t", Size::new(4, 1), ColorMode::Rgb, SampleType::F32);
+    let mut bg = Layer::raster("bg", d.pixel_format());
+    let px = [2.0, 0.0, 0.0, 1.0, 0.25, -0.25, 0.0, 1.0, 1.1, 0.9, 1.0, 1.0, 0.55, 0.45, 0.5, 1.0];
+    bg.surface_mut().unwrap().write_region(Rect::from_xywh(0, 0, 4, 1), &px);
+    d.layers.push(bg);
+    for (hue, saturation) in [(40.0, 0.0), (0.0, 25.0), (0.0, -25.0), (40.0, 75.0)] {
+        let hs = Adjustment::HueSaturation { hue, saturation, lightness: 0.0, colorize: false, ranges: HueRange::defaults() };
+        d.layers.push(Layer::new("hs", LayerContent::Adjustment(hs)));
+        check(&mut g, &d, &format!("hue {hue} saturation {saturation} on bright colours"));
+        d.layers.pop();
+    }
+    // A PSD can store a Colorize saturation beyond 100: clamped before the 32-bit scaling on both.
+    let hs = Adjustment::HueSaturation { hue: 200.0, saturation: 150.0, lightness: 50.0, colorize: true, ranges: HueRange::defaults() };
+    d.layers.push(Layer::new("hs", LayerContent::Adjustment(hs)));
+    check(&mut g, &d, "colorize saturation 150");
 }
 
 #[test]
@@ -989,6 +1057,71 @@ fn fills_and_dissolve() {
     l.opacity = 0.6;
     d.layers.push(l);
     check(&mut g, &d, "dissolve");
+}
+
+/// Dissolve picks the layer or the backdrop per pixel on every path the CPU does: an adjustment
+/// (on its own and clipped), a clipped layer at partial Opacity × Fill, a layer with effects (the
+/// finished stack at layer opacity) and a Dissolve colour overlay. Coverages here are exact
+/// constants or 8-bit alphas, so the CPU and the GPU compare the same values with the noise.
+#[test]
+fn dissolve_on_adjustments_clipping_and_effects() {
+    let Some(mut g) = gpu() else { return };
+    for clipped in [false, true] {
+        let mut d = base_doc(64, 48);
+        d.layers[0] = noise_layer("bg", PixelFormat::RGBA8, Rect::from_xywh(0, 0, 64, 48), 5, 1.0);
+        if clipped {
+            d.layers.push(noise_layer("base", PixelFormat::RGBA8, Rect::new(5, 6, 48, 40), 45, 0.0));
+        }
+        let mut l = Layer::new("inv", LayerContent::Adjustment(Adjustment::Invert));
+        l.blend = BlendMode::Dissolve;
+        l.opacity = 0.5;
+        l.clipped = clipped;
+        d.layers.push(l);
+        check(&mut g, &d, &format!("Dissolve adjustment, clipped {clipped}"));
+    }
+    for (opacity, fill) in [(0.4, 1.0), (0.8, 0.5)] {
+        let mut d = base_doc(56, 44);
+        let base = noise_layer("base", PixelFormat::RGBA8, Rect::new(5, 6, 48, 40), 45, 0.0);
+        let mut clip = noise_layer("dissolve clip", PixelFormat::RGBA8, d.bounds(), 46, 0.0);
+        clip.clipped = true;
+        clip.blend = BlendMode::Dissolve;
+        clip.opacity = opacity;
+        clip.fill_opacity = fill;
+        d.layers.extend([base, clip]);
+        check(&mut g, &d, &format!("clipped Dissolve at {opacity} x {fill}"));
+    }
+    for overlay_mode in [BlendMode::Normal, BlendMode::Dissolve] {
+        let mut d = base_doc(64, 48);
+        d.layers[0] = noise_layer("bg", PixelFormat::RGBA8, Rect::from_xywh(0, 0, 64, 48), 5, 1.0);
+        let mut l = noise_layer("fx", PixelFormat::RGBA8, Rect::new(8, 6, 56, 42), 12, 1.0);
+        l.blend = if overlay_mode == BlendMode::Dissolve { BlendMode::Normal } else { BlendMode::Dissolve };
+        l.opacity = 0.6;
+        l.effects.items = vec![photosplice_doc::Effect::ColorOverlay {
+            common: photosplice_doc::FxCommon::new(overlay_mode, 0.5),
+            color: Color::rgb(0.9, 0.2, 0.1),
+        }];
+        d.layers.push(l);
+        check(&mut g, &d, &format!("effects, overlay {overlay_mode:?}"));
+    }
+}
+
+/// Transparency Shapes Layer off changes the special eight's blend (the layer's alpha blends as
+/// Fill, compose::blend_layer_into); like the rest of Advanced Blending the GPU has no pass for it
+/// and leaves such documents to the CPU. Other modes look the same either way and stay on the GPU.
+#[test]
+fn transparency_shapes_off_special_blend_falls_back_to_the_cpu() {
+    let Some(mut g) = gpu() else { return };
+    let mut d = base_doc(64, 48);
+    let mut l = noise_layer("top", PixelFormat::RGBA8, Rect::new(4, 3, 60, 45), 2, 0.0);
+    l.blend = BlendMode::ColorDodge;
+    l.opacity = 0.53;
+    l.transparency_shapes = false;
+    d.layers.push(l);
+    assert!(render_to_vec(&mut g.comp, &g.device, &g.queue, &d, d.bounds()).is_err(), "Color Dodge with Transparency Shapes Layer off");
+    if let Some(l) = d.layers.last_mut() {
+        l.blend = BlendMode::Multiply;
+    }
+    check(&mut g, &d, "Multiply with Transparency Shapes Layer off");
 }
 
 #[test]
@@ -1644,6 +1777,24 @@ fn layer_effects_opacity_fill_blend_and_off_canvas() {
         d.layers.push(l);
         fx_check(&mut g, &d, &format!("outside stroke at fill {fill}"));
     }
+    // An Outside stroke has no share beneath fully opaque pixels: non-Normal layers with an
+    // Outside stroke on a soft blob and a hard square. (Blend Interior Effects as Group, where
+    // that share shows through the layer's mode, is composited on the CPU.)
+    for blend in [BlendMode::Multiply, BlendMode::Screen] {
+        let mut d = fx_doc(80, 80, SampleType::U8);
+        let mut l = blob("ring", d.pixel_format(), 40.0, 40.0, 20.0, [0.9, 0.1, 0.1]);
+        l.effects.items = vec![Effect::Stroke(stroke(4.0, StrokePosition::Outside, FxPaint::Color(Color::rgb(0.1, 0.2, 0.9))))];
+        l.blend = blend;
+        d.layers.push(l);
+        fx_check(&mut g, &d, &format!("outside stroke under a {blend:?} blob"));
+        let mut d = fx_doc(40, 40, SampleType::U8);
+        let mut l = Layer::raster("square", d.pixel_format());
+        l.surface_mut().unwrap().fill_rect(Rect::new(15, 15, 25, 25), &[1.0, 0.0, 0.0, 1.0]);
+        l.effects.items = vec![Effect::Stroke(stroke(3.0, StrokePosition::Outside, FxPaint::Color(Color::rgb(0.0, 0.0, 1.0))))];
+        l.blend = blend;
+        d.layers.push(l);
+        fx_check(&mut g, &d, &format!("outside stroke under a {blend:?} square"));
+    }
     // Shapes partly off the canvas (their effects reach back in) and a masked effect layer.
     let mut d = fx_doc(90, 70, SampleType::U8);
     let mut l = blob("edge", d.pixel_format(), 4.0, 66.0, 18.0, [0.9, 0.9, 0.2]);
@@ -1801,7 +1952,17 @@ fn layer_effects_on_shape_layers() {
         let path = Path::new(vec![Subpath::polygon(&[(14.3, 12.6), (70.2, 18.1), (60.7, 58.4), (24.9, 50.2)])]);
         let mut fill = Color::rgb(0.3, 0.6, 0.9);
         fill.alpha = alpha;
-        let mut sh = ShapeLayer { path, fill: Some(Fill::Solid(fill)), stroke: None, live: None, align_edges: false, cache: None, psd_raw: None };
+        let mut sh = ShapeLayer {
+            path,
+            fill: Some(Fill::Solid(fill)),
+            stroke: None,
+            live: None,
+            align_edges: false,
+            cache: None,
+            psd_raw: None,
+            density: 1.0,
+            feather: 0.0,
+        };
         sh.cache = Some(photosplice_vector::render_shape(&sh, d.pixel_format(), d.bounds()));
         let mut l = Layer::new("shape", LayerContent::Shape(sh));
         l.effects.items = vec![
@@ -1839,7 +2000,17 @@ fn stroke_effects_on_filled_and_stroked_shapes() {
                 paint: Fill::Solid(Color::rgb(0.1, 0.8, 0.2)),
                 ..ShapeStroke::default()
             });
-            let mut sh = ShapeLayer { path, fill: Some(fill), stroke: stroke_v, live: None, align_edges: false, cache: None, psd_raw: None };
+            let mut sh = ShapeLayer {
+                path,
+                fill: Some(fill),
+                stroke: stroke_v,
+                live: None,
+                align_edges: false,
+                cache: None,
+                psd_raw: None,
+                density: 1.0,
+                feather: 0.0,
+            };
             sh.cache = Some(photosplice_vector::render_shape(&sh, d.pixel_format(), d.bounds()));
             let mut l = Layer::new("shape", LayerContent::Shape(sh));
             if masked {
@@ -1914,6 +2085,8 @@ fn blend_if() {
             // An adjustment judged by its result, and a clipped layer.
             let mut adj = Layer::new("inv", LayerContent::Adjustment(Adjustment::Invert));
             adj.blend_if.set(e, pair);
+            // Judged by its result before Opacity (compose::apply_blend_if).
+            adj.opacity = 0.4;
             d.layers[1] = l.clone();
             d.layers[1].blend_if = Default::default();
             d.layers.push(adj);
@@ -1931,6 +2104,50 @@ fn blend_if() {
     l.blend_if.set(1, [r(60, 120, 255, 255), r(0, 0, 140, 200)]);
     d.layers.push(l);
     check(&mut g, &d, "gray blend if");
+}
+
+/// A Pass Through group with Blend If renders isolated on the GPU as on the CPU: an adjustment
+/// inside it leaves the layers beneath alone.
+#[test]
+fn pass_through_group_with_blend_if_is_isolated() {
+    use photosplice_doc::BlendRange;
+    let Some(mut g) = gpu() else { return };
+    for gated in [true, false] {
+        let mut d = base_doc(64, 48);
+        d.layers[0] = noise_layer("bg", PixelFormat::RGBA8, Rect::from_xywh(0, 0, 64, 48), 5, 1.0);
+        let mut grp = Layer::group("group", vec![Layer::new("inv", LayerContent::Adjustment(Adjustment::Invert))]);
+        grp.blend = BlendMode::PassThrough;
+        if gated {
+            grp.blend_if.set(1, [BlendRange::FULL, BlendRange { black: [0, 0], white: [110, 110] }]);
+        }
+        d.layers.push(grp);
+        check(&mut g, &d, &format!("pass-through group, Blend If {gated}"));
+    }
+}
+
+/// Blend If's Gray rounding (compose::blend_if_gray) on the GPU: 8-bit mixed colours around a hard
+/// Gray point. (Hard points at 16 bits aren't compared: a 16-bit layer can reach the GPU as half
+/// floats, off the 16-bit steps.)
+#[test]
+fn blend_if_gray_rounding() {
+    let Some(mut g) = gpu() else { return };
+    let r = |b: u8, w: u8| photosplice_doc::BlendRange { black: [b, b], white: [w, w] };
+    // RGB8: mixed colours around a hard Gray point at 128.
+    let colours: [[u8; 3]; 4] = [[123, 126, 151], [120, 129, 149], [121, 129, 149], [65, 0, 0]];
+    for (black, white) in [(128u8, 255u8), (0, 128), (20, 255)] {
+        let mut d = Document::new("bi8", Size::new(4, 1), ColorMode::Rgb, SampleType::U8);
+        let mut under = Layer::raster("under", PixelFormat::RGBA8);
+        for (x, c) in colours.iter().enumerate() {
+            let c = c.map(|v| f32::from(v) / 255.0);
+            under.surface_mut().unwrap().fill_rect(Rect::new(x as i32, 0, x as i32 + 1, 1), &[c[0], c[1], c[2], 1.0]);
+        }
+        d.layers.push(under);
+        let mut top = Layer::raster("top", PixelFormat::RGBA8);
+        top.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 4, 1), &[1.0, 1.0, 1.0, 1.0]);
+        top.blend_if.set(0, [photosplice_doc::BlendRange::FULL, r(black, white)]);
+        d.layers.push(top);
+        check(&mut g, &d, &format!("gray point {black}..{white}"));
+    }
 }
 
 #[test]
@@ -2199,7 +2416,17 @@ fn stroked_shapes_with_clipped_layers() {
             d.layers.push(noise_layer("bg", d.pixel_format(), Rect::from_xywh(0, 0, 80, 64), 1, 0.3));
             let path = Path::new(vec![Subpath::polygon(&[(10.3, 8.6), (66.2, 12.1), (58.7, 54.4), (16.9, 48.2)])]);
             let stroke = ShapeStroke { width: 5.0, paint: Fill::Solid(Color::rgb(0.9, 0.9, 0.1)), ..Default::default() };
-            let mut sh = ShapeLayer { path, fill: Some(Fill::Solid(Color::rgb(0.2, 0.3, 0.8))), stroke: Some(stroke), live: None, align_edges: false, cache: None, psd_raw: None };
+            let mut sh = ShapeLayer {
+                path,
+                fill: Some(Fill::Solid(Color::rgb(0.2, 0.3, 0.8))),
+                stroke: Some(stroke),
+                live: None,
+                align_edges: false,
+                cache: None,
+                psd_raw: None,
+                density: 1.0,
+                feather: 0.0,
+            };
             sh.cache = Some(photosplice_vector::render_shape(&sh, d.pixel_format(), d.bounds()));
             let mut l = Layer::new("shape", LayerContent::Shape(sh));
             l.blend = blend;
@@ -2394,7 +2621,7 @@ fn pattern_cache_tracks_source_format_and_cow_tiles() {
 fn pattern_fill_layers() {
     let Some(mut g) = gpu() else { return };
     let pat = checker_pattern();
-    for (link, scale, angle, masked) in [(true, 1.0, 0.0, false), (false, 0.7, 25.0, true), (true, 1.6, -40.0, false)] {
+    for (link, scale, angle, masked) in [(true, 1.0, 0.0, false), (false, 0.7, 25.0, true), (true, 1.6, -40.0, false), (true, 0.3, 10.0, false)] {
         let mut d = base_doc(70, 50);
         d.patterns.push(pat.clone());
         let fill = Fill::Pattern { name: pat.name.clone(), id: pat.id.clone(), scale, angle, link, phase: (3.0, -2.0) };
@@ -2730,5 +2957,64 @@ fn thirty_two_bit_threshold_and_posterize_cut_like_the_cpu() {
         let mut doc = d.clone();
         doc.layers.push(Layer::new("adj", LayerContent::Adjustment(adj.clone())));
         check(&mut g, &doc, &format!("32-bit {adj:?}"));
+    }
+}
+
+/// A shape's Density and Feather soften its fill (its own rendered pixels), with and without a
+/// vector stroke over clipped layers and layer effects: the GPU matches the CPU.
+#[test]
+fn soft_shapes_match_the_cpu() {
+    let Some(mut g) = gpu() else { return };
+    use photosplice_doc::vector::{Path, ShapeLayer, ShapeStroke, Subpath};
+    for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        for (density, feather, stroked, fx) in [(1.0, 6.0, false, false), (0.4, 0.0, true, false), (0.6, 4.0, true, true), (1.0, 3.0, false, true)] {
+            let mut d = fx_doc(90, 70, depth);
+            let path = Path::new(vec![Subpath::polygon(&[(14.3, 12.6), (70.2, 18.1), (60.7, 58.4), (24.9, 50.2)])]);
+            let stroke = stroked.then(|| ShapeStroke { width: 3.0, paint: Fill::Solid(Color::rgb(0.1, 0.8, 0.2)), ..ShapeStroke::default() });
+            let mut sh = ShapeLayer { path, fill: Some(Fill::Solid(Color::rgb(0.3, 0.6, 0.9))), stroke, density, feather, ..ShapeLayer::default() };
+            sh.cache = Some(photosplice_vector::render_shape(&sh, d.pixel_format(), d.bounds()));
+            let mut l = Layer::new("shape", LayerContent::Shape(sh));
+            if fx {
+                l.effects.items = vec![Effect::DropShadow(shadow(BlendMode::Multiply, 0.7, 120.0, 4.0, 5.0, 0.0))];
+            }
+            d.layers.push(l);
+            if stroked {
+                let mut c = noise_layer("clipped", d.pixel_format(), Rect::from_xywh(0, 0, 90, 70), 11, 0.9);
+                c.clipped = true;
+                d.layers.push(c);
+            }
+            let what = format!("{depth:?} density {density} feather {feather} stroked {stroked} fx {fx}");
+            if fx {
+                fx_check(&mut g, &d, &what);
+            } else {
+                check(&mut g, &d, &what);
+            }
+        }
+    }
+}
+
+/// A Reference Frame's stroke: along the group's vector mask, above its masked content, for an
+/// empty frame and one holding a layer, pass-through and isolated.
+#[test]
+fn frame_strokes() {
+    let Some(mut g) = gpu() else { return };
+    use photosplice_doc::vector::{Path, ShapeStroke, StrokeAlign, Subpath, VectorMask};
+    for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        for (blend, align, content) in
+            [(BlendMode::PassThrough, StrokeAlign::Inside, false), (BlendMode::PassThrough, StrokeAlign::Outside, true), (BlendMode::Multiply, StrokeAlign::Center, true)]
+        {
+            let mut d = Document::new("t", Size::new(80, 64), ColorMode::Rgb, depth);
+            d.layers.push(noise_layer("bg", d.pixel_format(), Rect::from_xywh(0, 0, 80, 64), 1, 0.3));
+            let kids = if content { vec![noise_layer("c", d.pixel_format(), Rect::from_xywh(0, 0, 80, 64), 7, 0.4)] } else { vec![] };
+            let mut l = Layer::group("Frame 1", kids);
+            l.blend = blend;
+            l.opacity = 0.8;
+            l.vector_mask = Some(VectorMask::new(Path::new(vec![Subpath::polygon(&[(10.3, 8.6), (66.2, 12.1), (58.7, 54.4), (16.9, 48.2)])])));
+            if let LayerContent::Group(gr) = &mut l.content {
+                gr.frame_stroke = Some(ShapeStroke { width: 5.0, align, paint: Fill::Solid(Color::rgb(0.9, 0.1, 0.1)), ..Default::default() });
+            }
+            d.layers.push(l);
+            check(&mut g, &d, &format!("{depth:?} frame stroke {blend:?} {align:?} content {content}"));
+        }
     }
 }

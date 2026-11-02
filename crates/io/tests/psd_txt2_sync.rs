@@ -439,3 +439,92 @@ fn a_moved_copy_of_path_text_gets_a_moved_path() {
     assert_eq!(p0.len(), p1.len());
     assert!(p0.iter().zip(&p1).enumerate().all(|(i, (a, b))| (b - a - if i % 2 == 0 { 0.0 } else { 30.0 }).abs() < 1e-6));
 }
+
+/// Older Reference keeps its text objects at `/DocumentObjects /TextObjects` (named keys, run
+/// lengths under `/Length`) and re-renders a type layer from that copy (psd-tools' `text.psd`,
+/// `pen-text.psd`). A text edit or a style-only edit updates the copy, so `Txt2` is kept (it
+/// was dropped, losing the path of `pen-text.psd`'s type), the edit shows, and an attribute the
+/// legacy runs can't hold still drops it.
+#[cfg(feature = "corpus")]
+#[test]
+fn an_edit_updates_older_reference_text_objects() {
+    use photosplice_text::engine_data::Value as E;
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/psd-tools");
+    let read = |name: &str| {
+        let bytes = std::fs::read(dir.join(name)).unwrap_or_else(|_| panic!("{name} is missing: run `cargo xtask corpus --all`"));
+        photosplice_io::import(name, &bytes).unwrap().document
+    };
+    let entry = |txt2: &E, i: usize| txt2.path(&["DocumentObjects", "TextObjects"]).and_then(|o| o.as_array()).and_then(|o| o.get(i)).cloned().unwrap();
+    let lens = |e: &E, run: &str| -> Vec<i64> {
+        e.path(&["Model", run, "RunArray"]).and_then(|a| a.as_array()).unwrap().iter().filter_map(|r| r.get("Length").and_then(|v| v.as_i64())).collect()
+    };
+    let edit = |doc: &mut Document, f: &dyn Fn(&mut TextLayer)| {
+        let l = doc.layers.iter_mut().find(|l| matches!(l.content, LayerContent::Text(_))).unwrap();
+        let LayerContent::Text(t) = &mut l.content else { unreachable!() };
+        f(t);
+        t.sync_summary();
+        t.psd_raw = Some(Arc::new(photosplice_text::psd::build_tysh(t, 72.0, None)));
+    };
+
+    // A text edit: the copy's text, its paragraph runs (one per paragraph) and the other runs.
+    let mut doc = read("text.psd");
+    edit(&mut doc, &|t| {
+        t.text.push('!');
+        if let Some(r) = t.runs.last_mut() {
+            r.len += 1;
+        }
+        if let Some(p) = t.paragraphs.last_mut() {
+            p.len += 1;
+        }
+    });
+    let bytes = export(&doc);
+    let txt2 = txt2_of(&bytes).expect("Txt2 kept");
+    let e = entry(&txt2, 0);
+    assert_eq!(e.path(&["Model", "Text"]).and_then(|v| v.as_str()), Some("Line 1\rLine 2\rLine 3 and text!\r"));
+    assert_eq!(lens(&e, "ParagraphRun"), vec![7, 7, 17]);
+    assert_eq!(lens(&e, "StyleRun").iter().sum::<i64>(), 31);
+    assert_eq!(lens(&e, "KernRun"), vec![31]);
+    let back = photosplice_io::import("t.psd", &bytes).unwrap().document;
+    assert!(back.walk().iter().any(|(_, _, l)| matches!(&l.content, LayerContent::Text(t) if t.text.ends_with("text!"))));
+
+    // A style-only edit: the size goes into the copy's style runs, under its legacy name.
+    let mut doc = read("text.psd");
+    edit(&mut doc, &|t| {
+        for r in &mut t.runs {
+            r.style.size_pt = 30.0;
+            r.style.faux_bold = true;
+        }
+    });
+    let txt2 = txt2_of(&export(&doc)).expect("Txt2 kept");
+    let e = entry(&txt2, 0);
+    let runs = e.path(&["Model", "StyleRun", "RunArray"]).and_then(|a| a.as_array()).unwrap();
+    for r in runs {
+        let f = r.path(&["RunData", "StyleSheet", "Features"]).unwrap();
+        assert_eq!(f.get("FontSize").and_then(|v| v.as_f64()), Some(30.0), "{f:?}");
+        assert_eq!(f.get("FauxBold"), Some(&E::Bool(true)));
+    }
+    assert_eq!(e.path(&["Model", "Text"]).and_then(|v| v.as_str()), Some("Line 1\rLine 2\rLine 3 and text\r"));
+
+    // Text on a path keeps its Txt2 (and so its path) through an edit.
+    let mut doc = read("pen-text.psd");
+    edit(&mut doc, &|t| {
+        t.text.push('!');
+        if let Some(r) = t.runs.last_mut() {
+            r.len += 1;
+        }
+        if let Some(p) = t.paragraphs.last_mut() {
+            p.len += 1;
+        }
+    });
+    let txt2 = txt2_of(&export(&doc)).expect("Txt2 kept");
+    assert!(entry(&txt2, 0).path(&["Model", "Text"]).and_then(|v| v.as_str()).is_some_and(|s| s.ends_with("!\r")));
+
+    // Underline has no legacy key we know: the block is dropped, and the editor rebuilds it.
+    let mut doc = read("text.psd");
+    edit(&mut doc, &|t| {
+        for r in &mut t.runs {
+            r.style.underline = true;
+        }
+    });
+    assert!(txt2_of(&export(&doc)).is_none());
+}

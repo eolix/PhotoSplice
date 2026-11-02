@@ -31,12 +31,21 @@ pub struct TySh {
     pub bounds: [f32; 4],
 }
 
-/// Parses a `TySh` block.
+/// Whether a `TySh` affine can safely go into text layout and UI geometry: finite and no larger
+/// than any real canvas needs (a malformed file's `1e62` would hang or garble layout).
+pub fn usable_tysh_transform(matrix: &[f64; 6]) -> bool {
+    matrix.iter().all(|v| v.is_finite() && v.abs() <= 1.0e9)
+}
+
+/// Parses a `TySh` block. `None` also for a matrix [`usable_tysh_transform`] rejects.
 pub fn parse_tysh(data: &[u8]) -> Option<TySh> {
     let f = |at: usize| data.get(at..at + 8).map(|b| f64::from_be_bytes(b.try_into().unwrap_or([0; 8])));
     let mut m = [0.0; 6];
     for (i, v) in m.iter_mut().enumerate() {
         *v = f(2 + i * 8)?;
+    }
+    if !usable_tysh_transform(&m) {
+        return None;
     }
     let (text, used) = VersionedDescriptor::parse_prefix(data.get(52..)?).ok()?;
     let rest = data.get(52 + used..).unwrap_or(&[]);
@@ -522,6 +531,19 @@ fn txt2_text_path(txt2: &E, object: &E) -> Option<TextPath> {
 /// font not in its font list, a paragraph style its runs don't have, several views.
 pub fn patch_txt2(txt2: &mut E, layer: &TextLayer, original: &[u8], written: &[u8], dpi: f32) -> bool {
     let mut next = txt2.clone();
+    // Older Reference's objects (`/DocumentObjects /TextObjects`), which it re-renders from when
+    // the block has them: a stale copy there brings the old text or style back on reopen.
+    if next.path(&["DocumentObjects", "TextObjects"]).is_some() && patch_legacy_txt2(&mut next, layer, original, written, dpi).is_none() {
+        return false;
+    }
+    if next.path(&["1", "1"]).is_none() {
+        // A legacy-only block: its objects are the whole of it.
+        let legacy = next.path(&["DocumentObjects", "TextObjects"]).is_some();
+        if legacy {
+            *txt2 = next;
+        }
+        return legacy;
+    }
     if add_txt2_fonts(&mut next, written).is_none() {
         return false;
     }
@@ -553,6 +575,149 @@ pub fn patch_txt2(txt2: &mut E, layer: &TextLayer, original: &[u8], written: &[u
     }
     *txt2 = next;
     true
+}
+
+/// Patches text object `TextIndex` of older Reference's `Txt2` objects (`/DocumentObjects
+/// /TextObjects`, named keys: `<< /Model << /Text … /ParagraphRun << /RunArray [ << /RunData <<
+/// /ParagraphSheet << /Features … >> >> /Length n >> ] >> /StyleRun … /KernRun … >> /View … >>`)
+/// for the edit `original` → `written`, as [`patch_txt2`] does the numbered objects: the model's
+/// text, its style runs (each from the entry's closest run, the changed attributes set under
+/// their legacy names), one paragraph run per paragraph, and its other run arrays (kerning,
+/// alternate glyphs) cut or extended to the new length. Fonts the edit uses join the block's
+/// font list (`/DocumentResources /FontSet /Resources`). `None`, with `txt2` untouched, when the
+/// entry isn't the layer's text as read, or a changed attribute has no legacy key.
+fn patch_legacy_txt2(txt2: &mut E, layer: &TextLayer, original: &[u8], written: &[u8], dpi: f32) -> Option<()> {
+    let index = usize::try_from(text_index(original)?).ok()?;
+    let mut was = text_layer_from_tysh(original, dpi)?;
+    apply_txt2(&mut was, original, txt2);
+    let mut fonts = txt2.path(&["DocumentResources", "FontSet", "Resources"]).and_then(E::as_array).map(<[E]>::to_vec).unwrap_or_default();
+    let fonts_before = fonts.len();
+    let mut entry = txt2.path(&["DocumentObjects", "TextObjects"])?.as_array()?.get(index)?.clone();
+    let text = entry.path(&["Model", "Text"])?.as_str()?;
+    if text.strip_suffix('\r').unwrap_or(text).replace('\r', "\n") != was.text {
+        return None;
+    }
+    // Every font a style run of the edit names, in the legacy list (shaped like its first entry).
+    for (_, attrs) in ed_runs(written, RunKind::Style)? {
+        let Some(name) = attrs.iter().find(|a| a.0 == "FontName").and_then(|a| a.1.as_str()) else { continue };
+        if name.is_empty() || fonts.iter().any(|f| f.path(&["Resource", "Identifier", "Name"]).and_then(E::as_str) == Some(name)) {
+            continue;
+        }
+        let mut f = fonts.first()?.clone();
+        f.get_mut("Resource")?.get_mut("Identifier")?.set("Name", E::String(name.to_string()));
+        fonts.push(f);
+    }
+    let ed_text = format!("{}\r", layer.text.replace('\n', "\r"));
+    let total = utf16_len(&ed_text);
+    let para_lens: Vec<usize> = layer.text.split('\n').map(|p| p.encode_utf16().count() + 1).collect();
+    let model = entry.get_mut("Model")?;
+    let style_runs = {
+        let runs = model.path(&["StyleRun", "RunArray"])?.as_array()?;
+        fitted_runs(runs, RunKind::Style, original, written, None, total, "Length", |e, key, v| set_legacy_attr(&fonts, e, RunKind::Style, key, v))?
+    };
+    let para_runs = {
+        let runs = model.path(&["ParagraphRun", "RunArray"])?.as_array()?;
+        fitted_runs(runs, RunKind::Paragraph, original, written, Some(&para_lens), total, "Length", |e, key, v| set_legacy_attr(&fonts, e, RunKind::Paragraph, key, v))?
+    };
+    let E::Dict(items) = model else { return None };
+    for (key, value) in items.iter_mut() {
+        match key.as_str() {
+            "Text" => *value = E::String(ed_text.clone()),
+            "StyleRun" => value.set("RunArray", E::Array(style_runs.clone())),
+            "ParagraphRun" => value.set("RunArray", E::Array(para_runs.clone())),
+            _ => {
+                // Another run array (`/KernRun`, `/AlternateGlyphRun`): its runs keep what they
+                // hold over the new length.
+                if let Some(E::Array(runs)) = value.get("RunArray") {
+                    let fitted = runs_to_length(runs, usize::try_from(total).ok()?, "Length")?;
+                    value.set("RunArray", E::Array(fitted));
+                }
+            }
+        }
+    }
+    match txt2.get_mut("DocumentObjects")?.get_mut("TextObjects")? {
+        E::Array(objects) => *objects.get_mut(index)? = entry,
+        _ => return None,
+    }
+    if fonts.len() != fonts_before {
+        txt2.get_mut("DocumentResources")?.get_mut("FontSet")?.set("Resources", E::Array(fonts));
+    }
+    Some(())
+}
+
+/// EngineData style keys that older Reference's `Txt2` objects name differently.
+const LEGACY_STYLE_KEYS: [(&str, &str); 1] = [("DLigatures", "DiscretionaryLigatures")];
+
+/// Sets one changed attribute on a legacy `Txt2` run (`<< /RunData << /StyleSheet << /Features
+/// … >> >> /Length n >>`, `/ParagraphSheet` for a paragraph): the key under its EngineData name
+/// (or [`LEGACY_STYLE_KEYS`]'s) when the run has it, the font as an index into `fonts`, the fill
+/// and stroke paint, and the auto-kern mode. `None` for any other key.
+fn set_legacy_attr(fonts: &[E], entry: &mut E, kind: RunKind, key: &str, v: &E) -> Option<()> {
+    let sheet = match kind {
+        RunKind::Style => "StyleSheet",
+        RunKind::Paragraph => "ParagraphSheet",
+    };
+    let features = entry.get_mut("RunData")?.get_mut(sheet)?.get_mut("Features")?;
+    let name = LEGACY_STYLE_KEYS.iter().find(|(k, _)| *k == key).map_or(key, |(_, n)| *n);
+    if kind == RunKind::Style {
+        match key {
+            "FontName" => {
+                let name = v.as_str()?;
+                let i = fonts.iter().position(|f| f.path(&["Resource", "Identifier", "Name"]).and_then(E::as_str) == Some(name))?;
+                features.set("Font", E::Int(i64::try_from(i).ok()?));
+                return Some(());
+            }
+            "FillColor" | "StrokeColor" => {
+                let paint = features.get_mut(key)?.get_mut("Color")?;
+                paint.set("Values", v.get("Values")?.clone());
+                if let Some(t) = v.get("Type") {
+                    paint.set("Type", t.clone());
+                }
+                return Some(());
+            }
+            "AutoKerning" => {
+                // On keeps the run's mode (metrics or optical), as `Txt2`'s numbered `/11`.
+                let now = features.get("AutoKern").and_then(E::as_i64).unwrap_or(1);
+                features.set("AutoKern", E::Int(if !v.as_bool()? { 0 } else if now == 0 { 1 } else { now }));
+                return Some(());
+            }
+            _ => {}
+        }
+    }
+    let typed = match v {
+        E::Array(_) => v.clone(),
+        _ => typed_like(v, Some(features.get(name)?))?,
+    };
+    features.set(name, typed);
+    Some(())
+}
+
+/// `runs` (`<< … /len_key length >>`) covering `total` UTF-16 units: the leading runs as they
+/// were, cut where `total` ends, the last kept run extended when `total` is longer. Empty runs
+/// are dropped. `None` when `runs` is empty or a length isn't a count.
+fn runs_to_length(runs: &[E], total: usize, len_key: &str) -> Option<Vec<E>> {
+    let mut out: Vec<(E, usize)> = Vec::new();
+    let mut left = total;
+    for r in runs {
+        let len = r.get(len_key).and_then(E::as_i64).and_then(|l| usize::try_from(l).ok())?;
+        let take = len.min(left);
+        if take > 0 {
+            out.push((r.clone(), take));
+            left -= take;
+        }
+    }
+    if left > 0 {
+        match out.last_mut() {
+            Some(last) => last.1 += left,
+            None => out.push((runs.last()?.clone(), left)),
+        }
+    }
+    out.into_iter()
+        .map(|(mut r, len)| {
+            r.set(len_key, E::Int(i64::try_from(len).ok()?));
+            Some(r)
+        })
+        .collect()
 }
 
 /// Adds to `Txt2`'s font list (`/0 /1 /0`) the fonts the `written` type layer's runs use that it
@@ -652,7 +817,7 @@ pub const TXT2_STYLE_KEYS: [(&str, &str); 23] = [
 /// `TySh` paragraph properties and the `Txt2` paragraph keys holding the same values (fitted as
 /// [`TXT2_STYLE_KEYS`] on the corpora's paragraph runs; Reference writes only some of them per
 /// run, the rest default).
-pub const TXT2_PARAGRAPH_KEYS: [(&str, &str); 16] = [
+pub const TXT2_PARAGRAPH_KEYS: [(&str, &str); 17] = [
     ("Justification", "0"),
     ("FirstLineIndent", "1"),
     ("StartIndent", "2"),
@@ -669,6 +834,9 @@ pub const TXT2_PARAGRAPH_KEYS: [(&str, &str); 16] = [
     ("WordSpacing", "17"),
     ("LetterSpacing", "18"),
     ("GlyphSpacing", "19"),
+    // After `SingleWordJustification` (20), in the paragraph sheets' key order (every Reference
+    // file of the oracle corpus: `/20 6 /21 false`).
+    ("Hanging", "21"),
 ];
 
 type Attrs = Vec<(String, E)>;
@@ -810,6 +978,21 @@ fn set_txt2_attr(txt2: &E, entry: &mut E, kind: RunKind, key: &str, v: &E) -> Op
 /// with `split`, one run per paragraph of those UTF-16 lengths. `None` when an attribute can't be
 /// set or the lengths don't add up to `total`.
 fn txt2_runs(txt2: &E, entries: &[E], kind: RunKind, original: &[u8], written: &[u8], split: Option<&[usize]>, total: i64) -> Option<Vec<E>> {
+    fitted_runs(entries, kind, original, written, split, total, "1", |e, key, v| set_txt2_attr(txt2, e, kind, key, v))
+}
+
+/// [`txt2_runs`] over runs whose length is under `len_key`, each changed attribute set by `set`.
+#[allow(clippy::too_many_arguments)]
+fn fitted_runs(
+    entries: &[E],
+    kind: RunKind,
+    original: &[u8],
+    written: &[u8],
+    split: Option<&[usize]>,
+    total: i64,
+    len_key: &str,
+    set: impl Fn(&mut E, &str, &E) -> Option<()>,
+) -> Option<Vec<E>> {
     let was = ed_runs(original, kind)?;
     // Reference's runs, each with the attributes of the `TySh` run it starts in.
     let covering = |runs: &[(usize, Attrs)], at: usize| -> Option<usize> {
@@ -825,7 +1008,7 @@ fn txt2_runs(txt2: &E, entries: &[E], kind: RunKind, original: &[u8], written: &
     let mut at = 0usize;
     for e in entries {
         templates.push((was.get(covering(&was, at)?)?.1.as_slice(), e));
-        at = at.checked_add(usize::try_from(e.get("1")?.as_i64()?).ok()?)?;
+        at = at.checked_add(usize::try_from(e.get(len_key)?.as_i64()?).ok()?)?;
     }
     let runs = ed_runs(written, kind)?;
     let runs: Vec<(usize, Attrs)> = match split {
@@ -862,10 +1045,10 @@ fn txt2_runs(txt2: &E, entries: &[E], kind: RunKind, original: &[u8], written: &
         for key in differing(base, &attrs) {
             // An attribute the layer doesn't state keeps the template run's value.
             let Some((_, v)) = attrs.iter().find(|a| a.0 == key) else { continue };
-            set_txt2_attr(txt2, &mut e, kind, &key, v)?;
+            set(&mut e, &key, v)?;
         }
         let n = i64::try_from(len).ok()?;
-        e.set("1", E::Int(n));
+        e.set(len_key, E::Int(n));
         sum = sum.checked_add(n)?;
         out.push(e);
     }
@@ -1035,8 +1218,42 @@ pub fn text_layer_from_tysh(data: &[u8], dpi: f32) -> Option<TextLayer> {
         let [a, b, c, d, e, f] = layer.transform.m;
         layer.transform.m = [a, b, c, d, a * x + c * y + e, b * x + d * y + f];
     }
+    if !usable_tysh_transform(&layer.transform.m) {
+        return None;
+    }
     layer.sync_summary();
     Some(layer)
+}
+
+/// Refines the legacy point-text placement [`text_layer_from_tysh`] estimated (see
+/// [`legacy_point_origin`]) once the layer's fonts are resolved: the descriptor's origin is where
+/// the ink starts, not the anchor, so the anchor goes where the layout's own bounds put the ink
+/// there (which also keeps centred and right-aligned text on its alignment anchor). Only while
+/// the layer still has the estimated transform; a `Txt2` frame that places the layer still wins
+/// (it is applied again after).
+pub fn refine_legacy_point_origin(layer: &mut TextLayer, dpi: f32, engine: &mut crate::TextEngine, txt2: Option<&E>) {
+    let Some(raw) = layer.psd_raw.clone() else { return };
+    let Some(t) = parse_tysh(&raw) else { return };
+    let Some([x, y]) = legacy_point_origin(&t) else { return };
+    if !matches!(layer.shape, TextShape::Point) || layer.path.is_some() {
+        return;
+    }
+    if layer.transform != t.transform.mul(&Affine::translate(x, y)) {
+        return;
+    }
+    let Some(bounds) = engine.layout(layer, dpi).bounds() else { return };
+    if !bounds.iter().all(|v| v.is_finite()) {
+        return;
+    }
+    let corrected = t.transform.mul(&Affine::translate(x - f64::from(bounds[0]), y - f64::from(bounds[1])));
+    if usable_tysh_transform(&corrected.m) {
+        layer.transform = corrected;
+        // A frame can coincide with the first estimate, so whether it was used can't be told
+        // from the transform: applied again, it always wins.
+        if let Some(txt2) = txt2 {
+            apply_txt2_frame(layer, &raw, txt2);
+        }
+    }
 }
 
 /// The local origin to fold into a legacy point-text transform, if any. Reference keeps point
@@ -1061,6 +1278,9 @@ fn legacy_point_origin(t: &TySh) -> Option<[f64; 2]> {
         return None;
     }
     let shifted = [a * bounds[0] + c * bounds[1] + e, b * bounds[0] + d * bounds[1] + f];
+    if !shifted.iter().all(|v| v.is_finite()) {
+        return None;
+    }
     let origin_distance = e.abs().max(f.abs());
     let shifted_distance = shifted[0].abs().max(shifted[1].abs());
     // A local origin in the thousands and a transform origin beyond any normal canvas are the
@@ -1316,6 +1536,9 @@ pub(crate) fn char_style(base: Option<&E>, d: &E, fonts: &[String], k: f32) -> C
         Some(2) => photosplice_doc::text::BaselinePosition::Subscript,
         _ => photosplice_doc::text::BaselinePosition::Normal,
     };
+    // Vertical type's roman text: 2 rotated along the column, 1 upright. A run without its own
+    // value takes the style sheet's, which Reference writes as 2 (its runs carry 1).
+    s.rotate_roman = g("BaselineDirection").and_then(E::as_i64) == Some(2);
     if let Some(c) = g("FillColor") {
         // Positions matter (alpha, then the channels): a non-finite entry voids the colour.
         let v: Vec<f64> = c.get("Values").and_then(E::as_array).map(|a| a.iter().filter_map(E::as_f64).collect()).unwrap_or_default();
@@ -1353,6 +1576,8 @@ pub(crate) fn para_style(base: Option<&E>, d: &E, k: f32) -> ParagraphStyle {
         auto_leading: numk("AutoLeading", 1.0).unwrap_or(1.2),
         hyphenate: lookup(d, base, "AutoHyphenate").and_then(E::as_bool).unwrap_or(false),
         every_line_composer: lookup(d, base, "EveryLineComposer").and_then(E::as_bool).unwrap_or(true),
+        // Roman Hanging Punctuation; off when missing, as Reference's default sheet writes it.
+        hanging: lookup(d, base, "Hanging").and_then(E::as_bool).unwrap_or(false),
         ..Default::default()
     }
 }
@@ -1561,6 +1786,7 @@ pub(crate) fn style_sheet_data(s: &CharStyle, font: usize, k: f32) -> E {
                 photosplice_doc::text::BaselinePosition::Subscript => 2,
             }),
         ),
+        ("BaselineDirection".into(), E::Int(if s.rotate_roman { 2 } else { 1 })),
         ("Underline".into(), E::Bool(s.underline)),
         ("Strikethrough".into(), E::Bool(s.strikethrough)),
         ("Ligatures".into(), E::Bool(s.ligatures)),
@@ -1597,6 +1823,8 @@ pub(crate) fn paragraph_properties(p: &ParagraphStyle, k: f32) -> E {
         ("SpaceBefore".into(), real(p.space_before_pt / k)),
         ("SpaceAfter".into(), real(p.space_after_pt / k)),
         ("AutoHyphenate".into(), E::Bool(p.hyphenate)),
+        // Roman Hanging Punctuation, beside the leading keys as Reference writes it.
+        ("Hanging".into(), E::Bool(p.hanging)),
         ("AutoLeading".into(), real(p.auto_leading)),
         ("LeadingType".into(), E::Int(0)),
         ("EveryLineComposer".into(), E::Bool(p.every_line_composer)),
@@ -2144,6 +2372,57 @@ mod nonfinite_tests {
         assert_eq!(para_style(None, &d, 1.0).start_indent_pt, 0.0);
         let d = parse(b"<< /FontSize 24.0 >>").unwrap();
         assert_eq!(char_style(None, &d, &[], 1.0).size_pt, 24.0);
+    }
+
+    /// `BaselineDirection` sets vertical type's roman text upright (1, what Reference writes in
+    /// its runs) or rotated (2); a run without one takes the style sheet's (Reference's default
+    /// sheet says 2). It is written back.
+    #[test]
+    fn baseline_direction_round_trips() {
+        let sheet = parse(b"<< /BaselineDirection 2 >>").unwrap();
+        let upright = parse(b"<< /BaselineDirection 1 >>").unwrap();
+        assert!(!char_style(Some(&sheet), &upright, &[], 1.0).rotate_roman, "the run's own value wins");
+        let plain = parse(b"<< /FontSize 24.0 >>").unwrap();
+        assert!(char_style(Some(&sheet), &plain, &[], 1.0).rotate_roman, "else the sheet's");
+        assert!(!char_style(None, &plain, &[], 1.0).rotate_roman, "none at all: upright");
+        for rotate in [false, true] {
+            let s = CharStyle { rotate_roman: rotate, ..Default::default() };
+            let data = style_sheet_data(&s, 0, 1.0);
+            assert_eq!(data.get("BaselineDirection").and_then(E::as_i64), Some(if rotate { 2 } else { 1 }));
+            assert_eq!(char_style(Some(&sheet), &data, &[], 1.0).rotate_roman, rotate);
+        }
+    }
+
+    #[test]
+    fn reject_unusable_matrices_before_type_layout() {
+        let original = TySh { transform: Affine { m: [1.0, 0.0, 0.0, 1.0, 30.0, 40.0] }, text: Descriptor::new("TxLr"), warp: None, bounds: [0.0; 4] };
+        let clean = write_tysh(&original);
+        assert_eq!(parse_tysh(&clean).unwrap().transform, original.transform);
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1.315776645269349e62] {
+            let mut bytes = clean.clone();
+            bytes[2..10].copy_from_slice(&bad.to_be_bytes());
+            assert!(parse_tysh(&bytes).is_none(), "invalid matrix must not be rendered: {bad}");
+        }
+    }
+
+    #[test]
+    fn overflowing_legacy_origin_does_not_escape_as_a_nonfinite_transform() {
+        let bounds = Descriptor::new("boundingBox")
+            .with("Left", D::Double(1.0e308))
+            .with("Top ", D::Double(1.0e308))
+            .with("Rght", D::Double(1.5e308))
+            .with("Btom", D::Double(1.5e308));
+        let text = Descriptor::new("TxLr").with("Txt ", D::Text(UnicodeString::new_nul("x"))).with("boundingBox", D::Descriptor(bounds)).with(
+            "EngineData",
+            D::RawData(
+                b"<< /EngineDict << /Rendered << /Shapes << /Children [ << /Cookie << /Photoshop << /PointBase [0.0 0.0] >> >> >> ] >> >> >> >>".to_vec(),
+            ),
+        );
+        let tysh = TySh { transform: Affine { m: [1.0e9, 0.0, -1.0e9, 0.0, 5000.0, 0.0] }, text, warp: None, bounds: [0.0; 4] };
+        assert!(engine_data(&tysh.text).is_some());
+        assert!(legacy_point_origin(&tysh).is_none());
+        let layer = text_layer_from_tysh(&write_tysh(&tysh), 72.0).unwrap();
+        assert!(usable_tysh_transform(&layer.transform.m));
     }
 
     #[test]

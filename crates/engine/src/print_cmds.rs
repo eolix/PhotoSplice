@@ -602,8 +602,12 @@ fn print_one_copy(s: &mut Session, p: &Value) -> Result<Value> {
 fn package(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "file.package";
     let dir = p.get("dir").and_then(Value::as_str).filter(|v| !v.is_empty()).ok_or_else(|| bad(cmd, "missing \"dir\" (where to create the package folder)"))?;
+    // The copies are relinked by absolute path: a relative one would be resolved against the
+    // package document's folder, not the working directory `dir` is relative to.
+    let dir = std::path::absolute(dir).map_or_else(|_| dir.to_string(), |d| d.to_string_lossy().into_owned());
     let d = s.active().ok_or(EngineError::NoDocument)?;
     let doc = (*d.doc).clone();
+    let document = d.path.clone();
     let name = stem(&d.path.clone().unwrap_or_else(|| doc.name.clone()));
     // The native format keeps external links; our PSD writer has no `lnkE` (external linked
     // file) support yet, so a PSD package would embed or flatten them.
@@ -612,7 +616,7 @@ fn package(s: &mut Session, p: &Value) -> Result<Value> {
         Some(f) => return Err(bad(cmd, format!("unknown package format `{f}` (pcraft|psd|psb)"))),
         None => "pcraft".into(),
     };
-    let folder = join(dir, &crate::file_cmds::sanitize(&name));
+    let folder = join(&dir, &crate::file_cmds::sanitize(&name));
     let links_dir = join(&folder, "Links");
     // Copy every linked file once; relink the copy of the document to the copies.
     let mut copied: Vec<(String, String)> = Vec::new();
@@ -629,7 +633,12 @@ fn package(s: &mut Session, p: &Value) -> Result<Value> {
                     fname = format!("{}-{}", copied.len(), fname);
                 }
                 let t = join(&links_dir, &fname);
-                match read_file(path) {
+                // A path that is not followed is packaged as missing, like a file that is gone.
+                let Ok(file) = crate::doc_path::resolve_in(path, document.as_deref().map(std::path::Path::new)) else {
+                    missing.push(path.clone());
+                    continue;
+                };
+                match read_file(&file.to_string_lossy()) {
                     Ok(bytes) => {
                         write_file(&t, &bytes)?;
                         copied.push((path.clone(), t.clone()));

@@ -41,11 +41,14 @@ pub mod blocks;
 pub mod camera_raw_xmp;
 mod channel_map;
 pub mod comps_map;
+pub mod doc_path;
+mod duotone_map;
 pub mod effects_map;
 pub mod exr_parts;
 mod flat;
 mod flat_modes;
 mod gradient_bake;
+pub mod guides_map;
 pub use gradient_bake::{Method as GradientMethod, bake as bake_gradient};
 mod kra;
 pub mod linked;
@@ -207,6 +210,9 @@ pub struct ExportOptions {
     /// File Compatibility (see [`PsdExportOptions::maximize_compatibility`]). On by default, as
     /// Photoshop's Always.
     pub psd_maximize_compatibility: bool,
+    /// The path of the document's own file, which linked smart objects that PSD/PSB and layered
+    /// TIFF embed are resolved against ([`doc_path::resolve`]).
+    pub document_path: Option<std::path::PathBuf>,
 }
 
 impl Default for ExportOptions {
@@ -219,6 +225,7 @@ impl Default for ExportOptions {
             tga_bits: None,
             image_previews: true,
             psd_maximize_compatibility: true,
+            document_path: None,
             pdf_discard_editing: false,
             pdf: pdf::export::PdfOptions::default(),
             pdf_security: None,
@@ -322,11 +329,19 @@ fn import_stages(name: &str, bytes: &[u8], ctl: &photosplice_raster::Interrupt, 
         psd_import::check_group_depth(&file)?;
         ctl.check().map_err(|_| IoError::Cancelled)?;
         ctl.progress(0.05);
-        let (mut document, warnings) = psd_import::psd_to_document_decoded(&file, ctl, merged).ok_or(IoError::Cancelled)?;
+        let (mut document, mut warnings, unsafe_for_editing) =
+            psd_import::psd_to_document_decoded_integrity(&file, ctl, merged).ok_or(IoError::Cancelled)?;
+        // Channels, layers or the merged image that could not be read are gone from the document:
+        // saving it over the original would destroy that data for good. It opens with what could
+        // be read, but its source is read-only, so a save goes to a new file
+        // (storytold/photocraft@aa1a77b9).
+        if unsafe_for_editing {
+            warnings.insert(0, "the file is damaged and opened incomplete: save it under a new name, so the original keeps the data that could not be read".into());
+        }
         document.name = name.to_string();
         text_import::prepare(&mut document);
         let selected = psd_import::selection(&file, &document);
-        return Ok(ImportResult { document, warnings, selected, source_read_only: false, preview_only: false });
+        return Ok(ImportResult { document, warnings, selected, source_read_only: unsafe_for_editing, preview_only: false });
     }
     if affinity::is_affinity(bytes) || affinity::has_extension(name) {
         return affinity::import(name, bytes);
@@ -458,6 +473,7 @@ fn export_stages(doc: &Document, name_or_ext: &str, opts: &ExportOptions, ctl: &
             maximize_compatibility: opts.psd_maximize_compatibility,
             // PhotoSplice's exporter writes the thumbnail (1036) itself when this is on.
             image_previews: opts.image_previews,
+            document_path: opts.document_path.clone(),
             ..Default::default()
         };
         let (mut file, mut warnings) = with_span(ctl, 0.0, PSD_MODEL_DONE, |ctl| psd_export::document_to_psd_interruptible(doc, &o, ctl));

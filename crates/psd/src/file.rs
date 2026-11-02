@@ -1,6 +1,6 @@
 //! The top-level [`PsdFile`] model, parser and writer.
 
-use crate::compression::{Compression, MAX_DECODED_BYTES, decode_planes, validate_planes};
+use crate::compression::{Compression, MAX_DECODED_BYTES, decode_planes, reserve_rle_widening, validate_planes, widen_rle_counts};
 use crate::error::{PsdError, Result};
 use crate::header::{ColorMode, Header, Version};
 use crate::image_data::ImageData;
@@ -293,6 +293,85 @@ impl PsdFile {
         Ok(out)
     }
 
+    /// The number of bytes [`Self::to_bytes`] writes, computed without serializing the channel
+    /// data. Lets a writer check a file against the 2 GB PSD limit before choosing the version
+    /// (storytold/photocraft#5285).
+    pub fn encoded_len(&self) -> Result<u64> {
+        let v = self.header.version;
+        let psb = v.is_psb();
+        let len_field = |long: bool| if long { 8u64 } else { 4 };
+        let blocks_len = |blocks: &[TaggedBlock]| blocks.iter().fold(0u64, |n, b| n.saturating_add(b.encoded_len_aligned(v, 4) as u64));
+        let body_len = |info: &LayerInfo| -> Result<u64> {
+            let unpadded = info.unpadded_len(v)?;
+            let padding = info.padding.as_ref().map_or(unpadded % 2, |p| p.len() as u64);
+            Ok(unpadded.saturating_add(padding))
+        };
+        // Header, colour mode data, resources.
+        let mut n = 26u64.saturating_add(4).saturating_add(self.color_mode_data.len() as u64).saturating_add(resources::section_len(&self.resources));
+
+        let in_block = matches!(self.layer_info_placement, LayerInfoPlacement::GlobalBlock { .. });
+        let section_empty =
+            self.layer_info.is_none() && self.global_layer_mask.is_none() && self.global_blocks.is_empty() && self.layer_mask_trailing.is_empty();
+        n = n.saturating_add(len_field(psb));
+        if !section_empty {
+            n = n.saturating_add(len_field(psb));
+            if let (Some(info), false) = (&self.layer_info, in_block) {
+                n = n.saturating_add(body_len(info)?);
+            }
+            let need_mask_field = self.global_layer_mask.is_some() || !self.global_blocks.is_empty() || (in_block && self.layer_info.is_some());
+            if need_mask_field {
+                n = n.saturating_add(4).saturating_add(self.global_layer_mask.as_ref().map_or(0, |g| g.data.len() as u64));
+            }
+            n = n.saturating_add(blocks_len(&self.global_blocks));
+            if let (Some(info), LayerInfoPlacement::GlobalBlock { key, padding, .. }) = (&self.layer_info, &self.layer_info_placement) {
+                let body = body_len(info)?;
+                let pad = padding.as_ref().map_or((4 - body % 4) % 4, |p| p.len() as u64);
+                n = n.saturating_add(8).saturating_add(len_field(uses_long_length(v, key))).saturating_add(body).saturating_add(pad);
+            }
+            n = n.saturating_add(self.layer_mask_trailing.len() as u64);
+        }
+        Ok(n.saturating_add(2).saturating_add(self.image_data.data.len() as u64))
+    }
+
+    /// Turns a PSD into the equivalent PSB in place, without re-encoding any pixels: the RLE
+    /// row-count tables of the layer channels and the merged image widen from two to four bytes
+    /// per row (the packed rows are the same in both versions), and the length fields widen when
+    /// the file is written. Raw and ZIP channel data is the same in both. A PSB is left as is.
+    ///
+    /// Atomic: every RLE stream is checked (and the room to widen it reserved) before the first
+    /// is changed, so an error leaves the file untouched. Padding is kept; a writer that pads to
+    /// an alignment re-pads for the new version.
+    pub fn promote_to_psb(&mut self) -> Result<()> {
+        if self.header.version.is_psb() {
+            return Ok(());
+        }
+        let merged_rows = match self.image_data.compression {
+            Compression::Rle => Some(ImageData::layout(&self.header).rows()?),
+            _ => None,
+        };
+        let layers = self.layer_info.as_mut().map_or(&mut [][..], |info| &mut info.layers[..]);
+        let mut streams: Vec<(&mut Vec<u8>, usize)> = Vec::new();
+        for layer in layers.iter_mut() {
+            let rects: Vec<_> = layer.channels.iter().map(|c| layer.channel_rect(c.id)).collect();
+            for (c, rect) in layer.channels.iter_mut().zip(rects) {
+                if c.compression == Some(Compression::Rle) {
+                    streams.push((&mut c.data, rect.size()?.1));
+                }
+            }
+        }
+        if let Some(rows) = merged_rows {
+            streams.push((&mut self.image_data.data, rows));
+        }
+        for (data, rows) in &mut streams {
+            reserve_rle_widening(data, *rows)?;
+        }
+        for (data, rows) in streams {
+            widen_rle_counts(data, rows)?;
+        }
+        self.header.version = Version::Psb;
+        Ok(())
+    }
+
     /// Layer records in file order (bottom-most first); empty if none.
     pub fn layers(&self) -> &[LayerRecord] {
         self.layer_info.as_ref().map_or(&[], |i| &i.layers)
@@ -431,6 +510,67 @@ impl PsdFile {
 mod write_tests {
     use super::*;
     use crate::{Compression, testgen};
+
+    /// `encoded_len` is exactly what `to_bytes` writes, for every generated file and both layer
+    /// info placements, with and without padding (storytold/photocraft#5285).
+    #[test]
+    fn encoded_len_matches_the_written_length() {
+        for case in testgen::all_cases() {
+            assert_eq!(case.file.encoded_len().unwrap(), case.file.to_bytes().unwrap().len() as u64, "{}", case.name);
+        }
+        for version in [Version::Psd, Version::Psb] {
+            for key in [*b"Lr16", *b"Layr"] {
+                for padding in [None, Some(vec![]), Some(vec![1, 2, 3])] {
+                    for body_padding in [None, Some(vec![]), Some(vec![9])] {
+                        let mut file = testgen::small(version, Compression::Rle);
+                        file.global_blocks = vec![TaggedBlock::new(*b"zz01", vec![11]), TaggedBlock::new(*b"lnk2", vec![1; 5])];
+                        file.layer_info_placement = LayerInfoPlacement::GlobalBlock { index: 1, signature: *b"8BIM", key, padding: padding.clone() };
+                        file.layer_info.as_mut().unwrap().padding = body_padding;
+                        file.layer_mask_trailing = vec![0; 3];
+                        file.resources.push(ImageResource { name: b"odd".to_vec(), ..ImageResource::new(4000, vec![1, 2, 3]) });
+                        assert_eq!(file.encoded_len().unwrap(), file.to_bytes().unwrap().len() as u64, "{version:?} {key:?}");
+                    }
+                }
+            }
+        }
+        let mut empty = testgen::small(Version::Psd, Compression::Raw);
+        empty.layer_info = None;
+        empty.global_layer_mask = None;
+        empty.global_blocks.clear();
+        assert_eq!(empty.encoded_len().unwrap(), empty.to_bytes().unwrap().len() as u64);
+    }
+
+    /// Promoting a PSD gives exactly the PSB written directly from the same pixels: only the RLE
+    /// row counts (and the length fields, on write) widen (storytold/photocraft#5285).
+    #[test]
+    fn promote_to_psb_equals_the_psb_written_directly() {
+        let cases = testgen::all_cases();
+        let (psd, psb) = cases.split_at(cases.len() / 2);
+        for (psd, psb) in psd.iter().zip(psb) {
+            assert_eq!(psd.file.header.version, Version::Psd, "{}", psd.name);
+            let mut promoted = psd.file.clone();
+            promoted.promote_to_psb().unwrap();
+            assert_eq!(promoted, psb.file, "{}", psd.name);
+            assert_eq!(promoted.to_bytes().unwrap(), psb.file.to_bytes().unwrap(), "{}", psd.name);
+        }
+    }
+
+    /// A damaged RLE table is refused before anything changes: the file stays a valid PSD.
+    #[test]
+    fn promote_to_psb_is_atomic() {
+        let mut file = testgen::small(Version::Psd, Compression::Rle);
+        let layers = &mut file.layer_info.as_mut().unwrap().layers;
+        let red = layers
+            .iter_mut()
+            .rev()
+            .flat_map(|l| l.channels.iter_mut())
+            .find(|c| c.id == 0 && c.compression == Some(Compression::Rle) && c.data.len() > 1)
+            .unwrap();
+        red.data.truncate(1);
+        let before = file.clone();
+        assert!(file.promote_to_psb().is_err());
+        assert_eq!(file, before);
+    }
 
     #[test]
     fn global_blocks_default_to_four_byte_padding() {

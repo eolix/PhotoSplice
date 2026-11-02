@@ -391,7 +391,7 @@ impl Conv {
                     }
                     return;
                 }
-                let mut l = Layer::new(self.name(g.id(), 1), LayerContent::Group(Group { children, expanded: false, artboard: None, divider_blocks: Vec::new() }));
+                let mut l = Layer::new(self.name(g.id(), 1), LayerContent::Group(Group { children, expanded: false, artboard: None, divider_blocks: Vec::new(), frame_stroke: None }));
                 l.opacity = g.opacity().get();
                 l.blend = blend(g.blend_mode());
                 l.vector_mask = clip;
@@ -416,7 +416,7 @@ impl Conv {
                 } else {
                     t.id().to_string()
                 };
-                out.push(Layer::new(name, LayerContent::Group(Group { children, expanded: false, artboard: None, divider_blocks: Vec::new() })));
+                out.push(Layer::new(name, LayerContent::Group(Group { children, expanded: false, artboard: None, divider_blocks: Vec::new(), frame_stroke: None })));
             }
         }
     }

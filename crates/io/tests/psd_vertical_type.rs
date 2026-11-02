@@ -63,3 +63,47 @@ fn vertical_orientation_round_trips_through_psd() {
     let out = photosplice_io::export(&doc, "h.psd", &Default::default()).unwrap();
     assert_eq!(text(&photosplice_io::import("h.psd", &out.bytes).unwrap().document).orientation, Orientation::Horizontal);
 }
+
+/// Roman text in vertical type: Reference's oracles carry `BaselineDirection` 1 in the run
+/// (`vertical-latin-upright.psd`: letters stacked upright, one per em) or 2
+/// (`vertical-latin-arial.psd`: the word turned along the column). Both read into
+/// `rotate_roman`, and our re-render lands on Reference's pixels.
+#[cfg(feature = "corpus")]
+#[test]
+fn roman_vertical_type_matches_reference_upright_and_rotated() {
+    use photosplice_geom::Rect;
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/photoshop/text");
+    assert!(dir.is_dir(), "{} is missing: run `cargo xtask corpus --all`", dir.display());
+    let mut engine = photosplice_text::TextEngine::with_system_fonts();
+    if !engine.fonts.resolve_postscript("ArialMT").exact {
+        eprintln!("Arial is not installed: skipping the pixel comparison");
+        return;
+    }
+    for (file, rotate) in [("vertical-latin-upright.psd", false), ("vertical-latin-arial.psd", true)] {
+        let bytes = std::fs::read(dir.join(file)).unwrap();
+        let doc = photosplice_io::import(file, &bytes).unwrap().document;
+        let t = doc
+            .layers
+            .iter()
+            .find_map(|l| match &l.content {
+                LayerContent::Text(t) => Some(t),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(t.orientation, Orientation::Vertical, "{file}");
+        assert!(t.runs.iter().all(|r| r.style.rotate_roman == rotate), "{file}");
+        let ps = t.cache.as_ref().unwrap();
+        let (_, ours) = engine.render(t, doc.resolution_dpi, doc.pixel_format());
+        let (a, b) = (ps.content_bounds(), ours.surface.content_bounds());
+        let u = Rect::new(a.x0.min(b.x0), a.y0.min(b.y0), a.x1.max(b.x1), a.y1.max(b.y1));
+        let alpha = |s: &photosplice_raster::Surface| -> Vec<f32> {
+            let n = s.channels();
+            s.read_region(u).chunks_exact(n).map(|p| p[n - 1]).collect()
+        };
+        let (pa, oa) = (alpha(ps), alpha(&ours.surface));
+        let inter: f32 = pa.iter().zip(&oa).map(|(x, y)| x.min(*y)).sum();
+        let union: f32 = pa.iter().zip(&oa).map(|(x, y)| x.max(*y)).sum();
+        // Upright: 0.08 when centred by the em-wide advance on the font's ascent share.
+        assert!(inter / union > 0.75, "{file}: IoU {} ({a:?} vs ours {b:?})", inter / union);
+    }
+}

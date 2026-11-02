@@ -368,6 +368,12 @@ fn hostile_type_sizes_without_pixels_import_without_a_huge_render() {
     {
         let runs = vec![Run { len: 1, size, leading: None }];
         let data = tysh("M", &runs, None, transform, [10.0, 10.0, 20.0, 20.0]);
+        // Extremely large TySh transforms are rejected before any layout or rendering; the
+        // import-time render cap is tested for matrices within that gate.
+        if !photosplice_text::psd::usable_tysh_transform(&transform.m) {
+            assert!(photosplice_text::psd::text_layer_from_tysh(&data, 72.0).is_none(), "unsafe transform must be rejected before layout");
+            continue;
+        }
         let mut t = photosplice_text::psd::text_layer_from_tysh(&data, 72.0).unwrap();
         if big {
             // Precondition: the renderer's own guard (256 Mpx) would have drawn this one.

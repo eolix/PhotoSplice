@@ -3,7 +3,9 @@
 //! A pattern tiles the plane from an origin (the layer's frame when linked, else the canvas
 //! origin, plus the phase), scaled and rotated about that origin. Samples are bilinear with
 //! wrap-around on premultiplied colour, so integer placements at 100 % reproduce the tile
-//! exactly and scaled ones stay seamless.
+//! exactly and scaled ones stay seamless. Below 100 % each document pixel averages an `n × n`
+//! grid of bilinear taps over its footprint in the tile (see [`pixel_taps`]), so a minified tile
+//! is box-filtered instead of aliased; at 100 % and above it is a single tap.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -149,6 +151,35 @@ impl Tile {
     /// Bilinear, wrapping sample at continuous tile coordinates, tile pixel `i` at `i`: callers
     /// map a document pixel's top-left corner (see [`render`]). Returns straight alpha.
     pub fn sample(&self, u: f64, v: f64) -> [f32; 4] {
+        straight(self.sample_premul(u, v))
+    }
+
+    /// The pattern for the document pixel whose corner is `(x, y)` (the point [`render`] maps),
+    /// filtered over the pixel's footprint in the tile when the placement shrinks it: `n × n`
+    /// taps centred on that point. One tap, exactly [`Tile::sample`], at 100 % and above.
+    /// Returns straight alpha.
+    pub fn sample_area(&self, place: &Placement, x: f64, y: f64) -> [f32; 4] {
+        let n = pixel_taps(place.inv_scale);
+        if n == 1 {
+            let (u, v) = place.map(x, y);
+            return self.sample(u, v);
+        }
+        let mut acc = [0.0f32; 4];
+        for j in 0..n {
+            for i in 0..n {
+                let (u, v) = place.map(x + tap_offset(i, n), y + tap_offset(j, n));
+                let q = self.sample_premul(u, v);
+                for c in 0..4 {
+                    acc[c] += q[c];
+                }
+            }
+        }
+        let k = 1.0 / (n * n) as f32;
+        straight(acc.map(|v| v * k))
+    }
+
+    /// Bilinear, wrapping sample (as [`Tile::sample`]), premultiplied.
+    fn sample_premul(&self, u: f64, v: f64) -> [f32; 4] {
         let (x0, y0) = (u.floor(), v.floor());
         let (fx, fy) = ((u - x0) as f32, (v - y0) as f32);
         let (x0, y0) = (x0 as i64, y0 as i64);
@@ -168,12 +199,32 @@ impl Tile {
                 }
             }
         }
-        if acc[3] <= 0.0 {
-            return [0.0; 4];
-        }
-        let c = crate::cmyk::project_rgb([acc[0] / acc[3], acc[1] / acc[3], acc[2] / acc[3]]);
-        [c[0], c[1], c[2], acc[3].min(1.0)]
+        acc
     }
+}
+
+/// Most taps per axis of the minification filter (compose.wgsl's mirror uses the same cap).
+const MAX_TAPS: usize = 8;
+
+/// Taps per axis for a placement whose inverse scale is `inv_scale`: one pixel covers
+/// `inv_scale` tile pixels, so that many taps (capped) box-filter it. 1 at 100 % and above.
+fn pixel_taps(inv_scale: f64) -> usize {
+    let s = inv_scale as f32;
+    if s.is_finite() && s > 1.0 { (s.ceil() as usize).min(MAX_TAPS) } else { 1 }
+}
+
+/// Offset in document pixels of tap `i` of `n`, centred on the pixel's sample point.
+fn tap_offset(i: usize, n: usize) -> f64 {
+    (i as f64 + 0.5) / n as f64 - 0.5
+}
+
+/// A premultiplied sample as straight alpha (through the CMYK projection when one is active).
+fn straight(acc: [f32; 4]) -> [f32; 4] {
+    if acc[3] <= 0.0 {
+        return [0.0; 4];
+    }
+    let c = crate::cmyk::project_rgb([acc[0] / acc[3], acc[1] / acc[3], acc[2] / acc[3]]);
+    [c[0], c[1], c[2], acc[3].min(1.0)]
 }
 
 /// Where a pattern sits: document point → tile coordinates.
@@ -228,8 +279,7 @@ pub fn render(tile: &Tile, place: &Placement, rect: Rect) -> Vec<[f32; 4]> {
         for x in rect.x0..rect.x1 {
             // Photoshop maps the pixel's corner: identical at 100 %, a quarter tile pixel off the
             // centre at 200 % (psd-tools patterns.psd: 56/255 → 0.8/255).
-            let (u, v) = place.map(f64::from(x), f64::from(y));
-            out.push(tile.sample(u, v));
+            out.push(tile.sample_area(place, f64::from(x), f64::from(y)));
         }
     }
     out
@@ -302,6 +352,31 @@ mod tests {
         assert!(px[2][2] > 0.99 && px[2][0] < 0.01, "{:?}", px[2]);
         assert!((px[3][0] - 0.5).abs() < 0.01, "{:?}", px[3]);
         assert!(px[4][0] > 0.99, "{:?}", px[4]);
+    }
+
+    #[test]
+    fn minified_pattern_is_filtered_not_aliased() {
+        // 1-px dark / light stripes (mean 0.5), shown at 25 %: every pixel covers 4 tile pixels.
+        // The phase puts each pixel's sample point on a light tile pixel, so a single bilinear
+        // tap would return pure white.
+        let mut s = Surface::new(PixelFormat::RGBA8);
+        s.fill_rect(Rect::new(0, 0, 8, 8), &[1.0, 1.0, 1.0, 1.0]);
+        for x in (0..8).step_by(2) {
+            s.fill_rect(Rect::new(x, 0, x + 1, 8), &[0.0, 0.0, 0.0, 1.0]);
+        }
+        let t = Tile::new(&Pattern::new("stripes", s, 8, 8)).unwrap();
+        let place = Placement::new(Rect::EMPTY, false, (-0.25, 0.0), 0.25, 0.0);
+        let (u, v) = place.map(0.0, 0.0);
+        assert_eq!(t.sample(u, v)[0], 1.0, "the single tap lands on a light stripe");
+        for p in render(&t, &place, Rect::new(0, 0, 8, 1)) {
+            assert!((p[0] - 0.5).abs() < 0.05, "{p:?}");
+        }
+        // 100 % stays exact.
+        let one = Placement::new(Rect::EMPTY, false, (0.0, 0.0), 1.0, 0.0);
+        let row = render(&t, &one, Rect::new(0, 0, 2, 1));
+        assert_eq!((row[0][0], row[1][0]), (0.0, 1.0));
+        assert_eq!(pixel_taps(f64::NAN), 1);
+        assert_eq!(pixel_taps(1e9), MAX_TAPS);
     }
 
     #[test]

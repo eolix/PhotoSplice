@@ -428,6 +428,10 @@ fn format_real(r: f64) -> String {
     if matches!(s.as_str(), "0." | "-0.") {
         return "0.0".into();
     }
+    // `5.000001` rounds to `5.`: a bare trailing dot is no number token either.
+    if s.ends_with('.') {
+        s.push('0');
+    }
     if let Some(rest) = s.strip_prefix("0.") {
         s = format!(".{rest}");
     } else if let Some(rest) = s.strip_prefix("-0.") {
@@ -444,6 +448,18 @@ mod tests {
 
     /// `Txt2` comes back byte for byte (all 83 in the corpora do): one line, single spaces, no
     /// enclosing `<< >>`, plain byte strings kept without a byte-order mark.
+    #[test]
+    fn format_real_never_ends_with_bare_dot() {
+        assert_eq!(format_real(5.000001), "5.0");
+        assert_eq!(format_real(12.000004), "12.0");
+        assert_eq!(format_real(-5.000001), "-5.0");
+        assert_eq!(format_real(1e20), "100000000000000000000.0");
+        assert_eq!(format_real(0.5), ".5");
+        assert_eq!(format_real(-0.25), "-.25");
+        assert_eq!(format_real(1e-9), "0.0");
+        assert_eq!(format_real(3.0), "3.0");
+    }
+
     #[test]
     fn txt2_round_trips_byte_for_byte() {
         // A UTF-16 string holding an escaped `)`, a byte string, reals, empty containers, a name.

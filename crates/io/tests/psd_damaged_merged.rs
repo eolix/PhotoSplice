@@ -136,3 +136,22 @@ fn reported_group_divider_fixture_opens_with_its_group() {
     assert!(matches!(result.document.layers[0].content, photosplice_doc::LayerContent::Group(_)));
     assert!(result.warnings.iter().any(|w| w.contains("merged image")));
 }
+
+/// storytold/photocraft@aa1a77b9: a file whose layer channels could not be decoded opens with
+/// what could be read, but source read-only, so a save can't replace the damaged original (and
+/// the data it still holds). An intact file stays editable in place.
+#[test]
+fn unreadable_layer_channels_open_source_read_only() {
+    let file = layered(SampleType::U8, "x.psd");
+    let intact = import("ok.psd", &file.to_bytes().unwrap()).unwrap();
+    assert!(!intact.source_read_only, "{:?}", intact.warnings);
+
+    let mut damaged = file.clone();
+    let channel = damaged.layers_mut().iter_mut().flat_map(|l| l.channels.iter_mut()).find(|c| c.id == 0 && !c.data.is_empty()).unwrap();
+    channel.compression = Some(Compression::Rle);
+    channel.data.truncate(1);
+    let opened = import("damaged.psd", &damaged.to_bytes().unwrap()).unwrap();
+    assert!(opened.source_read_only, "{:?}", opened.warnings);
+    assert!(opened.warnings.first().is_some_and(|w| w.contains("damaged")), "{:?}", opened.warnings);
+    assert!(opened.warnings.iter().any(|w| w.contains("could not be decoded")), "{:?}", opened.warnings);
+}

@@ -8,6 +8,7 @@ use std::sync::{Mutex, OnceLock};
 
 use photosplice_color::{PixelFormat, SampleType};
 use photosplice_doc::vector::ShapeLayer;
+use photosplice_doc::{Layer, LayerContent};
 use photosplice_geom::Rect;
 use photosplice_raster::Surface;
 
@@ -53,6 +54,7 @@ pub fn split(sh: &ShapeLayer, canvas: Rect, depth: SampleType) -> Option<(Surfac
     (canvas.x0, canvas.y0, canvas.x1, canvas.y1).hash(&mut h);
     depth.hash(&mut h);
     format!("{:?}{:?}{:?}{:?}", sh.path, sh.fill, sh.stroke, sh.live).hash(&mut h);
+    (sh.align_edges, sh.density.to_bits(), sh.feather.to_bits()).hash(&mut h);
     if let Some(c) = &sh.cache {
         format!("{:?}{:?}", c.format(), c.default_pixel()).hash(&mut h);
         for (k, t) in c.tiles() {
@@ -94,6 +96,22 @@ pub fn split(sh: &ShapeLayer, canvas: Rect, depth: SampleType) -> Option<(Surfac
     let tick = c.1;
     c.0.insert(key, (parts.clone(), tick, sh.cache.clone()));
     Some(parts)
+}
+
+/// The stroke-only shape a Reference Frame's stroke draws: `Group::frame_stroke` along the
+/// group's enabled vector mask (the frame outline). `None` for other layers and for a frame
+/// without a visible stroke or a vector mask.
+pub fn frame_shape(layer: &Layer) -> Option<ShapeLayer> {
+    let LayerContent::Group(g) = &layer.content else { return None };
+    let stroke = g.frame_stroke.as_ref().filter(|s| s.width.is_finite() && s.width > 0.0 && s.opacity > 0.0)?;
+    let vm = layer.vector_mask.as_ref().filter(|m| m.enabled && !m.path.is_empty())?;
+    Some(ShapeLayer { path: vm.path.clone(), fill: None, stroke: Some(stroke.clone()), ..ShapeLayer::default() })
+}
+
+/// A Reference Frame's stroke ([`frame_shape`]) rendered over `canvas` in RGBA at `depth`, from
+/// the same cache as the shape strokes. It goes above the frame's (masked) content.
+pub fn frame_stroke(layer: &Layer, canvas: Rect, depth: SampleType) -> Option<Surface> {
+    split(&frame_shape(layer)?, canvas, depth).map(|(_, stroke)| stroke)
 }
 
 /// Fits the stroke part to the shape's own pixels: where they reach past the fill, the stroke
@@ -164,6 +182,8 @@ mod tests {
             align_edges: false,
             cache: None,
             psd_raw: None,
+            density: 1.0,
+            feather: 0.0,
         }
     }
 

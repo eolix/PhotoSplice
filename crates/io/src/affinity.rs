@@ -131,7 +131,7 @@ impl Builder {
                 let r = self.bbox(to_doc, page);
                 let mut g = Layer::new(
                     format!("Page {}", i + 1),
-                    LayerContent::Group(Group { children: std::mem::take(&mut children), expanded: true, artboard: None, divider_blocks: Vec::new() }),
+                    LayerContent::Group(Group { children: std::mem::take(&mut children), expanded: true, artboard: None, divider_blocks: Vec::new(), frame_stroke: None }),
                 );
                 if let LayerContent::Group(gr) = &mut g.content {
                     gr.artboard = Some(Artboard { rect: r, background: ArtboardBackground::White, preset: String::new() });
@@ -226,7 +226,7 @@ impl Builder {
 
     fn group(&mut self, n: &af::Node, children: Vec<Layer>) -> Layer {
         // Pass-through and Normal (isolated) groups map one to one.
-        self.base(n, LayerContent::Group(Group { children, expanded: false, artboard: None, divider_blocks: Vec::new() }))
+        self.base(n, LayerContent::Group(Group { children, expanded: false, artboard: None, divider_blocks: Vec::new(), frame_stroke: None }))
     }
 
     /// One Affinity node and its subtree; `to_doc` maps Affinity document pixels to the canvas.
@@ -424,7 +424,7 @@ impl Builder {
                 dash_offset: s.dash.as_ref().map_or(0.0, |(_, o)| (o / s.width.max(1e-9)) as f32),
             })
         });
-        let mut sh = ShapeLayer { path, fill, stroke, live: None, align_edges: false, cache: None, psd_raw: None };
+        let mut sh = ShapeLayer { path, fill, stroke, live: None, align_edges: false, cache: None, psd_raw: None, density: 1.0, feather: 0.0 };
         sh.cache = Some(photosplice_vector::render_shape(&sh, self.format, self.canvas));
         sh
     }

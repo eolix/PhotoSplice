@@ -456,7 +456,8 @@ pub const F_QUANT: u32 = 32768;
 /// `Lerp` as A + (B − C) premultiplied (layers clipped to pass-through groups).
 pub const F_ADD_DIFF: u32 = 16384;
 /// `Lerp`: B mixed back towards A (the backdrop) by the layer's Blend If weight
-/// (`compose::apply_blend_if`), from C ("This Layer", or B itself for an adjustment layer, `p4.y`)
+/// (`compose::apply_blend_if`), from C ("This Layer": an adjustment layer's unmixed result; B when
+/// `p4.y` is set)
 /// and A ("Underlying Layer"). The ranges are packed in `p0..p3` (`blend_if_params`); `p4.x` marks
 /// a one-channel document.
 pub const F_BLEND_IF: u32 = 524288;
@@ -608,13 +609,19 @@ impl<'a> Planner<'a> {
 
     /// `compose::apply_blend_if`: `after` (the backdrop with `layer` drawn) mixed back towards
     /// `before` (the backdrop without it) where the layer's Blend If ranges hide it. "This Layer"
-    /// is the layer's own content with its masks; an adjustment layer is judged by its result.
-    /// Consumes both slots.
+    /// is the layer's own content with its masks; an adjustment layer is judged by its result at
+    /// full strength, before Opacity and its mask. Consumes both slots.
     fn blend_if(&mut self, layer: &'a Layer, before: Slot, after: Slot) -> Result<Slot, Unsupported> {
-        let own = match layer.content {
-            LayerContent::Adjustment(_) => None,
-            _ => Some(self.content(layer)?),
+        // An adjustment layer is judged by its result at full strength, before Opacity and its
+        // mask (compose::apply_blend_if).
+        let own = match &layer.content {
+            LayerContent::Adjustment(adj) => {
+                let b = self.retain(before);
+                self.adjust(adj, b)?
+            }
+            _ => self.content(layer)?,
         };
+        let own = Some(own);
         let mut p = Pass::new(Kernel::Lerp, 0);
         p.a = Some(before);
         p.b = Some(after);
@@ -722,11 +729,13 @@ impl<'a> Planner<'a> {
         let opacity = layer.opacity * layer.fill_opacity;
         let visible_clipped: Vec<&'a Layer> = clipped.iter().filter(|c| c.visible).collect();
 
-        // Below 100% fill a pass-through group renders isolated (as the CPU compositor does).
+        // Below 100% fill a pass-through group renders isolated (as the CPU compositor does), and
+        // so does one with Blend If.
         if let LayerContent::Group(g) = &layer.content
             && layer.blend == BlendMode::PassThrough
             && layer.fill_opacity >= 1.0
             && !has_effects(layer)
+            && !photosplice_compose::blend_if_active(layer, self.cx.mode)
         {
             // Clipped to, its adjustments reach only its own content while its blend modes still
             // reach below (the CPU compositor's pass-through path): composited on the CPU, not
@@ -742,6 +751,15 @@ impl<'a> Planner<'a> {
                 p.b = Some(after);
                 p.opacity = opacity;
                 p.mask = self.mask_use(layer);
+                after = self.emit(p);
+            }
+            // A Frame's stroke over the frame's content, at the group's opacity (compose).
+            if let Some(stroke) = photosplice_compose::shape_split::frame_stroke(layer, self.cx.canvas, self.cx.depth) {
+                let stroke = self.shape_part(layer, Role::Stroke, stroke);
+                let mut p = Pass::new(Kernel::Blend, 0);
+                p.a = Some(after);
+                p.b = Some(stroke);
+                p.opacity = opacity;
                 after = self.emit(p);
             }
             if visible_clipped.is_empty() {
@@ -785,7 +803,8 @@ impl<'a> Planner<'a> {
             p.a = Some(before);
             p.b = Some(adjusted);
             p.mode = layer.blend;
-            p.opacity = opacity;
+            // The special eight take Fill inside the blend (compose::adjustment_fill).
+            (p.opacity, p.fill) = photosplice_compose::adjustment_fill(layer);
             p.mask = self.mask_use(layer);
             return Ok(self.emit(p));
         }
@@ -909,12 +928,20 @@ impl<'a> Planner<'a> {
         match &layer.content {
             LayerContent::Group(g) => {
                 let empty = self.clear();
-                let s = self.stack(&g.children, empty)?;
+                let mut s = self.stack(&g.children, empty)?;
                 if layer.mask.is_some() || layer.vector_mask.is_some() {
                     let mut p = Pass::new(Kernel::Mask, 0);
                     p.a = Some(s);
                     p.mask = self.mask_use(layer);
-                    return Ok(self.emit(p));
+                    s = self.emit(p);
+                }
+                // A Frame's stroke over its masked content (compose::render_content).
+                if let Some(stroke) = photosplice_compose::shape_split::frame_stroke(layer, self.cx.canvas, self.cx.depth) {
+                    let stroke = self.shape_part(layer, Role::Stroke, stroke);
+                    let mut p = Pass::new(Kernel::Blend, 0);
+                    p.a = Some(s);
+                    p.b = Some(stroke);
+                    s = self.emit(p);
                 }
                 Ok(s)
             }
@@ -1027,7 +1054,8 @@ impl<'a> Planner<'a> {
             p.a = Some(before);
             p.b = Some(adjusted);
             p.mode = layer.blend;
-            p.opacity = opacity;
+            // The special eight take Fill inside the blend (compose::adjustment_fill).
+            (p.opacity, p.fill) = photosplice_compose::adjustment_fill(layer);
             p.mask = self.mask_use(layer);
             return Ok(self.emit(p));
         }
@@ -1060,6 +1088,10 @@ impl<'a> Planner<'a> {
         // A CMYK document's Colorize keeps the float lightness (compose::cmyk, INK_SPACE).
         if kind == 8 && self.cx.mode == photosplice_color::ColorMode::Cmyk {
             params[1][2] = 0.0;
+        }
+        // p0.w: continue the curve past 0..1 (32-bit RGB Curves, compose::adjust::float_tone_extrapolates).
+        if kind == 7 && adjust::float_tone_extrapolates(adj, Some(self.cx.depth), self.cx.mode) {
+            params[0][3] = 1.0;
         }
         p.adjust_kind = kind;
         p.params = params;
@@ -1382,7 +1414,9 @@ impl<'a> Planner<'a> {
                 p.c = cover.map(|c| self.retain(c));
                 p.d = acc;
                 let a = self.emit(p);
-                let mut p = self.fx_pass_kernel(Kernel::FxStroke, w, content, &Paint::Color([0.0; 3]), BlendMode::Normal, st.common.opacity, flags, clip, sb);
+                // The stroke's mode rides along only for Dissolve, whose coverage is all or
+                // nothing in this pass as in the colour pass.
+                let mut p = self.fx_pass_kernel(Kernel::FxStroke, w, content, &Paint::Color([0.0; 3]), st.common.blend, st.common.opacity, flags, clip, sb);
                 p.adjust_kind = 1;
                 p.map = Some(map(i, 0));
                 p.c = cover;

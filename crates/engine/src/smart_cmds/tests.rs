@@ -1175,6 +1175,51 @@ fn inspect_reports_the_smart_source() {
     assert!(source(&s)["fileName"].is_string());
 }
 
+/// Displace on a smart object with an open document as its map embeds the map in the smart
+/// filter, as Reference does (storytold/photocraft@3c7ee9ed): a later re-render, which can't read
+/// the session, still displaces, and the filter writes to PSD. Before, the filter kept only the
+/// document's index. A map document named through Edit Smart Filter replaces the embedded map.
+#[test]
+fn displace_smart_filter_embeds_a_document_map() {
+    let map_document = |s: &mut Session, v: f32| {
+        s.execute("file.new", json!({"width": 8, "height": 8, "depth": 8})).unwrap();
+        s.edit("map", |doc, _| {
+            let bg = doc.layers[0].id;
+            doc.layer_mut(bg).unwrap().surface_mut().unwrap().fill_rect(Rect::new(0, 0, 8, 8), &[v, v, v, 1.0]);
+            Ok(())
+        })
+        .unwrap();
+        s.set_active(0);
+        s.documents().len() - 1
+    };
+    for depth in DEPTHS {
+        let mut s = session(depth);
+        paint(&mut s);
+        convert(&mut s);
+        let before = flat(&s);
+        let white = map_document(&mut s, 1.0);
+        s.execute("filter.distort.displace", json!({"horizontal": 8, "vertical": 8, "mapDocument": white})).unwrap();
+        let displaced = flat(&s);
+        assert!(max_diff(&before, &displaced) > 0.1, "the smart filter displaced the pixels at {depth}-bit");
+        let f = active_smart(&s).smart_filters[0].clone();
+        assert!(f.params.get("mapDocument").is_none(), "{}", f.params);
+        let map = photosplice_io::smart_map::displace_embedded_map(&f.params).expect("the map is embedded");
+        assert_eq!(map.data.first(), Some(&1.0));
+        // A later re-render (hide and show the filter) still displaces, from the embedded map.
+        s.execute("layer.smartFilter.setVisible", json!({"index": 0, "visible": false})).unwrap();
+        s.execute("layer.smartFilter.setVisible", json!({"index": 0, "visible": true})).unwrap();
+        assert_eq!(max_diff(&displaced, &flat(&s)), 0.0, "re-rendered at {depth}-bit");
+        assert!(photosplice_io::smart_map::item_for_filter(&f).is_ok(), "written to PSD");
+        // A mid-grey map (no displacement) named through Edit Smart Filter replaces it.
+        let grey = map_document(&mut s, 0.5);
+        s.execute("layer.smartFilter.setParams", json!({"index": 0, "params": {"mapDocument": grey}})).unwrap();
+        let f = active_smart(&s).smart_filters[0].clone();
+        let map = photosplice_io::smart_map::displace_embedded_map(&f.params).expect("the new map is embedded");
+        assert_eq!(map.data.first(), Some(&(128.0 / 255.0)));
+        assert!(mean_diff(&before, &flat(&s)) * 4.0 < mean_diff(&before, &displaced), "the grey map hardly moves anything at {depth}-bit");
+    }
+}
+
 #[test]
 fn displace_smart_filter_reads_its_map_path_on_re_render() {
     let dir = std::env::temp_dir().join(format!("pcraft-displace-{}", std::process::id()));

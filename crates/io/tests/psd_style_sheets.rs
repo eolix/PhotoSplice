@@ -107,6 +107,32 @@ fn alignment_from_the_paragraph_style_the_run_names() {
     }
 }
 
+/// The paragraph sheets' `Hanging` key (Roman Hanging Punctuation, written after
+/// `AutoHyphenate` in Reference's files) reads into `ParagraphStyle.hanging`; missing means off,
+/// as Reference's own default sheet writes `/Hanging false`. It is written back.
+#[test]
+fn hanging_punctuation_comes_from_the_paragraph_sheet() {
+    let on = engine(
+        "Text",
+        d(vec![("Name", E::String("T".into())), ("DefaultStyleSheet", E::Int(0)), ("Properties", d(vec![("AutoHyphenate", E::Bool(true)), ("Hanging", E::Bool(true)), ("LeadingType", E::Int(0))]))]),
+        d(vec![("StyleSheetData", d(vec![]))]),
+        vec![para_sheet("Normal RGB", 0, 0), para_sheet("T", 0, 0)],
+        vec![normal_char(48.0)],
+    );
+    let t = layer("Text", &on);
+    assert!(t.paragraphs[0].style.hanging, "on by the sheet");
+    let back = photosplice_text::psd::text_layer_from_tysh(&photosplice_text::psd::build_tysh(&t, 72.0, None), 72.0).unwrap();
+    assert!(back.paragraphs[0].style.hanging, "written back");
+    let off = engine(
+        "Text",
+        d(vec![("Name", E::String("T".into())), ("DefaultStyleSheet", E::Int(0)), ("Properties", d(vec![("LeadingType", E::Int(0))]))]),
+        d(vec![("StyleSheetData", d(vec![]))]),
+        vec![para_sheet("Normal RGB", 0, 0), para_sheet("T", 0, 0)],
+        vec![normal_char(48.0)],
+    );
+    assert!(!layer("Text", &off).paragraphs[0].style.hanging, "off without the key");
+}
+
 /// A run's own value still wins over its paragraph style, and an unknown style name or an
 /// out-of-range sheet index falls back to Normal.
 #[test]

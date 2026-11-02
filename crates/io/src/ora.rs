@@ -77,9 +77,9 @@ pub(crate) fn krita_blend(id: &str) -> Option<(BlendMode, bool)> {
         "dodge" => (B::ColorDodge, false),
         "burn" => (B::ColorBurn, false),
         "hard_light" => (B::HardLight, false),
-        "soft_light" => (B::SoftLight, false),
-        // The W3C soft light curve, close to but not Photoshop's.
-        "soft_light_svg" => (B::SoftLight, true),
+        // Krita's own Soft Light keeps sqrt(cb) over dark backdrops; Reference's is the W3C curve.
+        "soft_light" => (B::SoftLight, true),
+        "soft_light_svg" => (B::SoftLight, false),
         "diff" => (B::Difference, false),
         "exclusion" => (B::Exclusion, false),
         "linear_burn" => (B::LinearBurn, false),
@@ -124,7 +124,7 @@ pub(crate) fn krita_id(mode: BlendMode) -> Option<&'static str> {
         B::LinearDodge => "linear_dodge",
         B::LighterColor => "lighter color",
         B::Overlay => "overlay",
-        B::SoftLight => "soft_light",
+        B::SoftLight => "soft_light_svg",
         B::HardLight => "hard_light",
         B::VividLight => "vivid_light",
         B::LinearLight => "linear light",
@@ -167,9 +167,6 @@ const SVG_OPS: [(&str, BlendMode); 15] = [
 /// A composite-op attribute as a blend mode; unknown names fall back to Normal with a warning.
 fn composite_op(op: &str, layer: &str, warnings: &mut Warnings) -> BlendMode {
     if let Some((_, mode)) = SVG_OPS.iter().find(|(name, _)| *name == op) {
-        if op == "svg:soft-light" {
-            warnings.note("svg:soft-light (the W3C curve) opens as Photoshop's Soft Light, which differs slightly");
-        }
         return *mode;
     }
     match op {

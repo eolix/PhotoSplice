@@ -234,7 +234,10 @@ pub(crate) fn has_filterable_layer(s: &Session) -> std::result::Result<(), Strin
 pub(crate) fn run_filter(s: &mut Session, id: &str, p: &Value) -> Result<Value> {
     validate_params(id, p)?;
     // Session state some filters read (colours) becomes explicit params; external inputs resolve here.
-    let prepared = crate::filters_ext::prepare(s, id, p);
+    let mut prepared = crate::filters_ext::prepare(s, id, p);
+    if id == "filter.distort.displace" {
+        prepared = crate::filters_ext::displace_request(&prepared);
+    }
     let p = &prepared;
     let mut fp = params_for(id, p).ok_or_else(|| EngineError::Other(format!("unknown filter {id}")))?;
     crate::filters_ext::resolve(s, &mut fp, p)?;
@@ -296,9 +299,24 @@ pub(crate) fn run_filter(s: &mut Session, id: &str, p: &Value) -> Result<Value> 
                     return Err(EngineError::Other(crate::filters_ext::LENS_BLUR_ON_SMART_OBJECT.into()));
                 }
                 LayerContent::Smart(_) => {
+                    // A smart filter re-renders from its params alone: a Displace map read from an
+                    // open document, which the re-render can't read again, is kept in them, as
+                    // Reference embeds it (storytold/photocraft@3c7ee9ed). A `mapPath` stays a
+                    // path, read next to the document on each re-render.
+                    let params = match &fp {
+                        FilterParams::Displace { map: Some(map), .. }
+                            if photosplice_io::smart_map::displace_embedded_map(&params).is_none() && crate::filters_ext::map_path(&params).is_none() =>
+                        {
+                            photosplice_io::smart_map::displace_embed_map(&params, map).ok_or_else(|| {
+                                EngineError::Other(
+                                    "Displace: the displacement map is too large to keep in a Smart Object's filter: rasterize the layer first".into(),
+                                )
+                            })?
+                        }
+                        _ => params.clone(),
+                    };
                     // Non-destructive: record the filter and re-render the smart object from its source.
-                    let sf =
-                        SmartFilter { command: id.clone(), params: params.clone(), blend: photosplice_color::BlendMode::Normal, opacity: 1.0, visible: true };
+                    let sf = SmartFilter { command: id.clone(), params, blend: photosplice_color::BlendMode::Normal, opacity: 1.0, visible: true };
                     return crate::smart_cmds::add_smart_filter(doc, layer, sf, selection.as_ref()).map(|()| fp);
                 }
                 _ => return Err(EngineError::Other("not a pixel layer".into())),

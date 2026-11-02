@@ -9,7 +9,7 @@ use std::sync::Arc;
 use photosplice_color::{ColorMode, PixelFormat, SampleType};
 use photosplice_doc::{Document, Pattern};
 use photosplice_geom::Rect;
-use photosplice_psd::patterns::{PatternBudget, PsdPattern, block_key, mode_channels, parse_pattern_block_with, write_pattern_block};
+use photosplice_psd::patterns::{PatternBudget, PsdPattern, block_has_user_mask, block_key, mode_channels, parse_pattern_block_with, write_pattern_block};
 use photosplice_raster::Surface;
 
 use crate::pixels::{deinterleave, interleave, max_sample, psd_depth, sample_for_depth, zero_sample};
@@ -26,17 +26,25 @@ fn psd_mode(m: ColorMode) -> u32 {
     }
 }
 
-/// A PSD pattern as a document pattern (indexed patterns become RGB through their palette).
+/// A PSD pattern as a document pattern (indexed patterns become RGB through their palette). A
+/// malformed pattern (an edge past the parser's 30000 px, an unknown depth, a plane that isn't
+/// exactly width × height samples) is `None`, checked before anything is converted
+/// (storytold/photocraft#10541).
 pub fn from_psd(p: &PsdPattern) -> Option<Pattern> {
     let (w, h) = (p.width as usize, p.height as usize);
-    if w == 0 || h == 0 {
+    if w == 0 || h == 0 || w > 30_000 || h > 30_000 || !matches!(p.depth, 1 | 8 | 16 | 32) {
+        return None;
+    }
+    let n = w.checked_mul(h)?;
+    let plane_len = w.checked_mul(usize::from(p.depth))?.div_ceil(8).checked_mul(h)?;
+    if p.channels.iter().chain(p.alpha.iter()).any(|plane| plane.len() != plane_len) {
         return None;
     }
     // 1-bit patterns: expand to 8-bit grey.
     let (channels, depth): (Vec<Vec<u8>>, u16) = if p.depth == 1 {
         let row = w.div_ceil(8);
         let expand = |plane: &Vec<u8>| -> Vec<u8> {
-            (0..w * h).map(|i| if plane.get((i / w) * row + (i % w) / 8).is_some_and(|b| b & (0x80 >> (i % w % 8)) != 0) { 0 } else { 255 }).collect()
+            (0..n).map(|i| if plane.get((i / w) * row + (i % w) / 8).is_some_and(|b| b & (0x80 >> (i % w % 8)) != 0) { 0 } else { 255 }).collect()
         };
         (p.channels.iter().map(expand).collect(), 8)
     } else {
@@ -69,7 +77,7 @@ pub fn from_psd(p: &PsdPattern) -> Option<Pattern> {
         fill.push(max_sample(s));
         invert.push(false);
     }
-    let mut bytes = interleave(&refs, &fill, w * h, s, &invert);
+    let mut bytes = interleave(&refs, &fill, n, s, &invert);
     if mode == ColorMode::Lab && s == SampleType::U16 {
         crate::pixels::lab16_chroma(&mut bytes, refs.len(), true);
     }
@@ -124,12 +132,13 @@ pub fn from_global_blocks(doc: &Document) -> Vec<Pattern> {
         .collect()
 }
 
-/// Global blocks to write: the raw ones while they still match [`Document::patterns`], else the
-/// raw pattern blocks replaced by one written from the document (at the first one's position).
+/// Global blocks to write: the raw ones while they still match [`Document::patterns`] (see
+/// [`repair_legacy_blocks`]), else the raw pattern blocks replaced by one written from the
+/// document (at the first one's position).
 pub fn export_global_blocks(doc: &Document) -> Vec<photosplice_doc::PsdGlobalBlock> {
     let raw = &doc.metadata.psd_global_blocks;
     if from_global_blocks(doc) == doc.patterns {
-        return raw.clone();
+        return repair_legacy_blocks(raw);
     }
     let key = block_key(psd_depth(doc.depth));
     let fresh = write_pattern_block(&doc.patterns.iter().map(to_psd).collect::<Vec<_>>()).unwrap_or_default();
@@ -149,6 +158,31 @@ pub fn export_global_blocks(doc: &Document) -> Vec<photosplice_doc::PsdGlobalBlo
         out.push((*b"8BIM", key, Arc::new(fresh)));
     }
     out
+}
+
+/// `raw` with each pattern block that keeps transparency where older builds put it (which
+/// Reference refuses, storytold/photocraft#8054) rewritten in place from its own patterns. Every
+/// other block, unreadable pattern blocks included, is kept verbatim. Blocks are decoded in order
+/// with one shared budget, as [`from_global_blocks`] decodes them.
+fn repair_legacy_blocks(raw: &[photosplice_doc::PsdGlobalBlock]) -> Vec<photosplice_doc::PsdGlobalBlock> {
+    if !raw.iter().any(|(_, k, d)| PATTERN_KEYS.contains(k) && block_has_user_mask(d)) {
+        return raw.to_vec();
+    }
+    let mut budget = PatternBudget::default();
+    raw.iter()
+        .map(|b @ (sig, key, data)| {
+            if !PATTERN_KEYS.contains(key) {
+                return b.clone();
+            }
+            match parse_pattern_block_with(data, &mut budget) {
+                Ok(ps) if block_has_user_mask(data) => match write_pattern_block(&ps) {
+                    Ok(fresh) => (*sig, *key, Arc::new(fresh)),
+                    Err(_) => b.clone(),
+                },
+                _ => b.clone(),
+            }
+        })
+        .collect()
 }
 
 /// Reads a `.pat` pattern file.
@@ -216,5 +250,68 @@ mod tests {
         d2.metadata.psd_global_blocks = out;
         assert_eq!(from_global_blocks(&d2), d.patterns);
         assert_eq!(read_pat(&write_pat(&d.patterns).unwrap()).unwrap(), d.patterns);
+    }
+
+    #[test]
+    fn transparent_pattern_blocks_from_older_builds_are_rewritten_on_save() {
+        // storytold/photocraft#8054: Define Pattern over transparency, then a Pattern Fill layer;
+        // Reference refused the PSD because the pattern's transparency sat in the user mask array.
+        let mut d = Document::new("x", photosplice_geom::Size { width: 4, height: 4 }, ColorMode::Rgb, SampleType::U16);
+        d.patterns.push(pattern(ColorMode::Rgb, SampleType::U16, true));
+        let out = export_global_blocks(&d);
+        assert_eq!(out.len(), 1);
+        assert!(!block_has_user_mask(&out[0].2));
+        // Move the transparency into the user mask array, as older builds wrote it: a 16-bit
+        // pattern's array is raw, so it is the last 8 + 23 + 5 × 3 × 2 bytes of the pattern.
+        let mut legacy = out[0].2.to_vec();
+        let end = 4 + u32::from_be_bytes([legacy[0], legacy[1], legacy[2], legacy[3]]) as usize;
+        legacy[end - (8 + 23 + 30) - 4..end].rotate_left(4);
+        assert!(block_has_user_mask(&legacy));
+        // A pattern block that doesn't decode (pattern version 2) sits beside it.
+        let unreadable = (*b"8BIM", *b"Patt", Arc::new(vec![0, 0, 0, 8, 0, 0, 0, 2, 0, 0, 0, 0]));
+        let other = (*b"8BIM", *b"Txt2", Arc::new(vec![1]));
+        d.metadata.psd_global_blocks = vec![other.clone(), (*b"8BIM", *b"Pat2", Arc::new(legacy)), unreadable.clone()];
+        assert_eq!(from_global_blocks(&d), d.patterns, "older files still open");
+        // The patterns are unchanged: only the legacy block is rewritten, in place; the other
+        // blocks are kept verbatim.
+        let out = export_global_blocks(&d);
+        assert_eq!(out.len(), 3);
+        assert_eq!((&out[0], &out[2]), (&other, &unreadable));
+        assert_eq!(out[1].1, *b"Pat2");
+        assert!(!block_has_user_mask(&out[1].2));
+        let mut back = d.clone();
+        back.metadata.psd_global_blocks = out;
+        assert_eq!(from_global_blocks(&back), d.patterns);
+        // Saving again keeps every block as it is.
+        assert_eq!(export_global_blocks(&back), back.metadata.psd_global_blocks);
+    }
+
+    /// storytold/photocraft#10541: a malformed pattern is refused before it is converted.
+    #[test]
+    fn malformed_dimensions_and_planes_fail_before_conversion() {
+        let mut p = PsdPattern {
+            mode: 1,
+            width: 9,
+            height: 2,
+            name: "Bits".into(),
+            id: "bits".into(),
+            palette: None,
+            depth: 1,
+            channels: vec![vec![0x80, 0, 0, 0x80]],
+            alpha: None,
+        };
+        let converted = from_psd(&p).unwrap();
+        assert_eq!(converted.surface.to_interleaved(converted.rect()), [0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0]);
+        p.channels[0].pop();
+        assert!(from_psd(&p).is_none());
+        p.channels[0].push(0x80);
+        p.alpha = Some(vec![0; 3]);
+        assert!(from_psd(&p).is_none(), "a short alpha plane");
+        p.alpha = None;
+        p.width = u32::MAX;
+        assert!(from_psd(&p).is_none());
+        p.width = 9;
+        p.depth = 7;
+        assert!(from_psd(&p).is_none());
     }
 }

@@ -20,11 +20,12 @@
 //! listed, can be hidden, reordered or deleted, and is written back unchanged.
 //!
 //! Camera Raw and Displace keep their whole item as a template next to the editable settings
-//! (Displace's carries the embedded displacement map, see `displace_map.rs`).
+//! (Displace's carries the embedded displacement map, see `displace_map.rs`); so does Perspective
+//! Warp (`perspective_warp_map.rs`), whose quads become the planes of its command.
 
 use photosplice_color::{BlendMode, ColorMode, PixelFormat, SampleType};
 use photosplice_doc::{LayerMask, SmartFilter};
-use photosplice_geom::warp::{Warp, WarpStyle};
+use photosplice_geom::warp::{BezierMesh, Warp, WarpStyle};
 use photosplice_geom::{Affine, Rect as GeomRect};
 use photosplice_psd::Compression;
 use photosplice_psd::Rect as PsdRect;
@@ -41,8 +42,10 @@ mod camera_raw;
 mod gallery;
 #[path = "displace_map.rs"]
 mod displace;
+#[path = "perspective_warp_map.rs"]
+mod perspective_warp;
 
-pub use displace::embedded_map as displace_embedded_map;
+pub use displace::{embed_map as displace_embed_map, embedded_map as displace_embedded_map, without_map as displace_without_map};
 
 /// Command id of a Photoshop smart filter PhotoSplice does not implement. Its params hold the
 /// filter's name, Photoshop filter id and descriptor (`psd`, hex); it renders as a pass-through.
@@ -146,7 +149,7 @@ const fn code(c: &[u8; 4]) -> i32 {
     i32::from_be_bytes(*c)
 }
 
-const KNOWN: [Known; 24] = [
+const KNOWN: [Known; 43] = [
     Known { class: "GsnB", filter_id: code(b"GsnB"), name: "Gaussian Blur...", command: "filter.blur.gaussianBlur" },
     Known { class: "boxblur", filter_id: 840, name: "Box Blur...", command: "filter.blur.boxBlur" },
     Known { class: "MtnB", filter_id: code(b"MtnB"), name: "Motion Blur...", command: "filter.blur.motionBlur" },
@@ -173,7 +176,197 @@ const KNOWN: [Known; 24] = [
     Known { class: "BlrM", filter_id: code(b"BlrM"), name: "Blur More", command: "filter.blur.blurMore" },
     Known { class: "Dspc", filter_id: code(b"Dspc"), name: "Despeckle", command: "filter.noise.despeckle" },
     Known { class: "FndE", filter_id: code(b"FndE"), name: "Find Edges", command: "filter.stylize.findEdges" },
+    // Distort, with the keys, enum codes and key order Reference 27 writes (one smart object per
+    // filter saved from Reference and read back; ported from storytold/photocraft@b464a334).
+    // Shear isn't mapped yet: its curve lives on Reference's own grid.
+    Known { class: "Pnch", filter_id: code(b"Pnch"), name: "Pinch...", command: "filter.distort.pinch" },
+    Known { class: "Plr ", filter_id: code(b"Plr "), name: "Polar Coordinates...", command: "filter.distort.polarCoordinates" },
+    Known { class: "Rple", filter_id: code(b"Rple"), name: "Ripple...", command: "filter.distort.ripple" },
+    Known { class: "Sphr", filter_id: code(b"Sphr"), name: "Spherize...", command: "filter.distort.spherize" },
+    Known { class: "Twrl", filter_id: code(b"Twrl"), name: "Twirl...", command: "filter.distort.twirl" },
+    Known { class: "Wave", filter_id: code(b"Wave"), name: "Wave...", command: "filter.distort.wave" },
+    Known { class: "ZgZg", filter_id: code(b"ZgZg"), name: "ZigZag...", command: "filter.distort.zigZag" },
+    // Smart Sharpen has a numeric filterID and a stringID class, like Box Blur (storytold/photocraft@96bff5d7).
+    Known { class: SMART_SHARPEN, filter_id: 1131, name: "Smart Sharpen...", command: "filter.sharpen.smartSharpen" },
+    Known { class: "DstS", filter_id: code(b"DstS"), name: "Dust & Scratches...", command: "filter.noise.dustAndScratches" },
+    // Stylize and Pixelate (storytold/photocraft@a99ad585, @b43be752).
+    Known { class: "Dfs ", filter_id: code(b"Dfs "), name: "Diffuse...", command: "filter.stylize.diffuse" },
+    Known { class: "TrcC", filter_id: code(b"TrcC"), name: "Trace Contour...", command: "filter.stylize.traceContour" },
+    Known { class: "Crst", filter_id: code(b"Crst"), name: "Crystallize...", command: "filter.pixelate.crystallize" },
+    Known { class: "Pntl", filter_id: code(b"Pntl"), name: "Pointillize...", command: "filter.pixelate.pointillize" },
+    Known { class: "Wnd ", filter_id: code(b"Wnd "), name: "Wind...", command: "filter.stylize.wind" },
+    Known { class: "Extr", filter_id: code(b"Extr"), name: "Extrude...", command: "filter.stylize.extrude" },
+    Known { class: "Tls ", filter_id: code(b"Tls "), name: "Tiles...", command: "filter.stylize.tiles" },
+    // Surface Blur, Smart Blur and Radial Blur (storytold/photocraft@ef4e9214). Radial Blur at its
+    // defaults stores no `Fltr` (`hasoptions` false); that entry is kept verbatim.
+    Known { class: "surfaceBlur", filter_id: 1135, name: "Surface Blur...", command: "filter.blur.surfaceBlur" },
+    Known { class: "SmrB", filter_id: code(b"SmrB"), name: "Smart Blur...", command: "filter.blur.smartBlur" },
+    Known { class: "RdlB", filter_id: code(b"RdlB"), name: "Radial Blur...", command: "filter.blur.radialBlur" },
 ];
+
+// ---------- settings tables and readers of the mapped filters ----------
+//
+// Each filter was measured in Reference: applied to a smart object, the PSD saved and `filterFX`
+// read back. Missing keys, wrong value types, out-of-range numbers and unknown enum values keep
+// the entry verbatim (an [`UNSUPPORTED_FILTER`]); params with no PSD equivalent are reported on
+// save, never guessed. Reference stores no random seed for any of these: our `seed` is not
+// written.
+
+/// Reference enum value ↔ our parameter value, per filter setting.
+type EnumTable = [(&'static str, &'static str)];
+const RIPPLE_SIZE: [(&str, &str); 3] = [("Sml ", "small"), ("Mdm ", "medium"), ("Lrg ", "large")];
+const SPHERIZE_MODE: [(&str, &str); 3] = [("Nrml", "normal"), ("HrzO", "horizontalOnly"), ("VrtO", "verticalOnly")];
+const POLAR_MODE: [(&str, &str); 2] = [("RctP", "rectangularToPolar"), ("PlrR", "polarToRectangular")];
+const ZIGZAG_STYLE: [(&str, &str); 3] = [("PndR", "pondRipples"), ("OtFr", "outFromCenter"), ("ArnC", "aroundCenter")];
+const WAVE_TYPE: [(&str, &str); 3] = [("WvSn", "sine"), ("WvTr", "triangle"), ("WvSq", "square")];
+const UNDEFINED_AREAS: [(&str, &str); 2] = [("WrpA", "wrap"), ("RptE", "repeat")];
+/// Diffuse's `Md  ` (`DfsM`); `anisotropic` is a long id.
+const DIFFUSE_MODES: [(&str, &str); 4] = [("Nrml", "normal"), ("DrkO", "darkenOnly"), ("LghO", "lightenOnly"), ("anisotropic", "anisotropic")];
+/// Trace Contour's `Edg ` (`CntE`).
+const TRACE_EDGES: [(&str, &str); 2] = [("Upr ", "upper"), ("Lwr ", "lower")];
+/// Wind's `WndM` and `Drct`: Reference's `Left` streaks extend to the left of an edge, which is
+/// our wind from the right.
+const WIND_METHODS: [(&str, &str); 3] = [("Wnd ", "wind"), ("Blst", "blast"), ("Stgr", "stagger")];
+const WIND_DIRECTIONS: [(&str, &str); 2] = [("Left", "fromRight"), ("Rght", "fromLeft")];
+/// Extrude's `ExtT` and `ExtR`, Tiles' `FlCl`.
+const EXTRUDE_TYPES: [(&str, &str); 2] = [("Blks", "blocks"), ("Pyrm", "pyramids")];
+const EXTRUDE_DEPTHS: [(&str, &str); 2] = [("Rndm", "random"), ("LvlB", "levelBased")];
+const TILE_FILLS: [(&str, &str); 4] = [("FlBc", "background"), ("FlFr", "foreground"), ("FlIn", "inverse"), ("FlSm", "unaltered")];
+/// Smart Blur's `SmBQ` / `SmBM`, Radial Blur's `BlrM` / `BlrQ`.
+const SMART_BLUR_QUALITY: [(&str, &str); 3] = [("SBQL", "low"), ("SBQM", "medium"), ("SBQH", "high")];
+const SMART_BLUR_MODE: [(&str, &str); 3] = [("SBMN", "normal"), ("SBME", "edgeOnly"), ("SBMO", "overlayEdge")];
+const RADIAL_METHOD: [(&str, &str); 2] = [("Spn ", "spin"), ("Zm  ", "zoom")];
+const RADIAL_QUALITY: [(&str, &str); 3] = [("Drft", "draft"), ("Gd  ", "good"), ("Bst ", "best")];
+
+/// `long` ranges, the engine's (and Reference's dialogs').
+const CELL_SIZE: (i32, i32) = (3, 300);
+const EXTRUDE_SIZE: (i32, i32) = (2, 255);
+const EXTRUDE_DEPTH: (i32, i32) = (1, 255);
+const TILE_COUNT: (i32, i32) = (1, 99);
+const TILE_OFFSET: (i32, i32) = (1, 99);
+
+const SMART_SHARPEN: &str = "smartSharpen";
+/// Smart Sharpen's keys: `presetKind` (`presetKindType` enum, only on the default entry),
+/// `useLegacy`, `Amnt` (#Prc), `Rds ` (#Pxl), `noiseReduction` (#Prc), `blur` (`blurType` enum:
+/// `GsnB`, `lensBlur` or `MtnB`; Motion Blur adds `Angl`).
+const SMART_SHARPEN_KEYS: [&str; 6] = ["presetKind", "useLegacy", "Amnt", "Rds ", "noiseReduction", "blur"];
+
+/// Our value for the enum `key` in `d` through `table`; with `type_id`, the enum must be of that
+/// type. `None`: absent, another type or a value we don't know.
+fn enum_in(d: &Descriptor, key: &str, type_id: Option<&str>, table: &EnumTable) -> Option<&'static str> {
+    let Some(Value::Enumerated { type_id: t, value }) = d.get(key) else { return None };
+    if type_id.is_some_and(|id| t.as_bytes() != id.as_bytes()) {
+        return None;
+    }
+    table.iter().find(|(psd, _)| value.as_bytes() == psd.as_bytes()).map(|(_, ours)| *ours)
+}
+
+/// The enum Reference stores (type `type_id`) for our `p[key]` (`default` when absent); `Err`
+/// for a value that isn't one of `table`'s.
+fn enum_out(p: &J, key: &str, default: &str, type_id: &str, table: &EnumTable) -> Result<Value, String> {
+    let ours = match p.get(key) {
+        None => default,
+        Some(v) => v.as_str().ok_or_else(|| format!("`{key}` is not text"))?,
+    };
+    let (psd, _) = table.iter().find(|(_, o)| *o == ours).ok_or_else(|| format!("{key} `{ours}` has no PSD equivalent"))?;
+    Ok(enumv(type_id, psd))
+}
+
+/// The `long` at `key` when it lies in `lo..=hi`.
+fn int_in(d: &Descriptor, key: &str, lo: i32, hi: i32) -> Option<i32> {
+    int(d, key).filter(|v| (lo..=hi).contains(v))
+}
+
+/// A `UntF` value in `unit`, finite and within `lo..=hi`.
+fn unit_in(d: &Descriptor, key: &str, u: &[u8; 4], lo: f64, hi: f64) -> Option<f64> {
+    match d.get(key)? {
+        Value::UnitFloat { unit, value } if unit == u && value.is_finite() && (lo..=hi).contains(value) => Some(*value),
+        _ => None,
+    }
+}
+
+/// `v` when it lies in `lo..=hi`: out-of-range settings are not opened as editable filters, so a
+/// re-save keeps Reference's value instead of a clamped one.
+fn in_range(v: f64, lo: f64, hi: f64) -> Option<f64> {
+    (lo..=hi).contains(&v).then_some(v)
+}
+
+/// The `bool` at `key`.
+fn bool_at(d: &Descriptor, key: &str) -> Option<bool> {
+    match d.get(key)? {
+        Value::Boolean(b) => Some(*b),
+        _ => None,
+    }
+}
+
+/// True when `d` holds only `keys`: a filter with a setting we don't model (Radial Blur's
+/// off-centre centre, for one) is kept verbatim rather than losing it.
+fn only_keys(d: &Descriptor, keys: &[&str]) -> bool {
+    d.items.iter().all(|(k, _)| keys.iter().any(|x| k.is(x)))
+}
+
+/// An `RGBC` object (0–255) as our `[r, g, b, 1]` colour param (0–1).
+fn rgbc_colour(d: &Descriptor) -> Option<J> {
+    let c = |k: &str| px(d, k).map(|v| (v / 255.0).clamp(0.0, 1.0));
+    Some(json!([c("Rd  ")?, c("Grn ")?, c("Bl  ")?, 1.0]))
+}
+
+/// A `[r, g, b(, a)]` (0–1) or `#rrggbb` colour param as an `RGBC` descriptor (0–255), the
+/// `default` grey level when absent.
+fn colour_rgbc(v: Option<&J>, default: f64) -> Result<Value, String> {
+    let Some(v) = v else { return Ok(rgbc(default)) };
+    let rgb = match v {
+        J::Array(a) => (|| Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?, a.get(2)?.as_f64()?]))(),
+        J::String(h) if h.len() == 7 && h.starts_with('#') => {
+            let ch = |j: usize| h.get(j..j + 2).and_then(|s| u8::from_str_radix(s, 16).ok()).map(|v| f64::from(v) / 255.0);
+            (|| Some([ch(1)?, ch(3)?, ch(5)?]))()
+        }
+        _ => None,
+    };
+    let rgb = rgb.filter(|c| c.iter().all(|v| v.is_finite())).ok_or("a colour is not [r, g, b] or #rrggbb")?;
+    let c = |v: f64| Value::Double(v.clamp(0.0, 1.0) * 255.0);
+    Ok(Value::Descriptor(Descriptor::new("RGBC").with("Rd  ", c(rgb[0])).with("Grn ", c(rgb[1])).with("Bl  ", c(rgb[2]))))
+}
+
+/// `filter.sharpen.smartSharpen` params. Our Smart Sharpen removes a Gaussian blur, non-legacy:
+/// Lens Blur (Reference's default), Motion Blur, legacy mode or any other key keep the entry
+/// verbatim. `presetKind` only names the dialog's preset: accepted on open, not kept or written
+/// (Reference leaves it out of entries with explicit values).
+fn smart_sharpen_params(f: &Descriptor) -> Option<J> {
+    if !only_keys(f, &SMART_SHARPEN_KEYS) {
+        return None;
+    }
+    let Some(Value::Boolean(false)) = f.get("useLegacy") else { return None };
+    let Some(Value::Enumerated { type_id, value }) = f.get("blur") else { return None };
+    if !type_id.is("blurType") || !value.is("GsnB") {
+        return None;
+    }
+    match f.get("presetKind") {
+        None => {}
+        Some(Value::Enumerated { type_id, .. }) if type_id.is("presetKindType") => {}
+        Some(_) => return None,
+    }
+    Some(json!({
+        "amount": unit_in(f, "Amnt", b"#Prc", 1.0, 500.0)?,
+        "radius": unit_in(f, "Rds ", b"#Pxl", 0.1, 64.0)?,
+        "reduceNoise": unit_in(f, "noiseReduction", b"#Prc", 0.0, 100.0)?,
+    }))
+}
+
+/// Tiles' params; its fills use the colours the entry carries (`FrgC`, `BckC`). `None` when a
+/// setting, or a colour that is there, can't be read.
+fn tiles_params(f: &Descriptor, item: &Descriptor) -> Option<J> {
+    let mut out = Map::new();
+    out.insert("count".into(), json!(int_in(f, "TlNm", TILE_COUNT.0, TILE_COUNT.1)?));
+    out.insert("maxOffset".into(), json!(int_in(f, "TlOf", TILE_OFFSET.0, TILE_OFFSET.1)?));
+    out.insert("fill".into(), json!(enum_in(f, "FlCl", Some("FlCl"), &TILE_FILLS)?));
+    for (psd, ours) in [("FrgC", "foreground"), ("BckC", "background")] {
+        if item.get(psd).is_some() {
+            out.insert(ours.into(), get_desc(item, psd).and_then(rgbc_colour)?);
+        }
+    }
+    Some(J::Object(out))
+}
 
 /// [`KNOWN`] filters that have no settings.
 const PLAIN: [&str; 8] = ["Invr", "Shrp", "ShrM", "ShrE", "Blr ", "BlrM", "Dspc", "FndE"];
@@ -324,9 +517,10 @@ fn curves_params(f: &Descriptor) -> Option<J> {
     Some(J::Object(out))
 }
 
-/// Our command and parameters for a known Photoshop filter; `None` when the filter (or one of its
-/// settings) is not modelled.
-fn known_params(class: &str, f: Option<&Descriptor>) -> Option<(&'static str, J)> {
+/// Our command and parameters for a known Reference filter; `None` when the filter (or one of
+/// its settings) is not modelled. `item` is the whole `filterFX` entry (Pointillize and Tiles
+/// read its colours).
+fn known_params(class: &str, f: Option<&Descriptor>, item: &Descriptor) -> Option<(&'static str, J)> {
     let k = KNOWN.iter().find(|k| k.class == class)?;
     let params = match (class, f) {
         ("adaptCorrect", None) => json!({}),
@@ -349,6 +543,70 @@ fn known_params(class: &str, f: Option<&Descriptor>) -> Option<(&'static str, J)
         }
         ("Msc ", Some(f)) => json!({"cellSize": px(f, "ClSz")?}),
         ("Embs", Some(f)) => json!({"angle": int(f, "Angl")?, "height": int(f, "Hght")?, "amount": int(f, "Amnt")?}),
+        ("Pnch", Some(f)) => json!({"amount": int(f, "Amnt")?}),
+        ("Twrl", Some(f)) => json!({"angle": int(f, "Angl")?}),
+        ("Rple", Some(f)) => json!({"amount": int(f, "Amnt")?, "size": enum_in(f, "RplS", None, &RIPPLE_SIZE)?}),
+        ("Sphr", Some(f)) => json!({"amount": int(f, "Amnt")?, "mode": enum_in(f, "SphM", None, &SPHERIZE_MODE)?}),
+        ("Plr ", Some(f)) => json!({"mode": enum_in(f, "Cnvr", None, &POLAR_MODE)?}),
+        ("ZgZg", Some(f)) => json!({"amount": int(f, "Amnt")?, "ridges": int(f, "NmbR")?, "style": enum_in(f, "ZZTy", None, &ZIGZAG_STYLE)?}),
+        ("Wave", Some(f)) => {
+            // Our Wave has no Scale: a scaled wave stays verbatim rather than lose it.
+            if int(f, "SclH")? != 100 || int(f, "SclV")? != 100 {
+                return None;
+            }
+            json!({
+                "type": enum_in(f, "Wvtp", None, &WAVE_TYPE)?,
+                "generators": int(f, "NmbG")?,
+                "wavelengthMin": int(f, "WLMn")?,
+                "wavelengthMax": int(f, "WLMx")?,
+                "amplitudeMin": int(f, "AmMn")?,
+                "amplitudeMax": int(f, "AmMx")?,
+                "undefinedAreas": enum_in(f, "UndA", None, &UNDEFINED_AREAS)?,
+                // `RndS` is a signed long; the seed is its bit pattern.
+                "seed": int(f, "RndS")?.cast_unsigned(),
+            })
+        }
+        (SMART_SHARPEN, Some(f)) => smart_sharpen_params(f)?,
+        ("DstS", Some(f)) if only_keys(f, &["Rds ", "Thsh"]) => json!({"radius": int_in(f, "Rds ", 1, 500)?, "threshold": int_in(f, "Thsh", 0, 255)?}),
+        ("Dfs ", Some(f)) => json!({"mode": enum_in(f, "Md  ", Some("DfsM"), &DIFFUSE_MODES)?}),
+        ("TrcC", Some(f)) => json!({"level": int_in(f, "Lvl ", 0, 255)?, "edge": enum_in(f, "Edg ", Some("CntE"), &TRACE_EDGES)?}),
+        ("Crst", Some(f)) => json!({"cellSize": int_in(f, "ClSz", CELL_SIZE.0, CELL_SIZE.1)?}),
+        ("Pntl", Some(f)) => {
+            let mut p = json!({"cellSize": int_in(f, "ClSz", CELL_SIZE.0, CELL_SIZE.1)?});
+            // Pointillize paints the gaps in the background colour the entry carries.
+            if item.get("BckC").is_some() {
+                p["background"] = get_desc(item, "BckC").and_then(rgbc_colour)?;
+            }
+            p
+        }
+        ("Wnd ", Some(f)) => json!({
+            "method": enum_in(f, "WndM", Some("WndM"), &WIND_METHODS)?,
+            "direction": enum_in(f, "Drct", Some("Drct"), &WIND_DIRECTIONS)?,
+        }),
+        ("Extr", Some(f)) => json!({
+            "type": enum_in(f, "ExtT", Some("ExtT"), &EXTRUDE_TYPES)?,
+            "size": int_in(f, "ExtS", EXTRUDE_SIZE.0, EXTRUDE_SIZE.1)?,
+            "depth": int_in(f, "ExtD", EXTRUDE_DEPTH.0, EXTRUDE_DEPTH.1)?,
+            "depthMode": enum_in(f, "ExtR", Some("ExtR"), &EXTRUDE_DEPTHS)?,
+            "solidFrontFaces": bool_at(f, "ExtF")?,
+            "maskIncompleteBlocks": bool_at(f, "ExtM")?,
+        }),
+        ("Tls ", Some(f)) => tiles_params(f, item)?,
+        ("surfaceBlur", Some(f)) if only_keys(f, &["Rds ", "Thsh"]) => json!({
+            "radius": in_range(px(f, "Rds ")?, 1.0, 100.0)?,
+            "threshold": int_in(f, "Thsh", 2, 255)?,
+        }),
+        ("SmrB", Some(f)) if only_keys(f, &["Rds ", "Thsh", "SmBQ", "SmBM"]) => json!({
+            "radius": in_range(px(f, "Rds ")?, 0.1, 100.0)?,
+            "threshold": in_range(px(f, "Thsh")?, 0.1, 100.0)?,
+            "quality": enum_in(f, "SmBQ", None, &SMART_BLUR_QUALITY)?,
+            "mode": enum_in(f, "SmBM", None, &SMART_BLUR_MODE)?,
+        }),
+        ("RdlB", Some(f)) if only_keys(f, &["Amnt", "BlrM", "BlrQ"]) => json!({
+            "amount": int_in(f, "Amnt", 1, 100)?,
+            "method": enum_in(f, "BlrM", None, &RADIAL_METHOD)?,
+            "quality": enum_in(f, "BlrQ", None, &RADIAL_QUALITY)?,
+        }),
         ("Lvls", Some(f)) => levels_params(f)?,
         ("Crvs", Some(f)) => curves_params(f)?,
         ("HStr", Some(f)) => hue_saturation_params(f)?,
@@ -477,8 +735,9 @@ pub fn filter_from_item(item: &Descriptor) -> SmartFilter {
     let known = match class.as_deref() {
         Some(camera_raw::CLASS) => camera_raw::import_params(item).map(|p| (camera_raw::COMMAND, p)),
         Some(displace::CLASS) => displace::import_params(item).map(|p| (displace::COMMAND, p)),
+        Some(perspective_warp::CLASS) => perspective_warp::import_params(item).map(|p| (perspective_warp::COMMAND, p)),
         Some(gallery::CLASS) => fltr.and_then(|f| gallery_import(item, f)),
-        c => c.and_then(|c| known_params(c, fltr)),
+        c => c.and_then(|c| known_params(c, fltr, item)),
     };
     let (command, params) = match known {
         Some((c, p)) => (c.to_string(), p),
@@ -582,6 +841,11 @@ fn adjustments(p: &J, curves: bool) -> Result<Value, String> {
     Ok(Value::List(list))
 }
 
+/// Param `key` (`default` when absent or not a finite number) rounded to a `long` in `lo..=hi`.
+fn long_in(p: &J, key: &str, default: f64, lo: i32, hi: i32) -> Value {
+    Value::Integer(pf(p, key, default).round().clamp(f64::from(lo), f64::from(hi)) as i32)
+}
+
 /// The `Fltr` descriptor of a modelled filter (`None` = written without options).
 fn fltr_for(k: &Known, p: &J) -> Result<Option<Descriptor>, String> {
     let d = Descriptor::new(k.class);
@@ -603,6 +867,69 @@ fn fltr_for(k: &Known, p: &J) -> Result<Option<Descriptor>, String> {
         }
         "Msc " => d.with("ClSz", unit(b"#Pxl", pf(p, "cellSize", 10.0))),
         "Embs" => d.with("Angl", pi(p, "angle", 135.0)).with("Hght", pi(p, "height", 3.0)).with("Amnt", pi(p, "amount", 100.0)),
+        // Keys and order as Reference writes them.
+        "Pnch" => d.with("Amnt", pi(p, "amount", 50.0)),
+        "Twrl" => d.with("Angl", pi(p, "angle", 50.0)),
+        "Rple" => d.with("Amnt", pi(p, "amount", 100.0)).with("RplS", enum_out(p, "size", "medium", "RplS", &RIPPLE_SIZE)?),
+        "Sphr" => d.with("Amnt", pi(p, "amount", 100.0)).with("SphM", enum_out(p, "mode", "normal", "SphM", &SPHERIZE_MODE)?),
+        "Plr " => d.with("Cnvr", enum_out(p, "mode", "rectangularToPolar", "Cnvr", &POLAR_MODE)?),
+        "ZgZg" => d
+            .with("Amnt", pi(p, "amount", 10.0))
+            .with("NmbR", pi(p, "ridges", 5.0))
+            .with("ZZTy", enum_out(p, "style", "pondRipples", "ZZTy", &ZIGZAG_STYLE)?),
+        "Wave" => {
+            let seed = p.get("seed").and_then(J::as_u64).and_then(|s| u32::try_from(s).ok()).unwrap_or(0);
+            d.with("Wvtp", enum_out(p, "type", "sine", "Wvtp", &WAVE_TYPE)?)
+                .with("NmbG", pi(p, "generators", 5.0))
+                .with("WLMn", pi(p, "wavelengthMin", 10.0))
+                .with("WLMx", pi(p, "wavelengthMax", 120.0))
+                .with("AmMn", pi(p, "amplitudeMin", 5.0))
+                .with("AmMx", pi(p, "amplitudeMax", 35.0))
+                .with("SclH", Value::Integer(100))
+                .with("SclV", Value::Integer(100))
+                .with("UndA", enum_out(p, "undefinedAreas", "wrap", "UndA", &UNDEFINED_AREAS)?)
+                .with("RndS", Value::Integer(seed.cast_signed()))
+        }
+        // The engine's defaults and ranges (it clamps the same way when rendering).
+        SMART_SHARPEN => d
+            .with("useLegacy", Value::Boolean(false))
+            .with("Amnt", unit(b"#Prc", pf(p, "amount", 100.0).clamp(1.0, 500.0)))
+            .with("Rds ", unit(b"#Pxl", pf(p, "radius", 1.0).clamp(0.1, 64.0)))
+            .with("noiseReduction", unit(b"#Prc", pf(p, "reduceNoise", 10.0).clamp(0.0, 100.0)))
+            .with("blur", enumv("blurType", "GsnB")),
+        // Reference stores whole pixels and levels.
+        "DstS" => d.with("Rds ", long_in(p, "radius", 1.0, 1, 500)).with("Thsh", long_in(p, "threshold", 0.0, 0, 255)),
+        "Dfs " => d.with("Md  ", enum_out(p, "mode", "normal", "DfsM", &DIFFUSE_MODES)?),
+        "TrcC" => d.with("Lvl ", long_in(p, "level", 128.0, 0, 255)).with("Edg ", enum_out(p, "edge", "lower", "CntE", &TRACE_EDGES)?),
+        "Crst" => d.with("ClSz", long_in(p, "cellSize", 10.0, CELL_SIZE.0, CELL_SIZE.1)),
+        "Pntl" => d.with("ClSz", long_in(p, "cellSize", 5.0, CELL_SIZE.0, CELL_SIZE.1)),
+        "Wnd " => d.with("WndM", enum_out(p, "method", "wind", "WndM", &WIND_METHODS)?).with("Drct", enum_out(p, "direction", "fromRight", "Drct", &WIND_DIRECTIONS)?),
+        "Extr" => d
+            .with("ExtT", enum_out(p, "type", "blocks", "ExtT", &EXTRUDE_TYPES)?)
+            .with("ExtS", long_in(p, "size", 30.0, EXTRUDE_SIZE.0, EXTRUDE_SIZE.1))
+            .with("ExtD", long_in(p, "depth", 30.0, EXTRUDE_DEPTH.0, EXTRUDE_DEPTH.1))
+            .with("ExtR", enum_out(p, "depthMode", "random", "ExtR", &EXTRUDE_DEPTHS)?)
+            .with("ExtF", Value::Boolean(p.get("solidFrontFaces").and_then(J::as_bool).unwrap_or(false)))
+            .with("ExtM", Value::Boolean(p.get("maskIncompleteBlocks").and_then(J::as_bool).unwrap_or(false))),
+        "Tls " => d
+            .with("TlNm", long_in(p, "count", 10.0, TILE_COUNT.0, TILE_COUNT.1))
+            .with("TlOf", long_in(p, "maxOffset", 10.0, TILE_OFFSET.0, TILE_OFFSET.1))
+            .with("FlCl", enum_out(p, "fill", "background", "FlCl", &TILE_FILLS)?),
+        "surfaceBlur" => d.with("Rds ", unit(b"#Pxl", pf(p, "radius", 5.0))).with("Thsh", pi(p, "threshold", 15.0)),
+        "SmrB" => d
+            .with("Rds ", Value::Double(pf(p, "radius", 3.0)))
+            .with("Thsh", Value::Double(pf(p, "threshold", 25.0)))
+            .with("SmBQ", enum_out(p, "quality", "high", "SmBQ", &SMART_BLUR_QUALITY)?)
+            .with("SmBM", enum_out(p, "mode", "normal", "SmBM", &SMART_BLUR_MODE)?),
+        "RdlB" => {
+            // Reference wrote no centre key for a centred blur; an off-centre one is unmeasured.
+            if ["centerX", "centerY"].iter().any(|k| (pf(p, k, 0.5) - 0.5).abs() > 1e-9) {
+                return Err("an off-centre Radial Blur centre is not written to PSD".into());
+            }
+            d.with("Amnt", pi(p, "amount", 10.0))
+                .with("BlrM", enum_out(p, "method", "spin", "BlrM", &RADIAL_METHOD)?)
+                .with("BlrQ", enum_out(p, "quality", "good", "BlrQ", &RADIAL_QUALITY)?)
+        }
         "Lvls" => d.with("Adjs", adjustments(p, false)?),
         "Crvs" => d.with("Adjs", adjustments(p, true)?),
         "HStr" => hue_saturation_fltr(d, p)?,
@@ -647,6 +974,9 @@ pub fn item_for_filter(f: &SmartFilter) -> Result<Descriptor, String> {
     if let Some(d) = gallery_export(f) {
         return d;
     }
+    if perspective_warp::handles(&f.command) {
+        return perspective_warp::export_item(f);
+    }
     if f.command == UNSUPPORTED_FILTER {
         let raw = f.params.get("psd").and_then(J::as_str).and_then(from_hex).ok_or("its filter data is missing")?;
         let mut d = Descriptor::from_bytes(&raw).map_err(|e| format!("its filter data is unreadable ({e})"))?;
@@ -656,13 +986,22 @@ pub fn item_for_filter(f: &SmartFilter) -> Result<Descriptor, String> {
     }
     let k = known_by_command(&f.command).ok_or("this filter has no PSD equivalent")?;
     let fltr = fltr_for(k, &f.params)?;
+    // Tiles fills with the entry's colours and Pointillize with its background; the others write
+    // the defaults.
+    let (foreground, background) = match k.class {
+        "Tls " => (colour_rgbc(f.params.get("foreground"), 0.0)?, colour_rgbc(f.params.get("background"), 255.0)?),
+        "Pntl" => (rgbc(0.0), colour_rgbc(f.params.get("background"), 255.0)?),
+        _ => (rgbc(0.0), rgbc(255.0)),
+    };
     let mut d = Descriptor::new("filterFX")
         .with("Nm  ", Value::Text(UnicodeString::new_nul(k.name)))
         .with("blendOptions", blend_options(f))
         .with("enab", Value::Boolean(f.visible))
-        .with("hasoptions", Value::Boolean(fltr.is_some()))
-        .with("FrgC", rgbc(0.0))
-        .with("BckC", rgbc(255.0));
+        // Reference marks Invert as having options although it stores none
+        // (storytold/photocraft@b464a334).
+        .with("hasoptions", Value::Boolean(fltr.is_some() || k.class == "Invr"))
+        .with("FrgC", foreground)
+        .with("BckC", background);
     if let Some(x) = fltr {
         d = d.with("Fltr", Value::Descriptor(x));
     }
@@ -695,6 +1034,16 @@ fn set(d: &mut Descriptor, key: &str, v: Value) {
     }
 }
 
+/// Replaces item `key` in place, or inserts it before item `before` (appends it without one).
+fn set_before(d: &mut Descriptor, key: &str, v: Value, before: &str) {
+    if let Some(e) = d.items.iter_mut().find(|(k, _)| k.is(key)) {
+        e.1 = v;
+        return;
+    }
+    let at = d.items.iter().position(|(k, _)| k.is(before)).unwrap_or(d.items.len());
+    d.items.insert(at, (Id::new(key), v));
+}
+
 /// Everything needed to write the placed-layer blocks of a smart object.
 #[derive(Clone, Debug)]
 pub struct PlacedSpec<'a> {
@@ -714,18 +1063,20 @@ pub struct PlacedSpec<'a> {
 }
 
 /// Where the frame corners land (top-left, top-right, bottom-right, bottom-left), as x, y pairs.
-/// The frame is [`crate::blocks::placed_frame`] for an affine placement (the inverse of
-/// `parse_smart`), the source rect for a projective one (as `parse_smart_perspective` reads it).
-fn quad_points(s: &PlacedSpec<'_>) -> [f64; 8] {
+/// The frame is [`crate::blocks::placed_frame`] of `warp`, the warp the block stores, for an
+/// affine placement (the inverse of `parse_smart`), [`crate::blocks::perspective_frame`] for a
+/// projective one (as `parse_smart_perspective` reads it).
+fn quad_points(s: &PlacedSpec<'_>, warp: Option<&Warp>) -> [f64; 8] {
     let (w, h) = s.size;
     let [a, b, c, d, e, f] = s.transform.m;
     let map = |x: f64, y: f64| match &s.perspective {
         Some(p) => photosplice_algo::transform::Homography(*p).apply(x, y),
         None => (a * x + c * y + e, b * x + d * y + f),
     };
-    // The frame Reference maps onto the quad: the custom warp's control-point box for an affine
-    // placement (the inverse of `parse_smart`), the source rect for a projective one.
-    let [x0, y0, x1, y1] = if s.perspective.is_some() { [0.0, 0.0, w, h] } else { crate::blocks::placed_frame(s.warp, w, h) };
+    // The frame Reference maps onto the quad: the warp's control-point box for an affine
+    // placement (the inverse of `parse_smart`); for a projective one a cylinder's box, else the
+    // source rect.
+    let [x0, y0, x1, y1] = if s.perspective.is_some() { crate::blocks::perspective_frame(warp, w, h) } else { crate::blocks::placed_frame(warp, w, h) };
     let mut out = [0.0; 8];
     for (i, (x, y)) in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].into_iter().enumerate() {
         (out[2 * i], out[2 * i + 1]) = map(x, y);
@@ -734,15 +1085,16 @@ fn quad_points(s: &PlacedSpec<'_>) -> [f64; 8] {
 }
 
 /// The transform quad: the source corners (top-left, top-right, bottom-right, bottom-left).
-fn quad(s: &PlacedSpec<'_>) -> Value {
-    Value::List(quad_points(s).into_iter().map(Value::Double).collect())
+fn quad(s: &PlacedSpec<'_>, warp: Option<&Warp>) -> Value {
+    Value::List(quad_points(s, warp).into_iter().map(Value::Double).collect())
 }
 
-/// Has the placement moved from the quad a template descriptor stores (`Trnf`)?
-fn quad_moved(template: &Descriptor, s: &PlacedSpec<'_>) -> bool {
+/// Has the placement moved from the quad a template descriptor stores (`Trnf`), framed by
+/// `warp`, the warp the block stores?
+fn quad_moved(template: &Descriptor, s: &PlacedSpec<'_>, warp: Option<&Warp>) -> bool {
     let Some(Value::List(pts)) = template.get("Trnf") else { return true };
     let old: Vec<f64> = pts.iter().filter_map(|v| crate::blocks::num(Some(v))).collect();
-    let new = quad_points(s);
+    let new = quad_points(s, warp);
     old.len() != 8 || old.iter().zip(new).any(|(a, b)| (a - b).abs() > 1e-6 * (1.0 + a.abs()))
 }
 
@@ -750,43 +1102,106 @@ fn enumv(t: &str, v: &str) -> Value {
     Value::Enumerated { type_id: Id::new(t), value: Id::new(v) }
 }
 
-/// The `warp` descriptor (also the `PlLd` warp). Multi-patch meshes have no 1 × 1 envelope and
-/// are written as no warp, with a message.
-fn warp_desc(w: Option<&Warp>, size: (f64, f64), warnings: &mut Vec<String>) -> Value {
-    let none = Warp::none([0.0, 0.0, size.0, size.1]);
-    let mut w = w.unwrap_or(&none).clone();
-    let mesh = match (&w.style, &w.mesh) {
-        (WarpStyle::Custom, Some(m)) if m.points.len() == 16 => Some(m.clone()),
-        (WarpStyle::Custom, _) => {
-            warnings.push("a custom warp with more than one patch was written to PSD without its warp".into());
-            w = none.clone();
-            None
-        }
-        _ => None,
-    };
+/// The mesh of a split warp: a custom warp of more than one patch, which `SoLd` stores as
+/// `quiltWarp` and `PlLd` can't store.
+fn split_mesh(w: Option<&Warp>) -> Option<&BezierMesh> {
+    w.filter(|w| w.style == WarpStyle::Custom).and_then(|w| w.mesh.as_ref()).filter(|m| m.points.len() != 16 && m.is_valid())
+}
+
+/// The warp `SoLd` stores: none, with a message, for a split warp of more patches along a side
+/// than a `quiltWarp` is read with, so its corners are framed by the source rect as on reopen.
+fn sold_warp<'a>(w: Option<&'a Warp>, warnings: &mut Vec<String>) -> Option<&'a Warp> {
+    let too_big = split_mesh(w).is_some_and(|m| m.us.len().max(m.vs.len()) > crate::blocks::QUILT_MAX_PATCHES + 1);
+    if too_big {
+        warnings.push(format!("a split warp of more than {} patches along a side was written to PSD without its warp", crate::blocks::QUILT_MAX_PATCHES));
+        return None;
+    }
+    w
+}
+
+/// The control points of a custom warp: an object array of their x and y.
+fn mesh_points(m: &BezierMesh) -> Value {
+    let body = Descriptor::new("rationalPoint")
+        .with("Hrzn", Value::UnitFloats { unit: *b"#Pxl", values: m.points.iter().map(|p| p[0]).collect() })
+        .with("Vrtc", Value::UnitFloats { unit: *b"#Pxl", values: m.points.iter().map(|p| p[1]).collect() });
+    Value::ObjectArray(ObjectArray { prefix: u32::try_from(m.points.len()).unwrap_or(u32::MAX), body })
+}
+
+/// Style, bend (a cylinder's seven `warpValues` after it), distortions, axis, bounds and order:
+/// the keys a `warp` and a `quiltWarp` descriptor share, in Reference's order.
+fn warp_head(class: &str, w: &Warp) -> Descriptor {
     let [x0, y0, x1, y1] = w.bounds;
     let bounds = Descriptor::new("classFloatRect")
         .with("Top ", Value::Double(y0))
         .with("Left", Value::Double(x0))
         .with("Btom", Value::Double(y1))
         .with("Rght", Value::Double(x1));
-    let mut d = Descriptor::new("warp")
-        .with("warpStyle", enumv("warpStyle", w.style.psd_name()))
-        .with("warpValue", Value::Double(w.bend))
-        .with("warpPerspective", Value::Double(w.h_distort))
+    let mut d = Descriptor::new(class).with("warpStyle", enumv("warpStyle", w.style.psd_name())).with("warpValue", Value::Double(w.bend));
+    if w.style == WarpStyle::Cylinder {
+        d = d.with("warpValues", Value::List(w.values.iter().copied().map(Value::Double).collect()));
+    }
+    d.with("warpPerspective", Value::Double(w.h_distort))
         .with("warpPerspectiveOther", Value::Double(w.v_distort))
         .with("warpRotate", enumv("Ornt", if w.vertical { "Vrtc" } else { "Hrzn" }))
         .with("bounds", Value::Descriptor(bounds))
         .with("uOrder", Value::Integer(4))
-        .with("vOrder", Value::Integer(4));
+        .with("vOrder", Value::Integer(4))
+}
+
+/// The `quiltWarp` descriptor of a split warp, in Reference's layout: `deformNumCols` ×
+/// `deformNumRows` control points, and the patch boundaries (`quiltSliceX` / `quiltSliceY`) at
+/// the knots across the warp's box. The imported `quiltWarp` (`old`) gives its own slices where
+/// they still bound the mesh's patches, so their units and padding stay Reference's.
+fn quilt_desc(w: &Warp, mesh: &BezierMesh, old: Option<&Descriptor>) -> Value {
+    let old_env = old.and_then(|q| get_desc(q, "customEnvelopeWarp"));
+    let [x0, y0, x1, y1] = w.bounds;
+    let slices = |key: &str, knots: &[f64], lo: f64, hi: f64| {
+        if let Some(env) = old_env
+            && crate::blocks::quilt_knots(env, key, knots.len().saturating_sub(1)).as_deref() == Some(knots)
+            && let Some(v) = env.get(key)
+        {
+            return v.clone();
+        }
+        let (lo, hi) = if (hi - lo).is_finite() && hi > lo { (lo, hi) } else { (0.0, 1.0) };
+        let values: Vec<f64> = knots.iter().map(|u| lo + u * (hi - lo)).collect();
+        let prefix = u32::try_from(values.len()).unwrap_or(u32::MAX);
+        Value::ObjectArray(ObjectArray { prefix, body: Descriptor::new("UntF").with(key, Value::UnitFloats { unit: *b"#Pxl", values }) })
+    };
+    let envelope = Descriptor::new("customEnvelopeWarp")
+        .with("quiltSliceX", slices("quiltSliceX", &mesh.us, x0, x1))
+        .with("quiltSliceY", slices("quiltSliceY", &mesh.vs, y0, y1))
+        .with("meshPoints", mesh_points(mesh));
+    let count = |n: usize| Value::Integer(i32::try_from(n).unwrap_or(i32::MAX));
+    Value::Descriptor(
+        warp_head("quiltWarp", w)
+            .with("deformNumRows", count(mesh.ny()))
+            .with("deformNumCols", count(mesh.nx()))
+            .with("customEnvelopeWarp", Value::Descriptor(envelope)),
+    )
+}
+
+/// The `warp` descriptor (also the `PlLd` warp). A split warp is written as no warp: `SoLd`
+/// keeps it in `quiltWarp` ([`quilt_desc`]), next to this `warpNone`, as Reference does. A
+/// custom warp without a usable mesh is written as no warp, with a message.
+fn warp_desc(w: Option<&Warp>, size: (f64, f64), warnings: &mut Vec<String>) -> Value {
+    let none = Warp::none([0.0, 0.0, size.0, size.1]);
+    let mut w = w.unwrap_or(&none).clone();
+    let mesh = match (&w.style, &w.mesh) {
+        (WarpStyle::Custom, Some(m)) if m.points.len() == 16 => Some(m.clone()),
+        (WarpStyle::Custom, Some(m)) if m.is_valid() => {
+            w = none.clone();
+            None
+        }
+        (WarpStyle::Custom, _) => {
+            warnings.push("a custom warp without a valid mesh was written to PSD without its warp".into());
+            w = none.clone();
+            None
+        }
+        _ => None,
+    };
+    let mut d = warp_head("warp", &w);
     if let Some(m) = mesh {
-        let body = Descriptor::new("rationalPoint")
-            .with("Hrzn", Value::UnitFloats { unit: *b"#Pxl", values: m.points.iter().map(|p| p[0]).collect() })
-            .with("Vrtc", Value::UnitFloats { unit: *b"#Pxl", values: m.points.iter().map(|p| p[1]).collect() });
-        d = d.with(
-            "customEnvelopeWarp",
-            Value::Descriptor(Descriptor::new("customEnvelopeWarp").with("meshPoints", Value::ObjectArray(ObjectArray { prefix: 16, body }))),
-        );
+        d = d.with("customEnvelopeWarp", Value::Descriptor(Descriptor::new("customEnvelopeWarp").with("meshPoints", mesh_points(&m))));
     }
     Value::Descriptor(d)
 }
@@ -804,25 +1219,44 @@ fn pad4(mut v: Vec<u8>) -> Vec<u8> {
 
 /// `SoLd` block data. With `template` (the imported descriptor) every key it has is kept and only
 /// the placed id (for a duplicate), transform (when it moved), warp and filter stack are rewritten;
-/// otherwise a fresh descriptor in Photoshop's key order.
+/// otherwise a fresh descriptor in Reference's key order. A split warp goes in `quiltWarp`.
 pub fn sold_bytes(template: Option<&Descriptor>, s: &PlacedSpec<'_>, warnings: &mut Vec<String>) -> Vec<u8> {
-    let warp = warp_desc(s.warp, s.size, warnings);
+    let stored = sold_warp(s.warp, warnings);
+    let warp = warp_desc(stored, s.size, warnings);
+    let split = stored.zip(split_mesh(stored));
     let d = match template {
         Some(t) => {
             let mut d = t.clone();
             if text_of(t, "placed").as_deref() != Some(s.placed) {
                 set(&mut d, "placed", Value::Text(UnicodeString::new_nul(s.placed)));
             }
-            if quad_moved(t, s) {
-                set(&mut d, "Trnf", quad(s));
-                set(&mut d, "nonAffineTransform", quad(s));
+            if quad_moved(t, s, stored) {
+                set(&mut d, "Trnf", quad(s, stored));
+                set(&mut d, "nonAffineTransform", quad(s, stored));
             }
-            // The file's warp stays while it still reads as the layer's warp: one the model
-            // can't hold (a multi-patch "quilt" mesh reads as none) survived a move only as
-            // "no warp" before.
-            let same_warp = get_desc(t, "warp").is_some_and(|w| crate::blocks::warp_from_desc(w).as_ref() == s.warp);
+            // The file's warp stays while it still reads as the warp `warp` stores (none beside a
+            // split warp's `quiltWarp`): one the model can't hold survived a move only as "no
+            // warp" before.
+            let same_warp = get_desc(t, "warp").is_some_and(|w| match split {
+                Some(_) => crate::blocks::warp_of(w) == Some(None),
+                None => crate::blocks::warp_from_desc(w).as_ref() == stored,
+            });
             if !same_warp {
                 set(&mut d, "warp", warp);
+            }
+            // `quiltWarp` is read before `warp`, so the imported one stays only while it still
+            // says what the layer's warp is (unchanged, or unreadable while the layer has none);
+            // otherwise it is rewritten, or dropped for a warp that isn't split.
+            let old = get_desc(t, "quiltWarp");
+            let kept = old.is_some_and(|q| match crate::blocks::warp_of(q) {
+                Some(w) => w.as_ref() == stored,
+                None => s.warp.is_none(),
+            });
+            if !kept {
+                match split {
+                    Some((w, m)) => set_before(&mut d, "quiltWarp", quilt_desc(w, m, old), "warp"),
+                    None => d.items.retain(|(k, _)| !k.is("quiltWarp")),
+                }
             }
             match &s.filter_fx {
                 Some(fx) => set(&mut d, "filterFX", Value::Descriptor(fx.clone())),
@@ -842,8 +1276,12 @@ pub fn sold_bytes(template: Option<&Descriptor>, s: &PlacedSpec<'_>, warnings: &
                 .with("frameCount", Value::Integer(1))
                 .with("Annt", Value::Integer(16))
                 .with("Type", Value::Integer(2))
-                .with("Trnf", quad(s))
-                .with("nonAffineTransform", quad(s))
+                .with("Trnf", quad(s, stored))
+                .with("nonAffineTransform", quad(s, stored));
+            if let Some((w, m)) = split {
+                d = d.with("quiltWarp", quilt_desc(w, m, None));
+            }
+            let mut d = d
                 .with("warp", warp)
                 .with("Sz  ", Value::Descriptor(Descriptor::new("Pnt ").with("Wdth", Value::Double(s.size.0)).with("Hght", Value::Double(s.size.1))))
                 .with("Rslt", unit(b"#Rsl", s.dpi));
@@ -860,10 +1298,12 @@ pub fn sold_bytes(template: Option<&Descriptor>, s: &PlacedSpec<'_>, warnings: &
     pad4(out)
 }
 
-/// `PlLd` block data (`plcL` version 3): the legacy placed-layer record Photoshop writes next to
+/// `PlLd` block data (`plcL` version 3): the legacy placed-layer record Reference writes next to
 /// `SoLd`. Its warp is the one `sold` (the `SoLd` data written beside it) carries, so a warp kept
-/// from the file (one the model can't hold) is not reset to none here.
+/// from the file (one the model can't hold) is not reset to none here. It has no split warp: it
+/// stores none, its corners framed by the source rect.
 pub fn plld_bytes(s: &PlacedSpec<'_>, sold: &[u8], warnings: &mut Vec<String>) -> Vec<u8> {
+    let warp = s.warp.filter(|_| split_mesh(s.warp).is_none());
     let mut out = b"plcL".to_vec();
     out.extend_from_slice(&3u32.to_be_bytes());
     let id = s.idnt.as_bytes();
@@ -873,7 +1313,7 @@ pub fn plld_bytes(s: &PlacedSpec<'_>, sold: &[u8], warnings: &mut Vec<String>) -
     for v in [1i32, 1, 16, 2] {
         out.extend_from_slice(&v.to_be_bytes());
     }
-    if let Value::List(q) = quad(s) {
+    if let Value::List(q) = quad(s, warp) {
         for v in q {
             if let Value::Double(x) = v {
                 out.extend_from_slice(&x.to_be_bytes());
@@ -885,7 +1325,7 @@ pub fn plld_bytes(s: &PlacedSpec<'_>, sold: &[u8], warnings: &mut Vec<String>) -
     let w = match kept {
         Some(w) => w,
         None => {
-            let Value::Descriptor(w) = warp_desc(s.warp, s.size, warnings) else { return pad4(out) };
+            let Value::Descriptor(w) = warp_desc(warp, s.size, warnings) else { return pad4(out) };
             w
         }
     };
@@ -1125,7 +1565,7 @@ mod tests {
         let q: Vec<f64> = q.iter().filter_map(|v| if let Value::Double(d) = v { Some(*d) } else { None }).collect();
         assert_eq!(q, [100.0, 200.0, 240.0, 200.0, 240.0, 260.0, 100.0, 260.0]);
         assert_eq!(p.transform, transform);
-        assert!(!quad_moved(&p.descriptor, &spec));
+        assert!(!quad_moved(&p.descriptor, &spec, spec.warp));
     }
 
     fn count(hay: &[u8], needle: &[u8]) -> usize {
@@ -1184,8 +1624,42 @@ mod tests {
             sf("filter.blur.blurMore", json!({})),
             sf("filter.noise.despeckle", json!({})),
             sf("filter.stylize.findEdges", json!({})),
+            sf("filter.distort.pinch", json!({"amount": -28})),
+            sf("filter.distort.polarCoordinates", json!({"mode": "rectangularToPolar"})),
+            sf("filter.distort.ripple", json!({"amount": 250, "size": "small"})),
+            sf("filter.distort.spherize", json!({"amount": 60, "mode": "verticalOnly"})),
+            sf("filter.distort.twirl", json!({"angle": -355})),
+            sf(
+                "filter.distort.wave",
+                json!({"type": "square", "generators": 3, "wavelengthMin": 20, "wavelengthMax": 90, "amplitudeMin": 4, "amplitudeMax": 30,
+                       "undefinedAreas": "repeat", "seed": 4_000_000_000u32}),
+            ),
+            sf("filter.distort.zigZag", json!({"amount": 30, "ridges": 7, "style": "aroundCenter"})),
+            sf("image.adjustments.invert", json!({})),
+            sf("filter.sharpen.smartSharpen", json!({"amount": 120.0, "radius": 2.5, "reduceNoise": 5.0})),
+            sf("filter.noise.dustAndScratches", json!({"radius": 4, "threshold": 20})),
+            sf("filter.stylize.diffuse", json!({"mode": "normal"})),
+            sf("filter.stylize.diffuse", json!({"mode": "darkenOnly"})),
+            sf("filter.stylize.diffuse", json!({"mode": "lightenOnly"})),
+            sf("filter.stylize.diffuse", json!({"mode": "anisotropic"})),
+            sf("filter.stylize.traceContour", json!({"level": 60, "edge": "lower"})),
+            sf("filter.stylize.traceContour", json!({"level": 128, "edge": "upper"})),
+            sf("filter.stylize.traceContour", json!({"level": 0, "edge": "upper"})),
+            sf("filter.stylize.traceContour", json!({"level": 255, "edge": "lower"})),
+            sf("filter.pixelate.crystallize", json!({"cellSize": 10})),
+            sf("filter.pixelate.crystallize", json!({"cellSize": 3})),
+            sf("filter.pixelate.crystallize", json!({"cellSize": 300})),
+            sf("filter.pixelate.pointillize", json!({"cellSize": 7, "background": [1.0, 1.0, 1.0, 1.0]})),
+            sf("filter.pixelate.pointillize", json!({"cellSize": 300, "background": [0.0, 0.5, 1.0, 1.0]})),
+            sf("filter.blur.surfaceBlur", json!({"radius": 12.0, "threshold": 40})),
+            sf("filter.blur.smartBlur", json!({"radius": 5.0, "threshold": 25.0, "quality": "high", "mode": "normal"})),
+            sf("filter.blur.smartBlur", json!({"radius": 3.0, "threshold": 30.0, "quality": "medium", "mode": "overlayEdge"})),
+            sf("filter.blur.smartBlur", json!({"radius": 0.5, "threshold": 0.1, "quality": "low", "mode": "edgeOnly"})),
+            sf("filter.blur.radialBlur", json!({"amount": 10, "method": "spin", "quality": "draft"})),
+            sf("filter.blur.radialBlur", json!({"amount": 20, "method": "zoom", "quality": "good"})),
+            sf("filter.blur.radialBlur", json!({"amount": 100, "method": "spin", "quality": "best"})),
         ];
-        for mut f in filters {
+        for mut f in filters.into_iter().chain(wind_extrude_tiles_settings()) {
             f.blend = BlendMode::Overlay;
             f.opacity = 0.75;
             f.visible = false;
@@ -1212,17 +1686,861 @@ mod tests {
         assert!(item_for_filter(&sf("image.adjustments.invert", json!({"amount": 2}))).is_err());
     }
 
+    /// The `Fltr` descriptors Reference 27 wrote for these filters (one smart object each, saved as
+    /// PSD and read back), with the settings PhotoSplice reads from them.
+    const REFERENCE_FLTR: [(&str, &str, &str); 6] = [
+        ("filter.distort.pinch", r#"{"amount":-28}"#, "0000000600500069006e00630068000000000000506e63680000000100000000416d6e746c6f6e67ffffffe4"),
+        ("filter.distort.twirl", r#"{"angle":-355}"#, "000000060054007700690072006c0000000000005477726c0000000100000000416e676c6c6f6e67fffffe9d"),
+        (
+            "filter.distort.ripple",
+            r#"{"amount":-273,"size":"large"}"#,
+            "000000070052006900700070006c006500000000000052706c650000000200000000416d6e746c6f6e67fffffeef0000000052706c53656e756d0000000052706c53000000004c726720",
+        ),
+        (
+            "filter.distort.spherize",
+            r#"{"amount":-1,"mode":"horizontalOnly"}"#,
+            "00000009005300700068006500720069007a0065000000000000537068720000000200000000416d6e746c6f6e67ffffffff000000005370684d656e756d000000005370684d0000000048727a4f",
+        ),
+        (
+            "filter.distort.polarCoordinates",
+            r#"{"mode":"polarToRectangular"}"#,
+            "000000120050006f006c0061007200200043006f006f007200640069006e0061007400650073000000000000506c72200000000100000000436e7672656e756d00000000436e767200000000506c7252",
+        ),
+        (
+            "filter.distort.zigZag",
+            r#"{"amount":-42,"ridges":11,"style":"pondRipples"}"#,
+            "00000007005a00690067005a006100670000000000005a675a670000000300000000416d6e746c6f6e67ffffffd6000000004e6d62526c6f6e670000000b000000005a5a5479656e756d000000005a5a547900000000506e6452",
+        ),
+    ];
+
+    /// Reference's Wave with Scale 100% / 28%: our Wave has no Scale.
+    const REFERENCE_WAVE: &str = "000000050057006100760065000000000000576176650000000a0000000057767470656e756d00000000577674700000000057765472000000004e6d62476c6f6e670000014c00000000574c4d6e6c6f6e67000000d500000000574c4d786c6f6e67000000d600000000416d4d6e6c6f6e67000000f000000000416d4d786c6f6e67000000f10000000053636c486c6f6e67000000640000000053636c566c6f6e670000001c00000000556e6441656e756d00000000556e6441000000005772704100000000526e64536c6f6e670013624a";
+
+    fn reference_item(fltr: Descriptor) -> Descriptor {
+        let id = code(fltr.class_id.as_bytes().try_into().unwrap());
+        Descriptor::new("filterFX")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("from Reference")))
+            .with("blendOptions", Value::Descriptor(Descriptor::new("blendOptions").with("Opct", unit(b"#Prc", 100.0)).with("Md  ", enumv("BlnM", "normal"))))
+            .with("enab", Value::Boolean(true))
+            .with("hasoptions", Value::Boolean(true))
+            .with("Fltr", Value::Descriptor(fltr))
+            .with("filterID", Value::Integer(id))
+    }
+
+    /// Distort smart filters from a Reference file open as their PhotoSplice filters, and the ones
+    /// PhotoSplice writes carry the same settings, keys and order as Reference's.
+    #[test]
+    fn reference_distort_filters_read_and_write_like_reference() {
+        for (command, params, hex) in REFERENCE_FLTR {
+            let ps = Descriptor::from_bytes(&from_hex(hex).unwrap()).unwrap();
+            let f = filter_from_item(&reference_item(ps.clone()));
+            let want: J = serde_json::from_str(params).unwrap();
+            assert_eq!((f.command.as_str(), &f.params), (command, &want), "{command}");
+            let ours = match item_for_filter(&f).unwrap().get("Fltr") {
+                Some(Value::Descriptor(d)) => d.clone(),
+                other => panic!("{command}: no Fltr ({other:?})"),
+            };
+            assert_eq!((&ours.class_id, &ours.items), (&ps.class_id, &ps.items), "{command}: same keys, values and order");
+        }
+        // A scaled wave can't be modelled, so it stays Reference's, unchanged.
+        let wave = Descriptor::from_bytes(&from_hex(REFERENCE_WAVE).unwrap()).unwrap();
+        let item = reference_item(wave);
+        let f = filter_from_item(&item);
+        assert_eq!(f.command, UNSUPPORTED_FILTER);
+        assert_eq!(item_for_filter(&f).unwrap().get("Fltr"), item.get("Fltr"));
+        // Unscaled, it opens as our Wave (Triangle, the other settings as stored).
+        let mut unscaled = match item.get("Fltr") {
+            Some(Value::Descriptor(d)) => d.clone(),
+            other => panic!("wave: no Fltr ({other:?})"),
+        };
+        set(&mut unscaled, "SclV", Value::Integer(100));
+        let f = filter_from_item(&reference_item(unscaled.clone()));
+        assert_eq!(
+            (f.command.as_str(), &f.params),
+            (
+                "filter.distort.wave",
+                &json!({"type": "triangle", "generators": 332, "wavelengthMin": 213, "wavelengthMax": 214, "amplitudeMin": 240, "amplitudeMax": 241,
+                        "undefinedAreas": "wrap", "seed": 1270346})
+            )
+        );
+        // The same keys, values and order (Reference also names the descriptor; we leave it unnamed).
+        let Some(Value::Descriptor(ours)) = item_for_filter(&f).unwrap().get("Fltr").cloned() else { panic!("no Fltr") };
+        assert_eq!((&ours.class_id, &ours.items), (&unscaled.class_id, &unscaled.items));
+    }
+
+    /// Invert on a smart object: Reference stores no `Fltr`, but `hasoptions` and its filter id.
+    #[test]
+    fn invert_smart_filter_reads_and_writes_like_reference() {
+        let item = Descriptor::new("filterFX")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("Invert")))
+            .with("blendOptions", Value::Descriptor(Descriptor::new("blendOptions").with("Opct", unit(b"#Prc", 100.0)).with("Md  ", enumv("BlnM", "normal"))))
+            .with("enab", Value::Boolean(true))
+            .with("hasoptions", Value::Boolean(true))
+            .with("FrgC", rgbc(255.0))
+            .with("BckC", rgbc(0.0))
+            .with("filterID", Value::Integer(code(b"Invr")));
+        let f = filter_from_item(&item);
+        assert_eq!((f.command.as_str(), &f.params), ("image.adjustments.invert", &json!({})));
+        let back = item_for_filter(&f).unwrap();
+        assert_eq!(back.get("Fltr"), None);
+        assert_eq!(back.get("hasoptions"), Some(&Value::Boolean(true)));
+        assert_eq!(back.get("filterID"), Some(&Value::Integer(code(b"Invr"))));
+        assert_eq!(back.get("Nm  "), Some(&Value::Text(UnicodeString::new_nul("Invert"))));
+    }
+
+    /// A `filterFXList` item as Reference writes it, around filter `fltr`.
+    fn ps_item(name: &str, fltr: Descriptor, filter_id: i32) -> Descriptor {
+        Descriptor::new("filterFX")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul(name)))
+            .with("blendOptions", Value::Descriptor(Descriptor::new("blendOptions").with("Opct", unit(b"#Prc", 100.0)).with("Md  ", enumv("BlnM", "normal"))))
+            .with("enab", Value::Boolean(true))
+            .with("hasoptions", Value::Boolean(true))
+            .with("FrgC", rgbc(0.0))
+            .with("BckC", rgbc(255.0))
+            .with("Fltr", Value::Descriptor(fltr))
+            .with("filterID", Value::Integer(filter_id))
+    }
+
+    /// Smart Sharpen's `Fltr` in the measured shape (no `presetKind`, no `Angl`).
+    fn smart_sharpen(amount: f64, radius: f64, noise: f64, blur: &str) -> Descriptor {
+        Descriptor::new("smartSharpen")
+            .with("useLegacy", Value::Boolean(false))
+            .with("Amnt", unit(b"#Prc", amount))
+            .with("Rds ", unit(b"#Pxl", radius))
+            .with("noiseReduction", unit(b"#Prc", noise))
+            .with("blur", enumv("blurType", blur))
+    }
+
+    fn dust(radius: i32, threshold: i32) -> Descriptor {
+        Descriptor::new("DstS").with("Rds ", Value::Integer(radius)).with("Thsh", Value::Integer(threshold))
+    }
+
+    /// The `Fltr` descriptor PhotoSplice writes for `f`, after a byte round trip.
+    fn written_fltr(f: &SmartFilter) -> Descriptor {
+        let d = Descriptor::from_bytes(&item_for_filter(f).unwrap().to_bytes()).unwrap();
+        get_desc(&d, "Fltr").unwrap().clone()
+    }
+
+    /// Measured in Reference: Smart Sharpen 120 %, 2.5 px, noise 5 %, Gaussian Blur
+    /// (filterID 1131); the default entry adds `presetKind` first, which is not kept.
+    #[test]
+    fn smart_sharpen_reference_entry_opens_and_writes_back() {
+        let fltr = smart_sharpen(120.0, 2.5, 5.0, "GsnB");
+        let item = ps_item("Smart Sharpen...", fltr.clone(), 1131);
+        let f = filter_from_item(&Descriptor::from_bytes(&item.to_bytes()).unwrap());
+        assert_eq!(f.command, "filter.sharpen.smartSharpen");
+        assert_eq!(f.params, json!({"amount": 120.0, "radius": 2.5, "reduceNoise": 5.0}));
+        assert_eq!(written_fltr(&f), fltr);
+        let d = item_for_filter(&f).unwrap();
+        assert_eq!(int(&d, "filterID"), Some(1131));
+        assert_eq!(get_desc(&d, "Fltr").unwrap().class_id, Id::Str(b"smartSharpen".to_vec()));
+        // The four-character keys and enum values are codes, as Reference writes them.
+        let bytes = d.to_bytes();
+        assert_eq!(count(&bytes, b"\0\0\0\0blurenum\0\0\0\x08blurType\0\0\0\0GsnB"), 1);
+        assert_eq!(count(&bytes, b"\0\0\0\0Rds UntF#Pxl"), 1);
+
+        // With `presetKind` (any value): opens, but the params hold only the engine's own keys
+        // (it rejects unknown ones), and a re-save leaves it out as Reference does for explicit
+        // values.
+        for kind in ["presetKindDefault", "presetKindCustom", "Xxxx"] {
+            let mut with_preset = Descriptor::new("smartSharpen").with("presetKind", enumv("presetKindType", kind));
+            with_preset.items.extend(smart_sharpen(200.0, 1.0, 10.0, "GsnB").items);
+            let f = filter_from_item(&Descriptor::from_bytes(&ps_item("Smart Sharpen...", with_preset, 1131).to_bytes()).unwrap());
+            assert_eq!(f.command, "filter.sharpen.smartSharpen");
+            let keys: Vec<&str> = f.params.as_object().unwrap().keys().map(String::as_str).collect();
+            assert_eq!(keys.len(), 3, "{keys:?}");
+            assert!(keys.iter().all(|k| ["amount", "radius", "reduceNoise"].contains(k)), "{keys:?}");
+            assert_eq!(f.params, json!({"amount": 200.0, "radius": 1.0, "reduceNoise": 10.0}));
+            assert_eq!(written_fltr(&f), smart_sharpen(200.0, 1.0, 10.0, "GsnB"));
+        }
+
+        // Without options PhotoSplice writes the engine's defaults, Gaussian Blur.
+        assert_eq!(written_fltr(&sf("filter.sharpen.smartSharpen", json!({}))), smart_sharpen(100.0, 1.0, 10.0, "GsnB"));
+    }
+
+    /// Lens Blur (Reference's default), Motion Blur and legacy mode render differently from
+    /// our Smart Sharpen, so those entries stay verbatim.
+    #[test]
+    fn smart_sharpen_settings_we_dont_render_stay_verbatim() {
+        let mut default_entry = Descriptor::new("smartSharpen").with("presetKind", enumv("presetKindType", "presetKindDefault"));
+        default_entry.items.extend(smart_sharpen(200.0, 1.0, 10.0, "lensBlur").items);
+        let motion = smart_sharpen(80.0, 1.5, 0.0, "MtnB").with("Angl", Value::Integer(30));
+        let mut legacy = smart_sharpen(100.0, 1.0, 10.0, "GsnB");
+        set(&mut legacy, "useLegacy", Value::Boolean(true));
+        for fltr in [default_entry, motion, legacy] {
+            let item = ps_item("Smart Sharpen...", fltr, 1131);
+            let f = filter_from_item(&item);
+            assert_eq!(f.command, UNSUPPORTED_FILTER);
+            assert_eq!(f.params["filterID"], 1131);
+            assert_eq!(item_for_filter(&f).unwrap(), item);
+        }
+    }
+
+    #[test]
+    fn malformed_smart_sharpen_is_kept_verbatim() {
+        let g = || smart_sharpen(100.0, 1.0, 10.0, "GsnB");
+        let without = |key: &str| {
+            let mut d = g();
+            d.items.retain(|(k, _)| !k.is(key));
+            d
+        };
+        let with = |key: &str, v: Value| {
+            let mut d = g();
+            set(&mut d, key, v);
+            d
+        };
+        let cases = vec![
+            without("useLegacy"),
+            without("Amnt"),
+            without("Rds "),
+            without("noiseReduction"),
+            without("blur"),
+            with("Amnt", Value::Double(100.0)),
+            with("Amnt", unit(b"#Pxl", 100.0)),
+            with("Rds ", Value::Integer(1)),
+            with("useLegacy", Value::Integer(0)),
+            with("Amnt", unit(b"#Prc", 0.0)),
+            with("Amnt", unit(b"#Prc", 501.0)),
+            with("Rds ", unit(b"#Pxl", 0.05)),
+            with("Rds ", unit(b"#Pxl", 65.0)),
+            with("Rds ", unit(b"#Pxl", f64::NAN)),
+            with("noiseReduction", unit(b"#Prc", -1.0)),
+            with("noiseReduction", unit(b"#Prc", f64::INFINITY)),
+            with("blur", enumv("blurType", "Xxxx")),
+            with("blur", enumv("BlrM", "GsnB")),
+            with("blur", Value::Integer(0)),
+            with("presetKind", Value::Integer(1)),
+            g().with("Angl", Value::Integer(30)),
+            g().with("shadowMode", Value::Descriptor(Descriptor::new("adaptCorrectTones"))),
+        ];
+        for fltr in cases {
+            let item = ps_item("Smart Sharpen...", fltr, 1131);
+            let f = filter_from_item(&Descriptor::from_bytes(&item.to_bytes()).unwrap());
+            assert_eq!(f.command, UNSUPPORTED_FILTER, "{:?}", get_desc(&item, "Fltr"));
+            assert_eq!(item_for_filter(&f).unwrap().to_bytes(), item.to_bytes());
+        }
+        // No `Fltr` at all (hasoptions false).
+        let bare = Descriptor::new("filterFX").with("filterID", Value::Integer(1131));
+        assert_eq!(filter_from_item(&bare).command, UNSUPPORTED_FILTER);
+    }
+
+    /// Measured in Reference: Dust & Scratches at its defaults (1, 0) and at 4, 20 (filterID
+    /// `DstS`, 1148417107; both settings `long`).
+    #[test]
+    fn dust_and_scratches_reference_entry_opens_and_writes_back() {
+        for (radius, threshold) in [(1, 0), (4, 20), (500, 255)] {
+            let fltr = dust(radius, threshold);
+            let item = ps_item("Dust & Scratches...", fltr.clone(), 1_148_417_107);
+            let f = filter_from_item(&Descriptor::from_bytes(&item.to_bytes()).unwrap());
+            assert_eq!(f.command, "filter.noise.dustAndScratches");
+            assert_eq!(f.params, json!({"radius": radius, "threshold": threshold}));
+            assert_eq!(written_fltr(&f), fltr);
+            assert_eq!(int(&item_for_filter(&f).unwrap(), "filterID"), Some(1_148_417_107));
+        }
+        // No `Fltr` (hasoptions false): kept verbatim.
+        let bare = Descriptor::new("filterFX").with("filterID", Value::Integer(code(b"DstS")));
+        assert_eq!(filter_from_item(&bare).command, UNSUPPORTED_FILTER);
+    }
+
+    #[test]
+    fn malformed_dust_and_scratches_is_kept_verbatim() {
+        let cases = vec![
+            Descriptor::new("DstS").with("Thsh", Value::Integer(0)),
+            Descriptor::new("DstS").with("Rds ", Value::Integer(1)),
+            Descriptor::new("DstS").with("Rds ", Value::Double(1.0)).with("Thsh", Value::Integer(0)),
+            Descriptor::new("DstS").with("Rds ", unit(b"#Pxl", 1.0)).with("Thsh", Value::Integer(0)),
+            Descriptor::new("DstS").with("Rds ", Value::Integer(1)).with("Thsh", Value::Boolean(false)),
+            dust(0, 0),
+            dust(501, 0),
+            dust(1, -1),
+            dust(1, 256),
+            dust(i32::MIN, i32::MAX),
+            dust(1, 0).with("Xtra", Value::Integer(1)),
+        ];
+        for fltr in cases {
+            let item = ps_item("Dust & Scratches...", fltr, code(b"DstS"));
+            let f = filter_from_item(&item);
+            assert_eq!(f.command, UNSUPPORTED_FILTER, "{:?}", get_desc(&item, "Fltr"));
+            assert_eq!(item_for_filter(&f).unwrap(), item);
+        }
+    }
+
+    /// Every option's range ends round trip; hostile params are written in range (the engine
+    /// clamps the same way), never a panic.
+    #[test]
+    fn smart_sharpen_and_dust_option_values_round_trip() {
+        let mut cases = Vec::new();
+        for amount in [1.0, 100.0, 500.0] {
+            for radius in [0.1, 1.0, 64.0] {
+                for noise in [0.0, 10.0, 100.0] {
+                    cases.push(sf("filter.sharpen.smartSharpen", json!({"amount": amount, "radius": radius, "reduceNoise": noise})));
+                }
+            }
+        }
+        for radius in [1, 2, 100, 500] {
+            for threshold in [0, 1, 128, 255] {
+                cases.push(sf("filter.noise.dustAndScratches", json!({"radius": radius, "threshold": threshold})));
+            }
+        }
+        for f in cases {
+            let back = filter_from_item(&Descriptor::from_bytes(&item_for_filter(&f).unwrap().to_bytes()).unwrap());
+            assert_eq!(back, f);
+        }
+        let defaults = json!({"amount": 100.0, "radius": 1.0, "reduceNoise": 10.0});
+        for (command, p, want) in [
+            (
+                "filter.sharpen.smartSharpen",
+                json!({"amount": 1e9, "radius": -5.0, "reduceNoise": "x"}),
+                json!({"amount": 500.0, "radius": 0.1, "reduceNoise": 10.0}),
+            ),
+            ("filter.sharpen.smartSharpen", json!({"presetKind": "presetKindDefault", "amount": null}), defaults.clone()),
+            ("filter.sharpen.smartSharpen", json!(null), defaults.clone()),
+            ("filter.noise.dustAndScratches", json!({"radius": 2.4, "threshold": 1e12}), json!({"radius": 2, "threshold": 255})),
+            ("filter.noise.dustAndScratches", json!({"radius": -3, "threshold": -3}), json!({"radius": 1, "threshold": 0})),
+            ("filter.noise.dustAndScratches", json!([]), json!({"radius": 1, "threshold": 0})),
+        ] {
+            let back = filter_from_item(&item_for_filter(&sf(command, p.clone())).unwrap());
+            assert_eq!((back.command.as_str(), &back.params), (command, &want), "{p}");
+        }
+    }
+
+    /// A `filterFX` entry shaped as Reference saves it (measured in Reference: the filter applied
+    /// through Action Manager to a smart object, the PSD saved, `filterFX` read back).
+    fn stylize_item(filter_id: &[u8; 4], fltr: Descriptor) -> Descriptor {
+        Descriptor::new("filterFX")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("Filter...")))
+            .with("blendOptions", blend_options(&sf("", J::Null)))
+            .with("enab", Value::Boolean(true))
+            .with("hasoptions", Value::Boolean(true))
+            .with("FrgC", rgbc(0.0))
+            .with("BckC", rgbc(255.0))
+            .with("Fltr", Value::Descriptor(fltr))
+            .with("filterID", Value::Integer(code(filter_id)))
+    }
+
+    #[test]
+    fn stylize_and_pixelate_filters_open_from_reference_shapes() {
+        let cases = [
+            (b"Dfs ", Descriptor::new("Dfs ").with("Md  ", enumv("DfsM", "Nrml")), "filter.stylize.diffuse", json!({"mode": "normal"})),
+            (b"Dfs ", Descriptor::new("Dfs ").with("Md  ", enumv("DfsM", "DrkO")), "filter.stylize.diffuse", json!({"mode": "darkenOnly"})),
+            (b"Dfs ", Descriptor::new("Dfs ").with("Md  ", enumv("DfsM", "LghO")), "filter.stylize.diffuse", json!({"mode": "lightenOnly"})),
+            (b"Dfs ", Descriptor::new("Dfs ").with("Md  ", enumv("DfsM", "anisotropic")), "filter.stylize.diffuse", json!({"mode": "anisotropic"})),
+            (
+                b"TrcC",
+                Descriptor::new("TrcC").with("Lvl ", Value::Integer(128)).with("Edg ", enumv("CntE", "Upr ")),
+                "filter.stylize.traceContour",
+                json!({"level": 128, "edge": "upper"}),
+            ),
+            (
+                b"TrcC",
+                Descriptor::new("TrcC").with("Lvl ", Value::Integer(60)).with("Edg ", enumv("CntE", "Lwr ")),
+                "filter.stylize.traceContour",
+                json!({"level": 60, "edge": "lower"}),
+            ),
+            (b"Crst", Descriptor::new("Crst").with("ClSz", Value::Integer(10)), "filter.pixelate.crystallize", json!({"cellSize": 10})),
+            (
+                b"Pntl",
+                Descriptor::new("Pntl").with("ClSz", Value::Integer(7)),
+                "filter.pixelate.pointillize",
+                json!({"cellSize": 7, "background": [1.0, 1.0, 1.0, 1.0]}),
+            ),
+        ];
+        for (id, fltr, command, params) in cases {
+            let item = stylize_item(id, fltr);
+            // Through bytes, as read from a file.
+            let f = filter_from_item(&Descriptor::from_bytes(&item.to_bytes()).unwrap());
+            assert_eq!((f.command.as_str(), &f.params), (command, &params));
+            // Written back in the measured shape: same class, keys, value types and filterID.
+            let back = item_for_filter(&f).unwrap();
+            for key in ["Fltr", "filterID", "BckC"] {
+                assert_eq!(back.get(key), item.get(key), "{command} {key}");
+            }
+        }
+        // The `anisotropic` mode is a long id, as Reference writes it.
+        let d = item_for_filter(&sf("filter.stylize.diffuse", json!({"mode": "anisotropic"}))).unwrap();
+        let Some(Value::Descriptor(fltr)) = d.get("Fltr") else { panic!("no Fltr") };
+        assert!(matches!(fltr.get("Md  "), Some(Value::Enumerated { value: Id::Str(v), .. }) if v == b"anisotropic"));
+        // Pointillize takes the entry's background colour; the others ignore it.
+        let mut item = stylize_item(b"Pntl", Descriptor::new("Pntl").with("ClSz", Value::Integer(7)));
+        set(&mut item, "BckC", rgbc(51.0));
+        let f = filter_from_item(&item);
+        assert_eq!(f.params["background"], json!([0.2, 0.2, 0.2, 1.0]));
+        assert_eq!(item_for_filter(&f).unwrap().get("BckC"), Some(&rgbc(51.0)));
+        let mut item = stylize_item(b"Crst", Descriptor::new("Crst").with("ClSz", Value::Integer(7)));
+        set(&mut item, "BckC", rgbc(51.0));
+        assert_eq!(filter_from_item(&item).params, json!({"cellSize": 7}));
+        // Our random seed has no PSD key: it is not written.
+        let fltr = |c: &str, p: J| item_for_filter(&sf(c, p)).unwrap().get("Fltr").cloned();
+        assert_eq!(
+            fltr("filter.stylize.diffuse", json!({"mode": "normal", "seed": 7})),
+            Some(Value::Descriptor(Descriptor::new("Dfs ").with("Md  ", enumv("DfsM", "Nrml"))))
+        );
+        // Defaults and out-of-range values are written in Reference's ranges.
+        assert_eq!(
+            fltr("filter.stylize.traceContour", json!({})),
+            Some(Value::Descriptor(Descriptor::new("TrcC").with("Lvl ", Value::Integer(128)).with("Edg ", enumv("CntE", "Lwr "))))
+        );
+        assert_eq!(fltr("filter.pixelate.crystallize", json!({})), Some(Value::Descriptor(Descriptor::new("Crst").with("ClSz", Value::Integer(10)))));
+        assert_eq!(fltr("filter.pixelate.pointillize", json!({})), Some(Value::Descriptor(Descriptor::new("Pntl").with("ClSz", Value::Integer(5)))));
+        assert_eq!(
+            fltr("filter.pixelate.crystallize", json!({"cellSize": 1e9})),
+            Some(Value::Descriptor(Descriptor::new("Crst").with("ClSz", Value::Integer(300))))
+        );
+        assert_eq!(
+            fltr("filter.pixelate.pointillize", json!({"cellSize": "big"})),
+            Some(Value::Descriptor(Descriptor::new("Pntl").with("ClSz", Value::Integer(5))))
+        );
+        assert_eq!(
+            fltr("filter.stylize.traceContour", json!({"level": -40, "edge": "upper"})),
+            Some(Value::Descriptor(Descriptor::new("TrcC").with("Lvl ", Value::Integer(0)).with("Edg ", enumv("CntE", "Upr "))))
+        );
+    }
+
+    #[test]
+    fn malformed_stylize_and_pixelate_filters_are_kept_verbatim() {
+        let long = Value::Integer;
+        let cases = [
+            // Missing keys.
+            (b"Dfs ", Descriptor::new("Dfs ")),
+            (b"TrcC", Descriptor::new("TrcC").with("Lvl ", long(60))),
+            (b"TrcC", Descriptor::new("TrcC").with("Edg ", enumv("CntE", "Upr "))),
+            (b"Crst", Descriptor::new("Crst")),
+            (b"Pntl", Descriptor::new("Pntl")),
+            // Unknown enum values or enum types.
+            (b"Dfs ", Descriptor::new("Dfs ").with("Md  ", enumv("DfsM", "Wild"))),
+            (b"Dfs ", Descriptor::new("Dfs ").with("Md  ", enumv("BlnM", "Nrml"))),
+            (b"TrcC", Descriptor::new("TrcC").with("Lvl ", long(60)).with("Edg ", enumv("CntE", "Mddl"))),
+            // Wrong types (also NaN).
+            (b"Dfs ", Descriptor::new("Dfs ").with("Md  ", long(1))),
+            (b"TrcC", Descriptor::new("TrcC").with("Lvl ", Value::Double(60.0)).with("Edg ", enumv("CntE", "Upr "))),
+            (b"Crst", Descriptor::new("Crst").with("ClSz", unit(b"#Pxl", 10.0))),
+            (b"Pntl", Descriptor::new("Pntl").with("ClSz", Value::Double(f64::NAN))),
+            // Out of range.
+            (b"TrcC", Descriptor::new("TrcC").with("Lvl ", long(256)).with("Edg ", enumv("CntE", "Upr "))),
+            (b"TrcC", Descriptor::new("TrcC").with("Lvl ", long(-1)).with("Edg ", enumv("CntE", "Upr "))),
+            (b"Crst", Descriptor::new("Crst").with("ClSz", long(2))),
+            (b"Pntl", Descriptor::new("Pntl").with("ClSz", long(i32::MAX))),
+        ];
+        for (id, fltr) in cases {
+            let item = stylize_item(id, fltr);
+            let f = filter_from_item(&Descriptor::from_bytes(&item.to_bytes()).unwrap());
+            assert_eq!(f.command, UNSUPPORTED_FILTER, "{item:?}");
+            assert_eq!(item_for_filter(&f).unwrap().to_bytes(), item.to_bytes());
+        }
+        // Saved without options (`hasoptions` false, no `Fltr`): kept verbatim.
+        let bare = Descriptor::new("filterFX").with("hasoptions", Value::Boolean(false)).with("filterID", Value::Integer(code(b"Crst")));
+        assert_eq!(filter_from_item(&bare).command, UNSUPPORTED_FILTER);
+        // A Pointillize entry whose background colour is unreadable is kept verbatim too.
+        for bad in [Value::Integer(3), Value::Descriptor(Descriptor::new("RGBC").with("Rd  ", Value::Double(0.0)))] {
+            let mut item = stylize_item(b"Pntl", Descriptor::new("Pntl").with("ClSz", Value::Integer(7)));
+            set(&mut item, "BckC", bad);
+            assert_eq!(filter_from_item(&item).command, UNSUPPORTED_FILTER);
+        }
+        // Values with no PSD equivalent are reported, not guessed.
+        for (c, p) in [
+            ("filter.stylize.diffuse", json!({"mode": "sideways"})),
+            ("filter.stylize.diffuse", json!({"mode": 3})),
+            ("filter.stylize.traceContour", json!({"edge": "middle"})),
+            ("filter.pixelate.pointillize", json!({"background": "teal"})),
+            ("filter.pixelate.pointillize", json!({"background": [1.0]})),
+        ] {
+            assert!(item_for_filter(&sf(c, p.clone())).is_err(), "{c} {p}");
+        }
+    }
+
+    /// Every option value of Wind, Extrude and Tiles (and the ends of their ranges).
+    fn wind_extrude_tiles_settings() -> Vec<SmartFilter> {
+        let mut v = Vec::new();
+        for method in ["wind", "blast", "stagger"] {
+            for direction in ["fromRight", "fromLeft"] {
+                v.push(sf("filter.stylize.wind", json!({"method": method, "direction": direction})));
+            }
+        }
+        for t in ["blocks", "pyramids"] {
+            for mode in ["random", "levelBased"] {
+                for (solid, mask) in [(false, false), (true, false), (false, true), (true, true)] {
+                    v.push(sf(
+                        "filter.stylize.extrude",
+                        json!({"type": t, "size": 7, "depth": 9, "depthMode": mode, "solidFrontFaces": solid, "maskIncompleteBlocks": mask}),
+                    ));
+                }
+            }
+        }
+        v.push(sf(
+            "filter.stylize.extrude",
+            json!({"type": "blocks", "size": 2, "depth": 1, "depthMode": "random", "solidFrontFaces": false, "maskIncompleteBlocks": false}),
+        ));
+        v.push(sf(
+            "filter.stylize.extrude",
+            json!({"type": "pyramids", "size": 255, "depth": 255, "depthMode": "levelBased", "solidFrontFaces": true, "maskIncompleteBlocks": true}),
+        ));
+        for fill in ["background", "foreground", "inverse", "unaltered"] {
+            v.push(sf(
+                "filter.stylize.tiles",
+                json!({"count": 6, "maxOffset": 20, "fill": fill, "foreground": [1.0, 0.0, 0.5, 1.0], "background": [0.0, 0.5, 1.0, 1.0]}),
+            ));
+        }
+        for (count, offset) in [(1, 1), (99, 99)] {
+            v.push(sf(
+                "filter.stylize.tiles",
+                json!({"count": count, "maxOffset": offset, "fill": "background", "foreground": [0.0, 0.0, 0.0, 1.0], "background": [1.0, 1.0, 1.0, 1.0]}),
+            ));
+        }
+        v
+    }
+
+    /// A `filterFX` entry shaped as Reference saves Wind, Extrude and Tiles (measured in Reference:
+    /// applied through Action Manager to a smart object, saved, `filterFX` read back): the item's
+    /// `FrgC`/`BckC` are the document colours, `Fltr` holds the settings, `filterID` the class code.
+    fn measured_item(fltr: Descriptor, fg: f64, bg: f64) -> Descriptor {
+        let id = code(fltr.class_id.as_bytes().try_into().unwrap());
+        Descriptor::new("filterFX")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("Filter...")))
+            .with("blendOptions", blend_options(&sf("", J::Null)))
+            .with("enab", Value::Boolean(true))
+            .with("hasoptions", Value::Boolean(true))
+            .with("FrgC", rgbc(fg))
+            .with("BckC", rgbc(bg))
+            .with("Fltr", Value::Descriptor(fltr))
+            .with("filterID", Value::Integer(id))
+    }
+
+    fn wind(method: &str, direction: &str) -> Descriptor {
+        Descriptor::new("Wnd ").with("WndM", enumv("WndM", method)).with("Drct", enumv("Drct", direction))
+    }
+
+    fn extrude(t: &str, size: Value, depth: Value, mode: &str, solid: Value, mask: Value) -> Descriptor {
+        Descriptor::new("Extr")
+            .with("ExtT", enumv("ExtT", t))
+            .with("ExtS", size)
+            .with("ExtD", depth)
+            .with("ExtR", enumv("ExtR", mode))
+            .with("ExtF", solid)
+            .with("ExtM", mask)
+    }
+
+    fn tiles(count: Value, offset: Value, fill: &str) -> Descriptor {
+        Descriptor::new("Tls ").with("TlNm", count).with("TlOf", offset).with("FlCl", enumv("FlCl", fill))
+    }
+
+    #[test]
+    fn wind_extrude_tiles_open_from_reference_shapes() {
+        let (long, yes, no) = (Value::Integer, Value::Boolean(true), Value::Boolean(false));
+        let cases = [
+            // The measured files.
+            (wind("Blst", "Left"), "filter.stylize.wind", json!({"method": "blast", "direction": "fromRight"})),
+            (wind("Stgr", "Rght"), "filter.stylize.wind", json!({"method": "stagger", "direction": "fromLeft"})),
+            (wind("Wnd ", "Rght"), "filter.stylize.wind", json!({"method": "wind", "direction": "fromLeft"})),
+            (
+                extrude("Blks", long(7), long(9), "Rndm", yes.clone(), no.clone()),
+                "filter.stylize.extrude",
+                json!({"type": "blocks", "size": 7, "depth": 9, "depthMode": "random", "solidFrontFaces": true, "maskIncompleteBlocks": false}),
+            ),
+            (
+                extrude("Pyrm", long(12), long(20), "LvlB", no, yes),
+                "filter.stylize.extrude",
+                json!({"type": "pyramids", "size": 12, "depth": 20, "depthMode": "levelBased", "solidFrontFaces": false, "maskIncompleteBlocks": true}),
+            ),
+            (
+                tiles(long(6), long(20), "FlFr"),
+                "filter.stylize.tiles",
+                json!({"count": 6, "maxOffset": 20, "fill": "foreground", "foreground": [0.2, 0.2, 0.2, 1.0], "background": [1.0, 1.0, 1.0, 1.0]}),
+            ),
+            (
+                tiles(long(4), long(5), "FlIn"),
+                "filter.stylize.tiles",
+                json!({"count": 4, "maxOffset": 5, "fill": "inverse", "foreground": [0.2, 0.2, 0.2, 1.0], "background": [1.0, 1.0, 1.0, 1.0]}),
+            ),
+            (
+                tiles(long(10), long(10), "FlBc"),
+                "filter.stylize.tiles",
+                json!({"count": 10, "maxOffset": 10, "fill": "background", "foreground": [0.2, 0.2, 0.2, 1.0], "background": [1.0, 1.0, 1.0, 1.0]}),
+            ),
+            (
+                tiles(long(99), long(1), "FlSm"),
+                "filter.stylize.tiles",
+                json!({"count": 99, "maxOffset": 1, "fill": "unaltered", "foreground": [0.2, 0.2, 0.2, 1.0], "background": [1.0, 1.0, 1.0, 1.0]}),
+            ),
+        ];
+        for (fltr, command, params) in cases {
+            let item = measured_item(fltr, 51.0, 255.0);
+            // Through bytes, as read from a file.
+            let f = filter_from_item(&Descriptor::from_bytes(&item.to_bytes()).unwrap());
+            assert_eq!((f.command.as_str(), &f.params), (command, &params));
+            // Written back in the measured shape: same class, keys and their order, value types
+            // (long, bool, enum with its type), filterID; Tiles also its colours.
+            let back = item_for_filter(&f).unwrap();
+            assert_eq!(get_desc(&back, "Fltr").map(Descriptor::to_bytes), get_desc(&item, "Fltr").map(Descriptor::to_bytes), "{command}");
+            assert_eq!(back.get("filterID"), item.get("filterID"), "{command}");
+            if command == "filter.stylize.tiles" {
+                assert_eq!((back.get("FrgC"), back.get("BckC")), (item.get("FrgC"), item.get("BckC")));
+            }
+        }
+        // The class codes: numeric filterIDs of the four-char classes.
+        for (c, id) in [("filter.stylize.wind", 1466852384), ("filter.stylize.extrude", 1165522034), ("filter.stylize.tiles", 1416393504)] {
+            assert_eq!(item_for_filter(&sf(c, json!({}))).unwrap().get("filterID"), Some(&Value::Integer(id)));
+        }
+        // A filter found by its filterID alone (no `Fltr` class to go by) still needs its settings.
+        let bare = Descriptor::new("filterFX").with("hasoptions", Value::Boolean(false)).with("filterID", Value::Integer(1466852384));
+        assert_eq!(filter_from_item(&bare).command, UNSUPPORTED_FILTER);
+        // Only Tiles reads the entry's colours; Wind and Extrude write the defaults.
+        let f = filter_from_item(&measured_item(wind("Wnd ", "Left"), 51.0, 0.0));
+        assert_eq!(f.params, json!({"method": "wind", "direction": "fromRight"}));
+        let back = item_for_filter(&f).unwrap();
+        assert_eq!((back.get("FrgC"), back.get("BckC")), (Some(&rgbc(0.0)), Some(&rgbc(255.0))));
+        // Tiles without colours in its params (or the entry) writes the engine's black and white.
+        let f = filter_from_item(&Descriptor::new("filterFX").with("Fltr", Value::Descriptor(tiles(long(4), long(5), "FlBc"))));
+        assert_eq!(f.params, json!({"count": 4, "maxOffset": 5, "fill": "background"}));
+        let back = item_for_filter(&f).unwrap();
+        assert_eq!((back.get("FrgC"), back.get("BckC")), (Some(&rgbc(0.0)), Some(&rgbc(255.0))));
+    }
+
+    #[test]
+    fn wind_extrude_tiles_write_defaults_and_reference_ranges() {
+        let fltr = |c: &str, p: J| match item_for_filter(&sf(c, p)).unwrap().get("Fltr") {
+            Some(Value::Descriptor(d)) => d.clone(),
+            other => panic!("no Fltr: {other:?}"),
+        };
+        let long = Value::Integer;
+        let (yes, no) = (Value::Boolean(true), Value::Boolean(false));
+        // Defaults are the engine's; our random seed has no PSD key and is not written.
+        assert_eq!(fltr("filter.stylize.wind", json!({"seed": 9})), wind("Wnd ", "Left"));
+        assert_eq!(fltr("filter.stylize.extrude", json!({"seed": 9})), extrude("Blks", long(30), long(30), "Rndm", no.clone(), no.clone()));
+        assert_eq!(fltr("filter.stylize.tiles", json!({"seed": 9})), tiles(long(10), long(10), "FlBc"));
+        // Out of range, fractional, non-numeric and non-bool values as the engine reads them.
+        assert_eq!(
+            fltr("filter.stylize.extrude", json!({"size": 1e12, "depth": -5, "solidFrontFaces": "yes", "maskIncompleteBlocks": true})),
+            extrude("Blks", long(255), long(1), "Rndm", no.clone(), yes)
+        );
+        assert_eq!(fltr("filter.stylize.tiles", json!({"count": 0, "maxOffset": 12.6})), tiles(long(1), long(13), "FlBc"));
+        assert_eq!(fltr("filter.stylize.tiles", json!({"count": "many", "maxOffset": 1000})), tiles(long(10), long(99), "FlBc"));
+        assert_eq!(fltr("filter.stylize.extrude", json!({"size": f64::NAN})), extrude("Blks", long(30), long(30), "Rndm", no.clone(), no));
+    }
+
+    #[test]
+    fn malformed_wind_extrude_tiles_are_kept_verbatim() {
+        let long = Value::Integer;
+        let (yes, no) = (Value::Boolean(true), Value::Boolean(false));
+        let cases = [
+            // Missing keys.
+            Descriptor::new("Wnd "),
+            Descriptor::new("Wnd ").with("WndM", enumv("WndM", "Blst")),
+            Descriptor::new("Wnd ").with("Drct", enumv("Drct", "Left")),
+            Descriptor::new("Extr").with("ExtT", enumv("ExtT", "Blks")).with("ExtS", long(7)).with("ExtD", long(9)).with("ExtR", enumv("ExtR", "Rndm")),
+            Descriptor::new("Tls ").with("TlNm", long(6)).with("TlOf", long(20)),
+            Descriptor::new("Tls ").with("TlNm", long(6)).with("FlCl", enumv("FlCl", "FlFr")),
+            // Unknown enum values and enum types (Reference falls back to a default for these;
+            // we keep them as they are rather than guess).
+            wind("Wild", "Left"),
+            wind("Blst", "Up  "),
+            Descriptor::new("Wnd ").with("WndM", enumv("Drct", "Blst")).with("Drct", enumv("Drct", "Left")),
+            extrude("Cube", long(7), long(9), "Rndm", yes.clone(), no.clone()),
+            extrude("Blks", long(7), long(9), "Sine", yes.clone(), no.clone()),
+            tiles(long(6), long(20), "FlXx"),
+            Descriptor::new("Tls ").with("TlNm", long(6)).with("TlOf", long(20)).with("FlCl", enumv("BlnM", "FlFr")),
+            // Wrong types (also NaN).
+            Descriptor::new("Wnd ").with("WndM", long(1)).with("Drct", enumv("Drct", "Left")),
+            extrude("Blks", Value::Double(7.0), long(9), "Rndm", yes.clone(), no.clone()),
+            extrude("Blks", long(7), unit(b"#Pxl", 9.0), "Rndm", yes.clone(), no.clone()),
+            extrude("Blks", long(7), long(9), "Rndm", long(1), no.clone()),
+            extrude("Blks", long(7), long(9), "Rndm", yes.clone(), Value::Double(f64::NAN)),
+            tiles(Value::Double(f64::NAN), long(20), "FlFr"),
+            tiles(long(6), Value::Text(UnicodeString::new_nul("20")), "FlFr"),
+            // Out of range.
+            extrude("Blks", long(1), long(9), "Rndm", yes.clone(), no.clone()),
+            extrude("Blks", long(256), long(9), "Rndm", yes.clone(), no.clone()),
+            extrude("Blks", long(7), long(0), "Rndm", yes.clone(), no.clone()),
+            extrude("Blks", long(7), long(i32::MAX), "Rndm", yes, no),
+            tiles(long(0), long(20), "FlFr"),
+            tiles(long(100), long(20), "FlFr"),
+            tiles(long(6), long(0), "FlFr"),
+            tiles(long(6), long(i32::MIN), "FlFr"),
+        ];
+        for fltr in cases {
+            let item = measured_item(fltr, 0.0, 255.0);
+            let f = filter_from_item(&Descriptor::from_bytes(&item.to_bytes()).unwrap());
+            assert_eq!(f.command, UNSUPPORTED_FILTER, "{item:?}");
+            assert_eq!(item_for_filter(&f).unwrap().to_bytes(), item.to_bytes());
+        }
+        // A Tiles entry whose colour is unreadable is kept verbatim too.
+        for (key, bad) in [
+            ("FrgC", Value::Integer(3)),
+            ("BckC", Value::Descriptor(Descriptor::new("RGBC").with("Rd  ", Value::Double(0.0)))),
+            (
+                "BckC",
+                Value::Descriptor(
+                    Descriptor::new("RGBC").with("Rd  ", Value::Double(f64::NAN)).with("Grn ", Value::Double(0.0)).with("Bl  ", Value::Double(0.0)),
+                ),
+            ),
+        ] {
+            let mut item = measured_item(tiles(long(6), long(20), "FlFr"), 0.0, 255.0);
+            set(&mut item, key, bad);
+            assert_eq!(filter_from_item(&item).command, UNSUPPORTED_FILTER);
+        }
+        // Values with no PSD equivalent are reported, not guessed.
+        for (c, p) in [
+            ("filter.stylize.wind", json!({"method": "gale"})),
+            ("filter.stylize.wind", json!({"direction": "fromTop"})),
+            ("filter.stylize.wind", json!({"direction": 1})),
+            ("filter.stylize.extrude", json!({"type": "cubes"})),
+            ("filter.stylize.extrude", json!({"depthMode": null})),
+            ("filter.stylize.tiles", json!({"fill": "transparent"})),
+            ("filter.stylize.tiles", json!({"foreground": "teal"})),
+            ("filter.stylize.tiles", json!({"background": [1.0]})),
+            ("filter.stylize.tiles", json!({"background": [f64::NAN, 0.0, 0.0]})),
+        ] {
+            assert!(item_for_filter(&sf(c, p.clone())).is_err(), "{c} {p}");
+        }
+    }
+
+    fn surface_blur(rds: f64, thsh: i32) -> Descriptor {
+        Descriptor::new("surfaceBlur").with("Rds ", unit(b"#Pxl", rds)).with("Thsh", Value::Integer(thsh))
+    }
+
+    fn smart_blur(rds: f64, thsh: f64, q: &str, m: &str) -> Descriptor {
+        Descriptor::new("SmrB").with("Rds ", Value::Double(rds)).with("Thsh", Value::Double(thsh)).with("SmBQ", enumv("SmBQ", q)).with("SmBM", enumv("SmBM", m))
+    }
+
+    fn radial_blur(amnt: i32, m: &str, q: &str) -> Descriptor {
+        Descriptor::new("RdlB").with("Amnt", Value::Integer(amnt)).with("BlrM", enumv("BlrM", m)).with("BlrQ", enumv("BlrQ", q))
+    }
+
+    /// The `Fltr` shapes measured in Reference (each filter applied to a smart object through
+    /// Action Manager, saved, and `filterFX` read back) open as our filters and are written back
+    /// with the same keys, value types, units, enums and filter ids.
+    #[test]
+    fn blur_family_matches_reference_shapes() {
+        let smart = code(b"SmrB");
+        let radial = code(b"RdlB");
+        assert_eq!((smart, radial), (1_399_681_602, 1_382_313_026));
+        let cases = [
+            (surface_blur(5.0, 15), 1135, "filter.blur.surfaceBlur", json!({"radius": 5.0, "threshold": 15})),
+            (surface_blur(12.0, 40), 1135, "filter.blur.surfaceBlur", json!({"radius": 12.0, "threshold": 40})),
+            (
+                smart_blur(5.0, 25.0, "SBQH", "SBMN"),
+                smart,
+                "filter.blur.smartBlur",
+                json!({"radius": 5.0, "threshold": 25.0, "quality": "high", "mode": "normal"}),
+            ),
+            (
+                smart_blur(3.0, 30.0, "SBQL", "SBME"),
+                smart,
+                "filter.blur.smartBlur",
+                json!({"radius": 3.0, "threshold": 30.0, "quality": "low", "mode": "edgeOnly"}),
+            ),
+            (
+                smart_blur(3.0, 30.0, "SBQM", "SBMO"),
+                smart,
+                "filter.blur.smartBlur",
+                json!({"radius": 3.0, "threshold": 30.0, "quality": "medium", "mode": "overlayEdge"}),
+            ),
+            (radial_blur(10, "Spn ", "Drft"), radial, "filter.blur.radialBlur", json!({"amount": 10, "method": "spin", "quality": "draft"})),
+            (radial_blur(20, "Spn ", "Bst "), radial, "filter.blur.radialBlur", json!({"amount": 20, "method": "spin", "quality": "best"})),
+            (radial_blur(20, "Zm  ", "Gd  "), radial, "filter.blur.radialBlur", json!({"amount": 20, "method": "zoom", "quality": "good"})),
+        ];
+        for (fltr, id, command, params) in cases {
+            let item = ps_item("x", fltr.clone(), id);
+            let f = filter_from_item(&Descriptor::from_bytes(&item.to_bytes()).unwrap());
+            assert_eq!((f.command.as_str(), &f.params), (command, &params), "{fltr:?}");
+            let out = item_for_filter(&f).unwrap();
+            assert_eq!(out.get("filterID"), Some(&Value::Integer(id)));
+            assert_eq!(out.get("hasoptions"), Some(&Value::Boolean(true)));
+            // Byte-identical filter descriptor: class id, four-char keys, types, units and enums.
+            let Some(Value::Descriptor(w)) = out.get("Fltr") else { panic!("no Fltr for {command}") };
+            assert_eq!(w.to_bytes(), fltr.to_bytes(), "{command}");
+        }
+        // Surface Blur's class is a string id; Smart Blur's and Radial Blur's are four-char codes.
+        assert_eq!(surface_blur(1.0, 2).class_id, Id::Str(b"surfaceBlur".to_vec()));
+        assert_eq!(radial_blur(1, "Spn ", "Gd  ").class_id, Id::Code(*b"RdlB"));
+        // Unset options are written with the dialog defaults.
+        let fltr = |c: &str, p: J| item_for_filter(&sf(c, p)).unwrap().get("Fltr").cloned();
+        assert_eq!(fltr("filter.blur.surfaceBlur", json!({})), Some(Value::Descriptor(surface_blur(5.0, 15))));
+        assert_eq!(fltr("filter.blur.smartBlur", json!({})), Some(Value::Descriptor(smart_blur(3.0, 25.0, "SBQH", "SBMN"))));
+        assert_eq!(fltr("filter.blur.radialBlur", json!({"centerX": 0.5, "centerY": 0.5})), Some(Value::Descriptor(radial_blur(10, "Spn ", "Gd  "))));
+    }
+
+    /// Malformed or unmodelled blur descriptors stay verbatim (and are written back unchanged);
+    /// settings PSD can't hold are reported, never a panic.
+    #[test]
+    fn blur_family_malformed_is_kept_verbatim() {
+        let smart = code(b"SmrB");
+        let radial = code(b"RdlB");
+        let text = |s: &str| Value::Text(UnicodeString::new_nul(s));
+        let bad = [
+            // Missing keys.
+            (Descriptor::new("surfaceBlur").with("Rds ", unit(b"#Pxl", 5.0)), 1135),
+            (Descriptor::new("SmrB").with("Rds ", Value::Double(3.0)).with("Thsh", Value::Double(25.0)), smart),
+            (Descriptor::new("RdlB").with("Amnt", Value::Integer(10)).with("BlrM", enumv("BlrM", "Spn ")), radial),
+            // Wrong types.
+            (Descriptor::new("surfaceBlur").with("Rds ", unit(b"#Pxl", 5.0)).with("Thsh", Value::Double(15.0)), 1135),
+            (
+                Descriptor::new("SmrB")
+                    .with("Rds ", text("3"))
+                    .with("Thsh", Value::Double(25.0))
+                    .with("SmBQ", enumv("SmBQ", "SBQH"))
+                    .with("SmBM", enumv("SmBM", "SBMN")),
+                smart,
+            ),
+            (Descriptor::new("RdlB").with("Amnt", text("10")).with("BlrM", enumv("BlrM", "Spn ")).with("BlrQ", enumv("BlrQ", "Gd  ")), radial),
+            (Descriptor::new("RdlB").with("Amnt", Value::Integer(10)).with("BlrM", Value::Integer(1)).with("BlrQ", enumv("BlrQ", "Gd  ")), radial),
+            // Out of range, NaN and infinity.
+            (surface_blur(0.5, 15), 1135),
+            (surface_blur(5.0, 300), 1135),
+            (surface_blur(f64::NAN, 15), 1135),
+            (smart_blur(f64::INFINITY, 25.0, "SBQH", "SBMN"), smart),
+            (smart_blur(3.0, 0.0, "SBQH", "SBMN"), smart),
+            (radial_blur(0, "Spn ", "Gd  "), radial),
+            (radial_blur(101, "Zm  ", "Gd  "), radial),
+            // Unknown enum values.
+            (smart_blur(3.0, 25.0, "SBQX", "SBMN"), smart),
+            (smart_blur(3.0, 25.0, "Hgh ", "SBMN"), smart),
+            (radial_blur(10, "Twrl", "Gd  "), radial),
+            (radial_blur(10, "Spn ", "Hgh "), radial),
+            // A key we don't model (an off-centre Radial Blur would carry one).
+            (radial_blur(10, "Zm  ", "Gd  ").with("Cntr", Value::Descriptor(Descriptor::new("Pnt ").with("Hrzn", Value::Double(10.0)))), radial),
+            (surface_blur(5.0, 15).with("Edg ", Value::Integer(1)), 1135),
+        ];
+        for (fltr, id) in bad {
+            let item = ps_item("x", fltr.clone(), id);
+            let f = filter_from_item(&item);
+            assert_eq!(f.command, UNSUPPORTED_FILTER, "{fltr:?}");
+            // Compared as bytes: a NaN setting is not equal to itself.
+            assert_eq!(item_for_filter(&f).unwrap().to_bytes(), item.to_bytes(), "{fltr:?}");
+        }
+        // Radial Blur at its defaults has no `Fltr` (measured): its values are not stored, so the
+        // entry stays verbatim instead of guessing them.
+        let no_opts = Descriptor::new("filterFX").with("hasoptions", Value::Boolean(false)).with("filterID", Value::Integer(radial));
+        assert_eq!(filter_from_item(&no_opts).command, UNSUPPORTED_FILTER);
+        // Settings with no PSD equivalent are errors when writing.
+        for (command, p) in [
+            ("filter.blur.smartBlur", json!({"quality": "ultra"})),
+            ("filter.blur.smartBlur", json!({"mode": 3})),
+            ("filter.blur.radialBlur", json!({"method": "twirl"})),
+            ("filter.blur.radialBlur", json!({"quality": ["best"]})),
+            ("filter.blur.radialBlur", json!({"centerX": 0.25})),
+            ("filter.blur.radialBlur", json!({"centerY": 1.0})),
+        ] {
+            assert!(item_for_filter(&sf(command, p.clone())).is_err(), "{command} {p}");
+        }
+        // Hostile numbers write without panicking.
+        for p in [json!({"radius": f64::MAX, "threshold": -1e300, "amount": 1e300}), json!({"radius": "x", "threshold": null}), json!(null), json!([1, 2])] {
+            for command in ["filter.blur.surfaceBlur", "filter.blur.smartBlur", "filter.blur.radialBlur"] {
+                let _ = item_for_filter(&sf(command, p.clone()));
+            }
+        }
+    }
+
     #[test]
     fn unknown_filters_keep_their_descriptor() {
         let item = Descriptor::new("filterFX")
-            .with("Nm  ", Value::Text(UnicodeString::new_nul("Twirl...")))
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("Shear...")))
             .with("blendOptions", Value::Descriptor(Descriptor::new("blendOptions").with("Opct", unit(b"#Prc", 100.0)).with("Md  ", enumv("BlnM", "normal"))))
             .with("enab", Value::Boolean(true))
-            .with("Fltr", Value::Descriptor(Descriptor::new("Twrl").with("Angl", Value::Integer(50))))
-            .with("filterID", Value::Integer(code(b"Twrl")));
+            .with("Fltr", Value::Descriptor(Descriptor::new("Shr ").with("UndA", enumv("UndA", "WrpA"))))
+            .with("filterID", Value::Integer(code(b"Shr ")));
         let f = filter_from_item(&item);
         assert_eq!(f.command, UNSUPPORTED_FILTER);
-        assert_eq!(f.params["name"], "Twirl...");
+        assert_eq!(f.params["name"], "Shear...");
         assert_eq!(item_for_filter(&f).unwrap(), item);
         // Hidden and re-blended: only those keys change.
         let mut g = f.clone();
@@ -1377,7 +2695,8 @@ mod tests {
     fn unwritable_filters_are_reported_not_fatal() {
         let stack = FilterStack {
             filters: vec![
-                sf("filter.distort.twirl", json!({"angle": 50})),
+                // Shear's curve isn't mapped to Reference's grid yet.
+                sf("filter.distort.shear", json!({"amount": 40})),
                 sf("filter.blur.gaussianBlur", json!({"radius": 2.0})),
                 sf(UNSUPPORTED_FILTER, json!({"psd": "zz"})),
                 sf("image.adjustments.levels", json!({"cyan": {"gamma": 2.0}})),
@@ -1469,14 +2788,14 @@ mod tests {
         let mut w = Vec::new();
         let mut spec = PlacedSpec { idnt: "id", placed: "pl", transform: t, perspective: None, size: (20.0, 10.0), dpi: 72.0, warp: None, filter_fx: None };
         let template = parse_sold(&sold_bytes(None, &spec, &mut w)).expect("parses").descriptor;
-        assert!(!quad_moved(&template, &spec), "same placement");
+        assert!(!quad_moved(&template, &spec, spec.warp), "same placement");
         spec.transform = Affine { m: [1.0, 0.0, 0.0, 1.0, 3.5, 4.0] };
-        assert!(quad_moved(&template, &spec), "moved half a pixel");
+        assert!(quad_moved(&template, &spec, spec.warp), "moved half a pixel");
         spec.transform = t;
         spec.perspective =
             photosplice_algo::transform::Homography::rect_to_quad([0.0, 0.0, 20.0, 10.0], [[3.0, 4.0], [23.0, 4.0], [20.0, 12.0], [3.0, 14.0]]).map(|h| h.0);
-        assert!(quad_moved(&template, &spec), "one corner moved (Distort)");
-        assert!(quad_moved(&Descriptor::new("null"), &spec), "no stored quad");
+        assert!(quad_moved(&template, &spec, spec.warp), "one corner moved (Distort)");
+        assert!(quad_moved(&Descriptor::new("null"), &spec, spec.warp), "no stored quad");
     }
 
     /// Corrupted placed-layer data and filter descriptors never panic: they parse to something
@@ -1567,13 +2886,15 @@ mod tests {
         let mut custom = BezierMesh::identity(bounds, 1, 1);
         custom.points[15] = [67.0, 30.0];
         let mut multi = Warp::preset(WarpStyle::Custom, 0.0, bounds);
-        multi.mesh = Some(BezierMesh::identity(bounds, 2, 2));
+        let mut split = BezierMesh::identity(bounds, 2, 2);
+        split.points[8][1] += 4.0;
+        multi.mesh = Some(split);
         let mut arc = Warp::preset(WarpStyle::Arc, 40.0, bounds);
         arc.vertical = true;
         arc.h_distort = 10.0;
         let mut c = Warp::preset(WarpStyle::Custom, 0.0, bounds);
         c.mesh = Some(custom);
-        for (w, back) in [(Some(arc.clone()), Some(arc)), (Some(c.clone()), Some(c)), (Some(multi), None), (None, None)] {
+        for (w, back) in [(Some(arc.clone()), Some(arc)), (Some(c.clone()), Some(c)), (Some(multi.clone()), Some(multi)), (None, None)] {
             let mut warnings = Vec::new();
             let spec = PlacedSpec {
                 idnt: "i",
@@ -1587,8 +2908,258 @@ mod tests {
             };
             let sold = sold_bytes(None, &spec, &mut warnings);
             assert_eq!(crate::blocks::parse_placed_warp(b"SoLd", &sold), back);
-            assert_eq!(warnings.len(), usize::from(w.is_some() && back.is_none()));
+            assert!(warnings.is_empty(), "{warnings:?}");
         }
+    }
+
+    /// A placed layer over a 50 × 25 source, at `transform`, with `warp`.
+    fn placed<'a>(transform: Affine, warp: Option<&'a Warp>) -> PlacedSpec<'a> {
+        PlacedSpec { idnt: "i", placed: "p", transform, perspective: None, size: (50.0, 25.0), dpi: 72.0, warp, filter_fx: None }
+    }
+
+    /// A 3 × 2 patch split warp over the 50 × 25 source with one interior control point pulled.
+    fn split_warp() -> Warp {
+        let mut mesh = BezierMesh::identity([0.0, 0.0, 50.0, 25.0], 3, 2);
+        mesh.points[10 * 3 + 4][1] += 3.0;
+        Warp::custom(mesh, [0.0, 0.0, 50.0, 25.0])
+    }
+
+    /// An imported `soLD` descriptor holding `warp` as Reference writes a split warp: a
+    /// `quiltWarp` whose outer slices sit 0.6 px past the source, before a `warpNone` `warp`.
+    fn reference_template(warp: &Warp) -> Descriptor {
+        let mesh = warp.mesh.as_ref().expect("a mesh");
+        let slices = |k: &str, knots: &[f64], len: f64| {
+            let n = knots.len() - 1;
+            let values = knots
+                .iter()
+                .enumerate()
+                .map(|(i, u)| {
+                    if i == 0 {
+                        -0.6
+                    } else if i == n {
+                        len + 0.6
+                    } else {
+                        u * len
+                    }
+                })
+                .collect::<Vec<_>>();
+            let prefix = values.len() as u32;
+            Value::ObjectArray(ObjectArray { prefix, body: Descriptor::new("UntF").with(k, Value::UnitFloats { unit: *b"#Pxl", values }) })
+        };
+        let Value::Descriptor(plain) = warp_desc(None, (50.0, 25.0), &mut Vec::new()) else { panic!("a descriptor") };
+        let mut quilt = plain.clone();
+        quilt.class_id = Id::new("quiltWarp");
+        set(&mut quilt, "warpStyle", enumv("warpStyle", "warpCustom"));
+        let envelope = Descriptor::new("customEnvelopeWarp")
+            .with("quiltSliceX", slices("quiltSliceX", &mesh.us, 50.0))
+            .with("quiltSliceY", slices("quiltSliceY", &mesh.vs, 25.0))
+            .with("meshPoints", mesh_points(mesh));
+        quilt = quilt
+            .with("deformNumRows", Value::Integer(mesh.ny() as i32))
+            .with("deformNumCols", Value::Integer(mesh.nx() as i32))
+            .with("customEnvelopeWarp", Value::Descriptor(envelope));
+        let mut d = sold_descriptor(&sold_bytes(None, &placed(Affine::IDENTITY, None), &mut Vec::new())).expect("a descriptor");
+        let at = d.items.iter().position(|(k, _)| k.is("warp")).expect("a warp key");
+        d.items.insert(at, (Id::new("quiltWarp"), Value::Descriptor(quilt)));
+        d
+    }
+
+    fn sold_of(d: Descriptor) -> Vec<u8> {
+        let mut out = b"soLD".to_vec();
+        out.extend_from_slice(&4u32.to_be_bytes());
+        out.extend(VersionedDescriptor::new(d).to_bytes());
+        out
+    }
+
+    fn quilt_of(d: &Descriptor) -> Option<&Descriptor> {
+        get_desc(d, "quiltWarp")
+    }
+
+    /// A split (multi-patch) custom warp is written as Reference writes it, a `quiltWarp` before a
+    /// `warpNone` `warp`, and reads back with its mesh and its transform. Before, the warp was
+    /// written as none while `Trnf` was still the image of its control-point box, so the layer
+    /// came back stretched and shifted (ported from storytold/photocraft@f8d5345a).
+    #[test]
+    fn split_warp_round_trips_through_sold() {
+        let mut mesh = BezierMesh::identity([0.0, 0.0, 50.0, 25.0], 2, 1);
+        mesh.points[0] = [-10.0, -5.0];
+        let warp = Warp::custom(mesh, [0.0, 0.0, 50.0, 25.0]);
+        let transform = Affine { m: [2.0, 0.0, 0.0, 2.0, 120.0, 210.0] };
+        let mut warnings = Vec::new();
+        let sold = sold_bytes(None, &placed(transform, Some(&warp)), &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(crate::blocks::parse_smart(b"SoLd", &sold).1, transform);
+        assert_eq!(crate::blocks::parse_placed_warp(b"SoLd", &sold), Some(warp));
+        let d = sold_descriptor(&sold).expect("a descriptor");
+        let at = |key: &str| d.items.iter().position(|(k, _)| k.is(key));
+        assert!(at("quiltWarp").expect("a quiltWarp") < at("warp").expect("a warp"));
+        let plain = get_desc(&d, "warp").expect("a warp");
+        assert_eq!(enum_of(plain, "warpStyle"), Some(&b"warpNone"[..]));
+        assert!(plain.get("customEnvelopeWarp").is_none());
+        let quilt = quilt_of(&d).expect("a quiltWarp");
+        assert!(quilt.class_id.is("quiltWarp"));
+        assert_eq!((quilt.get("deformNumCols"), quilt.get("deformNumRows")), (Some(&Value::Integer(7)), Some(&Value::Integer(4))));
+        let env = get_desc(quilt, "customEnvelopeWarp").expect("an envelope");
+        let prefix = |k: &str| match env.get(k) {
+            Some(Value::ObjectArray(a)) => Some(a.prefix),
+            _ => None,
+        };
+        assert_eq!((prefix("quiltSliceX"), prefix("quiltSliceY"), prefix("meshPoints")), (Some(3), Some(2), Some(28)));
+    }
+
+    /// A template's split warp is replaced along with its `warp`: a warp changed to Arc, to none,
+    /// to one patch or to another mesh reads back as changed, not as the imported split warp.
+    #[test]
+    fn a_replaced_split_warp_does_not_come_back() {
+        let bounds = [0.0, 0.0, 50.0, 25.0];
+        let template = reference_template(&split_warp());
+        let arc = Warp::preset(WarpStyle::Arc, 30.0, bounds);
+        let mut one = BezierMesh::identity(bounds, 1, 1);
+        one.points[5][0] += 2.0;
+        let one = Warp::custom(one, bounds);
+        let mut resplit = BezierMesh::identity(bounds, 2, 2);
+        resplit.points[8][1] += 4.0;
+        let resplit = Warp::custom(resplit, bounds);
+        for w in [Some(arc), None, Some(one), Some(resplit)] {
+            let mut warnings = Vec::new();
+            let sold = sold_bytes(Some(&template), &placed(Affine::IDENTITY, w.as_ref()), &mut warnings);
+            assert_eq!(crate::blocks::parse_placed_warp(b"SoLd", &sold), w);
+            let d = sold_descriptor(&sold).expect("a descriptor");
+            assert_eq!(quilt_of(&d).is_some(), w.as_ref().is_some_and(|w| w.mesh.as_ref().is_some_and(|m| m.points.len() > 16)), "{w:?}");
+            assert!(warnings.is_empty(), "{warnings:?}");
+        }
+    }
+
+    /// An imported split warp that nothing changed keeps Reference's `quiltWarp` as stored when
+    /// the layer is rewritten for something else (here a move); a mesh edited on the same grid
+    /// keeps Reference's slices.
+    #[test]
+    fn an_imported_split_warp_keeps_reference_s_quilt() {
+        let template = reference_template(&split_warp());
+        let read = crate::blocks::parse_placed_warp(b"SoLd", &sold_of(template.clone())).expect("the split warp");
+        let moved = Affine { m: [1.0, 0.0, 0.0, 1.0, 4.0, 0.0] };
+        let sold = sold_bytes(Some(&template), &placed(moved, Some(&read)), &mut Vec::new());
+        let d = sold_descriptor(&sold).expect("a descriptor");
+        assert_eq!(d.get("quiltWarp"), template.get("quiltWarp"));
+        assert_eq!(d.get("warp"), template.get("warp"), "the `warpNone` beside it stays as stored");
+        assert_eq!(crate::blocks::parse_smart(b"SoLd", &sold).1, moved);
+        let mut edited = read.clone();
+        if let Some(m) = edited.mesh.as_mut() {
+            m.points[12][0] += 1.5;
+        }
+        let sold = sold_bytes(Some(&template), &placed(Affine::IDENTITY, Some(&edited)), &mut Vec::new());
+        assert_eq!(crate::blocks::parse_placed_warp(b"SoLd", &sold), Some(edited));
+        let slices = |d: &Descriptor| {
+            let env = get_desc(quilt_of(d)?, "customEnvelopeWarp")?;
+            Some((env.get("quiltSliceX").cloned(), env.get("quiltSliceY").cloned()))
+        };
+        assert_eq!(slices(&sold_descriptor(&sold).expect("a descriptor")), slices(&template));
+    }
+
+    /// The legacy `PlLd` record has no split warp: it stores none, with its corners framed by the
+    /// source rect, so a reader of `PlLd` alone places the layer where its transform puts it.
+    #[test]
+    fn plld_of_a_split_warp_is_framed_by_the_source() {
+        let warp = split_warp();
+        let transform = Affine { m: [2.0, 0.0, 0.0, 2.0, 120.0, 210.0] };
+        let spec = placed(transform, Some(&warp));
+        let mut warnings = Vec::new();
+        let sold = sold_bytes(None, &spec, &mut warnings);
+        for beside in [&sold[..], &[]] {
+            let plld = plld_bytes(&spec, beside, &mut warnings);
+            assert_eq!(crate::blocks::parse_plld_warp(&plld), crate::blocks::PlldWarp::None);
+            let (_, corners) = crate::blocks::parse_plld(&plld).expect("a record");
+            assert_eq!(crate::blocks::plld_transform(&corners, Some((50.0, 25.0)), None).0, transform);
+        }
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    /// A split warp of more patches along a side than a `quiltWarp` is read with (Warp Grid 64,
+    /// then one more split) is written as no warp, with a message, framed by the source rect, so
+    /// the layer reopens where it was. Before, its `quiltWarp` was refused on reopen while `Trnf`
+    /// still framed its control box (ported from storytold/photocraft@f65cea0e).
+    #[test]
+    fn a_split_warp_past_the_quilt_limit_keeps_its_placement() {
+        let mut mesh = BezierMesh::identity([0.0, 0.0, 50.0, 25.0], crate::blocks::QUILT_MAX_PATCHES, 1);
+        assert!(mesh.split_u(0.005));
+        mesh.points[0] = [-10.0, -5.0];
+        let warp = Warp::custom(mesh, [0.0, 0.0, 50.0, 25.0]);
+        let transform = Affine { m: [2.0, 0.0, 0.0, 2.0, 120.0, 210.0] };
+        let mut warnings = Vec::new();
+        let sold = sold_bytes(None, &placed(transform, Some(&warp)), &mut warnings);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(crate::blocks::parse_smart(b"SoLd", &sold).1, transform);
+        assert_eq!(crate::blocks::parse_placed_warp(b"SoLd", &sold), None);
+        assert!(quilt_of(&sold_descriptor(&sold).expect("a descriptor")).is_none());
+        // Over an imported split warp, the stale `quiltWarp` goes and the placement holds.
+        let template = reference_template(&split_warp());
+        let mut warnings = Vec::new();
+        let sold = sold_bytes(Some(&template), &placed(transform, Some(&warp)), &mut warnings);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(crate::blocks::parse_smart(b"SoLd", &sold).1, transform);
+        assert!(quilt_of(&sold_descriptor(&sold).expect("a descriptor")).is_none());
+        // So does one this reader can't read, which Reference would still apply.
+        let mut template = reference_template(&split_warp());
+        let Some((_, Value::Descriptor(q))) = template.items.iter_mut().find(|(k, _)| k.is("quiltWarp")) else { panic!("a quiltWarp") };
+        set(q, "deformNumRows", Value::Integer(0));
+        let sold = sold_bytes(Some(&template), &placed(transform, Some(&warp)), &mut Vec::new());
+        assert!(quilt_of(&sold_descriptor(&sold).expect("a descriptor")).is_none());
+        // At the limit the split warp is still written.
+        let mut mesh = BezierMesh::identity([0.0, 0.0, 50.0, 25.0], crate::blocks::QUILT_MAX_PATCHES, 1);
+        mesh.points[0] = [-10.0, -5.0];
+        let warp = Warp::custom(mesh, [0.0, 0.0, 50.0, 25.0]);
+        let mut warnings = Vec::new();
+        let sold = sold_bytes(None, &placed(transform, Some(&warp)), &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(crate::blocks::parse_smart(b"SoLd", &sold).1, transform);
+        assert_eq!(crate::blocks::parse_placed_warp(b"SoLd", &sold), Some(warp));
+    }
+
+    /// A regenerated `SoLd` (after Replace Contents, a move…) writes a cylinder back as
+    /// `warpCylinder` and its seven values, not as no warp, and frames its control-point box with
+    /// the quad, affine or projective, so import places it where it was.
+    #[test]
+    fn cylinder_warp_round_trips_through_sold() {
+        let v = [100.0, 800.0, 900.0, 200.0, 0.3, 0.3, 0.5];
+        let warp = Warp::cylinder(&v, [0.0, 0.0, 1000.0, 1000.0]).expect("a cylinder");
+        let transform = Affine { m: [0.5, 0.0, 0.0, 0.5, 40.0, 30.0] };
+        let mut spec =
+            PlacedSpec { idnt: "i", placed: "p", transform, perspective: None, size: (1000.0, 1000.0), dpi: 72.0, warp: Some(&warp), filter_fx: None };
+        let mut warnings = Vec::new();
+        let sold = sold_bytes(None, &spec, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let p = parse_sold(&sold).expect("parses");
+        let Some(Value::Descriptor(w)) = p.descriptor.get("warp") else { panic!("no warp") };
+        assert_eq!(crate::blocks::enum_of(w, "warpStyle"), Some(b"warpCylinder".as_slice()));
+        let Some(Value::List(values)) = w.get("warpValues") else { panic!("no warpValues") };
+        assert_eq!(values.iter().filter_map(|x| num(Some(x))).collect::<Vec<_>>(), v);
+        assert!(w.get("customEnvelopeWarp").is_none());
+        assert_eq!(crate::blocks::parse_placed_warp(b"SoLd", &sold), Some(warp.clone()));
+        for (a, b) in p.transform.m.iter().zip(transform.m) {
+            assert!((a - b).abs() < 1e-9, "{:?}", p.transform);
+        }
+        // The quad is the image of the control-point box, not of the source rect.
+        let cb = warp.mesh.as_ref().expect("a cylinder").control_bounds();
+        let Some(Value::List(q)) = p.descriptor.get("Trnf") else { panic!("no Trnf") };
+        let q: Vec<f64> = q.iter().filter_map(|x| num(Some(x))).collect();
+        let want = [cb[0], cb[1], cb[2], cb[1], cb[2], cb[3], cb[0], cb[3]].map(|c| 0.5 * c);
+        for (i, (a, b)) in q.iter().zip(want).enumerate() {
+            let shift = if i % 2 == 0 { 40.0 } else { 30.0 };
+            assert!((a - (b + shift)).abs() < 1e-9, "corner {i}: {q:?}");
+        }
+        assert!(!quad_moved(&p.descriptor, &spec, spec.warp));
+        // A projective placement comes back as the same map.
+        let h = photosplice_algo::transform::Homography::rect_to_quad(cb, [[10.0, 20.0], [410.0, 60.0], [400.0, 480.0], [30.0, 520.0]]).expect("a cylinder");
+        spec.perspective = Some(h.0);
+        let sold = sold_bytes(None, &spec, &mut warnings);
+        let back = crate::blocks::parse_smart_perspective(b"SoLd", &sold).expect("projective");
+        let n = |m: [f64; 9]| m.map(|x| x / m[8]);
+        for (a, b) in n(back).iter().zip(n(h.0)) {
+            assert!((a - b).abs() < 1e-9 * (1.0 + b.abs()), "{back:?} vs {:?}", h.0);
+        }
+        let plld = plld_bytes(&spec, &sold, &mut warnings);
+        assert_eq!(crate::blocks::parse_plld_warp(&plld), crate::blocks::PlldWarp::Warp(warp));
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]

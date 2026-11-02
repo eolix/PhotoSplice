@@ -136,6 +136,11 @@ pub struct CharStyle {
     pub variations: Vec<FontVariation>,
     /// BCP-47 language tag (affects shaping and line breaking).
     pub language: Option<String>,
+    /// Vertical type: roman text (Latin, digits) runs rotated 90° clockwise along the column
+    /// (PSD `BaselineDirection` 2) instead of standing upright one character per em
+    /// (`BaselineDirection` 1, what Reference's Vertical Type tool sets). CJK text stands upright
+    /// either way.
+    pub rotate_roman: bool,
     /// Applied character style (id in [`crate::TextStyles`]); `None` = "None". Attributes above
     /// stay fully resolved; differences from the style are local overrides.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -171,6 +176,7 @@ impl Default for CharStyle {
             features: Vec::new(),
             variations: Vec::new(),
             language: None,
+            rotate_roman: false,
             style_sheet: None,
         }
     }
@@ -231,6 +237,11 @@ pub struct ParagraphStyle {
     /// Adobe Every-line Composer (Photoshop's default): line breaks weigh the whole paragraph.
     /// Off = Single-line Composer, each line filled in turn.
     pub every_line_composer: bool,
+    /// Roman Hanging Punctuation (Reference's Paragraph panel): trailing punctuation (`, . : ;
+    /// …`, quotes, hyphens, dashes and their fullwidth twins) may step past the box's edge
+    /// without counting toward the line's width, so a centred line ending in an ellipsis stays
+    /// centred and a period the box can't hold hangs instead of wrapping.
+    pub hanging: bool,
     /// Applied paragraph style (id in [`crate::TextStyles`]); `None` = Basic Paragraph.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style_sheet: Option<u32>,
@@ -249,6 +260,7 @@ impl Default for ParagraphStyle {
             direction: TextDirection::Auto,
             hyphenate: false,
             every_line_composer: true,
+            hanging: false,
             style_sheet: None,
         }
     }

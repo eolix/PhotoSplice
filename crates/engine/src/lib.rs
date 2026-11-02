@@ -34,6 +34,7 @@ mod crop_fill;
 pub mod cutout_cmds;
 pub mod display_color;
 pub mod distort_cmds;
+pub mod doc_path;
 pub mod document_preset_cmds;
 pub mod edit_cmds;
 pub mod edit_menu_cmds;
@@ -820,6 +821,8 @@ impl Session {
         // Every mutation path (linked-file refresh, transform, place) re-renders smart objects
         // through this entry; the requesting session's authority must reach those renders.
         let _authorization = crate::jobs::render_authorization_scope(self.authorize);
+        // ... and stored paths those renders follow resolve against the edited document.
+        let _document = crate::doc_path::scope(self.active().and_then(|d| d.path.as_deref()).map(std::path::Path::new));
         let restrict = self.color_restrict;
         let sampler_map = self.sampler_map.take();
         let st = self.active_mut().ok_or(EngineError::NoDocument)?;
