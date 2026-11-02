@@ -161,6 +161,7 @@ mod tests {
             fill: Some(Fill::Solid(Color::rgb(0.2, 0.4, 0.6))),
             stroke: Some(ShapeStroke { width: 6.0, ..ShapeStroke::default() }),
             live: None,
+            align_edges: false,
             cache: None,
             psd_raw: None,
         }

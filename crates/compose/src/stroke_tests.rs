@@ -31,7 +31,7 @@ fn blue() -> FxPaint {
 /// A shape layer over the square `x0..x1` with its Photoshop-style cached pixels.
 fn shape(x0: f64, x1: f64, fill: Fill, stroke: Option<ShapeStroke>) -> Layer {
     let path = Path::new(vec![Subpath::polygon(&[(x0, x0), (x1, x0), (x1, x1), (x0, x1)])]);
-    let mut sh = ShapeLayer { path, fill: Some(fill), stroke, live: None, cache: None, psd_raw: None };
+    let mut sh = ShapeLayer { path, fill: Some(fill), stroke, live: None, align_edges: false, cache: None, psd_raw: None };
     sh.cache = Some(photosplice_vector::render_shape(&sh, PixelFormat::RGBA8, Rect::new(0, 0, 40, 40)));
     Layer::new("shape", LayerContent::Shape(sh))
 }
@@ -43,6 +43,7 @@ fn gradient_shape(width: u32, height: u32) -> ShapeLayer {
         fill: Some(Fill::gradient(vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], 0.0, 1.0, GradientStyle::Linear, false)),
         stroke: Some(ShapeStroke { width: 4.0, ..ShapeStroke::default() }),
         live: None,
+        align_edges: false,
         cache: None,
         psd_raw: None,
     }
@@ -234,7 +235,7 @@ fn hairline_vector_stroke_keeps_the_files_edge_pixel_colour() {
         let mut cache = photosplice_raster::Surface::new(fmt);
         cache.fill_rect(Rect::new(10, 10, 30, 30), &[edge, edge, edge, 1.0]);
         cache.fill_rect(Rect::new(11, 11, 29, 29), &[fill, fill, fill, 1.0]);
-        let sh = ShapeLayer { path, fill: Some(Fill::Solid(Color::rgb(fill, fill, fill))), stroke: Some(vs), live: None, cache: Some(cache), psd_raw: None };
+        let sh = ShapeLayer { path, fill: Some(Fill::Solid(Color::rgb(fill, fill, fill))), stroke: Some(vs), live: None, align_edges: false, cache: Some(cache), psd_raw: None };
         let mut l = Layer::new("shape", LayerContent::Shape(sh));
         // Any layer effect sends the shape through the fill/stroke split.
         l.effects.items = vec![Effect::default_drop_shadow()];

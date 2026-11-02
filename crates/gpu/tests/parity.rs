@@ -1801,7 +1801,7 @@ fn layer_effects_on_shape_layers() {
         let path = Path::new(vec![Subpath::polygon(&[(14.3, 12.6), (70.2, 18.1), (60.7, 58.4), (24.9, 50.2)])]);
         let mut fill = Color::rgb(0.3, 0.6, 0.9);
         fill.alpha = alpha;
-        let mut sh = ShapeLayer { path, fill: Some(Fill::Solid(fill)), stroke: None, live: None, cache: None, psd_raw: None };
+        let mut sh = ShapeLayer { path, fill: Some(Fill::Solid(fill)), stroke: None, live: None, align_edges: false, cache: None, psd_raw: None };
         sh.cache = Some(photosplice_vector::render_shape(&sh, d.pixel_format(), d.bounds()));
         let mut l = Layer::new("shape", LayerContent::Shape(sh));
         l.effects.items = vec![
@@ -1839,7 +1839,7 @@ fn stroke_effects_on_filled_and_stroked_shapes() {
                 paint: Fill::Solid(Color::rgb(0.1, 0.8, 0.2)),
                 ..ShapeStroke::default()
             });
-            let mut sh = ShapeLayer { path, fill: Some(fill), stroke: stroke_v, live: None, cache: None, psd_raw: None };
+            let mut sh = ShapeLayer { path, fill: Some(fill), stroke: stroke_v, live: None, align_edges: false, cache: None, psd_raw: None };
             sh.cache = Some(photosplice_vector::render_shape(&sh, d.pixel_format(), d.bounds()));
             let mut l = Layer::new("shape", LayerContent::Shape(sh));
             if masked {
@@ -2199,7 +2199,7 @@ fn stroked_shapes_with_clipped_layers() {
             d.layers.push(noise_layer("bg", d.pixel_format(), Rect::from_xywh(0, 0, 80, 64), 1, 0.3));
             let path = Path::new(vec![Subpath::polygon(&[(10.3, 8.6), (66.2, 12.1), (58.7, 54.4), (16.9, 48.2)])]);
             let stroke = ShapeStroke { width: 5.0, paint: Fill::Solid(Color::rgb(0.9, 0.9, 0.1)), ..Default::default() };
-            let mut sh = ShapeLayer { path, fill: Some(Fill::Solid(Color::rgb(0.2, 0.3, 0.8))), stroke: Some(stroke), live: None, cache: None, psd_raw: None };
+            let mut sh = ShapeLayer { path, fill: Some(Fill::Solid(Color::rgb(0.2, 0.3, 0.8))), stroke: Some(stroke), live: None, align_edges: false, cache: None, psd_raw: None };
             sh.cache = Some(photosplice_vector::render_shape(&sh, d.pixel_format(), d.bounds()));
             let mut l = Layer::new("shape", LayerContent::Shape(sh));
             l.blend = blend;

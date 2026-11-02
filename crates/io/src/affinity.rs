@@ -424,7 +424,7 @@ impl Builder {
                 dash_offset: s.dash.as_ref().map_or(0.0, |(_, o)| (o / s.width.max(1e-9)) as f32),
             })
         });
-        let mut sh = ShapeLayer { path, fill, stroke, live: None, cache: None, psd_raw: None };
+        let mut sh = ShapeLayer { path, fill, stroke, live: None, align_edges: false, cache: None, psd_raw: None };
         sh.cache = Some(photosplice_vector::render_shape(&sh, self.format, self.canvas));
         sh
     }

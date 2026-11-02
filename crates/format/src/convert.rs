@@ -489,6 +489,7 @@ impl Loader<'_> {
                 fill: fill.clone(),
                 stroke: stroke.clone(),
                 live: live.clone(),
+                align_edges: false,
                 cache: self.opt_surface(cache)?,
                 psd_raw: self.opt_blob(psd_raw)?,
             }),

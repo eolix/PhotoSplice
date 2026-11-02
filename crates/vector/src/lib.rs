@@ -4,6 +4,7 @@
 //! shape layers (fill + stroke), vector masks, and the inverse direction (tracing a coverage
 //! mask back into a path for "Make Work Path").
 //!
+//! * [`align`]: Align Edges (a shape snapped to the pixel grid).
 //! * [`edit`]: point-level path editing (Direct Selection, Convert Point) and hit testing.
 //! * [`flatten`]: cubic Bézier flattening with a distance tolerance.
 //! * [`map`]: non-affine maps of paths (Distort, Perspective, Warp).
@@ -19,6 +20,7 @@
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod align;
 pub mod edit;
 pub mod flatten;
 pub mod map;
@@ -355,18 +357,20 @@ impl CompiledShape {
     /// the whole canvas, as Photoshop lays a shape layer's gradient over the layer's bounds
     /// (psd-tools vector-mask2.psd).
     pub fn new(shape: &ShapeLayer, tol: f64, canvas: Rect) -> Self {
+        let aligned = shape.align_edges.then(|| aligned_path(shape, tol));
+        let path = aligned.as_ref().unwrap_or(&shape.path);
         let cb = (f64::from(canvas.x0), f64::from(canvas.y0), f64::from(canvas.x1), f64::from(canvas.y1));
-        let pb = match shape.path.control_bounds() {
-            Some(b) if !shape.path.inverted => b,
+        let pb = match path.control_bounds() {
+            Some(b) if !path.inverted => b,
             _ => cb,
         };
-        let area = fill_rasterizer(&shape.path, tol);
+        let area = fill_rasterizer(path, tol);
         let mut bounds = None;
         let fill = shape.fill.as_ref().map(|f| {
             bounds = area.pixel_bounds();
             (area.clone(), Paint::from_fill(f, pb, cb))
         });
-        let all_closed = shape.path.subpaths.iter().all(|s| s.closed);
+        let all_closed = path.subpaths.iter().all(|s| s.closed);
         let mut align = None;
         let stroke = shape.stroke.as_ref().filter(|s| s.width > 0.0 && s.opacity > 0.0).map(|s| {
             let mut st = stroke_style(s);
@@ -375,7 +379,7 @@ impl CompiledShape {
                 st.width *= 2.0;
                 align = Some((area.clone(), s.align == StrokeAlign::Inside));
             }
-            let r = stroke_rasterizer(&shape.path, &st, tol);
+            let r = stroke_rasterizer(path, &st, tol);
             let sb = r.pixel_bounds();
             bounds = match (bounds, sb) {
                 (Some(a), Some(b)) => Some(a.union(&b)),
@@ -383,7 +387,7 @@ impl CompiledShape {
             };
             (r, Paint::from_fill(&s.paint, pb, cb), s.opacity.clamp(0.0, 1.0))
         });
-        if shape.path.inverted && shape.fill.is_some() {
+        if path.inverted && shape.fill.is_some() {
             bounds = Some(Rect::new(i32::MIN / 4, i32::MIN / 4, i32::MAX / 4, i32::MAX / 4));
         }
         CompiledShape { fill, stroke, align, bounds }
@@ -411,13 +415,14 @@ impl CompiledShape {
             }
         }
         if let Some((r, paint, opacity)) = &self.stroke {
-            let mut cov = r.render(rect);
-            if let Some((area, inside)) = &self.align {
-                let a = area.render(rect);
-                for (c, f) in cov.iter_mut().zip(&a) {
-                    *c *= if *inside { *f } else { 1.0 - *f };
-                }
-            }
+            let cov = r.render(rect);
+            // Inside and outside strokes split each edge pixel with the fill by the path's
+            // coverage there, as Reference draws them: an inside stroke goes atop the fill (the
+            // pixel keeps the path's coverage, its colour mixed by the stroke's), an outside one
+            // fills the rest of the pixel beside it. Composited one over the other, both halves
+            // of a partly covered pixel would show the background through (align kit, a 3 px
+            // inside stroke at x = 90.25: alpha 239 where Reference has the path's 195).
+            let area = self.align.as_ref().map(|(area, inside)| (area.render(rect), *inside));
             for (i, (o, c)) in out.iter_mut().zip(&cov).enumerate() {
                 if *c <= 0.0 {
                     continue;
@@ -425,14 +430,42 @@ impl CompiledShape {
                 let (x, y) = ((rect.x0 + (i % w) as i32) as f64 + 0.5, (rect.y0 + (i / w) as i32) as f64 + 0.5);
                 let s = paint.at(x, y);
                 let sa = s[3] * c * opacity;
-                let da = o[3];
-                let a = sa + da * (1.0 - sa);
-                if a > 0.0 {
-                    for k in 0..3 {
-                        o[k] = (s[k] * sa + o[k] * da * (1.0 - sa)) / a;
+                match area.as_ref().map(|(a, inside)| (a.get(i).copied().unwrap_or(0.0), *inside)) {
+                    Some((a, true)) => {
+                        if a <= 0.0 {
+                            continue;
+                        }
+                        // The fill's own alpha before the path's coverage scaled it.
+                        let fa = (o[3] / a).min(1.0);
+                        let ia = sa + fa * (1.0 - sa);
+                        if ia > 0.0 {
+                            for k in 0..3 {
+                                o[k] = (s[k] * sa + o[k] * fa * (1.0 - sa)) / ia;
+                            }
+                        }
+                        o[3] = ia * a;
+                    }
+                    Some((a, false)) => {
+                        let sa = sa * (1.0 - a).max(0.0);
+                        let t = o[3] + sa;
+                        if t > 0.0 {
+                            for k in 0..3 {
+                                o[k] = (o[k] * o[3] + s[k] * sa) / t;
+                            }
+                        }
+                        o[3] = t.min(1.0);
+                    }
+                    None => {
+                        let da = o[3];
+                        let a = sa + da * (1.0 - sa);
+                        if a > 0.0 {
+                            for k in 0..3 {
+                                o[k] = (s[k] * sa + o[k] * da * (1.0 - sa)) / a;
+                            }
+                        }
+                        o[3] = a;
                     }
                 }
-                o[3] = a;
             }
         }
         out
@@ -457,6 +490,32 @@ impl CompiledShape {
             band_tiles(band, &vals, ch, |px| if alpha { px[ch - 1] > 0.0 } else { px.iter().any(|v| *v != 0.0) })
         });
         s
+    }
+}
+
+/// A shape's path under Align Edges: what it draws (the path, or the outline of a centre or
+/// outside stroke, which reaches past it) snapped to the pixel grid, the path moved with it.
+fn aligned_path(shape: &ShapeLayer, tol: f64) -> Path {
+    let mut extent = align::tight_bounds(&shape.path);
+    let all_closed = shape.path.subpaths.iter().all(|s| s.closed);
+    if let Some(s) = shape.stroke.as_ref().filter(|s| s.width > 0.0 && s.opacity > 0.0 && !(all_closed && s.align == StrokeAlign::Inside)) {
+        let mut st = stroke_style(s);
+        if all_closed && s.align == StrokeAlign::Outside {
+            st.width *= 2.0;
+        }
+        let lines = flatten_path(&shape.path, tol);
+        for p in stroke_polygons(&lines, &st, tol).iter().flatten() {
+            if p.0.is_finite() && p.1.is_finite() {
+                extent = Some(match extent {
+                    Some((x0, y0, x1, y1)) => (x0.min(p.0), y0.min(p.1), x1.max(p.0), y1.max(p.1)),
+                    None => (p.0, p.1, p.0, p.1),
+                });
+            }
+        }
+    }
+    match extent.and_then(align::align_transform) {
+        Some(a) => shape.path.transform(&a),
+        None => shape.path.clone(),
     }
 }
 

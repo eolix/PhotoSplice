@@ -323,6 +323,8 @@ pub struct ShapeLayer {
     pub fill: Option<Fill>,
     pub stroke: Option<ShapeStroke>,
     pub live: Option<LiveShape>,
+    /// Align Edges (PSD `sn2P`): the shape is drawn snapped to the pixel grid.
+    pub align_edges: bool,
     /// Rasterized appearance (from PSD or `photosplice-vector`).
     pub cache: Option<Surface>,
     /// Data of the PSD vector mask block (`vsms`, else `vmsk`). On export it replaces that entry

@@ -539,6 +539,12 @@ pub fn shape_from_blocks(sh: &mut ShapeLayer, block: &dyn Fn(&[u8; 4]) -> Option
         }
     }
     sh.live = block(b"vogk").and_then(|d| live_from_vogk(&d));
+    sh.align_edges = block(b"sn2P").is_some_and(|d| sn2p_on(&d));
+}
+
+/// An `sn2P` (Align Edges) block's flag: a u32, non-zero when on.
+fn sn2p_on(d: &[u8]) -> bool {
+    d.get(..4).is_some_and(|b| b.iter().any(|&x| x != 0))
 }
 
 fn has_fill_block(raw: &[([u8; 4], Vec<u8>)]) -> bool {
@@ -602,6 +608,17 @@ pub fn shape_blocks(sh: &ShapeLayer, raw: &mut Vec<([u8; 4], Vec<u8>)>, w: u32, 
         None if sh.stroke.is_some() || (sh.fill.is_none() && has_fill_block(raw)) => {
             raw.push((*b"vstk", vstk_bytes(sh.stroke.as_ref(), sh.fill.is_some(), dpi)));
         }
+        None => {}
+    }
+    // Align Edges: Reference writes `sn2P` 1 on a shape that has it and leaves the block out
+    // otherwise; a block that already says what the model does stays as it is.
+    match find(raw, b"sn2P") {
+        Some(i) if sn2p_on(&raw[i].1) == sh.align_edges => {}
+        Some(i) if sh.align_edges => raw[i].1 = vec![0, 0, 0, 1],
+        Some(i) => {
+            raw.remove(i);
+        }
+        None if sh.align_edges => raw.push((*b"sn2P", vec![0, 0, 0, 1])),
         None => {}
     }
     // Live shape origination. One we can't read (a polygon, a star, several shapes) stays while
@@ -839,6 +856,32 @@ mod tests {
             assert_eq!(live_from_vogk(&b), Some(s));
         }
         assert!(vogk_bytes(&LiveShape::Polygon { rect: [0.0; 4], sides: 5, star_ratio: 1.0 }, 72.0).is_none());
+    }
+
+    /// Reference writes `sn2P` 1 on an Align Edges shape and leaves it out otherwise.
+    #[test]
+    fn align_edges_round_trips_through_sn2p() {
+        let mut sh = ShapeLayer { path: sample_path(), fill: Some(Fill::Solid(Color::BLACK)), align_edges: true, ..Default::default() };
+        let mut raw = Vec::new();
+        shape_blocks(&sh, &mut raw, 64, 64, 72.0);
+        assert!(raw.contains(&(*b"sn2P", vec![0, 0, 0, 1])));
+        let lookup = |raw: &Vec<([u8; 4], Vec<u8>)>| {
+            let raw = raw.clone();
+            let mut back = ShapeLayer::default();
+            shape_from_blocks(&mut back, &move |k: &[u8; 4]| raw.iter().find(|(key, _)| key == k).map(|(_, d)| d.clone()), 64, 64, 72.0);
+            back.align_edges
+        };
+        assert!(lookup(&raw));
+        // A stored block that agrees stays as it is; turning the flag off drops it.
+        let before = raw.clone();
+        shape_blocks(&sh, &mut raw, 64, 64, 72.0);
+        assert_eq!(raw, before);
+        sh.align_edges = false;
+        shape_blocks(&sh, &mut raw, 64, 64, 72.0);
+        assert!(!raw.iter().any(|(k, _)| k == b"sn2P"));
+        assert!(!lookup(&raw));
+        // A short or zero block reads as off.
+        assert!(!sn2p_on(&[0, 0, 0, 0]) && !sn2p_on(&[1]) && sn2p_on(&[0, 0, 0, 1]));
     }
 
     #[test]
