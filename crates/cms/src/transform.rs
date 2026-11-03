@@ -100,14 +100,23 @@ impl Transform {
     }
 
     pub fn with_options(src: &Profile, dst: &Profile, opts: TransformOptions) -> Result<Transform, CmsError> {
-        let stages = link_stages(src, dst, opts.intent, opts.bpc)?;
+        let mut stages = link_stages(src, dst, opts.intent, opts.bpc)?;
+        // A Lab source reads its 3-input tables (the destination's Lab-indexed BToA) and the
+        // grid built from them trilinearly, not tetrahedrally (`Clut::lab_input`). Only there:
+        // separating an RGB colour keeps tetrahedral cells (nothing measured says otherwise).
+        let lab_source = src.color_space == ColorSpace::Lab;
+        if lab_source {
+            for s in &mut stages {
+                if let Stage::Clut(c) = s {
+                    *c = c.clone().lab_input();
+                }
+            }
+        }
         let mut t = Self::from_pipeline(Pipeline::new(src.channels(), stages), opts);
         if opts.intent != Intent::AbsoluteColorimetric {
             t.fix_white(src.color_space, dst.color_space);
         }
-        // A Lab source reads its grid trilinearly, as the profile's own Lab-indexed tables
-        // (`Clut::lab_input`).
-        if src.color_space == ColorSpace::Lab
+        if lab_source
             && let Core::Grid(c) = &mut t.core
         {
             *c = c.clone().lab_input();
