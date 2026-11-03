@@ -1822,9 +1822,9 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photospli
             p[0] = [hue, saturation / 100.0, lightness / 100.0, if *colorize { 1.0 } else { 0.0 }];
             // 32-bit documents don't hold the smallest channel at 0 (compose::adjust::hue_saturation_in).
             p[1][1] = if depth == photosplice_color::SampleType::F32 { 1.0 } else { 0.0 };
-            // p1.z: 8-bit Colorize in whole levels (compose::adjust::colorize_lightness_8bit);
-            // p1.w: the slider's whole levels, signed.
-            if *colorize && depth == photosplice_color::SampleType::U8 {
+            // p1.z: an 8-bit document's lightness in whole levels (compose::adjust::
+            // colorize_lightness_8bit, lightness_8bit); p1.w: the slider's whole levels, signed.
+            if depth == photosplice_color::SampleType::U8 {
                 let l = if lightness.is_finite() { lightness.clamp(-100.0, 100.0) } else { 0.0 };
                 p[1][2] = 1.0;
                 p[1][3] = (f64::from(l.abs()) * 255.0 / 100.0 + 1e-9).floor() as f32 * l.signum();

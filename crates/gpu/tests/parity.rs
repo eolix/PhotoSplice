@@ -739,6 +739,55 @@ fn hdr_hue_saturation_bright_colours() {
     check(&mut g, &d, "colorize saturation 150");
 }
 
+/// The adjustment kit's rules on the GPU as on the CPU, on near-greys and saturated colours:
+/// 8-bit Hue/Saturation taking its Lightness first in whole levels, the saturation held at
+/// black and white and capped at 128 (compose::adjust::hue_saturation_scale), absolute Selective
+/// Color with the black percentage as a factor, and a Photo Filter colour outside sRGB.
+#[test]
+fn adjustment_kit_rules() {
+    let Some(mut g) = gpu() else { return };
+    let warm = photosplice_color::convert::lab_to_srgb_unclamped([67.06, 32.0, 120.0]);
+    let hs = |hue: f32, saturation: f32, lightness: f32| Adjustment::HueSaturation { hue, saturation, lightness, colorize: false, ranges: HueRange::defaults() };
+    let mut sc = [[0.0f32; 4]; 9];
+    sc[0] = [40.0, -40.0, 20.0, 10.0];
+    sc[4] = [20.0, -20.0, 0.0, 5.0];
+    sc[7] = [10.0, -10.0, 20.0, 30.0];
+    let adjustments = [
+        hs(122.0, 100.0, -37.0),
+        hs(0.0, 100.0, 0.0),
+        hs(0.0, 50.0, 0.0),
+        hs(-17.0, 19.0, 4.0),
+        Adjustment::SelectiveColor { relative: false, adjustments: sc },
+        Adjustment::PhotoFilter { color: warm, density: 0.25, preserve_luminosity: true },
+        Adjustment::PhotoFilter { color: warm, density: 0.5, preserve_luminosity: false },
+    ];
+    // 16 × 16 colours: near-greys a level or two off neutral, then a cube of saturated ones.
+    let px: Vec<f32> = (0..256u32)
+        .flat_map(|i| {
+            let c = if i < 128 {
+                let g = (i / 8 * 16 + 8) as f32;
+                let d = (i % 8) as f32;
+                [g + d % 2.0, g + (d / 2.0).floor() % 2.0, g + (d / 4.0).floor()]
+            } else {
+                let j = i - 128;
+                [(j % 4 * 85) as f32, (j / 4 % 4 * 85) as f32, (j / 16 * 36) as f32]
+            };
+            [c[0].min(255.0) / 255.0, c[1].min(255.0) / 255.0, c[2].min(255.0) / 255.0, 1.0]
+        })
+        .collect();
+    for depth in [SampleType::U8, SampleType::U16] {
+        let mut d = Document::new("t", Size::new(16, 16), ColorMode::Rgb, depth);
+        let mut bg = Layer::raster("bg", d.pixel_format());
+        bg.surface_mut().unwrap().write_region(Rect::from_xywh(0, 0, 16, 16), &px);
+        d.layers.push(bg);
+        for adj in &adjustments {
+            d.layers.push(Layer::new("adj", LayerContent::Adjustment(adj.clone())));
+            check(&mut g, &d, &format!("kit {} {depth:?}", adj.label()));
+            d.layers.pop();
+        }
+    }
+}
+
 #[test]
 fn adjustment_layers() {
     let Some(mut g) = gpu() else { return };

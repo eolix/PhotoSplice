@@ -603,9 +603,9 @@ fn selective_row(r: i32, w: f32, c: vec3<f32>, relative: bool) -> vec3<f32> {
         let t = ink * (1.0 + a) * (1.0 + k);
         return select(vec3(0.0), (clamp(t, vec3(0.0), vec3(1.0)) - ink) * w, w > 0.0);
     }
-    // Absolute: scaled by the room the ink has (adding: 2 × (1 − ink), removing: 2 × ink, capped at 1).
-    var d = a + k;
-    d = d * select(min(2.0 * (1.0 - c), vec3(1.0)), min(2.0 * c, vec3(1.0)), d > vec3(0.0));
+    // Absolute: the percentage and the black one as factors, held so the ink stays in 0..1.
+    let ink = 1.0 - c;
+    let d = clamp((1.0 + a) * (1.0 + k) - vec3(1.0), -ink, vec3(1.0) - ink);
     return select(vec3(0.0), d * w, w > 0.0);
 }
 
@@ -747,7 +747,18 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
             } else {
                 // Saturation scales about the HSL lightness, held where the smallest channel would
                 // go below 0 (mirrors compose::adjust::hue_saturation).
-                hh = rem_euclid(hsl.x + (p0.x + dh) / 360.0, 1.0);
+                var ml = clamp(p0.z, -1.0, 1.0);
+                var src = hsl;
+                if (p1.z > 0.5 && ml != 0.0) {
+                    // 8 bits: the Lightness first, in whole levels (compose::adjust::lightness_8bit).
+                    let q = round(clamp(c, vec3(0.0), vec3(1.0)) * 255.0);
+                    let k8 = abs(p1.w);
+                    var v = q * (255.0 - k8) / 255.0;
+                    if (p1.w > 0.0) { v = q + (255.0 - q) * k8 / 255.0; }
+                    src = rgb_to_hsl(floor(v + 0.5) / 255.0);
+                    ml = 0.0;
+                }
+                hh = rem_euclid(src.x + (p0.x + dh) / 360.0, 1.0);
                 if (p1.y > 0.5) {
                     // 32-bit: the chroma about the lightness, not the HSL saturation, which
                     // divides by zero at lightness 1 (compose::adjust::hue_saturation_ranged).
@@ -759,7 +770,7 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
                         rgb = vec3(hue_ch(lo, hi, hh + 1.0 / 3.0), hue_ch(lo, hi, hh), hue_ch(lo, hi, hh - 1.0 / 3.0));
                     }
                 } else {
-                    rgb = hsl_to_rgb(hh, hsl.y, hsl.z);
+                    rgb = hsl_to_rgb(hh, src.y, src.z);
                 }
                 // A range's lightness comes before the saturation step: a raise towards the
                 // brightest channel, a cut towards the darkest (adjust::hue_saturation_ranged).
@@ -772,14 +783,11 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
                     rgb = rgb + (lo - rgb) * -rl;
                 }
                 // The master lightness towards white or black: before the saturation step when
-                // set (but for 32-bit without ranges), which then also holds the largest channel
-                // at 1 under ranges or a cut (adjust::hue_saturation_ranged).
-                let ml = clamp(p0.z, -1.0, 1.0);
+                // set (but for 32-bit without ranges; adjust::hue_saturation_ranged).
                 let first = ml != 0.0 && !(p1.y > 0.5 && p1.x < 0.5);
                 if (first) {
                     if (ml > 0.0) { rgb = rgb + (1.0 - rgb) * ml; } else if (ml < 0.0) { rgb = rgb * (1.0 + ml); }
                 }
-                let hold_white = p1.x > 0.5 || (first && ml < 0.0);
                 let mx = max(rgb.r, max(rgb.g, rgb.b));
                 let mn = min(rgb.r, min(rgb.g, rgb.b));
                 let mid = (mx + mn) * 0.5;
@@ -793,10 +801,11 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
                         k = f32(min(65280u / (255u - steps), 32767u)) / 256.0;
                     }
                 } else if (sat > 0.0) {
-                    k = 1.0 / max(1.0 - sat, 1e-6);
+                    // +100 % scales by 128 at most (adjust::SATURATION_FACTOR_MAX).
+                    k = min(1.0 / max(1.0 - sat, 1e-6), 128.0);
                     if (p1.y < 0.5 && mn < mid) { k = min(k, mid / (mid - mn)); }
-                    // With colour ranges, nor the largest above 1 (adjust::hue_saturation_scale).
-                    if (p1.y < 0.5 && hold_white && mx > mid) { k = min(max(k, 1.0), max((1.0 - mid) / (mx - mid), 1.0)); }
+                    // Nor the largest above 1 (adjust::hue_saturation_scale).
+                    if (p1.y < 0.5 && mx > mid) { k = min(max(k, 1.0), max((1.0 - mid) / (mx - mid), 1.0)); }
                 }
                 rgb = mid + (rgb - mid) * k;
                 if (!first) {
