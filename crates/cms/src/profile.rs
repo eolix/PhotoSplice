@@ -360,7 +360,12 @@ impl Profile {
     pub fn pcs_to_device(&self, intent: Intent) -> Result<(Vec<Stage>, Pcs), CmsError> {
         if let Some(l) = Self::lut_for(&self.b2a, intent) {
             let mut st = vec![encode_pcs(self.pcs, l.kind)];
-            st.extend(l.stages.iter().cloned());
+            // Tables read from Lab interpolate trilinearly (`Clut::lab_input`).
+            let lab = self.pcs == Pcs::Lab;
+            st.extend(l.stages.iter().cloned().map(|s| match s {
+                Stage::Clut(c) if lab => Stage::Clut(c.lab_input()),
+                s => s,
+            }));
             return Ok((st, self.pcs));
         }
         match self.color_space {

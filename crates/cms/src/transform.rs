@@ -105,6 +105,13 @@ impl Transform {
         if opts.intent != Intent::AbsoluteColorimetric {
             t.fix_white(src.color_space, dst.color_space);
         }
+        // A Lab source reads its grid trilinearly, as the profile's own Lab-indexed tables
+        // (`Clut::lab_input`).
+        if src.color_space == ColorSpace::Lab
+            && let Core::Grid(c) = &mut t.core
+        {
+            *c = c.clone().lab_input();
+        }
         Ok(t)
     }
 
@@ -320,7 +327,7 @@ impl Transform {
         let mut mid = [0.0f32; 16];
         let mut out = [0.0f32; 16];
         match &self.core {
-            Core::Grid(c) if c.inputs == 3 => {
+            Core::Grid(c) if c.inputs == 3 && !c.is_trilinear() => {
                 let (g0, g1, g2) = (&self.grid8[0], &self.grid8[1], &self.grid8[2]);
                 let s1 = c.outputs * c.grid[2];
                 let s0 = s1 * c.grid[1];

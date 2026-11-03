@@ -423,18 +423,22 @@ fn adjust(a: &Adjustment, buf: &mut CBuf, cx: &Ctx) {
     // untouched (Reference corpus cmyk8: K exact in every one; the others carry the residual
     // their RGB versions have; `cmyk_probe` ADJ=1).
     // Photo Filter: the inks' colour through the profile to Lab, its D50 XYZ scaled by the
-    // filter, and separated back (black rebuilt as the profile does). Preserve Luminosity then
-    // keeps the source's K and moves C, M, Y's complements together to the source's luma
-    // (0.30 / 0.59 / 0.11, clipped as the Luminosity mode does). Reference kit inks-pf-*: warming
-    // 50 % with and without it, cooling 25 %, 192 patches; the complements filtered as an RGB
-    // colour took 80 % cyan to 54 % and left a 70 % K grey's K alone without it.
+    // filter, and separated back (black rebuilt as the profile does), both ways with black point
+    // compensation, so the filter scales the colour above the profile's black, not above L* 0
+    // (Reference kit cmyk8prof-pf-*, the same five settings through our embedded profile: mean
+    // ink error 6.8–46 → 3.2–7.3 levels; without compensation dark colours lost black). Preserve
+    // Luminosity then keeps the source's K and moves C, M, Y's complements together to the
+    // source's luma (0.30 / 0.59 / 0.11, clipped as the Luminosity mode does; that kit: the
+    // three offsets agree within 1.4–1.9 levels where nothing clips). Reference kit inks-pf-*:
+    // the complements filtered as an RGB colour took 80 % cyan to 54 % and left a 70 % K grey's
+    // K alone without it.
     if let Adjustment::PhotoFilter { color, density, preserve_luminosity } = a {
-        use photosplice_color::convert::{cmyk_to_lab, lab_to_cmyk, lab_to_xyz, xyz_to_lab};
+        use photosplice_color::convert::{cmyk_to_lab_bpc, lab_to_cmyk_bpc, lab_to_xyz, xyz_to_lab};
         let scale = crate::adjust::photo_filter_scale(*color, *density);
         for p in &mut buf.px {
             let ink = inks(p);
-            let xyz = lab_to_xyz(cmyk_to_lab(ink));
-            let mut out = lab_to_cmyk(xyz_to_lab(std::array::from_fn(|i| xyz[i] * scale[i])));
+            let xyz = lab_to_xyz(cmyk_to_lab_bpc(ink));
+            let mut out = lab_to_cmyk_bpc(xyz_to_lab(std::array::from_fn(|i| xyz[i] * scale[i])));
             if *preserve_luminosity {
                 let src = [1.0 - ink[0], 1.0 - ink[1], 1.0 - ink[2]];
                 let f = photosplice_color::blend::set_lum([1.0 - out[0], 1.0 - out[1], 1.0 - out[2]], photosplice_color::blend::lum(src));
@@ -1054,6 +1058,38 @@ mod tests {
         let (a, b) = (inks_at(&d, 0), inks_at(&nolum, 0));
         assert!((a[3] - 0.0).abs() < 1e-4 && a[0] < b[0], "{a:?} vs {b:?}");
         assert!(((b[1] - a[1]) - (b[2] - a[2])).abs() < 0.01, "C, M, Y move together: {a:?} vs {b:?}");
+    }
+
+    /// Photo Filter separates with black point compensation both ways, and the profile's Lab
+    /// tables read trilinearly (Reference kit cmyk8prof-pf-*, Warming Filter (85) through our
+    /// own profile; inks in levels). Without either, 100 % K came back 98 110 153 214 at 50 %
+    /// without Preserve Luminosity, Reference 72 71 96 224.
+    #[test]
+    fn photo_filter_separates_with_black_point_compensation() {
+        let warm = photosplice_color::convert::lab_to_srgb_unclamped([67.06, 32.0, 120.0]);
+        let pf = |density: f32, preserve_luminosity: bool| Layer::new("p", LayerContent::Adjustment(Adjustment::PhotoFilter { color: warm, density, preserve_luminosity }));
+        // (density, Preserve Luminosity, source inks, Reference's inks, tolerance in levels)
+        type Row = (f32, bool, [u8; 4], [u8; 4], f32);
+        #[rustfmt::skip]
+        let rows: [Row; 9] = [
+            (0.5, false, [0, 0, 0, 0], [10, 39, 46, 0], 3.5),
+            (0.5, false, [0, 0, 0, 64], [61, 72, 79, 19], 2.5),
+            (0.5, false, [0, 64, 64, 0], [15, 100, 111, 0], 1.5),
+            (0.5, false, [255, 0, 128, 128], [222, 47, 168, 127], 1.5),
+            (0.5, false, [0, 0, 0, 255], [72, 71, 96, 224], 10.0),
+            (0.25, true, [0, 0, 64, 255], [6, 0, 47, 255], 2.5),
+            (0.25, true, [64, 0, 0, 255], [52, 6, 1, 255], 1.5),
+            (0.25, true, [128, 0, 128, 0], [115, 5, 131, 0], 1.5),
+            (0.25, true, [255, 255, 255, 0], [255, 255, 255, 0], 0.5),
+        ];
+        for (density, lum, src, want, tol) in rows {
+            let mut d = doc_at(src.map(|v| f32::from(v) / 255.0), SampleType::U8);
+            d.layers.push(pf(density, lum));
+            let got = inks_at(&d, 0).map(|v| v * 255.0);
+            for k in 0..4 {
+                assert!((got[k] - f32::from(want[k])).abs() <= tol, "{density} {lum} {src:?} → {got:?}, Reference {want:?}");
+            }
+        }
     }
 
     /// Selective Color moves each ink by its own percentage, K by the black one, weighted by the

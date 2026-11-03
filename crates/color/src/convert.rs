@@ -164,6 +164,17 @@ fn lab_to_cmyk_transform() -> Option<&'static Transform> {
 /// built-in coated CMYK), relative colorimetric: no sRGB gamut on the way, unlike
 /// [`cmyk_to_rgb`].
 pub fn cmyk_to_lab(c: [f32; 4]) -> [f32; 3] {
+    cmyk_to_lab_with(c, cmyk_to_lab_transform())
+}
+
+/// [`cmyk_to_lab`] with black point compensation, as a document's embedded profile always
+/// converts (`CmykSpace`): the built-in profile's black maps to L* 0.
+pub fn cmyk_to_lab_bpc(c: [f32; 4]) -> [f32; 3] {
+    static T: OnceLock<Option<Transform>> = OnceLock::new();
+    cmyk_to_lab_with(c, T.get_or_init(|| Transform::new(Builtin::CoatedCmyk.profile(), Builtin::LabD50.profile(), Intent::RelativeColorimetric, true).ok()).as_ref())
+}
+
+fn cmyk_to_lab_with(c: [f32; 4], builtin: Option<&Transform>) -> [f32; 3] {
     let mut o = [0.0f32; 3];
     let active = ACTIVE_CMYK.with(|a| match &*a.borrow() {
         Some(s) => {
@@ -173,7 +184,7 @@ pub fn cmyk_to_lab(c: [f32; 4]) -> [f32; 3] {
         None => false,
     });
     if !active {
-        let Some(t) = cmyk_to_lab_transform() else {
+        let Some(t) = builtin else {
             return srgb_to_lab(cmyk_to_rgb_naive(c));
         };
         t.eval_fast(&c, &mut o);
@@ -184,6 +195,16 @@ pub fn cmyk_to_lab(c: [f32; 4]) -> [f32; 3] {
 /// Colour-managed CIE L*a*b* (D50) → CMYK through the active document CMYK profile (else the
 /// built-in coated CMYK), relative colorimetric: the inverse of [`cmyk_to_lab`].
 pub fn lab_to_cmyk(lab: [f32; 3]) -> [f32; 4] {
+    lab_to_cmyk_with(lab, lab_to_cmyk_transform())
+}
+
+/// [`lab_to_cmyk`] with black point compensation: the inverse of [`cmyk_to_lab_bpc`].
+pub fn lab_to_cmyk_bpc(lab: [f32; 3]) -> [f32; 4] {
+    static T: OnceLock<Option<Transform>> = OnceLock::new();
+    lab_to_cmyk_with(lab, T.get_or_init(|| Transform::new(Builtin::LabD50.profile(), Builtin::CoatedCmyk.profile(), Intent::RelativeColorimetric, true).ok()).as_ref())
+}
+
+fn lab_to_cmyk_with(lab: [f32; 3], builtin: Option<&Transform>) -> [f32; 4] {
     let v = [(lab[0] / 100.0).clamp(0.0, 1.0), ((lab[1] + 128.0) / 255.0).clamp(0.0, 1.0), ((lab[2] + 128.0) / 255.0).clamp(0.0, 1.0)];
     let mut o = [0.0f32; 4];
     let active = ACTIVE_CMYK.with(|a| match &*a.borrow() {
@@ -194,7 +215,7 @@ pub fn lab_to_cmyk(lab: [f32; 3]) -> [f32; 4] {
         None => false,
     });
     if !active {
-        let Some(t) = lab_to_cmyk_transform() else {
+        let Some(t) = builtin else {
             return rgb_to_cmyk_naive(lab_to_srgb(lab));
         };
         t.eval_fast(&v, &mut o);
@@ -300,6 +321,18 @@ pub fn rgb_to_gray(rgb: [f32; 3]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Black point compensation maps the built-in profile's darkest ink to L* 0 and back, and
+    /// leaves paper white alone.
+    #[test]
+    fn bpc_lab_maps_the_profile_black_to_zero() {
+        let black = cmyk_to_lab([1.0, 1.0, 1.0, 1.0]);
+        let bpc = cmyk_to_lab_bpc([1.0, 1.0, 1.0, 1.0]);
+        assert!(black[0] > 3.0 && bpc[0] < black[0] - 3.0, "{black:?} {bpc:?}");
+        assert!((cmyk_to_lab_bpc([0.0; 4])[0] - 100.0).abs() < 0.5);
+        let back = lab_to_cmyk_bpc(cmyk_to_lab_bpc([0.2, 0.4, 0.1, 0.0]));
+        assert!(back.iter().zip([0.2, 0.4, 0.1, 0.0]).all(|(a, b)| (a - b).abs() < 0.03), "{back:?}");
+    }
 
     #[test]
     fn srgb_roundtrip() {
