@@ -153,10 +153,14 @@ fn text_shape_smart_raw_blocks_survive() {
     if let LayerContent::Shape(s) = &bsh.content {
         assert_eq!(s.psd_raw.as_deref(), Some(&vec![7u8; 8]));
     }
-    // Plus the advanced-blending defaults Photoshop writes on every non-group layer.
-    let mut expected = d.layers[n - 1].psd_blocks.clone();
-    expected.extend([(*b"clbl", std::sync::Arc::new(vec![1u8, 0, 0, 0])), (*b"infx", std::sync::Arc::new(vec![0u8; 4])), (*b"knko", std::sync::Arc::new(vec![0u8; 4]))]);
-    assert_eq!(bsh.psd_blocks, expected);
+    // Plus a stroke style saying "no fill" (Reference's shapes always carry one; without it the
+    // kept vscg would paint) and the advanced-blending defaults Reference writes on every
+    // non-group layer.
+    let keys: Vec<&[u8; 4]> = bsh.psd_blocks.iter().map(|(k, _)| k).collect();
+    assert_eq!(keys, [b"vscg", b"vmsk", b"vstk", b"clbl", b"infx", b"knko"]);
+    assert_eq!(bsh.psd_blocks[..2], d.layers[n - 1].psd_blocks[..]);
+    let vstk = photosplice_io::vector_map::parse_vstk(&bsh.psd_blocks[2].1, 72.0).expect("a stroke style");
+    assert!(vstk.stroke.is_none() && !vstk.fill_enabled);
 }
 
 #[test]

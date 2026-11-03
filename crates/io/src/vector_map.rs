@@ -644,8 +644,11 @@ pub fn shape_blocks(sh: &ShapeLayer, raw: &mut Vec<([u8; 4], Vec<u8>)>, w: u32, 
     match find(raw, b"vstk") {
         Some(i) if parse_vstk(&raw[i].1, dpi).as_ref().is_some_and(same) => {}
         Some(i) => raw[i].1 = vstk_bytes_onto(sh.stroke.as_ref(), sh.fill.is_some(), dpi, Some(&raw[i].1)),
-        // "No fill" needs a vstk only when a fill block would otherwise paint.
-        None if sh.stroke.is_some() || (sh.fill.is_none() && has_fill_block(raw)) => {
+        // Reference's own shapes always carry one (stroke off when unstroked): a fill-only shape
+        // written without it came back from Reference as a fill layer with a vector mask (pattern
+        // kit). A legacy shape (fill in a top-level block) keeps its form, needing one only for a
+        // stroke, or for "no fill" where its fill block would otherwise paint.
+        None if sh.stroke.is_some() || (sh.fill.is_none() && has_fill_block(raw)) || !raw.iter().any(|(k, _)| matches!(k, b"SoCo" | b"GdFl" | b"PtFl")) => {
             raw.push((*b"vstk", vstk_bytes(sh.stroke.as_ref(), sh.fill.is_some(), dpi)));
         }
         None => {}
@@ -916,6 +919,21 @@ mod tests {
             assert_eq!(live_from_vogk(&b), Some(s));
         }
         assert!(vogk_bytes(&LiveShape::Polygon { rect: [0.0; 4], sides: 5, star_ratio: 1.0 }, 72.0).is_none());
+    }
+
+    /// Reference's shapes carry a `vstk` even unstroked (stroke off); without one, Reference turned
+    /// a fill-only shape into a fill layer with a vector mask. Legacy shapes keep their form.
+    #[test]
+    fn fill_only_shapes_get_a_stroke_style_with_the_stroke_off() {
+        let sh = ShapeLayer { path: sample_path(), fill: Some(Fill::Solid(Color::BLACK)), ..Default::default() };
+        let mut raw = Vec::new();
+        shape_blocks(&sh, &mut raw, 64, 64, 72.0);
+        let vstk = raw.iter().find(|(k, _)| k == b"vstk").map(|(_, d)| d.clone()).expect("a vstk");
+        let info = parse_vstk(&vstk, 72.0).unwrap();
+        assert!(info.stroke.is_none() && info.fill_enabled);
+        let mut legacy = vec![(*b"SoCo", VersionedDescriptor::new(crate::blocks::fill_to_desc(&Fill::Solid(Color::BLACK)).1).to_bytes())];
+        shape_blocks(&sh, &mut legacy, 64, 64, 72.0);
+        assert!(!legacy.iter().any(|(k, _)| k == b"vstk"), "a legacy shape keeps its form");
     }
 
     /// Reference writes `sn2P` 1 on an Align Edges shape and leaves it out otherwise.
