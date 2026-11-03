@@ -414,7 +414,7 @@ pub(crate) fn gradient_stops_editable(grad: &Descriptor, method: Option<&[u8]>) 
 }
 
 pub(crate) fn gradient_stops_raw(grad: &Descriptor) -> RawStops {
-    // Noise gradients have no stops: an approximation of Photoshop's random ramp, generated.
+    // Noise gradients have no stops: Reference's random ramp, generated (`noise_gradient`).
     if let Some(n) = crate::noise_gradient::Noise::from_desc(grad) {
         let (stops, opacity) = n.stops();
         return RawStops { stops, mids: Vec::new(), opacity, smooth: 0.0, noise: true };
@@ -582,7 +582,9 @@ pub fn fill_from_desc(key: &[u8; 4], d: &Descriptor) -> Option<Fill> {
     match key {
         b"SoCo" => Some(Fill::Solid(color_from_desc(get_desc(d, "Clr ")?)?)),
         b"GdFl" => {
-            let angle = num(d.get("Angl")).unwrap_or(90.0) as f32;
+            // Reference leaves `Angl` out at 0° (never written as 0 in the corpora; its noise
+            // fills without one run left to right).
+            let angle = num(d.get("Angl")).unwrap_or(0.0) as f32;
             let scale = num(d.get("Scl ")).map_or(1.0, |v| v as f32 / 100.0);
             let raw = get_desc(d, "Grad").map(|g| gradient_stops_editable(g, gradient_method(d)));
             let (mut stops, midpoints) = raw.map(|r| (r.stops, r.mids)).unwrap_or_default();
