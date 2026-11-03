@@ -3895,3 +3895,5 @@ curves	Smooth	Εξομάλυνση
 	This document's layers: {needed} of {budget} for layers	Επίπεδα αυτού του εγγράφου: {needed} από {budget} για επίπεδα
 	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	Τα επίπεδα αυτού του εγγράφου χρειάζονται {needed} αλλά μπορούν να καταλάβουν {budget}: η επανασχεδίαση όλου του εγγράφου γίνεται στη CPU
 	GPU Memory (MB, 0 = Automatic)	Μνήμη GPU (MB, 0 = Αυτόματο)
+	Automatic (Coated FOGRA39 if installed)	Αυτόματο (Coated FOGRA39, αν είναι εγκατεστημένο)
+	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (ενσωματωμένο)

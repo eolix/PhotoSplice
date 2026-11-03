@@ -4269,3 +4269,5 @@ shape	Appearance	Aspetto
 	This document's layers: {needed} of {budget} for layers	Livelli di questo documento: {needed} su {budget} per i livelli
 	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	I livelli di questo documento richiedono {needed} ma possono occupare {budget}: i ridisegni dell'intero documento usano la CPU
 	GPU Memory (MB, 0 = Automatic)	Memoria GPU (MB, 0 = Automatico)
+	Automatic (Coated FOGRA39 if installed)	Automatico (Coated FOGRA39 se installato)
+	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (integrato)

@@ -3840,3 +3840,5 @@ curves	Smooth	スムーズ
 	This document's layers: {needed} of {budget} for layers	このドキュメントのレイヤー: レイヤー用 {budget} のうち {needed}
 	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	このドキュメントのレイヤーには {needed} が必要ですが、使えるのは {budget} です: ドキュメント全体の再描画は CPU で行われます
 	GPU Memory (MB, 0 = Automatic)	GPU メモリ（MB、0 = 自動）
+	Automatic (Coated FOGRA39 if installed)	自動 (インストールされていれば Coated FOGRA39)
+	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (内蔵)

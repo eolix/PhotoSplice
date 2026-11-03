@@ -2778,3 +2778,5 @@ curves	Smooth	平滑
 	This document's layers: {needed} of {budget} for layers	此文件的圖層：圖層可用 {budget} 中的 {needed}
 	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	此文件的圖層需要 {needed}，但只能佔用 {budget}：整份文件的重繪使用 CPU
 	GPU Memory (MB, 0 = Automatic)	GPU 記憶體（MB，0 = 自動）
+	Automatic (Coated FOGRA39 if installed)	自動（如已安裝則為 Coated FOGRA39）
+	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK（內置）

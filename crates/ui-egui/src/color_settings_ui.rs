@@ -99,7 +99,7 @@ pub fn body(app: &mut PhotospliceApp, ui: &mut egui::Ui, f: &mut Map<String, Val
                 let rgb = builtins(&["srgb", "display-p3", "adobe-rgb-compat", "prophoto-compat", "linear-srgb", "rec2020"]);
                 menu_row(ui, f, "RGB:", label_w, "workingRgb", profile_menu(rgb, &profiles, ColorSpace::Rgb, &any_class), menu_w);
                 let mut cmyk = vec![
-                    ("auto".to_string(), "Automatic (U.S. Web Coated (SWOP) v2 if installed)"),
+                    ("auto".to_string(), "Automatic (Coated FOGRA39 if installed)"),
                     ("coated-cmyk".to_string(), "PhotoSplice Coated CMYK (built-in)"),
                 ];
                 cmyk = profile_menu(cmyk, &profiles, ColorSpace::Cmyk, &any_class);

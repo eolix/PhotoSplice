@@ -4203,3 +4203,5 @@ shape	Appearance	Izgled
 	This document's layers: {needed} of {budget} for layers	Slojevi ovog dokumenta: {needed} od {budget} za slojeve
 	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	Slojevima ovog dokumenta treba {needed}, a smeju da zauzmu {budget}: ceo dokument se ponovo iscrtava na CPU-u
 	GPU Memory (MB, 0 = Automatic)	GPU memorija (MB, 0 = Automatski)
+	Automatic (Coated FOGRA39 if installed)	Аутоматски (Coated FOGRA39 ако је инсталиран)
+	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (уграђени)
