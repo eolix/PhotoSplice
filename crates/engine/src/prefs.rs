@@ -877,21 +877,6 @@ impl Default for RawDefaults {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct Integrations {
-    /// Allow agents to drive the app over the loopback control channel.
-    pub allow_agent_control: bool,
-    /// Default control port (0 = only when `--control` is given).
-    pub control_port: u32,
-}
-
-impl Default for Integrations {
-    fn default() -> Self {
-        Self { allow_agent_control: true, control_port: 0 }
-    }
-}
-
 /// Edit › Menus: hidden items and item colours, by command id.
 ///
 /// `hidden` defaults to [`crate::prefs_hidden::HIDDEN_MENU_ITEMS`] rather than to nothing: this
@@ -1024,7 +1009,6 @@ pub struct Preferences {
     pub type_: TypePrefs,
     pub enhanced_controls: EnhancedControls,
     pub raw_defaults: RawDefaults,
-    pub integrations: Integrations,
     /// Edit › Keyboard Shortcuts: command id → shortcut (`Cmd+Shift+N` notation); an empty
     /// string removes the default shortcut.
     pub shortcuts: BTreeMap<String, String>,
@@ -1082,7 +1066,7 @@ pub struct Preferences {
 }
 
 /// Preferences dialog sections in Photoshop's order: (id, title).
-pub const SECTIONS: [(&str, &str); 18] = [
+pub const SECTIONS: [(&str, &str); 17] = [
     ("general", "General"),
     ("interface", "Interface"),
     ("workspace", "Workspace"),
@@ -1100,7 +1084,6 @@ pub const SECTIONS: [(&str, &str); 18] = [
     ("type", "Type"),
     ("enhancedControls", "Enhanced Controls"),
     ("rawDefaults", "Camera Raw Defaults"),
-    ("integrations", "Integrations"),
 ];
 
 /// Preferences that nothing reads yet, so Edit › Preferences doesn't show them: a control that
@@ -1139,10 +1122,6 @@ pub const HIDDEN_UNTIL_IMPLEMENTED: &[&str] = &[
     "rawDefaults.sharpenFor",
     "rawDefaults.openAsSmartObject",
     "rawDefaults.applyAutoTone",
-    // Agent access is governed by the launch flags (`--control`, the automation roots), not
-    // by these yet.
-    "integrations.allowAgentControl",
-    "integrations.controlPort",
 ];
 
 /// Preferences that work but PhotoSplice keeps out of Edit › Preferences, so the dialog stays the
@@ -1277,7 +1256,6 @@ pub fn range(path: &str) -> Option<(f64, f64)> {
         "guidesGridAndSlices.gridlineEvery" => (0.001, 10_000.0),
         "guidesGridAndSlices.subdivisions" => (1.0, 100.0),
         "type.recentFonts" => (0.0, 50.0),
-        "integrations.controlPort" => (0.0, 65535.0),
         _ => return None,
     })
 }
@@ -2659,7 +2637,6 @@ pub fn specs() -> Vec<CommandSpec> {
         section!("edit.preferences.type", "Type…"),
         section!("edit.preferences.enhancedControls", "Enhanced Controls…"),
         section!("edit.preferences.rawDefaults", "Camera Raw…"),
-        section!("edit.preferences.integrations", "Integrations…"),
         spec!(
             "edit.keyboardShortcuts",
             "Keyboard Shortcuts…",

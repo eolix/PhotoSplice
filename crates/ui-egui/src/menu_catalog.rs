@@ -149,7 +149,6 @@ pub static CATALOG: &[(&[&str], &str, Option<&str>, &str)] = &[
     (&["Edit"], "Toolbar…", None, "edit.toolbar"),
     (&["Edit"], "---", None, "---"),
     (&["Edit", "Preferences"], "Settings…", Some("Cmd+K"), "edit.preferences.general"),
-    (&["Edit", "Preferences"], "AI Integrations…", None, "edit.preferences.integrations"),
     (&["Edit", "Preferences"], "Interface…", None, "edit.preferences.interface"),
     (&["Edit", "Preferences"], "Workspace…", None, "edit.preferences.workspace"),
     (&["Edit", "Preferences"], "Tools…", None, "edit.preferences.tools"),

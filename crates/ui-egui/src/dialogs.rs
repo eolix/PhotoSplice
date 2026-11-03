@@ -605,6 +605,9 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
         if crate::duplicate_layer_ui::owns(&d.fields) {
             (min_w, max_w) = (360.0, 360.0);
         }
+        if crate::color_settings_ui::owns(&d.fields) {
+            (min_w, max_w) = (crate::color_settings_ui::WIDTH, crate::color_settings_ui::WIDTH);
+        }
         // Only the last dialog takes input, and egui only lets the modal drawn on top take input,
         // so the last one must be drawn above the others. egui can raise an older one (it raises an
         // area that is pressed or wasn't drawn the frame before), which left a greyed-out dialog
@@ -689,11 +692,8 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
                 DialogKind::Command if crate::adjust_ui::owns_lookup(&fields) => crate::adjust_ui::lookup_dialog_body(app, ui, &mut fields),
                 DialogKind::Command if crate::adjust_dialog::owns(&fields) => crate::adjust_dialog::body(app, ui, &mut fields),
                 DialogKind::Command if crate::blur_pins::owns(&fields) => crate::blur_pins::body(ui, &mut fields),
+                DialogKind::Command if crate::color_settings_ui::owns(&fields) => crate::color_settings_ui::body(app, ui, &mut fields),
                 DialogKind::Command if fields.contains_key("__filter") => {
-                    // Color Settings: the monitor profile in use can change while it is open.
-                    if fields.get("__command").and_then(Value::as_str) == Some("edit.colorSettings") {
-                        fields.insert("__note".into(), Value::String(crate::monitor_status::note(app)));
-                    }
                     // Long parameter lists (Flame, Lighting Effects) scroll, so the title and the
                     // OK / Cancel buttons stay inside a small window.
                     // The preview window below the parameters reserves its own space (#3769).
