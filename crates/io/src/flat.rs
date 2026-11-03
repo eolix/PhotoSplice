@@ -368,9 +368,12 @@ fn document_to_image_for(doc: &Document, warnings: &mut Vec<String>, cmyk_target
         // own handling (built-in coated CMYK when the embedded profile is unusable).
         let space = if cmyk {
             use photosplice_cms::{Builtin, ColorSpace, Intent, Profile, Transform};
+            // Untagged: the working CMYK separates it. Only our own built-in profile is
+            // written into the file then; an installed working profile (Reference's) is not
+            // ours to embed in a document that had none.
             let profile = match doc.icc_profile.as_ref() {
-                Some(bytes) => Profile::parse(bytes).map_err(|e| IoError::Unsupported(format!("invalid CMYK composite profile: {e}")))?,
-                None => Builtin::CoatedCmyk.profile().clone(),
+                Some(bytes) => Arc::new(Profile::parse(bytes).map_err(|e| IoError::Unsupported(format!("invalid CMYK composite profile: {e}")))?),
+                None => photosplice_color::convert::working_cmyk_profile(),
             };
             if profile.color_space != ColorSpace::Cmyk {
                 return Err(IoError::Unsupported("CMYK composite requires a CMYK ICC profile".into()));
@@ -378,7 +381,8 @@ fn document_to_image_for(doc: &Document, warnings: &mut Vec<String>, cmyk_target
             let srgb = Builtin::Srgb.profile();
             Transform::new(&profile, srgb, Intent::RelativeColorimetric, true).map_err(|e| IoError::Unsupported(e.to_string()))?;
             Transform::new(srgb, &profile, Intent::RelativeColorimetric, true).map_err(|e| IoError::Unsupported(e.to_string()))?;
-            if icc.is_none() {
+            let ours = doc.icc_profile.is_some() || profile.content_hash() == Builtin::CoatedCmyk.profile().content_hash();
+            if icc.is_none() && ours {
                 icc = Some(profile.to_bytes().to_vec());
             }
             photosplice_compose::cmyk_space(doc)
@@ -752,7 +756,7 @@ fn convert_from(
 }
 
 /// Colour-managed CMYK → sRGB for formats that cannot store CMYK (the document's embedded
-/// CMYK profile when it parses, else the built-in coated CMYK; relative colorimetric + BPC).
+/// CMYK profile when it parses, else the working CMYK; relative colorimetric + BPC).
 pub(crate) fn cmyk_image_to_srgb(img: &Image) -> Result<Image, IoError> {
     use photosplice_cms::{Builtin, ColorSpace, Intent, Profile, Transform};
     let src = img
@@ -760,7 +764,8 @@ pub(crate) fn cmyk_image_to_srgb(img: &Image) -> Result<Image, IoError> {
         .as_ref()
         .and_then(|b| Profile::parse(b).ok())
         .filter(|p| p.color_space == ColorSpace::Cmyk)
-        .unwrap_or_else(|| Builtin::CoatedCmyk.profile().clone());
+        .map(Arc::new)
+        .unwrap_or_else(photosplice_color::convert::working_cmyk_profile);
     let dst = Builtin::Srgb.profile();
     let t = Transform::new(&src, dst, Intent::RelativeColorimetric, true).map_err(|e| IoError::Unsupported(e.to_string()))?;
     let alpha = img.layout().has_alpha();

@@ -271,9 +271,10 @@ fn in_blend_space<R>(lab: bool, hdr: bool, f: impl FnOnce() -> R) -> R {
     psblend::with_lab_mix(lab, || psblend::with_hdr(hdr, f))
 }
 
-/// The document's own CMYK profile for reading its CMYK pixels (`None`: not a CMYK document,
-/// untagged, or the built-in coated CMYK). Enter it with `photosplice_color::convert::with_cmyk_space`
-/// around code that converts the document's CMYK pixels or colours to RGB.
+/// The document's own CMYK profile for reading its CMYK pixels, or the working CMYK when it has
+/// none (`photosplice_color::convert::set_working_cmyk`); `None`: not a CMYK document, or the
+/// built-in coated CMYK. Enter it with `photosplice_color::convert::with_cmyk_space` around code
+/// that converts the document's CMYK pixels or colours to RGB.
 pub fn cmyk_space(doc: &Document) -> Option<std::sync::Arc<photosplice_color::convert::CmykSpace>> {
     if doc.mode != photosplice_color::ColorMode::Cmyk {
         return None;

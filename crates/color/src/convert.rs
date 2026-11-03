@@ -6,10 +6,13 @@
 //! way a colour-managed editor does. A document's embedded CMYK profile replaces the built-in
 //! one while its [`CmykSpace`] is active on the thread ([`with_cmyk_space`]: the compositor,
 //! the GPU upload and composite exports enter it); otherwise the built-in profiles apply.
+//! Documents without a CMYK profile are in the working CMYK ([`set_working_cmyk`]: Reference's
+//! U.S. Web Coated (SWOP) v2 when the application finds it installed), which
+//! [`CmykSpace::for_profile`] hands out the same way.
 //! Lab uses the exact D50 formulas; gray is treated as sGray (gray `v` = sRGB `(v, v, v)`).
 
 use std::cell::RefCell;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 use photosplice_cms::{Builtin, ColorSpace, Intent, Profile, Transform};
 
@@ -28,40 +31,92 @@ pub struct CmykSpace {
 }
 
 impl CmykSpace {
-    /// The space of a document's embedded profile bytes: `None` when there are none, they do
-    /// not parse as a CMYK profile, or they are the built-in coated CMYK (the default path).
-    /// Cached by allocation, so calling this per render is cheap.
+    /// The space of a document's embedded profile bytes: `None` for the built-in coated CMYK
+    /// (the default path). Without bytes, or with bytes that do not parse as a CMYK profile
+    /// (an RGB document's own profile), it is the working CMYK ([`working_cmyk`]), as Reference
+    /// reads an untagged CMYK document and CMYK colour values. Cached by allocation, so calling
+    /// this per render is cheap.
     pub fn for_profile(icc: Option<&Arc<Vec<u8>>>) -> Option<Arc<CmykSpace>> {
-        type Cache = Mutex<Vec<(Weak<Vec<u8>>, Option<Arc<CmykSpace>>)>>;
+        // Per allocation: `None` = not a CMYK profile, `Some(None)` = the built-in one.
+        type Cache = Mutex<Vec<(Weak<Vec<u8>>, Option<Option<Arc<CmykSpace>>>)>>;
         static CACHE: OnceLock<Cache> = OnceLock::new();
-        let bytes = icc?;
+        let Some(bytes) = icc else { return working_cmyk() };
         let cache = CACHE.get_or_init(Default::default);
-        {
+        let hit = {
             let mut c = cache.lock().unwrap_or_else(|e| e.into_inner());
             c.retain(|(w, _)| w.strong_count() > 0);
-            if let Some((_, s)) = c.iter().find(|(w, _)| w.as_ptr() == Arc::as_ptr(bytes)) {
-                return s.clone();
+            c.iter().find(|(w, _)| w.as_ptr() == Arc::as_ptr(bytes)).map(|(_, s)| s.clone())
+        };
+        let space = match hit {
+            Some(s) => s,
+            None => {
+                let s = Profile::parse(bytes).ok().filter(|p| p.color_space == ColorSpace::Cmyk).map(|p| Self::from_profile(&p));
+                cache.lock().unwrap_or_else(|e| e.into_inner()).push((Arc::downgrade(bytes), s.clone()));
+                s
             }
-        }
-        let space = Self::build(bytes);
-        cache.lock().unwrap_or_else(|e| e.into_inner()).push((Arc::downgrade(bytes), space.clone()));
-        space
+        };
+        space.unwrap_or_else(working_cmyk)
     }
 
-    fn build(bytes: &[u8]) -> Option<Arc<CmykSpace>> {
-        let p = Profile::parse(bytes).ok().filter(|p| p.color_space == ColorSpace::Cmyk)?;
+    /// The space of a CMYK profile: `None` for the built-in coated CMYK (the default path), a
+    /// profile of another colour space, or one that does not link to sRGB and Lab.
+    pub fn from_profile(p: &Profile) -> Option<Arc<CmykSpace>> {
+        if p.color_space != ColorSpace::Cmyk {
+            return None;
+        }
         let coated = Builtin::CoatedCmyk.profile();
         if p.content_hash() == coated.content_hash() {
             return None;
         }
         let srgb = Builtin::Srgb.profile();
-        let to_srgb = Transform::new(&p, srgb, Intent::RelativeColorimetric, true).ok()?;
-        let from_srgb = Transform::new(srgb, &p, Intent::RelativeColorimetric, true).ok()?;
+        let to_srgb = Transform::new(p, srgb, Intent::RelativeColorimetric, true).ok()?;
+        let from_srgb = Transform::new(srgb, p, Intent::RelativeColorimetric, true).ok()?;
         let lab = Builtin::LabD50.profile();
-        let to_lab = Transform::new(&p, lab, Intent::RelativeColorimetric, true).ok()?;
-        let from_lab = Transform::new(lab, &p, Intent::RelativeColorimetric, true).ok()?;
+        let to_lab = Transform::new(p, lab, Intent::RelativeColorimetric, true).ok()?;
+        let from_lab = Transform::new(lab, p, Intent::RelativeColorimetric, true).ok()?;
         Some(Arc::new(CmykSpace { to_srgb, from_srgb, to_lab, from_lab, id: p.content_hash() }))
     }
+}
+
+/// The working CMYK profile and its space; `None`: the built-in coated CMYK.
+type Working = Option<(Arc<Profile>, Arc<CmykSpace>)>;
+
+fn working_slot() -> &'static RwLock<Working> {
+    static WORKING: OnceLock<RwLock<Working>> = OnceLock::new();
+    WORKING.get_or_init(Default::default)
+}
+
+/// Sets the working CMYK: the profile CMYK documents without one of their own are in, and CMYK
+/// colour values outside a document (Edit › Color Settings › Working CMYK; Reference separates
+/// with relative colorimetric and black point compensation, as [`CmykSpace`] does). `None`, the
+/// built-in coated CMYK, a non-CMYK profile or one that does not link mean the built-in. It is
+/// process-wide (like the text gamma), so the application sets it from its preferences; until
+/// then it is the built-in. Returns whether it changed.
+pub fn set_working_cmyk(profile: Option<Arc<Profile>>) -> bool {
+    let next = profile.and_then(|p| CmykSpace::from_profile(&p).map(|s| (p, s)));
+    let mut w = working_slot().write().unwrap_or_else(|e| e.into_inner());
+    let id = |w: &Working| w.as_ref().map(|(_, s)| s.id);
+    if id(&w) == id(&next) {
+        return false;
+    }
+    *w = next;
+    true
+}
+
+/// The working CMYK's space (`None`: the built-in coated CMYK; see [`set_working_cmyk`]).
+pub fn working_cmyk() -> Option<Arc<CmykSpace>> {
+    working_slot().read().unwrap_or_else(|e| e.into_inner()).as_ref().map(|(_, s)| s.clone())
+}
+
+/// The working CMYK profile (the built-in coated CMYK unless [`set_working_cmyk`] chose another).
+pub fn working_cmyk_profile() -> Arc<Profile> {
+    static BUILTIN: OnceLock<Arc<Profile>> = OnceLock::new();
+    working_slot()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|(p, _)| p.clone())
+        .unwrap_or_else(|| BUILTIN.get_or_init(|| Arc::new(Builtin::CoatedCmyk.profile().clone())).clone())
 }
 
 thread_local! {

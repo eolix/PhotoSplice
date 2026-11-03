@@ -4,7 +4,9 @@
 //!
 //! Document space: `Document::icc_profile` holds the document's ICC bytes (kept byte-exact
 //! from PSD resource 1039 / PNG iCCP / JPEG APP2 / TIFF). `None` means untagged: the working
-//! profile of the mode is assumed (sRGB, sGray, the built-in coated CMYK, Lab D50).
+//! profile of the mode is assumed (sRGB, sGray, the working CMYK, Lab D50). The working CMYK is
+//! process-wide ([`crate::working_cmyk`]): Reference's U.S. Web Coated (SWOP) v2 when it is
+//! installed, else the built-in coated CMYK.
 //!
 //! Compositing stays in document space for RGB and gray documents. CMYK and Lab documents are
 //! composited in sRGB after a per-layer conversion with the built-in profiles (see
@@ -44,7 +46,7 @@ impl Default for ProofSetup {
     fn default() -> Self {
         ProofSetup {
             name: "working-cmyk".into(),
-            profile: Arc::new(Builtin::CoatedCmyk.profile().clone()),
+            profile: working_profile(ColorMode::Cmyk),
             intent: Intent::RelativeColorimetric,
             bpc: true,
             simulate_paper: false,
@@ -104,9 +106,15 @@ impl Policy {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ColorSettings {
-    /// Working spaces: built-in profile ids (see `edit.profileInfo`) or `.icc` paths.
+    /// Working spaces: built-in profile ids (see `edit.profileInfo`) or `.icc` paths. Working
+    /// CMYK may also be `auto`: Reference's U.S. Web Coated (SWOP) v2 when it is installed, else
+    /// the built-in coated CMYK (see [`crate::working_cmyk`]).
     pub working_rgb: String,
     pub working_cmyk: String,
+    /// 1 once `working_cmyk` can be `auto`. Preferences saved before (0) stored the built-in
+    /// coated CMYK as the only default, and load as `auto` ([`ColorSettings::migrate`]).
+    #[serde(default)]
+    pub working_cmyk_rev: u32,
     pub working_gray: String,
     pub policy_rgb: Policy,
     pub policy_cmyk: Policy,
@@ -132,7 +140,8 @@ impl Default for ColorSettings {
     fn default() -> Self {
         Self {
             working_rgb: Builtin::Srgb.id().into(),
-            working_cmyk: Builtin::CoatedCmyk.id().into(),
+            working_cmyk: "auto".into(),
+            working_cmyk_rev: 1,
             // Photoshop's default working gray is Dot Gain 20 %.
             working_gray: Builtin::DotGain20Compat.id().into(),
             policy_rgb: Policy::Preserve,
@@ -151,6 +160,17 @@ impl Default for ColorSettings {
 }
 
 impl ColorSettings {
+    /// Brings settings saved by an older version up to date: the built-in coated CMYK was the
+    /// default working CMYK before `auto` existed, so it becomes `auto`.
+    pub fn migrate(&mut self) {
+        if self.working_cmyk_rev == 0 {
+            if self.working_cmyk == Builtin::CoatedCmyk.id() {
+                self.working_cmyk = "auto".into();
+            }
+            self.working_cmyk_rev = 1;
+        }
+    }
+
     pub fn intent(&self) -> Intent {
         Intent::parse(&self.intent).unwrap_or(Intent::RelativeColorimetric)
     }
@@ -511,8 +531,12 @@ fn space_mode(cs: ColorSpace) -> Option<ColorMode> {
     })
 }
 
-/// Working (default) profile of a mode.
+/// Working (default) profile of a mode; CMYK's is the process-wide working CMYK
+/// (`photosplice_color::convert::working_cmyk_profile`, set from Color Settings).
 pub fn working_profile(mode: ColorMode) -> Arc<Profile> {
+    if mode_space(mode) == ColorSpace::Cmyk {
+        return photosplice_color::convert::working_cmyk_profile();
+    }
     Arc::new(photosplice_cms::builtin::default_for(mode_space(mode)).unwrap_or(Builtin::Srgb.profile()).clone())
 }
 
@@ -567,6 +591,8 @@ pub fn resolve_profile(spec: &str, doc: Option<&Document>, mode: Option<ColorMod
         "working-cmyk" | "workingCmyk" => return Ok(working_profile(ColorMode::Cmyk)),
         "working-rgb" | "workingRgb" => return Ok(working_profile(ColorMode::Rgb)),
         "working-gray" | "workingGray" => return Ok(working_profile(ColorMode::Grayscale)),
+        // Working CMYK `auto` (Color Settings): what it resolved to when it was applied.
+        "auto" if mode == Some(ColorMode::Cmyk) => return Ok(working_profile(ColorMode::Cmyk)),
         "document" => return doc.map(document_profile).ok_or(EngineError::NoDocument),
         _ => {}
     }
@@ -1061,9 +1087,13 @@ fn color_settings(s: &mut Session, p: &Value) -> Result<Value> {
     validate_settings(&next).map_err(|msg| EngineError::BadParams { cmd: cmd.into(), msg })?;
     if next != s.color.settings {
         photosplice_compose::psblend::set_text_gamma(next.blend_text_gamma);
+        let cmyk_changed = next.working_cmyk != s.color.settings.working_cmyk;
         s.color.settings = next;
         // Persisted with the preferences.
         s.prefs.edit(|_| ());
+        if cmyk_changed {
+            s.apply_working_cmyk();
+        }
     }
     let c = &s.color.settings;
     let desc = |m: ColorMode| s.color.working(m).description.clone();
@@ -1156,7 +1186,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "edit.colorSettings",
             "Color Settings…",
             ["Edit"],
-            r##"{"workingRgb":"srgb|display-p3|adobe-rgb-compat|prophoto-compat|linear-srgb|rec2020","workingCmyk":"coated-cmyk","workingGray":"dot-gain-20-compat|sgray|gray-gamma-2.2","policyRgb":"preserve|convert|off","policyCmyk":"preserve|convert|off","policyGray":"preserve|convert|off","askOnMismatch":bool=true,"askOnPaste":bool=true,"askOnMissing":bool=false,"intent":"relative|perceptual|saturation|absolute","blendTextGamma":1.0..2.2|bool=1.45,"bpc":bool=true,"dither":bool=true,"monitorProfile":"auto|srgb|display-p3|adobe-rgb-compat|prophoto-compat|rec2020","reset":bool=false} (working spaces and the monitor profile also accept .icc paths; monitor `auto` = the main display's profile when the platform provides it, else sRGB; the reply's `monitorStatus` says which profile is in use and why: source auto|manual|fallback, reason)"##,
+            r##"{"workingRgb":"srgb|display-p3|adobe-rgb-compat|prophoto-compat|linear-srgb|rec2020","workingCmyk":"auto|coated-cmyk","workingGray":"dot-gain-20-compat|sgray|gray-gamma-2.2","policyRgb":"preserve|convert|off","policyCmyk":"preserve|convert|off","policyGray":"preserve|convert|off","askOnMismatch":bool=true,"askOnPaste":bool=true,"askOnMissing":bool=false,"intent":"relative|perceptual|saturation|absolute","blendTextGamma":1.0..2.2|bool=1.45,"bpc":bool=true,"dither":bool=true,"monitorProfile":"auto|srgb|display-p3|adobe-rgb-compat|prophoto-compat|rec2020","reset":bool=false} (working spaces and the monitor profile also accept .icc paths; working CMYK `auto` = U.S. Web Coated (SWOP) v2 when installed, else the built-in coated CMYK (`edit.workingCmyk` lists the choices and says which is in use); monitor `auto` = the main display's profile when the platform provides it, else sRGB; the reply's `monitorStatus` says which profile is in use and why: source auto|manual|fallback, reason)"##,
             always,
             color_settings,
             true,

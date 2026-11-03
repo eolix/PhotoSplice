@@ -40,7 +40,9 @@ const MAX_FILES: usize = 1000;
 /// Larger files are not profiles anyone prints with.
 const MAX_BYTES: u64 = 32 << 20;
 
-/// The operating system's colour profile folders.
+/// The operating system's colour profile folders, and the folders Reference installs its own
+/// profiles to (U.S. Web Coated (SWOP) v2 and the rest of its Recommended set, which Reference's
+/// profile menus list too; see `photosplice_cms::installed`).
 pub fn profile_dirs() -> Vec<PathBuf> {
     let mut v = Vec::new();
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from);
@@ -59,6 +61,11 @@ pub fn profile_dirs() -> Vec<PathBuf> {
         if let Some(h) = &home {
             v.push(h.join(".local/share/icc"));
             v.push(h.join(".color/icc"));
+        }
+    }
+    for d in photosplice_cms::installed::search_dirs() {
+        if !v.contains(&d) {
+            v.push(d);
         }
     }
     v

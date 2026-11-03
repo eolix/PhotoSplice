@@ -132,6 +132,7 @@ pub mod vp_cmds;
 pub mod warp_cmds;
 pub mod web_cmds;
 mod wia_cmds;
+pub mod working_cmyk;
 
 use std::sync::Arc;
 

@@ -322,7 +322,7 @@ fn params_contain_ambient_path(id: &str, params: &Value) -> bool {
             &["path"]
         }
         "image.mode.rgb" | "image.mode.grayscale" | "image.mode.cmyk" | "image.mode.lab" => &["profile"],
-        "edit.assignProfile" | "edit.convertToProfile" | "edit.profileInfo" | "view.proofSetup" | "view.gamutWarning" => &["profile"],
+        "edit.assignProfile" | "edit.convertToProfile" | "edit.profileInfo" | "view.proofSetup" | "view.gamutWarning" | "edit.workingCmyk" => &["profile"],
         "edit.colorSettings" => &["workingRgb", "workingCmyk", "workingGray"],
         _ => &[],
     };
@@ -336,7 +336,7 @@ fn params_contain_ambient_path(id: &str, params: &Value) -> bool {
 
 fn profile_command_may_read_ambient(id: &str, params: &Value) -> bool {
     // Installed profiles scan OS and user directories even without a request path.
-    if matches!(id, "color.profileMismatch" | "edit.colorSettings" | "edit.installedProfiles" | "view.proofSetup") {
+    if matches!(id, "color.profileMismatch" | "edit.colorSettings" | "edit.installedProfiles" | "edit.workingCmyk" | "view.proofSetup") {
         return true;
     }
     matches!(id, "edit.assignProfile" | "edit.convertToProfile" | "edit.profileInfo")

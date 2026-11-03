@@ -676,7 +676,9 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
                 DialogKind::Command if crate::file_ui::owns(&fields) => crate::file_ui::body(app, ui, &mut fields),
                 // The Color Picker draws its own OK / Cancel, top right as in Photoshop.
                 DialogKind::Command if crate::color_picker_ui::owns(&fields) => {
-                    outcome = crate::color_picker_ui::body(ui, &mut fields);
+                    // CMYK values are the document's CMYK profile's, else the working CMYK's.
+                    let cmyk = photosplice_engine::working_cmyk::values_space(&app.session);
+                    outcome = photosplice_color::convert::with_cmyk_space(cmyk.as_ref(), || crate::color_picker_ui::body(ui, &mut fields));
                     crate::color_picker_ui::take_add_swatch(app, &mut fields);
                 }
                 DialogKind::Command if crate::color_range_ui::owns(&fields) => crate::color_range_ui::body(app, ui, &mut fields),
@@ -938,7 +940,10 @@ pub fn confirm(app: &mut PhotospliceApp, id: u64) -> Result<Value, String> {
         DialogKind::Command if crate::variables_ui::owns(&d.fields) => crate::variables_ui::confirm(app, &d.fields),
         DialogKind::Command if crate::file_ui::owns(&d.fields) => crate::file_ui::confirm(app, &d.fields),
         DialogKind::Command if crate::new_guide_ui::owns(&d.fields) => crate::new_guide_ui::confirm(app, &d.fields),
-        DialogKind::Command if crate::color_picker_ui::owns(&d.fields) => crate::color_picker_ui::confirm(app, &d.fields),
+        DialogKind::Command if crate::color_picker_ui::owns(&d.fields) => {
+            let cmyk = photosplice_engine::working_cmyk::values_space(&app.session);
+            photosplice_color::convert::with_cmyk_space(cmyk.as_ref(), || crate::color_picker_ui::confirm(app, &d.fields))
+        }
         DialogKind::Command if crate::color_range_ui::owns(&d.fields) => crate::color_range_ui::confirm(app, &d.fields),
         DialogKind::Command if crate::prefs_ui::owns(&d.fields) => crate::prefs_ui::confirm(app, &d.fields),
         DialogKind::Command if d.fields.contains_key("__export") => crate::export_dialog::confirm(app, &d.fields),
