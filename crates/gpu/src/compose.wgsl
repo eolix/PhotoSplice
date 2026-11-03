@@ -1200,11 +1200,11 @@ fn pattern_tap(u: f32, v: f32) -> vec4<f32> {
 
 // compose::pattern::Tile::sample_area through Placement::map. p3 = (origin, cos, sin),
 // p4 = (1 / scale, tile w, tile h); `pat_tex` holds premultiplied RGBA. The pixel's corner maps
-// into the tile (compose::pattern::render); below 100 % a pixel averages n x n taps centred on
-// it over its footprint (n = ceil(1 / scale), at most 8), like the CPU.
+// into the tile (compose::pattern::render); below 100 % a pixel averages n x n taps from its
+// corner, 1 / n apart (n = floor(1 / scale), at most 8: compose::pattern::pixel_taps), like the CPU.
 fn pattern_sample(d: vec2<i32>) -> vec4<f32> {
     var n = 1;
-    if (op.p4.x > 1.0) { n = i32(min(ceil(op.p4.x), 8.0)); }
+    if (op.p4.x > 1.0) { n = i32(clamp(floor(op.p4.x + 1e-4), 1.0, 8.0)); }
     let c = op.p3.z;
     let s = op.p3.w;
     var acc = vec4(0.0);
@@ -1213,8 +1213,8 @@ fn pattern_sample(d: vec2<i32>) -> vec4<f32> {
             var ox = 0.0;
             var oy = 0.0;
             if (n > 1) {
-                ox = (f32(i) + 0.5) / f32(n) - 0.5;
-                oy = (f32(j) + 0.5) / f32(n) - 0.5;
+                ox = f32(i) / f32(n);
+                oy = f32(j) / f32(n);
             }
             let dx = f32(d.x) + ox - op.p3.x;
             let dy = f32(d.y) + oy - op.p3.y;

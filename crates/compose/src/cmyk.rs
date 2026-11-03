@@ -720,7 +720,8 @@ pub(crate) fn fill_in(l: &Layer, f: &Fill, rect: Rect, canvas: Rect, patterns: &
     // projected render per ink group.
     let frame = crate::fill_frame(l, canvas);
     let mut buf = CBuf::transparent(rect);
-    two_passes(&mut buf, |b| *b = crate::render_fill(f, rect, frame, patterns));
+    let anchor = crate::fill_pattern_anchor(l, frame);
+    two_passes(&mut buf, |b| *b = crate::render_fill(f, rect, frame, anchor, patterns));
     buf
 }
 

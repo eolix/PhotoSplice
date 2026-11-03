@@ -954,12 +954,12 @@ impl<'a> Planner<'a> {
             // Adjustments are handled by the caller and never get here.
             LayerContent::Adjustment(_) => Err(Unsupported("adjustment layer reached the content planner".into())),
             LayerContent::Fill(f @ Fill::Pattern { name, scale, id, angle, link, phase }) if layer.fill_cache.as_ref().is_none_or(|c| c.fill != *f) => {
-                // compose::render_fill: the pattern tiled from the layer's frame (transparent
-                // when missing), then the layer's masks.
+                // compose::render_fill: the pattern tiled from the layer's reference point or
+                // frame (transparent when missing), then the layer's masks.
                 let empty = self.clear();
                 let Some(pat) = photosplice_doc::pattern::find(self.cx.patterns, id, name).filter(|p| p.is_paintable()) else { return Ok(empty) };
                 let frame = photosplice_compose::fill_frame(layer, self.cx.canvas);
-                let anchor = if frame.is_empty() { (0.0, 0.0) } else { (f64::from(frame.x0), f64::from(frame.y0)) };
+                let anchor = photosplice_compose::fill_pattern_anchor(layer, frame);
                 let paint = Paint::Pattern(pat, placement(anchor, *link, *phase, *scale, *angle));
                 let canvas = self.cx.canvas;
                 let s = self.paint(empty, empty, Cov::One, &paint, BlendMode::Normal, 1.0, 0, canvas, canvas);

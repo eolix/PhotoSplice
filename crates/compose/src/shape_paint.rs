@@ -2,13 +2,15 @@
 //! same sampler as pattern fill layers and effects ([`crate::pattern`]), handed to
 //! `photosplice-vector` (which rasterises the shape but can't see the document's patterns).
 //!
-//! Placement, measured on psd-tools stroke.psd (a 56 % Dots fill and a 100 % Yellow Mums stroke,
-//! both "Link with Layer"): Reference tiles a shape's pattern from the layer's effects reference
-//! point (PSD `fxrp`, the canvas origin in that file) plus the phase, not from the path's bounds.
-//! At that anchor every stroke pixel Reference drew in the pattern matches it exactly, and the
-//! fill matches within 4 levels on 72 % of its interior (the rest is Reference's own minification
-//! at 56 %); anchored at the path's bounds, no stroke pixel matches. Moving the layer moves the
-//! reference point, so a linked pattern follows the layer; an unlinked one stays on the canvas.
+//! Placement: Reference tiles a linked pattern from the layer's effects reference point (PSD
+//! `fxrp`) plus the phase, an unlinked one from the canvas origin plus the phase, never from the
+//! path's bounds. Measured on the pattern kit (a rectangle at (20, 20) painted with an asymmetric
+//! 13 × 9 tile: linked / unlinked, phase (5, 3), `fxrp` (10, 6), an 8 px pattern stroke, each
+//! opened and saved by Reference, then moved by (13, 7)): every interior pixel matches exactly,
+//! before and after the move, which moves `fxrp` by the same amount and keeps the phase (so a
+//! linked pattern follows the layer, an unlinked one stays on the canvas). psd-tools stroke.psd
+//! agrees (its `fxrp` is the canvas origin): anchored at the path's bounds, no pixel of its
+//! pattern stroke matches.
 
 use std::sync::Arc;
 
@@ -162,6 +164,33 @@ mod tests {
         assert!(blue(&at(&unlinked, Some((2.0, 0.0)), 8, 4)));
         // A hostile reference point falls back to the canvas origin.
         assert!(blue(&at(&sh, Some((f64::NAN, 0.0)), 8, 4)));
+    }
+
+    /// A pattern fill layer clipped by a vector mask tiles a linked pattern from its effects
+    /// reference point plus the phase, not from the mask's bounds (the pattern kit: a mask at
+    /// (20, 20), `fxrp` (10, 6)); without a reference point it keeps the mask's top-left.
+    #[test]
+    fn fill_layers_tile_linked_patterns_from_the_reference_point() {
+        let p = checker();
+        let pats = [p.clone()];
+        let canvas = Rect::new(0, 0, 40, 30);
+        let mut l = Layer::new("f", LayerContent::Fill(pattern_fill(&p, true, (1.0, 0.0))));
+        l.vector_mask = Some(photosplice_doc::VectorMask::new(Path::new(vec![Subpath::polygon(&[(21.0, 21.0), (35.0, 21.0), (35.0, 28.0), (21.0, 28.0)])])));
+        let px = |l: &Layer, x: i32, y: i32| {
+            let LayerContent::Fill(f) = &l.content else { panic!("a fill layer") };
+            let b = crate::render_fill_content(l, f, canvas, &pats);
+            b.px[(y * 40 + x) as usize]
+        };
+        let is_blue = |q: [f32; 4]| q[2] > 0.99 && q[0] < 0.01;
+        // No reference point: the mask's top-left (21, 21) plus the phase → tile (0, 0) at (22, 21).
+        assert!(is_blue(px(&l, 22, 21)) && !is_blue(px(&l, 24, 21)));
+        // fxrp (10, 6) plus the phase: tile (0, 0) at (11, 6), so (23, 22) is tile (0, 0) again.
+        l.effects.reference = Some((10.0, 6.0));
+        assert_eq!(crate::fill_pattern_anchor(&l, canvas), (10.0, 6.0));
+        assert!(is_blue(px(&l, 23, 22)) && !is_blue(px(&l, 25, 22)));
+        // Unlinked: the canvas origin plus the phase.
+        l.content = LayerContent::Fill(pattern_fill(&p, false, (1.0, 0.0)));
+        assert!(is_blue(px(&l, 21, 24)) && !is_blue(px(&l, 23, 24)));
     }
 
     /// Pattern strokes paint too; a missing pattern paints nothing (as a pattern fill layer).

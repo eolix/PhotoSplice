@@ -2693,6 +2693,26 @@ fn pattern_fill_layers() {
     }
 }
 
+/// Pattern fill layers clipped by a vector mask tile a linked pattern from the layer's effects
+/// reference point plus the phase (an unlinked one from the canvas origin), and shrink it by
+/// averaging floor(1 / scale) taps per axis from each pixel's corner, on the GPU as on the CPU.
+#[test]
+fn pattern_fill_layers_tile_from_the_reference_point_at_every_minification() {
+    let Some(mut g) = gpu() else { return };
+    use photosplice_doc::vector::{Path, Subpath, VectorMask};
+    let pat = checker_pattern();
+    for (link, scale) in [(true, 0.25f32), (true, 0.5), (true, 0.56), (false, 1.0 / 3.0), (true, 2.0), (false, 0.4)] {
+        let mut d = base_doc(80, 60);
+        d.patterns.push(pat.clone());
+        let fill = Fill::Pattern { name: pat.name.clone(), id: pat.id.clone(), scale, angle: 0.0, link, phase: (5.0, 3.0) };
+        let mut l = Layer::new("pat", LayerContent::Fill(fill));
+        l.vector_mask = Some(VectorMask::new(Path::new(vec![Subpath::polygon(&[(20.0, 20.0), (70.0, 20.0), (70.0, 50.0), (20.0, 50.0)])])));
+        l.effects.reference = Some((10.0, 6.0));
+        d.layers.push(l);
+        check(&mut g, &d, &format!("pattern fill link {link} scale {scale}"));
+    }
+}
+
 /// An RGB pattern paints in the document's mode: grey in a Grayscale document (fills and Pattern
 /// Overlay), on the GPU as on the CPU; a CMYK one composites on the CPU.
 #[test]

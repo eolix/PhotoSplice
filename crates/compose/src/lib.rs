@@ -1178,7 +1178,10 @@ fn render_content(layer: &Layer, rect: Rect, cx: &Ctx) -> Option<Buffer> {
         LayerContent::Fill(f) => match &layer.fill_cache {
             // Photoshop's own rendering, valid while the fill is unchanged.
             Some(c) if c.fill == *f => surface_to_buffer(&c.surface, rect),
-            _ => render_fill_quantized(f, rect, fill_frame(layer, cx.canvas), cx.patterns, adjustment_quantum(cx.depth)),
+            _ => {
+                let frame = fill_frame(layer, cx.canvas);
+                render_fill_quantized(f, rect, frame, fill_pattern_anchor(layer, frame), cx.patterns, adjustment_quantum(cx.depth))
+            }
         },
         LayerContent::Adjustment(_) => return None,
         _ => match layer.surface() {
@@ -1262,7 +1265,22 @@ pub fn fill_frame(layer: &Layer, canvas: Rect) -> Rect {
 /// compositor does) but without applying the masks: the pixels a PSD fill layer stores.
 pub fn render_fill_content(layer: &Layer, f: &Fill, canvas: Rect, patterns: &[Pattern]) -> Buffer {
     let prepared = pattern::PreparedPatterns::new(patterns, pattern::PREPARED_PATTERN_BYTES);
-    render_fill(f, canvas, fill_frame(layer, canvas), &prepared)
+    let frame = fill_frame(layer, canvas);
+    render_fill(f, canvas, frame, fill_pattern_anchor(layer, frame), &prepared)
+}
+
+/// Where a fill layer's linked pattern tiles from (before its phase): the layer's effects
+/// reference point (PSD `fxrp`), which moves with the layer, else the top-left of its `frame`
+/// ([`fill_frame`]). Measured on the pattern kit's fill layers clipped by a vector mask at
+/// (20, 20): Reference tiles from `fxrp` plus the phase, exactly, before and after a move by
+/// (13, 7) (which moves `fxrp` and keeps the phase); an unlinked pattern stays at the canvas
+/// origin plus the phase.
+pub fn fill_pattern_anchor(layer: &Layer, frame: Rect) -> (f64, f64) {
+    match layer.effects.reference {
+        Some((x, y)) if x.is_finite() && y.is_finite() => (x, y),
+        _ if frame.is_empty() => (0.0, 0.0),
+        _ => (f64::from(frame.x0), f64::from(frame.y0)),
+    }
 }
 
 /// A fill layer's pixels over `canvas` in a CMYK document, as ink amounts `[C, M, Y, K, alpha]`
@@ -1275,13 +1293,14 @@ pub fn render_fill_inks(layer: &Layer, f: &Fill, canvas: Rect, patterns: &[Patte
 }
 
 /// [`render_fill_quantized`] with a dithered gradient kept in float.
-fn render_fill(f: &Fill, rect: Rect, canvas: Rect, patterns: &pattern::PreparedPatterns<'_>) -> Buffer {
-    render_fill_quantized(f, rect, canvas, patterns, None)
+fn render_fill(f: &Fill, rect: Rect, canvas: Rect, anchor: (f64, f64), patterns: &pattern::PreparedPatterns<'_>) -> Buffer {
+    render_fill_quantized(f, rect, canvas, anchor, patterns, None)
 }
 
 /// `quantum`: the document depth's levels, which a dithered gradient is rounded to
-/// ([`gradient_fill::render_quantized`]); `None` keeps it in float.
-fn render_fill_quantized(f: &Fill, rect: Rect, canvas: Rect, patterns: &pattern::PreparedPatterns<'_>, quantum: Option<f32>) -> Buffer {
+/// ([`gradient_fill::render_quantized`]); `None` keeps it in float. A linked pattern tiles from
+/// `anchor` ([`fill_pattern_anchor`]).
+fn render_fill_quantized(f: &Fill, rect: Rect, canvas: Rect, anchor: (f64, f64), patterns: &pattern::PreparedPatterns<'_>, quantum: Option<f32>) -> Buffer {
     match f {
         Fill::Solid(c) => {
             let rgb = c.to_rgb_unclamped();
@@ -1289,9 +1308,9 @@ fn render_fill_quantized(f: &Fill, rect: Rect, canvas: Rect, patterns: &pattern:
         }
         // Gradient geometry relative to the layer's frame, independent of the render rect.
         Fill::Gradient { .. } => Buffer { rect, px: gradient_fill::render_quantized(f, rect, canvas, quantum) },
-        // Laid out from the layer's frame when linked; transparent if the pattern is missing.
+        // Laid out from the anchor when linked; transparent if the pattern is missing.
         Fill::Pattern { name, scale, id, angle, link, phase } => match patterns.get(id, name) {
-            Some(tile) => Buffer { rect, px: pattern::render(&tile, &pattern::Placement::new(canvas, *link, *phase, *scale, *angle), rect) },
+            Some(tile) => Buffer { rect, px: pattern::render(&tile, &pattern::Placement::anchored(anchor, *link, *phase, *scale, *angle), rect) },
             None => Buffer::transparent(rect),
         },
     }

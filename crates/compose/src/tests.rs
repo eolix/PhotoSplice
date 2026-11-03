@@ -508,9 +508,9 @@ fn solid_and_gradient_fill_layers() {
 
     let g = Fill::gradient(vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], 0.0, 1.0, photosplice_doc::GradientStyle::Linear, false);
     let patterns = pattern::PreparedPatterns::new(&[], pattern::PREPARED_PATTERN_BYTES);
-    let buf = render_fill_quantized(&g, Rect::new(0, 0, 10, 1), Rect::new(0, 0, 10, 1), &patterns, None);
+    let buf = render_fill_quantized(&g, Rect::new(0, 0, 10, 1), Rect::new(0, 0, 10, 1), (0.0, 0.0), &patterns, None);
     // tile independence: a 1px render of the right edge equals the full render
-    let one = render_fill_quantized(&g, Rect::new(9, 0, 10, 1), Rect::new(0, 0, 10, 1), &patterns, None);
+    let one = render_fill_quantized(&g, Rect::new(9, 0, 10, 1), Rect::new(0, 0, 10, 1), (0.0, 0.0), &patterns, None);
     assert_eq!(one.px[0], buf.px[9]);
     assert!(buf.px[0][0] < buf.px[9][0], "left dark, right light");
 }

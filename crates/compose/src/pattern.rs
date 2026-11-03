@@ -4,8 +4,9 @@
 //! origin, plus the phase), scaled and rotated about that origin. Samples are bilinear with
 //! wrap-around on premultiplied colour, so integer placements at 100 % reproduce the tile
 //! exactly and scaled ones stay seamless. Below 100 % each document pixel averages an `n × n`
-//! grid of bilinear taps over its footprint in the tile (see [`pixel_taps`]), so a minified tile
-//! is box-filtered instead of aliased; at 100 % and above it is a single tap.
+//! grid of bilinear taps from its corner (see [`pixel_taps`]): `n` whole tile steps per pixel, so
+//! at 50 % or 25 % a pixel is the exact average of the 2 × 2 or 4 × 4 tile pixels it covers, and
+//! at 56 % (under two steps) a single tap; at 100 % and above it is a single tap.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -156,8 +157,8 @@ impl Tile {
 
     /// The pattern for the document pixel whose corner is `(x, y)` (the point [`render`] maps),
     /// filtered over the pixel's footprint in the tile when the placement shrinks it: `n × n`
-    /// taps centred on that point. One tap, exactly [`Tile::sample`], at 100 % and above.
-    /// Returns straight alpha.
+    /// taps from that corner, `1 / n` of a pixel apart ([`pixel_taps`]). One tap, exactly
+    /// [`Tile::sample`], at 100 % and above. Returns straight alpha.
     pub fn sample_area(&self, place: &Placement, x: f64, y: f64) -> [f32; 4] {
         let n = pixel_taps(place.inv_scale);
         if n == 1 {
@@ -207,15 +208,20 @@ impl Tile {
 const MAX_TAPS: usize = 8;
 
 /// Taps per axis for a placement whose inverse scale is `inv_scale`: one pixel covers
-/// `inv_scale` tile pixels, so that many taps (capped) box-filter it. 1 at 100 % and above.
+/// `inv_scale` tile pixels, and Reference averages the whole ones (rounded down, capped): 2 at
+/// 50 %, 4 at 25 %, 1 at 56 % and at 100 % and above. Measured on a 13 × 9 ramp tile (the
+/// pattern kit): 25 % and 50 % match Reference's fill within 1 level on every pixel, 56 % within
+/// 0.6 on average (a centred ceil(1 / scale) box was 30 levels off there, 37 at 50 %).
 fn pixel_taps(inv_scale: f64) -> usize {
     let s = inv_scale as f32;
-    if s.is_finite() && s > 1.0 { (s.ceil() as usize).min(MAX_TAPS) } else { 1 }
+    // A hair over the whole number, so 1 / 0.33333334 still counts 3 steps.
+    if s.is_finite() && s > 1.0 { ((s + 1e-4).floor() as usize).clamp(1, MAX_TAPS) } else { 1 }
 }
 
-/// Offset in document pixels of tap `i` of `n`, centred on the pixel's sample point.
+/// Offset in document pixels of tap `i` of `n`: from the pixel's corner (the point [`render`]
+/// maps), `1 / n` of a pixel apart, so the taps land on whole tile pixels at 50 % and 25 %.
 fn tap_offset(i: usize, n: usize) -> f64 {
-    (i as f64 + 0.5) / n as f64 - 0.5
+    i as f64 / n as f64
 }
 
 /// A premultiplied sample as straight alpha (through the CMYK projection when one is active).
@@ -377,6 +383,50 @@ mod tests {
         assert_eq!((row[0][0], row[1][0]), (0.0, 1.0));
         assert_eq!(pixel_taps(f64::NAN), 1);
         assert_eq!(pixel_taps(1e9), MAX_TAPS);
+    }
+
+    /// Reference's minification (the pattern kit's 13 × 9 ramp tile, a fill at 25 / 50 / 56 %):
+    /// a pixel averages the whole tile pixels it covers from its corner, `floor(1 / scale)` per
+    /// axis; at 56 % that is one bilinear tap at the corner.
+    #[test]
+    fn minified_patterns_average_whole_tile_pixels_from_the_corner() {
+        let mut s = Surface::new(PixelFormat::RGBA8);
+        for y in 0..9 {
+            for x in 0..13 {
+                s.fill_rect(Rect::new(x, y, x + 1, y + 1), &[x as f32 / 12.0, y as f32 / 8.0, ((x + y) % 3) as f32 / 2.0, 1.0]);
+            }
+        }
+        let p = Pattern::new("ramp", s, 13, 9);
+        let px = pattern_rgba(&p, ColorMode::Rgb);
+        let at = |x: i64, y: i64| px[(y.rem_euclid(9) * 13 + x.rem_euclid(13)) as usize];
+        let t = Tile::new(&p).unwrap();
+        for (scale, n) in [(0.5f32, 2i64), (0.25, 4)] {
+            let place = Placement::new(Rect::EMPTY, false, (0.0, 0.0), scale, 0.0);
+            let out = render(&t, &place, Rect::new(0, 0, 9, 7));
+            for y in 0..7i64 {
+                for x in 0..9i64 {
+                    let mut want = [0.0f32; 3];
+                    for j in 0..n {
+                        for i in 0..n {
+                            let q = at(x * n + i, y * n + j);
+                            (0..3).for_each(|k| want[k] += q[k] / (n * n) as f32);
+                        }
+                    }
+                    let got = out[(y * 9 + x) as usize];
+                    assert!((0..3).all(|k| (got[k] - want[k]).abs() < 1e-4), "{scale} ({x},{y}): {got:?} vs {want:?}");
+                }
+            }
+        }
+        // 56 %: one tap at the pixel's corner.
+        let place = Placement::new(Rect::EMPTY, false, (0.0, 0.0), 0.56, 0.0);
+        let out = render(&t, &place, Rect::new(0, 0, 9, 1));
+        for (x, got) in out.iter().enumerate() {
+            let (u, v) = place.map(x as f64, 0.0);
+            assert_eq!(*got, t.sample(u, v), "56 % x = {x}");
+        }
+        assert_eq!(pixel_taps(1.0 / f64::from(0.56f32)), 1);
+        assert_eq!(pixel_taps(1.0 / f64::from(1.0f32 / 3.0)), 3);
+        assert_eq!(pixel_taps(1.0 / f64::from(0.25f32)), 4);
     }
 
     #[test]
