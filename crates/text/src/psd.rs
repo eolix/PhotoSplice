@@ -18,16 +18,20 @@ use photosplice_psd::descriptor::{Descriptor, Id, UnicodeString, Value as D, Ver
 use crate::engine_data::{self as ed, Value as E};
 use crate::fonts::guess_from_postscript;
 
+mod fresh;
+pub use fresh::{fill_txt2_fonts, new_txt2};
+
 /// Parsed `TySh` contents.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TySh {
     pub transform: Affine,
     pub text: Descriptor,
     pub warp: Option<Descriptor>,
-    /// The trailing left, top, right, bottom: four big-endian `f32`s holding the `bounds`
-    /// rectangle (every Photoshop type layer of the oracle corpus; the spec's "4 × 8 bytes" is not
-    /// what Photoshop writes). Integers here read back as NaN and denormals, and Photoshop then
-    /// asks to update the layer and loses its warp when it does (Photoshop kit case 07).
+    /// The trailing left, top, right, bottom: four big-endian `f32`s, the `bounds` rectangle for
+    /// warped type and zeros otherwise (every type layer of the oracle corpus; the spec's "4 × 8
+    /// bytes" is not what Reference writes). Integers here read back as NaN and denormals, and
+    /// Reference then asks to update a warped layer and loses its warp when it does (Reference kit
+    /// case 07).
     pub bounds: [f32; 4],
 }
 
@@ -1886,8 +1890,8 @@ pub const MAX_TEXT_INDEX: i32 = 0xFFFF;
 /// Whether the document `Txt2` block is needed for `objects`: only a non-Metrics auto-kern mode
 /// (`Optical`) is exclusive to `Txt2` — EngineData's `AutoKerning` cannot distinguish Metrics from
 /// Optical — so a fresh document of ordinary Metrics text has nothing to put in the block.
-/// Writing Photoshop's empty `<< /0 << >> >>` stub anyway makes some readers fail
-/// (#3514); the export omits the block for such a document.
+/// Writing Reference's empty `<< /0 << >> >>` stub anyway makes some readers fail (#3514); the
+/// export writes a whole block made from the layers instead ([`new_txt2`]).
 pub fn needs_txt2(objects: &[(i32, &TextLayer)]) -> bool {
     objects.iter().any(|(_, l)| l.char_runs().iter().any(|r| r.style.kerning == Kerning::Optical))
 }
@@ -2350,7 +2354,11 @@ pub fn build_tysh(layer: &TextLayer, dpi: f32, ink: Option<[f32; 4]>) -> Vec<u8>
         (None, Some(old)) if enum_value(&old, "warpStyle").as_deref() == Some("warpNone") => Some(old),
         _ => None,
     };
-    write_tysh(&TySh { transform: layer.transform, text, warp, bounds: [l, t, r, b] })
+    // The trailing rectangle as Reference writes it: zeros for unwarped type (every unwarped type
+    // layer of the oracle corpus, Reference CS3 to 2026), the text-space bounds when warped.
+    let warped = warp.as_ref().is_some_and(|w| enum_value(w, "warpStyle").is_some_and(|s| s != "warpNone"));
+    let bounds = if warped { [l, t, r, b] } else { [0.0; 4] };
+    write_tysh(&TySh { transform: layer.transform, text, warp, bounds })
 }
 
 #[cfg(test)]

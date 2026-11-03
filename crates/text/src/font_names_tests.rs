@@ -405,3 +405,20 @@ fn postscript_name_of_a_named_instance_lays_out_at_that_instance() {
     assert!(explicit < family * 0.8, "wdth 75 is narrower: {explicit} vs {family}");
     assert!((instance - explicit).abs() < 0.5, "instance: {instance} px, its axes: {explicit} px, default instance: {family} px");
 }
+
+/// A variable font's named instance, as a PSD names a type layer set in it (variations prefix and
+/// subfamily), resolves to the installed family with the instance's weight, and the `Txt2` font
+/// list gets the instance's axis values; another family's name with the same style doesn't.
+/// Uses macOS's STIX Two Text (skipped where the file isn't there).
+#[test]
+fn variable_instance_names_resolve_to_their_family() {
+    let Ok(bytes) = std::fs::read("/System/Library/Fonts/Supplemental/STIXTwoText.ttf") else { return };
+    let mut db = FontDb::new();
+    db.register_font_data(bytes);
+    let r = db.resolve_postscript("STIXTwoTextRoman-Bold");
+    assert_eq!((r.family.as_str(), r.weight, r.exact), ("STIX Two Text", 700, true));
+    assert!(!db.resolve_postscript("NoSuchFamily-Bold").exact);
+    let d = db.txt2_font_details("STIX Two Text Roman", "STIXTwoTextRoman-Medium", &[]);
+    assert_eq!(d.axes, vec![500.0]);
+    assert!(d.version.is_some());
+}

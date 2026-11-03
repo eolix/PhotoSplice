@@ -113,12 +113,12 @@ struct Ex {
     text: TextSync,
 }
 
-/// The type layers as written, against the document's `Txt2` (Photoshop's document-wide copy
+/// The type layers as written, against the document's `Txt2` (Reference's document-wide copy
 /// of every type layer, which it reads in preference to each layer's `TySh`: a text edit left
-/// with a stale `Txt2` reverts in Photoshop; Photoshop-verified 2026-10-12). Edited layers get
-/// their objects updated ([`photosplice_text::psd::patch_txt2`]); when that can't be done, `Txt2`
-/// is dropped and Photoshop rebuilds it from the layers' `TySh`, losing what only `Txt2` holds
-/// (text on a path becomes box text, optical kerning metrics).
+/// with a stale `Txt2` reverts in Reference; Reference-verified 2026-10-12). Edited layers get
+/// their objects updated ([`photosplice_text::psd::patch_txt2`]); when that can't be done, the
+/// file's `Txt2` is dropped and one is made from the layers ([`TextSync::fresh_txt2`]), losing
+/// what only the file's held (text on a path becomes point text).
 #[derive(Default)]
 struct TextSync {
     /// Type layers whose `TySh` differs from the one they were read with (edited).
@@ -137,6 +137,9 @@ struct TextSync {
     sources: Vec<Vec<u8>>,
     /// The number of type layers written.
     layers: usize,
+    /// Every type layer written, with its `TySh` as written: what a fresh `Txt2` is made from
+    /// (see [`TextSync::fresh_txt2`]).
+    written: Vec<(photosplice_doc::TextLayer, Vec<u8>)>,
 }
 
 struct TextAppend {
@@ -189,6 +192,53 @@ impl TextSync {
             let templates: Vec<&[u8]> = a.read.iter().chain(&self.sources).map(Vec::as_slice).collect();
             photosplice_text::psd::append_txt2(&mut txt2, &pristine, &a.layer, &templates, &a.written, dpi)?;
         }
+        // Fonts the edits brought into the block's list get what Reference writes beside a name
+        // there (a variable font's instance axes, the version), which only the font knows.
+        let listed = pristine.path(&["0", "1", "0"]).and_then(photosplice_text::engine_data::Value::as_array).map_or(0, <[_]>::len);
+        let layers: Vec<&photosplice_doc::TextLayer> = self.edits.iter().map(|e| &e.layer).chain(self.appends.iter().map(|a| &a.layer)).collect();
+        photosplice_text::psd::fill_txt2_fonts(&mut txt2, listed, &layers, &mut font_details);
+        Some(photosplice_text::engine_data::write_txt2(&txt2))
+    }
+
+    /// A `Txt2` made from the type layers alone, for a document that writes none of its own (it
+    /// had none, or its block could not take the layers and is dropped; `previous` is that
+    /// block): one text object per `TySh` of `records`, in their order, each renumbered to its
+    /// object when the block is written. Reference reads type from `Txt2` when a file has one,
+    /// and only there finds a variable font's instance (without it the type opened in the font's
+    /// default instance: Reference kit 7, `SourceSerifRoman_389.344wght` for
+    /// `SourceSerifRoman-Regular`) and Optical kerning (it reopened as Metrics). Reference opens
+    /// the block as made here, composes each object's layout as ours and keeps every run's font,
+    /// instance, size, underline, kerning mode, alignment and orientation (Txt2 kit, 2026-11:
+    /// point, box, vertical, grouped, mixed-run and two-layer type, all 13 files). `None`, with
+    /// `records` untouched, when there is no type or a layer can't be described.
+    fn fresh_txt2(&self, previous: Option<&[u8]>, records: &mut [LayerRecord]) -> Option<Vec<u8>> {
+        if self.layers == 0 || self.written.is_empty() {
+            return None;
+        }
+        let mut renumbered: Vec<((usize, usize), &photosplice_doc::TextLayer, Vec<u8>)> = Vec::new();
+        // Records come in the order the layers were written: the next one is tried first.
+        let mut next = 0usize;
+        for (ri, r) in records.iter().enumerate() {
+            for (bi, b) in r.blocks.iter().enumerate().filter(|(_, b)| b.key == *b"TySh") {
+                // The record holds the block padded to four bytes inside its length.
+                let same = |w: &[u8]| b.data.get(..w.len()) == Some(w) && b.data.get(w.len()..).is_some_and(|pad| pad.len() < 4 && pad.iter().all(|x| *x == 0));
+                let at = (next..self.written.len()).chain(0..next).find(|i| self.written.get(*i).is_some_and(|(_, w)| same(w)))?;
+                next = at + 1;
+                let (layer, _) = self.written.get(at)?;
+                let index = i64::try_from(renumbered.len()).ok()?;
+                let mut data = photosplice_text::psd::set_text_index(&b.data, index)?;
+                data.resize(data.len().next_multiple_of(4), 0);
+                renumbered.push(((ri, bi), layer, data));
+            }
+        }
+        let objects: Vec<(&photosplice_doc::TextLayer, &[u8])> = renumbered.iter().map(|(_, l, w)| (*l, w.as_slice())).collect();
+        let previous = previous.and_then(photosplice_text::psd::parse_txt2);
+        let txt2 = photosplice_text::psd::new_txt2(&objects, previous.as_ref(), &mut font_details)?;
+        for ((ri, bi), _, w) in renumbered {
+            if let Some(b) = records.get_mut(ri).and_then(|r| r.blocks.get_mut(bi)) {
+                b.data = w;
+            }
+        }
         Some(photosplice_text::engine_data::write_txt2(&txt2))
     }
 
@@ -207,6 +257,13 @@ impl TextSync {
             }
         }
     }
+}
+
+/// What the document `Txt2` font list says beside a face's name (see
+/// [`photosplice_text::FontDb::txt2_font_details`]), from the shared text engine's fonts.
+fn font_details(style: &photosplice_doc::text::CharStyle, ps: &str) -> photosplice_text::fonts::FontDetails {
+    let mut engine = photosplice_text::shared().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    engine.fonts.txt2_font_details(&style.font_family, ps, &style.variations)
 }
 
 /// The layer to write as Photoshop's Background: a pixel layer with no transparency channel
@@ -910,6 +967,9 @@ impl Ex {
                 }
                 if let Some(i) = out.and_then(|d| photosplice_text::psd::text_index(d)) {
                     self.text.indices.push(i);
+                }
+                if let Some(o) = out {
+                    self.text.written.push((t.clone(), o.to_vec()));
                 }
                 set_principal(&mut raw, &[b"TySh"], out);
                 if !raw.iter().any(|(k, _)| k == b"TySh") {
@@ -2284,6 +2344,15 @@ fn document_to_psd_sized(doc: &Document, opts: &PsdExportOptions, depth: u32, ct
             continue;
         }
         global_blocks.push(global_block(block_signature(*sig, *key, version), *key, &data));
+    }
+    // Type layers with no `Txt2` written for them get one made from the layers, where Reference
+    // writes it: after the pattern and merged-transparency blocks.
+    if !global_blocks.iter().any(|b| b.key == *b"Txt2") {
+        let previous = doc.metadata.psd_global_blocks.iter().find(|(_, k, _)| k == b"Txt2").map(|(_, _, d)| d.as_slice());
+        if let Some(txt2) = ex.text.fresh_txt2(previous, &mut ex.records) {
+            let at = global_blocks.iter().rposition(|b| matches!(&b.key, b"Mtrn" | b"Mt16" | b"Mt32" | b"Patt" | b"Pat2" | b"Pat3")).map_or(0, |i| i + 1);
+            global_blocks.insert(at, global_block(block_signature(*b"8BIM", *b"Txt2", version), *b"Txt2", &txt2));
+        }
     }
     let comps_resource = ex.comps.is_some().then(|| crate::comps_map::write_comps_resource(doc));
     let (slices_resource, slices_warning) = crate::slices_map::export_resource(doc, &ex.layer_ids);

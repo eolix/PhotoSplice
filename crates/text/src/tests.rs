@@ -2007,8 +2007,9 @@ fn translate_tysh_moves_only_the_translation() {
     assert!(crate::psd::translate_tysh(&tysh[..40], 1.0, 1.0).is_none(), "a truncated block is refused");
 }
 
-/// The four values after the `TySh` warp descriptor are big-endian f32 holding the text-space
-/// `bounds` (every type layer of the oracle corpus, warped or not).
+/// The four values after the `TySh` warp descriptor are big-endian f32: the text-space `bounds`
+/// for warped type, zeros for unwarped type (every type layer of the oracle corpus: the 5 warped
+/// ones, and 54 unwarped from Reference 2026 and 155 from CS3 to 2023).
 #[test]
 fn tysh_trailing_bounds_are_f32() {
     use photosplice_doc::text::TextWarp;
@@ -2018,7 +2019,7 @@ fn tysh_trailing_bounds_are_f32() {
     };
     let ink = [0.0, -34.316406, 288.90625, 15.058594];
     let plain = crate::psd::build_tysh(&point("Type", 20.0), 72.0, Some(ink));
-    assert_eq!(tail(&plain), ink);
+    assert_eq!(tail(&plain), [0.0; 4]);
     let warped = TextLayer {
         warp: Some(TextWarp { style: "warpArc".into(), value: 50.0, horizontal_distortion: 0.0, vertical_distortion: 0.0, horizontal: true }),
         ..point("Type", 20.0)

@@ -79,18 +79,18 @@ fn manual_and_off_kerning_round_trip_through_psd() {
     assert!(f.iter().enumerate().filter(|(j, _)| ![1, 4, 8, 9, 10].contains(j)).all(|(_, x)| *x == (true, 0)), "{f:?}");
 }
 
-/// Whether a saved file carries a document `Txt2` block.
-fn saves_txt2(bytes: &[u8]) -> bool {
-    photosplice_psd::PsdFile::from_bytes(bytes).unwrap().global_blocks.iter().any(|b| &b.key == b"Txt2")
+/// A saved file's document `Txt2` block, parsed.
+fn saved_txt2(bytes: &[u8]) -> Option<E> {
+    let f = photosplice_psd::PsdFile::from_bytes(bytes).unwrap();
+    f.global_blocks.iter().find(|b| &b.key == b"Txt2").and_then(|b| photosplice_text::psd::parse_txt2(&b.data))
 }
 
-/// The automatic mode (Metrics/Optical) lives in the document `Txt2` block, which PhotoSplice
-/// keeps and updates from the file (see `psd_txt2_sync`) but never invents: Reference reads
-/// `Txt2` in preference to each layer's `TySh`, so a made-up one could misplace the layers. A
-/// fresh document's Optical runs therefore reopen as Metrics (EngineData's `AutoKerning` covers
-/// both), with every run boundary and manual kern intact.
+/// The automatic mode (Metrics/Optical) lives in the document `Txt2` block, which EngineData's
+/// `AutoKerning` can't tell apart: a fresh document gets a `Txt2` made from its layers (Reference
+/// kept Optical from it: Txt2 kit, 2026-11), so its Optical runs reopen as Optical, with every run
+/// boundary and manual kern intact.
 #[test]
-fn fresh_optical_kerning_reopens_as_metrics_without_a_txt2() {
+fn fresh_optical_kerning_round_trips_through_a_made_txt2() {
     use Kerning::{Metrics as M, Optical as P};
     let t1 = layer("AVATAR", &[(4, P, 0.0), (2, M, 0.0)]);
     let t2 = layer("Wave", &[(2, M, 0.0), (2, P, 0.0)]);
@@ -101,20 +101,19 @@ fn fresh_optical_kerning_reopens_as_metrics_without_a_txt2() {
         doc.layers.push(Layer::new(name, LayerContent::Text(t)));
     }
     let bytes = photosplice_io::export(&doc, "k.psd", &Default::default()).unwrap().bytes;
-    assert!(!saves_txt2(&bytes));
+    assert_eq!(saved_txt2(&bytes).and_then(|t| t.path(&["1", "1"]).and_then(E::as_array).map(<[E]>::len)), Some(2));
     let back = photosplice_io::import("k.psd", &bytes).unwrap().document;
     for (want, l) in [(&t1, &back.layers[0]), (&t2, &back.layers[1])] {
         let LayerContent::Text(b) = &l.content else { panic!("not text") };
-        let want: Vec<_> = chars(want).into_iter().map(|(m, k)| (if m == P { M } else { m }, k)).collect();
-        assert_eq!(chars(b), want, "{}", l.name);
+        assert_eq!(chars(b), chars(want), "{}", l.name);
     }
 }
 
-/// #3514: a fresh document writes no document `Txt2` block, Metrics or Optical: Reference never
-/// writes an empty `<< /0 << >> >>` stub, and some readers reject it.
+/// #3514: a fresh document never writes Reference's empty `<< /0 << >> >>` stub, which some
+/// readers reject: its `Txt2`, Metrics or Optical, is a whole block (font list, sheets, one
+/// object and frame per layer).
 #[test]
-fn fresh_metrics_text_writes_no_txt2_block() {
-    use photosplice_doc::text::Kerning;
+fn fresh_type_writes_a_whole_txt2_never_a_stub() {
     let save = |kerning: Kerning| {
         let t = layer("AV", &[(2, kerning, 0.0)]);
         let mut doc = Document::new("k", photosplice_geom::Size::new(64, 32), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
@@ -123,12 +122,19 @@ fn fresh_metrics_text_writes_no_txt2_block() {
         doc.layers.push(Layer::new("t", LayerContent::Text(r)));
         photosplice_io::export(&doc, "k.psd", &Default::default()).unwrap().bytes
     };
-    assert!(!saves_txt2(&save(Kerning::Metrics)), "a plain Metrics layer must not write the empty Txt2 stub");
-    assert!(!saves_txt2(&save(Kerning::Optical)), "no Txt2 is invented for an Optical layer either");
+    for kerning in [Kerning::Metrics, Kerning::Optical] {
+        let txt2 = saved_txt2(&save(kerning)).expect("a Txt2");
+        assert!(txt2.path(&["0", "1", "0"]).and_then(E::as_array).is_some_and(|f| !f.is_empty()), "{kerning:?}: a font list");
+        assert_eq!(txt2.path(&["0", "8", "0"]).and_then(E::as_array).map(<[E]>::len), Some(1), "{kerning:?}: one frame");
+        let object = txt2.path(&["1", "1"]).and_then(E::as_array).and_then(|o| o.first()).cloned().expect("one object");
+        assert_eq!(object.path(&["0", "0"]).and_then(E::as_str), Some("AV\r"));
+        assert!(object.path(&["1", "2"]).is_some(), "{kerning:?}: a view");
+    }
 }
 
 /// A file-controlled `TextIndex` must not size the save: `i32::MAX` writes no `Txt2` slots for
-/// it, and the document still saves and reopens with its text.
+/// it (the layer is renumbered to its object, 0), and the document still saves and reopens with
+/// its text.
 #[test]
 fn hostile_text_index_never_sizes_the_save() {
     let t = layer("AV", &[(1, Kerning::Metrics, 0.0), (1, Kerning::Optical, 0.0)]);
@@ -139,7 +145,10 @@ fn hostile_text_index_never_sizes_the_save() {
     doc.layers.push(Layer::new("hostile", LayerContent::Text(r)));
     let bytes = photosplice_io::export(&doc, "k.psd", &Default::default()).unwrap().bytes;
     assert!(bytes.len() < 1 << 20, "a file-controlled TextIndex sized the save: {} bytes", bytes.len());
-    assert!(!saves_txt2(&bytes));
+    assert_eq!(saved_txt2(&bytes).and_then(|t| t.path(&["1", "1"]).and_then(E::as_array).map(<[E]>::len)), Some(1));
+    let f = photosplice_psd::PsdFile::from_bytes(&bytes).unwrap();
+    let tysh = f.layers().iter().find_map(|l| l.block(b"TySh")).map(|b| b.data.clone()).unwrap();
+    assert_eq!(photosplice_text::psd::text_index(&tysh), Some(0));
     let back = photosplice_io::import("k.psd", &bytes).unwrap().document;
     let LayerContent::Text(b) = &back.layers[0].content else { panic!("not text") };
     assert_eq!(b.text, "AV");
