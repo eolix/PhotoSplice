@@ -31,7 +31,8 @@ pub use blend_if::{BlendIf, BlendRange, Knockout};
 pub use comps::{Artboard, ArtboardBackground, CompAppearance, CompLayerState, LayerComp};
 pub use effects::{
     Bevel, BevelContour, BevelStyle, BevelTechnique, BevelTexture, Contour, Effect, FxCommon, FxPaint, GlobalLight, Glow, GlowSource, GlowTechnique, Gradient,
-    GradientStyle, Satin, Shadow, StrokeFx, StrokePosition,
+    GradientColorStop, GradientForm, GradientMethod, GradientNoise, GradientOpacityStop, GradientSource, GradientStopKind, GradientStyle, NoiseModel, Satin,
+    Shadow, StrokeFx, StrokePosition,
 };
 pub use mode::{ColorTable, Duotone, DuotoneInk, StackMode};
 pub use pattern::Pattern;
@@ -362,6 +363,11 @@ pub enum Fill {
         /// "Align with layer": lay out in the layer's frame (its masks' bounds), else the canvas.
         #[serde(default = "effects::yes")]
         align: bool,
+        /// The gradient as the file defined it, which `stops`, `opacity_stops` and `midpoints`
+        /// were read or baked from ([`GradientSource`]); `None` for gradients made here. PSD data:
+        /// not serialized (the native format and the control channel carry the stops alone).
+        #[serde(skip)]
+        source: Option<Box<GradientSource>>,
     },
     /// A pattern from [`Document::patterns`] (looked up by `id`, then `name`).
     Pattern {
@@ -385,7 +391,19 @@ impl Fill {
     /// A gradient fill with the classic settings: opaque stops at their alpha, 50 % midpoints,
     /// centred, no dither, aligned with the layer.
     pub fn gradient(stops: Vec<(f32, Color)>, angle: f32, scale: f32, style: GradientStyle, reverse: bool) -> Fill {
-        Fill::Gradient { stops, angle, scale, style, reverse, opacity_stops: Vec::new(), midpoints: Vec::new(), offset: (0.0, 0.0), dither: false, align: true }
+        Fill::Gradient {
+            stops,
+            angle,
+            scale,
+            style,
+            reverse,
+            opacity_stops: Vec::new(),
+            midpoints: Vec::new(),
+            offset: (0.0, 0.0),
+            dither: false,
+            align: true,
+            source: None,
+        }
     }
 
     /// This fill with its colours in `mode`'s model (see [`Color::in_mode`]): a fill layer's

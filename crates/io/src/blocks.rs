@@ -325,6 +325,10 @@ pub(crate) fn gradient_method(d: &Descriptor) -> Option<&[u8]> {
 /// to linear sRGB, which is Classic; kept, the method bent the baked transparency again on every
 /// open ([`crate::gradient_bake::bake_opacity`] is not idempotent for those two).
 pub(crate) fn with_baked_method(base: &Descriptor, mut over: Descriptor) -> Descriptor {
+    // A gradient written from its definition names its own method.
+    if over.get("gradientsInterpolationMethod").is_some() || over.get("gs99").is_some() {
+        return over;
+    }
     for key in ["gradientsInterpolationMethod", "gs99"] {
         if let Some(Value::Enumerated { type_id, value }) = base.get(key)
             && (value.is("Perc") || value.is("Lnr "))
@@ -610,6 +614,7 @@ pub fn fill_from_desc(key: &[u8; 4], d: &Descriptor) -> Option<Fill> {
                 offset,
                 dither: bool_of(d, "Dthr"),
                 align: !matches!(d.get("Algn"), Some(Value::Boolean(false))),
+                source: get_desc(d, "Grad").map(|g| Box::new(crate::gradient_source::from_desc(g, gradient_method(d)))),
             })
         }
         b"PtFl" => {
@@ -679,34 +684,62 @@ pub fn fill_to_desc_onto(f: &Fill, old: Option<(&[u8; 4], &[u8])>) -> ([u8; 4], 
     (k, merged)
 }
 
-/// A fill as (block key, descriptor with class `null`).
+/// A fill as (block key, descriptor with class `null`). A gradient is written as the definition
+/// it was read from (its `source`) while that still reads back as its stops (they
+/// weren't edited), so Reference renders it as it did; else as its (baked) stops.
 pub fn fill_to_desc(f: &Fill) -> ([u8; 4], Descriptor) {
+    if let Fill::Gradient { source: Some(src), stops, opacity_stops, midpoints, .. } = f {
+        let d = gradient_fill_desc(f, crate::gradient_source::to_desc(src), src.method);
+        let same = match fill_from_desc(b"GdFl", &d) {
+            Some(Fill::Gradient { stops: s, opacity_stops: o, midpoints: m, .. }) => {
+                crate::gradient_source::same_color_stops(&s, stops)
+                    && crate::gradient_source::same_opacity_stops(&o, opacity_stops)
+                    && crate::gradient_source::same_floats(&m, midpoints)
+            }
+            _ => false,
+        };
+        if same {
+            return (*b"GdFl", d);
+        }
+    }
+    fill_to_desc_plain(f)
+}
+
+/// A gradient fill's `GdFl` descriptor around `grad` (its `Grdn`), naming `method` first as
+/// Reference does.
+fn gradient_fill_desc(f: &Fill, grad: Descriptor, method: Option<photosplice_doc::GradientMethod>) -> Descriptor {
+    let mut d = Descriptor::new("null");
+    if let Some(m) = method {
+        d = d.with("gradientsInterpolationMethod", crate::gradient_source::method_value(m));
+    }
+    let Fill::Gradient { angle, scale, style, reverse, offset, dither, align, .. } = f else { return d };
+    let prc = |v: f32| Value::UnitFloat { unit: *b"#Prc", value: f64::from(v * 100.0) };
+    d = d.with("Angl", Value::UnitFloat { unit: *b"#Ang", value: f64::from(*angle) }).with("Type", gradient_style_value(*style));
+    // Reference writes the scale only when it isn't 100 %.
+    if *scale != 1.0 {
+        d = d.with("Scl ", prc(*scale));
+    }
+    d = d.with("Grad", Value::Descriptor(grad));
+    if *reverse {
+        d = d.with("Rvrs", Value::Boolean(true));
+    }
+    if *dither {
+        d = d.with("Dthr", Value::Boolean(true));
+    }
+    if !*align {
+        d = d.with("Algn", Value::Boolean(false));
+    }
+    if *offset != (0.0, 0.0) {
+        d = d.with("Ofst", Value::Descriptor(Descriptor::new("Pnt ").with("Hrzn", prc(offset.0)).with("Vrtc", prc(offset.1))));
+    }
+    d
+}
+
+/// [`fill_to_desc`] for solid and pattern fills.
+fn fill_to_desc_plain(f: &Fill) -> ([u8; 4], Descriptor) {
     match f {
         Fill::Solid(c) => (*b"SoCo", Descriptor::new("null").with("Clr ", Value::Descriptor(color_to_desc_with_pc_alpha(c)))),
-        Fill::Gradient { stops, angle, scale, style, reverse, opacity_stops, midpoints, offset, dither, align } => {
-            let prc = |v: f32| Value::UnitFloat { unit: *b"#Prc", value: f64::from(v * 100.0) };
-            let mut d = Descriptor::new("null")
-                .with("Angl", Value::UnitFloat { unit: *b"#Ang", value: f64::from(*angle) })
-                .with("Type", gradient_style_value(*style));
-            // Photoshop writes the scale only when it isn't 100 %.
-            if *scale != 1.0 {
-                d = d.with("Scl ", prc(*scale));
-            }
-            d = d.with("Grad", Value::Descriptor(gradient_desc_with(stops, opacity_stops, midpoints)));
-            if *reverse {
-                d = d.with("Rvrs", Value::Boolean(true));
-            }
-            if *dither {
-                d = d.with("Dthr", Value::Boolean(true));
-            }
-            if !*align {
-                d = d.with("Algn", Value::Boolean(false));
-            }
-            if *offset != (0.0, 0.0) {
-                d = d.with("Ofst", Value::Descriptor(Descriptor::new("Pnt ").with("Hrzn", prc(offset.0)).with("Vrtc", prc(offset.1))));
-            }
-            (*b"GdFl", d)
-        }
+        Fill::Gradient { stops, opacity_stops, midpoints, .. } => (*b"GdFl", gradient_fill_desc(f, gradient_desc_with(stops, opacity_stops, midpoints), None)),
         Fill::Pattern { name, scale, id, angle, link, phase } => {
             let d = Descriptor::new("null")
                 .with("Scl ", Value::UnitFloat { unit: *b"#Prc", value: f64::from(scale * 100.0) })
@@ -1265,6 +1298,7 @@ mod tests {
             offset: (0.0, 0.0),
             dither: false,
             align: true,
+            source: None,
         };
         let (k, d) = super::fill_to_desc(&fill);
         let Fill::Gradient { stops, .. } = super::fill_from_desc(&k, &d).unwrap() else { panic!("grad") };
@@ -1472,11 +1506,16 @@ mod tests {
                 offset: (0.125, -0.375),
                 dither: true,
                 align: false,
+                source: None,
             },
             Fill::Pattern { name: "Bubbles".into(), scale: 0.5, id: "abc".into(), angle: 30.0, link: false, phase: (3.0, -2.0) },
         ] {
             let (k, d) = write_fill(&f);
-            let back = parse_fill(&k, &d).unwrap();
+            let mut back = parse_fill(&k, &d).unwrap();
+            // The definition a read attaches isn't part of a fill made here.
+            if let Fill::Gradient { source, .. } = &mut back {
+                *source = None;
+            }
             match (&f, &back) {
                 (Fill::Solid(a), Fill::Solid(b)) => {
                     assert_eq!(a.mode, b.mode);
@@ -1491,7 +1530,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod more_tests {
+pub(crate) mod more_tests {
     use super::*;
 
     #[test]
@@ -2045,16 +2084,20 @@ mod more_tests {
             .with("Type", Value::Enumerated { type_id: Id::new("GrdT"), value: Id::new("Lnr ") })
             .with("Grad", Value::Descriptor(grad.clone()));
         let data = VersionedDescriptor::new(base).to_bytes();
-        let Some(Fill::Gradient { mut angle, stops, opacity_stops, midpoints, style, scale, reverse, offset, dither, align }) = parse_fill(b"GdFl", &data) else { panic!() };
+        let Some(Fill::Gradient { mut angle, stops, opacity_stops, midpoints, style, scale, reverse, offset, dither, align, source }) =
+            parse_fill(b"GdFl", &data)
+        else {
+            panic!()
+        };
         angle += 30.0;
-        let edited = Fill::Gradient { angle, stops, opacity_stops, midpoints, style, scale, reverse, offset, dither, align };
+        let edited = Fill::Gradient { angle, stops, opacity_stops, midpoints, style, scale, reverse, offset, dither, align, source };
         let (_, d) = fill_to_desc_onto(&edited, Some((b"GdFl", &data)));
         assert_eq!(get_desc(&d, "Grad"), Some(&grad));
         assert!(matches!(d.get("Angl"), Some(Value::UnitFloat { value, .. }) if (*value - 120.0).abs() < 1e-3));
         // Edited stops are written from the model.
-        let Fill::Gradient { mut stops, angle, opacity_stops, midpoints, style, scale, reverse, offset, dither, align } = edited else { panic!() };
+        let Fill::Gradient { mut stops, angle, opacity_stops, midpoints, style, scale, reverse, offset, dither, align, source } = edited else { panic!() };
         stops[0].1 = Color::rgb(1.0, 0.0, 0.0);
-        let changed = Fill::Gradient { angle, stops, opacity_stops, midpoints, style, scale, reverse, offset, dither, align };
+        let changed = Fill::Gradient { angle, stops, opacity_stops, midpoints, style, scale, reverse, offset, dither, align, source };
         let (_, d) = fill_to_desc_onto(&changed, Some((b"GdFl", &data)));
         assert_ne!(get_desc(&d, "Grad"), Some(&grad));
     }
@@ -2088,12 +2131,28 @@ mod more_tests {
             offset: (0.25, 0.5),
             dither: true,
             align: false,
+            source: None,
         };
         let (k, data) = write_fill(&set);
         let Fill::Gradient { stops, angle, style, opacity_stops, midpoints, .. } = set.clone() else { panic!() };
-        let plain = Fill::Gradient { stops, angle, scale: 1.0, style, reverse: false, opacity_stops, midpoints, offset: (0.0, 0.0), dither: false, align: true };
+        let plain = Fill::Gradient {
+            stops,
+            angle,
+            scale: 1.0,
+            style,
+            reverse: false,
+            opacity_stops,
+            midpoints,
+            offset: (0.0, 0.0),
+            dither: false,
+            align: true,
+            source: None,
+        };
         let (_, d) = fill_to_desc_onto(&plain, Some((&k, &data)));
-        let back = parse_fill(&k, &VersionedDescriptor::new(d).to_bytes()).unwrap();
+        let mut back = parse_fill(&k, &VersionedDescriptor::new(d).to_bytes()).unwrap();
+        if let Fill::Gradient { source, .. } = &mut back {
+            *source = None;
+        }
         assert_eq!(back, plain);
         // No `Scl` where the file had none and the scale is 100 %.
         let (_, d) = fill_to_desc_onto(&plain, Some((&k, &write_fill(&plain).1)));
@@ -2131,5 +2190,43 @@ mod more_tests {
         let Some(Value::List(l)) = m.get("list") else { panic!() };
         let Value::Descriptor(pt) = &l[0] else { panic!() };
         assert_eq!(pt.items.len(), 2);
+    }
+
+    /// A Reference noise gradient fill, as psd-tools noise-gradient-rgb.psd stores one.
+    pub(crate) fn noise_gdfl() -> Descriptor {
+        let list = |v: [f64; 4]| Value::List(v.iter().map(|x| Value::Double(*x)).collect());
+        let grad = Descriptor::new("Grdn")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul("Custom")))
+            .with("GrdF", Value::Enumerated { type_id: Id::new("GrdF"), value: Id::new("ClNs") })
+            .with("ShTr", Value::Boolean(false))
+            .with("VctC", Value::Boolean(false))
+            .with("ClrS", Value::Enumerated { type_id: Id::new("ClrS"), value: Id::new("RGBC") })
+            .with("RndS", Value::Integer(1_234_567))
+            .with("Smth", Value::Integer(2048))
+            .with("Mnm ", list([79.998779296875, 39.9993896484375, 20.001220703125, 100.0]))
+            .with("Mxm ", list([79.998779296875, 39.9993896484375, 20.001220703125, 100.0]));
+        Descriptor::new("null")
+            .with("gradientsInterpolationMethod", Value::Enumerated { type_id: Id::new("gradientInterpolationMethodType"), value: Id::new("Gcls") })
+            .with("Angl", Value::UnitFloat { unit: *b"#Ang", value: 90.0 })
+            .with("Type", Value::Enumerated { type_id: Id::new("GrdT"), value: Id::new("Lnr ") })
+            .with("Grad", Value::Descriptor(grad))
+    }
+
+    /// A noise gradient fill is written fresh as its noise settings, not as the thinned stops of
+    /// its generated ramp (round-trip kit 8: 17–41/255 off); edited, as its stops.
+    #[test]
+    fn fresh_noise_gradient_fill_is_written_as_its_definition() {
+        let d = noise_gdfl();
+        let fill = fill_from_desc(b"GdFl", &d).unwrap();
+        let (_, back) = fill_to_desc(&fill);
+        assert_eq!(get_desc(&back, "Grad"), get_desc(&d, "Grad"));
+        assert_eq!(back.get("gradientsInterpolationMethod"), d.get("gradientsInterpolationMethod"));
+        let mut edited = fill;
+        if let Fill::Gradient { stops, .. } = &mut edited {
+            stops[100].1 = Color::rgb(0.0, 1.0, 0.0);
+        }
+        let (_, back) = fill_to_desc(&edited);
+        assert!(matches!(get_desc(&back, "Grad").and_then(|g| enum_of(g, "GrdF")), Some(b"CstS")));
+        assert!(back.get("gradientsInterpolationMethod").is_none());
     }
 }

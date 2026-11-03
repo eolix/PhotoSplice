@@ -108,6 +108,7 @@ pub fn rich_doc(mode: ColorMode, depth: SampleType) -> Document {
             offset: (0.1, -0.2),
             dither: true,
             align: false,
+            source: None,
         }),
     );
 

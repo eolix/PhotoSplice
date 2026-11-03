@@ -10,8 +10,8 @@
 //! that cannot be read (noise gradients, profile lookups, CMYK channel mixers, unknown versions)
 //! stay [`Adjustment::Unsupported`] and are written back verbatim.
 
-use photosplice_doc::Adjustment;
 use photosplice_doc::adjust::{CURVE_MAP_LEN, CurvePoint, HueRange, LevelsChannel, ToneSpace, curve_map, curve_map_outputs};
+use photosplice_doc::{Adjustment, GradientColorStop, GradientForm, GradientNoise, GradientOpacityStop, GradientSource, GradientStopKind, NoiseModel};
 use photosplice_psd::descriptor::{Descriptor, Value, VersionedDescriptor};
 
 /// All PSD adjustment keys recognized as adjustment layers.
@@ -301,13 +301,23 @@ fn parse_gradient_map(d: &[u8]) -> Option<Adjustment> {
         _ => return None,
     };
     // The gradient's name (UTF-16 units); checked, as `len * 2` overflows a 32-bit `usize`.
-    at = (be32(d, at)? as usize).checked_mul(2)?.checked_add(at + 4)?;
+    let name_units = be32(d, at)? as usize;
+    let name_at = at + 4;
+    at = name_units.checked_mul(2)?.checked_add(at + 4)?;
+    let name: Vec<u16> = (0..name_units).map_while(|k| be16(d, name_at + 2 * k)).take_while(|u| *u != 0).collect();
+    let mut source = GradientSource {
+        name: String::from_utf16_lossy(&name),
+        method: crate::gradient_source::method_from_code(method),
+        form: GradientForm::Solid,
+        ..GradientSource::default()
+    };
     let n = usize::from(be16(d, at)?);
     at += 2;
     let mut stops = Vec::with_capacity(n);
     let mut mids = Vec::with_capacity(n);
     for _ in 0..n {
-        let loc = (be32(d, at)? as f32 / 4096.0).clamp(0.0, 1.0);
+        let raw_loc = be32(d, at)? as f32 / 4096.0;
+        let loc = raw_loc.clamp(0.0, 1.0);
         let mid = be32(d, at + 4)? as f32 / 100.0;
         let raw = [be16(d, at + 10)?, be16(d, at + 12)?, be16(d, at + 14)?, be16(d, at + 16)?];
         let n = |k: usize| f32::from(raw[k]) / 65535.0;
@@ -321,15 +331,25 @@ fn parse_gradient_map(d: &[u8]) -> Option<Adjustment> {
             space @ (0 | 2 | 7 | 8) => crate::channel_map::decode_color(space, raw),
             _ => return None,
         };
+        source.colors.push(GradientColorStop { location: raw_loc, midpoint: mid, color, kind: GradientStopKind::User });
         stops.push((loc, color));
         mids.push(mid);
         at += 20;
     }
     let nt = usize::from(be16(d, at)?);
+    for k in 0..nt {
+        let o = at + 2 + k * 10;
+        let (Some(location), Some(midpoint), Some(opacity)) = (be32(d, o), be32(d, o + 4), be16(d, o + 8)) else { break };
+        source.opacity.push(GradientOpacityStop { location: location as f32 / 4096.0, midpoint: midpoint as f32 / 100.0, opacity: f32::from(opacity) / 255.0 });
+    }
     at += 2 + nt * 10 + 2; // transparency stops, expansion count
-    // Then smoothness, a length (32), the form (1 = noise) and the noise settings.
+    // Then smoothness, a length (32), the form (1 = noise) and the noise settings (which a solid
+    // gradient carries too: the dialog's last ones).
+    source.smoothness = f32::from(be16(d, at).unwrap_or(0)) / 4096.0;
+    source.noise = gradient_map_noise(d, at + 6);
     if be16(d, at + 4) == Some(1) {
-        return parse_noise_gradient_map(d, at + 6, reverse, dither);
+        source.form = GradientForm::Noise;
+        return parse_noise_gradient_map(d, at + 6, reverse, dither, source);
     }
     if stops.len() < 2 {
         return None;
@@ -345,14 +365,32 @@ fn parse_gradient_map(d: &[u8]) -> Option<Adjustment> {
     let baked = crate::gradient_bake::bake(stops, &mids, smooth, method);
     let mut stops: Vec<(f32, [f32; 3])> = baked.iter().map(|(t, c)| (*t, c.to_rgb())).collect();
     stops.sort_by(|a, b| a.0.total_cmp(&b.0));
-    Some(Adjustment::GradientMap { stops, reverse, dither, ink_stops })
+    Some(Adjustment::GradientMap { stops, reverse, dither, ink_stops, source: Some(Box::new(source)) })
+}
+
+/// The noise settings of a `grdm` block at `at` (see [`parse_noise_gradient_map`]), as stored.
+fn gradient_map_noise(d: &[u8], at: usize) -> Option<GradientNoise> {
+    let bound = |k: usize| be16(d, k).map(|v| f64::from(v) / 32768.0 * 100.0);
+    Some(GradientNoise {
+        seed: be32(d, at)?,
+        transparency: be16(d, at + 4)? != 0,
+        restrict: be16(d, at + 6)? != 0,
+        roughness: be32(d, at + 8)? as f32 / 4096.0,
+        model: match be16(d, at + 12)? {
+            4 => NoiseModel::Hsb,
+            5 => NoiseModel::Lab,
+            _ => NoiseModel::Rgb,
+        },
+        min: [bound(at + 14)?, bound(at + 16)?, bound(at + 18)?, bound(at + 20)?],
+        max: [bound(at + 22)?, bound(at + 24)?, bound(at + 26)?, bound(at + 28)?],
+    })
 }
 
 /// A noise gradient map's settings at `at` (Adobe spec: seed, add-transparency and
 /// restrict-colours flags, roughness /4096, colour model, four minimums and four maximums on a
 /// 0..32768 scale), generated as dense stops (`noise_gradient`). Colour model 4 is HSB
 /// (Photoshop-verified 2026-10-13), 3 RGB; 5 is taken as Lab (next in the sequence, unverified).
-fn parse_noise_gradient_map(d: &[u8], at: usize, reverse: bool, dither: bool) -> Option<Adjustment> {
+fn parse_noise_gradient_map(d: &[u8], at: usize, reverse: bool, dither: bool, source: GradientSource) -> Option<Adjustment> {
     let flag = |k: usize| be16(d, k).map(|v| v != 0);
     let bound = |k: usize| be16(d, k).map(|v| (f32::from(v) / 32768.0).clamp(0.0, 1.0));
     let noise = crate::noise_gradient::Noise {
@@ -370,7 +408,94 @@ fn parse_noise_gradient_map(d: &[u8], at: usize, reverse: bool, dither: bool) ->
     };
     let (stops, _) = noise.stops();
     let stops = stops.into_iter().map(|(t, c)| (t, c.to_rgb())).collect();
-    Some(Adjustment::GradientMap { stops, reverse, dither, ink_stops: Vec::new() })
+    Some(Adjustment::GradientMap { stops, reverse, dither, ink_stops: Vec::new(), source: Some(Box::new(source)) })
+}
+
+/// `grdm` for a Gradient Map's definition (version 3 when it names a method, else 1), laid out
+/// as Reference writes it: its stops in their own colour spaces, midpoints, opacity stops,
+/// smoothness and noise settings.
+fn write_gradient_map_source(src: &GradientSource, reverse: bool, dither: bool) -> Vec<u8> {
+    let u32_of = |v: f32, scale: f32| if v.is_finite() { (v * scale).round().clamp(0.0, u32::MAX as f32) as u32 } else { 0 };
+    let u16_of = |v: f32, scale: f32| if v.is_finite() { (v * scale).round().clamp(0.0, 65535.0) as u16 } else { 0 };
+    let mut v = Vec::new();
+    match src.method {
+        Some(m) => {
+            put16(&mut v, 3);
+            v.push(u8::from(reverse));
+            v.push(u8::from(dither));
+            v.extend_from_slice(crate::gradient_source::method_code(m).as_bytes());
+        }
+        None => {
+            put16(&mut v, 1);
+            v.push(u8::from(reverse));
+            v.push(u8::from(dither));
+        }
+    }
+    let name: Vec<u16> = src.name.encode_utf16().take(usize::from(u16::MAX)).chain(std::iter::once(0)).collect();
+    v.extend_from_slice(&(name.len() as u32).to_be_bytes());
+    for u in name {
+        put16(&mut v, u);
+    }
+    let colors = src.colors.get(..src.colors.len().min(usize::from(u16::MAX))).unwrap_or_default();
+    put16(&mut v, colors.len() as u16);
+    for s in colors {
+        v.extend_from_slice(&u32_of(s.location, 4096.0).to_be_bytes());
+        v.extend_from_slice(&u32_of(s.midpoint, 100.0).to_be_bytes());
+        let (space, c) = crate::channel_map::encode_color(&s.color);
+        put16(&mut v, space);
+        for x in c {
+            put16(&mut v, x);
+        }
+        put16(&mut v, 0);
+    }
+    let opacity = src.opacity.get(..src.opacity.len().min(usize::from(u16::MAX))).unwrap_or_default();
+    put16(&mut v, opacity.len() as u16);
+    for s in opacity {
+        v.extend_from_slice(&u32_of(s.location, 4096.0).to_be_bytes());
+        v.extend_from_slice(&u32_of(s.midpoint, 100.0).to_be_bytes());
+        put16(&mut v, u16_of(s.opacity, 255.0));
+    }
+    put16(&mut v, 2); // expansion count
+    put16(&mut v, u16_of(src.smoothness, 4096.0));
+    put16(&mut v, 32); // length
+    put16(&mut v, u16::from(src.form == GradientForm::Noise));
+    let noise = src.noise.clone().unwrap_or(GradientNoise {
+        seed: 0,
+        roughness: 0.5,
+        model: NoiseModel::Rgb,
+        restrict: false,
+        transparency: false,
+        min: [0.0; 4],
+        max: [100.0; 4],
+    });
+    v.extend_from_slice(&noise.seed.to_be_bytes());
+    put16(&mut v, u16::from(noise.transparency));
+    put16(&mut v, u16::from(noise.restrict));
+    v.extend_from_slice(&u32_of(noise.roughness, 4096.0).to_be_bytes());
+    put16(
+        &mut v,
+        match noise.model {
+            NoiseModel::Rgb => 3,
+            NoiseModel::Hsb => 4,
+            NoiseModel::Lab => 5,
+        },
+    );
+    for x in noise.min.iter().chain(&noise.max) {
+        put16(&mut v, if x.is_finite() { (x / 100.0 * 32768.0).round().clamp(0.0, 65535.0) as u16 } else { 0 });
+    }
+    v.extend_from_slice(&0u32.to_be_bytes());
+    v
+}
+
+/// The `grdm` block of a Gradient Map's definition ([`write_gradient_map_source`]) when reading
+/// it back gives the map's stops (they weren't edited); `None` otherwise or without one.
+fn gradient_map_from_source(adj: &Adjustment) -> Option<Vec<u8>> {
+    let Adjustment::GradientMap { stops, reverse, dither, ink_stops, source: Some(src) } = adj else { return None };
+    let data = write_gradient_map_source(src, *reverse, *dither);
+    let Some(Adjustment::GradientMap { stops: s, ink_stops: k, .. }) = parse_gradient_map(&data) else { return None };
+    let same = crate::gradient_source::same_stops(&s, stops, |a, b| crate::gradient_source::same_values(&[*a], &[*b]))
+        && crate::gradient_source::same_stops(&k, ink_stops, |a, b| crate::gradient_source::same_values(&[*a], &[*b]));
+    same.then_some(data)
 }
 
 /// `grdm` version 1 with CMYK stops (colour space 2, stored inverted: 65535 = no ink).
@@ -425,7 +550,7 @@ fn patch_gradient_map_colors(v: &mut [u8], channels: Channels) {
 /// (in whatever colour space it stored them), smoothness and method survive the save. `false`
 /// leaves `data` untouched.
 pub(crate) fn retarget_gradient_map(data: &mut [u8], target: &Adjustment, channels: Channels) -> bool {
-    let Adjustment::GradientMap { stops, reverse, dither, ink_stops } = target else { return false };
+    let Adjustment::GradientMap { stops, reverse, dither, ink_stops, .. } = target else { return false };
     // An older build's unaligned block is regenerated, not patched.
     if is_unpadded_legacy_gradient_map(data) {
         return false;
@@ -776,6 +901,9 @@ pub fn write_in(adj: &Adjustment, channels: Channels) -> Vec<([u8; 4], Vec<u8>)>
         // A Grayscale or Lab document's Gradient Map holds its stops in the document's space,
         // as Reference writes them: RGB stops it converts through its own profiles (Reference
         // corpus gray8/gradient-map.psd saved by us: every pixel 23/255 off; lab8 2.9/255).
+        // A map read from a file is written as its definition while that still gives its stops:
+        // its stops are in the space the file stored them in.
+        Adjustment::GradientMap { .. } if let Some(data) = gradient_map_from_source(adj) => vec![(*b"grdm", data)],
         Adjustment::GradientMap { ink_stops, .. } if ink_stops.len() < 2 && matches!(channels, Channels::Gray | Channels::Lab) => {
             let mut blocks = write(adj);
             for (key, data) in &mut blocks {
@@ -968,6 +1096,7 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
             v.extend_from_slice(&VersionedDescriptor::new(d).to_bytes());
             return vec![(*b"clrL", v)];
         }
+        Adjustment::GradientMap { .. } if let Some(data) = gradient_map_from_source(adj) => return vec![(*b"grdm", data)],
         Adjustment::GradientMap { ink_stops, reverse, dither, .. } if ink_stops.len() >= 2 => {
             let inks = crate::blocks::thin_stops(ink_stops, crate::blocks::MAX_GRADIENT_STOPS, |c| *c);
             return vec![(*b"grdm", write_gradient_map_inks(&inks, *reverse, *dither))];
@@ -1074,7 +1203,7 @@ mod tests {
     #[test]
     fn gradient_map_stops_take_the_document_space() {
         let stops = vec![(0.0, [0.0; 3]), (0.5, [0.6; 3]), (1.0, [1.0; 3])];
-        let a = Adjustment::GradientMap { stops: stops.clone(), reverse: false, dither: false, ink_stops: Vec::new() };
+        let a = Adjustment::GradientMap { stops: stops.clone(), reverse: false, dither: false, ink_stops: Vec::new(), source: None };
         for (channels, space) in [(Channels::Gray, 8u16), (Channels::Lab, 7)] {
             let [(key, data)] = write_in(&a, channels).try_into().unwrap();
             assert_eq!(&key, b"grdm");
@@ -1319,20 +1448,28 @@ mod tests {
         let original = grdm_with((2, [65535, 65535, 65535, 0]), (7, [10000, 0, 0, 0]));
         let Adjustment::GradientMap { stops, .. } = parse(b"grdm", &original, None, Channels::Cmyk) else { panic!() };
         let mut data = original.clone();
-        let target = Adjustment::GradientMap { stops: stops.clone(), reverse: true, dither: true, ink_stops: Vec::new() };
+        let target = Adjustment::GradientMap { stops: stops.clone(), reverse: true, dither: true, ink_stops: Vec::new(), source: None };
         assert!(retarget_gradient_map(&mut data, &target, Channels::Cmyk));
         assert_eq!(&data[2..4], &[1, 1]);
         assert_eq!(data[4..], original[4..], "the stops keep their colour spaces");
-        assert_eq!(parse(b"grdm", &data, None, Channels::Cmyk), target);
+        assert_eq!(without_source(parse(b"grdm", &data, None, Channels::Cmyk)), target);
         // Edited stops are not patched in.
         let mut edited = stops;
         edited[0].1 = [0.5; 3];
         let mut data2 = original.clone();
-        let target = Adjustment::GradientMap { stops: edited, reverse: false, dither: false, ink_stops: Vec::new() };
+        let target = Adjustment::GradientMap { stops: edited, reverse: false, dither: false, ink_stops: Vec::new(), source: None };
         assert!(!retarget_gradient_map(&mut data2, &target, Channels::Cmyk));
         assert_eq!(data2, original);
         assert!(!retarget_gradient_map(&mut [], &target, Channels::Cmyk));
         assert!(!retarget_gradient_map(&mut data2, &Adjustment::Invert, Channels::Cmyk));
+    }
+
+    /// `a` without the definition a Gradient Map read from a block carries.
+    fn without_source(mut a: Adjustment) -> Adjustment {
+        if let Adjustment::GradientMap { source, .. } = &mut a {
+            *source = None;
+        }
+        a
     }
 
     fn rt(a: Adjustment) {
@@ -1340,7 +1477,7 @@ mod tests {
         assert!(!blocks.is_empty(), "{a:?}");
         let cged = blocks.iter().find(|b| &b.0 == b"CgEd").map(|b| &b.1[..]);
         let back = parse(&blocks[0].0, &blocks[0].1, cged, Channels::Rgb);
-        assert_eq!(back, a);
+        assert_eq!(without_source(back), a);
     }
 
     /// Reference keeps the colorize triplet at byte 4 and the master triplet at byte 10, and fills
@@ -1445,7 +1582,7 @@ mod tests {
     #[test]
     fn legacy_gradient_map_detection_matches_only_old_output() {
         let stops = vec![(0.0, [0.1, 0.2, 0.3]), (1.0, [1.0; 3])];
-        let a = Adjustment::GradientMap { stops, reverse: true, dither: false, ink_stops: Vec::new() };
+        let a = Adjustment::GradientMap { stops, reverse: true, dither: false, ink_stops: Vec::new(), source: None };
         for channels in [Channels::Rgb, Channels::Gray, Channels::Lab] {
             let [(_, data)] = write_in(&a, channels).try_into().unwrap();
             assert!(!is_unpadded_legacy_gradient_map(&data), "{channels:?}");
@@ -1505,8 +1642,20 @@ mod tests {
         let b = write(&inkl);
         assert_eq!(parse(&b[0].0, &b[0].1, None, Channels::Cmyk), inkl);
         rt(Adjustment::Unsupported { psd_key: "selc".into(), raw: vec![1, 2, 3] });
-        rt(Adjustment::GradientMap { stops: vec![(0.0, [0.0, 0.0, 0.0]), (0.5, [1.0, 0.0, 0.0]), (1.0, [1.0, 1.0, 1.0])], reverse: true, dither: false, ink_stops: Vec::new() });
-        rt(Adjustment::GradientMap { stops: vec![(0.0, [0.0, 0.0, 0.0]), (1.0, [1.0, 1.0, 1.0])], reverse: false, dither: true, ink_stops: Vec::new() });
+        rt(Adjustment::GradientMap {
+            stops: vec![(0.0, [0.0, 0.0, 0.0]), (0.5, [1.0, 0.0, 0.0]), (1.0, [1.0, 1.0, 1.0])],
+            reverse: true,
+            dither: false,
+            ink_stops: Vec::new(),
+            source: None,
+        });
+        rt(Adjustment::GradientMap {
+            stops: vec![(0.0, [0.0, 0.0, 0.0]), (1.0, [1.0, 1.0, 1.0])],
+            reverse: false,
+            dither: true,
+            ink_stops: Vec::new(),
+            source: None,
+        });
         rt(Adjustment::SelectiveColor { relative: true, adjustments: std::array::from_fn(|r| [r as f32 * 10.0 - 40.0, 5.0, -100.0, 100.0]) });
         rt(Adjustment::SelectiveColor { relative: false, adjustments: [[0.0; 4]; 9] });
         rt(Adjustment::Vibrance { vibrance: 35.0, saturation: -12.0 });
@@ -1870,7 +2019,7 @@ mod tests {
         for (stops, want) in
             [(vec![], vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])]), (vec![(0.3, [0.2, 0.4, 0.6])], vec![(0.0, [0.2, 0.4, 0.6]), (1.0, [0.2, 0.4, 0.6])])]
         {
-            let b = write(&Adjustment::GradientMap { stops, reverse: true, dither: false, ink_stops: Vec::new() });
+            let b = write(&Adjustment::GradientMap { stops, reverse: true, dither: false, ink_stops: Vec::new(), source: None });
             let back = parse(&b[0].0, &b[0].1, None, Channels::Rgb);
             let Adjustment::GradientMap { stops, reverse: true, .. } = back else { panic!("{back:?}") };
             assert_eq!(stops.len(), want.len());
@@ -1934,5 +2083,85 @@ mod tests {
     fn legacy_brit_without_cged() {
         let a = parse(b"brit", &[0, 10, 0xff, 0xf6, 0, 127, 0], None, Channels::Rgb);
         assert_eq!(a, Adjustment::BrightnessContrast { brightness: 10.0, contrast: -10.0, legacy: true });
+    }
+
+    /// A Gradient Map read from Reference's block (version 3, Perceptual, smoothness, CMYK and
+    /// Lab stops, noise settings kept from the dialog) is written back as that block; edited
+    /// stops are written as stops.
+    #[test]
+    fn gradient_map_is_written_as_its_definition() {
+        let mut v = Vec::new();
+        put16(&mut v, 3);
+        v.extend_from_slice(&[0, 0]);
+        v.extend_from_slice(b"Perc");
+        let name: Vec<u16> = "oracle".encode_utf16().chain(std::iter::once(0)).collect();
+        v.extend_from_slice(&(name.len() as u32).to_be_bytes());
+        name.iter().for_each(|u| put16(&mut v, *u));
+        put16(&mut v, 3);
+        for (loc, mid, space, c) in
+            [(0u32, 50u32, 2u16, [0u16, 0, 0xb717, 0x97a7]), (2048, 30, 7, [5000, 2000, 0xf830, 0]), (4096, 50, 0, [0xffff, 0xf0ef, 0xa09f, 0])]
+        {
+            v.extend_from_slice(&loc.to_be_bytes());
+            v.extend_from_slice(&mid.to_be_bytes());
+            put16(&mut v, space);
+            c.iter().for_each(|x| put16(&mut v, *x));
+            put16(&mut v, 0);
+        }
+        put16(&mut v, 2);
+        for (loc, mid, op) in [(0u32, 50u32, 255u16), (4096, 40, 128)] {
+            v.extend_from_slice(&loc.to_be_bytes());
+            v.extend_from_slice(&mid.to_be_bytes());
+            put16(&mut v, op);
+        }
+        for x in [2u16, 3072, 32, 0] {
+            put16(&mut v, x);
+        }
+        v.extend_from_slice(&0x2600_9a2eu32.to_be_bytes());
+        for x in [0u16, 1] {
+            put16(&mut v, x);
+        }
+        v.extend_from_slice(&2048u32.to_be_bytes());
+        put16(&mut v, 3);
+        for x in [0u16, 0, 0, 0, 0x8000, 0x8000, 0x8000, 0x8000] {
+            put16(&mut v, x);
+        }
+        v.extend_from_slice(&0u32.to_be_bytes());
+        for channels in [Channels::Rgb, Channels::Cmyk, Channels::Gray, Channels::Lab] {
+            let a = parse(b"grdm", &v, None, channels);
+            let Adjustment::GradientMap { source: Some(_), stops, .. } = &a else { panic!("{a:?}") };
+            assert!(stops.len() > 3, "baked");
+            assert_eq!(write_in(&a, channels), vec![(*b"grdm", v.clone())], "{channels:?}");
+        }
+        // Reverse and Dither are the map's own.
+        let Adjustment::GradientMap { stops, ink_stops, source, .. } = parse(b"grdm", &v, None, Channels::Cmyk) else { panic!() };
+        let flipped = Adjustment::GradientMap { stops: stops.clone(), reverse: true, dither: true, ink_stops: ink_stops.clone(), source: source.clone() };
+        let written = write(&flipped);
+        assert_eq!(written[0].1.get(2..4), Some(&[1u8, 1][..]));
+        assert_eq!(written[0].1.get(4..), v.get(4..));
+        // Edited: the stops, version 1 (Classic, no smoothness).
+        let mut edited = stops;
+        edited[0].1 = [1.0, 0.0, 0.0];
+        let a = Adjustment::GradientMap { stops: edited, reverse: false, dither: false, ink_stops: Vec::new(), source };
+        let w = write(&a);
+        assert_eq!(be16(&w[0].1, 0), Some(1));
+        assert_ne!(w[0].1, v);
+    }
+
+    /// A noise Gradient Map is written back with its noise settings.
+    #[test]
+    fn noise_gradient_map_is_written_as_its_definition() {
+        let mut v = write_gradient_map(&[], false, false);
+        // Form 1 (noise), seed, transparency and restrict flags, roughness, HSB.
+        let tail = v.len() - 4 - 16 - 2 - 4 - 2 - 2 - 4 - 2;
+        v[tail..tail + 2].copy_from_slice(&1u16.to_be_bytes());
+        v[tail + 2..tail + 6].copy_from_slice(&1_234_567u32.to_be_bytes());
+        v[tail + 6..tail + 8].copy_from_slice(&1u16.to_be_bytes());
+        v[tail + 10..tail + 14].copy_from_slice(&3000u32.to_be_bytes());
+        v[tail + 14..tail + 16].copy_from_slice(&4u16.to_be_bytes());
+        let a = parse(b"grdm", &v, None, Channels::Rgb);
+        let Adjustment::GradientMap { source: Some(src), stops, .. } = &a else { panic!("{a:?}") };
+        assert_eq!(src.form, GradientForm::Noise);
+        assert_eq!(stops.len(), crate::noise_gradient::ENTRIES);
+        assert_eq!(write(&a), vec![(*b"grdm", v)]);
     }
 }

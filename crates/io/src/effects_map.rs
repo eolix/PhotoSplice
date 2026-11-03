@@ -198,6 +198,7 @@ fn gradient_from(d: &Descriptor) -> Gradient {
         align: !matches!(d.get("Algn"), Some(Value::Boolean(false))),
         offset: off.map_or((0.0, 0.0), |o| (pct(o, "Hrzn", 0.0), pct(o, "Vrtc", 0.0))),
         color_stops,
+        source: get_desc(d, "Grad").map(|g| Box::new(crate::gradient_source::from_desc(g, crate::blocks::gradient_method(d)))),
     }
 }
 
@@ -403,9 +404,20 @@ fn with_common(d: Descriptor, c: &FxCommon) -> Descriptor {
         .with("Opct", unit(b"#Prc", c.opacity * 100.0))
 }
 
-fn gradient_keys(mut d: Descriptor, g: &Gradient) -> Descriptor {
+/// The gradient keys of an effect: its definition when `source` (see [`write_one`]), naming its
+/// method under `method_key` (Reference writes `gs99` in Gradient Overlays,
+/// `gradientsInterpolationMethod` in strokes and glows), else its stops.
+fn gradient_keys(mut d: Descriptor, g: &Gradient, method_key: &str, source: bool) -> Descriptor {
+    match g.source.as_deref().filter(|_| source) {
+        Some(src) => {
+            d = d.with("Grad", Value::Descriptor(crate::gradient_source::to_desc(src)));
+            if let Some(m) = src.method {
+                d = d.with(method_key, crate::gradient_source::method_value(m));
+            }
+        }
+        None => d = d.with("Grad", Value::Descriptor(gradient_desc(&g.stops, &g.opacity_stops))),
+    }
     d = d
-        .with("Grad", Value::Descriptor(gradient_desc(&g.stops, &g.opacity_stops)))
         .with("Angl", unit(b"#Ang", g.angle))
         .with("Type", gradient_style_value(g.style))
         .with("Rvrs", Value::Boolean(g.reverse))
@@ -414,7 +426,41 @@ fn gradient_keys(mut d: Descriptor, g: &Gradient) -> Descriptor {
     d.with("Ofst", Value::Descriptor(Descriptor::new("Pnt ").with("Hrzn", unit(b"#Prc", g.offset.0 * 100.0)).with("Vrtc", unit(b"#Prc", g.offset.1 * 100.0))))
 }
 
+/// The descriptor key an effect is written under.
+fn kind_key(e: &Effect) -> &'static str {
+    match e {
+        Effect::DropShadow(_) => "DrSh",
+        Effect::InnerShadow(_) => "IrSh",
+        Effect::OuterGlow(_) => "OrGl",
+        Effect::InnerGlow(_) => "IrGl",
+        Effect::Stroke(_) => "FrFX",
+        Effect::ColorOverlay { .. } => "SoFi",
+        Effect::GradientOverlay { .. } => "GrFl",
+        Effect::PatternOverlay { .. } => "patternFill",
+        Effect::Satin(_) => "ChFX",
+        Effect::BevelEmboss(_) => "ebbl",
+    }
+}
+
+/// An effect as (key, descriptor). A gradient is written as the definition it was read from
+/// ([`Gradient::source`]) while that still reads back as its stops (they weren't edited), so
+/// Reference renders it as it did; else as its (baked) stops.
 fn write_one(e: &Effect) -> (&'static str, Descriptor) {
+    if let Some(model) = gradient_stops(e).filter(|_| gradient_of(e).is_some_and(|g| g.source.is_some())) {
+        let (k, d) = write_one_with(e, true);
+        let back = parse_one(k, &d);
+        if back
+            .as_ref()
+            .and_then(gradient_stops)
+            .is_some_and(|(s, o)| crate::gradient_source::same_color_stops(s, model.0) && crate::gradient_source::same_opacity_stops(o, model.1))
+        {
+            return (k, d);
+        }
+    }
+    write_one_with(e, false)
+}
+
+fn write_one_with(e: &Effect, source: bool) -> (&'static str, Descriptor) {
     match e {
         Effect::DropShadow(s) | Effect::InnerShadow(s) => {
             let inner = matches!(e, Effect::InnerShadow(_));
@@ -437,7 +483,7 @@ fn write_one(e: &Effect) -> (&'static str, Descriptor) {
             let inner = matches!(e, Effect::InnerGlow(_));
             let mut d = with_common(Descriptor::new(if inner { "IrGl" } else { "OrGl" }), &g.common);
             d = match &g.paint {
-                FxPaint::Gradient(gr) => gradient_keys(d, gr),
+                FxPaint::Gradient(gr) => gradient_keys(d, gr, "gradientsInterpolationMethod", source),
                 FxPaint::Color(c) => d.with("Clr ", Value::Descriptor(color_to_desc(c))),
                 FxPaint::Pattern { .. } => d.with("Clr ", Value::Descriptor(color_to_desc(&Color::WHITE))),
             };
@@ -472,7 +518,12 @@ fn write_one(e: &Effect) -> (&'static str, Descriptor) {
                 FxPaint::Color(c) => {
                     d.with("PntT", Value::Enumerated { type_id: Id::new("FrFl"), value: Id::new("SClr") }).with("Clr ", Value::Descriptor(color_to_desc(c)))
                 }
-                FxPaint::Gradient(g) => gradient_keys(d.with("PntT", Value::Enumerated { type_id: Id::new("FrFl"), value: Id::new("GrFl") }), g),
+                FxPaint::Gradient(g) => gradient_keys(
+                    d.with("PntT", Value::Enumerated { type_id: Id::new("FrFl"), value: Id::new("GrFl") }),
+                    g,
+                    "gradientsInterpolationMethod",
+                    source,
+                ),
                 FxPaint::Pattern { name, id, scale } => d
                     .with("PntT", Value::Enumerated { type_id: Id::new("FrFl"), value: Id::new("Ptrn") })
                     .with(
@@ -489,7 +540,7 @@ fn write_one(e: &Effect) -> (&'static str, Descriptor) {
         }
         Effect::ColorOverlay { common: c, color } => ("SoFi", with_common(Descriptor::new("SoFi"), c).with("Clr ", Value::Descriptor(color_to_desc(color)))),
         Effect::GradientOverlay { common: c, gradient, dither } => {
-            ("GrFl", gradient_keys(with_common(Descriptor::new("GrFl"), c), gradient).with("Dthr", Value::Boolean(*dither)))
+            ("GrFl", gradient_keys(with_common(Descriptor::new("GrFl"), c), gradient, "gs99", source).with("Dthr", Value::Boolean(*dither)))
         }
         Effect::PatternOverlay { common: c, name, id, scale, angle, link, phase } => (
             "patternFill",
@@ -682,7 +733,7 @@ fn merge_kind(i: usize, base: &Descriptor, fresh: &Descriptor, items: &[Effect])
     let old = instances(base, single, multi);
     let new = instances(fresh, single, multi);
     // The document's effects of this kind, in the order `new` holds them.
-    let model: Vec<&Effect> = items.iter().filter(|e| write_one(e).0 == single).collect();
+    let model: Vec<&Effect> = items.iter().filter(|e| kind_key(e) == single).collect();
     let (items, as_list) = if new.is_empty() {
         let kept: Vec<Descriptor> = old
             .into_iter()
@@ -736,18 +787,24 @@ type GradientStops<'a> = (&'a [(f32, Color)], &'a [(f32, f32)]);
 
 /// The gradient definition an effect paints with, if any.
 fn gradient_stops(e: &Effect) -> Option<GradientStops<'_>> {
-    let g = match e {
-        Effect::GradientOverlay { gradient, .. } => gradient,
-        Effect::Stroke(StrokeFx { paint: FxPaint::Gradient(g), .. }) | Effect::OuterGlow(Glow { paint: FxPaint::Gradient(g), .. }) | Effect::InnerGlow(Glow { paint: FxPaint::Gradient(g), .. }) => g,
-        _ => return None,
-    };
-    Some((&g.stops, &g.opacity_stops))
+    gradient_of(e).map(|g| (g.stops.as_slice(), g.opacity_stops.as_slice()))
+}
+
+/// The gradient an effect paints with, if any.
+fn gradient_of(e: &Effect) -> Option<&Gradient> {
+    match e {
+        Effect::GradientOverlay { gradient, .. } => Some(gradient),
+        Effect::Stroke(StrokeFx { paint: FxPaint::Gradient(g), .. })
+        | Effect::OuterGlow(Glow { paint: FxPaint::Gradient(g), .. })
+        | Effect::InnerGlow(Glow { paint: FxPaint::Gradient(g), .. }) => Some(g),
+        _ => None,
+    }
 }
 
 pub(crate) fn lfx2_descriptor(master: bool, items: &[Effect]) -> Descriptor {
     let mut d = Descriptor::new("null").with("Scl ", unit(b"#Prc", 100.0)).with("masterFXSwitch", Value::Boolean(master));
     for (single, multi) in KINDS {
-        let of_kind: Vec<Descriptor> = items.iter().map(write_one).filter(|(k, _)| *k == single).map(|(_, d)| d).collect();
+        let of_kind: Vec<Descriptor> = items.iter().filter(|e| kind_key(e) == single).map(|e| write_one(e).1).collect();
         match of_kind.len() {
             0 => {}
             1 => d = d.with(single, Value::Descriptor(of_kind.into_iter().next().unwrap_or_default())),
@@ -1416,5 +1473,73 @@ mod tests {
         assert_eq!(parse_lfx2(&data).unwrap().1.len(), 2);
         // A template that doesn't parse is ignored.
         assert_eq!(write_lfx2_onto(Some(&[1, 2, 3]), true, &fx).0, data);
+    }
+
+    /// Every effect is written under the key its kind is listed with.
+    #[test]
+    fn kind_keys_match_the_written_keys() {
+        for e in sample_effects() {
+            assert_eq!(kind_key(&e), write_one(&e).0);
+        }
+    }
+
+    /// The gradient of each effect kind, read from Reference's definition (smoothness, Smooth
+    /// method) and written with no template, is that definition with its method again; edited, it
+    /// is written as its stops.
+    #[test]
+    fn fresh_effect_gradients_are_written_as_their_definition() {
+        let data = overlay_lfx2(30, 4096.0, "Smoo");
+        let (_, fx) = parse_lfx2(&data).unwrap();
+        let Some(Effect::GradientOverlay { gradient, .. }) = fx.first() else { panic!("{fx:?}") };
+        let (Some(src), true) = (gradient.source.clone(), gradient.stops.len() > 2) else { panic!("baked, with its definition") };
+        let file_grad = {
+            let (v, _) = VersionedDescriptor::parse_prefix(&data[4..]).unwrap();
+            get_desc(get_desc(&v.descriptor, "GrFl").unwrap(), "Grad").unwrap().clone()
+        };
+        let paint = FxPaint::Gradient(gradient.clone());
+        let glow = Glow {
+            common: FxCommon::new(BlendMode::Screen, 0.75),
+            paint: paint.clone(),
+            technique: GlowTechnique::Softer,
+            spread: 0.0,
+            size: 5.0,
+            contour: Contour::Linear,
+            anti_alias: false,
+            range: 0.5,
+            jitter: 0.0,
+            noise: 0.0,
+            source: GlowSource::Edge,
+        };
+        let effects = [
+            fx[0].clone(),
+            Effect::OuterGlow(glow.clone()),
+            Effect::InnerGlow(glow),
+            Effect::Stroke(StrokeFx { common: FxCommon::new(BlendMode::Normal, 1.0), size: 3.0, position: StrokePosition::Outside, paint }),
+        ];
+        for e in &effects {
+            // A glow reads its opacity stops unbaked: the same definition gives them.
+            let e = match e.clone() {
+                Effect::OuterGlow(mut g) | Effect::InnerGlow(mut g) if matches!(e, Effect::OuterGlow(_) | Effect::InnerGlow(_)) => {
+                    let outer = matches!(e, Effect::OuterGlow(_));
+                    if let FxPaint::Gradient(gr) = &mut g.paint {
+                        gr.opacity_stops = crate::blocks::gradient_stops_raw(&file_grad).opacity;
+                    }
+                    if outer { Effect::OuterGlow(g) } else { Effect::InnerGlow(g) }
+                }
+                other => other,
+            };
+            let (key, d) = write_one(&e);
+            assert_eq!(get_desc(&d, "Grad"), Some(&crate::gradient_source::to_desc(&src)), "{key}");
+            let method_key = if key == "GrFl" { "gs99" } else { "gradientsInterpolationMethod" };
+            assert!(matches!(d.get(method_key), Some(Value::Enumerated { value, .. }) if value.is("Smoo")), "{key}");
+        }
+        // Edited stops: written as stops, without the method.
+        let mut edited = fx[0].clone();
+        if let Effect::GradientOverlay { gradient, .. } = &mut edited {
+            gradient.stops[0].1 = Color::rgb(1.0, 0.0, 0.0);
+        }
+        let (_, d) = write_one(&edited);
+        assert!(d.get("gs99").is_none());
+        assert_ne!(get_desc(&d, "Grad"), Some(&crate::gradient_source::to_desc(&src)));
     }
 }

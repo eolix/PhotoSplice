@@ -825,6 +825,7 @@ fn preset_fill(app: &PhotospliceApp) -> Option<Fill> {
         offset: (0.0, 0.0),
         dither: false,
         align: true,
+        source: None,
     })
 }
 

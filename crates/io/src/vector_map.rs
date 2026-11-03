@@ -1070,3 +1070,21 @@ mod csh_tests {
         assert!(super::read_csh(b"nope").is_err());
     }
 }
+
+#[cfg(test)]
+mod gradient_source_tests {
+    /// A shape's gradient stroke read from a file is written fresh as the file's definition.
+    #[test]
+    fn gradient_stroke_is_written_as_its_definition() {
+        let d = crate::blocks::more_tests::noise_gdfl();
+        let paint = crate::blocks::fill_from_desc(b"GdFl", &d).unwrap();
+        let stroke = photosplice_doc::ShapeStroke { paint, ..photosplice_doc::ShapeStroke::default() };
+        let v = crate::vector_map::vstk_bytes(Some(&stroke), true, 72.0);
+        let (vd, _) = photosplice_psd::descriptor::VersionedDescriptor::parse_prefix(&v).unwrap();
+        let content = crate::blocks::get_desc(&vd.descriptor, "strokeStyleContent").unwrap();
+        assert_eq!(crate::blocks::get_desc(content, "Grad"), crate::blocks::get_desc(&d, "Grad"));
+        assert!(content.get("gradientsInterpolationMethod").is_some());
+        let back = crate::vector_map::parse_vstk(&v, 72.0).and_then(|i| i.stroke).unwrap();
+        assert_eq!(back.paint, stroke.paint);
+    }
+}

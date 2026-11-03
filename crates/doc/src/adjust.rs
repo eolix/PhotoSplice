@@ -292,6 +292,11 @@ pub enum Adjustment {
         /// cleared when the stops are edited.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         ink_stops: Vec<(f32, [f32; 4])>,
+        /// The gradient as the file defined it, which the stops were baked from
+        /// ([`crate::GradientSource`]); `None` for maps made here. PSD data:
+        /// not serialized (the native format and the control channel carry the stops alone).
+        #[serde(skip)]
+        source: Option<Box<crate::GradientSource>>,
     },
     /// Per range (reds, yellows, greens, cyans, blues, magentas, whites, neutrals, blacks) the
     /// cyan, magenta, yellow and black change in percent (-100..=100), as in Photoshop.

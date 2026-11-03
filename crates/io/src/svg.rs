@@ -516,6 +516,7 @@ impl Conv {
             offset: (0.0, 0.0),
             dither: false,
             align: true,
+            source: None,
         };
         match paint {
             usvg::Paint::Color(c) => Fill::Solid(color(*c, opacity)),

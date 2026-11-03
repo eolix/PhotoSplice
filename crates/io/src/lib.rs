@@ -48,6 +48,7 @@ pub mod exr_parts;
 mod flat;
 mod flat_modes;
 mod gradient_bake;
+mod gradient_source;
 pub mod guides_map;
 pub use gradient_bake::{Method as GradientMethod, bake as bake_gradient};
 mod kra;

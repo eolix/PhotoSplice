@@ -196,9 +196,11 @@ pub fn from_params(kind: &str, p: &Value, base: Option<&Adjustment>, mode: Color
             Adjustment::ChannelMixer { matrix, monochrome, cmyk }
         }
         "gradientMap" => {
-            let (stops0, rev0, dither0, inks0) = match base {
-                Some(Adjustment::GradientMap { stops, reverse, dither, ink_stops }) => (stops.clone(), *reverse, *dither, ink_stops.clone()),
-                _ => (vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])], false, false, Vec::new()),
+            let (stops0, rev0, dither0, inks0, source) = match base {
+                Some(Adjustment::GradientMap { stops, reverse, dither, ink_stops, source }) => {
+                    (stops.clone(), *reverse, *dither, ink_stops.clone(), source.clone())
+                }
+                _ => (vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])], false, false, Vec::new(), None),
             };
             let stops = match p.get("stops") {
                 None | Some(Value::Null) => stops0.clone(),
@@ -206,7 +208,9 @@ pub fn from_params(kind: &str, p: &Value, base: Option<&Adjustment>, mode: Color
             };
             // The file's CMYK stops stay while the stops are the ones they were read with.
             let ink_stops = if stops == stops0 { inks0 } else { Vec::new() };
-            Adjustment::GradientMap { stops, reverse: r.boolean("reverse", rev0)?, dither: r.boolean("dither", dither0)?, ink_stops }
+            // The file's definition goes with it: the PSD writer writes it while it still gives
+            // these stops (unedited), else the stops.
+            Adjustment::GradientMap { stops, reverse: r.boolean("reverse", rev0)?, dither: r.boolean("dither", dither0)?, ink_stops, source }
         }
         "selectiveColor" => crate::adjust_cmds::selective_from_params(p, base.filter(|b| matches!(b, Adjustment::SelectiveColor { .. })))?,
         "colorLookup" => crate::adjust_cmds::lookup_from_params(p, base.filter(|b| matches!(b, Adjustment::ColorLookup { .. })))?,
@@ -1164,7 +1168,8 @@ mod tests {
         assert!(matches!(&a, Adjustment::HueSaturation { ranges, .. } if ranges[4].hue == 40.0 && ranges[0].is_neutral()));
         // A file's CMYK stops stay through a Reverse toggle and go when the stops are edited.
         let inks = vec![(0.0, [0.0, 0.0, 0.0, 1.0]), (1.0, [0.0; 4])];
-        let base = Adjustment::GradientMap { stops: vec![(0.0, [0.1; 3]), (1.0, [1.0; 3])], reverse: false, dither: false, ink_stops: inks.clone() };
+        let base =
+            Adjustment::GradientMap { stops: vec![(0.0, [0.1; 3]), (1.0, [1.0; 3])], reverse: false, dither: false, ink_stops: inks.clone(), source: None };
         let a = from_params("gradientMap", &json!({"reverse": true}), Some(&base), ColorMode::Cmyk).unwrap();
         assert!(matches!(&a, Adjustment::GradientMap { reverse: true, ink_stops, .. } if *ink_stops == inks));
         let a = from_params("gradientMap", &json!({"stops": [[0, "#ff0000"], [1, "#ffffff"]]}), Some(&base), ColorMode::Cmyk).unwrap();

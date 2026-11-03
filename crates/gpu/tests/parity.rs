@@ -686,8 +686,20 @@ fn adjustments() -> Vec<Adjustment> {
         Adjustment::Vibrance { vibrance: -60.0, saturation: 0.0 },
         Adjustment::Vibrance { vibrance: 85.0, saturation: 10.0 },
         Adjustment::Vibrance { vibrance: 0.0, saturation: -100.0 },
-        Adjustment::GradientMap { stops: vec![(0.0, [0.1, 0.0, 0.3]), (0.5, [0.9, 0.3, 0.1]), (1.0, [1.0, 1.0, 0.8])], reverse: false, dither: false, ink_stops: Vec::new() },
-        Adjustment::GradientMap { stops: vec![(0.0, [0.0, 0.0, 0.0]), (1.0, [1.0, 1.0, 1.0])], reverse: true, dither: true, ink_stops: Vec::new() },
+        Adjustment::GradientMap {
+            stops: vec![(0.0, [0.1, 0.0, 0.3]), (0.5, [0.9, 0.3, 0.1]), (1.0, [1.0, 1.0, 0.8])],
+            reverse: false,
+            dither: false,
+            ink_stops: Vec::new(),
+            source: None,
+        },
+        Adjustment::GradientMap {
+            stops: vec![(0.0, [0.0, 0.0, 0.0]), (1.0, [1.0, 1.0, 1.0])],
+            reverse: true,
+            dither: true,
+            ink_stops: Vec::new(),
+            source: None,
+        },
         Adjustment::ColorBalance { shadows: [20.0, -10.0, 5.0], midtones: [-15.0, 10.0, 30.0], highlights: [0.0, 5.0, -20.0], preserve_luminosity: true },
         Adjustment::ColorBalance { shadows: [10.0, 0.0, 0.0], midtones: [0.0, 0.0, 0.0], highlights: [0.0, 0.0, 10.0], preserve_luminosity: false },
         Adjustment::SelectiveColor { relative: true, adjustments: selective() },
@@ -1014,6 +1026,7 @@ fn hard_stop_effects_and_gradient_maps_request_cpu() {
             ink_stops: Vec::new(),
             reverse: false,
             dither: false,
+            source: None,
         }),
     ));
     assert_gradient_fallback(&d);
@@ -1054,6 +1067,7 @@ fn fills_and_dissolve() {
             offset: (0.15, -0.1),
             dither: true,
             align: false,
+            source: None,
         };
         let mut l = Layer::new("live", LayerContent::Fill(fill));
         l.mask = Some(mask(Rect::new(8, 4, 40, 40), 13, 0.0));
@@ -1517,6 +1531,7 @@ fn gradient() -> Gradient {
         align: true,
         offset: (0.1, -0.05),
         color_stops: 0,
+        source: None,
     }
 }
 

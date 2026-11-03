@@ -94,13 +94,23 @@ fn adjustments() -> Vec<(Adjustment, bool)> {
                 reverse: false,
                 dither: false,
                 ink_stops: Vec::new(),
+                source: None,
             },
             true,
         ),
-        (Adjustment::GradientMap { stops: vec![(0.0, [0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 0.0])], reverse: true, dither: false, ink_stops: Vec::new() }, true),
+        (
+            Adjustment::GradientMap {
+                stops: vec![(0.0, [0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 0.0])],
+                reverse: true,
+                dither: false,
+                ink_stops: Vec::new(),
+                source: None,
+            },
+            true,
+        ),
         // Fewer than two stops: written as the equivalent two-stop gradient.
-        (Adjustment::GradientMap { stops: vec![], reverse: false, dither: false, ink_stops: Vec::new() }, false),
-        (Adjustment::GradientMap { stops: vec![(0.4, [0.2, 0.6, 0.4])], reverse: false, dither: false, ink_stops: Vec::new() }, false),
+        (Adjustment::GradientMap { stops: vec![], reverse: false, dither: false, ink_stops: Vec::new(), source: None }, false),
+        (Adjustment::GradientMap { stops: vec![(0.4, [0.2, 0.6, 0.4])], reverse: false, dither: false, ink_stops: Vec::new(), source: None }, false),
         (Adjustment::SelectiveColor { relative: true, adjustments: std::array::from_fn(|r| [r as f32 * 10.0 - 40.0, 5.0, -30.0, 20.0]) }, true),
         (Adjustment::SelectiveColor { relative: false, adjustments: std::array::from_fn(|r| [0.0, r as f32 * 5.0, 0.0, -10.0]) }, true),
         // A block this version cannot read (a truncated Selective Color) is kept verbatim.
@@ -166,7 +176,7 @@ fn check_adjustment(adj: &Adjustment, lossless: bool, depth: SampleType) {
         match (&x.content, &y.content) {
             (LayerContent::Adjustment(a), LayerContent::Adjustment(b)) => {
                 if lossless {
-                    assert_eq!(a, b, "{ctx}: adjustment");
+                    assert_eq!(common::without_source_adj(a), common::without_source_adj(b), "{ctx}: adjustment");
                 } else {
                     assert_eq!(std::mem::discriminant(a), std::mem::discriminant(b), "{ctx}: kind");
                 }

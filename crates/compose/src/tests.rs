@@ -2560,7 +2560,7 @@ fn shape_layer_gradients_match_fill_layers() {
         if unsorted {
             stops.reverse();
         }
-        Fill::Gradient { stops, angle: 30.0, scale: 1.7, style, reverse: false, opacity_stops, midpoints, offset, dither, align }
+        Fill::Gradient { stops, angle: 30.0, scale: 1.7, style, reverse: false, opacity_stops, midpoints, offset, dither, align, source: None }
     };
     let styles = [GradientStyle::Linear, GradientStyle::Radial, GradientStyle::Angle, GradientStyle::Reflected, GradientStyle::Diamond];
     // (name, midpoints, opacity stops, centre offset, dither, unsorted stops) per case.
@@ -3226,7 +3226,13 @@ fn lab_documents_evaluate_invert_threshold_and_gradient_map_on_lab() {
         assert!(near(inv, want, 0.5), "{depth:?}: {inv:?}");
         let th = render(Adjustment::Threshold { level: 0.25 });
         assert!(near(th, [100.0, 0.0, 0.0], 0.5), "{depth:?}: L 30 is above level 64: {th:?}");
-        let gm = render(Adjustment::GradientMap { stops: vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])], reverse: false, dither: false, ink_stops: Vec::new() });
+        let gm = render(Adjustment::GradientMap {
+            stops: vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])],
+            reverse: false,
+            dither: false,
+            ink_stops: Vec::new(),
+            source: None,
+        });
         let want = srgb_to_lab([0.3; 3]);
         assert!(near(gm, want, 1.0), "{depth:?}: L 30 → 30 % of the way: {gm:?} vs {want:?}");
     }
@@ -3375,7 +3381,7 @@ fn lab_documents_gradient_map_follows_lightness() {
     let grey = photosplice_color::convert::lab_to_srgb([l, 0.0, 0.0]);
     for depth in SampleType::ALL {
         for reverse in [false, true] {
-            let adj = Adjustment::GradientMap { stops: stops.clone(), reverse, dither: false, ink_stops: Vec::new() };
+            let adj = Adjustment::GradientMap { stops: stops.clone(), reverse, dither: false, ink_stops: Vec::new(), source: None };
             let a = lab_doc_adjusted(red, adj.clone(), depth);
             let b = lab_doc_adjusted(grey, adj.clone(), depth);
             near3(a, b, 1.0, &format!("{depth:?} reverse {reverse}"));
@@ -3386,7 +3392,7 @@ fn lab_documents_gradient_map_follows_lightness() {
     }
     // In RGB documents the map still follows RGB luminance: red and grey differ there.
     let mut buf = Buffer::filled(Rect::new(0, 0, 1, 1), [red[0], red[1], red[2], 1.0]);
-    let adj = Adjustment::GradientMap { stops, reverse: false, dither: false, ink_stops: Vec::new() };
+    let adj = Adjustment::GradientMap { stops, reverse: false, dither: false, ink_stops: Vec::new(), source: None };
     adjust::apply_in(&adj, &mut buf, adjust::Transfer::Srgb, None, ColorMode::Rgb);
     let mut grey_buf = Buffer::filled(Rect::new(0, 0, 1, 1), [grey[0], grey[1], grey[2], 1.0]);
     adjust::apply_in(&adj, &mut grey_buf, adjust::Transfer::Srgb, None, ColorMode::Rgb);

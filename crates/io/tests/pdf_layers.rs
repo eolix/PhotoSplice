@@ -566,6 +566,7 @@ fn gradient(style: photosplice_doc::GradientStyle, angle: f32, reverse: bool) ->
         offset: (0.0, 0.0),
         dither: false,
         align: true,
+        source: None,
     }
 }
 

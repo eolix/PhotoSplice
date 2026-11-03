@@ -288,9 +288,9 @@ pub fn assert_layers_eq(a: &Layer, b: &Layer, path: &str) {
             assert!(c1.iter().zip(c2).all(|(x, y)| (x - y).abs() < 0.5 / 255.0), "{ctx}: photo filter colour {c1:?} vs {c2:?}");
             assert_eq!((d1, p1), (d2, p2), "{ctx}: photo filter");
         }
-        (LayerContent::Adjustment(x), LayerContent::Adjustment(y)) => assert_eq!(x, y, "{ctx}: adjustment"),
+        (LayerContent::Adjustment(x), LayerContent::Adjustment(y)) => assert_eq!(without_source_adj(x), without_source_adj(y), "{ctx}: adjustment"),
         (LayerContent::Fill(Fill::Solid(x)), LayerContent::Fill(Fill::Solid(y))) => color_close(x, y, &ctx),
-        (LayerContent::Fill(x), LayerContent::Fill(y)) => assert_eq!(x, y, "{ctx}: fill"),
+        (LayerContent::Fill(x), LayerContent::Fill(y)) => assert_eq!(without_source(x), without_source(y), "{ctx}: fill"),
         (LayerContent::Text(x), LayerContent::Text(y)) => {
             assert_eq!(x.text, y.text, "{ctx}: text");
             surface_eq(x.cache.as_ref().unwrap(), y.cache.as_ref().unwrap(), &ctx);
@@ -303,6 +303,24 @@ pub fn assert_layers_eq(a: &Layer, b: &Layer, path: &str) {
         }
         (x, y) => panic!("{ctx}: kind {} vs {}", x.kind_name(), y.kind_name()),
     }
+}
+
+/// `f` without the gradient definition a PSD read attaches (a document made here has none).
+pub fn without_source(f: &Fill) -> Fill {
+    let mut f = f.clone();
+    if let Fill::Gradient { source, .. } = &mut f {
+        *source = None;
+    }
+    f
+}
+
+/// [`without_source`] for a Gradient Map.
+pub fn without_source_adj(a: &Adjustment) -> Adjustment {
+    let mut a = a.clone();
+    if let Adjustment::GradientMap { source, .. } = &mut a {
+        *source = None;
+    }
+    a
 }
 
 pub fn assert_docs_eq(a: &Document, b: &Document) {

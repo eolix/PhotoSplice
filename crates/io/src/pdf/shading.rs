@@ -74,5 +74,6 @@ pub(super) fn fill(g: Gradient, frame: photosplice_geom::Rect) -> Fill {
         offset,
         dither: false,
         align: true,
+        source: None,
     }
 }

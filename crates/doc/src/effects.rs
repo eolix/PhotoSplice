@@ -41,6 +41,11 @@ pub struct Gradient {
     /// as many stops as a baked five-stop one.
     #[serde(default)]
     pub color_stops: u16,
+    /// The gradient as the file defined it, which `stops` were baked from (see
+    /// [`GradientSource`]); `None` for gradients made here. PSD data:
+    /// not serialized (the native format and the control channel carry the stops alone).
+    #[serde(skip)]
+    pub source: Option<Box<GradientSource>>,
 }
 
 impl Gradient {
@@ -62,8 +67,101 @@ impl Default for Gradient {
             align: true,
             offset: (0.0, 0.0),
             color_stops: 0,
+            source: None,
         }
     }
+}
+
+/// How Reference interpolates between a gradient's stops (PSD `gradientsInterpolationMethod`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GradientMethod {
+    #[default]
+    Classic,
+    Perceptual,
+    Linear,
+    Smooth,
+}
+
+/// What a gradient colour stop takes its colour from (PSD `Clry`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GradientStopKind {
+    #[default]
+    User,
+    Foreground,
+    Background,
+}
+
+/// A colour stop as Reference stores it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GradientColorStop {
+    /// Location, `0..=1` (stored as 0..4096).
+    pub location: f32,
+    /// Midpoint of the segment that ends at this stop, `0..=1` (stored in percent).
+    pub midpoint: f32,
+    /// In the model the file stored it in (RGB, CMYK, Lab, Gray).
+    pub color: Color,
+    #[serde(default)]
+    pub kind: GradientStopKind,
+}
+
+/// An opacity stop as Reference stores it (all `0..=1`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GradientOpacityStop {
+    pub location: f32,
+    pub midpoint: f32,
+    pub opacity: f32,
+}
+
+/// The colour model a noise gradient generates in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NoiseModel {
+    #[default]
+    Rgb,
+    Hsb,
+    Lab,
+}
+
+/// A noise gradient's settings, as Reference stores them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GradientNoise {
+    pub seed: u32,
+    /// Roughness, `0..=1` (stored as 0..4096).
+    pub roughness: f32,
+    pub model: NoiseModel,
+    /// Restrict Colors.
+    pub restrict: bool,
+    /// Add Transparency.
+    pub transparency: bool,
+    /// Per-channel range in percent as stored (the model's three channels, then transparency).
+    pub min: [f64; 4],
+    pub max: [f64; 4],
+}
+
+/// Whether a gradient is made of stops or generated noise (PSD `GrdF`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GradientForm {
+    #[default]
+    Solid,
+    Noise,
+}
+
+/// A gradient's definition as Reference stores it: the stops with their models, midpoints and
+/// kinds, the smoothness, interpolation method, name and noise settings. The model renders the
+/// stops baked from it; a writer writes this definition again while baking it still gives the
+/// gradient's stops (they weren't edited), so Reference reads back the gradient it wrote.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GradientSource {
+    pub name: String,
+    /// The interpolation method the file names; `None` when it names none (Classic).
+    pub method: Option<GradientMethod>,
+    pub form: GradientForm,
+    /// Smoothness, `0..=1` (stored as 0..4096).
+    pub smoothness: f32,
+    pub colors: Vec<GradientColorStop>,
+    pub opacity: Vec<GradientOpacityStop>,
+    /// The noise settings: the gradient's own for [`GradientForm::Noise`]; a Gradient Map's
+    /// block carries them for a solid gradient too.
+    pub noise: Option<GradientNoise>,
 }
 
 /// Effect contour (transfer curve applied to the effect's coverage).

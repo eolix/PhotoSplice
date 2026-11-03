@@ -61,7 +61,7 @@ fn legacy_unaligned_gradient_map_is_repaired_on_resave() {
     let stops = vec![(0.0, [0.04, 0.1, 0.18]), (0.5, [0.4, 0.2, 0.1]), (1.0, [1.0; 3])];
     for mode in [ColorMode::Rgb, ColorMode::Cmyk, ColorMode::Grayscale, ColorMode::Lab] {
         let mut doc = Document::new("gradient", Size::new(16, 16), mode, SampleType::U8);
-        let map = Adjustment::GradientMap { stops: stops.clone(), reverse: false, dither: false, ink_stops: Vec::new() };
+        let map = Adjustment::GradientMap { stops: stops.clone(), reverse: false, dither: false, ink_stops: Vec::new(), source: None };
         doc.layers.push(Layer::new("Gradient Map", LayerContent::Adjustment(map)));
         let mut file = PsdFile::from_bytes(&export(&doc, "gradient.psd", &ExportOptions::default()).expect("export").bytes).expect("reparse");
         let legacy = file.layers_mut().iter_mut().find_map(|layer| layer.block_mut(b"grdm")).expect("Gradient Map block");

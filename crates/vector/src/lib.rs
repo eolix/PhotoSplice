@@ -316,7 +316,8 @@ impl Paint {
             Fill::Solid(c) => Paint::Solid(rgba(c)),
             // No `..` here on purpose: a new gradient field must fail to compile until the
             // shape renderer honours it (the same sentinel the document/compositor pair uses).
-            Fill::Gradient { stops, angle, scale, style, reverse, opacity_stops, midpoints, offset, dither, align } => {
+            // `source` is the file's definition the stops were baked from: not render data.
+            Fill::Gradient { stops, angle, scale, style, reverse, opacity_stops, midpoints, offset, dither, align, source: _ } => {
                 let frame = frame_of(if *align { bounds } else { canvas });
                 // Linear and Reflected end points on whole pixels, as fill layers lay them out.
                 let (angle, scale, offset) = gradient::gradient_layout(*style, *angle, *scale, *offset, frame);

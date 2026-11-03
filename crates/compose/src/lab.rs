@@ -453,7 +453,7 @@ mod tests {
     #[test]
     fn gradient_map_8_bit_cuts_to_whole_codes() {
         let c = lab_to_srgb_unclamped([54.9, 60.2, 40.6]);
-        let gm = Adjustment::GradientMap { stops: vec![(0.0, c), (1.0, c)], reverse: false, dither: false, ink_stops: Vec::new() };
+        let gm = Adjustment::GradientMap { stops: vec![(0.0, c), (1.0, c)], reverse: false, dither: false, ink_stops: Vec::new(), source: None };
         let out = run_at(&gm, [50.0, 0.0, 0.0], photosplice_color::SampleType::U8);
         near3(out, [(54.9f32 * 2.55).floor() / 2.55, 60.0, 40.0], 0.05);
         let out = run_at(&gm, [50.0, 0.0, 0.0], photosplice_color::SampleType::U16);
@@ -515,7 +515,7 @@ mod tests {
     #[test]
     fn gradient_map_follows_l() {
         let stops = vec![(0.0, [0.0, 0.0, 1.0]), (1.0, [1.0, 1.0, 0.0])];
-        let gm = Adjustment::GradientMap { stops, reverse: false, dither: false, ink_stops: Vec::new() };
+        let gm = Adjustment::GradientMap { stops, reverse: false, dither: false, ink_stops: Vec::new(), source: None };
         let gray = lab_to_srgb([60.0, 0.0, 0.0]);
         let red = lab_to_srgb([60.0, 40.0, 30.0]);
         let (mut a, mut b) = (one(gray), one(red));
