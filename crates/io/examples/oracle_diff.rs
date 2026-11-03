@@ -524,6 +524,7 @@ fn corpus_summary(root: &std::path::Path) {
 /// file's stored pixels: how close a PhotoSplice edit lands to Photoshop's rendering.
 fn rerender(doc: &mut photosplice_doc::Document) {
     let (dpi, fmt, canvas) = (doc.resolution_dpi, doc.pixel_format(), doc.bounds());
+    let patterns = doc.patterns.clone();
     let mut engine = photosplice_text::TextEngine::with_system_fonts();
     fn walk(ls: &mut [photosplice_doc::Layer], f: &mut dyn FnMut(&mut photosplice_doc::Layer)) {
         for l in ls {
@@ -537,7 +538,10 @@ fn rerender(doc: &mut photosplice_doc::Document) {
         photosplice_doc::LayerContent::Text(t) => {
             engine.render_layer(t, dpi, fmt);
         }
-        photosplice_doc::LayerContent::Shape(sh) => sh.cache = Some(photosplice_vector::render_shape(sh, fmt, canvas)),
+        photosplice_doc::LayerContent::Shape(sh) => {
+            let pats = photosplice_compose::shape_paint::ShapePatterns { patterns: &patterns, mode: fmt.mode, reference: l.effects.reference };
+            sh.cache = Some(photosplice_compose::shape_paint::render_shape(sh, fmt, canvas, pats));
+        }
         _ => {}
     });
 }

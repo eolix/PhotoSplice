@@ -324,6 +324,12 @@ impl<'a> DocCtx<'a> {
             doc,
         }
     }
+
+    /// The patterns `layer`'s shape paint samples (`compose::shape_paint`), for the shape parts
+    /// the CPU rasterises.
+    pub fn shape_patterns(&self, layer: &Layer) -> photosplice_compose::shape_paint::ShapePatterns<'a> {
+        photosplice_compose::shape_paint::ShapePatterns { patterns: self.patterns, mode: self.mode, reference: layer.effects.reference }
+    }
 }
 
 /// Build the pass list for `doc`.
@@ -754,7 +760,7 @@ impl<'a> Planner<'a> {
                 after = self.emit(p);
             }
             // A Frame's stroke over the frame's content, at the group's opacity (compose).
-            if let Some(stroke) = photosplice_compose::shape_split::frame_stroke(layer, self.cx.canvas, self.cx.depth) {
+            if let Some(stroke) = photosplice_compose::shape_split::frame_stroke(layer, self.cx.canvas, self.cx.depth, self.cx.shape_patterns(layer)) {
                 let stroke = self.shape_part(layer, Role::Stroke, stroke);
                 let mut p = Pass::new(Kernel::Blend, 0);
                 p.a = Some(after);
@@ -815,7 +821,7 @@ impl<'a> Planner<'a> {
 
         if let LayerContent::Shape(sh) = &layer.content
             && !visible_clipped.is_empty()
-            && let Some((fill, stroke)) = photosplice_compose::shape_split::split(sh, self.cx.canvas, self.cx.depth)
+            && let Some((fill, stroke)) = photosplice_compose::shape_split::split(sh, self.cx.canvas, self.cx.depth, self.cx.shape_patterns(layer))
         {
             // The vector stroke goes above the clipped layers: the fill is the clipping base,
             // the stroke is laid over the clipped result, then the masks apply to both
@@ -936,7 +942,7 @@ impl<'a> Planner<'a> {
                     s = self.emit(p);
                 }
                 // A Frame's stroke over its masked content (compose::render_content).
-                if let Some(stroke) = photosplice_compose::shape_split::frame_stroke(layer, self.cx.canvas, self.cx.depth) {
+                if let Some(stroke) = photosplice_compose::shape_split::frame_stroke(layer, self.cx.canvas, self.cx.depth, self.cx.shape_patterns(layer)) {
                     let stroke = self.shape_part(layer, Role::Stroke, stroke);
                     let mut p = Pass::new(Kernel::Blend, 0);
                     p.a = Some(s);
@@ -1110,7 +1116,7 @@ impl<'a> Planner<'a> {
         // A stroked shape's vector stroke goes above its clipped layers and interior effects
         // (compose::split_parts): the fill and the stroke unmasked, the masks applied after.
         let split = match &layer.content {
-            LayerContent::Shape(sh) if sh.stroke.is_some() => photosplice_compose::shape_split::split(sh, canvas, self.cx.depth),
+            LayerContent::Shape(sh) if sh.stroke.is_some() => photosplice_compose::shape_split::split(sh, canvas, self.cx.depth, self.cx.shape_patterns(layer)),
             _ => None,
         };
         let (mut content, vstroke) = match split {
@@ -1941,6 +1947,14 @@ fn gradient_rows(g: &Gradient) -> Vec<[f32; 4096]> {
 fn check_gradient_stops<T>(stops: &[(f32, T)]) -> Result<(), Unsupported> {
     let mut positions: Vec<f32> = stops.iter().map(|s| s.0).collect();
     positions.sort_by(f32::total_cmp);
+    // An evenly spaced ramp over the whole range (a generated noise gradient's 4097 stops) has
+    // no discontinuity: the LUT resamples it.
+    let gap = |w: &[f32]| w.get(1).zip(w.first()).map_or(0.0, |(b, a)| b - a);
+    let first = positions.get(..2).map_or(0.0, gap);
+    let spans = positions.first().is_some_and(|p| *p <= 1e-6) && positions.last().is_some_and(|p| *p >= 1.0 - 1e-6);
+    if positions.len() > 2 && spans && first > 0.0 && positions.windows(2).all(|w| (gap(w) - first).abs() < 1e-6) {
+        return Ok(());
+    }
     // A 4096-entry LUT cannot keep two stops that fall in the same entry apart (#3053).
     if positions.windows(2).any(|w| (w[1] - w[0]).abs() < 1.0 / 4095.0) {
         return Err(Unsupported("coincident gradient stops (composited on the CPU)".into()));
@@ -2035,6 +2049,12 @@ mod tests {
     fn stops_closer_than_one_lut_step_stay_on_the_cpu() {
         assert!(check_gradient_stops(&[(0.4999_f32, ()), (0.5, ())]).is_err());
         assert!(check_gradient_stops(&[(0.0_f32, ()), (1.0, ())]).is_ok());
+        // A noise gradient's evenly spaced 4097 stops are a smooth ramp, not coincident stops.
+        let dense: Vec<(f32, ())> = (0..=4096).map(|i| (i as f32 / 4096.0, ())).collect();
+        assert!(check_gradient_stops(&dense).is_ok());
+        let mut uneven = dense.clone();
+        uneven.push((0.5, ()));
+        assert!(check_gradient_stops(&uneven).is_err());
     }
 
     #[test]

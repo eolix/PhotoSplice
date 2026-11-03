@@ -2032,6 +2032,53 @@ fn stroke_effects_on_filled_and_stroked_shapes() {
     }
 }
 
+/// Shapes painted with patterns (fill and stroke): the CPU rasterises them with the document's
+/// patterns (`compose::shape_paint`), plain from the layer's pixels and, with clipped layers or
+/// effects, through the split fill and vector stroke; the GPU composites the same parts.
+#[test]
+fn pattern_painted_shapes() {
+    let Some(mut g) = gpu() else { return };
+    use photosplice_doc::vector::{Path, ShapeLayer, ShapeStroke, StrokeAlign, Subpath};
+    let pat = checker_pattern();
+    let paint = |scale: f32, angle: f32, link: bool| Fill::Pattern { name: pat.name.clone(), scale, id: pat.id.clone(), angle, link, phase: (1.0, 2.0) };
+    for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        for (case, clipped, fx) in [("plain", false, false), ("clipped", true, false), ("effects", false, true)] {
+            let mut d = fx_doc(90, 70, depth);
+            d.patterns.push(pat.clone());
+            let mut sh = ShapeLayer {
+                path: Path::new(vec![Subpath::polygon(&[(14.3, 12.6), (70.2, 18.1), (60.7, 58.4), (24.9, 50.2)])]),
+                fill: Some(paint(0.6, 20.0, true)),
+                stroke: Some(ShapeStroke { width: 4.0, align: StrokeAlign::Outside, paint: paint(1.0, 0.0, false), ..ShapeStroke::default() }),
+                ..ShapeLayer::default()
+            };
+            let mut l = Layer::new("shape", LayerContent::Shape(sh.clone()));
+            l.effects.reference = Some((3.0, 5.0));
+            sh.cache = photosplice_compose::shape_paint::render_layer_shape(&d, &l);
+            let painted = sh.cache.as_ref().map(|c| c.content_bounds());
+            assert!(painted.is_some_and(|b| !b.is_empty()), "{case}: the patterns paint");
+            l.content = LayerContent::Shape(sh);
+            if fx {
+                l.effects.items = vec![
+                    Effect::Stroke(stroke(2.0, StrokePosition::Outside, FxPaint::Color(Color::rgb(1.0, 1.0, 1.0)))),
+                    Effect::DropShadow(shadow(BlendMode::Multiply, 0.7, 120.0, 4.0, 5.0, 0.0)),
+                ];
+            }
+            d.layers.push(l);
+            if clipped {
+                let mut c = noise_layer("clip", d.pixel_format(), Rect::new(30, 0, 60, 70), 9, 0.5);
+                c.clipped = true;
+                d.layers.push(c);
+            }
+            let what = format!("{depth:?} {case}");
+            if fx {
+                fx_check(&mut g, &d, &what);
+            } else {
+                check(&mut g, &d, &what);
+            }
+        }
+    }
+}
+
 /// Blend If on the GPU matches `compose::apply_blend_if` (#4395): this-layer and underlying
 /// ranges, hard and split points, per channel, on raster, masked, adjustment and clipped layers,
 /// with channel restrictions, and in grayscale. Hard points are compared on 8-bit documents only:

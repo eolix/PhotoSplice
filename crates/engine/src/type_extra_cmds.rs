@@ -331,7 +331,7 @@ fn convert_to_shape(s: &mut Session, p: &Value) -> Result<Value> {
         let LayerContent::Text(t) = &l.content else { return Err(EngineError::Other("not a type layer".into())) };
         let color = t.char_runs().first().map_or(t.color, |r| r.style.color);
         let mut sh = ShapeLayer { path: text_path(&snapshot, t), fill: Some(Fill::Solid(color)), ..Default::default() };
-        crate::vector_cmds::refresh_shape(&snapshot, &mut sh);
+        crate::vector_cmds::refresh_shape(&snapshot, l.effects.reference, &mut sh);
         let n = sh.path.subpaths.len();
         l.content = LayerContent::Shape(sh);
         l.psd_blocks.retain(|(k, _)| k != b"TySh");

@@ -135,6 +135,56 @@ fn shape_layer_typed_roundtrip() {
     }
 }
 
+/// A shape painted with patterns (fill and stroke, with scale, angle, phase and link) survives a
+/// PSD save and load: the paints come back from `vscg` / `vstk`, the pattern from the document's
+/// `Patt` block, the effects reference point (`fxrp`) the pattern tiles from with them, so the
+/// shape redraws exactly as it was saved.
+#[test]
+fn pattern_painted_shapes_roundtrip_with_their_patterns() {
+    use photosplice_compose::shape_paint::{ShapePatterns, render_layer_shape};
+    let mut tile = photosplice_doc::Surface::new(photosplice_color::PixelFormat::new(ColorMode::Rgb, SampleType::U8, false));
+    tile.fill_rect(Rect::new(0, 0, 8, 8), &[0.9, 0.2, 0.1]);
+    tile.fill_rect(Rect::new(0, 0, 4, 4), &[0.1, 0.3, 0.8]);
+    let pat = photosplice_doc::Pattern::new("Quarters", tile, 8, 8);
+    let paint = |scale: f32, angle: f32, link: bool, phase: (f32, f32)| Fill::Pattern { name: pat.name.clone(), scale, id: pat.id.clone(), angle, link, phase };
+    let mut d = doc();
+    d.patterns.push(pat.clone());
+    let sh = ShapeLayer {
+        path: Path::new(vec![Subpath::polygon(&[(32.0, 32.0), (160.0, 32.0), (160.0, 128.0), (32.0, 128.0)])]),
+        fill: Some(paint(0.5, 30.0, true, (3.0, -2.0))),
+        stroke: Some(ShapeStroke { width: 6.0, paint: paint(1.0, 0.0, false, (0.0, 0.0)), align: StrokeAlign::Outside, ..ShapeStroke::default() }),
+        ..Default::default()
+    };
+    let mut l = Layer::new("Patterned", LayerContent::Shape(sh.clone()));
+    l.effects.reference = Some((5.0, 7.0));
+    let pixels = render_layer_shape(&d, &l).unwrap();
+    assert!(!pixels.content_bounds().is_empty(), "the patterns paint");
+    if let LayerContent::Shape(s) = &mut l.content {
+        s.cache = Some(pixels.clone());
+    }
+    d.layers.push(l);
+    let b = roundtrip(&d);
+    assert!(b.patterns.iter().any(|p| p.id == pat.id && p.width == 8 && p.height == 8), "pattern saved in Patt");
+    let back = &b.layers[1];
+    let LayerContent::Shape(s) = &back.content else { panic!("not a shape") };
+    assert_eq!(s.fill, sh.fill);
+    assert_eq!(s.stroke.as_ref().map(|s| &s.paint), sh.stroke.as_ref().map(|s| &s.paint));
+    assert_eq!(back.effects.reference, Some((5.0, 7.0)));
+    // Redrawn from what was read: the same pixels as saved.
+    let redrawn = photosplice_compose::shape_paint::render_shape(s, b.pixel_format(), b.bounds(), ShapePatterns::of(&b, back));
+    let r = Rect::new(0, 0, 256, 256);
+    let (mut want, mut got) = (vec![[0.0f32; 4]; 256 * 256], vec![[0.0f32; 4]; 256 * 256]);
+    pixels.read_rgba_into(r, &mut want);
+    redrawn.read_rgba_into(r, &mut got);
+    let worst = want.iter().zip(&got).map(|(a, b)| (0..4).map(|k| (a[k] - b[k]).abs()).fold(0.0f32, f32::max)).fold(0.0f32, f32::max);
+    assert!(worst < 1.5 / 255.0, "redraw differs by {}", worst * 255.0);
+    // And the stored layer pixels are that rendering.
+    let stored = s.cache.as_ref().unwrap();
+    let mut st = vec![[0.0f32; 4]; 256 * 256];
+    stored.read_rgba_into(r, &mut st);
+    assert_eq!(st.iter().filter(|p| p[3] > 0.0).count(), want.iter().filter(|p| p[3] > 0.0).count());
+}
+
 /// A translucent solid fill and stroke colour survive a PSD save and load (the fill's alpha in
 /// `pcAl`, the stroke's folded into its opacity for Reference and unfolded on read), and a
 /// redraw keeps them.

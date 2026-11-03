@@ -71,6 +71,8 @@ pub(crate) struct Ctx<'a> {
     /// Layer records decoded so far, out of `total` (progress).
     pub done: usize,
     pub total: usize,
+    /// The document's patterns (shapes rendered here paint pattern fills and strokes with them).
+    pub patterns: Vec<photosplice_doc::Pattern>,
 }
 
 fn doc_mode(m: PsdMode) -> Option<ColorMode> {
@@ -516,7 +518,13 @@ impl Ctx<'_> {
             let soft = sh.has_soft_mask() && sh.fill.is_some();
             if soft || ((rec.rect.is_empty() || rec.rect.size().is_err()) && (!sh.path.subpaths.is_empty() || sh.path.inverted)) {
                 let canvas = Rect::new(0, 0, self.file.header.width as i32, self.file.header.height as i32);
-                sh.cache = Some(photosplice_vector::render_shape(&sh, self.fmt, canvas));
+                // Pattern paint tiles from the layer's effects reference point (`fxrp`).
+                let reference = rec.block(b"fxrp").and_then(|b| {
+                    let f = |s: &[u8]| Some(f64::from_be_bytes(s.try_into().ok()?));
+                    Some((f(b.data.get(..8)?)?, f(b.data.get(8..16)?)?))
+                });
+                let patterns = photosplice_compose::shape_paint::ShapePatterns { patterns: &self.patterns, mode: self.fmt.mode, reference };
+                sh.cache = Some(photosplice_compose::shape_paint::render_shape(&sh, self.fmt, canvas, patterns));
             }
             LayerContent::Shape(sh)
         } else if let Some(k) = fill_key {
@@ -1093,6 +1101,7 @@ pub(crate) fn psd_to_document_decoded_integrity(
         ctl: *ctl,
         done: 0,
         total: file.layers().len(),
+        patterns: doc.patterns.clone(),
     };
     if let Some(w) = anno_warning {
         cx.warn(w);

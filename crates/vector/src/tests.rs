@@ -633,3 +633,41 @@ fn soft_fills_show_beyond_the_path_and_keep_aligned_strokes_crisp() {
         assert!(rgba.iter().all(|p| p.iter().all(|v| v.is_finite())), "{density} {feather}");
     }
 }
+
+/// A pattern paint for tests: red on even columns, blue on odd ones.
+struct Columns;
+
+impl PatternPaint for Columns {
+    fn at(&self, x: i32, _y: i32) -> [f32; 4] {
+        if x.rem_euclid(2) == 0 { [1.0, 0.0, 0.0, 1.0] } else { [0.0, 0.0, 1.0, 1.0] }
+    }
+}
+
+#[test]
+fn pattern_paint_comes_from_the_resolver() {
+    let pattern = Fill::Pattern { name: "P".into(), scale: 1.0, id: "p".into(), angle: 0.0, link: true, phase: (0.0, 0.0) };
+    let sh = ShapeLayer {
+        path: shapes::rect(2.0, 2.0, 12.0, 12.0),
+        fill: Some(pattern.clone()),
+        stroke: Some(ShapeStroke { width: 2.0, paint: pattern, align: StrokeAlign::Outside, ..Default::default() }),
+        ..Default::default()
+    };
+    let clip = Rect::new(0, 0, 16, 16);
+    // Without the document's patterns: transparent, as before.
+    assert!(CompiledShape::new(&sh, DEFAULT_TOLERANCE, clip).render_rgba(clip).iter().all(|p| p[3] == 0.0));
+    let resolve = |f: &Fill| matches!(f, Fill::Pattern { .. }).then(|| PatternSource(std::sync::Arc::new(Columns)));
+    let rgba = CompiledShape::with_patterns(&sh, DEFAULT_TOLERANCE, clip, &resolve).render_rgba(clip);
+    let at = |x: usize, y: usize| rgba[y * 16 + x];
+    // Fill (inside) and outside stroke (x = 0, 1) both sample the pattern at their own pixel.
+    for (x, y) in [(6, 6), (7, 6), (0, 6), (1, 6)] {
+        let want = if x % 2 == 0 { [1.0, 0.0, 0.0, 1.0] } else { [0.0, 0.0, 1.0, 1.0] };
+        assert_eq!(at(x, y), want, "({x},{y})");
+    }
+    let s = render_shape_with(&sh, PixelFormat::RGBA8, clip, &resolve);
+    assert_eq!(s.pixel(4, 4), vec![1.0, 0.0, 0.0, 1.0]);
+    // A gradient position means nothing to a pattern.
+    assert_eq!(Paint::Pattern(PatternSource(std::sync::Arc::new(Columns))).sample(0.5), [0.0; 4]);
+    // Hostile coordinates stay in range.
+    assert_eq!(px_of(f64::NAN), 0);
+    assert_eq!(px_of(1e300), i32::MAX);
+}

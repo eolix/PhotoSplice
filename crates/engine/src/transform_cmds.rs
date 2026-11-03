@@ -501,7 +501,7 @@ pub fn split_selected(surf: &Surface, sel: &Surface) -> Result<(Surface, Surface
 pub(crate) fn refresh_text(doc: &Document, l: &mut Layer) {
     match &mut l.content {
         LayerContent::Text(t) => crate::type_cmds::refresh_geometry(doc, t),
-        LayerContent::Shape(sh) => crate::vector_cmds::refresh_shape(doc, sh),
+        LayerContent::Shape(sh) => crate::vector_cmds::refresh_shape(doc, l.effects.reference, sh),
         LayerContent::Smart(_) => {
             // Unavailable sources keep the warped cache.
             let _ = crate::smart_cmds::refresh_layer(doc, l);

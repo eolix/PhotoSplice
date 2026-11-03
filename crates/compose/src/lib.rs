@@ -32,6 +32,7 @@ pub mod native_lab;
 pub mod pattern;
 pub mod proxy;
 pub mod psblend;
+pub mod shape_paint;
 pub mod shape_split;
 
 use photosplice_color::blend::BlendMode;
@@ -1191,7 +1192,7 @@ fn render_content(layer: &Layer, rect: Rect, cx: &Ctx) -> Option<Buffer> {
         }
     }
     // A Frame's stroke lies over its masked content; the frame doesn't clip it.
-    if let Some(stroke) = shape_split::frame_stroke(layer, cx.canvas, cx.depth) {
+    if let Some(stroke) = shape_split::frame_stroke(layer, cx.canvas, cx.depth, shape_patterns(cx, layer)) {
         blend_into(&mut buf, &surface_to_buffer(&stroke, rect), BlendMode::Normal, 1.0);
     }
     Some(buf)
@@ -1712,7 +1713,7 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
             }
         }
         // A Frame's stroke over the frame's content, at the group's opacity.
-        if let Some(stroke) = shape_split::frame_stroke(layer, cx.canvas, cx.depth) {
+        if let Some(stroke) = shape_split::frame_stroke(layer, cx.canvas, cx.depth, shape_patterns(cx, layer)) {
             blend_into(backdrop, &surface_to_buffer(&stroke, rect), BlendMode::Normal, opacity);
         }
         // Layers clipped to a pass-through group sit atop the group's
@@ -1915,8 +1916,13 @@ fn shape_parts(layer: &Layer, clipped: &[Layer], rect: Rect, cx: &Ctx) -> Option
 fn split_parts(layer: &Layer, rect: Rect, cx: &Ctx) -> Option<(Buffer, Buffer, Option<Vec<f32>>)> {
     let LayerContent::Shape(sh) = &layer.content else { return None };
     sh.stroke.as_ref()?;
-    let (fs, ss) = shape_split::split(sh, cx.canvas, cx.depth)?;
+    let (fs, ss) = shape_split::split(sh, cx.canvas, cx.depth, shape_patterns(cx, layer))?;
     Some((surface_to_buffer(&fs, rect), surface_to_buffer(&ss, rect), mask_vals(layer, rect, cx)))
+}
+
+/// The patterns `layer`'s shape paint samples in this render (see [`shape_paint`]).
+fn shape_patterns<'a>(cx: &Ctx<'a>, layer: &Layer) -> shape_paint::ShapePatterns<'a> {
+    shape_paint::ShapePatterns { patterns: cx.patterns.source(), mode: cx.mode, reference: layer.effects.reference }
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -478,9 +478,11 @@ fn shift_shown(doc: &Document, l: &mut Layer, dx: i32, dy: i32) {
                     && (x1 + stroke_pad) < canvas.x1 as f64
                     && (y1 + stroke_pad) < canvas.y1 as f64
             });
+            // A pattern that stays on the canvas (unlinked) doesn't move with the pixels.
+            let moves = photosplice_compose::shape_paint::moves_with_layer(sh, l.effects.reference);
             match &mut sh.cache {
-                Some(c) if was_inside && stays_inside => *c = translate_surface(c, dx, dy),
-                _ => crate::vector_cmds::refresh_shape(doc, sh),
+                Some(c) if was_inside && stays_inside && moves => *c = translate_surface(c, dx, dy),
+                _ => crate::vector_cmds::refresh_shape(doc, l.effects.reference, sh),
             }
         }
         LayerContent::Smart(sm) => crate::smart_cmds::shift_smart(sm, dx, dy),
@@ -1889,7 +1891,7 @@ mod tests {
         let cached = sh.cache.as_ref().expect("cached render");
 
         let mut fresh_sh = sh.clone();
-        crate::vector_cmds::refresh_shape(&moved_doc, &mut fresh_sh);
+        crate::vector_cmds::refresh_shape(&moved_doc, moved_layer.effects.reference, &mut fresh_sh);
         let fresh = fresh_sh.cache.as_ref().expect("fresh render");
 
         assert_eq!(cached, fresh, "dragged shape cached render must match fresh render across canvas edge");
@@ -1901,7 +1903,7 @@ mod tests {
         let back_cached = back_sh.cache.as_ref().expect("cached render");
 
         let mut fresh_back = back_sh.clone();
-        crate::vector_cmds::refresh_shape(&moved_back, &mut fresh_back);
+        crate::vector_cmds::refresh_shape(&moved_back, back_layer.effects.reference, &mut fresh_back);
         let fresh_back_render = fresh_back.cache.as_ref().expect("fresh render");
 
         assert_eq!(back_cached, fresh_back_render, "cached render must match fresh render when dragged back");

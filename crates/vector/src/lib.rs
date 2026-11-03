@@ -242,10 +242,34 @@ pub fn coverage_surface(r: &Rasterizer, format: PixelFormat, clip: Rect) -> Surf
     s
 }
 
+/// A pattern as a shape paints it: tiles, placement and sampling live above this crate (the
+/// document's pattern table and the compositor's sampler), so callers that have them hand them
+/// in through [`CompiledShape::with_patterns`].
+pub trait PatternPaint: Send + Sync {
+    /// Straight RGBA of the pattern for the pixel whose top-left corner is `(x, y)`.
+    fn at(&self, x: i32, y: i32) -> [f32; 4];
+}
+
+/// A shared [`PatternPaint`] (cheap to clone, printable).
+#[derive(Clone)]
+pub struct PatternSource(pub std::sync::Arc<dyn PatternPaint>);
+
+impl std::fmt::Debug for PatternSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PatternSource")
+    }
+}
+
+/// Resolves a shape's pattern paint (`Fill::Pattern`) into the pattern it samples; `None` when
+/// the pattern is missing or can't be painted (the paint is then transparent).
+pub type PatternResolver<'a> = &'a dyn Fn(&Fill) -> Option<PatternSource>;
+
 /// Colour source for fills and strokes.
 #[derive(Clone, Debug)]
 pub enum Paint {
     None,
+    /// A pattern ([`PatternResolver`]).
+    Pattern(PatternSource),
     /// Straight RGBA.
     Solid([f32; 4]),
     Gradient {
@@ -277,8 +301,13 @@ impl Paint {
     /// stops), rendering the same pixels as the compositor's fill layers; the parity tests in
     /// `photosplice-compose` (which this crate cannot depend on) keep the two in step. Pattern
     /// fills are not rendered (transparent): they need the document's pattern table, which
-    /// lives above this crate.
+    /// lives above this crate ([`Paint::from_fill_with`] takes it).
     pub fn from_fill(f: &Fill, bounds: (f64, f64, f64, f64), canvas: (f64, f64, f64, f64)) -> Paint {
+        Paint::from_fill_with(f, bounds, canvas, &|_| None)
+    }
+
+    /// [`Paint::from_fill`] with pattern fills painted by `patterns`.
+    pub fn from_fill_with(f: &Fill, bounds: (f64, f64, f64, f64), canvas: (f64, f64, f64, f64), patterns: PatternResolver<'_>) -> Paint {
         let rgba = |c: &photosplice_color::Color| {
             let v = c.to_rgb();
             [v[0], v[1], v[2], c.alpha]
@@ -308,7 +337,7 @@ impl Paint {
                     frame,
                 }
             }
-            Fill::Pattern { .. } => Paint::None,
+            Fill::Pattern { .. } => patterns(f).map_or(Paint::None, Paint::Pattern),
         }
     }
 
@@ -316,6 +345,7 @@ impl Paint {
     pub fn at(&self, x: f64, y: f64) -> [f32; 4] {
         match self {
             Paint::None => [0.0; 4],
+            Paint::Pattern(p) => p.0.at(px_of(x), px_of(y)),
             Paint::Solid(c) => *c,
             Paint::Gradient { style, angle, scale, reverse, offset, dither: dith, frame, .. } => {
                 let mut c = self.sample(gradient::gradient_t(*style, *angle, *scale, *reverse, *offset, *frame, x as f32, y as f32));
@@ -327,14 +357,20 @@ impl Paint {
         }
     }
 
-    /// Straight RGBA at gradient position `t` (`0..=1`); a solid paint's colour.
+    /// Straight RGBA at gradient position `t` (`0..=1`); a solid paint's colour (a pattern,
+    /// which has no gradient position, is transparent).
     pub fn sample(&self, t: f32) -> [f32; 4] {
         match self {
-            Paint::None => [0.0; 4],
+            Paint::None | Paint::Pattern(_) => [0.0; 4],
             Paint::Solid(c) => *c,
             Paint::Gradient { stops, mids, opacity, .. } => gradient::sample(stops, mids, opacity, t),
         }
     }
+}
+
+/// The pixel holding coordinate `v` (a pixel centre maps to its pixel), saturating far off.
+fn px_of(v: f64) -> i32 {
+    if v.is_finite() { v.floor().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32 } else { 0 }
 }
 
 /// The whole-pixel frame of shape bounds (`x0, y0, x1, y1`), as Photoshop lays a shape layer's
@@ -461,6 +497,12 @@ impl CompiledShape {
     /// the whole canvas, as Photoshop lays a shape layer's gradient over the layer's bounds
     /// (psd-tools vector-mask2.psd).
     pub fn new(shape: &ShapeLayer, tol: f64, canvas: Rect) -> Self {
+        Self::with_patterns(shape, tol, canvas, &|_| None)
+    }
+
+    /// [`CompiledShape::new`] with pattern fills and strokes painted by `patterns` (without it
+    /// they are transparent).
+    pub fn with_patterns(shape: &ShapeLayer, tol: f64, canvas: Rect, patterns: PatternResolver<'_>) -> Self {
         let aligned = shape.align_edges.then(|| aligned_path(shape, tol));
         let path = aligned.as_ref().unwrap_or(&shape.path);
         let cb = (f64::from(canvas.x0), f64::from(canvas.y0), f64::from(canvas.x1), f64::from(canvas.y1));
@@ -475,7 +517,7 @@ impl CompiledShape {
             // stays crisp.
             let coverage = FillCoverage::new(shape, path, &area, canvas);
             bounds = coverage.bounds();
-            (coverage, Paint::from_fill(f, pb, cb))
+            (coverage, Paint::from_fill_with(f, pb, cb, patterns))
         });
         let all_closed = path.subpaths.iter().all(|s| s.closed);
         let mut align = None;
@@ -492,7 +534,7 @@ impl CompiledShape {
                 (Some(a), Some(b)) => Some(a.union(&b)),
                 (a, b) => a.or(b),
             };
-            (r, Paint::from_fill(&s.paint, pb, cb), s.opacity.clamp(0.0, 1.0))
+            (r, Paint::from_fill_with(&s.paint, pb, cb, patterns), s.opacity.clamp(0.0, 1.0))
         });
         if path.inverted && shape.fill.is_some() {
             bounds = Some(Rect::new(i32::MIN / 4, i32::MIN / 4, i32::MAX / 4, i32::MAX / 4));
@@ -641,6 +683,11 @@ fn aligned_path(shape: &ShapeLayer, tol: f64) -> Path {
 /// `clip` — the canvas, which also lays out gradients whose fill is not aligned with the layer.
 pub fn render_shape(shape: &ShapeLayer, format: PixelFormat, clip: Rect) -> Surface {
     CompiledShape::new(shape, DEFAULT_TOLERANCE, clip).render(format, clip)
+}
+
+/// [`render_shape`] with pattern fills and strokes painted by `patterns`.
+pub fn render_shape_with(shape: &ShapeLayer, format: PixelFormat, clip: Rect, patterns: PatternResolver<'_>) -> Surface {
+    CompiledShape::with_patterns(shape, DEFAULT_TOLERANCE, clip, patterns).render(format, clip)
 }
 
 #[cfg(test)]
