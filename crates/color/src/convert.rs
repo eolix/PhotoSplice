@@ -7,7 +7,7 @@
 //! one while its [`CmykSpace`] is active on the thread ([`with_cmyk_space`]: the compositor,
 //! the GPU upload and composite exports enter it); otherwise the built-in profiles apply.
 //! Documents without a CMYK profile are in the working CMYK ([`set_working_cmyk`]: Reference's
-//! U.S. Web Coated (SWOP) v2 when the application finds it installed), which
+//! Coated FOGRA39 when the application finds it installed), which
 //! [`CmykSpace::for_profile`] hands out the same way.
 //! Lab uses the exact D50 formulas; gray is treated as sGray (gray `v` = sRGB `(v, v, v)`).
 

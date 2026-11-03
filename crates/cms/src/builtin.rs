@@ -38,6 +38,10 @@ pub enum Builtin {
     /// gamma of 1.732, fitted on Photoshop 27.11's RGB → Grayscale (sRGB 64 / 128 / 192 and pure red
     /// become 46 / 105 / 177 / 107, all within 1 level). Not Adobe's profile.
     DotGain20Compat,
+    /// Gray matching Reference's Europe working gray (Dot Gain 15 %) with our own curve: the gamma
+    /// that prints a 50 % dot at 65 % (ln 0.35 / ln 0.5 ≈ 1.515), by the same law that gives 1.737
+    /// for 20 %, which [`Builtin::DotGain20Compat`]'s fit (1.732) confirms. Not Adobe's profile.
+    DotGain15Compat,
     /// CIE L*a*b* D50 identity (device Lab = PCS Lab, ICC v4 encoding).
     LabD50,
     /// Synthetic coated-offset CMYK (300 % total ink, medium GCR); see [`crate::synth`].
@@ -45,7 +49,7 @@ pub enum Builtin {
 }
 
 impl Builtin {
-    pub const ALL: [Builtin; 12] = [
+    pub const ALL: [Builtin; 13] = [
         Builtin::Srgb,
         Builtin::DisplayP3,
         Builtin::AdobeRgbCompat,
@@ -56,6 +60,7 @@ impl Builtin {
         Builtin::GrayGamma22,
         Builtin::SGray,
         Builtin::DotGain20Compat,
+        Builtin::DotGain15Compat,
         Builtin::LabD50,
         Builtin::CoatedCmyk,
     ];
@@ -73,6 +78,7 @@ impl Builtin {
             Builtin::GrayGamma22 => "gray-gamma-2.2",
             Builtin::SGray => "sgray",
             Builtin::DotGain20Compat => "dot-gain-20-compat",
+            Builtin::DotGain15Compat => "dot-gain-15-compat",
             Builtin::LabD50 => "lab-d50",
             Builtin::CoatedCmyk => "coated-cmyk",
         }
@@ -91,6 +97,7 @@ impl Builtin {
             Builtin::GrayGamma22 => "Gray Gamma 2.2 (PhotoSplice)",
             Builtin::SGray => "sGray (sRGB tone curve, PhotoSplice)",
             Builtin::DotGain20Compat => "Dot Gain 20%-compatible (gamma 1.732, PhotoSplice)",
+            Builtin::DotGain15Compat => "Dot Gain 15%-compatible (gamma 1.515, PhotoSplice)",
             Builtin::LabD50 => "Lab D50 identity (PhotoSplice)",
             Builtin::CoatedCmyk => crate::synth::DESCRIPTION,
         }
@@ -109,6 +116,7 @@ impl Builtin {
             "gray" | "graygamma22" | "gamma22" => Some(Builtin::GrayGamma22),
             "sgray" | "graysrgb" => Some(Builtin::SGray),
             "dotgain20" | "dotgain20compat" | "dotgain" => Some(Builtin::DotGain20Compat),
+            "dotgain15" | "dotgain15compat" => Some(Builtin::DotGain15Compat),
             "aces-cg" | "acescg" => Some(Builtin::AcesCg),
             "lab" | "labd50" | "cielab" => Some(Builtin::LabD50),
             "cmyk" | "coatedcmyk" | "defaultcmyk" | "photosplicecoatedcmyk" => Some(Builtin::CoatedCmyk),
@@ -119,7 +127,7 @@ impl Builtin {
 
     /// The profile (built once per process).
     pub fn profile(self) -> &'static Profile {
-        static CELLS: [OnceLock<Profile>; 12] = [const { OnceLock::new() }; 12];
+        static CELLS: [OnceLock<Profile>; 13] = [const { OnceLock::new() }; 13];
         // `ALL` lists the variants in declaration order (checked by `all_in_declaration_order`),
         // so the discriminant is the cell index.
         CELLS[self as usize].get_or_init(|| build(self))
@@ -288,6 +296,7 @@ fn build(b: Builtin) -> Profile {
         Builtin::GrayGamma22 => gray(b.description(), Curve::Gamma(2.2)),
         Builtin::SGray => gray(b.description(), srgb_trc()),
         Builtin::DotGain20Compat => gray(b.description(), Curve::Gamma(1.732)),
+        Builtin::DotGain15Compat => gray(b.description(), Curve::Gamma(1.515)),
         Builtin::LabD50 => lab(),
         // The shipped bytes are `synth::coated_cmyk()` (checked by the `regen` test); rebuild
         // them rather than crash if they ever fail to parse.

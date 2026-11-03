@@ -1,9 +1,10 @@
 //! Edit › Color Settings › Working CMYK: the profile CMYK documents without one of their own are
 //! separated with, and CMYK colour values are read in.
 //!
-//! Reference's default (North America General Purpose 2) is U.S. Web Coated (SWOP) v2 with
-//! relative colorimetric and black point compensation. That profile may not be shipped, so
-//! `auto` uses it when Reference's installer or the system put it on disk
+//! PhotoSplice's default follows Reference's Europe General Purpose 3 settings: Coated FOGRA39
+//! (ISO 12647-2:2004) with relative colorimetric and black point compensation (Reference's North
+//! America default, U.S. Web Coated (SWOP) v2, is one of the installed choices). That profile may
+//! not be shipped, so `auto` uses it when Reference's installer or the system put it on disk
 //! (`photosplice_cms::installed`), and the built-in coated CMYK otherwise (always on the web).
 //! A configured profile (`coated-cmyk` or an `.icc` path) is used as it is; one that no longer
 //! reads falls back to `auto`.
@@ -29,7 +30,7 @@ pub const AUTO: &str = "auto";
 #[derive(Clone, Debug)]
 pub struct Resolved {
     pub profile: Arc<Profile>,
-    /// `installed` (`auto` found U.S. Web Coated (SWOP) v2), `builtin` or `configured`.
+    /// `installed` (`auto` found Coated FOGRA39), `builtin` or `configured`.
     pub source: &'static str,
     /// The file it was read from, when it was.
     pub path: Option<String>,
@@ -42,7 +43,7 @@ fn builtin() -> Resolved {
 }
 
 fn auto() -> Resolved {
-    match photosplice_cms::installed::swop_v2() {
+    match photosplice_cms::installed::fogra39() {
         Some(f) => Resolved { profile: f.profile, source: "installed", path: Some(f.path.to_string_lossy().into_owned()), fallback: false },
         None => builtin(),
     }
@@ -99,7 +100,7 @@ fn report(s: &Session) -> Value {
     let setting = s.color.settings.working_cmyk.clone();
     let r = resolve(&setting);
     let mut choices = vec![
-        json!({"id": AUTO, "description": format!("Automatic ({} if installed)", photosplice_cms::installed::SWOP_V2_DESCRIPTION)}),
+        json!({"id": AUTO, "description": format!("Automatic ({} if installed)", photosplice_cms::installed::FOGRA39.description)}),
         json!({"id": Builtin::CoatedCmyk.id(), "description": Builtin::CoatedCmyk.description()}),
     ];
     choices.extend(
@@ -157,7 +158,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "Working CMYK",
         menu: &[],
         shortcut: None,
-        params: r##"{"profile":"auto|coated-cmyk" (or a path to a CMYK .icc file; omit to read)} → {setting, profile, source: installed|builtin|configured, path, fallback, inUse, choices: [{id, description}]} (auto = U.S. Web Coated (SWOP) v2 when installed, else the built-in coated CMYK; untagged CMYK documents and CMYK colours use it)"##,
+        params: r##"{"profile":"auto|coated-cmyk" (or a path to a CMYK .icc file; omit to read)} → {setting, profile, source: installed|builtin|configured, path, fallback, inUse, choices: [{id, description}]} (auto = Coated FOGRA39 (ISO 12647-2:2004) when installed, else the built-in coated CMYK; untagged CMYK documents and CMYK colours use it)"##,
         enabled: |_| Ok(()),
         run: working_cmyk,
         journal: true,
@@ -223,7 +224,7 @@ mod tests {
     fn old_preferences_load_as_auto() {
         let mut c = crate::color_cmds::ColorSettings { working_cmyk: "coated-cmyk".into(), working_cmyk_rev: 0, ..Default::default() };
         c.migrate();
-        assert_eq!((c.working_cmyk.as_str(), c.working_cmyk_rev), (AUTO, 1));
+        assert_eq!((c.working_cmyk.as_str(), c.working_cmyk_rev), (AUTO, crate::color_cmds::SETTINGS_REV));
         // A choice made since is kept.
         let mut c = crate::color_cmds::ColorSettings { working_cmyk: "coated-cmyk".into(), ..Default::default() };
         c.migrate();
@@ -232,6 +233,24 @@ mod tests {
         let old: crate::color_cmds::ColorSettings = serde_json::from_value(json!({"workingCmyk": "coated-cmyk"})).unwrap();
         assert_eq!(old.working_cmyk_rev, 0);
         let new: crate::color_cmds::ColorSettings = serde_json::from_value(serde_json::to_value(crate::color_cmds::ColorSettings::default()).unwrap()).unwrap();
-        assert_eq!(new.working_cmyk_rev, 1);
+        assert_eq!(new.working_cmyk_rev, crate::color_cmds::SETTINGS_REV);
+    }
+
+    /// Europe General Purpose 3 is the default: Dot Gain 15 % gray, no profile warnings. Settings
+    /// saved with the old North America defaults move to it; other choices stay.
+    #[test]
+    fn europe_defaults_and_their_migration() {
+        let d = crate::color_cmds::ColorSettings::default();
+        assert_eq!((d.working_gray.as_str(), d.ask_on_mismatch, d.ask_on_paste, d.ask_on_missing), ("dot-gain-15-compat", false, false, false));
+        let mut old = crate::color_cmds::ColorSettings { working_gray: "dot-gain-20-compat".into(), ask_on_mismatch: true, ask_on_paste: true, working_cmyk_rev: 1, ..d.clone() };
+        old.migrate();
+        assert_eq!((old.working_gray.as_str(), old.ask_on_mismatch, old.ask_on_paste), ("dot-gain-15-compat", false, false));
+        let mut chosen = crate::color_cmds::ColorSettings { working_gray: "sgray".into(), working_cmyk_rev: 1, ..d.clone() };
+        chosen.migrate();
+        assert_eq!(chosen.working_gray, "sgray");
+        // Up to date: left alone.
+        let mut now = crate::color_cmds::ColorSettings { working_gray: "dot-gain-20-compat".into(), ask_on_mismatch: true, ..d };
+        now.migrate();
+        assert_eq!((now.working_gray.as_str(), now.ask_on_mismatch), ("dot-gain-20-compat", true));
     }
 }

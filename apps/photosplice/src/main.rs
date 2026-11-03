@@ -460,8 +460,8 @@ fn main() -> eframe::Result {
                 }
             }
             let mut app = PhotospliceApp::new(Session::new(), services);
-            // Color Settings › Working CMYK (Reference's U.S. Web Coated (SWOP) v2 when it is
-            // installed) separates untagged CMYK documents from the first one opened.
+            // Color Settings › Working CMYK (Reference's Coated FOGRA39 when it is installed)
+            // separates untagged CMYK documents from the first one opened.
             app.session.apply_working_cmyk();
             app.bundled = photosplice_ui_egui::bundled::State::new(services::bundled_libraries());
             app.min_frame_ms = uncapped.then_some(1000.0 / 240.0);

@@ -767,7 +767,7 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                     };
                     if working_cmyk {
                         opts = vec![
-                            ("auto".to_string(), "Automatic (U.S. Web Coated (SWOP) v2 if installed)"),
+                            ("auto".to_string(), "Automatic (Coated FOGRA39 if installed)"),
                             ("coated-cmyk".to_string(), "PhotoSplice Coated CMYK (built-in)"),
                         ];
                         opts.extend(cmyk_profiles.iter().map(|i| (i.path.clone(), i.description.as_str())));

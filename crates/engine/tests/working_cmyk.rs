@@ -106,8 +106,8 @@ fn working_cmyk_setting_separates_untagged_documents() {
     assert_eq!(working_cmyk_profile().description, "Working Test CMYK");
     s.execute("prefs.reset", json!({"path": "colorSettings.workingCmyk"})).unwrap();
     assert_eq!(s.color.settings.working_cmyk, "auto");
-    let auto = photosplice_cms::installed::swop_v2();
-    assert_eq!(working_cmyk().map(|w| w.id), auto.as_ref().map(|f| f.profile.content_hash()), "auto: the installed SWOP v2, else the built-in");
+    let auto = photosplice_cms::installed::fogra39();
+    assert_eq!(working_cmyk().map(|w| w.id), auto.as_ref().map(|f| f.profile.content_hash()), "auto: the installed Coated FOGRA39, else the built-in");
     // Preferences saved before `auto` existed held the built-in profile as the default.
     s.execute("edit.workingCmyk", json!({"profile": "coated-cmyk"})).unwrap();
     let mut old: serde_json::Value = serde_json::from_str(&s.prefs_to_json()).unwrap();
@@ -123,18 +123,18 @@ fn working_cmyk_setting_separates_untagged_documents() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// With Reference's U.S. Web Coated (SWOP) v2 installed (not on CI), `auto` separates untagged
-/// CMYK through it, relative colorimetric with black point compensation.
+/// With Reference's Coated FOGRA39 installed (not on CI), `auto` separates untagged CMYK through
+/// it, relative colorimetric with black point compensation (Europe General Purpose 3).
 #[test]
-fn auto_uses_the_installed_swop_profile() {
+fn auto_uses_the_installed_fogra39_profile() {
     let _guard = LOCK.lock().unwrap_or_else(PoisonError::into_inner);
-    let Some(swop) = photosplice_cms::installed::swop_v2() else {
-        eprintln!("U.S. Web Coated (SWOP) v2 is not installed: skipped");
+    let Some(swop) = photosplice_cms::installed::fogra39() else {
+        eprintln!("Coated FOGRA39 is not installed: skipped");
         return;
     };
     let mut s = Session::new();
     let r = s.execute("edit.workingCmyk", json!({"profile": "auto"})).unwrap();
-    assert_eq!((r["source"].as_str(), r["inUse"].as_str()), (Some("installed"), Some(photosplice_cms::installed::SWOP_V2_DESCRIPTION)));
+    assert_eq!((r["source"].as_str(), r["inUse"].as_str()), (Some("installed"), Some(photosplice_cms::installed::FOGRA39.description)));
     assert_eq!(r["path"].as_str(), Some(swop.path.to_string_lossy().as_ref()));
     s.add_document(untagged_cmyk(), None);
     let ours = flat(&s);
@@ -146,10 +146,12 @@ fn auto_uses_the_installed_swop_profile() {
         let mut want = [0.0f32; 3];
         t.eval(&ink[..4], &mut want);
         for c in 0..3 {
-            assert!((p[c] - want[c].clamp(0.0, 1.0)).abs() < 2.0 / 255.0, "pixel {i}: {p:?} vs SWOP {want:?}");
+            // The render separates through a cached grid of the profile (17⁴ / 33³ entries), which
+            // sits within 3 levels of the exact profile evaluation.
+            assert!((p[c] - want[c].clamp(0.0, 1.0)).abs() < 3.0 / 255.0, "pixel {i}: {p:?} vs FOGRA39 {want:?}");
         }
     }
-    // 100 % cyan is SWOP's cyan, not the built-in profile's.
+    // 100 % cyan is FOGRA39's cyan, not the built-in profile's.
     let mut builtin = [0.0f32; 3];
     Transform::new(Builtin::CoatedCmyk.profile(), Builtin::Srgb.profile(), Intent::RelativeColorimetric, true)
         .unwrap()

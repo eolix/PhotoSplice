@@ -5,7 +5,7 @@
 //! Document space: `Document::icc_profile` holds the document's ICC bytes (kept byte-exact
 //! from PSD resource 1039 / PNG iCCP / JPEG APP2 / TIFF). `None` means untagged: the working
 //! profile of the mode is assumed (sRGB, sGray, the working CMYK, Lab D50). The working CMYK is
-//! process-wide ([`crate::working_cmyk`]): Reference's U.S. Web Coated (SWOP) v2 when it is
+//! process-wide ([`crate::working_cmyk`]): Reference's Coated FOGRA39 when it is
 //! installed, else the built-in coated CMYK.
 //!
 //! Compositing stays in document space for RGB and gray documents. CMYK and Lab documents are
@@ -107,12 +107,13 @@ impl Policy {
 #[serde(default, rename_all = "camelCase")]
 pub struct ColorSettings {
     /// Working spaces: built-in profile ids (see `edit.profileInfo`) or `.icc` paths. Working
-    /// CMYK may also be `auto`: Reference's U.S. Web Coated (SWOP) v2 when it is installed, else
-    /// the built-in coated CMYK (see [`crate::working_cmyk`]).
+    /// CMYK may also be `auto`: Coated FOGRA39 (ISO 12647-2:2004) when it is installed, else the
+    /// built-in coated CMYK (see [`crate::working_cmyk`]). The defaults are Reference's Europe
+    /// General Purpose 3 settings.
     pub working_rgb: String,
     pub working_cmyk: String,
-    /// 1 once `working_cmyk` can be `auto`. Preferences saved before (0) stored the built-in
-    /// coated CMYK as the only default, and load as `auto` ([`ColorSettings::migrate`]).
+    /// Settings revision ([`ColorSettings::migrate`]): 1 once `working_cmyk` can be `auto`, 2 once
+    /// the defaults are Europe General Purpose 3 (Dot Gain 15 % gray, no profile warnings).
     #[serde(default)]
     pub working_cmyk_rev: u32,
     pub working_gray: String,
@@ -141,14 +142,15 @@ impl Default for ColorSettings {
         Self {
             working_rgb: Builtin::Srgb.id().into(),
             working_cmyk: "auto".into(),
-            working_cmyk_rev: 1,
-            // Photoshop's default working gray is Dot Gain 20 %.
-            working_gray: Builtin::DotGain20Compat.id().into(),
+            working_cmyk_rev: SETTINGS_REV,
+            // Europe General Purpose 3: Dot Gain 15 % (North America's is 20 %).
+            working_gray: Builtin::DotGain15Compat.id().into(),
             policy_rgb: Policy::Preserve,
             policy_cmyk: Policy::Preserve,
             policy_gray: Policy::Preserve,
-            ask_on_mismatch: true,
-            ask_on_paste: true,
+            // "Profile warnings are disabled" in Reference's General Purpose settings.
+            ask_on_mismatch: false,
+            ask_on_paste: false,
             ask_on_missing: false,
             intent: Intent::RelativeColorimetric.id().into(),
             bpc: true,
@@ -159,16 +161,27 @@ impl Default for ColorSettings {
     }
 }
 
+/// The current [`ColorSettings::working_cmyk_rev`].
+pub const SETTINGS_REV: u32 = 2;
+
 impl ColorSettings {
-    /// Brings settings saved by an older version up to date: the built-in coated CMYK was the
-    /// default working CMYK before `auto` existed, so it becomes `auto`.
+    /// Brings settings saved by an older version up to date, moving values that were the old
+    /// defaults to the new ones (a value chosen differently is kept): the built-in coated CMYK
+    /// was the only working CMYK before `auto` existed (revision 0); North America's Dot Gain
+    /// 20 % gray and the profile-mismatch questions were the defaults before Europe General
+    /// Purpose 3 (revision 1).
     pub fn migrate(&mut self) {
-        if self.working_cmyk_rev == 0 {
-            if self.working_cmyk == Builtin::CoatedCmyk.id() {
-                self.working_cmyk = "auto".into();
-            }
-            self.working_cmyk_rev = 1;
+        if self.working_cmyk_rev == 0 && self.working_cmyk == Builtin::CoatedCmyk.id() {
+            self.working_cmyk = "auto".into();
         }
+        if self.working_cmyk_rev < 2 {
+            if self.working_gray == Builtin::DotGain20Compat.id() {
+                self.working_gray = Builtin::DotGain15Compat.id().into();
+            }
+            self.ask_on_mismatch = false;
+            self.ask_on_paste = false;
+        }
+        self.working_cmyk_rev = self.working_cmyk_rev.max(SETTINGS_REV);
     }
 
     pub fn intent(&self) -> Intent {
@@ -1168,7 +1181,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "edit.assignProfile",
             "Assign Profile…",
             ["Edit"],
-            r##"{"profile":"working|srgb|display-p3|adobe-rgb-compat|prophoto-compat|linear-srgb|rec2020|gray-gamma-2.2|sgray|dot-gain-20-compat|lab-d50|coated-cmyk|none" (or a path to an .icc file)}"##,
+            r##"{"profile":"working|srgb|display-p3|adobe-rgb-compat|prophoto-compat|linear-srgb|rec2020|gray-gamma-2.2|sgray|dot-gain-15-compat|dot-gain-20-compat|lab-d50|coated-cmyk|none" (or a path to an .icc file)}"##,
             has_doc,
             assign_profile,
             true
@@ -1186,7 +1199,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "edit.colorSettings",
             "Color Settings…",
             ["Edit"],
-            r##"{"workingRgb":"srgb|display-p3|adobe-rgb-compat|prophoto-compat|linear-srgb|rec2020","workingCmyk":"auto|coated-cmyk","workingGray":"dot-gain-20-compat|sgray|gray-gamma-2.2","policyRgb":"preserve|convert|off","policyCmyk":"preserve|convert|off","policyGray":"preserve|convert|off","askOnMismatch":bool=true,"askOnPaste":bool=true,"askOnMissing":bool=false,"intent":"relative|perceptual|saturation|absolute","blendTextGamma":1.0..2.2|bool=1.45,"bpc":bool=true,"dither":bool=true,"monitorProfile":"auto|srgb|display-p3|adobe-rgb-compat|prophoto-compat|rec2020","reset":bool=false} (working spaces and the monitor profile also accept .icc paths; working CMYK `auto` = U.S. Web Coated (SWOP) v2 when installed, else the built-in coated CMYK (`edit.workingCmyk` lists the choices and says which is in use); monitor `auto` = the main display's profile when the platform provides it, else sRGB; the reply's `monitorStatus` says which profile is in use and why: source auto|manual|fallback, reason)"##,
+            r##"{"workingRgb":"srgb|display-p3|adobe-rgb-compat|prophoto-compat|linear-srgb|rec2020","workingCmyk":"auto|coated-cmyk","workingGray":"dot-gain-15-compat|dot-gain-20-compat|sgray|gray-gamma-2.2","policyRgb":"preserve|convert|off","policyCmyk":"preserve|convert|off","policyGray":"preserve|convert|off","askOnMismatch":bool=false,"askOnPaste":bool=false,"askOnMissing":bool=false,"intent":"relative|perceptual|saturation|absolute","blendTextGamma":1.0..2.2|bool=1.45,"bpc":bool=true,"dither":bool=true,"monitorProfile":"auto|srgb|display-p3|adobe-rgb-compat|prophoto-compat|rec2020","reset":bool=false} (working spaces and the monitor profile also accept .icc paths; working CMYK `auto` = Coated FOGRA39 (ISO 12647-2:2004) when installed, else the built-in coated CMYK (`edit.workingCmyk` lists the choices and says which is in use); monitor `auto` = the main display's profile when the platform provides it, else sRGB; the reply's `monitorStatus` says which profile is in use and why: source auto|manual|fallback, reason)"##,
             always,
             color_settings,
             true,
@@ -1514,6 +1527,8 @@ mod settings_tests {
     #[test]
     fn open_policies() {
         let mut s = Session::new();
+        // Profile warnings are off by default (Europe General Purpose 3); this test asks.
+        s.color.settings.ask_on_mismatch = true;
         // Preserve (default): an Adobe RGB file keeps its profile and asks.
         let (_, r) = s.open_document(tagged("adobe-rgb-compat"), None);
         assert_eq!((r["action"].as_str(), r["mismatch"].as_bool(), r["ask"].as_bool()), (Some("kept"), Some(true), Some(true)));
@@ -1601,6 +1616,7 @@ mod settings_tests {
         assert!(Builtin::DisplayP3.profile().can_be_destination());
         assert!(!input.can_be_destination());
         let mut s = Session::new();
+        s.color.settings.ask_on_mismatch = true;
         let mut d = tagged("srgb");
         d.icc_profile = Some(input.to_bytes());
         let (photo, r) = s.open_document(d, None);

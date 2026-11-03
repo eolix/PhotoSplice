@@ -49,9 +49,10 @@
 //! `*_mutations_never_panic` truncates and corrupts every corpus file and
 //! asserts import + flatten return (Ok or Err) without panicking.
 //!
-//! CMYK files without an embedded profile are in Reference's working CMYK, U.S. Web Coated
-//! (SWOP) v2: the oracle runs use it when it is installed (as the application does), else the
-//! built-in coated CMYK. The floors are what the built-in profile reaches (CI has no SWOP).
+//! CMYK files without an embedded profile are in Reference's working CMYK. The oracles were made
+//! with its North America settings, U.S. Web Coated (SWOP) v2 (the application defaults to Europe
+//! General Purpose 3's Coated FOGRA39), so the oracle runs use SWOP v2 when it is installed, else
+//! the built-in coated CMYK. The floors are what the built-in profile reaches (CI has no SWOP).
 #![cfg(feature = "corpus")]
 
 mod common;
@@ -445,7 +446,7 @@ fn check_file(name: &str, bytes: &[u8]) -> (Outcome, Option<f32>) {
     (outcome, Some(rt))
 }
 
-/// The working CMYK the application would use: the installed U.S. Web Coated (SWOP) v2, else
+/// The working CMYK the oracles were made with: the installed U.S. Web Coated (SWOP) v2, else
 /// the built-in coated CMYK. Every oracle run sets the same one.
 fn use_installed_working_cmyk() {
     let found = photosplice_cms::installed::swop_v2();
