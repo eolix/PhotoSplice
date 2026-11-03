@@ -250,12 +250,16 @@ fn fill_json(f: &Fill) -> Value {
         Fill::Gradient { stops, angle, scale, style, reverse, .. } => json!({ "gradient": {
             "stops": stops.iter().map(|(t, c)| json!([t, hex(c)])).collect::<Vec<_>>(),
             "angle": angle, "scale": scale * 100.0, "style": format!("{style:?}").to_ascii_lowercase(), "reverse": reverse } }),
-        Fill::Pattern { name, scale, .. } => json!({ "pattern": name, "scale": scale * 100.0 }),
+        Fill::Pattern { name, scale, id, angle, link, phase } => {
+            json!({ "pattern": name, "id": id, "scale": scale * 100.0, "angle": angle, "link": link, "phase": [phase.0, phase.1] })
+        }
     }
 }
 
 /// `"#rrggbb"` / `[r,g,b,a]` / `{"gradient":{"stops":[[t,"#hex"],…],"angle","scale","style","reverse"}}` /
-/// `{"pattern":name,"scale"}`. `null` → `Ok(None)` (no fill).
+/// `{"pattern":name|id,"scale","angle","link","phase":[x,y]}` (the pattern's key is kept in `name`
+/// with an empty id until [`bind_patterns`] points it at the resolved pattern). `null` → `Ok(None)`
+/// (no fill).
 fn parse_fill(v: &Value) -> std::result::Result<Option<Fill>, String> {
     if v.is_null() {
         return Ok(None);
@@ -285,13 +289,25 @@ fn parse_fill(v: &Value) -> std::result::Result<Option<Fill>, String> {
         )));
     }
     if let Some(name) = v.get("pattern").and_then(Value::as_str) {
+        let scale = f64p(v, "scale").unwrap_or(100.0);
+        if !(1.0..=1000.0).contains(&scale) {
+            return Err(format!("pattern `scale` must be 1..1000 %, got {scale}"));
+        }
+        let angle = f64p(v, "angle").unwrap_or(0.0);
+        let phase = match v.get("phase") {
+            None => [0.0, 0.0],
+            Some(_) => nums::<2>(v, "phase").ok_or("pattern `phase` must be [x, y]")?,
+        };
+        if !(-360.0..=360.0).contains(&angle) || phase.iter().any(|v| !v.is_finite() || v.abs() > 1e6) {
+            return Err("pattern `angle` must be -360..360 and `phase` [x, y] finite pixels".into());
+        }
         return Ok(Some(Fill::Pattern {
             name: name.into(),
-            scale: f64p(v, "scale").unwrap_or(100.0) as f32 / 100.0,
+            scale: (scale / 100.0) as f32,
             id: String::new(),
-            angle: 0.0,
-            link: true,
-            phase: (0.0, 0.0),
+            angle: angle as f32,
+            link: v.get("link").and_then(Value::as_bool).unwrap_or(true),
+            phase: (phase[0] as f32, phase[1] as f32),
         }));
     }
     Err(format!("unrecognised fill {v}"))
@@ -452,9 +468,46 @@ fn live_kind(l: &LiveShape) -> &'static str {
     }
 }
 
-/// Re-renders a shape layer's cache for `doc` (canvas-clipped, document pixel format).
-pub fn refresh_shape(doc: &Document, sh: &mut ShapeLayer) {
-    sh.cache = Some(vector::render_shape(sh, doc.pixel_format(), doc.bounds()));
+/// Re-renders a shape layer's cache for `doc` (canvas-clipped, document pixel format). Pattern
+/// paint samples the document's patterns, a linked one tiled from `reference`: the layer's
+/// effects reference point (`Layer::effects.reference`, see `photosplice_compose::shape_paint`).
+pub fn refresh_shape(doc: &Document, reference: Option<(f64, f64)>, sh: &mut ShapeLayer) {
+    let patterns = photosplice_compose::shape_paint::ShapePatterns::in_doc(doc, reference);
+    sh.cache = Some(photosplice_compose::shape_paint::render_shape(sh, doc.pixel_format(), doc.bounds(), patterns));
+}
+
+/// The patterns a shape command's params name (`fill`, and the stroke's `color` / `fill`, as
+/// `{"pattern": key}`), resolved from the document or the library: (key, pattern).
+fn param_patterns(s: &Session, cmd: &str, p: &Value) -> Result<Vec<(String, photosplice_doc::Pattern)>> {
+    let stroke = p.get("stroke").and_then(|v| v.get("color").or_else(|| v.get("fill")));
+    let mut out = Vec::new();
+    for v in [p.get("fill"), stroke].into_iter().flatten() {
+        if let Some(key) = v.get("pattern").and_then(Value::as_str) {
+            let pat = crate::pattern_cmds::resolve(s, key).ok_or_else(|| bad(cmd, format!("no pattern \"{key}\" (see pattern.list)")))?;
+            out.push((key.to_string(), pat));
+        }
+    }
+    Ok(out)
+}
+
+/// Points the pattern paint [`parse_fill`] made from params (the requested key in `name`, no id)
+/// at the pattern [`param_patterns`] resolved (the caller puts it in the document's patterns, so
+/// it is saved with the file). A linked pattern tiles from the layer's effects reference point: a
+/// layer without one gets the canvas origin, where it was drawn, so moving the layer (which moves
+/// the point) moves the pattern.
+fn bind_patterns(l: &mut Layer, sh: &mut ShapeLayer, pats: &[(String, photosplice_doc::Pattern)]) {
+    for f in sh.fill.iter_mut().chain(sh.stroke.iter_mut().map(|s| &mut s.paint)) {
+        if let Fill::Pattern { name, id, .. } = f
+            && id.is_empty()
+            && let Some((_, p)) = pats.iter().find(|(k, _)| k == name)
+        {
+            name.clone_from(&p.name);
+            id.clone_from(&p.id);
+        }
+    }
+    if l.effects.reference.is_none() && photosplice_compose::shape_paint::uses_patterns(sh) {
+        l.effects.reference = Some((0.0, 0.0));
+    }
 }
 
 /// A staged stroke edit rendered with the same validation and cache refresh as `shape.edit`.
@@ -467,7 +520,7 @@ pub fn preview_shape_stroke(doc: &Document, id: LayerId, params: &Value) -> Resu
     };
     shape.stroke = parse_stroke(params, shape.stroke.clone(), Color::BLACK).map_err(|e| bad("shape.edit", e))?;
     vector::flatten::validate_shape(&shape.path, shape.stroke.as_ref()).map_err(|e| bad("shape.edit", e))?;
-    refresh_shape(doc, shape);
+    refresh_shape(doc, layer.effects.reference, shape);
     Ok(result)
 }
 
@@ -483,7 +536,7 @@ pub fn translate_vectors(doc: &Document, l: &mut Layer, dx: f64, dy: f64) {
     match &mut l.content {
         LayerContent::Shape(sh) => {
             transform_shape(sh, &a);
-            refresh_shape(doc, sh);
+            refresh_shape(doc, l.effects.reference, sh);
         }
         LayerContent::Group(g) => {
             for c in &mut g.children {
@@ -607,6 +660,17 @@ fn shape_info(s: &Session, id: LayerId) -> Result<Value> {
 }
 
 pub(crate) fn with_shape<R>(s: &mut Session, id: LayerId, label: &str, f: impl FnOnce(&mut ShapeLayer, &mut Layer) -> Result<R>) -> Result<R> {
+    with_shape_patterns(s, id, label, &[], f)
+}
+
+/// [`with_shape`] binding the pattern paint the edit sets to `pats` ([`bind_patterns`]).
+fn with_shape_patterns<R>(
+    s: &mut Session,
+    id: LayerId,
+    label: &str,
+    pats: &[(String, photosplice_doc::Pattern)],
+    f: impl FnOnce(&mut ShapeLayer, &mut Layer) -> Result<R>,
+) -> Result<R> {
     if let Some(st) = s.active() {
         let locks = st.doc.effective_locks(id);
         if locks.all || locks.pixels {
@@ -614,6 +678,10 @@ pub(crate) fn with_shape<R>(s: &mut Session, id: LayerId, label: &str, f: impl F
         }
     }
     s.edit(label, |doc, _| {
+        // The patterns the edit paints with, saved with the document (an error drops them).
+        for (_, p) in pats {
+            crate::pattern_cmds::ensure_in_doc(doc, p);
+        }
         let snapshot = doc.clone();
         let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
         if !matches!(l.content, LayerContent::Shape(_)) {
@@ -624,7 +692,8 @@ pub(crate) fn with_shape<R>(s: &mut Session, id: LayerId, label: &str, f: impl F
         };
         let r = f(&mut sh, l);
         if r.is_ok() {
-            refresh_shape(&snapshot, &mut sh);
+            bind_patterns(l, &mut sh, pats);
+            refresh_shape(&snapshot, l.effects.reference, &mut sh);
         }
         l.content = LayerContent::Shape(sh);
         r
@@ -664,6 +733,7 @@ fn shape_create(s: &mut Session, p: &Value) -> Result<Value> {
         None => None,
     };
     vector::flatten::validate_shape(&path, stroke.as_ref()).map_err(|e| bad(CMD, e))?;
+    let pats = param_patterns(s, CMD, p)?;
     // Add to an existing shape layer with a path operation (Shape tool in combine/subtract… mode).
     if let Some(target) = p.get("addTo").and_then(Value::as_u64) {
         let op = p.get("op").and_then(Value::as_str).map_or(Some(PathOp::Combine), op_from).ok_or_else(|| bad(CMD, "unknown `op`"))?;
@@ -683,9 +753,15 @@ fn shape_create(s: &mut Session, p: &Value) -> Result<Value> {
     let name = p.get("name").and_then(Value::as_str).map(str::to_string);
     let mut sh = ShapeLayer { path, fill, stroke, live, ..Default::default() };
     let id = s.edit("New Shape Layer", |doc, active| {
-        refresh_shape(doc, &mut sh);
+        for (_, p) in &pats {
+            crate::pattern_cmds::ensure_in_doc(doc, p);
+        }
         let name = name.unwrap_or_else(|| doc.next_layer_name(default_name(kind)));
-        let id = doc.insert_above(*active, Layer::new(name, LayerContent::Shape(sh)));
+        let mut layer = Layer::new(name, LayerContent::Shape(ShapeLayer::default()));
+        bind_patterns(&mut layer, &mut sh, &pats);
+        refresh_shape(doc, layer.effects.reference, &mut sh);
+        layer.content = LayerContent::Shape(sh);
+        let id = doc.insert_above(*active, layer);
         *active = Some(id);
         Ok(id)
     })?;
@@ -698,7 +774,8 @@ fn shape_edit(s: &mut Session, p: &Value) -> Result<Value> {
     let fg = s.tools.foreground;
     let fgc = Color::rgba(fg[0], fg[1], fg[2], fg[3]);
     let name = p.get("name").and_then(Value::as_str).map(str::to_string);
-    with_shape(s, id, "Edit Shape", |sh, layer| {
+    let pats = param_patterns(s, CMD, p)?;
+    with_shape_patterns(s, id, "Edit Shape", &pats, |sh, layer| {
         if let Some(v) = p.get("path") {
             sh.path = parse_path(v).map_err(|e| bad(CMD, e))?;
             sh.live = None;
@@ -762,7 +839,7 @@ fn shape_rasterize(s: &mut Session, p: &Value) -> Result<Value> {
             return Err(EngineError::Other(format!("layer {} is not a shape layer", id.0)));
         };
         if sh.cache.is_none() {
-            refresh_shape(&snapshot, sh);
+            refresh_shape(&snapshot, l.effects.reference, sh);
         }
         let fmt = snapshot.pixel_format();
         let surface = sh.cache.take().unwrap_or_else(|| photosplice_raster::Surface::new(fmt));
@@ -1369,11 +1446,15 @@ fn path_stroke(s: &mut Session, p: &Value) -> Result<Value> {
 fn vector_mask_info(s: &Session, id: LayerId) -> Result<Value> {
     let d = s.active().ok_or(EngineError::NoDocument)?;
     let l = d.doc.layer(id).ok_or(EngineError::NoLayer(id))?;
-    Ok(match &l.vector_mask {
-        Some(v) => {
+    Ok(match (&l.vector_mask, &l.content) {
+        (Some(v), _) => {
             json!({ "layer": id.0, "path": path_json(&v.path), "enabled": v.enabled, "linked": v.linked, "density": v.density * 100.0, "feather": v.feather })
         }
-        None => json!({ "layer": id.0, "vectorMask": null }),
+        // A shape layer's path is its vector mask.
+        (None, LayerContent::Shape(sh)) => {
+            json!({ "layer": id.0, "path": path_json(&sh.path), "enabled": true, "linked": true, "shape": true, "density": sh.density * 100.0, "feather": sh.feather })
+        }
+        (None, _) => json!({ "layer": id.0, "vectorMask": null }),
     })
 }
 
@@ -1425,6 +1506,35 @@ fn vector_mask_edit(s: &mut Session, p: &Value) -> Result<Value> {
                 .ok_or_else(|| bad(CMD, "`feather` must be a finite number within 0..1000"))
         })
         .transpose()?;
+    let density = p
+        .get("density")
+        .map(|v| {
+            v.as_f64()
+                .filter(|n| n.is_finite() && (0.0..=100.0).contains(n))
+                .map(|n| (n / 100.0) as f32)
+                .ok_or_else(|| bad(CMD, "`density` must be a finite number within 0..100 (%)"))
+        })
+        .transpose()?;
+    // A shape layer's path is its vector mask (Reference's Properties › Masks): Density and
+    // Feather soften its fill; the path itself is edited with the shape and path commands.
+    if s.active().and_then(|d| d.doc.layer(id)).is_some_and(|l| matches!(l.content, LayerContent::Shape(_)) && l.vector_mask.is_none()) {
+        if let Some(k) = ["path", "enabled", "linked", "invert"].into_iter().find(|k| p.get(*k).is_some()) {
+            return Err(bad(CMD, format!("`{k}`: a shape layer's vector mask is its path; only `density` and `feather` apply")));
+        }
+        if density.is_none() && feather.is_none() {
+            return vector_mask_info(s, id);
+        }
+        with_shape(s, id, "Edit Vector Mask", |sh, _| {
+            if let Some(d) = density {
+                sh.density = d;
+            }
+            if let Some(f) = feather {
+                sh.feather = f;
+            }
+            Ok(())
+        })?;
+        return vector_mask_info(s, id);
+    }
     s.edit("Edit Vector Mask", |doc, _| {
         let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
         let vm = l.vector_mask.as_mut().ok_or_else(|| EngineError::Other("layer has no vector mask".into()))?;
@@ -1437,8 +1547,8 @@ fn vector_mask_edit(s: &mut Session, p: &Value) -> Result<Value> {
         if let Some(b) = p.get("linked").and_then(Value::as_bool) {
             vm.linked = b;
         }
-        if let Some(d) = f64p(p, "density") {
-            vm.density = (d / 100.0).clamp(0.0, 1.0) as f32;
+        if let Some(d) = density {
+            vm.density = d;
         }
         if let Some(f) = feather {
             vm.feather = f;
@@ -1617,7 +1727,7 @@ fn merge_shape_layers(s: &mut Session, ids: &[LayerId], op: Option<PathOp>, labe
             bake_components(&mut merged, tol)?;
         }
         vector::flatten::validate_shape(&merged.path, merged.stroke.as_ref()).map_err(|e| bad(label, e))?;
-        refresh_shape(&snapshot, &mut merged);
+        refresh_shape(&snapshot, l.effects.reference, &mut merged);
         *sh = merged;
         for id in ids.iter().filter(|id| **id != keep) {
             doc.remove(*id);
@@ -1676,7 +1786,7 @@ pub(crate) fn leak(s: String) -> &'static str {
 
 pub fn specs() -> Vec<CommandSpec> {
     let stroke = r##""stroke":{"width":px,"color":"#rrggbb"|fill,"opacity":0..100,"align":"inside|center|outside","cap":"butt|round|square","join":"miter|round|bevel","miterLimit":n,"dashes":[multiples of width],"dashOffset":n}|null"##;
-    let fill = r##""fill":"#rrggbb"|[r,g,b,a]|{"gradient":{"stops":[[t,"#hex"]],"angle":deg,"scale":%,"style":"linear|radial|angle|reflected|diamond","reverse":bool}}|{"pattern":name}|null (no fill)"##;
+    let fill = r##""fill":"#rrggbb"|[r,g,b,a]|{"gradient":{"stops":[[t,"#hex"]],"angle":deg,"scale":%,"style":"linear|radial|angle|reflected|diamond","reverse":bool}}|{"pattern":name|id (document, then library; copied into the document),"scale":1..1000%=100,"angle":deg=0,"link":bool=true (tiles from the layer, else the canvas),"phase":[x,y]=[0,0]}|null (no fill)"##;
     vec![
         spec!(
             "shape.create",
@@ -1832,7 +1942,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Edit Vector Mask",
             [],
             leak(format!(
-                r##"{{"layer":id?,"path":{{…}}?,"enabled":bool?,"linked":bool?,"density":0..100?,"feather":0..1000? (pixels),"invert":true?}}. {PATH_FORM}"##
+                r##"{{"layer":id?,"path":{{…}}?,"enabled":bool?,"linked":bool?,"density":0..100?,"feather":0..1000? (pixels),"invert":true?}}. On a shape layer (whose path is its vector mask) only density and feather apply: they soften its fill, which shows beyond the path at 100 − density %. {PATH_FORM}"##
             )),
             has_layer,
             vector_mask_edit

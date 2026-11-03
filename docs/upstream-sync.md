@@ -9,6 +9,21 @@ Synced through: `11f6f00ccc888cb12caa95ab70dcadc231fda90f`
 Every upstream commit up to and including that one is in PhotoSplice or was decided against.
 (`a96a621` is the revision PhotoSplice was created from.)
 
+## Harvests outside the ledger
+
+PhotoSplice diverges from PhotoCraft on purpose; after the pin, upstream work has been taken in
+batches rather than commit by commit, and only where it improves PSD fidelity or rendering:
+
+- `92683ecc` (2026-10-17): whole-tree merge of upstream `2a952f16`, PhotoSplice winning the
+  conflicts in its PSD, effects and adjustments code.
+- `85f3d530` (2026-11-02): about 90 PSD and rendering fixes from upstream commits up to
+  `f8e393fd`, ported by hand into PhotoSplice's code (Reference-measured behaviour kept where the
+  two disagree). Not taken: the fixed import memory cap (it refuses the large PSBs PhotoSplice
+  opens), the lazy PSD reader rewrite, and shape pattern paints (removed upstream at the
+  contributor's request; to be written here independently).
+
+"Synced through" above still marks the last commit-by-commit decision.
+
 ## How a port works
 
 PhotoSplice started as a copy of PhotoCraft's files, so the two repositories share no history.

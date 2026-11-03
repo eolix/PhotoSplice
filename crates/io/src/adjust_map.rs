@@ -10,8 +10,8 @@
 //! that cannot be read (noise gradients, profile lookups, CMYK channel mixers, unknown versions)
 //! stay [`Adjustment::Unsupported`] and are written back verbatim.
 
-use photosplice_doc::Adjustment;
 use photosplice_doc::adjust::{CURVE_MAP_LEN, CurvePoint, HueRange, LevelsChannel, ToneSpace, curve_map, curve_map_outputs};
+use photosplice_doc::{Adjustment, GradientColorStop, GradientForm, GradientNoise, GradientOpacityStop, GradientSource, GradientStopKind, NoiseModel};
 use photosplice_psd::descriptor::{Descriptor, Value, VersionedDescriptor};
 
 /// All PSD adjustment keys recognized as adjustment layers.
@@ -139,6 +139,19 @@ pub fn label(key: &[u8; 4]) -> &'static str {
     }
 }
 
+/// Keys of a Brightness/Contrast `CgEd` descriptor: the ones [`write`] emits plus Reference's
+/// preset bookkeeping.
+const BRIT_CGED_KEYS: [&str; 9] = ["Vrsn", "Brgh", "Cntr", "means", "Lab ", "useLegacy", "Auto", "presetKind", "presetFileName"];
+
+/// Whether a `brit` layer's `CgEd` descriptor holds settings Brightness/Contrast has no place
+/// for. Reference 2026's Light adjustment (Exposure, Contrast, Highlights, Shadows, Whites,
+/// Blacks) is stored under the `brit` key; read as Brightness/Contrast it kept only Contrast and
+/// lost the rest without a word, so such a layer stays [`Adjustment::Unsupported`].
+pub fn is_extended_brit(cged: Option<&[u8]>) -> bool {
+    cged.and_then(|c| VersionedDescriptor::parse_prefix(c).ok())
+        .is_some_and(|(v, _)| v.descriptor.items.iter().any(|(k, _)| !BRIT_CGED_KEYS.iter().any(|n| k.is(n))))
+}
+
 /// Why [`parse`] keeps a block as [`Adjustment::Unsupported`], when there is more to say than
 /// "it could not be read" (so far: Color Lookup).
 pub fn unreadable_reason(key: &[u8; 4], data: &[u8]) -> Option<String> {
@@ -209,6 +222,8 @@ fn parse_any(key: &[u8; 4], data: &[u8], cged: Option<&[u8]>) -> Adjustment {
         b"nvrt" => Some(Adjustment::Invert),
         b"thrs" => be16(data, 0).map(|v| Adjustment::Threshold { level: f32::from(v) / 255.0 }),
         b"post" => be16(data, 0).map(|v| Adjustment::Posterize { levels: u32::from(v) }),
+        // Kept raw (with its `CgEd`, which the PSD writer keeps while the layer is unchanged).
+        b"brit" if is_extended_brit(cged) => None,
         b"brit" => {
             let modern = cged.and_then(|c| VersionedDescriptor::parse_prefix(c).ok()).and_then(|(v, _)| {
                 let d = v.descriptor;
@@ -233,8 +248,10 @@ fn parse_any(key: &[u8; 4], data: &[u8], cged: Option<&[u8]>) -> Adjustment {
                     *r = HueRange { hue: h, saturation: s, lightness: l, bounds: HueRange::canonical_bounds([a, b, c, d]) };
                 }
             }
+            let hue = f32::from(bei16(data, base)?);
             Some(Adjustment::HueSaturation {
-                hue: f32::from(bei16(data, base)?),
+                // Reference stores the colorize hue signed (200 as -160); the model keeps 0..360.
+                hue: if colorize { hue.rem_euclid(360.0) } else { hue },
                 saturation: f32::from(bei16(data, base + 2)?),
                 lightness: f32::from(bei16(data, base + 4)?),
                 colorize,
@@ -284,13 +301,23 @@ fn parse_gradient_map(d: &[u8]) -> Option<Adjustment> {
         _ => return None,
     };
     // The gradient's name (UTF-16 units); checked, as `len * 2` overflows a 32-bit `usize`.
-    at = (be32(d, at)? as usize).checked_mul(2)?.checked_add(at + 4)?;
+    let name_units = be32(d, at)? as usize;
+    let name_at = at + 4;
+    at = name_units.checked_mul(2)?.checked_add(at + 4)?;
+    let name: Vec<u16> = (0..name_units).map_while(|k| be16(d, name_at + 2 * k)).take_while(|u| *u != 0).collect();
+    let mut source = GradientSource {
+        name: String::from_utf16_lossy(&name),
+        method: crate::gradient_source::method_from_code(method),
+        form: GradientForm::Solid,
+        ..GradientSource::default()
+    };
     let n = usize::from(be16(d, at)?);
     at += 2;
     let mut stops = Vec::with_capacity(n);
     let mut mids = Vec::with_capacity(n);
     for _ in 0..n {
-        let loc = (be32(d, at)? as f32 / 4096.0).clamp(0.0, 1.0);
+        let raw_loc = be32(d, at)? as f32 / 4096.0;
+        let loc = raw_loc.clamp(0.0, 1.0);
         let mid = be32(d, at + 4)? as f32 / 100.0;
         let raw = [be16(d, at + 10)?, be16(d, at + 12)?, be16(d, at + 14)?, be16(d, at + 16)?];
         let n = |k: usize| f32::from(raw[k]) / 65535.0;
@@ -304,15 +331,25 @@ fn parse_gradient_map(d: &[u8]) -> Option<Adjustment> {
             space @ (0 | 2 | 7 | 8) => crate::channel_map::decode_color(space, raw),
             _ => return None,
         };
+        source.colors.push(GradientColorStop { location: raw_loc, midpoint: mid, color, kind: GradientStopKind::User });
         stops.push((loc, color));
         mids.push(mid);
         at += 20;
     }
     let nt = usize::from(be16(d, at)?);
+    for k in 0..nt {
+        let o = at + 2 + k * 10;
+        let (Some(location), Some(midpoint), Some(opacity)) = (be32(d, o), be32(d, o + 4), be16(d, o + 8)) else { break };
+        source.opacity.push(GradientOpacityStop { location: location as f32 / 4096.0, midpoint: midpoint as f32 / 100.0, opacity: f32::from(opacity) / 255.0 });
+    }
     at += 2 + nt * 10 + 2; // transparency stops, expansion count
-    // Then smoothness, a length (32), the form (1 = noise) and the noise settings.
+    // Then smoothness, a length (32), the form (1 = noise) and the noise settings (which a solid
+    // gradient carries too: the dialog's last ones).
+    source.smoothness = f32::from(be16(d, at).unwrap_or(0)) / 4096.0;
+    source.noise = gradient_map_noise(d, at + 6);
     if be16(d, at + 4) == Some(1) {
-        return parse_noise_gradient_map(d, at + 6, reverse, dither);
+        source.form = GradientForm::Noise;
+        return parse_noise_gradient_map(d, at + 6, reverse, dither, source);
     }
     if stops.len() < 2 {
         return None;
@@ -328,14 +365,32 @@ fn parse_gradient_map(d: &[u8]) -> Option<Adjustment> {
     let baked = crate::gradient_bake::bake(stops, &mids, smooth, method);
     let mut stops: Vec<(f32, [f32; 3])> = baked.iter().map(|(t, c)| (*t, c.to_rgb())).collect();
     stops.sort_by(|a, b| a.0.total_cmp(&b.0));
-    Some(Adjustment::GradientMap { stops, reverse, dither, ink_stops })
+    Some(Adjustment::GradientMap { stops, reverse, dither, ink_stops, source: Some(Box::new(source)) })
+}
+
+/// The noise settings of a `grdm` block at `at` (see [`parse_noise_gradient_map`]), as stored.
+fn gradient_map_noise(d: &[u8], at: usize) -> Option<GradientNoise> {
+    let bound = |k: usize| be16(d, k).map(|v| f64::from(v) / 32768.0 * 100.0);
+    Some(GradientNoise {
+        seed: be32(d, at)?,
+        transparency: be16(d, at + 4)? != 0,
+        restrict: be16(d, at + 6)? != 0,
+        roughness: be32(d, at + 8)? as f32 / 4096.0,
+        model: match be16(d, at + 12)? {
+            4 => NoiseModel::Hsb,
+            5 => NoiseModel::Lab,
+            _ => NoiseModel::Rgb,
+        },
+        min: [bound(at + 14)?, bound(at + 16)?, bound(at + 18)?, bound(at + 20)?],
+        max: [bound(at + 22)?, bound(at + 24)?, bound(at + 26)?, bound(at + 28)?],
+    })
 }
 
 /// A noise gradient map's settings at `at` (Adobe spec: seed, add-transparency and
 /// restrict-colours flags, roughness /4096, colour model, four minimums and four maximums on a
 /// 0..32768 scale), generated as dense stops (`noise_gradient`). Colour model 4 is HSB
 /// (Photoshop-verified 2026-10-13), 3 RGB; 5 is taken as Lab (next in the sequence, unverified).
-fn parse_noise_gradient_map(d: &[u8], at: usize, reverse: bool, dither: bool) -> Option<Adjustment> {
+fn parse_noise_gradient_map(d: &[u8], at: usize, reverse: bool, dither: bool, source: GradientSource) -> Option<Adjustment> {
     let flag = |k: usize| be16(d, k).map(|v| v != 0);
     let bound = |k: usize| be16(d, k).map(|v| (f32::from(v) / 32768.0).clamp(0.0, 1.0));
     let noise = crate::noise_gradient::Noise {
@@ -353,7 +408,94 @@ fn parse_noise_gradient_map(d: &[u8], at: usize, reverse: bool, dither: bool) ->
     };
     let (stops, _) = noise.stops();
     let stops = stops.into_iter().map(|(t, c)| (t, c.to_rgb())).collect();
-    Some(Adjustment::GradientMap { stops, reverse, dither, ink_stops: Vec::new() })
+    Some(Adjustment::GradientMap { stops, reverse, dither, ink_stops: Vec::new(), source: Some(Box::new(source)) })
+}
+
+/// `grdm` for a Gradient Map's definition (version 3 when it names a method, else 1), laid out
+/// as Reference writes it: its stops in their own colour spaces, midpoints, opacity stops,
+/// smoothness and noise settings.
+fn write_gradient_map_source(src: &GradientSource, reverse: bool, dither: bool) -> Vec<u8> {
+    let u32_of = |v: f32, scale: f32| if v.is_finite() { (v * scale).round().clamp(0.0, u32::MAX as f32) as u32 } else { 0 };
+    let u16_of = |v: f32, scale: f32| if v.is_finite() { (v * scale).round().clamp(0.0, 65535.0) as u16 } else { 0 };
+    let mut v = Vec::new();
+    match src.method {
+        Some(m) => {
+            put16(&mut v, 3);
+            v.push(u8::from(reverse));
+            v.push(u8::from(dither));
+            v.extend_from_slice(crate::gradient_source::method_code(m).as_bytes());
+        }
+        None => {
+            put16(&mut v, 1);
+            v.push(u8::from(reverse));
+            v.push(u8::from(dither));
+        }
+    }
+    let name: Vec<u16> = src.name.encode_utf16().take(usize::from(u16::MAX)).chain(std::iter::once(0)).collect();
+    v.extend_from_slice(&(name.len() as u32).to_be_bytes());
+    for u in name {
+        put16(&mut v, u);
+    }
+    let colors = src.colors.get(..src.colors.len().min(usize::from(u16::MAX))).unwrap_or_default();
+    put16(&mut v, colors.len() as u16);
+    for s in colors {
+        v.extend_from_slice(&u32_of(s.location, 4096.0).to_be_bytes());
+        v.extend_from_slice(&u32_of(s.midpoint, 100.0).to_be_bytes());
+        let (space, c) = crate::channel_map::encode_color(&s.color);
+        put16(&mut v, space);
+        for x in c {
+            put16(&mut v, x);
+        }
+        put16(&mut v, 0);
+    }
+    let opacity = src.opacity.get(..src.opacity.len().min(usize::from(u16::MAX))).unwrap_or_default();
+    put16(&mut v, opacity.len() as u16);
+    for s in opacity {
+        v.extend_from_slice(&u32_of(s.location, 4096.0).to_be_bytes());
+        v.extend_from_slice(&u32_of(s.midpoint, 100.0).to_be_bytes());
+        put16(&mut v, u16_of(s.opacity, 255.0));
+    }
+    put16(&mut v, 2); // expansion count
+    put16(&mut v, u16_of(src.smoothness, 4096.0));
+    put16(&mut v, 32); // length
+    put16(&mut v, u16::from(src.form == GradientForm::Noise));
+    let noise = src.noise.clone().unwrap_or(GradientNoise {
+        seed: 0,
+        roughness: 0.5,
+        model: NoiseModel::Rgb,
+        restrict: false,
+        transparency: false,
+        min: [0.0; 4],
+        max: [100.0; 4],
+    });
+    v.extend_from_slice(&noise.seed.to_be_bytes());
+    put16(&mut v, u16::from(noise.transparency));
+    put16(&mut v, u16::from(noise.restrict));
+    v.extend_from_slice(&u32_of(noise.roughness, 4096.0).to_be_bytes());
+    put16(
+        &mut v,
+        match noise.model {
+            NoiseModel::Rgb => 3,
+            NoiseModel::Hsb => 4,
+            NoiseModel::Lab => 5,
+        },
+    );
+    for x in noise.min.iter().chain(&noise.max) {
+        put16(&mut v, if x.is_finite() { (x / 100.0 * 32768.0).round().clamp(0.0, 65535.0) as u16 } else { 0 });
+    }
+    v.extend_from_slice(&0u32.to_be_bytes());
+    v
+}
+
+/// The `grdm` block of a Gradient Map's definition ([`write_gradient_map_source`]) when reading
+/// it back gives the map's stops (they weren't edited); `None` otherwise or without one.
+fn gradient_map_from_source(adj: &Adjustment) -> Option<Vec<u8>> {
+    let Adjustment::GradientMap { stops, reverse, dither, ink_stops, source: Some(src) } = adj else { return None };
+    let data = write_gradient_map_source(src, *reverse, *dither);
+    let Some(Adjustment::GradientMap { stops: s, ink_stops: k, .. }) = parse_gradient_map(&data) else { return None };
+    let same = crate::gradient_source::same_stops(&s, stops, |a, b| crate::gradient_source::same_values(&[*a], &[*b]))
+        && crate::gradient_source::same_stops(&k, ink_stops, |a, b| crate::gradient_source::same_values(&[*a], &[*b]));
+    same.then_some(data)
 }
 
 /// `grdm` version 1 with CMYK stops (colour space 2, stored inverted: 65535 = no ink).
@@ -408,7 +550,11 @@ fn patch_gradient_map_colors(v: &mut [u8], channels: Channels) {
 /// (in whatever colour space it stored them), smoothness and method survive the save. `false`
 /// leaves `data` untouched.
 pub(crate) fn retarget_gradient_map(data: &mut [u8], target: &Adjustment, channels: Channels) -> bool {
-    let Adjustment::GradientMap { stops, reverse, dither, ink_stops } = target else { return false };
+    let Adjustment::GradientMap { stops, reverse, dither, ink_stops, .. } = target else { return false };
+    // An older build's unaligned block is regenerated, not patched.
+    if is_unpadded_legacy_gradient_map(data) {
+        return false;
+    }
     // CMYK ink stops (a CMYK document's map) must be unchanged too: they are what is written.
     let same_stops = matches!(parse(b"grdm", data, None, channels), Adjustment::GradientMap { stops: s, ink_stops: k, .. } if s == *stops && k == *ink_stops);
     match (same_stops, data.get_mut(2..4)) {
@@ -419,6 +565,23 @@ pub(crate) fn retarget_gradient_map(data: &mut [u8], target: &Adjustment, channe
         }
         _ => false,
     }
+}
+
+/// `true` for a `grdm` block exactly as older PhotoSplice builds wrote it: [`write_gradient_map`]'s
+/// layout ending in two zero bytes after the colour limits instead of four, which makes Reference
+/// refuse the file. Matched on the fixed name and tail, so blocks written in any document space
+/// are found; Reference's own blocks (and other writers'), whatever their length, are not.
+pub(crate) fn is_unpadded_legacy_gradient_map(data: &[u8]) -> bool {
+    if data.len().is_multiple_of(4) || be16(data, 0) != Some(1) {
+        return false;
+    }
+    // The fixed head ("Custom" and its NUL, 7 UTF-16 units), the stops, then the fixed tail.
+    let empty = write_gradient_map(&[], false, false);
+    let head = 4 + 4 + 7 * 2;
+    let (Some(name), Some(tail)) = (empty.get(4..head), empty.get(head + 2..empty.len().saturating_sub(2))) else { return false };
+    let Some(n) = be16(data, head) else { return false };
+    let tail_at = head + 2 + usize::from(n) * 20;
+    data.get(4..head) == Some(name) && data.get(tail_at..) == Some(tail)
 }
 
 /// `grdm` version 1 for [`Adjustment::GradientMap`] (Classic interpolation, Smoothness 0, so
@@ -537,6 +700,14 @@ fn read_lookup(d: &[u8]) -> Result<Adjustment, String> {
         _ => ("x.cube", "CUBE"),
     };
     let lut = photosplice_cms::lutfile::parse(ext, bytes).map_err(|e| format!("its {format} LUT can't be read ({e})"))?;
+    // The model's table samples 0..1 inputs: a custom domain stays raw rather than render wrong
+    // and be rewritten with the default domain.
+    if !lut.domain_is_default() {
+        return Err(format!(
+            "its LUT has a non-default input domain (DOMAIN_MIN {:?}, DOMAIN_MAX {:?}), which is not supported yet",
+            lut.domain_min, lut.domain_max
+        ));
+    }
     Ok(Adjustment::ColorLookup { name, size: lut.size as u32, lut: Some(std::sync::Arc::new(lut.data)), tetrahedral: false, dither })
 }
 
@@ -621,6 +792,10 @@ fn parse_black_white(d: &[u8]) -> Option<Adjustment> {
 /// and decodes to #EC8A00); reading them as absolute XYZ gives #FFE03A and #F18600.
 const PHFL_XYZ_ONE: f32 = 32768.0;
 
+/// How far past 0..1 a Photo Filter colour may sit in extended sRGB: Lab's whole range lands
+/// within about ±3 of it.
+const PHFL_RGB_REACH: f32 = 4.0;
+
 fn parse_photo_filter(d: &[u8]) -> Option<Adjustment> {
     let (color, at) = match be16(d, 0)? {
         2 => {
@@ -629,7 +804,16 @@ fn parse_photo_filter(d: &[u8]) -> Option<Adjustment> {
                 return None;
             }
             let c = [be16(d, 4)?, be16(d, 6)?, be16(d, 8)?, be16(d, 10)?];
-            (crate::channel_map::decode_color(space, c).to_rgb(), 12)
+            // A Lab colour stays as stored, outside sRGB if it is (Reference's Warming Filter (85)
+            // is L 67.06, a 32, b 120): the compositors clip it, as Reference renders it, and the
+            // writer gives the same Lab back. Clipped here, a re-save turned b 120 into 72.9.
+            let rgb = if space == 7 {
+                let lab = [f32::from(c[0]) / 100.0, f32::from(c[1] as i16) / 100.0, f32::from(c[2] as i16) / 100.0];
+                photosplice_color::convert::lab_to_srgb_unclamped(lab)
+            } else {
+                crate::channel_map::decode_color(space, c).to_rgb()
+            };
+            (rgb, 12)
         }
         3 => {
             let rel = [be32(d, 2)?, be32(d, 6)?, be32(d, 10)?].map(|v| v as f32 / PHFL_XYZ_ONE);
@@ -647,7 +831,9 @@ fn parse_photo_filter(d: &[u8]) -> Option<Adjustment> {
     };
     let density = (be32(d, at)? as f32 / 100.0).clamp(0.0, 1.0);
     let preserve_luminosity = *d.get(at + 4)? != 0;
-    Some(Adjustment::PhotoFilter { color: color.map(|v| v.clamp(0.0, 1.0)), density, preserve_luminosity })
+    // Finite and within what a Lab colour reaches in extended sRGB; the compositors clip to 0..1.
+    let color = color.map(|v| if v.is_finite() { v.clamp(-PHFL_RGB_REACH, 1.0 + PHFL_RGB_REACH) } else { 0.0 });
+    Some(Adjustment::PhotoFilter { color, density, preserve_luminosity })
 }
 
 /// `mixr` (Adobe spec, "Channel Mixer"): version (1), monochrome (u16), then one 10-byte record
@@ -715,6 +901,9 @@ pub fn write_in(adj: &Adjustment, channels: Channels) -> Vec<([u8; 4], Vec<u8>)>
         // A Grayscale or Lab document's Gradient Map holds its stops in the document's space,
         // as Reference writes them: RGB stops it converts through its own profiles (Reference
         // corpus gray8/gradient-map.psd saved by us: every pixel 23/255 off; lab8 2.9/255).
+        // A map read from a file is written as its definition while that still gives its stops:
+        // its stops are in the space the file stored them in.
+        Adjustment::GradientMap { .. } if let Some(data) = gradient_map_from_source(adj) => vec![(*b"grdm", data)],
         Adjustment::GradientMap { ink_stops, .. } if ink_stops.len() < 2 && matches!(channels, Channels::Gray | Channels::Lab) => {
             let mut blocks = write(adj);
             for (key, data) in &mut blocks {
@@ -723,6 +912,12 @@ pub fn write_in(adj: &Adjustment, channels: Channels) -> Vec<([u8; 4], Vec<u8>)>
                 }
             }
             blocks
+        }
+        // A Grayscale document's Curves has one channel curve (the model copies it to all three).
+        Adjustment::Curves { master, per_channel, space, black, pencil } if channels == Channels::Gray => {
+            let line = vec![CurvePoint { input: 0.0, output: 0.0 }, CurvePoint { input: 1.0, output: 1.0 }];
+            let [g, _, _] = per_channel;
+            write(&Adjustment::Curves { master: master.clone(), per_channel: [g.clone(), line.clone(), line], space: *space, black: black.clone(), pencil: *pencil })
         }
         Adjustment::ChannelMixer { matrix, monochrome: false, cmyk: None } if channels == Channels::Cmyk => {
             write(&Adjustment::ChannelMixer { matrix: *matrix, monochrome: false, cmyk: Some(photosplice_doc::adjust::cmyk_mixer_records(matrix)) })
@@ -769,10 +964,16 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
             put16(&mut v, 2);
             v.push(u8::from(*colorize));
             v.push(0);
-            for _ in 0..2 {
-                for x in [hue, saturation, lightness] {
-                    v.extend_from_slice(&clamp_i16(*x).to_be_bytes());
-                }
+            // The colorize triplet, then the master triplet. The inactive one gets Reference's
+            // defaults; the colorize hue (0..360 in the model) is stored signed, -180..180.
+            let (colorize_hsl, master) = if *colorize {
+                let h = hue.rem_euclid(360.0);
+                ([if h > 180.0 { h - 360.0 } else { h }, *saturation, *lightness], [0.0; 3])
+            } else {
+                ([30.0, 25.0, 0.0], [*hue, *saturation, *lightness])
+            };
+            for x in colorize_hsl.into_iter().chain(master) {
+                v.extend_from_slice(&clamp_i16(x).to_be_bytes());
             }
             // Six hue ranges (reds, yellows, greens, cyans, blues, magentas): range values in
             // 0..360, then the range's hue, saturation and lightness.
@@ -811,18 +1012,40 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
             v.push(u8::from(*pencil));
             put16(&mut v, 1);
             let ink = *space == ToneSpace::Cmyk && black.len() >= 2;
-            v.extend_from_slice(&(if ink { 0b11111u32 } else { 0b1111 }).to_be_bytes());
-            for c in std::iter::once(master).chain(per_channel.iter()).chain(ink.then_some(black)) {
-                if *pencil {
+            let all: Vec<&Vec<CurvePoint>> = std::iter::once(master).chain(per_channel.iter()).chain(ink.then_some(black)).collect();
+            if *pencil {
+                v.extend_from_slice(&(if ink { 0b11111u32 } else { 0b1111 }).to_be_bytes());
+                for c in all {
                     v.extend(curve_map_outputs(c).iter().map(|&o| u8::try_from(q255(o)).unwrap_or(u8::MAX)));
-                    continue;
                 }
-                put16(&mut v, c.len().min(19) as u16);
-                for p in c.iter().take(19) {
-                    put16(&mut v, q255(p.output));
-                    put16(&mut v, q255(p.input));
-                }
+                return vec![(*b"curv", v)];
             }
+            // As Reference writes them: only the curves that do something, flagged in the bitmap,
+            // then the same curves again in a 'Crv ' section keyed by channel. It refuses a CMYK
+            // block of all five curves, with or without that section, or a minimal one without it.
+            let identity = |c: &[CurvePoint]| c.len() == 2 && c.iter().zip([0, 255]).all(|(p, e)| q255(p.input) == e && q255(p.output) == e);
+            let edited: Vec<(u16, &Vec<CurvePoint>)> = (0u16..).zip(all).filter(|(_, c)| !identity(c)).collect();
+            let points = |v: &mut Vec<u8>, c: &[CurvePoint]| {
+                put16(v, c.len().min(19) as u16);
+                for p in c.iter().take(19) {
+                    put16(v, q255(p.output));
+                    put16(v, q255(p.input));
+                }
+            };
+            v.extend_from_slice(&edited.iter().fold(0u32, |bits, (i, _)| bits | 1 << i).to_be_bytes());
+            for (_, c) in &edited {
+                points(&mut v, c);
+            }
+            v.extend_from_slice(b"Crv ");
+            put16(&mut v, 4);
+            v.extend_from_slice(&(edited.len() as u32).to_be_bytes());
+            for (i, c) in &edited {
+                put16(&mut v, *i);
+                points(&mut v, c);
+            }
+            // Zero-padded to four bytes, as Reference writes it; it refuses the block padded to
+            // two (psd-tools curves_rgb and curves_grayscale saved by us).
+            v.resize(v.len().next_multiple_of(4), 0);
             return vec![(*b"curv", v)];
         }
         Adjustment::SelectiveColor { relative, adjustments } => {
@@ -837,8 +1060,17 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
             return vec![(*b"selc", v)];
         }
         Adjustment::ColorLookup { name, lut, size, dither, .. } => {
-            // A lookup without a usable table (none chosen yet, or a bad size) renders as the
-            // identity, so it is written as a 2³ identity cube rather than dropped.
+            put16(&mut v, 1);
+            // No table chosen yet: the empty descriptor Reference writes for a fresh Color
+            // Lookup layer (it refuses one with a stand-in cube and an empty profile).
+            if lut.is_none() || *size == 0 {
+                let mut d = Descriptor::new("null");
+                d.name = photosplice_psd::descriptor::UnicodeString::new_nul("");
+                v.extend_from_slice(&VersionedDescriptor::new(d).to_bytes());
+                return vec![(*b"clrL", v)];
+            }
+            // A table with a bad size renders as the identity, so it is written as a 2³
+            // identity cube rather than dropped.
             let n = *size as usize;
             let cube = lut.as_deref().zip(photosplice_doc::adjust::lut3d_len(*size)).and_then(|(table, len)| table.get(..len)).filter(|_| n <= 256);
             let (file, dither) = match cube {
@@ -861,12 +1093,13 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
                 .with("tableOrder", en("colorLookupOrder", "bgrOrder"))
                 .with("LUT3DFileData", Value::RawData(photosplice_cms::lutfile::write_cube(&file).into_bytes()))
                 .with("LUT3DFileName", text(name));
-            put16(&mut v, 1);
             v.extend_from_slice(&VersionedDescriptor::new(d).to_bytes());
             return vec![(*b"clrL", v)];
         }
+        Adjustment::GradientMap { .. } if let Some(data) = gradient_map_from_source(adj) => return vec![(*b"grdm", data)],
         Adjustment::GradientMap { ink_stops, reverse, dither, .. } if ink_stops.len() >= 2 => {
-            return vec![(*b"grdm", write_gradient_map_inks(ink_stops, *reverse, *dither))];
+            let inks = crate::blocks::thin_stops(ink_stops, crate::blocks::MAX_GRADIENT_STOPS, |c| *c);
+            return vec![(*b"grdm", write_gradient_map_inks(&inks, *reverse, *dither))];
         }
         Adjustment::GradientMap { stops, reverse, dither, .. } => {
             // Photoshop needs two stops; fewer are written as the gradient they render as
@@ -874,7 +1107,8 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
             let stops = match stops.as_slice() {
                 [] => vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])],
                 [(_, c)] => vec![(0.0, *c), (1.0, *c)],
-                s => s.to_vec(),
+                // More than Reference takes (it trims a Gradient Map's): thinned.
+                s => crate::blocks::thin_stops(s, crate::blocks::MAX_GRADIENT_STOPS, |c| [c[0], c[1], c[2], 0.0]),
             };
             return vec![(*b"grdm", write_gradient_map(&stops, *reverse, *dither))];
         }
@@ -911,7 +1145,8 @@ pub fn write(adj: &Adjustment) -> Vec<([u8; 4], Vec<u8>)> {
             // filter came back yellower, 93 % of pixels up to 17/255 off).
             put16(&mut v, 2);
             put16(&mut v, 7);
-            let lab = photosplice_color::convert::srgb_to_lab(color.map(|x| if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 }));
+            // Unclipped: a Lab colour read outside sRGB is written back as it was.
+            let lab = photosplice_color::convert::srgb_to_lab(color.map(|x| if x.is_finite() { x.clamp(-PHFL_RGB_REACH, 1.0 + PHFL_RGB_REACH) } else { 0.0 }));
             put16(&mut v, (lab[0] * 100.0).round().clamp(0.0, 10000.0) as u16);
             for x in [lab[1], lab[2]] {
                 put16(&mut v, (x * 100.0).round().clamp(-12800.0, 12700.0) as i16 as u16);
@@ -968,7 +1203,7 @@ mod tests {
     #[test]
     fn gradient_map_stops_take_the_document_space() {
         let stops = vec![(0.0, [0.0; 3]), (0.5, [0.6; 3]), (1.0, [1.0; 3])];
-        let a = Adjustment::GradientMap { stops: stops.clone(), reverse: false, dither: false, ink_stops: Vec::new() };
+        let a = Adjustment::GradientMap { stops: stops.clone(), reverse: false, dither: false, ink_stops: Vec::new(), source: None };
         for (channels, space) in [(Channels::Gray, 8u16), (Channels::Lab, 7)] {
             let [(key, data)] = write_in(&a, channels).try_into().unwrap();
             assert_eq!(&key, b"grdm");
@@ -1213,20 +1448,28 @@ mod tests {
         let original = grdm_with((2, [65535, 65535, 65535, 0]), (7, [10000, 0, 0, 0]));
         let Adjustment::GradientMap { stops, .. } = parse(b"grdm", &original, None, Channels::Cmyk) else { panic!() };
         let mut data = original.clone();
-        let target = Adjustment::GradientMap { stops: stops.clone(), reverse: true, dither: true, ink_stops: Vec::new() };
+        let target = Adjustment::GradientMap { stops: stops.clone(), reverse: true, dither: true, ink_stops: Vec::new(), source: None };
         assert!(retarget_gradient_map(&mut data, &target, Channels::Cmyk));
         assert_eq!(&data[2..4], &[1, 1]);
         assert_eq!(data[4..], original[4..], "the stops keep their colour spaces");
-        assert_eq!(parse(b"grdm", &data, None, Channels::Cmyk), target);
+        assert_eq!(without_source(parse(b"grdm", &data, None, Channels::Cmyk)), target);
         // Edited stops are not patched in.
         let mut edited = stops;
         edited[0].1 = [0.5; 3];
         let mut data2 = original.clone();
-        let target = Adjustment::GradientMap { stops: edited, reverse: false, dither: false, ink_stops: Vec::new() };
+        let target = Adjustment::GradientMap { stops: edited, reverse: false, dither: false, ink_stops: Vec::new(), source: None };
         assert!(!retarget_gradient_map(&mut data2, &target, Channels::Cmyk));
         assert_eq!(data2, original);
         assert!(!retarget_gradient_map(&mut [], &target, Channels::Cmyk));
         assert!(!retarget_gradient_map(&mut data2, &Adjustment::Invert, Channels::Cmyk));
+    }
+
+    /// `a` without the definition a Gradient Map read from a block carries.
+    fn without_source(mut a: Adjustment) -> Adjustment {
+        if let Adjustment::GradientMap { source, .. } = &mut a {
+            *source = None;
+        }
+        a
     }
 
     fn rt(a: Adjustment) {
@@ -1234,7 +1477,126 @@ mod tests {
         assert!(!blocks.is_empty(), "{a:?}");
         let cged = blocks.iter().find(|b| &b.0 == b"CgEd").map(|b| &b.1[..]);
         let back = parse(&blocks[0].0, &blocks[0].1, cged, Channels::Rgb);
-        assert_eq!(back, a);
+        assert_eq!(without_source(back), a);
+    }
+
+    /// Reference keeps the colorize triplet at byte 4 and the master triplet at byte 10, and fills
+    /// the inactive one with its defaults: colorize (30, 25, 0), master (0, 0, 0). The colorize hue
+    /// is stored signed (200 -> -160).
+    #[test]
+    fn hue2_writes_each_triplet_in_its_own_slot() {
+        let triplets = |a: &Adjustment| -> Vec<i16> {
+            let blocks = write(a);
+            (0..6).map(|i| bei16(&blocks[0].1, 4 + 2 * i).unwrap_or(i16::MIN)).collect()
+        };
+        let on = Adjustment::HueSaturation { hue: 200.0, saturation: 40.0, lightness: 10.0, colorize: true, ranges: HueRange::defaults() };
+        assert_eq!(triplets(&on), [-160, 40, 10, 0, 0, 0]);
+        let off = Adjustment::HueSaturation { hue: -30.0, saturation: 20.0, lightness: 5.0, colorize: false, ranges: HueRange::defaults() };
+        assert_eq!(triplets(&off), [30, 25, 0, -30, 20, 5]);
+    }
+
+    /// Reference 2026's Light layer is a `brit` block whose `CgEd` descriptor carries more than
+    /// Brightness/Contrast: it stays unsupported and both blocks are saved back byte for byte.
+    /// Synthetic block: the extra key names are placeholders.
+    #[test]
+    fn light_adjustment_is_kept_verbatim() {
+        use photosplice_doc::{ColorMode, Document, Layer, LayerContent, SampleType};
+        use photosplice_psd::PsdFile;
+        let brit = vec![0, 0, 0xff, 0xfe, 0, 127, 0, 0];
+        let d = Descriptor::new("null")
+            .with("Vrsn", Value::Integer(1))
+            .with("Brgh", Value::Integer(0))
+            .with("Cntr", Value::Integer(-2))
+            .with("Exps", Value::Double(-2.3))
+            .with("Hghl", Value::Integer(-64))
+            .with("useLegacy", Value::Boolean(false));
+        // Padded to 4 inside its length, as Reference writes layer blocks.
+        let mut cged = VersionedDescriptor::new(d).to_bytes();
+        cged.resize(cged.len().next_multiple_of(4), 0);
+        let adjustment = parse(b"brit", &brit, Some(&cged), Channels::Rgb);
+        assert_eq!(adjustment, Adjustment::Unsupported { psd_key: "brit".into(), raw: brit.clone() });
+        let mut doc = Document::with_background("Light", photosplice_geom::Size::new(8, 8), ColorMode::Rgb, SampleType::U8, photosplice_doc::Color::WHITE);
+        let mut layer = Layer::new("Light 1", LayerContent::Adjustment(adjustment));
+        layer.psd_blocks = vec![(*b"brit", std::sync::Arc::new(brit.clone())), (*b"CgEd", std::sync::Arc::new(cged.clone()))];
+        doc.layers.push(layer);
+        let block = |file: &PsdFile, key: &[u8; 4]| {
+            let records = &file.layer_info.as_ref().unwrap().layers;
+            records.iter().flat_map(|r| r.blocks.iter()).find(|b| b.key == *key).map(|b| b.data.clone())
+        };
+        let file = PsdFile::from_bytes(&crate::psd_export::document_to_psd(&doc).to_bytes().unwrap()).unwrap();
+        let (restored, warnings) = crate::psd_import::psd_to_document(&file);
+        assert!(warnings.iter().any(|w| w.contains("\"Light 1\"")), "{warnings:?}");
+        // Saved again unchanged, both blocks are written back byte for byte.
+        let again = PsdFile::from_bytes(&crate::psd_export::document_to_psd(&restored).to_bytes().unwrap()).unwrap();
+        assert_eq!(block(&again, b"brit").as_deref(), Some(&brit[..]));
+        assert_eq!(block(&again, b"CgEd").as_deref(), Some(&cged[..]));
+        // A plain Brightness/Contrast descriptor (ours, Lab or not) still reads as Brightness/Contrast.
+        for lab in [false, true] {
+            let plain = brightness_contrast_blocks(5.0, -2.0, false, lab);
+            assert!(!is_extended_brit(Some(&plain[1].1)));
+        }
+    }
+
+    fn cube_lookup_block(cube: &[u8]) -> Vec<u8> {
+        let en = |t: &str, val: &str| Value::Enumerated { type_id: photosplice_psd::descriptor::Id::new(t), value: photosplice_psd::descriptor::Id::new(val) };
+        let desc = Descriptor::new("null")
+            .with("LUTFormat", en("LUTFormatType", "LUTFormatCUBE"))
+            .with("LUT3DFileName", Value::Text(photosplice_psd::descriptor::UnicodeString::new_nul("domain.cube")))
+            .with("LUT3DFileData", Value::RawData(cube.to_vec()));
+        let mut block = vec![0, 1];
+        block.extend(VersionedDescriptor::new(desc).to_bytes());
+        block
+    }
+
+    fn identity_cube(domain: &str) -> Vec<u8> {
+        format!("{domain}LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n").into_bytes()
+    }
+
+    #[test]
+    fn color_lookup_custom_domains_are_kept_unsupported() {
+        let domains = ["DOMAIN_MIN 0 0 0\nDOMAIN_MAX 0.5 0.5 0.5\n", "DOMAIN_MIN 0 0.25 0\nDOMAIN_MAX 1 0.75 1\n", "LUT_3D_INPUT_RANGE 0 0.5\n"];
+        for domain in domains {
+            let raw = cube_lookup_block(&identity_cube(domain));
+            let Adjustment::Unsupported { psd_key, raw: kept } = parse(b"clrL", &raw, None, Channels::Rgb) else {
+                panic!("custom LUT domain was applied instead of kept unsupported: {domain}")
+            };
+            assert_eq!(psd_key, "clrL");
+            assert_eq!(kept, raw);
+            let reason = unreadable_reason(b"clrL", &raw).expect("custom domain has an explanation");
+            assert!(reason.contains("DOMAIN_MIN") && reason.contains("DOMAIN_MAX"), "{reason}");
+            assert!(reason.to_ascii_lowercase().contains("not supported"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn color_lookup_default_domains_stay_supported() {
+        for domain in ["", "DOMAIN_MIN 0 0 0\nDOMAIN_MAX 1 1 1\n"] {
+            let raw = cube_lookup_block(&identity_cube(domain));
+            assert!(matches!(parse(b"clrL", &raw, None, Channels::Rgb), Adjustment::ColorLookup { size: 2, .. }));
+            assert_eq!(unreadable_reason(b"clrL", &raw), None);
+        }
+    }
+
+    /// Only an older build's own unaligned `grdm` is matched: not today's block, nor one with
+    /// another tail or name, in any document space.
+    #[test]
+    fn legacy_gradient_map_detection_matches_only_old_output() {
+        let stops = vec![(0.0, [0.1, 0.2, 0.3]), (1.0, [1.0; 3])];
+        let a = Adjustment::GradientMap { stops, reverse: true, dither: false, ink_stops: Vec::new(), source: None };
+        for channels in [Channels::Rgb, Channels::Gray, Channels::Lab] {
+            let [(_, data)] = write_in(&a, channels).try_into().unwrap();
+            assert!(!is_unpadded_legacy_gradient_map(&data), "{channels:?}");
+            let old = &data[..data.len() - 2];
+            assert!(is_unpadded_legacy_gradient_map(old), "{channels:?}");
+            let mut renamed = old.to_vec();
+            renamed[9] = b'D';
+            assert!(!is_unpadded_legacy_gradient_map(&renamed), "{channels:?}");
+            let mut tail = old.to_vec();
+            *tail.last_mut().unwrap() = 1;
+            assert!(!is_unpadded_legacy_gradient_map(&tail), "{channels:?}");
+        }
+        assert!(!is_unpadded_legacy_gradient_map(&[0, 1, 0]));
+        assert!(!is_unpadded_legacy_gradient_map(&[]));
     }
 
     #[test]
@@ -1280,8 +1642,20 @@ mod tests {
         let b = write(&inkl);
         assert_eq!(parse(&b[0].0, &b[0].1, None, Channels::Cmyk), inkl);
         rt(Adjustment::Unsupported { psd_key: "selc".into(), raw: vec![1, 2, 3] });
-        rt(Adjustment::GradientMap { stops: vec![(0.0, [0.0, 0.0, 0.0]), (0.5, [1.0, 0.0, 0.0]), (1.0, [1.0, 1.0, 1.0])], reverse: true, dither: false, ink_stops: Vec::new() });
-        rt(Adjustment::GradientMap { stops: vec![(0.0, [0.0, 0.0, 0.0]), (1.0, [1.0, 1.0, 1.0])], reverse: false, dither: true, ink_stops: Vec::new() });
+        rt(Adjustment::GradientMap {
+            stops: vec![(0.0, [0.0, 0.0, 0.0]), (0.5, [1.0, 0.0, 0.0]), (1.0, [1.0, 1.0, 1.0])],
+            reverse: true,
+            dither: false,
+            ink_stops: Vec::new(),
+            source: None,
+        });
+        rt(Adjustment::GradientMap {
+            stops: vec![(0.0, [0.0, 0.0, 0.0]), (1.0, [1.0, 1.0, 1.0])],
+            reverse: false,
+            dither: true,
+            ink_stops: Vec::new(),
+            source: None,
+        });
         rt(Adjustment::SelectiveColor { relative: true, adjustments: std::array::from_fn(|r| [r as f32 * 10.0 - 40.0, 5.0, -100.0, 100.0]) });
         rt(Adjustment::SelectiveColor { relative: false, adjustments: [[0.0; 4]; 9] });
         rt(Adjustment::Vibrance { vibrance: 35.0, saturation: -12.0 });
@@ -1571,6 +1945,40 @@ mod tests {
         VersionedDescriptor::new(d).to_bytes()
     }
 
+    /// psd-tools fill_adjustments.psd: Reference's Warming Filter (85) stores Lab 67.06 / 32 / 120,
+    /// outside sRGB. It reads back as the same block, and renders clipped as Reference draws it.
+    #[test]
+    fn photo_filter_lab_outside_srgb_round_trips() {
+        let block = [0, 2, 0, 7, 0x1a, 0x32, 0x0c, 0x80, 0x2e, 0xe0, 0, 0, 0, 0, 0, 0x19, 1, 0, 0, 0];
+        let a = parse(b"phfl", &block, None, Channels::Rgb);
+        let Adjustment::PhotoFilter { color, density, preserve_luminosity: true } = &a else { panic!("{a:?}") };
+        assert!(color[2] < 0.0 && (density - 0.25).abs() < 1e-6, "{color:?}");
+        let [(key, data)] = &write(&a)[..] else { panic!() };
+        assert_eq!((key, &data[..]), (b"phfl", &block[..]));
+    }
+
+    /// psd-tools curves_rgb / curves_cmyk / curves_grayscale: Reference's blocks (only the edited
+    /// curves, then the 'Crv ' section, zero-padded to four bytes) come back byte for byte.
+    /// Reference refuses a CMYK block of all five curves, and one padded to two bytes.
+    #[test]
+    fn curves_golden_blocks() {
+        let hex = |s: &str| (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect::<Vec<u8>>();
+        for (channels, block) in [
+            (Channels::Rgb, "0000010000000900040003001a0054003700aa00ab00ff00ff000300000000006e00a700a600ff43727620000400000002000000040003001a0054003700aa00ab00ff00ff0003000300000000006e00a700a600ff000000"),
+            (Channels::Cmyk, "0000010000000b00020000000000ff009f0003000000000064008200ff00ff0004000000000036005800dd00c600ff00ff43727620000400000003000000020000000000ff009f00010003000000000064008200ff00ff00030004000000000036005800dd00c600ff00ff00"),
+            (Channels::Cmyk, "0000010000000e00020000009500ff00ff00040000000000ff0078003600a700ff00ff00040000000000410038007800aa00ff00ff43727620000400000003000100020000009500ff00ff000200040000000000ff0078003600a700ff00ff000300040000000000410038007800aa00ff00ff00"),
+            (Channels::Gray, "0000010000000200020000000000ff009f43727620000400000001000100020000000000ff009f00"),
+            (Channels::Gray, "0000010000000043727620000400000000000000"),
+        ] {
+            let block = hex(block);
+            let a = parse(b"curv", &block, None, channels);
+            let out = write_in(&a, channels);
+            let [(key, data)] = &out[..] else { panic!("{out:?}") };
+            assert_eq!(key, b"curv");
+            assert_eq!(*data, block, "{a:?}");
+        }
+    }
+
     #[test]
     fn vibrance_golden_block() {
         let d = vdesc(Descriptor::new("null").with("vibrance", Value::Integer(-40)).with("Strt", Value::Integer(25)));
@@ -1611,7 +2019,7 @@ mod tests {
         for (stops, want) in
             [(vec![], vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])]), (vec![(0.3, [0.2, 0.4, 0.6])], vec![(0.0, [0.2, 0.4, 0.6]), (1.0, [0.2, 0.4, 0.6])])]
         {
-            let b = write(&Adjustment::GradientMap { stops, reverse: true, dither: false, ink_stops: Vec::new() });
+            let b = write(&Adjustment::GradientMap { stops, reverse: true, dither: false, ink_stops: Vec::new(), source: None });
             let back = parse(&b[0].0, &b[0].1, None, Channels::Rgb);
             let Adjustment::GradientMap { stops, reverse: true, .. } = back else { panic!("{back:?}") };
             assert_eq!(stops.len(), want.len());
@@ -1619,13 +2027,21 @@ mod tests {
                 assert!((s.0 - w.0).abs() < 1e-6 && (0..3).all(|k| (s.1[k] - w.1[k]).abs() < 1e-4), "{s:?} vs {w:?}");
             }
         }
-        // A colour lookup without a (usable) table becomes an identity cube, without dither.
-        for lut in [None, Some(std::sync::Arc::new(vec![0.5; 7]))] {
+        // A colour lookup with a bad table becomes an identity cube, without dither.
+        {
+            let lut = Some(std::sync::Arc::new(vec![0.5; 7]));
             let b = write(&Adjustment::ColorLookup { name: "L".into(), lut, size: 3, tetrahedral: false, dither: true });
             let back = parse(&b[0].0, &b[0].1, None, Channels::Rgb);
             let Adjustment::ColorLookup { lut: Some(t), size: 2, dither: false, name, .. } = back else { panic!("{back:?}") };
             assert_eq!(name, "L");
             assert_eq!(*t, photosplice_cms::lutfile::LutFile::identity(2).data);
+        }
+        // One without a table is written as Reference writes a fresh Color Lookup layer.
+        for (lut, size) in [(None, 3), (Some(std::sync::Arc::new(vec![0.5; 81])), 0)] {
+            let b = write(&Adjustment::ColorLookup { name: "L".into(), lut, size, tetrahedral: false, dither: true });
+            let fresh = [0, 1, 0, 0, 0, 16, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, b'n', b'u', b'l', b'l', 0, 0, 0, 0];
+            assert_eq!(b, vec![(*b"clrL", fresh.to_vec())]);
+            assert!(matches!(parse(b"clrL", &b[0].1, None, Channels::Rgb), Adjustment::ColorLookup { lut: None, size: 0, .. }));
         }
         // Every kind except a malformed Unsupported key has an encoding.
         assert!(write(&Adjustment::Unsupported { psd_key: "abc".into(), raw: vec![] }).is_empty());
@@ -1667,5 +2083,85 @@ mod tests {
     fn legacy_brit_without_cged() {
         let a = parse(b"brit", &[0, 10, 0xff, 0xf6, 0, 127, 0], None, Channels::Rgb);
         assert_eq!(a, Adjustment::BrightnessContrast { brightness: 10.0, contrast: -10.0, legacy: true });
+    }
+
+    /// A Gradient Map read from Reference's block (version 3, Perceptual, smoothness, CMYK and
+    /// Lab stops, noise settings kept from the dialog) is written back as that block; edited
+    /// stops are written as stops.
+    #[test]
+    fn gradient_map_is_written_as_its_definition() {
+        let mut v = Vec::new();
+        put16(&mut v, 3);
+        v.extend_from_slice(&[0, 0]);
+        v.extend_from_slice(b"Perc");
+        let name: Vec<u16> = "oracle".encode_utf16().chain(std::iter::once(0)).collect();
+        v.extend_from_slice(&(name.len() as u32).to_be_bytes());
+        name.iter().for_each(|u| put16(&mut v, *u));
+        put16(&mut v, 3);
+        for (loc, mid, space, c) in
+            [(0u32, 50u32, 2u16, [0u16, 0, 0xb717, 0x97a7]), (2048, 30, 7, [5000, 2000, 0xf830, 0]), (4096, 50, 0, [0xffff, 0xf0ef, 0xa09f, 0])]
+        {
+            v.extend_from_slice(&loc.to_be_bytes());
+            v.extend_from_slice(&mid.to_be_bytes());
+            put16(&mut v, space);
+            c.iter().for_each(|x| put16(&mut v, *x));
+            put16(&mut v, 0);
+        }
+        put16(&mut v, 2);
+        for (loc, mid, op) in [(0u32, 50u32, 255u16), (4096, 40, 128)] {
+            v.extend_from_slice(&loc.to_be_bytes());
+            v.extend_from_slice(&mid.to_be_bytes());
+            put16(&mut v, op);
+        }
+        for x in [2u16, 3072, 32, 0] {
+            put16(&mut v, x);
+        }
+        v.extend_from_slice(&0x2600_9a2eu32.to_be_bytes());
+        for x in [0u16, 1] {
+            put16(&mut v, x);
+        }
+        v.extend_from_slice(&2048u32.to_be_bytes());
+        put16(&mut v, 3);
+        for x in [0u16, 0, 0, 0, 0x8000, 0x8000, 0x8000, 0x8000] {
+            put16(&mut v, x);
+        }
+        v.extend_from_slice(&0u32.to_be_bytes());
+        for channels in [Channels::Rgb, Channels::Cmyk, Channels::Gray, Channels::Lab] {
+            let a = parse(b"grdm", &v, None, channels);
+            let Adjustment::GradientMap { source: Some(_), stops, .. } = &a else { panic!("{a:?}") };
+            assert!(stops.len() > 3, "baked");
+            assert_eq!(write_in(&a, channels), vec![(*b"grdm", v.clone())], "{channels:?}");
+        }
+        // Reverse and Dither are the map's own.
+        let Adjustment::GradientMap { stops, ink_stops, source, .. } = parse(b"grdm", &v, None, Channels::Cmyk) else { panic!() };
+        let flipped = Adjustment::GradientMap { stops: stops.clone(), reverse: true, dither: true, ink_stops: ink_stops.clone(), source: source.clone() };
+        let written = write(&flipped);
+        assert_eq!(written[0].1.get(2..4), Some(&[1u8, 1][..]));
+        assert_eq!(written[0].1.get(4..), v.get(4..));
+        // Edited: the stops, version 1 (Classic, no smoothness).
+        let mut edited = stops;
+        edited[0].1 = [1.0, 0.0, 0.0];
+        let a = Adjustment::GradientMap { stops: edited, reverse: false, dither: false, ink_stops: Vec::new(), source };
+        let w = write(&a);
+        assert_eq!(be16(&w[0].1, 0), Some(1));
+        assert_ne!(w[0].1, v);
+    }
+
+    /// A noise Gradient Map is written back with its noise settings.
+    #[test]
+    fn noise_gradient_map_is_written_as_its_definition() {
+        let mut v = write_gradient_map(&[], false, false);
+        // Form 1 (noise), seed, transparency and restrict flags, roughness, HSB.
+        let tail = v.len() - 4 - 16 - 2 - 4 - 2 - 2 - 4 - 2;
+        v[tail..tail + 2].copy_from_slice(&1u16.to_be_bytes());
+        v[tail + 2..tail + 6].copy_from_slice(&1_234_567u32.to_be_bytes());
+        v[tail + 6..tail + 8].copy_from_slice(&1u16.to_be_bytes());
+        v[tail + 10..tail + 14].copy_from_slice(&3000u32.to_be_bytes());
+        v[tail + 14..tail + 16].copy_from_slice(&4u16.to_be_bytes());
+        let a = parse(b"grdm", &v, None, Channels::Rgb);
+        let Adjustment::GradientMap { source: Some(src), stops, .. } = &a else { panic!("{a:?}") };
+        assert_eq!(src.form, GradientForm::Noise);
+        assert_eq!(stops.len(), crate::noise_gradient::ENTRIES);
+        assert_eq!(write(&a), vec![(*b"grdm", v)]);
     }
 }

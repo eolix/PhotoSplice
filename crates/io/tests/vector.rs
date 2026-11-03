@@ -135,6 +135,86 @@ fn shape_layer_typed_roundtrip() {
     }
 }
 
+/// A shape painted with patterns (fill and stroke, with scale, angle, phase and link) survives a
+/// PSD save and load: the paints come back from `vscg` / `vstk`, the pattern from the document's
+/// `Patt` block, the effects reference point (`fxrp`) the pattern tiles from with them, so the
+/// shape redraws exactly as it was saved.
+#[test]
+fn pattern_painted_shapes_roundtrip_with_their_patterns() {
+    use photosplice_compose::shape_paint::{ShapePatterns, render_layer_shape};
+    let mut tile = photosplice_doc::Surface::new(photosplice_color::PixelFormat::new(ColorMode::Rgb, SampleType::U8, false));
+    tile.fill_rect(Rect::new(0, 0, 8, 8), &[0.9, 0.2, 0.1]);
+    tile.fill_rect(Rect::new(0, 0, 4, 4), &[0.1, 0.3, 0.8]);
+    let pat = photosplice_doc::Pattern::new("Quarters", tile, 8, 8);
+    let paint = |scale: f32, angle: f32, link: bool, phase: (f32, f32)| Fill::Pattern { name: pat.name.clone(), scale, id: pat.id.clone(), angle, link, phase };
+    let mut d = doc();
+    d.patterns.push(pat.clone());
+    let sh = ShapeLayer {
+        path: Path::new(vec![Subpath::polygon(&[(32.0, 32.0), (160.0, 32.0), (160.0, 128.0), (32.0, 128.0)])]),
+        fill: Some(paint(0.5, 30.0, true, (3.0, -2.0))),
+        stroke: Some(ShapeStroke { width: 6.0, paint: paint(1.0, 0.0, false, (0.0, 0.0)), align: StrokeAlign::Outside, ..ShapeStroke::default() }),
+        ..Default::default()
+    };
+    let mut l = Layer::new("Patterned", LayerContent::Shape(sh.clone()));
+    l.effects.reference = Some((5.0, 7.0));
+    let pixels = render_layer_shape(&d, &l).unwrap();
+    assert!(!pixels.content_bounds().is_empty(), "the patterns paint");
+    if let LayerContent::Shape(s) = &mut l.content {
+        s.cache = Some(pixels.clone());
+    }
+    d.layers.push(l);
+    let b = roundtrip(&d);
+    assert!(b.patterns.iter().any(|p| p.id == pat.id && p.width == 8 && p.height == 8), "pattern saved in Patt");
+    let back = &b.layers[1];
+    let LayerContent::Shape(s) = &back.content else { panic!("not a shape") };
+    assert_eq!(s.fill, sh.fill);
+    assert_eq!(s.stroke.as_ref().map(|s| &s.paint), sh.stroke.as_ref().map(|s| &s.paint));
+    assert_eq!(back.effects.reference, Some((5.0, 7.0)));
+    // Redrawn from what was read: the same pixels as saved.
+    let redrawn = photosplice_compose::shape_paint::render_shape(s, b.pixel_format(), b.bounds(), ShapePatterns::of(&b, back));
+    let r = Rect::new(0, 0, 256, 256);
+    let (mut want, mut got) = (vec![[0.0f32; 4]; 256 * 256], vec![[0.0f32; 4]; 256 * 256]);
+    pixels.read_rgba_into(r, &mut want);
+    redrawn.read_rgba_into(r, &mut got);
+    let worst = want.iter().zip(&got).map(|(a, b)| (0..4).map(|k| (a[k] - b[k]).abs()).fold(0.0f32, f32::max)).fold(0.0f32, f32::max);
+    assert!(worst < 1.5 / 255.0, "redraw differs by {}", worst * 255.0);
+    // And the stored layer pixels are that rendering.
+    let stored = s.cache.as_ref().unwrap();
+    let mut st = vec![[0.0f32; 4]; 256 * 256];
+    stored.read_rgba_into(r, &mut st);
+    assert_eq!(st.iter().filter(|p| p[3] > 0.0).count(), want.iter().filter(|p| p[3] > 0.0).count());
+}
+
+/// A translucent solid fill and stroke colour survive a PSD save and load (the fill's alpha in
+/// `pcAl`, the stroke's folded into its opacity for Reference and unfolded on read), and a
+/// redraw keeps them.
+#[test]
+fn rectangle_appearance_alphas_survive_psd_and_redraw() {
+    let mut d = doc();
+    let sh = ShapeLayer {
+        path: photosplice_vector::shapes::rect(16.0, 16.0, 128.0, 96.0),
+        fill: Some(Fill::Solid(Color::rgba(1.0, 0.0, 0.0, 0.5))),
+        stroke: Some(ShapeStroke { width: 4.0, paint: Fill::Solid(Color::rgba(0.0, 0.0, 1.0, 0.4)), opacity: 0.5, ..ShapeStroke::default() }),
+        live: Some(LiveShape::Rect { rect: [16.0, 16.0, 128.0, 96.0], radii: [0.0; 4] }),
+        ..Default::default()
+    };
+    let before = photosplice_vector::render_shape(&sh, photosplice_color::PixelFormat::RGBA8, Rect::new(0, 0, 256, 256));
+    d.layers.push(shape_layer(sh));
+    let b = roundtrip(&d);
+    let LayerContent::Shape(s) = &b.layers[1].content else { panic!("not a shape") };
+    let Fill::Solid(fill) = s.fill.as_ref().unwrap() else { panic!("solid fill") };
+    assert!((fill.alpha - 0.5).abs() < 1e-4, "fill appearance alpha {}", fill.alpha);
+    let st = s.stroke.as_ref().unwrap();
+    let Fill::Solid(stroke_c) = &st.paint else { panic!("solid stroke") };
+    assert!((stroke_c.alpha - 0.4).abs() < 1e-4, "stroke colour alpha {}", stroke_c.alpha);
+    assert!((st.opacity - 0.5).abs() < 1e-4, "stroke opacity {}", st.opacity);
+    let after = photosplice_vector::render_shape(s, photosplice_color::PixelFormat::RGBA8, Rect::new(0, 0, 256, 256));
+    for (x, y) in [(60, 60), (16, 50), (14, 50)] {
+        let (p, q) = (before.rgba(x, y), after.rgba(x, y));
+        assert!(p.iter().zip(&q).all(|(a, b)| (a - b).abs() < 2e-3), "({x}, {y}): {p:?} != {q:?}");
+    }
+}
+
 #[test]
 fn custom_stroke_styles_roundtrip_through_psd_vstk() {
     for align in [StrokeAlign::Inside, StrokeAlign::Center, StrokeAlign::Outside] {
@@ -169,6 +249,52 @@ fn custom_stroke_styles_roundtrip_through_psd_vstk() {
             }
         }
     }
+}
+
+/// A shape layer's Density and Feather live in the PSD mask parameters, as Reference writes a
+/// shape's vector-mask density and feather; with and without a vector stroke (our export writes a
+/// `vstk` either way), at 8 and 16 bits, the shape comes back a shape with both and renders its
+/// soft fill again.
+#[test]
+fn shape_density_and_feather_roundtrip_through_mask_parameters() {
+    let square = Path::new(vec![Subpath::polygon(&[(64.0, 64.0), (192.0, 64.0), (192.0, 192.0), (64.0, 192.0)])]);
+    for depth in [SampleType::U8, SampleType::U16] {
+        for stroke in [None, Some(ShapeStroke { width: 2.0, ..ShapeStroke::default() })] {
+            let mut d = Document::with_background("v", Size::new(256, 256), ColorMode::Rgb, depth, Color::WHITE);
+            let mut sh = ShapeLayer {
+                path: square.clone(),
+                fill: Some(Fill::Solid(Color::BLACK)),
+                stroke: stroke.clone(),
+                density: 0.5,
+                feather: 6.0,
+                ..ShapeLayer::default()
+            };
+            sh.cache = Some(photosplice_vector::render_shape(&sh, d.pixel_format(), d.bounds()));
+            d.layers.push(Layer::new("Shape", LayerContent::Shape(sh)));
+            let bytes = export(&d, "x.psd", &ExportOptions::default()).unwrap().bytes;
+            let file = photosplice_psd::PsdFile::from_bytes(&bytes).unwrap();
+            let rec = file.layers().last().unwrap();
+            let p = rec.layer_mask().and_then(|m| m.parameters).expect("mask parameters");
+            assert_eq!((p.vector_density, p.vector_feather), (Some(128), Some(6.0)), "{depth:?}");
+            assert!(rec.channel(-2).is_none(), "no user mask channel");
+            let b = import("x.psd", &bytes).unwrap().document;
+            let LayerContent::Shape(back) = &b.layers[1].content else { panic!("{depth:?} {stroke:?}: {}", b.layers[1].content.kind_name()) };
+            assert_eq!((back.density, back.feather), (128.0 / 255.0, 6.0), "{depth:?} {stroke:?}");
+            assert_eq!(back.stroke, stroke);
+            assert!(b.layers[1].mask.is_none() && b.layers[1].vector_mask.is_none());
+            let f = photosplice_compose::flatten(&b);
+            assert!(f.get(128, 128)[0] < 0.01, "inside: black");
+            assert!((f.get(4, 4)[0] - 127.0 / 255.0).abs() < 0.01, "{depth:?}: beyond the path at half density: {:?}", f.get(4, 4));
+        }
+    }
+    // Defaults write no parameters.
+    let mut d = doc();
+    d.layers.push(shape_layer(ShapeLayer { path: square, fill: Some(Fill::Solid(Color::BLACK)), ..ShapeLayer::default() }));
+    let bytes = export(&d, "x.psd", &ExportOptions::default()).unwrap().bytes;
+    let file = photosplice_psd::PsdFile::from_bytes(&bytes).unwrap();
+    assert!(file.layers().last().unwrap().layer_mask().and_then(|m| m.parameters).is_none());
+    let LayerContent::Shape(back) = &import("x.psd", &bytes).unwrap().document.layers[1].content else { panic!("a shape") };
+    assert_eq!((back.density, back.feather), (1.0, 0.0));
 }
 
 #[test]

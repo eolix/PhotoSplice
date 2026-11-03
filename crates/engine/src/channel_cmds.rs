@@ -450,13 +450,12 @@ fn ref_planes(doc: &Document, layer: Option<LayerId>, active: Option<LayerId>, r
                 // A shape can have no pixel cache yet (for example after loading a document).
                 // Use its existing renderer rather than treating it as a canvas-wide fill.
                 None => match &l.content {
-                    LayerContent::Shape(shape) => vec![
-                        photosplice_vector::CompiledShape::new(shape, photosplice_vector::DEFAULT_TOLERANCE, area)
-                            .render_rgba(area)
-                            .into_iter()
-                            .map(|p| p[3])
-                            .collect(),
-                    ],
+                    LayerContent::Shape(shape) => {
+                        let patterns = photosplice_compose::shape_paint::ShapePatterns::of(doc, l);
+                        let compiled =
+                            photosplice_vector::CompiledShape::with_patterns(shape, photosplice_vector::DEFAULT_TOLERANCE, area, &|f| patterns.resolve(f));
+                        vec![compiled.render_rgba(area).into_iter().map(|p| p[3]).collect()]
+                    }
                     // Adjustment and fill layers cover the whole canvas.
                     _ => vec![vec![1.0; area.width() as usize * area.height() as usize]],
                 },

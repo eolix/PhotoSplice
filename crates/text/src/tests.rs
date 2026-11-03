@@ -454,39 +454,33 @@ fn styles_change_pixels() {
     assert!(hrect.width() as f32 > prect.width() as f32 * 1.7);
 }
 
-/// #3705: Faux bold dilation must scale with horizontal and vertical glyph scaling.
+/// #3705: Faux bold dilation must scale with horizontal and vertical glyph scaling. Extents are
+/// sub-pixel (each column's, or row's, strongest alpha summed), so the thickening is measured
+/// rather than rounded to whole pixels.
 #[test]
 fn faux_bold_scales_with_glyph_scaling() {
     let mut e = TextEngine::new();
-    let base = CharStyle { size_pt: 40.0, ..Default::default() };
-    let ink = |e: &mut TextEngine, s: CharStyle| {
-        let (_, r) = e.render(&TextLayer { transform: Affine::translate(5.0, 50.0), ..styled("Hi", s) }, 72.0, PixelFormat::RGBA8);
-        (alpha_sum(&r.surface, r.rect), r.rect)
+    let extent = |e: &mut TextEngine, s: CharStyle| {
+        let (_, r) = e.render(&TextLayer { transform: Affine::translate(5.0, 90.0), ..styled("Hi", s) }, 72.0, PixelFormat::RGBA8);
+        let a = |x: i32, y: i32| alpha_sum(&r.surface, photosplice_geom::Rect::new(x, y, x + 1, y + 1));
+        let w: f64 = (r.rect.x0..r.rect.x1).map(|x| (r.rect.y0..r.rect.y1).map(|y| a(x, y)).fold(0.0, f64::max)).sum();
+        let h: f64 = (r.rect.y0..r.rect.y1).map(|y| (r.rect.x0..r.rect.x1).map(|x| a(x, y)).fold(0.0, f64::max)).sum();
+        (w, h)
     };
-    let (_plain, prect) = ink(&mut e, base.clone());
-    let (_bold, brect) = ink(&mut e, CharStyle { faux_bold: true, ..base.clone() });
-    let unscaled_extra_w = brect.width() - prect.width();
-    let unscaled_extra_h = brect.height() - prect.height();
-
+    let extra = |e: &mut TextEngine, s: CharStyle| {
+        let (pw, ph) = extent(e, s.clone());
+        let (bw, bh) = extent(e, CharStyle { faux_bold: true, ..s });
+        (bw - pw, bh - ph)
+    };
+    let base = CharStyle { size_pt: 40.0, ..Default::default() };
+    let (w1, h1) = extra(&mut e, base.clone());
+    assert!(w1 > 0.0 && h1 > 0.0, "{w1} {h1}");
     // With 2x horizontal scale, the horizontal dilation scales with the glyph:
-    let hscaled = CharStyle { size_pt: 40.0, horizontal_scale: 2.0, ..Default::default() };
-    let (_, phrect) = ink(&mut e, hscaled.clone());
-    let (_, bhrect) = ink(&mut e, CharStyle { faux_bold: true, ..hscaled });
-    let hscaled_extra_w = bhrect.width() - phrect.width();
-    assert!(
-        hscaled_extra_w >= unscaled_extra_w * 2 - 1 && hscaled_extra_w <= unscaled_extra_w * 2 + 1,
-        "hscaled extra width {hscaled_extra_w} vs unscaled {unscaled_extra_w}"
-    );
-
+    let (w2, _) = extra(&mut e, CharStyle { horizontal_scale: 2.0, ..base.clone() });
+    assert!((w2 / w1 - 2.0).abs() < 0.3, "hscaled extra width {w2} vs unscaled {w1}");
     // With 2x vertical scale, the vertical dilation scales with the glyph:
-    let vscaled = CharStyle { size_pt: 40.0, vertical_scale: 2.0, ..Default::default() };
-    let (_, pvrect) = ink(&mut e, vscaled.clone());
-    let (_, bvrect) = ink(&mut e, CharStyle { faux_bold: true, ..vscaled });
-    let vscaled_extra_h = bvrect.height() - pvrect.height();
-    assert!(
-        vscaled_extra_h >= unscaled_extra_h * 2 - 1 && vscaled_extra_h <= unscaled_extra_h * 2 + 1,
-        "vscaled extra height {vscaled_extra_h} vs unscaled {unscaled_extra_h}"
-    );
+    let (_, h2) = extra(&mut e, CharStyle { vertical_scale: 2.0, ..base });
+    assert!((h2 / h1 - 2.0).abs() < 0.3, "vscaled extra height {h2} vs unscaled {h1}");
 }
 
 #[test]
@@ -2013,8 +2007,9 @@ fn translate_tysh_moves_only_the_translation() {
     assert!(crate::psd::translate_tysh(&tysh[..40], 1.0, 1.0).is_none(), "a truncated block is refused");
 }
 
-/// The four values after the `TySh` warp descriptor are big-endian f32 holding the text-space
-/// `bounds` (every type layer of the oracle corpus, warped or not).
+/// The four values after the `TySh` warp descriptor are big-endian f32: the text-space `bounds`
+/// for warped type, zeros for unwarped type (every type layer of the oracle corpus: the 5 warped
+/// ones, and 54 unwarped from Reference 2026 and 155 from CS3 to 2023).
 #[test]
 fn tysh_trailing_bounds_are_f32() {
     use photosplice_doc::text::TextWarp;
@@ -2024,7 +2019,7 @@ fn tysh_trailing_bounds_are_f32() {
     };
     let ink = [0.0, -34.316406, 288.90625, 15.058594];
     let plain = crate::psd::build_tysh(&point("Type", 20.0), 72.0, Some(ink));
-    assert_eq!(tail(&plain), ink);
+    assert_eq!(tail(&plain), [0.0; 4]);
     let warped = TextLayer {
         warp: Some(TextWarp { style: "warpArc".into(), value: 50.0, horizontal_distortion: 0.0, vertical_distortion: 0.0, horizontal: true }),
         ..point("Type", 20.0)
@@ -2156,4 +2151,530 @@ fn psd_font_kind_round_trips_with_its_face() {
     let mut changed = back.clone();
     changed.runs[0].style.postscript_name = Some("ArialMT".into());
     assert!(kinds(&crate::psd::build_tysh(&changed, 72.0, None)).contains(&("ArialMT".into(), 1)));
+}
+
+/// Faux bold drawn as offset copies summed into one coverage saturated every antialiased edge
+/// pixel (hard, pixelated stems at small sizes). The thickened outline keeps its edges soft.
+#[test]
+fn faux_bold_keeps_antialiased_edges_at_small_sizes() {
+    let mut e = TextEngine::new();
+    let base = CharStyle { size_pt: 12.0, ..Default::default() };
+    let stats = |e: &mut TextEngine, s: CharStyle| {
+        let (_, r) = e.render(&TextLayer { transform: Affine::translate(5.0, 20.0), ..styled("Bold Test", s) }, 72.0, PixelFormat::RGBA8);
+        let mut partial = 0usize;
+        for y in r.rect.y0..r.rect.y1 {
+            for x in r.rect.x0..r.rect.x1 {
+                let a = alpha_sum(&r.surface, photosplice_geom::Rect::new(x, y, x + 1, y + 1));
+                if a > 0.05 && a < 0.95 {
+                    partial += 1;
+                }
+            }
+        }
+        (alpha_sum(&r.surface, r.rect), partial)
+    };
+    let (plain_ink, plain_partial) = stats(&mut e, base.clone());
+    let (bold_ink, bold_partial) = stats(&mut e, CharStyle { faux_bold: true, ..base });
+    assert!(bold_ink > plain_ink, "bold must add ink");
+    assert!(bold_partial * 10 >= plain_partial * 8, "edges stay antialiased: {plain_partial} -> {bold_partial}");
+}
+
+/// Thickening moves each outline point along its bisector, so curves stay as smooth as the
+/// regular glyph's at a large size (the bend of a bold "O"'s edge between rows matches the
+/// regular one's).
+#[test]
+fn faux_bold_curves_stay_smooth_at_large_sizes() {
+    let mut e = TextEngine::new();
+    // The largest bend of the left edge between consecutive rows, in pixels (second difference
+    // of its sub-pixel position), over the middle of the glyph's height.
+    let bumpiness = |e: &mut TextEngine, bold: bool| -> f64 {
+        let style = CharStyle { size_pt: 600.0, faux_bold: bold, ..Default::default() };
+        let (_, r) = e.render(&TextLayer { transform: Affine::translate(60.0, 640.0), ..styled("O", style) }, 72.0, PixelFormat::RGBA8);
+        let alpha = |x: i32, y: i32| alpha_sum(&r.surface, photosplice_geom::Rect::new(x, y, x + 1, y + 1));
+        let h = r.rect.height() as i32;
+        let mut edges = Vec::new();
+        for y in (r.rect.y0 + h * 15 / 100)..(r.rect.y0 + h * 85 / 100) {
+            if let Some(x) = (r.rect.x0..r.rect.x1).find(|&x| alpha(x, y) > 0.01) {
+                edges.push(f64::from(x) + 1.0 - alpha(x, y));
+            }
+        }
+        edges.windows(3).map(|w| (w[2] - 2.0 * w[1] + w[0]).abs()).fold(0.0, f64::max)
+    };
+    let plain = bumpiness(&mut e, false);
+    let bold = bumpiness(&mut e, true);
+    assert!(bold < plain + 0.5, "faux bold's edge is notched: bends {bold} px vs {plain} px regular");
+}
+
+/// Stamped copies leave a stepped bite out of a square corner; a thickened outline keeps
+/// corners square, as a bold "l" shows.
+#[test]
+fn faux_bold_keeps_square_corners_square() {
+    let mut e = TextEngine::new();
+    for bold in [false, true] {
+        let style = CharStyle { size_pt: 600.0, faux_bold: bold, ..Default::default() };
+        let (_, r) = e.render(&TextLayer { transform: Affine::translate(60.0, 640.0), ..styled("l", style) }, 72.0, PixelFormat::RGBA8);
+        let alpha = |x: i32, y: i32| alpha_sum(&r.surface, photosplice_geom::Rect::new(x, y, x + 1, y + 1));
+        // The ink's own top-left and top-right corners (the raster rect pads the ink by a pixel).
+        let top = (r.rect.y0..r.rect.y1).find(|&y| (r.rect.x0..r.rect.x1).any(|x| alpha(x, y) > 0.5)).unwrap();
+        let left = (r.rect.x0..r.rect.x1).find(|&x| (r.rect.y0..r.rect.y1).any(|y| alpha(x, y) > 0.5)).unwrap();
+        let right = (r.rect.x0..r.rect.x1).rev().find(|&x| (r.rect.y0..r.rect.y1).any(|y| alpha(x, y) > 0.5)).unwrap();
+        for (x, corner) in [(left + 1, "top-left"), (right - 1, "top-right")] {
+            let a = alpha(x, top + 1);
+            assert!(a > 0.9, "bold {bold}: the {corner} corner is cut away (alpha {a})");
+        }
+    }
+}
+
+/// Paragraph text breaks at its horizontally scaled width. At 60% it breaks like 100% text in a
+/// box 1/0.6 as wide, and the lines fill the box instead of wrapping early.
+#[test]
+fn horizontal_scale_breaks_paragraph_lines_at_the_scaled_width() {
+    let mut e = TextEngine::new();
+    let text = "The quick brown fox jumps over the lazy dog again and again until the paragraph wraps";
+    // The greedy breaker: the Every-line Composer weighs widths, not just the scale.
+    let boxed = |scale: f32, width: f32, align: TextAlign| {
+        let style = CharStyle { font_family: "Inter".into(), size_pt: 12.0, horizontal_scale: scale, ..Default::default() };
+        let t = TextLayer { shape: TextShape::Box { x: 10.0, y: 0.0, width, height: 1000.0 }, ..styled(text, style) };
+        with_para(t, ParagraphStyle { align, every_line_composer: false, ..Default::default() })
+    };
+    let ranges = |l: &crate::TextLayout| l.lines.iter().map(|ln| ln.range.clone()).collect::<Vec<_>>();
+    for scale in [0.6f32, 1.5] {
+        let scaled = e.layout(&boxed(scale, 120.0, TextAlign::Left), 72.0);
+        let plain = e.layout(&boxed(1.0, 120.0 / scale, TextAlign::Left), 72.0);
+        assert!(scaled.lines.len() > 1, "{scale}");
+        assert_eq!(ranges(&scaled), ranges(&plain), "{scale}: same breaks as unscaled text in the widened box");
+        for (li, ln) in scaled.lines.iter().enumerate() {
+            assert!(ln.x0 >= 10.0 - 1e-3 && ln.x1 <= 130.0 + 1e-3, "{scale}: {ln:?}");
+            // The extent ends at the last glyph, not after the scaled trailing space.
+            let ink = scaled.clusters.iter().filter(|c| c.line == li && !text[c.range.clone()].trim().is_empty());
+            assert!((ink.map(|c| c.x + c.advance).fold(0.0, f32::max) - ln.x1).abs() < 0.01, "{scale}: {ln:?}");
+        }
+    }
+    // At 60% the lines use the box: the first would not fit at 100%.
+    let scaled = e.layout(&boxed(0.6, 120.0, TextAlign::Left), 72.0);
+    assert!(scaled.lines[0].x1 > 110.0, "{:?}", scaled.lines[0]);
+    // Centred and right-aligned lines are placed by their scaled width.
+    let c = e.layout(&boxed(0.6, 120.0, TextAlign::Center), 72.0);
+    for ln in &c.lines {
+        assert!(((ln.x0 + ln.x1) * 0.5 - 70.0).abs() < 0.5, "{ln:?}");
+    }
+    let r = e.layout(&boxed(0.6, 120.0, TextAlign::Right), 72.0);
+    for ln in &r.lines {
+        assert!((ln.x1 - 130.0).abs() < 0.5, "{ln:?}");
+    }
+    // The Every-line Composer breaks at the scaled width too: no line leaves the box.
+    let style = CharStyle { font_family: "Inter".into(), size_pt: 12.0, horizontal_scale: 1.5, ..Default::default() };
+    let composed = e.layout(&TextLayer { shape: TextShape::Box { x: 10.0, y: 0.0, width: 120.0, height: 1000.0 }, ..styled(text, style) }, 72.0);
+    assert!(composed.lines.len() > 1);
+    for ln in &composed.lines {
+        assert!(ln.x1 <= 130.0 + 1e-3, "{ln:?}");
+    }
+}
+
+/// A word wider than its paragraph box wraps at the box edge instead of running past it; a
+/// normal break opportunity still wins, and a box that fits the word lays out exactly as before.
+#[test]
+fn a_word_wider_than_the_paragraph_box_breaks_at_the_box_edge() {
+    let mut e = TextEngine::new();
+    let word = "BLOQUEADO?!";
+    let alone = e.layout(&point(word, 12.0), 72.0);
+    assert_eq!(alone.lines.len(), 1, "{:?}", alone.lines);
+    let word_width = width(&alone);
+    let narrow = 30.0;
+    assert!(word_width > narrow * 2.0, "{word_width}");
+
+    let mut t = point(word, 12.0);
+    t.shape = TextShape::Box { x: 0.0, y: 0.0, width: narrow, height: 200.0 };
+    let l = e.layout(&t, 72.0);
+    assert!(l.lines.len() >= 2, "{:?}", l.lines);
+    for line in &l.lines {
+        assert!(line.x1 <= narrow + 0.5, "{line:?}");
+    }
+    let joined: String = l.lines.iter().map(|l| &word[l.range.clone()]).collect();
+    assert_eq!(joined, word);
+
+    t.shape = TextShape::Box { x: 0.0, y: 0.0, width: word_width + 20.0, height: 200.0 };
+    let fits = e.layout(&t, 72.0);
+    assert_eq!(fits.lines.len(), 1, "{:?}", fits.lines);
+    assert!((width(&fits) - word_width).abs() < 0.01, "{} vs {word_width}", width(&fits));
+
+    let mut spaced = point("ab cd", 12.0);
+    spaced.shape = TextShape::Box { x: 0.0, y: 0.0, width: narrow, height: 200.0 };
+    let l = e.layout(&spaced, 72.0);
+    assert_eq!(l.lines.len(), 2, "{:?}", l.lines);
+    assert_eq!(l.lines[1].range.start, 3, "{:?}", l.lines);
+}
+
+/// Korean box text broke between Hangul syllables, mid-word ("설 / 정이나"). Lines break at the
+/// spaces between words, as Reference sets Korean; a word longer than the box still breaks.
+#[test]
+fn korean_box_text_wraps_between_words() {
+    let mut engine = TextEngine::new();
+    let mut text = point("여기서는 각종 설정이나 캐릭터 제작을 진행합니다.", 12.0);
+    text.shape = TextShape::Box { x: 0.0, y: 0.0, width: 60.0, height: 1000.0 };
+    let layout = engine.layout(&text, 72.0);
+    assert!(layout.lines.len() > 2, "{}", layout.lines.len());
+    let words: Vec<&str> = text.text.split(' ').collect();
+    for line in &layout.lines {
+        let content = text.text.get(line.range.clone()).expect("UTF-8 line boundaries").trim();
+        assert!(content.split(' ').all(|w| words.contains(&w)), "a line holds whole words only: {content:?}");
+    }
+    assert_eq!(super::layout::hangul_runs("a 한국어 b"), vec![2..11]);
+}
+
+/// Older Reference's `Txt2` keeps its text objects at `/DocumentObjects /TextObjects`, named keys
+/// and `/Length` run lengths, and re-renders from them: an edit refits the layer's entry (text,
+/// paragraph runs, style runs with the changed attributes under their names, other run arrays)
+/// instead of leaving the old text there; an attribute the entry can't hold refuses the patch.
+#[test]
+fn patch_txt2_updates_older_reference_text_objects() {
+    use crate::engine_data::Value as E;
+    let d = |v: Vec<(&str, E)>| E::Dict(v.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
+    let run = |sheet: &str, features: Vec<(&str, E)>, len: i64| {
+        d(vec![("RunData", d(vec![(sheet, d(vec![("Features", d(features))]))])), ("Length", E::Int(len))])
+    };
+    let style = CharStyle { font_family: "Inter".into(), postscript_name: Some("Inter-Regular".into()), size_pt: 24.0, ..Default::default() };
+    let t = styled("Hi", style);
+    let original = with_text_index(&crate::psd::build_tysh(&t, 72.0, None), 0);
+    let font = |name: &str| d(vec![("Resource", d(vec![("StreamTag", E::Name("CoolTypeFont".into())), ("Identifier", d(vec![("Name", E::String(name.into())), ("Type", E::Int(1))]))]))]);
+    let legacy = d(vec![
+        ("DocumentResources", d(vec![("FontSet", d(vec![("Resources", E::Array(vec![font("Inter-Regular")]))]))])),
+        (
+            "DocumentObjects",
+            d(vec![(
+                "TextObjects",
+                E::Array(vec![d(vec![(
+                    "Model",
+                    d(vec![
+                        ("Text", E::String("Hi\r".into())),
+                        ("ParagraphRun", d(vec![("RunArray", E::Array(vec![run("ParagraphSheet", vec![("Justification", E::Int(0))], 3)]))])),
+                        (
+                            "StyleRun",
+                            d(vec![(
+                                "RunArray",
+                                E::Array(vec![run("StyleSheet", vec![("Font", E::Int(0)), ("FontSize", E::Real(24.0)), ("FauxBold", E::Bool(false)), ("DiscretionaryLigatures", E::Bool(false))], 3)]),
+                            )]),
+                        ),
+                        ("KernRun", d(vec![("RunArray", E::Array(vec![d(vec![("RunData", d(vec![])), ("Length", E::Int(3))])]))])),
+                    ]),
+                )])]),
+            )]),
+        ),
+    ]);
+    let entry = |txt2: &E| txt2.path(&["DocumentObjects", "TextObjects"]).and_then(E::as_array).and_then(|o| o.first()).cloned().unwrap();
+    let lens = |e: &E, key: &str| -> Vec<i64> { e.path(&["Model", key, "RunArray"]).and_then(E::as_array).unwrap().iter().filter_map(|r| r.get("Length").and_then(E::as_i64)).collect() };
+
+    // Text: "Hi" → "Hi\nyou", one paragraph run per paragraph, the others to the new length.
+    let mut edited = t.clone();
+    edited.text = "Hi\nyou".into();
+    edited.runs[0].len = edited.text.len();
+    edited.sync_summary();
+    edited.psd_raw = Some(std::sync::Arc::new(original.clone()));
+    let written = with_text_index(&crate::psd::build_tysh(&edited, 72.0, None), 0);
+    let mut txt2 = legacy.clone();
+    assert!(crate::psd::patch_txt2(&mut txt2, &edited, &original, &written, 72.0));
+    let e = entry(&txt2);
+    assert_eq!(e.path(&["Model", "Text"]).and_then(E::as_str), Some("Hi\ryou\r"));
+    assert_eq!(lens(&e, "ParagraphRun"), vec![3, 4]);
+    assert_eq!(lens(&e, "StyleRun"), vec![7]);
+    assert_eq!(lens(&e, "KernRun"), vec![7]);
+
+    // Style: the size, faux bold, discretionary ligatures and a new font, by their legacy names.
+    let mut restyled = t.clone();
+    restyled.runs[0].style = CharStyle {
+        size_pt: 30.0,
+        faux_bold: true,
+        discretionary_ligatures: true,
+        font_family: "JetBrains Mono".into(),
+        postscript_name: Some("JetBrainsMono-Regular".into()),
+        ..restyled.runs[0].style.clone()
+    };
+    restyled.psd_raw = Some(std::sync::Arc::new(original.clone()));
+    let written = with_text_index(&crate::psd::build_tysh(&restyled, 72.0, None), 0);
+    let mut txt2 = legacy.clone();
+    assert!(crate::psd::patch_txt2(&mut txt2, &restyled, &original, &written, 72.0));
+    let e = entry(&txt2);
+    let f = e.path(&["Model", "StyleRun", "RunArray"]).and_then(E::as_array).and_then(|r| r.first()).and_then(|r| r.path(&["RunData", "StyleSheet", "Features"])).unwrap();
+    assert_eq!(f.get("FontSize").and_then(E::as_f64), Some(30.0));
+    assert_eq!(f.get("FauxBold"), Some(&E::Bool(true)));
+    assert_eq!(f.get("DiscretionaryLigatures"), Some(&E::Bool(true)));
+    assert_eq!(f.get("Font").and_then(E::as_i64), Some(1));
+    let fonts = txt2.path(&["DocumentResources", "FontSet", "Resources"]).and_then(E::as_array).unwrap();
+    assert_eq!(fonts.get(1).and_then(|f| f.path(&["Resource", "Identifier", "Name"])).and_then(E::as_str), Some("JetBrainsMono-Regular"));
+
+    // An attribute with no legacy key: refused, the block untouched.
+    let mut underlined = t.clone();
+    underlined.runs[0].style.underline = true;
+    underlined.psd_raw = Some(std::sync::Arc::new(original.clone()));
+    let written = with_text_index(&crate::psd::build_tysh(&underlined, 72.0, None), 0);
+    let mut txt2 = legacy.clone();
+    assert!(!crate::psd::patch_txt2(&mut txt2, &underlined, &original, &written, 72.0));
+    assert_eq!(txt2, legacy);
+}
+
+/// Legacy point text placed from its saved ink origin: once the fonts are resolved the origin is
+/// matched against the layout's own bounds, so left, centred and right text keep their anchors
+/// through import and a `TySh` round trip, and a `Txt2` frame still wins.
+#[test]
+fn legacy_point_origin_is_refined_from_the_layout_bounds() {
+    use photosplice_psd::descriptor::{Descriptor, Id, Value as D};
+
+    let original = Affine { m: [4.1667, 0.0, 0.0, 4.1667, -32375.0, -32887.5] };
+    let saved_ink_origin = [8050.0, 8160.0];
+    for align in [TextAlign::Left, TextAlign::Center, TextAlign::Right] {
+        let mut source = styled("Name", CharStyle { font_family: "Inter".into(), size_pt: 120.0, ..Default::default() });
+        source.paragraphs = vec![ParagraphRun { len: source.text.len(), style: ParagraphStyle { align, ..Default::default() } }];
+        let native = TextEngine::new().layout(&source, 72.0).bounds().unwrap();
+        let saved_ink = [
+            saved_ink_origin[0],
+            saved_ink_origin[1],
+            saved_ink_origin[0] + f64::from(native[2] - native[0]),
+            saved_ink_origin[1] + f64::from(native[3] - native[1]),
+        ];
+        let rect = |class| {
+            D::Descriptor(
+                Descriptor::new(class)
+                    .with("Left", D::UnitFloat { unit: *b"#Pnt", value: saved_ink[0] })
+                    .with("Top ", D::UnitFloat { unit: *b"#Pnt", value: saved_ink[1] })
+                    .with("Rght", D::UnitFloat { unit: *b"#Pnt", value: saved_ink[2] })
+                    .with("Btom", D::UnitFloat { unit: *b"#Pnt", value: saved_ink[3] }),
+            )
+        };
+        let mut tysh = crate::psd::parse_tysh(&crate::psd::build_tysh(&source, 72.0, None)).unwrap();
+        tysh.transform = original;
+        tysh.text.items.retain(|(key, _)| !key.is("bounds") && !key.is("boundingBox"));
+        tysh.text.items.push((Id::new("bounds"), rect("bounds")));
+        tysh.text.items.push((Id::new("boundingBox"), rect("boundingBox")));
+        let data = crate::psd::write_tysh(&tysh);
+
+        let mut imported = crate::psd::text_layer_from_tysh(&data, 72.0).unwrap();
+        imported.psd_raw = Some(std::sync::Arc::new(data.clone()));
+        let mut engine = TextEngine::new();
+        crate::psd::refine_legacy_point_origin(&mut imported, 72.0, &mut engine, None);
+        assert_eq!(imported.paragraph_runs()[0].style.align, align);
+        let expected_anchor = original.apply(photosplice_geom::Point::new(saved_ink_origin[0], saved_ink_origin[1]));
+        let recovered_ink = imported.transform.apply(photosplice_geom::Point::new(f64::from(native[0]), f64::from(native[1])));
+        assert!((recovered_ink.x - expected_anchor.x).abs() < 0.001, "{align:?}: {recovered_ink:?} vs {expected_anchor:?}");
+        assert!((recovered_ink.y - expected_anchor.y).abs() < 0.001, "{align:?}: {recovered_ink:?} vs {expected_anchor:?}");
+        // Refined once: a second pass leaves it.
+        let refined = imported.transform;
+        crate::psd::refine_legacy_point_origin(&mut imported, 72.0, &mut engine, None);
+        assert_eq!(imported.transform, refined);
+
+        let round_trip_data = crate::psd::build_tysh(&imported, 72.0, Some(native));
+        let round_trip = crate::psd::text_layer_from_tysh(&round_trip_data, 72.0).unwrap();
+        let round_trip_ink = TextEngine::new().layout(&round_trip, 72.0).bounds().unwrap();
+        let round_trip_origin = round_trip.transform.apply(photosplice_geom::Point::new(f64::from(round_trip_ink[0]), f64::from(round_trip_ink[1])));
+        assert!((round_trip_origin.x - expected_anchor.x).abs() < 1.0, "{align:?}: {round_trip_origin:?}");
+        assert!((round_trip_origin.y - expected_anchor.y).abs() < 1.0, "{align:?}: {round_trip_origin:?}");
+
+        // A frame may equal the first estimate. It must still win over the refinement.
+        let framed = with_text_index(&data, 0);
+        let txt2 = crate::psd::parse_txt2(&txt2_with_frame("Name", Some(saved_ink_origin), [1.0, 0.0, 0.0, 1.0, 0.0, 0.0])).unwrap();
+        let mut with_frame = crate::psd::text_layer_from_tysh(&framed, 72.0).unwrap();
+        with_frame.psd_raw = Some(std::sync::Arc::new(framed.clone()));
+        crate::psd::apply_txt2_frame(&mut with_frame, &framed, &txt2);
+        let authoritative = with_frame.transform;
+        crate::psd::refine_legacy_point_origin(&mut with_frame, 72.0, &mut engine, Some(&txt2));
+        assert_eq!(with_frame.transform, authoritative, "{align:?}: the frame wins");
+    }
+}
+
+/// Hanging punctuation (Roman Hanging Punctuation): trailing marks don't steer the alignment.
+/// A centered line keeps its text centered and lets the marks hang right instead of pulling
+/// everything left — a centered text ending in an ellipsis no longer sits off-center.
+#[test]
+fn hanging_marks_do_not_steer_the_alignment() {
+    let mut e = TextEngine::new();
+    // The comma hangs fully and the ellipsis half (Reference's list), so the kept composition
+    // is "Hello" plus half the ellipsis.
+    let mut centered =
+        |hanging: bool| e.layout(&with_para(point("Hello,…", 20.0), ParagraphStyle { align: TextAlign::Center, hanging, ..Default::default() }), 72.0);
+    let off = centered(false);
+    let on = centered(true);
+    let lo = &off.lines[0];
+    let ln = &on.lines[0];
+    assert!(((lo.x0 + lo.x1) * 0.5).abs() < 0.01, "without the flag the whole line centers: {lo:?}");
+    // With hanging, the composition centers: the drawn extent keeps the marks' full width,
+    // and dropping the trimmed advance (full mark + half mark) from the drawn line leaves
+    // content + kept halves centered on the anchor.
+    let comma = on.clusters.iter().find(|c| c.range.start == 5).unwrap_or_else(|| panic!("the comma is its own cluster: {:?}", on.clusters));
+    let ell = on.clusters.iter().find(|c| c.range.start == 6).unwrap_or_else(|| panic!("the ellipsis is its own cluster: {:?}", on.clusters));
+    let trim = comma.advance + ell.advance * 0.5;
+    assert!(((ln.x0 + ln.x1 - trim) * 0.5).abs() < 0.05, "the drawn line less the trimmed advance centers: {ln:?}");
+    assert!(ln.x1 > comma.x, "the marks hang past the anchor: {ln:?}");
+    assert!(ln.x0 > lo.x0 + 0.5, "the content sits further right than with the marks counted: {ln:?} vs {lo:?}");
+
+    // Right-aligned point text: the content stays flush at the anchor, marks hang past it.
+    let mut right =
+        |hanging: bool| e.layout(&with_para(point("Hello,…", 20.0), ParagraphStyle { align: TextAlign::Right, hanging, ..Default::default() }), 72.0);
+    let roff = right(false);
+    let ron = right(true);
+    assert!(roff.lines[0].x1.abs() < 0.01, "everything ends at the anchor: {:?}", roff.lines[0]);
+    assert!(ron.lines[0].x1 > 0.5, "the marks hang past the anchor: {:?}", ron.lines[0]);
+    assert!((ron.lines[0].x0 - roff.lines[0].x0 - trim).abs() < 0.05, "the whole line shifts by the trimmed advance: {:?}", ron.lines[0]);
+}
+
+/// Reference's Roman Hanging Punctuation list doesn't include `!` and `?`: they stay in the
+/// measure, a comma hangs fully and a colon or semicolon hangs half ("dashes hang 50%").
+#[test]
+fn hanging_only_the_mark_list_trims() {
+    let mut e = TextEngine::new();
+    let mut right =
+        |text: &str, hanging: bool| e.layout(&with_para(point(text, 20.0), ParagraphStyle { align: TextAlign::Right, hanging, ..Default::default() }), 72.0);
+    // `!` isn't in the list: hanging changes nothing.
+    let off = right("Hi!", false);
+    let on = right("Hi!", true);
+    assert_eq!(off.lines.len(), on.lines.len());
+    let (lo, ln) = (&off.lines[0], &on.lines[0]);
+    assert!((lo.x0 - ln.x0).abs() < 1e-3 && (lo.x1 - ln.x1).abs() < 1e-3, "an exclamation stays in the measure: {lo:?} vs {ln:?}");
+
+    // A comma hangs fully: the content ends flush at the anchor and the whole mark sits
+    // past it.
+    right("Hi,", false);
+    let on = right("Hi,", true);
+    let ln = &on.lines[0];
+    let comma = on.clusters.iter().find(|c| c.range.start == 2).unwrap_or_else(|| panic!("the comma is its own cluster: {:?}", on.clusters));
+    assert!(comma.x.abs() < 0.05, "the content ends at the anchor: {ln:?}");
+    assert!(ln.x1 > 0.5, "the full mark hangs past the anchor: {ln:?}");
+
+    // A colon hangs half: half its width stays in the measure (the mark straddles the
+    // anchor), half hangs out.
+    right("Hi:", false);
+    let on = right("Hi:", true);
+    let ln = &on.lines[0];
+    let colon = on.clusters.iter().find(|c| c.range.start == 2).unwrap_or_else(|| panic!("the colon is its own cluster: {:?}", on.clusters));
+    assert!((colon.x + colon.advance * 0.5).abs() < 0.05, "half the colon stays, half hangs: {ln:?} mark width {}", colon.advance);
+}
+
+/// A marks-only row after a forced break is the author's row: the merge-back must not pull
+/// those marks onto the line above, or the break would vanish.
+#[test]
+fn hanging_keeps_marks_after_a_forced_break_on_their_row() {
+    let mut e = TextEngine::new();
+    let mut boxed = |hanging: bool| {
+        let mut t = point("abc\u{3}…", 16.0);
+        t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 300.0, height: 300.0 };
+        e.layout(&with_para(t, ParagraphStyle { hanging, ..Default::default() }), 72.0)
+    };
+    let off = boxed(false);
+    let on = boxed(true);
+    assert_eq!(off.lines.len(), on.lines.len(), "the forced break keeps its row: {:?} vs {:?}", off.lines, on.lines);
+    assert_eq!(on.lines.len(), 2, "two rows: {on:?}");
+    let ell = on.clusters.iter().find(|c| c.range.start == 4).unwrap_or_else(|| panic!("the ellipsis is its own cluster: {:?}", on.clusters));
+    assert_eq!(ell.line, 1, "the marks stay on the author's row: {ell:?}");
+}
+
+/// Hanging punctuation steps a wrapped run of marks back onto the line above: a box holding
+/// text plus a mark nobody could fit keeps one row, the mark hanging past the box edge, and
+/// the mark belongs to that row for carets and selection.
+#[test]
+fn a_hanging_run_steps_back_onto_the_line_above() {
+    let mut e = TextEngine::new();
+    // A box just wide enough for "xx" (probed left-aligned at the same size).
+    let probe = e.layout(&point("xx", 20.0), 72.0);
+    let w = probe.lines[0].x1 - probe.lines[0].x0;
+    let mut boxed = |hanging: bool| {
+        let mut t = point("xx …", 20.0);
+        t.shape = TextShape::Box { x: 0.0, y: 0.0, width: w + 0.5, height: 100.0 };
+        e.layout(&with_para(t, ParagraphStyle { hanging, ..Default::default() }), 72.0)
+    };
+    let off = boxed(false);
+    assert_eq!(off.lines.len(), 2, "the ellipsis wraps onto its own row: {:?}", off.lines);
+    let on = boxed(true);
+    assert_eq!(on.lines.len(), 1, "the mark steps back up: {:?}", on.lines);
+    let ln = &on.lines[0];
+    assert!(ln.x1 > w + 0.5, "the mark hangs past the box edge: {ln:?}");
+    assert_eq!(ln.range.end, 6, "the row's range now covers the mark ({})", ln.range.end);
+    let mark = on.clusters.iter().find(|c| c.range.start == 3).unwrap_or_else(|| panic!("the ellipsis is its own cluster: {:?}", on.clusters));
+    // The row above keeps its trailing breaking space (as a blank cluster); the mark starts
+    // past it, so hit-testing can tell the space from the mark.
+    let space = on.clusters.iter().find(|c| c.range.start == 2).unwrap_or_else(|| panic!("the space is its own cluster: {:?}", on.clusters));
+    assert!((mark.x - (space.x + space.advance)).abs() < 1e-3, "mark follows the space: {mark:?} {space:?}");
+    assert_eq!(mark.line, 0, "the mark's caret lives on the merged row: {mark:?}");
+    assert!(on.glyphs.iter().any(|g| g.x >= w && (g.y - ln.baseline).abs() < 1e-3), "the mark's glyphs draw on that row past the edge: {ln:?}");
+}
+
+/// A merged row of several marks keeps its clusters and glyphs in step: each cluster starts
+/// where the previous one's advance ended, and a mark's glyphs sit relative to its own cluster
+/// (a per-cluster pen), not wherever a shared pen would drop them.
+#[test]
+fn a_merged_mark_row_keeps_its_clusters_and_glyphs_in_step() {
+    let mut e = TextEngine::new();
+    let probe = e.layout(&point("xx", 20.0), 72.0);
+    let w = probe.lines[0].x1 - probe.lines[0].x0;
+    let mut t = point("xx ……", 20.0);
+    t.shape = TextShape::Box { x: 0.0, y: 0.0, width: w + 0.5, height: 100.0 };
+    let on = e.layout(&with_para(t, ParagraphStyle { hanging: true, ..Default::default() }), 72.0);
+    assert_eq!(on.lines.len(), 1, "both marks step back up: {:?}", on.lines);
+    // The row above keeps its trailing breaking space (as a blank cluster); the mark starts
+    // past it, so hit-testing can tell the space from the mark.
+
+    let space = on.clusters.iter().find(|c| c.range.start == 2).unwrap_or_else(|| panic!("the space is its own cluster: {:?}", on.clusters));
+    let marks: Vec<_> = on.clusters.iter().filter(|c| c.range.start >= 3).collect();
+    assert_eq!(marks.len(), 2, "the two ellipses are two clusters: {:?}", on.clusters);
+    let first = marks[0];
+    let second = marks[1];
+    assert!((first.x - (space.x + space.advance)).abs() < 1e-3, "run starts past the space: {first:?} {space:?}");
+    assert!((second.x - (first.x + first.advance)).abs() < 1e-3, "chain: {first:?} {second:?}");
+    // The same glyph in both clusters carries the same offset from its own cluster: a shared
+    // (run-wide) pen would leave the second mark's glyph an advance too far right.
+    let glyph_shift = |c: &crate::ClusterInfo| on.glyphs.iter().filter(|g| g.x >= c.x - 0.5).map(|g| g.x - c.x).min_by(|a, b| a.partial_cmp(b).unwrap());
+    let (d1, d2) = (glyph_shift(first), glyph_shift(second));
+    assert!(d1.zip(d2).is_some_and(|(a, b)| (a - b).abs() < 1e-3), "glyph pens belong to their clusters: {d1:?} vs {d2:?}");
+}
+
+/// Hanging punctuation trims out of centered box lines too, not only ones at the margin: a
+/// centered `Hello…` line that doesn't come near the box edges still centers its text and
+/// lets the mark hang.
+#[test]
+fn hanging_centers_the_box_content_behind_its_marks() {
+    let mut e = TextEngine::new();
+    let mut boxed = |hanging: bool| {
+        let mut t = point("Hello…", 20.0);
+        t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 400.0, height: 60.0 };
+        e.layout(&with_para(t, ParagraphStyle { align: TextAlign::Center, hanging, ..Default::default() }), 72.0)
+    };
+    let off = boxed(false);
+    let on = boxed(true);
+    let lo = &off.lines[0];
+    let ln = &on.lines[0];
+    assert_eq!(off.lines.len(), 1);
+    assert_eq!(on.lines.len(), 1);
+    assert!(((lo.x0 + lo.x1) * 0.5 - 200.0).abs() < 0.01, "without the flag the whole line centers: {lo:?}");
+    // With hanging, the composition centers: dropping the kept advance (half the ellipsis)
+    // from the drawn extent leaves content + kept half centered in the box.
+    let ell = on.clusters.iter().find(|c| c.range.start == 5).unwrap_or_else(|| panic!("the mark is its own cluster: {:?}", on.clusters));
+    let trim = ell.advance * 0.5;
+    assert!(((ln.x0 + ln.x1 - trim) * 0.5 - 200.0).abs() < 0.05, "drawn less trim centers: {ln:?} mark at {}", ell.x);
+    assert!(ln.x1 > ell.x, "the mark hangs past the content: {ln:?}");
+}
+
+/// Two forced breaks in a row keep their blank paragraph row with hanging on: a row with no
+/// glyphs must not be read as a hanging run and merged into the line above.
+#[test]
+fn hanging_keeps_empty_rows_between_forced_breaks() {
+    let mut e = TextEngine::new();
+    let mut boxed = |hanging: bool| {
+        let mut t = point("abc\u{3}\u{3}def", 16.0);
+        t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 300.0, height: 300.0 };
+        e.layout(&with_para(t, ParagraphStyle { hanging, ..Default::default() }), 72.0)
+    };
+    assert_eq!(boxed(false).lines.len(), boxed(true).lines.len(), "same rows either way");
+}
+
+/// Hanging changes nothing when no line ends in a mark: the same breaks at the same place.
+#[test]
+fn hanging_leaves_plain_paragraphs_untouched() {
+    let mut e = TextEngine::new();
+    let mut boxed = |hanging: bool| {
+        let mut t = point("The quick brown fox jumps over the lazy dog", 16.0);
+        t.shape = TextShape::Box { x: 0.0, y: 0.0, width: 160.0, height: 300.0 };
+        e.layout(&with_para(t, ParagraphStyle { hanging, ..Default::default() }), 72.0)
+    };
+    let off = boxed(false);
+    let on = boxed(true);
+    assert_eq!(off.lines.len(), on.lines.len(), "same breaks");
+    for (a, b) in off.lines.iter().zip(&on.lines) {
+        assert!((a.x0 - b.x0).abs() < 1e-3 && (a.x1 - b.x1).abs() < 1e-3, "same place: {a:?} vs {b:?}");
+    }
 }

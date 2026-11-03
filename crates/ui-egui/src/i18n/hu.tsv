@@ -4118,3 +4118,5 @@ cameraRaw	Yellow	Sárga
 	This document's layers: {needed} of {budget} for layers	A dokumentum rétegei: {needed} / {budget} a rétegeknek
 	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	A dokumentum rétegeinek {needed} kell, de {budget} foglalhatnak: a teljes dokumentum újrarajzolása a CPU-n fut
 	GPU Memory (MB, 0 = Automatic)	GPU-memória (MB, 0 = Automatikus)
+	Automatic (Coated FOGRA39 if installed)	Automatikus (Coated FOGRA39, ha telepítve van)
+	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (beépített)

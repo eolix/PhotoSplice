@@ -77,6 +77,12 @@ pub fn apply_with(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer) {
 /// unrounded). Integer depths work on whole levels like Photoshop's (see [`levels_q`] and
 /// `adjustment_quantum`), 32-bit documents get its float Levels (see [`levels_float`]).
 pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth: Option<SampleType>) {
+    apply_depth_mode(adj, buf, transfer, depth, ColorMode::Rgb);
+}
+
+/// [`apply_depth`] in a document of colour `mode` (which decides whether float curves extend,
+/// see [`float_tone_extrapolates`]).
+pub fn apply_depth_mode(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth: Option<SampleType>, mode: ColorMode) {
     match adj {
         Adjustment::Invert => map_rgb(buf, |c| [1.0 - c[0], 1.0 - c[1], 1.0 - c[2]]),
         Adjustment::Threshold { level } => map_rgb(buf, |c| [if threshold_white(c, *level, depth) { 1.0 } else { 0.0 }; 3]),
@@ -134,8 +140,9 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
         Adjustment::Levels { space, .. } | Adjustment::Curves { space, .. } => {
             let luts = tone_luts_depth(adj, depth);
             let identity = float_tone_identity(adj, depth);
+            let sample = if float_tone_extrapolates(adj, depth, mode) { lut_extended } else { lut };
             match space {
-                ToneSpace::Rgb => map_rgb(buf, |c| std::array::from_fn(|i| if identity[i] { c[i] } else { lut(&luts[i], c[i]) })),
+                ToneSpace::Rgb => map_rgb(buf, |c| std::array::from_fn(|i| if identity[i] { c[i] } else { sample(&luts[i], c[i]) })),
                 ToneSpace::Cmyk | ToneSpace::Lab => map_rgb(buf, |c| tone_in_space(*space, &luts, c)),
             }
         }
@@ -168,7 +175,13 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
                 // The master's saturation factor times the ranges' (Reference 16-bit master ±50 %
                 // with Reds ∓50 %: unchanged in the core; adding the sliders was 31/255 off).
                 let s = master_and_range_saturation(*saturation / 100.0, ds);
-                hue_saturation_ranged(c, *hue + dh, s, (*lightness / 100.0).clamp(-1.0, 1.0), dl.clamp(-1.0, 1.0), depth == Some(SampleType::F32), table.is_some())
+                // 32-bit: the master alone reaches its own steps (+100 % is Reference's largest
+                // factor, not the combination's 0.999 cap; see `hdr_saturation_factor`).
+                let s = if depth == Some(SampleType::F32) && ds == 0.0 && saturation.is_finite() { (*saturation / 100.0).clamp(-1.0, 1.0) } else { s };
+                let l = (*lightness / 100.0).clamp(-1.0, 1.0);
+                // 8 bits: the Lightness first, in whole levels (`lightness_8bit`).
+                let (c, l) = if depth == Some(SampleType::U8) && !INK_SPACE.with(|i| i.get()) { (lightness_8bit(c, l), 0.0) } else { (c, l) };
+                hue_saturation_ranged(c, *hue + dh, s, l, dl.clamp(-1.0, 1.0), depth == Some(SampleType::F32), table.is_some())
             })
         }
         Adjustment::Vibrance { vibrance, saturation } => {
@@ -210,8 +223,11 @@ pub fn apply_depth(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth
         }
         Adjustment::BlackWhite { weights, tint } => {
             let hdr = depth == Some(SampleType::F32);
+            // 32-bit greys keep their superwhites: Reference maps negatives to 0 and caps neutrals
+            // at 16, but leaves 2.0 at 2.0.
+            let hi = if hdr { 16.0 } else { 1.0 };
             map_rgb(buf, |c| {
-                let g = black_white_gray(c, weights);
+                let g = black_white_gray(c, weights).clamp(0.0, hi);
                 match tint {
                     // Photoshop tints like the Color blend mode: the tint's hue and saturation at
                     // the grey's luminosity (SetLum + ClipColor), measured in Photoshop 27.11. In
@@ -345,7 +361,7 @@ pub fn apply_in(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, depth: O
             });
         }
     } else {
-        apply_depth(adj, buf, transfer, depth);
+        apply_depth_mode(adj, buf, transfer, depth, mode);
     }
 }
 
@@ -574,8 +590,8 @@ fn apply_lab(adj: &Adjustment, buf: &mut Buffer, depth: Option<SampleType>) {
     }
 }
 
-/// Float RGB curve channels with no edit must preserve samples outside the LUT domain.
-/// Edited curves retain the existing spline/LUT behaviour until HDR extrapolation has an oracle.
+/// Float RGB curve channels with no edit must preserve samples outside the LUT domain; edited
+/// ones extend past it (see [`float_tone_extrapolates`]).
 pub fn float_tone_identity(adj: &Adjustment, depth: Option<SampleType>) -> [bool; 3] {
     match adj {
         Adjustment::Curves { master, per_channel, space: ToneSpace::Rgb, .. } if depth == Some(SampleType::F32) => {
@@ -583,6 +599,15 @@ pub fn float_tone_identity(adj: &Adjustment, depth: Option<SampleType>) -> [bool
         }
         _ => [false; 3],
     }
+}
+
+/// Whether an edited Curves adjustment continues past 0..1 instead of clipping: in a 32-bit RGB
+/// document Reference extends each curve beyond its end points along the slope of its end
+/// segments (Reference 27.11: `[[0,0],[255,128]]` maps -0.5 to -0.250980407 and 2 to
+/// 1.003921628). Only in RGB documents: the curve's space is not the document's, and other modes
+/// keep the table.
+pub fn float_tone_extrapolates(adj: &Adjustment, depth: Option<SampleType>, mode: ColorMode) -> bool {
+    matches!(adj, Adjustment::Curves { space: ToneSpace::Rgb, .. }) && depth == Some(SampleType::F32) && mode == ColorMode::Rgb
 }
 
 /// Per-channel LUTs of a Levels or Curves adjustment, each channel's record composed with the
@@ -847,14 +872,23 @@ pub fn hue_saturation_in(c: [f32; 3], hue: f32, s: f32, l: f32, colorize: bool, 
 /// weighted by the pixel's membership): a raise moves the channels towards the brightest one,
 /// not towards white like the master slider (Photoshop corpus hs-blues-light40.psd: the blue
 /// square 20 90 200 → 71 121 200; 17/255 → 2/255), a cut towards the darkest one.
-/// `ranges`: colour ranges are in use, which also holds the largest channel at 1.
+/// `ranges`: colour ranges are in use (a 32-bit document then lightens before saturating).
 pub fn hue_saturation_ranged(c: [f32; 3], hue: f32, s: f32, l: f32, range_l: f32, float: bool, ranges: bool) -> [f32; 3] {
     // Hue turns the HSL hue; saturation then scales each channel about the HSL lightness by
     // 1 / (1 − s) (s > 0) or 1 + s, held only where the smallest channel would go below 0: the
     // largest may overshoot 1 (Reference corpus hue-saturation.psd, rgb16: within 0.9/255; was
     // 17/255 with a clamped HSL saturation).
     let (hh, ss, ll) = rgb_to_hsl(c);
-    let mut rgb = hsl_to_rgb((hh + hue / 360.0).rem_euclid(1.0), ss, ll);
+    let hh = (hh + hue / 360.0).rem_euclid(1.0);
+    let mut rgb = if float {
+        // The chroma, not the HSL saturation, whose `2 - max - min` divisor is 0 at lightness 1
+        // and negative above it (and `max + min` is 0 at lightness 0 with a negative channel):
+        // (2, 0, 0) with Hue +40 becomes (2, 1.333, 0) in Reference. The same colour in gamut.
+        let d = c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2]);
+        if d.is_finite() && d > 0.0 { hue_rgb(hh, ll - d / 2.0, ll + d / 2.0) } else { c }
+    } else {
+        hsl_to_rgb(hh, ss, ll)
+    };
     // A range's lightness comes before the saturation step: a raise pulls the channels towards
     // the brightest one, a cut towards the darkest (Reference 16-bit Reds −30 with hue −90 and
     // saturation +40: within 1/255; scaling towards black after saturating was 39/255 off).
@@ -865,11 +899,11 @@ pub fn hue_saturation_ranged(c: [f32; 3], hue: f32, s: f32, l: f32, range_l: f32
         rgb = rgb.map(|v| v + (min - v) * -range_l);
     }
     // The master lightness comes before the saturation step too, which then holds the channels
-    // inside 0..1 (the largest only with colour ranges or a cut): the saturation stops where
-    // the lightness step would have put a channel past black or white (psd-tools
-    // huesaturation_rgb: Saturation +100 with Lightness −37 keeps near-white tints 52/255 off
-    // black, and +93 % Reds with Lightness +10 take dark reds to 0, not 26/255; pixels off
-    // 14.1 → 11.7 %). Without a lightness the largest overshoots to the final clip.
+    // inside 0..1: the saturation stops where the lightness step would have put a channel past
+    // black or white (psd-tools huesaturation_rgb: Saturation +100 with Lightness −37 keeps
+    // near-white tints 52/255 off black, and +93 % Reds with Lightness +10 take dark reds to 0,
+    // not 26/255; pixels off 14.1 → 11.7 %). 8-bit documents take it in whole levels before
+    // this (`lightness_8bit`, called with `l` 0).
     let light = |rgb: [f32; 3]| {
         if l > 0.0 {
             rgb.map(|v| v + (1.0 - v) * l)
@@ -880,9 +914,9 @@ pub fn hue_saturation_ranged(c: [f32; 3], hue: f32, s: f32, l: f32, range_l: f32
         }
     };
     let rgb = if l == 0.0 || (float && !ranges) {
-        light(hue_saturation_scale(rgb, s, l, float, ranges))
+        light(hue_saturation_scale(rgb, s, l, float))
     } else {
-        hue_saturation_scale(light(rgb), s, 0.0, float, ranges || l < 0.0)
+        hue_saturation_scale(light(rgb), s, 0.0, float)
     };
     if float { rgb } else { rgb.map(|v| v.clamp(0.0, 1.0)) }
 }
@@ -907,12 +941,22 @@ pub fn in_ink_space<R>(f: impl FnOnce() -> R) -> R {
 
 /// Hue/Saturation's saturation step on `rgb` (see [`hue_saturation`]). 32-bit documents don't
 /// hold the smallest channel at 0 nor clip: channels leave 0..1 as Reference's float composite
-/// keeps them (corpus rgb32 hue-saturation.psd: (1, 0, 0) at +25 % ends at (1.048, …, −0.148)).
-fn hue_saturation_scale(rgb: [f32; 3], s: f32, l: f32, float: bool, hold_white: bool) -> [f32; 3] {
+/// keeps them (corpus rgb32 hue-saturation.psd: (1, 0, 0) at +25 % ends at (1.048, …, −0.148)),
+/// scaled by Reference's stepped [`hdr_saturation_factor`].
+fn hue_saturation_scale(rgb: [f32; 3], s: f32, l: f32, float: bool) -> [f32; 3] {
     let (max, min) = (rgb[0].max(rgb[1]).max(rgb[2]), rgb[0].min(rgb[1]).min(rgb[2]));
     let mid = (max + min) / 2.0;
+    if float && !INK_SPACE.with(|i| i.get()) {
+        return rgb.map(|v| mid + (v - mid) * hdr_saturation_factor(s));
+    }
+    let ink_space = INK_SPACE.with(|i| i.get());
     let mut k = if s > 0.0 { 1.0 / (1.0 - s).max(1e-6) } else { 1.0 + s };
-    if s > 0.0 && INK_SPACE.with(|i| i.get()) {
+    if s > 0.0 && !ink_space {
+        // +100 % scales the chroma by 128, not without bound (Reference kit hs-sat100, 8- and
+        // 16-bit: a grey one level off neutral spreads to 128 levels).
+        k = k.min(SATURATION_FACTOR_MAX);
+    }
+    if s > 0.0 && ink_space {
         // On ink complements no ink leaves 0..100 % once the lightness step `l` has applied:
         // the scale stops where the first complement would end up past 0 or 1 (Reference kit
         // inks-hs-sat50: (78, 18, 58, 6) % → (96, 0, 64, 6) held at the smallest ink,
@@ -930,13 +974,55 @@ fn hue_saturation_scale(rgb: [f32; 3], s: f32, l: f32, float: bool, hold_white: 
     if s > 0.0 && !float && min < mid {
         k = k.min(mid / (mid - min));
     }
-    if s > 0.0 && !float && hold_white && max > mid {
-        // With colour ranges in use, nor the largest above 1: a colour at full HSL saturation
-        // stays as it is (Reference 16-bit Reds +100 %, master +30 % with Reds +40 %); the
-        // master alone lets it overshoot until the lightness step.
+    if s > 0.0 && !float && max > mid {
+        // Nor the largest above 1, the master alone included: a colour at full HSL saturation
+        // stays as it is (Reference 16-bit Reds +100 %, master +30 % with Reds +40 %; kit
+        // hs-sat50 and hs-sat100, 8- and 16-bit: 73 73 255 unchanged, the near-white 251 249 249
+        // at +100 % → 255 245 245, where letting the largest overshoot cut it to 255 0 0).
         k = k.max(1.0).min(((1.0 - mid) / (max - mid)).max(1.0));
     }
     rgb.map(|v| mid + (v - mid) * k)
+}
+
+/// The largest factor 8/16-bit Hue/Saturation scales chroma by: +100 % (see
+/// [`hue_saturation_scale`]).
+pub const SATURATION_FACTOR_MAX: f32 = 128.0;
+
+/// An 8-bit document's Hue/Saturation Lightness, which Reference applies first and in whole
+/// levels: each channel rounded to a level, moved by the slider's whole levels (`|l|` % of 255,
+/// truncated) towards white or black and rounded half up, before the hue is taken (kit hs-file:
+/// hue +122, saturation +100, lightness −37; the near-grey 199 199 200 lands on 126 126 126 and
+/// keeps no hue to saturate, 203 199 202 takes the hue of 128 126 128: 126 → 1.7/255 off).
+/// `l` is the slider as a fraction (−1..=1); 0 keeps the colour.
+pub fn lightness_8bit(c: [f32; 3], l: f32) -> [f32; 3] {
+    if !l.is_finite() || l == 0.0 {
+        return c;
+    }
+    let k = (f64::from(l.clamp(-1.0, 1.0)).abs() * 255.0 + 1e-9).floor();
+    c.map(|v| {
+        let q = (f64::from(if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }) * 255.0).round();
+        let v = if l > 0.0 { q + (255.0 - q) * k / 255.0 } else { q * (255.0 - k) / 255.0 };
+        ((v + 0.5).floor() / 255.0) as f32
+    })
+}
+
+/// The factor 32-bit Hue/Saturation scales chroma by for saturation `s` (-1..1), as Reference
+/// computes it (measured at every whole percent from -100 to +100 on a 32-bit document): lowering
+/// cuts `s` to 1/256 steps, raising cuts it to 254 steps out of 255, takes 255 / (255 - steps) to
+/// 1/256 and stops at 32767/256, so +25 % gives 340/256, +99 % 63.75 and +100 % 127.996.
+/// compose.wgsl's Hue/Saturation does the same in whole numbers.
+pub fn hdr_saturation_factor(s: f32) -> f32 {
+    if !s.is_finite() {
+        return 1.0;
+    }
+    // The 1e-4 keeps a slider combined with the ranges' factor on its step against f32 rounding
+    // (0.5 can arrive as 0.49999997).
+    let s = s.clamp(-1.0, 1.0);
+    if s <= 0.0 {
+        return 1.0 - (-s * 256.0 + 1e-4).floor() / 256.0;
+    }
+    let steps = (s * 254.0 + 1e-4).floor() as u32;
+    (65280 / 255u32.saturating_sub(steps).max(1)).min(32767) as f32 / 256.0
 }
 
 /// Color Balance as one curve per channel (each output channel depends only on its own value;
@@ -1267,7 +1353,8 @@ pub fn range_lightness(c: [f32; 3], l: f32) -> [f32; 3] {
 /// Black & White grey value. Each colour is the sum of a grey part (its smallest channel), a
 /// secondary-colour part (yellow, cyan or magenta: middle − smallest) and a primary part (red,
 /// green or blue: largest − middle); the sliders (percent, Photoshop defaults 40 60 40 60 20 80 for
-/// reds, yellows, greens, cyans, blues, magentas) weight the two colour parts.
+/// reds, yellows, greens, cyans, blues, magentas) weight the two colour parts. Unclipped: the
+/// document's depth decides the range.
 pub fn black_white_gray(c: [f32; 3], weights: &[f32; 6]) -> f32 {
     let (r, g, b) = (c[0], c[1], c[2]);
     let (max, min) = (r.max(g).max(b), r.min(g).min(b));
@@ -1287,7 +1374,7 @@ pub fn black_white_gray(c: [f32; 3], weights: &[f32; 6]) -> f32 {
     } else {
         5 // red + blue = magenta
     };
-    (min + (mid - min) * weights[secondary] / 100.0 + (max - mid) * weights[primary] / 100.0).clamp(0.0, 1.0)
+    min + (mid - min) * weights[secondary] / 100.0 + (max - mid) * weights[primary] / 100.0
 }
 
 /// Ordered-dither offset in -0.5..0.5 (4×4 Bayer matrix) for document pixel (x, y).
@@ -1424,9 +1511,10 @@ pub fn selective_color_weights(c: [f32; 3]) -> [f32; 9] {
 /// the range. Relative mode moves the ink to a target, clamped to 0..100 %: the ink scaled by its
 /// percentage, then by the black percentage (`ink · (1 + a) · (1 + k)`, so it can't tint pure
 /// white; Photoshop corpus selective-color.psd, rgb16: within 1/255, was 11/255). Absolute mode
-/// scales the shift by the room the ink has: adding ink by min(1, 2 × (1 − ink)), removing it by
-/// min(1, 2 × ink), so Neutrals Cyan +50 darkens red 64 by 32, not 64 (all 72 absolute range ×
-/// ink cases within 1 level of Photoshop 27.11).
+/// shifts the ink by the percentage and the black one combined as factors, `(1 + a)(1 + k) − 1`,
+/// held so the ink stays within 0..100 % (Reference kit rgb8-sc-*-abs, 3 × 1024 colours under
+/// every range: all within 0.94 levels; adding the two and scaling by the ink's room was up to 27
+/// levels off).
 pub fn selective_color(c: [f32; 3], relative: bool, adj: &[[f32; 4]; 9]) -> [f32; 3] {
     let w = selective_color_weights(c);
     let mut delta = [0.0f32; 3];
@@ -1441,9 +1529,9 @@ pub fn selective_color(c: [f32; 3], relative: bool, adj: &[[f32; 4]; 9]) -> [f32
                 let target = ink * (1.0 + a[i]) * (1.0 + a[3]);
                 delta[i] += (target.clamp(0.0, 1.0) - ink) * wr;
             } else {
-                let d = a[i] + a[3];
-                let d = if d > 0.0 { d * (2.0 * (1.0 - ink)).min(1.0) } else { d * (2.0 * ink).min(1.0) };
-                delta[i] += d * wr;
+                let d = (1.0 + a[i]) * (1.0 + a[3]) - 1.0;
+                // max/min, not clamp: a non-finite sample must not panic.
+                delta[i] += d.max(-ink).min(1.0 - ink) * wr;
             }
         }
     }
@@ -1473,10 +1561,47 @@ pub(crate) fn lut(table: &[f32], v: f32) -> f32 {
     table[i] * (1.0 - f) + table[j] * f
 }
 
+/// Table steps the end slopes of [`lut_extended`] are measured over: one step's difference near
+/// 0.5 carries f32 rounding (2e-4 of the slope), while 16 steps are still only 0.4 % of the domain.
+pub const TONE_SLOPE_SPAN: usize = 16;
+
+/// [`lut`] continued past 0..1 along the slope of the table's end segments, as Reference applies
+/// a curve to float samples ([`float_tone_extrapolates`]). Inside the domain it is [`lut`];
+/// non-finite samples stay with it too, so an infinite one can't become NaN on a flat end.
+#[inline]
+fn lut_extended(table: &[f32], v: f32) -> f32 {
+    let n = table.len();
+    if !v.is_finite() || (0.0..=1.0).contains(&v) || n < 2 {
+        return lut(table, v);
+    }
+    let k = TONE_SLOPE_SPAN.min(n - 1);
+    let per_unit = (n - 1) as f32 / k as f32;
+    let (Some(&first), Some(&near_first), Some(&last), Some(&near_last)) = (table.first(), table.get(k), table.last(), table.get(n - 1 - k)) else {
+        return lut(table, v);
+    };
+    if v < 0.0 { first + v * (near_first - first) * per_unit } else { last + (v - 1.0) * (last - near_last) * per_unit }
+}
+
 /// Linear sRGB → its own D65 XYZ (IEC 61966-2-1, no chromatic adaptation).
 const SRGB_TO_XYZ_D65: [[f32; 3]; 3] = [[0.412_390_8, 0.357_584_3, 0.180_480_8], [0.212_639, 0.715_168_7, 0.072_192_3], [0.019_330_8, 0.119_194_8, 0.950_532_2]];
 /// The inverse of [`SRGB_TO_XYZ_D65`].
 const XYZ_D65_TO_SRGB: [[f32; 3]; 3] = [[3.240_97, -1.537_383_2, -0.498_610_8], [-0.969_243_6, 1.875_967_5, 0.041_555_1], [0.055_630_1, -0.203_977, 1.056_971_5]];
+
+/// A Photo Filter colour's D50 XYZ: from its sRGB value as stored, outside 0..1 when the file's
+/// Lab colour is (Warming Filter (85) is L 67.06, a 32, b 120), with each component floored at
+/// 0, not the colour clipped to sRGB first (Reference kit rgb8-pf-warm-d25: 7.3 → 2.3 levels;
+/// the Lab colour's own Z is −0.002).
+fn photo_filter_xyz(color: [f32; 3]) -> [f32; 3] {
+    mat3_mul(&SRGB_TO_XYZ_D50, color.map(|v| if v.is_finite() { srgb_to_linear(v.clamp(-4.0, 4.0)) } else { 0.0 })).map(|v| v.max(0.0))
+}
+
+/// Photo Filter's per-component scale of D50 XYZ (relative to white), the diagonal
+/// [`photo_filter_matrix`] wraps between sRGB and XYZ.
+pub fn photo_filter_scale(color: [f32; 3], density: f32) -> [f32; 3] {
+    let d = if density.is_finite() { density.clamp(0.0, 1.0) } else { 0.0 };
+    let xyz = photo_filter_xyz(color);
+    std::array::from_fn(|i| 1.0 - d + d * xyz[i] / D50[i])
+}
 
 /// Photo Filter's linear-light RGB matrix. Reference multiplies the pixel's XYZ, relative to
 /// white, by the filter colour's D50 XYZ relative to D50 (mixed in by `density`): a fixed linear
@@ -1485,18 +1610,8 @@ const XYZ_D65_TO_SRGB: [[f32; 3]; 3] = [[3.240_97, -1.537_383_2, -0.498_610_8], 
 /// (32-bit Preserve Luminosity; 8/16-bit documents instead restore the encoded luminosity like
 /// the Luminosity blend mode). Fitted on the Reference corpus `photo-filter.psd`: rgb16 within
 /// 0.6/255 everywhere; rgb32 the whole matrix within 0.0001 of the one its pixels give.
-/// Photo Filter's per-component scale of D50 XYZ (relative to white), the diagonal
-/// [`photo_filter_matrix`] wraps between sRGB and XYZ.
-pub fn photo_filter_scale(color: [f32; 3], density: f32) -> [f32; 3] {
-    let d = if density.is_finite() { density.clamp(0.0, 1.0) } else { 0.0 };
-    let xyz = mat3_mul(&SRGB_TO_XYZ_D50, color.map(|v| srgb_to_linear(if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 })));
-    std::array::from_fn(|i| 1.0 - d + d * xyz[i] / D50[i])
-}
-
 pub fn photo_filter_matrix(color: [f32; 3], density: f32, normalize_y: bool, hdr: bool) -> [[f32; 3]; 3] {
-    let d = if density.is_finite() { density.clamp(0.0, 1.0) } else { 0.0 };
-    let xyz = mat3_mul(&SRGB_TO_XYZ_D50, color.map(|v| srgb_to_linear(if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 })));
-    let mut s: [f32; 3] = std::array::from_fn(|i| 1.0 - d + d * xyz[i] / D50[i]);
+    let mut s = photo_filter_scale(color, density);
     if normalize_y && s[1] > 1e-6 {
         let y = s[1];
         s = s.map(|v| v / y);
@@ -1682,6 +1797,11 @@ pub fn levels_gamma(u: f32, g: f32) -> f32 {
         return u.powf(c);
     }
     let b = (a * u1 - u1.powf(c)) / u1.powf(q);
+    // Just above gamma 1 the toe shrinks to nothing: u1^q underflows to 0 while u1 doesn't, and
+    // the power curve is the toe's limit there (otherwise b = inf and black turns NaN).
+    if !b.is_finite() {
+        return u.powf(c);
+    }
     a * u - b * u.powf(q)
 }
 
@@ -1903,7 +2023,11 @@ pub fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [f32; 3] {
         return [l; 3];
     }
     let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
-    let p = 2.0 * l - q;
+    hue_rgb(h, 2.0 * l - q, q)
+}
+
+/// The colour of hue `h` (0..1) with its smallest channel at `p` and its largest at `q`.
+fn hue_rgb(h: f32, p: f32, q: f32) -> [f32; 3] {
     let f = |mut t: f32| {
         t = t.rem_euclid(1.0);
         if t < 1.0 / 6.0 {
@@ -2101,6 +2225,54 @@ mod tone_tests {
         assert!((f[0] - 1.0477).abs() < 0.004 && (f[1] - 0.649).abs() < 0.004 && (f[2] + 0.1477).abs() < 0.004, "{f:?}");
         let i = hue_saturation_ranged([1.0, 0.0, 0.0], 40.0, 0.25, -0.1, 0.0, false, false);
         assert!(i.iter().all(|v| (0.0..=1.0).contains(v)), "{i:?}");
+    }
+
+    /// Reference's 32-bit saturation factor (Hue/Saturation on red (1, 0, 0) in a 32-bit
+    /// document, read back from the saved float TIFF, exact in 1/512): red's R is 0.5 + 0.5 x the
+    /// factor.
+    #[test]
+    fn thirty_two_bit_saturation_steps_match_reference() {
+        for (sat, want) in [
+            (10.0, 539.0 / 512.0),
+            (25.0, 0.5 + 170.0 / 256.0),
+            (75.0, 2.4609375),
+            (90.0, 2673.0 / 512.0),
+            (99.0, 32.375),
+            (100.0, 33023.0 / 512.0),
+            (-10.0, 487.0 / 512.0),
+            (-25.0, 0.875),
+            (-50.0, 0.75),
+            (-100.0, 0.5),
+        ] {
+            let adj = Adjustment::HueSaturation { hue: 0.0, saturation: sat, lightness: 0.0, colorize: false, ranges: HueRange::defaults() };
+            let got = hdr(&adj, [1.0, 0.0, 0.0])[0];
+            assert!((got - want).abs() < 1e-4, "saturation {sat}: {got}, Reference {want}");
+        }
+        assert_eq!(hdr_saturation_factor(f32::NAN), 1.0);
+    }
+
+    /// 32-bit colours at or above HSL lightness 1 (red at +1 stop, (2, 0, 0)) keep their hue and
+    /// get their chroma scaled like any other, as in Reference; they used to turn NaN or grey.
+    #[test]
+    fn thirty_two_bit_hue_saturation_keeps_bright_colours() {
+        let pale = [280.0 / 255.0, 230.0 / 255.0, 256.0 / 255.0];
+        let near = |got: [f32; 3], want: [f32; 3]| got.iter().zip(want).all(|(g, w)| (g - w).abs() <= 1e-3 * w.abs().max(1.0));
+        for (hue, sat, c, want) in [
+            (40.0, 0.0, [2.0, 0.0, 0.0], [2.0, 1.33301, 0.0]),
+            (40.0, 0.0, pale, [1.09804, 0.930687, 0.901961]),
+            (0.0, 25.0, [2.0, 0.0, 0.0], [2.32812, -0.328125, -0.328125]),
+            (0.0, 25.0, pale, [1.13021, 0.869792, 1.00521]),
+            (0.0, -25.0, [2.0, 0.0, 0.0], [1.75, 0.25, 0.25]),
+            (0.0, 100.0, [140.0 / 255.0, 115.0 / 255.0, 128.0 / 255.0], [6.77432, -5.77432, 0.750976]),
+            (0.0, 100.0, [2.0, 0.0, 0.0], [128.996, -126.996, -126.996]),
+        ] {
+            let adj = Adjustment::HueSaturation { hue, saturation: sat, lightness: 0.0, colorize: false, ranges: HueRange::defaults() };
+            let got = hdr(&adj, c);
+            assert!(near(got, want), "hue {hue}, saturation {sat}, {c:?}: {got:?}, Reference {want:?}");
+        }
+        // Lightness 0 with a negative channel divides by zero the same way.
+        let adj = Adjustment::HueSaturation { hue: 40.0, saturation: 25.0, lightness: 0.0, colorize: false, ranges: HueRange::defaults() };
+        assert!(hdr(&adj, [0.25, -0.25, 0.0]).iter().all(|v| v.is_finite()));
     }
 
     fn ramp() -> Buffer {
@@ -2672,12 +2844,31 @@ mod tone_tests {
         assert!(black_white_gray([1.0, 0.0, 0.0], &w) > black_white_gray([1.0, 0.0, 0.0], &d));
     }
 
+    /// 32-bit superwhites stay above 1 (Reference 27.11: 2.0 stays 2.0, neutrals cap at 16,
+    /// negatives go to 0); 8-bit still clips at 1.
+    #[test]
+    fn black_white_keeps_32_bit_superwhites() {
+        let adj = Adjustment::BlackWhite { weights: [40.0, 60.0, 40.0, 60.0, 20.0, 80.0], tint: None };
+        let run = |depth, c: f32| {
+            let mut b = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![[c, c, c, 1.0]] };
+            apply_depth(&adj, &mut b, Transfer::Srgb, Some(depth));
+            b.px[0][0]
+        };
+        assert_eq!(run(SampleType::F32, 2.0), 2.0);
+        assert_eq!(run(SampleType::F32, 20.0), 16.0);
+        assert_eq!(run(SampleType::F32, -0.5), 0.0);
+        assert_eq!(run(SampleType::U8, 2.0), 1.0);
+    }
+
     /// Gradient Map places colours at 0.30 R + 0.59 G + 0.11 B (Reference corpus
     /// rgb8/gradient-map.psd: pure blue at 28/255 on the black → white map, not Rec.601's 29).
     #[test]
     fn gradient_map_level_weights() {
         let mut b = Buffer { rect: photosplice_geom::Rect::new(0, 0, 1, 1), px: vec![[0.0, 0.0, 1.0, 1.0]] };
-        apply(&Adjustment::GradientMap { stops: vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])], reverse: false, dither: false, ink_stops: Vec::new() }, &mut b);
+        apply(
+            &Adjustment::GradientMap { stops: vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])], reverse: false, dither: false, ink_stops: Vec::new(), source: None },
+            &mut b,
+        );
         assert!((b.px[0][0] - 0.11).abs() < 1e-3, "{:?}", b.px[0]);
     }
 
@@ -2732,7 +2923,7 @@ mod tone_tests {
         let stops = vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])];
         for (c, t) in [([0.0, 1.0, 0.0], 0.59), ([1.0, 0.0, 0.0], 0.3), ([0.0, 0.0, 1.0], 0.11), ([0.2, 0.6, 0.9], 0.513)] {
             let mut b = Buffer::filled(crate::Rect::new(0, 0, 1, 1), [c[0], c[1], c[2], 1.0]);
-            apply(&Adjustment::GradientMap { stops: stops.clone(), reverse: false, dither: false, ink_stops: Vec::new() }, &mut b);
+            apply(&Adjustment::GradientMap { stops: stops.clone(), reverse: false, dither: false, ink_stops: Vec::new(), source: None }, &mut b);
             assert!((b.px[0][0] - t).abs() < 1e-5, "{c:?}: {}", b.px[0][0]);
         }
     }
@@ -2742,8 +2933,8 @@ mod tone_tests {
         let stops = vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])];
         let mut a = ramp();
         let mut b = ramp();
-        apply(&Adjustment::GradientMap { stops: stops.clone(), reverse: false, dither: false, ink_stops: Vec::new() }, &mut a);
-        apply(&Adjustment::GradientMap { stops, reverse: false, dither: true, ink_stops: Vec::new() }, &mut b);
+        apply(&Adjustment::GradientMap { stops: stops.clone(), reverse: false, dither: false, ink_stops: Vec::new(), source: None }, &mut a);
+        apply(&Adjustment::GradientMap { stops, reverse: false, dither: true, ink_stops: Vec::new(), source: None }, &mut b);
         assert!(a.px.iter().zip(&b.px).all(|(x, y)| (x[0] - y[0]).abs() <= 0.5 / 255.0 + 1e-6));
         assert!(a.px.iter().zip(&b.px).any(|(x, y)| x[0] != y[0]));
     }
@@ -2906,7 +3097,7 @@ mod tone_tests {
     fn lab_gradient_map_follows_l() {
         let stops = vec![(0.0, [1.0, 0.0, 0.0]), (1.0, [0.0, 0.0, 1.0])];
         for reverse in [false, true] {
-            let map = Adjustment::GradientMap { stops: stops.clone(), reverse, dither: false, ink_stops: Vec::new() };
+            let map = Adjustment::GradientMap { stops: stops.clone(), reverse, dither: false, ink_stops: Vec::new(), source: None };
             // A grey and a saturated colour with the same L map to the same colour.
             let grey = in_lab(&map, lab(60.0, 0.0, 0.0));
             let green = in_lab(&map, lab(60.0, -50.0, 40.0));
@@ -2934,7 +3125,7 @@ mod tone_tests {
         }
         // Transparent pixels are left alone and odd values never panic.
         let mut t = Buffer::filled(crate::Rect::new(0, 0, 2, 1), [f32::NAN, 2.0, -1.0, 0.0]);
-        for adj in lab_only.iter().chain([&Adjustment::GradientMap { stops: vec![], reverse: true, dither: true, ink_stops: Vec::new() }]) {
+        for adj in lab_only.iter().chain([&Adjustment::GradientMap { stops: vec![], reverse: true, dither: true, ink_stops: Vec::new(), source: None }]) {
             for mode in [ColorMode::Lab, ColorMode::Cmyk] {
                 apply_in(adj, &mut t, Transfer::Srgb, None, mode);
                 let mut odd = Buffer::filled(crate::Rect::new(0, 0, 1, 1), [f32::NAN, f32::INFINITY, -3.0, 1.0]);
@@ -2962,5 +3153,85 @@ mod lut3d_guard_tests {
             assert_eq!(lut3d_sample(&[0.0; 3], 2, c, tetra), c);
             assert_eq!(lut3d_sample(&[0.0; 24], usize::MAX, c, tetra), c);
         }
+    }
+}
+
+/// Excerpts of the Reference adjustment kit: 1024 colour patches per setting, each saved through
+/// Reference so its merged image is Reference's rendering (8-bit levels; 16-bit read as levels).
+#[cfg(test)]
+mod kit_tests {
+    use super::*;
+
+    fn run(adj: &Adjustment, depth: SampleType, c: [u8; 3]) -> [f32; 3] {
+        let mut b = Buffer::filled(crate::Rect::new(0, 0, 1, 1), [f32::from(c[0]) / 255.0, f32::from(c[1]) / 255.0, f32::from(c[2]) / 255.0, 1.0]);
+        apply_depth(adj, &mut b, Transfer::Srgb, Some(depth));
+        [b.px[0][0] * 255.0, b.px[0][1] * 255.0, b.px[0][2] * 255.0]
+    }
+
+    fn check(adj: &Adjustment, depth: SampleType, rows: &[([u8; 3], [u8; 3])], tol: f32) {
+        for (src, want) in rows {
+            let got = run(adj, depth, *src);
+            for k in 0..3 {
+                assert!((got[k] - f32::from(want[k])).abs() <= tol, "{adj:?} {depth:?}: {src:?} → {got:?}, Reference {want:?}");
+            }
+        }
+    }
+
+    fn hs(hue: f32, saturation: f32, lightness: f32) -> Adjustment {
+        Adjustment::HueSaturation { hue, saturation, lightness, colorize: false, ranges: HueRange::defaults() }
+    }
+
+    /// Saturation holds both the smallest channel at 0 and the largest at 1, and +100 % scales
+    /// the chroma by 128 at most (8-bit: hue rounding leaves up to 1.5 levels).
+    #[test]
+    fn saturation_holds_black_and_white_and_caps_at_128() {
+        check(&hs(0.0, 50.0, 0.0), SampleType::U8, &[([73, 73, 255], [73, 73, 255]), ([125, 82, 253], [124, 80, 255]), ([198, 254, 94], [198, 255, 93])], 1.0);
+        let rows = [([251, 249, 249], [255, 245, 245]), ([251, 251, 248], [255, 255, 244]), ([7, 7, 8], [0, 0, 15]), ([121, 121, 120], [183, 184, 56])];
+        check(&hs(0.0, 100.0, 0.0), SampleType::U8, &rows, 1.6);
+        check(&hs(0.0, 100.0, 0.0), SampleType::U16, &[([135, 135, 136], [72, 72, 199]), ([121, 121, 120], [185, 185, 56]), ([251, 249, 249], [255, 245, 245])], 0.6);
+    }
+
+    /// 8-bit Lightness comes first in whole levels: near-greys one level off neutral land on a
+    /// grey (nothing left to saturate); 16-bit keeps the fraction (the psd-tools
+    /// huesaturation_rgb setting, hue +122, saturation +100, lightness −37).
+    #[test]
+    fn eight_bit_lightness_is_whole_levels_before_the_hue() {
+        let rows = [([199, 199, 200], [126, 126, 126]), ([203, 199, 202], [244, 254, 0]), ([201, 199, 201], [185, 190, 62]), ([229, 231, 231], [209, 81, 204])];
+        check(&hs(122.0, 100.0, -37.0), SampleType::U8, &rows, 2.0);
+        check(&hs(122.0, 100.0, -37.0), SampleType::U16, &[([201, 199, 201], [201, 206, 46]), ([199, 199, 200], [166, 88, 85])], 1.0);
+        assert_eq!(lightness_8bit([0.5, 0.25, 1.0], 0.0), [0.5, 0.25, 1.0]);
+        assert_eq!(lightness_8bit([f32::NAN, 2.0, -1.0], -0.5), [0.0, 128.0 / 255.0, 0.0]);
+    }
+
+    /// Absolute Selective Color: `(1 + a)(1 + k) − 1` of ink, held within 0..100 %.
+    #[test]
+    fn absolute_selective_color_combines_black_as_a_factor() {
+        let sc = |rows: &[(usize, [f32; 4])]| {
+            let mut a = [[0.0f32; 4]; 9];
+            for (r, v) in rows {
+                a[*r] = *v;
+            }
+            Adjustment::SelectiveColor { relative: false, adjustments: a }
+        };
+        let each = sc(&[(0, [40.0, -40.0, 20.0, 10.0]), (1, [-40.0, 20.0, 40.0, -10.0]), (2, [20.0, 40.0, -40.0, 10.0]), (3, [-20.0, -20.0, 30.0, 0.0]), (4, [40.0, -40.0, 20.0, 10.0]), (5, [-40.0, 20.0, 40.0, -10.0])]);
+        check(&each, SampleType::U8, &[([255, 0, 0], [117, 87, 0]), ([0, 0, 255], [0, 87, 173]), ([255, 0, 73], [157, 62, 2]), ([0, 199, 252], [40, 250, 175])], 1.0);
+        let file = sc(&[(0, [-30.0, 10.0, 0.0, 0.0]), (4, [20.0, -20.0, 0.0, 5.0])]);
+        check(&file, SampleType::U8, &[([182, 0, 0], [234, 0, 0]), ([73, 0, 255], [26, 29, 246]), ([0, 0, 255], [0, 41, 242])], 1.0);
+        let neutrals = sc(&[(6, [0.0, 0.0, -20.0, -10.0]), (7, [10.0, -10.0, 20.0, 30.0]), (8, [0.0, 10.0, 0.0, 20.0])]);
+        check(&neutrals, SampleType::U8, &[([146, 146, 146], [56, 113, 34]), ([55, 55, 56], [2, 5, 3])], 1.0);
+        let Adjustment::SelectiveColor { adjustments, .. } = &each else { return };
+        assert!(selective_color([f32::NAN, f32::INFINITY, -1.0], false, adjustments).iter().all(|v| !v.is_finite() || (0.0..=1.0).contains(v)));
+    }
+
+    /// Photo Filter's Warming Filter (85), a Lab colour outside sRGB: its XYZ, floored at 0, not
+    /// the colour clipped to sRGB.
+    #[test]
+    fn photo_filter_takes_an_out_of_gamut_colour_through_xyz() {
+        let warm = photosplice_color::convert::lab_to_srgb_unclamped([67.06, 32.0, 120.0]);
+        let pf = Adjustment::PhotoFilter { color: warm, density: 0.25, preserve_luminosity: true };
+        check(&pf, SampleType::U8, &[([9, 15, 248], [55, 1, 202]), ([0, 255, 36], [53, 233, 3]), ([36, 0, 219], [53, 1, 169]), ([109, 255, 36], [128, 248, 17])], 1.0);
+        let s = photo_filter_scale(warm, 1.0);
+        assert!(s[2].abs() < 1e-6, "{s:?}");
+        assert!(photo_filter_scale([f32::NAN, f32::INFINITY, -9.0], 0.5).iter().all(|v| v.is_finite()));
     }
 }

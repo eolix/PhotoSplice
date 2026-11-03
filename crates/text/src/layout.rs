@@ -10,9 +10,11 @@
 //! into text space: a line becomes a column running top to bottom, and successive columns advance
 //! right to left. Within a column, CJK characters stay upright (centred on the column, placed with
 //! the font's vertical metrics: `VORG`, `vhea`/`vmtx`, else the ideographic em box) and use the
-//! font's vertical alternates (`vert`) for punctuation, brackets and the long-vowel mark; other
-//! text (Latin, digits) runs rotated 90° clockwise, Photoshop's default. Lines, clusters, carets
-//! and hit tests stay in line space; [`TextLayout::to_text`] / [`TextLayout::to_line`] convert.
+//! font's vertical alternates (`vert`) for punctuation, brackets and the long-vowel mark. Other
+//! text (Latin, digits) stands upright one character per em too, as Reference's Vertical Type
+//! tool sets it, or runs rotated 90° clockwise where its style says so
+//! (`CharStyle::rotate_roman`, PSD `BaselineDirection` 2). Lines, clusters, carets and hit tests
+//! stay in line space; [`TextLayout::to_text`] / [`TextLayout::to_line`] convert.
 
 use std::borrow::Cow;
 use std::ops::Range;
@@ -88,6 +90,12 @@ pub enum VClass {
     /// when the font has none.
     AlternateOrRotate = 2,
 }
+
+/// Where the ideographic em box puts the baseline: 0.88 em below its top (880/1000 units).
+const IDEOGRAPHIC_BASELINE: f32 = 0.88;
+
+/// The brush class of roman text set upright in vertical type (beside [`VClass`]'s values).
+const UPRIGHT_ROMAN: u8 = 3;
 
 /// The vertical-type class of a character.
 pub fn vertical_class(c: char) -> VClass {
@@ -442,8 +450,15 @@ struct KernSlot {
     size: f32,
     rtl: bool,
     blank: bool,
+    /// Hangs at the line's end when the paragraph has hanging punctuation on, weighted: 1.0 for
+    /// the marks that hang fully outside the margin (a period, a comma, a hyphen, a quote, an
+    /// apostrophe), 0.5 for those that hang half (a colon, a semicolon, an ellipsis, a dash); 0.0
+    /// marks no hang (Reference's Roman Hanging Punctuation list).
+    hang_w: f32,
     /// Advance along the line (px, horizontal scale included).
     advance: f32,
+    /// What horizontal scale adds to the shaped advance (px; negative below 100%).
+    growth: f32,
     /// A tab, shaped as a space; it advances to the next tab stop.
     tab: bool,
     /// Vertical type, upright glyph (its outline doesn't run along the column).
@@ -585,14 +600,42 @@ impl Layouter {
             // fetches it (`served`); it joins the fallback stack once it arrives.
             crate::served::request_for_text(&ptext);
             let fallback: Vec<String> = fonts.fallback_stack().map(str::to_string).collect();
-            // Shapes the paragraph, each tab widened by its letter spacing in `tab_spacing` (px).
-            let build = |lcx: &mut LayoutContext<RunBrush>, fcx: &mut parley::FontContext, tab_spacing: &[f32]| -> Layout<RunBrush> {
+            // Vertical type's upright roman characters, as byte ranges in `ptext` with their letter
+            // spacing (px), em (px) and run: each takes one em down the column, as Reference sets
+            // them, where shaping gives it its horizontal advance.
+            let mut roman: Vec<(Range<usize>, f32, f32, usize)> = Vec::new();
+            if vertical {
+                for (ri, st) in out.styles.iter().enumerate() {
+                    let rs = run_starts.get(ri).copied().unwrap_or(0);
+                    let (a, z) = (rs.max(prange.start), rs.saturating_add(runs.get(ri).map_or(0, |r| r.len)).min(content_end));
+                    if a >= z || st.rotate_roman {
+                        continue;
+                    }
+                    let base = a - prange.start + prefix.len();
+                    let piece = ptext.get(base..base + (z - a)).unwrap_or("");
+                    let px = st.size_pt * k;
+                    for (i, ch) in piece.char_indices() {
+                        if vertical_class(ch) == VClass::Rotate && !ch.is_whitespace() && ch != '\n' {
+                            roman.push(((base + i)..(base + i + ch.len_utf8()), st.tracking / 1000.0 * px, px, ri));
+                        }
+                    }
+                }
+            }
+            // Shapes the paragraph, each tab widened by its letter spacing in `tab_spacing` (px)
+            // and each upright roman character by its spacing in `roman_spacing` (px).
+            let build = |lcx: &mut LayoutContext<RunBrush>, fcx: &mut parley::FontContext, tab_spacing: &[f32], roman_spacing: &[f32]| -> Layout<RunBrush> {
                 let mut b = lcx.ranged_builder(fcx, &ptext, 1.0, false);
                 // Paragraph-start style as the default (covers the direction mark and empty
                 // paragraphs), then every run piece intersecting this paragraph.
                 let si0 = style_at(prange.start);
                 for p in style_props(&out.styles[si0], k, &fallback, si0 as u32, small_caps[si0]) {
                     b.push_default(p);
+                }
+                // Paragraph text breaks a word wider than the box at the box edge, as Reference
+                // does: parley's default only breaks at UAX #14 opportunities and lets the word
+                // run out of the box. Point text has no width to overflow.
+                if is_box {
+                    b.push_default(StyleProperty::OverflowWrap(parley::style::OverflowWrap::BreakWord));
                 }
                 for (ri, st) in out.styles.iter().enumerate() {
                     let rs = run_starts[ri];
@@ -607,19 +650,23 @@ impl Layouter {
                     if vertical {
                         // Upright pieces get the vertical alternates and their class in the brush.
                         let piece = ptext.get(range.clone()).unwrap_or("");
-                        let mut seg: Option<(usize, VClass)> = None;
-                        let flush = |b: &mut parley::RangedBuilder<'_, RunBrush>, from: usize, to: usize, cls: VClass| {
-                            if cls == VClass::Rotate || from >= to {
+                        let mut seg: Option<(usize, u8)> = None;
+                        let flush = |b: &mut parley::RangedBuilder<'_, RunBrush>, from: usize, to: usize, cls: u8| {
+                            if cls == VClass::Rotate as u8 || from >= to {
                                 return;
                             }
                             let mut feats = feature_list(st, small_caps[ri]);
                             feats.push("\"vert\" 1".into());
                             let r = (range.start + from)..(range.start + to);
                             b.push(StyleProperty::FontFeatures(FontFeatures::Source(Cow::Owned(feats.join(", ")))), r.clone());
-                            b.push(StyleProperty::Brush(RunBrush(ri as u32, cls as u8)), r);
+                            b.push(StyleProperty::Brush(RunBrush(ri as u32, cls)), r);
                         };
                         for (i, ch) in piece.char_indices() {
-                            let cls = vertical_class(ch);
+                            // Roman text stands upright too unless the run rotates it.
+                            let cls = match vertical_class(ch) {
+                                VClass::Rotate if !st.rotate_roman => UPRIGHT_ROMAN,
+                                cls => cls as u8,
+                            };
                             match seg {
                                 Some((_, c)) if c == cls => {}
                                 Some((from, c)) => {
@@ -637,8 +684,22 @@ impl Layouter {
                 for (range, size) in &synthetic_small_caps {
                     b.push(StyleProperty::FontSize(*size), range.clone());
                 }
+                // Korean breaks lines at spaces, between words, as Reference sets it; Unicode's
+                // default rules break between any two Hangul syllables, mid-word.
+                for range in hangul_runs(&ptext) {
+                    b.push(StyleProperty::WordBreak(parley::WordBreak::KeepAll), range);
+                }
                 for (&at, &spacing) in tabs.iter().zip(tab_spacing) {
                     b.push(StyleProperty::LetterSpacing(spacing), at..at + 1);
+                }
+                for ((range, _, _, ri), &spacing) in roman.iter().zip(roman_spacing) {
+                    b.push(StyleProperty::LetterSpacing(spacing), range.clone());
+                    // Pair kerning is horizontal: none between letters stacked upright.
+                    if let Some(st) = out.styles.get(*ri) {
+                        let mut feats = feature_list(st, small_caps.get(*ri).copied().unwrap_or(SmallCapsMode::None));
+                        feats.push("\"kern\" 0".into());
+                        b.push(StyleProperty::FontFeatures(FontFeatures::Source(Cow::Owned(feats.join(", ")))), range.clone());
+                    }
                 }
                 b.build(&ptext)
             };
@@ -648,14 +709,32 @@ impl Layouter {
             // Box extent along the lines: width, or height for vertical type (columns).
             let (line_origin, line_len) = if vertical { (box_rect.1, box_rect.3) } else { (box_rect.0, box_rect.2) };
             let avail = if is_box { Some((line_len - indent_start - indent_end).max(1.0)) } else { None };
+            // Horizontal scale is applied after shaping, so paragraph text breaks at the box
+            // width divided by it, as Reference wraps scaled type (storytold/photocraft@a1e19a0b).
+            // Mixed scales break at the largest, so no line overflows the box.
+            let break_scale = if is_box {
+                let si0 = style_at(prange.start);
+                (0..out.styles.len())
+                    .filter(|&ri| {
+                        let rs = run_starts.get(ri).copied().unwrap_or(0);
+                        let end = rs.saturating_add(runs.get(ri).map_or(0, |r| r.len));
+                        ri == si0 || (rs.max(prange.start) < end.min(content_end))
+                    })
+                    .filter_map(|ri| out.styles.get(ri))
+                    .map(effective_horizontal_scale)
+                    .fold(0.0f32, f32::max)
+            } else {
+                1.0
+            };
+            let break_scale = if break_scale > 0.0 { break_scale } else { 1.0 };
             let break_lines = |layout: &mut Layout<RunBrush>| {
                 if first_indent != 0.0 {
-                    layout.set_text_indent(first_indent, IndentOptions::default());
+                    layout.set_text_indent(first_indent / break_scale, IndentOptions::default());
                 }
-                match avail {
+                match avail.map(|a| a / break_scale) {
                     // Box text: Photoshop's Every-line Composer (see `compose_lines`).
-                    Some(w) if !vertical && ps.every_line_composer => compose_lines(layout, &ptext, w, first_indent),
-                    _ => layout.break_all_lines(avail),
+                    Some(w) if !vertical && ps.every_line_composer => compose_lines(layout, &ptext, w, first_indent / break_scale),
+                    unscaled => layout.break_all_lines(unscaled),
                 }
             };
             // Paragraph text: a tab is never wider than a space plus one tab interval, so breaking
@@ -663,14 +742,23 @@ impl Layouter {
             // Break again with the tab widths that layout gives until they agree; if they don't
             // settle, keep the safe layout.
             let wide = if is_box { tab_px } else { 0.0 };
-            let mut layout = build(&mut self.lcx, &mut fonts.fcx, &vec![wide; tabs.len()]);
+            let mut roman_spacing: Vec<f32> = roman.iter().map(|r| r.1).collect();
+            let mut layout = build(&mut self.lcx, &mut fonts.fcx, &vec![wide; tabs.len()], &roman_spacing);
+            if !roman.is_empty() {
+                // Shaped advances (with the letter spacing) → spacing that makes each one em. The
+                // clusters are read from broken lines; the real break follows the rebuild.
+                break_lines(&mut layout);
+                let advances = cluster_advances(&layout, &roman);
+                roman_spacing = roman.iter().zip(&advances).map(|((_, track, em, _), a)| a.map_or(*track, |a| em + track - (a - track))).collect();
+                layout = build(&mut self.lcx, &mut fonts.fcx, &vec![wide; tabs.len()], &roman_spacing);
+            }
             break_lines(&mut layout);
             if is_box && !tabs.is_empty() {
                 let first = tab_widths(&layout, &tabs, &out.styles, indent_start, first_indent, tab_px);
                 let mut want: Vec<f32> = first.iter().map(|t| t.width).collect();
                 for _ in 0..4 {
                     let spacing: Vec<f32> = first.iter().zip(&want).map(|(t, w)| w / t.scale - (t.advance - tab_px)).collect();
-                    let mut next = build(&mut self.lcx, &mut fonts.fcx, &spacing);
+                    let mut next = build(&mut self.lcx, &mut fonts.fcx, &spacing, &roman_spacing);
                     break_lines(&mut next);
                     let got: Vec<f32> = tab_widths(&next, &tabs, &out.styles, indent_start, first_indent, tab_px).iter().map(|t| t.width).collect();
                     if got.iter().zip(&want).all(|(a, b)| (a - b).abs() < 0.01) {
@@ -728,6 +816,107 @@ impl Layouter {
                 } else {
                     (first_px * 0.8, first_px * 0.2)
                 };
+                let map = |o: usize| (prange.start + o.saturating_sub(prefix.len())).min(content_end);
+                // Hanging punctuation: a row of nothing but marks was pushed here because they
+                // didn't fit the line above; with the paragraph's hanging on, step them back onto
+                // that line so they hang past the box edge (Reference's Roman Hanging
+                // Punctuation): a centred line keeps its centring, a left line keeps filling the
+                // box. Horizontal lines only (vertical type has Burasagari instead) and no RTL
+                // marks; the text between the line above and the marks stays contiguous, so
+                // carets and selection keep their rows. The marks keep their style's manual
+                // kerning but drop optical pair kerning and underline decorations along the way.
+                let hang_row = ps.hanging
+                    && !vertical
+                    // An empty row (two forced breaks in a row) has no items: `all` would read it
+                    // as a hanging run and merge it into the line above.
+                    && line.items().next().is_some()
+                    && line.items().all(|it| match it {
+                        PositionedLayoutItem::GlyphRun(gr) => gr.run().visual_clusters().all(|c| {
+                            !c.is_rtl() && !c.is_space_or_nbsp() && c.text_range().end > prefix.len() && hang_cluster(ptext.get(c.text_range()).unwrap_or(""))
+                        }),
+                        _ => false,
+                    });
+                if hang_row
+                    && let Some(prev) = out.lines.last()
+                    && prev.paragraph == pi
+                    // The author's own break owns the row start: a forced break becomes '\n' in
+                    // `ptext`, so a marks-only row after it is deliberate, not a run the line
+                    // breaker pushed out.
+                    && line
+                        .items()
+                        .find_map(|it| match it {
+                            PositionedLayoutItem::GlyphRun(gr) => gr.run().visual_clusters().next().map(|c| c.text_range().start),
+                            _ => None,
+                        })
+                        .is_none_or(|s| ptext.as_bytes().get(s.wrapping_sub(1)) != Some(&b'\n'))
+                {
+                    // Start past the row above's trailing breaking space: that space's cluster
+                    // stays on the row, and `prev.x1` excludes trailing whitespace.
+                    let merged_line = out.lines.len() - 1;
+                    let mut cx = out.clusters.iter().rev().find(|c| c.line == merged_line).map_or(prev.x1, |c| c.x + c.advance);
+                    let merged_baseline = prev.baseline;
+                    // The kern of a pair comes from the pair's left cluster's style, as the line's
+                    // `kern_px` does; the pair with the row above's last cluster crosses a row
+                    // boundary, so the first cluster starts un-kerned.
+                    let mut left: Option<(usize, f32)> = None;
+                    // The row's last cluster (whose pair leads into nothing) keeps its drawn
+                    // advance only, like the line's last kern slot.
+                    let total = line
+                        .items()
+                        .map(|it| match it {
+                            PositionedLayoutItem::GlyphRun(gr) => gr.run().visual_clusters().count(),
+                            _ => 0,
+                        })
+                        .sum::<usize>();
+                    let mut n = 0usize;
+                    let mut merged_end = cx;
+                    for item in line.items() {
+                        let PositionedLayoutItem::GlyphRun(gr) = item else {
+                            continue;
+                        };
+                        let run = gr.run();
+                        let si = gr.style().brush.0;
+                        let Some(st) = out.styles.get(si as usize) else { continue };
+                        let hs = if st.horizontal_scale > 0.0 { st.horizontal_scale } else { 1.0 };
+                        let synth = run.synthesis();
+                        let face = out.faces.len() as u32;
+                        out.faces.push(GlyphFace {
+                            font: run.font().clone(),
+                            coords: run.normalized_coords().to_vec(),
+                            size_px: run.font_size(),
+                            embolden: synthetic_bold(synth.embolden(), st.weight, run.font_attrs().weight.value()),
+                            skew_deg: synth.skew().unwrap_or(0.0),
+                        });
+                        for c in run.visual_clusters() {
+                            n += 1;
+                            cx += left.take().map_or(0.0, |(byte, size)| {
+                                let units = out.styles.get(style_at(byte)).map_or(0.0, |st| if st.kern.is_finite() { st.kern } else { 0.0 });
+                                units / 1000.0 * size
+                            });
+                            let r = c.text_range();
+                            let units = out.styles.get(style_at(map(r.start))).map_or(0.0, |st| if st.kern.is_finite() { st.kern } else { 0.0 });
+                            let kern = units / 1000.0 * run.font_size();
+                            let drawn = c.advance() * hs;
+                            // The glyph pen is local to the cluster.
+                            let mut gp = 0.0f32;
+                            for g in c.glyphs() {
+                                out.glyphs.push(PlacedGlyph { face, id: g.id, x: cx + gp + g.x, y: merged_baseline + g.y, style: si, orient: GlyphOrient::Horizontal });
+                                advances.push(g.advance * hs);
+                                gp += g.advance * hs;
+                            }
+                            let adv = drawn + if n == total { 0.0 } else { kern };
+                            out.clusters.push(ClusterInfo { range: map(r.start)..map(r.end), x: cx, advance: adv, line: merged_line, rtl: false });
+                            cx += drawn;
+                            merged_end = cx;
+                            left = Some((map(r.start), run.font_size()));
+                        }
+                    }
+                    if let Some(p) = out.lines.last_mut() {
+                        p.x1 = merged_end;
+                        p.range.end = map(line.text_range().end);
+                    }
+                    continue;
+                }
                 let baseline = match prev_baseline {
                     // The first column's right edge touches the box's right edge.
                     None if is_box && vertical => -(box_rect.0 + box_rect.2) + col_half,
@@ -750,7 +939,6 @@ impl Layouter {
                 prev_baseline = Some(baseline);
                 let last_line = li + 1 == nlines;
                 let adv = m.advance - m.trailing_whitespace;
-                let map = |o: usize| (prange.start + o.saturating_sub(prefix.len())).min(content_end);
 
                 // Kerning after each cluster (px), per run in visual cluster order: manual
                 // kerning plus optical pair kerning. Applied after shaping (like horizontal
@@ -783,8 +971,10 @@ impl Layouter {
                             size: run.font_size(),
                             rtl: c.is_rtl(),
                             blank: first.is_none() || c.is_space_or_nbsp() || c.text_range().end <= prefix.len(),
+                            hang_w: hang_weight(ptext.get(c.text_range()).unwrap_or("")),
                             upright: vertical && c.first_style().brush.1 != VClass::Rotate as u8,
                             advance: c.advance() * hs,
+                            growth: c.advance() * (hs - 1.0),
                             tab: tabs.binary_search(&c.text_range().start).is_ok(),
                         });
                     }
@@ -829,17 +1019,41 @@ impl Layouter {
                 // moves the whole line).
                 let mut pos = indent_start + if li == 0 { first_indent } else { 0.0 };
                 let mut trailing_tabs = 0.0f32;
+                let mut trailing_growth = 0.0f32;
                 for (j, s) in slots.iter().enumerate() {
+                    // Trailing whitespace is outside the line's extent (`adv`).
+                    let trailing = s.blank && slots[j + 1..].iter().all(|n| n.blank);
+                    if trailing {
+                        trailing_growth += s.growth;
+                    }
                     if s.tab {
                         kern_px[j] = next_tab_stop(pos, tab_px) - pos - s.advance;
-                        // Trailing whitespace is outside the line's extent (`adv`).
-                        if slots[j + 1..].iter().all(|n| n.blank) {
+                        if trailing {
                             trailing_tabs += kern_px[j];
                         }
                     }
                     pos += s.advance + kern_px.get(j).copied().unwrap_or(0.0);
                 }
                 let line_kern: f32 = kern_px.iter().sum::<f32>() - trailing_tabs;
+                // Hanging punctuation (Reference's Roman Hanging Punctuation): a trailing run of
+                // marks doesn't count toward the aligned width and hangs past the box edge,
+                // though the marks keep their full drawn width, each weighted by its mark (a
+                // half-hanging one leaves half of it in). `hang_edge` is where the run starts
+                // along the line, to tell that it sits at the margin.
+                let (hang_adv, hang_kern, hang_edge) = match hang_runs(&slots).filter(|_| ps.hanging && !vertical) {
+                    Some((start, tail)) => {
+                        let adv: f32 = slots.get(start..tail).unwrap_or(&[]).iter().map(|s| s.advance * s.hang_w).sum();
+                        let kern: f32 = (start..tail).map(|j| kern_px.get(j).copied().unwrap_or(0.0) * slots.get(j).map_or(0.0, |s| s.hang_w)).sum();
+                        let edge = slots.get(..start).unwrap_or(&[]).iter().map(|s| s.advance).sum::<f32>() + kern_px.get(..start).unwrap_or(&[]).iter().sum::<f32>();
+                        (adv, kern, edge)
+                    }
+                    None => (0.0, 0.0, 0.0),
+                };
+                // Point text has no box, so every trailing run trims; on a box, centred and right
+                // lines move as a whole, so any trailing run there trims too, and a run at the
+                // margin trims whatever the alignment.
+                let trim = hang_adv > 0.0 && (!is_box || matches!(ps.align, TextAlign::Center | TextAlign::Right) || hang_edge >= avail.unwrap_or(0.0) - 0.5);
+                let (trim_adv, trim_kern) = if trim { (hang_adv, hang_kern) } else { (0.0, 0.0) };
                 // Per run on the line: (run index, glyph → slot, glyphs emitted, first slot whose
                 // kerning isn't applied yet).
                 let mut cursors: Vec<(usize, Vec<usize>, usize, usize)> = Vec::new();
@@ -861,8 +1075,8 @@ impl Layouter {
                 // Parley aligned box lines without the kerning.
                 let kern_align = if is_box {
                     match ps.align {
-                        TextAlign::Center => line_kern / 2.0,
-                        TextAlign::Right => line_kern,
+                        TextAlign::Center => (line_kern - trim_kern) / 2.0,
+                        TextAlign::Right => line_kern - trim_kern,
                         _ => 0.0,
                     }
                 } else {
@@ -870,20 +1084,27 @@ impl Layouter {
                 };
                 let dx = if is_box {
                     let base = line_origin + indent_start - kern_align;
-                    let slack = avail.unwrap_or(0.0) - adv - line_kern;
-                    base + if last_line {
-                        match ps.align {
-                            TextAlign::JustifyCenter => slack * 0.5 - m.offset,
-                            TextAlign::JustifyRight => slack - m.offset,
-                            _ => 0.0,
-                        }
-                    } else {
-                        0.0
+                    // The shaped advance scales into the box; the trim is already in layout pixels
+                    // (the slot advances carry the scale), so it goes in after the scaling.
+                    let slack = avail.unwrap_or(0.0) - (adv * break_scale - trim_adv) - (line_kern - trim_kern);
+                    // Parley aligned the unscaled line in `avail / break_scale`: scale its
+                    // indent and alignment offset back to the box.
+                    let scaled_offset = m.offset * (break_scale - 1.0);
+                    // A hung run trims out of the width, so the marks stop steering the
+                    // alignment: centred and right lines are placed by the formulas the last
+                    // line uses (parley's own offset made the marks count).
+                    let hung = trim && matches!(ps.align, TextAlign::Center | TextAlign::Right);
+                    base + match ps.align {
+                        TextAlign::JustifyCenter if last_line => slack * 0.5 - m.offset,
+                        TextAlign::JustifyRight if last_line => slack - m.offset,
+                        TextAlign::Center if hung => slack * 0.5 - m.offset,
+                        TextAlign::Right if hung => slack - m.offset,
+                        _ => scaled_offset,
                     }
                 } else {
                     let target = match ps.align {
-                        TextAlign::Center | TextAlign::JustifyCenter => -(adv + line_kern) / 2.0,
-                        TextAlign::Right | TextAlign::JustifyRight => -(adv + line_kern),
+                        TextAlign::Center | TextAlign::JustifyCenter => -(adv + line_kern - trim_adv - trim_kern) / 2.0,
+                        TextAlign::Right | TextAlign::JustifyRight => -(adv + line_kern - trim_adv - trim_kern),
                         _ => indent_start,
                     };
                     target - m.offset
@@ -958,11 +1179,18 @@ impl Layouter {
                         });
                         advances.push(g.advance * hs);
                         if let Some(v) = &vm {
-                            let upright = class == 1 || (class == 2 && !plain.contains(&g.id));
+                            let upright = class == 1 || class == UPRIGHT_ROMAN || (class == 2 && !plain.contains(&g.id));
+                            // An upright roman letter's advance is stretched to the em: it is
+                            // centred on the column by its own width.
+                            let across = if class == UPRIGHT_ROMAN { v.h_advance(g.id).unwrap_or(g.advance) } else { g.advance };
                             vinfo.push(VGlyph {
                                 upright,
-                                advance: g.advance * hs,
-                                origin: if upright { v.origin(g.id) } else { 0.0 },
+                                advance: across * hs,
+                                origin: match (upright, class) {
+                                    (false, _) => 0.0,
+                                    (true, UPRIGHT_ROMAN) => v.roman_origin(g.id),
+                                    (true, _) => v.origin(g.id),
+                                },
                                 // Rotated text is centred on the column: its baseline sits
                                 // (ascent − descent) / 2 from the centre line.
                                 centre: (rm.ascent - rm.descent) * 0.5,
@@ -1009,7 +1237,7 @@ impl Layouter {
                     extra -= squeeze_punctuation(text, &mut out.clusters[c0..], &mut out.glyphs[g0..]);
                 }
                 if justify_all {
-                    let slack = avail.unwrap_or(0.0) - (adv + extra);
+                    let slack = avail.unwrap_or(0.0) - (adv + extra - trim_adv - trim_kern);
                     let n = out.clusters.len() - c0;
                     if n > 1 && slack > 0.0 {
                         let step = slack / (n - 1) as f32;
@@ -1044,7 +1272,7 @@ impl Layouter {
                     range: map(lr.start)..map(lr.end).min(content_end),
                     baseline,
                     x0,
-                    x1: x0 + adv + extra - trailing_tabs,
+                    x1: x0 + adv + extra - trailing_tabs - trailing_growth,
                     ascent,
                     descent,
                     paragraph: pi,
@@ -1057,6 +1285,84 @@ impl Layouter {
         }
         out
     }
+}
+
+/// The shaped advance (px, letter spacing included) of the cluster starting each of `ranges`
+/// (sorted byte ranges of the shaped text), `None` where no cluster starts there.
+fn cluster_advances(layout: &Layout<RunBrush>, ranges: &[(Range<usize>, f32, f32, usize)]) -> Vec<Option<f32>> {
+    let mut out = vec![None; ranges.len()];
+    for line in layout.lines() {
+        for item in line.items() {
+            let PositionedLayoutItem::GlyphRun(gr) = item else {
+                continue;
+            };
+            for c in gr.run().visual_clusters() {
+                if let Ok(i) = ranges.binary_search_by_key(&c.text_range().start, |r| r.0.start)
+                    && let Some(slot) = out.get_mut(i)
+                {
+                    *slot = Some(c.advance());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A cluster consisting only of characters that may hang at the line's end with hanging
+/// punctuation on (Reference's Roman Hanging Punctuation).
+fn hang_cluster(text: &str) -> bool {
+    hang_weight(text) > 0.0
+}
+
+/// A cluster's hang weight: every character must be a hangable mark for it to hang at all, and
+/// the weakest mark governs: 1.0 hangs fully outside the margin, 0.5 hangs half, 0.0 doesn't.
+fn hang_weight(text: &str) -> f32 {
+    if text.is_empty() { 0.0 } else { text.chars().map(hang_mark).fold(1.0, f32::min) }
+}
+
+fn hang_mark(c: char) -> f32 {
+    match c {
+        // Reference's Help: quotes, apostrophes, hyphens, periods and commas hang 100%.
+        '.' | ',' | '-' | '\u{2010}' | '－' | '\'' | '"' | '‘' | '’' | '“' | '”' | '«' | '»' | '，' | '．' => 1.0,
+        // Colons, semicolons, ellipses and dashes hang 50%; `!` and `?` aren't in the list.
+        ':' | ';' | '…' | '–' | '—' | '：' | '；' => 0.5,
+        _ => 0.0,
+    }
+}
+
+/// Where the hanging run at the line's tail starts and ends: from the first slot after the last
+/// non-hang, non-blank cluster to the slot after the last non-blank one (a wrapped line ends
+/// with its breaking space, which doesn't count). `None` when nothing hangs there or when the
+/// whole line is marks (an all-mark line is the merge-back case, and its trim would fight it).
+fn hang_runs(slots: &[KernSlot]) -> Option<(usize, usize)> {
+    let tail = slots.iter().rposition(|s| !s.blank).map_or(0, |i| i + 1);
+    let mut end = tail;
+    while end > 0 && slots.get(end - 1).is_some_and(|s| s.hang_w > 0.0) {
+        end -= 1;
+    }
+    (end > 0 && end < tail).then_some((end, tail))
+}
+
+/// Hangul (syllables and jamo).
+fn is_hangul(c: char) -> bool {
+    matches!(c, '\u{1100}'..='\u{11FF}' | '\u{3130}'..='\u{318F}' | '\u{A960}'..='\u{A97F}' | '\u{AC00}'..='\u{D7AF}' | '\u{D7B0}'..='\u{D7FF}')
+}
+
+/// The byte ranges of `text` made of Hangul, each as long as it runs.
+pub(crate) fn hangul_runs(text: &str) -> Vec<Range<usize>> {
+    let mut runs: Vec<Range<usize>> = Vec::new();
+    for (i, c) in text.char_indices().filter(|&(_, c)| is_hangul(c)) {
+        match runs.last_mut() {
+            Some(r) if r.end == i => r.end = i + c.len_utf8(),
+            _ => runs.push(i..i + c.len_utf8()),
+        }
+    }
+    runs
+}
+
+/// A style's horizontal scale; unset (zero, negative or not finite) is 100%.
+fn effective_horizontal_scale(st: &CharStyle) -> f32 {
+    if st.horizontal_scale > 0.0 && st.horizontal_scale.is_finite() { st.horizontal_scale } else { 1.0 }
 }
 
 /// The first tab stop after `pos` (px from the anchor or box edge); stops are `interval` apart.
@@ -1160,6 +1466,8 @@ struct VMetrics<'a> {
     scale: f32,
     /// Em-box fallback origin (px below the cell top).
     em_origin: f32,
+    /// The font size (px).
+    size: f32,
 }
 
 impl<'a> VMetrics<'a> {
@@ -1178,7 +1486,15 @@ impl<'a> VMetrics<'a> {
             }
             None => (0.0, size * 0.88),
         };
-        Self { font, coords, scale, em_origin }
+        Self { font, coords, scale, em_origin, size }
+    }
+
+    /// The glyph's horizontal advance (px).
+    fn h_advance(&self, gid: u32) -> Option<f32> {
+        use skrifa::MetadataProvider;
+        let f = self.font.as_ref()?;
+        let a = f.glyph_metrics(skrifa::instance::Size::unscaled(), skrifa::instance::LocationRef::new(&self.coords)).advance_width(skrifa::GlyphId::new(gid))?;
+        Some(a * self.scale).filter(|a| a.is_finite())
     }
 
     fn cmap(&self, c: char) -> Option<u32> {
@@ -1189,6 +1505,14 @@ impl<'a> VMetrics<'a> {
     /// Distance from the top of an upright glyph's cell to its baseline (px).
     fn origin(&self, gid: u32) -> f32 {
         self.vertical_origin(gid).filter(|v| v.is_finite()).unwrap_or(self.em_origin)
+    }
+
+    /// [`Self::origin`] for a roman letter set upright: without the font's vertical metrics,
+    /// Reference stands it on the ideographic em box's baseline, 0.88 em below the cell top
+    /// (`vertical-latin-upright.psd`, Arial: its own ascent share, 0.81 em, sat 1.6 px high at
+    /// 24 px).
+    fn roman_origin(&self, gid: u32) -> f32 {
+        self.vertical_origin(gid).filter(|v| v.is_finite()).unwrap_or(self.size * IDEOGRAPHIC_BASELINE)
     }
 
     fn vertical_origin(&self, gid: u32) -> Option<f32> {

@@ -8,12 +8,15 @@ use std::sync::{Mutex, OnceLock};
 
 use photosplice_color::{PixelFormat, SampleType};
 use photosplice_doc::vector::ShapeLayer;
+use photosplice_doc::{Layer, LayerContent};
 use photosplice_geom::Rect;
 use photosplice_raster::Surface;
 
-/// (fill, stroke), last use, and the shape's pixels the stroke was fitted to (kept alive so
-/// their tile addresses, part of the key, can't be reused).
-type Entry = ((Surface, Surface), u64, Option<Surface>);
+use crate::shape_paint::ShapePatterns;
+
+/// (fill, stroke), last use, and the shape's pixels the stroke was fitted to and the patterns it
+/// paints with (kept alive so their tile addresses, part of the key, can't be reused).
+type Entry = ((Surface, Surface), u64, Option<Surface>, Vec<Surface>);
 
 fn cache() -> &'static Mutex<(HashMap<u64, Entry>, u64)> {
     static C: OnceLock<Mutex<(HashMap<u64, Entry>, u64)>> = OnceLock::new();
@@ -43,20 +46,32 @@ pub fn purge_cache() -> usize {
     bytes
 }
 
-/// (fill only, stroke only) of a stroked shape, rendered over `canvas` in RGBA at `depth`.
-/// `None` without a stroke. Where the shape's pixels
+/// (fill only, stroke only) of a stroked shape, rendered over `canvas` in RGBA at `depth`, pattern
+/// paint sampled from `patterns`. `None` without a stroke. Where the shape's pixels
 /// (Photoshop's rendering, `sh.cache`) reach past our fill, the part the fill doesn't explain is
 /// stroke: the stroke follows Photoshop's coverage (psd-tools double-stroke-effects).
-pub fn split(sh: &ShapeLayer, canvas: Rect, depth: SampleType) -> Option<(Surface, Surface)> {
+pub fn split(sh: &ShapeLayer, canvas: Rect, depth: SampleType, patterns: ShapePatterns<'_>) -> Option<(Surface, Surface)> {
     sh.stroke.as_ref()?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     (canvas.x0, canvas.y0, canvas.x1, canvas.y1).hash(&mut h);
     depth.hash(&mut h);
     format!("{:?}{:?}{:?}{:?}", sh.path, sh.fill, sh.stroke, sh.live).hash(&mut h);
-    if let Some(c) = &sh.cache {
-        format!("{:?}{:?}", c.format(), c.default_pixel()).hash(&mut h);
+    (sh.align_edges, sh.density.to_bits(), sh.feather.to_bits()).hash(&mut h);
+    let surface_id = |c: &Surface, h: &mut std::collections::hash_map::DefaultHasher| {
+        format!("{:?}{:?}", c.format(), c.default_pixel()).hash(h);
         for (k, t) in c.tiles() {
-            (k.tx, k.ty, std::sync::Arc::as_ptr(t) as usize).hash(&mut h);
+            (k.tx, k.ty, std::sync::Arc::as_ptr(t) as usize).hash(h);
+        }
+    };
+    if let Some(c) = &sh.cache {
+        surface_id(c, &mut h);
+    }
+    let used = patterns.used_by(sh);
+    if !used.is_empty() {
+        (patterns.mode, patterns.reference.map(|(x, y)| (x.to_bits(), y.to_bits()))).hash(&mut h);
+        for p in &used {
+            (&p.id, p.width, p.height).hash(&mut h);
+            surface_id(&p.surface, &mut h);
         }
     }
     let key = h.finish();
@@ -72,7 +87,8 @@ pub fn split(sh: &ShapeLayer, canvas: Rect, depth: SampleType) -> Option<(Surfac
     let fmt = PixelFormat::RGBA8.with_sample(depth);
     let fill_only = ShapeLayer { stroke: None, cache: None, ..sh.clone() };
     let stroke_only = ShapeLayer { fill: None, cache: None, ..sh.clone() };
-    let mut parts = (photosplice_vector::render_shape(&fill_only, fmt, canvas), photosplice_vector::render_shape(&stroke_only, fmt, canvas));
+    let render = |s: &ShapeLayer| crate::shape_paint::render_shape(s, fmt, canvas, patterns);
+    let mut parts = (render(&fill_only), render(&stroke_only));
     if let Some(cache) = &sh.cache {
         fit_stroke(&parts.0, &mut parts.1, cache, canvas);
     }
@@ -92,8 +108,25 @@ pub fn split(sh: &ShapeLayer, canvas: Rect, depth: SampleType) -> Option<(Surfac
         return Some(parts);
     }
     let tick = c.1;
-    c.0.insert(key, (parts.clone(), tick, sh.cache.clone()));
+    c.0.insert(key, (parts.clone(), tick, sh.cache.clone(), used.iter().map(|p| p.surface.clone()).collect()));
     Some(parts)
+}
+
+/// The stroke-only shape a Reference Frame's stroke draws: `Group::frame_stroke` along the
+/// group's enabled vector mask (the frame outline). `None` for other layers and for a frame
+/// without a visible stroke or a vector mask.
+pub fn frame_shape(layer: &Layer) -> Option<ShapeLayer> {
+    let LayerContent::Group(g) = &layer.content else { return None };
+    let stroke = g.frame_stroke.as_ref().filter(|s| s.width.is_finite() && s.width > 0.0 && s.opacity > 0.0)?;
+    let vm = layer.vector_mask.as_ref().filter(|m| m.enabled && !m.path.is_empty())?;
+    Some(ShapeLayer { path: vm.path.clone(), fill: None, stroke: Some(stroke.clone()), ..ShapeLayer::default() })
+}
+
+/// A Reference Frame's stroke ([`frame_shape`]) rendered over `canvas` in RGBA at `depth`, from
+/// the same cache as the shape strokes (a pattern stroke sampled from `patterns`, which carry
+/// the frame's effects reference point). It goes above the frame's (masked) content.
+pub fn frame_stroke(layer: &Layer, canvas: Rect, depth: SampleType, patterns: ShapePatterns<'_>) -> Option<Surface> {
+    split(&frame_shape(layer)?, canvas, depth, patterns).map(|(_, stroke)| stroke)
 }
 
 /// Fits the stroke part to the shape's own pixels: where they reach past the fill, the stroke
@@ -161,8 +194,11 @@ mod tests {
             fill: Some(Fill::Solid(Color::rgb(0.2, 0.4, 0.6))),
             stroke: Some(ShapeStroke { width: 6.0, ..ShapeStroke::default() }),
             live: None,
+            align_edges: false,
             cache: None,
             psd_raw: None,
+            density: 1.0,
+            feather: 0.0,
         }
     }
 
@@ -176,7 +212,7 @@ mod tests {
     fn split_cache_keeps_to_its_budget_and_purges() {
         let canvas = Rect::new(0, 0, 1024, 512);
         for i in 0..6 {
-            let parts = split(&shape(f64::from(i) * 10.0), canvas, SampleType::U8).expect("stroked");
+            let parts = split(&shape(f64::from(i) * 10.0), canvas, SampleType::U8, ShapePatterns::NONE).expect("stroked");
             assert!(entry_bytes(&parts) > 0);
             assert!(held() <= BUDGET, "shape {i}: {} bytes held", held());
         }

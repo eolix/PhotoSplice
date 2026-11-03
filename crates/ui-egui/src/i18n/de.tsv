@@ -3175,3 +3175,5 @@ curves	Smooth	Glätten
 	This document's layers: {needed} of {budget} for layers	Ebenen dieses Dokuments: {needed} von {budget} für Ebenen
 	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	Die Ebenen dieses Dokuments brauchen {needed}, dürfen aber {budget} belegen: Das ganze Dokument wird auf der CPU neu gezeichnet
 	GPU Memory (MB, 0 = Automatic)	GPU-Speicher (MB, 0 = Automatisch)
+	Automatic (Coated FOGRA39 if installed)	Automatisch (Coated FOGRA39, falls installiert)
+	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (integriert)

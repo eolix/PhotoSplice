@@ -198,6 +198,10 @@ pub fn bake(stops: Vec<(f32, Color)>, midpoints: &[f32], smoothness: f32, method
     // Classic interpolates in the stops' own model: Lab stops (Lab documents) blend in L*a*b*, which the
     // compositors' sRGB interpolation can't reproduce (psd-tools 4x4_16bit_lab).
     let lab = method == Method::Classic && stops.iter().all(|(_, c)| c.mode == ColorMode::Lab);
+    // Gray stops (Grayscale and Duotone documents) stay gray: written back as RGB, Reference takes
+    // them through the document's gray profile (psd-tools 4x4_8bit_grayscale saved by us: every
+    // pixel 22/255 darker).
+    let gray = !lab && stops.iter().all(|(_, c)| c.mode == ColorMode::Grayscale);
     if stops.len() < 2 || (smoothness <= 0.0 && method == Method::Classic && plain_mids && !lab) {
         return stops;
     }
@@ -218,6 +222,9 @@ pub fn bake(stops: Vec<(f32, Color)>, midpoints: &[f32], smoothness: f32, method
                 return (t, Color { mode: ColorMode::Lab, c: [v[0].clamp(0.0, 1.0), v[1].clamp(0.0, 1.0), v[2].clamp(0.0, 1.0), 0.0], alpha: alpha(t) });
             }
             let rgb = out_of_space(method, v);
+            if gray {
+                return (t, Color { mode: ColorMode::Grayscale, c: [rgb[0].clamp(0.0, 1.0), 0.0, 0.0, 0.0], alpha: alpha(t) });
+            }
             (t, Color::rgba(rgb[0], rgb[1], rgb[2], alpha(t)))
         })
         .collect();
@@ -225,9 +232,116 @@ pub fn bake(stops: Vec<(f32, Color)>, midpoints: &[f32], smoothness: f32, method
     out
 }
 
+/// Exponent of Reference's opacity response for Perceptual and Linear gradients: the opacity
+/// stops enter the method's space as if they were sRGB grey levels (Linear: linear light;
+/// Perceptual: Oklab L), and the interpolated linear-light value `y` comes out as opacity
+/// `y^0.65`. Fitted upstream on Reference 25.1 (scripted Gradient Overlays and gradient fill
+/// layers, which render identical pixels: 100 → 0 % and 100 → 20 → 90 % ramps with Smoothness 0
+/// and 100 and midpoints 25 and 50 %, within 0.015 of every 8-bit sample; a flat 60 % renders as
+/// 47 %) (storytold/photocraft@1ce9a87b).
+const OPACITY_RESPONSE: f32 = 0.65;
+
+/// Dense linear opacity stops reproducing Reference's interpolation of a gradient's transparency
+/// (Smoothness, opacity midpoints and the method, see [`OPACITY_RESPONSE`]). Returns the input
+/// unchanged when it already interpolates linearly. Smooth keeps Classic's opacity curve (its
+/// colour easing [`SMOOTH_EASE`] was measured on colours only).
+pub fn bake_opacity(stops: Vec<(f32, f32)>, midpoints: &[f32], smoothness: f32, method: Method) -> Vec<(f32, f32)> {
+    let method = if method == Method::Smooth { Method::Classic } else { method };
+    let plain_mids = midpoints.iter().all(|m| (m - 0.5).abs() < 1e-3);
+    let smoothness = if smoothness.is_finite() { smoothness.clamp(0.0, 1.0) } else { 0.0 };
+    if stops.len() < 2 || (smoothness <= 0.0 && method == Method::Classic && plain_mids) {
+        return stops;
+    }
+    let into = |o: f32| -> f32 {
+        let o = if o.is_finite() { o.clamp(0.0, 1.0) } else { 1.0 };
+        match method {
+            Method::Linear => lin(o),
+            Method::Perceptual => lin(o).cbrt(),
+            Method::Classic | Method::Smooth => o,
+        }
+    };
+    let out = |v: f32| -> f32 {
+        let v = if v.is_finite() { v } else { 1.0 };
+        let y = match method {
+            Method::Linear => v,
+            Method::Perceptual => v.max(0.0).powi(3),
+            Method::Classic | Method::Smooth => return v.clamp(0.0, 1.0),
+        };
+        y.clamp(0.0, 1.0).powf(OPACITY_RESPONSE)
+    };
+    let mut s = stops;
+    s.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let pts: Vec<(f32, [f32; 3])> = s.iter().map(|(t, o)| (*t, [into(*o); 3])).collect();
+    const N: usize = 96;
+    let mut baked: Vec<(f32, f32)> = (0..=N)
+        .map(|k| {
+            let t = k as f32 / N as f32;
+            // Smoothness and midpoints shape the curve as for Classic colours, in the method's space.
+            (t, out(eval(&pts, midpoints, smoothness, t, Method::Classic)[0]))
+        })
+        .collect();
+    baked.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-6);
+    baked
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn opacity_at(stops: &[(f32, f32)], t: f32) -> f32 {
+        let i = stops.windows(2).position(|w| t >= w[0].0 && t <= w[1].0).unwrap();
+        let (a, b) = (stops[i], stops[i + 1]);
+        a.1 + (b.1 - a.1) * (t - a.0) / (b.0 - a.0)
+    }
+
+    /// Reference 25.1 Gradient Overlay samples (black, Normal, over white; a 256 px wide linear
+    /// gradient, pixel `x` at t = (x + 0.5) / 256): opacity stops, midpoints, Smoothness, method,
+    /// and (x, opacity) pairs read from the composite (storytold/photocraft@1ce9a87b).
+    #[test]
+    fn opacity_matches_reference_samples() {
+        type Case = (&'static [(f32, f32)], &'static [f32], f32, Method, &'static [(f32, f32)]);
+        let ramp: &[(f32, f32)] = &[(0.0, 1.0), (1.0, 0.0)];
+        let three: &[(f32, f32)] = &[(0.0, 1.0), (0.25, 0.2), (1.0, 0.9)];
+        let cases: [Case; 9] = [
+            (ramp, &[0.5], 0.0, Method::Linear, &[(64.0, 0.827), (128.0, 0.631), (192.0, 0.400)]),
+            (ramp, &[0.5], 0.0, Method::Perceptual, &[(64.0, 0.565), (128.0, 0.255), (192.0, 0.063)]),
+            (ramp, &[0.25], 1.0, Method::Classic, &[(32.0, 0.796), (64.0, 0.502), (128.0, 0.298), (192.0, 0.122)]),
+            (ramp, &[0.25], 1.0, Method::Linear, &[(32.0, 0.859), (64.0, 0.631), (128.0, 0.447), (192.0, 0.247)]),
+            (ramp, &[0.25], 1.0, Method::Perceptual, &[(32.0, 0.639), (64.0, 0.255), (128.0, 0.090), (192.0, 0.016)]),
+            (ramp, &[0.5], 1.0, Method::Classic, &[(64.0, 0.796), (128.0, 0.502), (192.0, 0.204)]),
+            (three, &[0.5, 0.5], 1.0, Method::Classic, &[(32.0, 0.557), (64.0, 0.200), (160.0, 0.502)]),
+            (three, &[0.5, 0.5], 1.0, Method::Perceptual, &[(32.0, 0.392), (64.0, 0.106), (160.0, 0.341)]),
+            (three, &[0.5, 0.5], 0.0, Method::Linear, &[(32.0, 0.647), (64.0, 0.106), (160.0, 0.557)]),
+        ];
+        for (stops, mids, smooth, m, samples) in cases {
+            let baked = bake_opacity(stops.to_vec(), mids, smooth, m);
+            for (x, want) in samples {
+                let got = opacity_at(&baked, (x + 0.5) / 256.0);
+                assert!((got - want).abs() < 0.015, "{m:?} smooth {smooth} mids {mids:?} x {x}: {got} vs Reference {want}");
+            }
+        }
+        // A flat 60 % renders as 47 % in Linear and Perceptual, 60 % in Classic.
+        for (m, want) in [(Method::Linear, 0.471), (Method::Perceptual, 0.471)] {
+            let baked = bake_opacity(vec![(0.0, 0.6), (1.0, 0.6)], &[0.5], 0.0, m);
+            assert!(baked.iter().all(|o| (o.1 - want).abs() < 0.01), "{m:?}: {baked:?}");
+        }
+    }
+
+    #[test]
+    fn plain_classic_and_smooth_opacity_stay_as_stored() {
+        let stops = vec![(1.0, 0.0), (0.0, 1.0)];
+        assert_eq!(bake_opacity(stops.clone(), &[0.5], 0.0, Method::Classic), stops);
+        assert_eq!(bake_opacity(stops.clone(), &[0.5], 0.0, Method::Smooth), stops);
+        assert_eq!(bake_opacity(vec![(0.5, 0.3)], &[], 1.0, Method::Linear), vec![(0.5, 0.3)]);
+    }
+
+    #[test]
+    fn opacity_bake_survives_hostile_values() {
+        for m in [Method::Classic, Method::Perceptual, Method::Linear, Method::Smooth] {
+            let baked = bake_opacity(vec![(f32::NAN, f32::INFINITY), (1.0, f32::NAN), (0.5, -3.0)], &[f32::NAN, 2.0], f32::NAN, m);
+            assert!(baked.iter().all(|o| (0.0..=1.0).contains(&o.1)), "{m:?}: {baked:?}");
+        }
+    }
 
     fn at(stops: &[(f32, Color)], t: f32) -> [f32; 3] {
         let i = stops.windows(2).position(|w| t >= w[0].0 && t <= w[1].0).unwrap();
@@ -341,6 +455,18 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Gray stops bake to gray stops (Grayscale and Duotone documents write them back as gray).
+    #[test]
+    fn gray_stops_stay_gray() {
+        let s = bake(vec![(0.0, Color::gray(0.2)), (1.0, Color::gray(0.9))], &[0.5], 1.0, Method::Classic);
+        assert!(s.len() > 2 && s.iter().all(|(_, c)| c.mode == ColorMode::Grayscale), "{s:?}");
+        let mid = s.iter().find(|(t, _)| (t - 0.5).abs() < 1e-6).map(|(_, c)| c.c[0]).unwrap();
+        assert!((mid - 0.55).abs() < 1e-3, "{mid}");
+        // Mixed with an RGB stop, they bake to RGB as before.
+        let mixed = bake(vec![(0.0, Color::gray(0.2)), (1.0, Color::rgb(1.0, 0.0, 0.0))], &[0.5], 1.0, Method::Classic);
+        assert!(mixed.iter().all(|(_, c)| c.mode == ColorMode::Rgb));
     }
 
     #[test]

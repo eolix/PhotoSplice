@@ -186,7 +186,7 @@ pub(crate) fn refresh(doc: &mut Document, what: Refresh) {
         for l in layers {
             match &mut l.content {
                 LayerContent::Group(g) => rec(snapshot, &mut g.children, what),
-                LayerContent::Shape(sh) => crate::vector_cmds::refresh_shape(snapshot, sh),
+                LayerContent::Shape(sh) => crate::vector_cmds::refresh_shape(snapshot, l.effects.reference, sh),
                 LayerContent::Text(t) if what == Refresh::All => crate::type_cmds::refresh_geometry(snapshot, t),
                 LayerContent::Smart(_) if what == Refresh::All => {
                     let _ = crate::smart_cmds::refresh_layer(snapshot, l);

@@ -253,33 +253,38 @@ pub(crate) fn decode_comps(resource: Option<&[u8]>, doc: &Document) -> (Vec<Laye
     for (_, _, l) in doc.walk() {
         let Some(settings) = layer_cmls(l).and_then(|c| parse_cmls(&c)) else { continue };
         let here = layer_position(l);
+        // Reference writes `enab` only where the layer's visibility changes from one comp to the
+        // next: a comp's entry without it has the last `enab` before it, or visible when none
+        // came before (storytold/photocraft#8093). Only comps that capture visibility take that
+        // inherited value; the Last Document State entry (comp 0) and the others keep what the
+        // entry says.
+        let mut inherited = true;
         for s in settings {
-            if s.visible.is_none() && s.offset.is_none() && s.appearance.is_none() {
-                continue;
+            let resolved = s.visible.unwrap_or(inherited);
+            if s.comps.iter().any(|id| *id != 0) {
+                inherited = resolved;
             }
-            let state = CompLayerState {
-                layer: l.id,
-                visible: s.visible,
-                position: match (here, s.offset) {
-                    (Some(h), Some(o)) => {
-                        let p = offset_position(h, o);
-                        if p.is_none() {
-                            warnings.push(format!(
-                                "layer \"{}\": layer comp position offset ({}, {}) is out of range; that position was not imported",
-                                l.name, o.0, o.1
-                            ));
-                        }
-                        p
+            let position = match (here, s.offset) {
+                (Some(h), Some(o)) => {
+                    let p = offset_position(h, o);
+                    if p.is_none() {
+                        warnings.push(format!(
+                            "layer \"{}\": layer comp position offset ({}, {}) is out of range; that position was not imported",
+                            l.name, o.0, o.1
+                        ));
                     }
-                    _ => None,
-                },
-                appearance: s.appearance.clone(),
+                    p
+                }
+                _ => None,
             };
             for id in &s.comps {
                 let target = if *id == 0 { Some(&mut last) } else { comps.iter_mut().find(|c| c.id == *id) };
-                if let Some(c) = target {
-                    c.states.push(state.clone());
+                let Some(c) = target else { continue };
+                let visible = if *id != 0 && c.apply_visibility { Some(resolved) } else { s.visible };
+                if visible.is_none() && s.offset.is_none() && s.appearance.is_none() {
+                    continue;
                 }
+                c.states.push(CompLayerState { layer: l.id, visible, position, appearance: s.appearance.clone() });
             }
         }
     }
@@ -503,6 +508,36 @@ mod tests {
         let comp = Descriptor::new("Comp").with("Nm  ", Value::Text(nul_name())).with("compID", Value::Integer(1)).with("capturedInfo", Value::Integer(3));
         let res = VersionedDescriptor::new(Descriptor::new("CompList").with("list", Value::List(vec![Value::Descriptor(comp)]))).to_bytes();
         (d, lid, res)
+    }
+
+    /// storytold/photocraft#8093: Reference writes `enab` only where a layer's visibility changes
+    /// from one comp to the next; an entry without it has the previous comp's visibility.
+    #[test]
+    fn a_comp_entry_without_enab_inherits_the_previous_visibility() {
+        let mut d = Document::with_background("t", Size::new(32, 32), ColorMode::Rgb, SampleType::U8, Color::WHITE);
+        let mut l = Layer::raster("A", PixelFormat::RGBA8);
+        l.surface_mut().unwrap().fill_rect(Rect::new(4, 4, 8, 8), &[1.0, 0.0, 0.0, 1.0]);
+        let setting = |enab: Option<bool>, id: i32| {
+            let s = obj("null");
+            let s = if let Some(v) = enab { s.with("enab", Value::Boolean(v)) } else { s };
+            Value::Descriptor(s.with("compList", Value::List(vec![Value::Integer(id)])))
+        };
+        let settings = vec![setting(Some(false), 1), setting(None, 2), setting(Some(true), 3), setting(None, 4), setting(None, 0)];
+        let cmls = VersionedDescriptor::new(Descriptor::new("null").with("layerSettings", Value::List(settings))).to_bytes();
+        l.psd_blocks = vec![(*b"shmd", std::sync::Arc::new(write_shmd(&[MetadataItem::new(*b"cmls", cmls)])))];
+        let lid = l.id;
+        d.layers.push(l);
+        let comp = |id: i32| {
+            Value::Descriptor(
+                Descriptor::new("Comp").with("Nm  ", Value::Text(nul_name())).with("compID", Value::Integer(id)).with("capturedInfo", Value::Integer(1)),
+            )
+        };
+        let res = VersionedDescriptor::new(Descriptor::new("CompList").with("list", Value::List((1..=4).map(comp).collect()))).to_bytes();
+        let (comps, _, last, _) = decode_comps(Some(&res), &d);
+        let visible: Vec<Option<bool>> = comps.iter().map(|c| c.state(lid).and_then(|s| s.visible)).collect();
+        assert_eq!(visible, [Some(false), Some(false), Some(true), Some(true)]);
+        // The Last Document State entry keeps what it says (nothing).
+        assert_eq!(last, None);
     }
 
     #[test]

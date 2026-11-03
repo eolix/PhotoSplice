@@ -3789,3 +3789,5 @@ curves	Smooth	Згладити
 	This document's layers: {needed} of {budget} for layers	Шари цього документа: {needed} з {budget} для шарів
 	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	Шарам цього документа потрібно {needed}, але займати вони можуть {budget}: увесь документ перемальовується на CPU
 	GPU Memory (MB, 0 = Automatic)	Пам'ять GPU (МБ, 0 = автоматично)
+	Automatic (Coated FOGRA39 if installed)	Автоматично (Coated FOGRA39, якщо встановлено)
+	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (вбудований)

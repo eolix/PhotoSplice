@@ -754,6 +754,24 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                         Vec::new()
                     };
                     opts.extend(installed.iter().map(|i| (i.path.clone(), i.description.as_str())));
+                    // Color Settings › Working CMYK: Automatic, the built-in profile and every
+                    // installed CMYK profile, by description.
+                    let working_cmyk = cmd == "edit.colorSettings" && p.key == "workingCmyk";
+                    let cmyk_profiles: Vec<_> = if working_cmyk {
+                        photosplice_engine::installed_profiles::installed()
+                            .into_iter()
+                            .filter(|i| i.color_space == photosplice_cms::ColorSpace::Cmyk && i.is_destination())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    if working_cmyk {
+                        opts = vec![
+                            ("auto".to_string(), "Automatic (Coated FOGRA39 if installed)"),
+                            ("coated-cmyk".to_string(), "PhotoSplice Coated CMYK (built-in)"),
+                        ];
+                        opts.extend(cmyk_profiles.iter().map(|i| (i.path.clone(), i.description.as_str())));
+                    }
                     // Assign Profile: only what the document's colour mode can take (#4951).
                     if p.key == "profile"
                         && let Some(allowed) = f.get("__profiles").and_then(Value::as_array)
@@ -763,7 +781,8 @@ pub fn body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                     // A profile given by path that isn't listed (typed by an agent, or spelled with
                     // different case) still shows, by its file name, instead of a blank menu.
                     let stem = std::path::Path::new(&cur).file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                    if p.key == "profile" && PROFILE_DIALOGS.contains(&cmd.as_str()) && !opts.iter().any(|(v, _)| *v == cur) {
+                    let profile_menu = p.key == "profile" && PROFILE_DIALOGS.contains(&cmd.as_str()) || working_cmyk;
+                    if profile_menu && !opts.iter().any(|(v, _)| *v == cur) {
                         opts.push((cur.clone(), stem.as_str()));
                     }
                     crate::widgets::dropdown(ui, &format!("flt-{cmd}-{}", p.key), &mut cur, &opts, 170.0);

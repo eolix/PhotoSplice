@@ -879,6 +879,37 @@ pub fn kind_of(e: &Effect) -> &'static str {
 fn same_kind(a: &Effect, b: &Effect) -> bool {
     std::mem::discriminant(a) == std::mem::discriminant(b)
 }
+
+/// The gradient an effect paints with, if any.
+fn gradient_mut(e: &mut Effect) -> Option<&mut Gradient> {
+    match e {
+        Effect::GradientOverlay { gradient, .. } => Some(gradient),
+        Effect::Stroke(StrokeFx { paint: FxPaint::Gradient(g), .. })
+        | Effect::OuterGlow(Glow { paint: FxPaint::Gradient(g), .. })
+        | Effect::InnerGlow(Glow { paint: FxPaint::Gradient(g), .. }) => Some(g),
+        _ => None,
+    }
+}
+
+/// Gives `new` the file definition of the gradient `old` painted with (JSON snapshots and
+/// params don't carry it): the PSD writer writes that definition while it still gives `new`'s
+/// stops, else the stops, so an unchanged gradient stays as Reference defined it.
+fn keep_gradient_source(old: &Effect, new: &mut Effect) {
+    let src = match old {
+        Effect::GradientOverlay { gradient, .. } => gradient.source.as_ref(),
+        Effect::Stroke(StrokeFx { paint: FxPaint::Gradient(g), .. })
+        | Effect::OuterGlow(Glow { paint: FxPaint::Gradient(g), .. })
+        | Effect::InnerGlow(Glow { paint: FxPaint::Gradient(g), .. }) => g.source.as_ref(),
+        _ => None,
+    };
+    if let Some(src) = src.filter(|_| same_kind(old, new))
+        && let Some(g) = gradient_mut(new)
+        && g.source.is_none()
+    {
+        g.source = Some(src.clone());
+    }
+}
+
 /// Upper bound on the effects one `layer.layerStyle.replace` call accepts, so an
 /// automation mistake can't ask for an unbounded document change.
 const MAX_EFFECTS: usize = 256;
@@ -932,7 +963,17 @@ fn replace_effects(s: &mut Session, p: &Value) -> Result<Value> {
         // The list's master switch (`layer.setEffectsVisible`, the Layers panel's "Effects" eye)
         // survives the edit: the dialog models per-effect state, not the switch (#3648). A layer
         // with no effects yet still has the default `enabled: true`, so its style shows.
-        l.effects.items = list.into_iter().map(|e| e.in_mode(mode)).collect();
+        let mut list: Vec<Effect> = list.into_iter().map(|e| e.in_mode(mode)).collect();
+        // The n-th effect of a kind takes over the gradient definition of the one it replaces.
+        for i in 0..list.len() {
+            let Some(e) = list.get(i) else { continue };
+            let n = list.iter().take(i).filter(|x| same_kind(x, e)).count();
+            let old = l.effects.items.iter().filter(|x| same_kind(x, e)).nth(n);
+            if let (Some(old), Some(e)) = (old, list.get_mut(i)) {
+                keep_gradient_source(old, e);
+            }
+        }
+        l.effects.items = list;
         Ok(())
     })?;
     Ok(json!({ "layer": id.0, "effects": count }))
@@ -954,7 +995,11 @@ fn set_effect(s: &mut Session, p: &Value, kind: &str) -> Result<Value> {
         // Adding or replacing one effect leaves the list's master switch alone (#3648); a fresh
         // effects list already has the default `enabled: true`, so a first effect still shows.
         match l.effects.items.iter_mut().find(|e| same_kind(e, &fx)) {
-            Some(slot) if !add => *slot = fx,
+            Some(slot) if !add => {
+                let mut fx = fx;
+                keep_gradient_source(slot, &mut fx);
+                *slot = fx;
+            }
             _ => l.effects.items.push(fx),
         }
         Ok(())
@@ -1616,5 +1661,42 @@ mod tests {
         let entries: Vec<Value> = items.iter().map(|fx| json!({"kind": "stroke", "fx": serde_json::to_value(fx).unwrap(), "params": {}})).collect();
         s.execute("layer.layerStyle.replace", json!({"layer": id.0, "effects": entries})).unwrap();
         assert_eq!(px(&mut s, 24, 14), before, "both strokes render identically after the round trip");
+    }
+
+    /// The Layer Style dialog's OK goes through JSON snapshots, which don't carry a gradient's
+    /// file definition: each effect keeps the one of the effect it replaces (the PSD writer
+    /// writes it while it still gives the stops).
+    #[test]
+    fn replacing_effects_keeps_their_gradient_definition() {
+        let mut s = session();
+        let overlay = Effect::GradientOverlay { common: FxCommon::new(BlendMode::Normal, 1.0), gradient: Gradient::default(), dither: false };
+        s.execute("layer.layerStyle.replace", json!({"effects": [{"kind": "gradientOverlay", "fx": snapshot(&overlay)}]})).unwrap();
+        let src = photosplice_doc::GradientSource { name: "Oracle".into(), smoothness: 1.0, ..Default::default() };
+        let id = s.active().unwrap().active_layer.unwrap();
+        s.edit("t", |doc, _| {
+            if let Some(Effect::GradientOverlay { gradient, .. }) = doc.layer_mut(id).and_then(|l| l.effects.items.first_mut()) {
+                gradient.source = Some(Box::new(src.clone()));
+            }
+            Ok(())
+        })
+        .unwrap();
+        let source = |s: &Session| match effects(s).first() {
+            Some(Effect::GradientOverlay { gradient, .. }) => gradient.source.as_deref().map(|g| g.name.clone()),
+            _ => None,
+        };
+        let fx = snapshot(&effects(&s)[0]);
+        s.execute("layer.layerStyle.replace", json!({"effects": [{"kind": "gradientOverlay", "fx": fx, "params": {"opacity": 50}}]})).unwrap();
+        assert_eq!(source(&s).as_deref(), Some("Oracle"), "the dialog's OK");
+        s.execute("layer.layerStyle.gradientOverlay", json!({"opacity": 40})).unwrap();
+        assert_eq!(source(&s).as_deref(), Some("Oracle"), "one effect's command");
+        // A different kind takes nothing.
+        let mut stroke = Effect::Stroke(StrokeFx {
+            common: FxCommon::new(BlendMode::Normal, 1.0),
+            size: 3.0,
+            position: StrokePosition::Outside,
+            paint: FxPaint::Gradient(Gradient::default()),
+        });
+        keep_gradient_source(&effects(&s)[0], &mut stroke);
+        assert!(matches!(&stroke, Effect::Stroke(StrokeFx { paint: FxPaint::Gradient(g), .. }) if g.source.is_none()));
     }
 }

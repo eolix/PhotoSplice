@@ -324,6 +324,12 @@ impl<'a> DocCtx<'a> {
             doc,
         }
     }
+
+    /// The patterns `layer`'s shape paint samples (`compose::shape_paint`), for the shape parts
+    /// the CPU rasterises.
+    pub fn shape_patterns(&self, layer: &Layer) -> photosplice_compose::shape_paint::ShapePatterns<'a> {
+        photosplice_compose::shape_paint::ShapePatterns { patterns: self.patterns, mode: self.mode, reference: layer.effects.reference }
+    }
 }
 
 /// Build the pass list for `doc`.
@@ -456,7 +462,8 @@ pub const F_QUANT: u32 = 32768;
 /// `Lerp` as A + (B − C) premultiplied (layers clipped to pass-through groups).
 pub const F_ADD_DIFF: u32 = 16384;
 /// `Lerp`: B mixed back towards A (the backdrop) by the layer's Blend If weight
-/// (`compose::apply_blend_if`), from C ("This Layer", or B itself for an adjustment layer, `p4.y`)
+/// (`compose::apply_blend_if`), from C ("This Layer": an adjustment layer's unmixed result; B when
+/// `p4.y` is set)
 /// and A ("Underlying Layer"). The ranges are packed in `p0..p3` (`blend_if_params`); `p4.x` marks
 /// a one-channel document.
 pub const F_BLEND_IF: u32 = 524288;
@@ -608,13 +615,19 @@ impl<'a> Planner<'a> {
 
     /// `compose::apply_blend_if`: `after` (the backdrop with `layer` drawn) mixed back towards
     /// `before` (the backdrop without it) where the layer's Blend If ranges hide it. "This Layer"
-    /// is the layer's own content with its masks; an adjustment layer is judged by its result.
-    /// Consumes both slots.
+    /// is the layer's own content with its masks; an adjustment layer is judged by its result at
+    /// full strength, before Opacity and its mask. Consumes both slots.
     fn blend_if(&mut self, layer: &'a Layer, before: Slot, after: Slot) -> Result<Slot, Unsupported> {
-        let own = match layer.content {
-            LayerContent::Adjustment(_) => None,
-            _ => Some(self.content(layer)?),
+        // An adjustment layer is judged by its result at full strength, before Opacity and its
+        // mask (compose::apply_blend_if).
+        let own = match &layer.content {
+            LayerContent::Adjustment(adj) => {
+                let b = self.retain(before);
+                self.adjust(adj, b)?
+            }
+            _ => self.content(layer)?,
         };
+        let own = Some(own);
         let mut p = Pass::new(Kernel::Lerp, 0);
         p.a = Some(before);
         p.b = Some(after);
@@ -722,11 +735,13 @@ impl<'a> Planner<'a> {
         let opacity = layer.opacity * layer.fill_opacity;
         let visible_clipped: Vec<&'a Layer> = clipped.iter().filter(|c| c.visible).collect();
 
-        // Below 100% fill a pass-through group renders isolated (as the CPU compositor does).
+        // Below 100% fill a pass-through group renders isolated (as the CPU compositor does), and
+        // so does one with Blend If.
         if let LayerContent::Group(g) = &layer.content
             && layer.blend == BlendMode::PassThrough
             && layer.fill_opacity >= 1.0
             && !has_effects(layer)
+            && !photosplice_compose::blend_if_active(layer, self.cx.mode)
         {
             // Clipped to, its adjustments reach only its own content while its blend modes still
             // reach below (the CPU compositor's pass-through path): composited on the CPU, not
@@ -742,6 +757,15 @@ impl<'a> Planner<'a> {
                 p.b = Some(after);
                 p.opacity = opacity;
                 p.mask = self.mask_use(layer);
+                after = self.emit(p);
+            }
+            // A Frame's stroke over the frame's content, at the group's opacity (compose).
+            if let Some(stroke) = photosplice_compose::shape_split::frame_stroke(layer, self.cx.canvas, self.cx.depth, self.cx.shape_patterns(layer)) {
+                let stroke = self.shape_part(layer, Role::Stroke, stroke);
+                let mut p = Pass::new(Kernel::Blend, 0);
+                p.a = Some(after);
+                p.b = Some(stroke);
+                p.opacity = opacity;
                 after = self.emit(p);
             }
             if visible_clipped.is_empty() {
@@ -785,7 +809,8 @@ impl<'a> Planner<'a> {
             p.a = Some(before);
             p.b = Some(adjusted);
             p.mode = layer.blend;
-            p.opacity = opacity;
+            // The special eight take Fill inside the blend (compose::adjustment_fill).
+            (p.opacity, p.fill) = photosplice_compose::adjustment_fill(layer);
             p.mask = self.mask_use(layer);
             return Ok(self.emit(p));
         }
@@ -796,7 +821,7 @@ impl<'a> Planner<'a> {
 
         if let LayerContent::Shape(sh) = &layer.content
             && !visible_clipped.is_empty()
-            && let Some((fill, stroke)) = photosplice_compose::shape_split::split(sh, self.cx.canvas, self.cx.depth)
+            && let Some((fill, stroke)) = photosplice_compose::shape_split::split(sh, self.cx.canvas, self.cx.depth, self.cx.shape_patterns(layer))
         {
             // The vector stroke goes above the clipped layers: the fill is the clipping base,
             // the stroke is laid over the clipped result, then the masks apply to both
@@ -909,24 +934,32 @@ impl<'a> Planner<'a> {
         match &layer.content {
             LayerContent::Group(g) => {
                 let empty = self.clear();
-                let s = self.stack(&g.children, empty)?;
+                let mut s = self.stack(&g.children, empty)?;
                 if layer.mask.is_some() || layer.vector_mask.is_some() {
                     let mut p = Pass::new(Kernel::Mask, 0);
                     p.a = Some(s);
                     p.mask = self.mask_use(layer);
-                    return Ok(self.emit(p));
+                    s = self.emit(p);
+                }
+                // A Frame's stroke over its masked content (compose::render_content).
+                if let Some(stroke) = photosplice_compose::shape_split::frame_stroke(layer, self.cx.canvas, self.cx.depth, self.cx.shape_patterns(layer)) {
+                    let stroke = self.shape_part(layer, Role::Stroke, stroke);
+                    let mut p = Pass::new(Kernel::Blend, 0);
+                    p.a = Some(s);
+                    p.b = Some(stroke);
+                    s = self.emit(p);
                 }
                 Ok(s)
             }
             // Adjustments are handled by the caller and never get here.
             LayerContent::Adjustment(_) => Err(Unsupported("adjustment layer reached the content planner".into())),
             LayerContent::Fill(f @ Fill::Pattern { name, scale, id, angle, link, phase }) if layer.fill_cache.as_ref().is_none_or(|c| c.fill != *f) => {
-                // compose::render_fill: the pattern tiled from the layer's frame (transparent
-                // when missing), then the layer's masks.
+                // compose::render_fill: the pattern tiled from the layer's reference point or
+                // frame (transparent when missing), then the layer's masks.
                 let empty = self.clear();
                 let Some(pat) = photosplice_doc::pattern::find(self.cx.patterns, id, name).filter(|p| p.is_paintable()) else { return Ok(empty) };
                 let frame = photosplice_compose::fill_frame(layer, self.cx.canvas);
-                let anchor = if frame.is_empty() { (0.0, 0.0) } else { (f64::from(frame.x0), f64::from(frame.y0)) };
+                let anchor = photosplice_compose::fill_pattern_anchor(layer, frame);
                 let paint = Paint::Pattern(pat, placement(anchor, *link, *phase, *scale, *angle));
                 let canvas = self.cx.canvas;
                 let s = self.paint(empty, empty, Cov::One, &paint, BlendMode::Normal, 1.0, 0, canvas, canvas);
@@ -996,14 +1029,8 @@ impl<'a> Planner<'a> {
                 let quantum = photosplice_compose::adjustment_quantum(self.cx.depth).unwrap_or(0.0);
                 p.params[2] = [offset.0, offset.1, quantum, if *dither { 1.0 } else { 0.0 }];
                 let ramp = photosplice_compose::gradient_fill::Ramp::new(f);
-                let mut rows = vec![[0.0f32; 4096]; 4];
-                for k in 0..4096 {
-                    let v = ramp.as_ref().map_or([0.0; 4], |r| r.sample(k as f32 / 4095.0));
-                    for (ch, row) in rows.iter_mut().enumerate() {
-                        row[k] = v[ch];
-                    }
-                }
-                p.lut = Some(rows);
+                let per_location = per_location_ramp(stops) && (opacity_stops.is_empty() || per_location_ramp(opacity_stops));
+                p.lut = Some(ramp_rows(|t| ramp.as_ref().map_or([0.0; 4], |r| r.sample(t)), per_location));
             }
             // Pattern fills fall back to the CPU compositor (see `check`).
             Fill::Pattern { .. } => {}
@@ -1027,7 +1054,8 @@ impl<'a> Planner<'a> {
             p.a = Some(before);
             p.b = Some(adjusted);
             p.mode = layer.blend;
-            p.opacity = opacity;
+            // The special eight take Fill inside the blend (compose::adjustment_fill).
+            (p.opacity, p.fill) = photosplice_compose::adjustment_fill(layer);
             p.mask = self.mask_use(layer);
             return Ok(self.emit(p));
         }
@@ -1061,6 +1089,10 @@ impl<'a> Planner<'a> {
         if kind == 8 && self.cx.mode == photosplice_color::ColorMode::Cmyk {
             params[1][2] = 0.0;
         }
+        // p0.w: continue the curve past 0..1 (32-bit RGB Curves, compose::adjust::float_tone_extrapolates).
+        if kind == 7 && adjust::float_tone_extrapolates(adj, Some(self.cx.depth), self.cx.mode) {
+            params[0][3] = 1.0;
+        }
         p.adjust_kind = kind;
         p.params = params;
         p.lut = lut;
@@ -1078,7 +1110,7 @@ impl<'a> Planner<'a> {
         // A stroked shape's vector stroke goes above its clipped layers and interior effects
         // (compose::split_parts): the fill and the stroke unmasked, the masks applied after.
         let split = match &layer.content {
-            LayerContent::Shape(sh) if sh.stroke.is_some() => photosplice_compose::shape_split::split(sh, canvas, self.cx.depth),
+            LayerContent::Shape(sh) if sh.stroke.is_some() => photosplice_compose::shape_split::split(sh, canvas, self.cx.depth, self.cx.shape_patterns(layer)),
             _ => None,
         };
         let (mut content, vstroke) = match split {
@@ -1382,7 +1414,9 @@ impl<'a> Planner<'a> {
                 p.c = cover.map(|c| self.retain(c));
                 p.d = acc;
                 let a = self.emit(p);
-                let mut p = self.fx_pass_kernel(Kernel::FxStroke, w, content, &Paint::Color([0.0; 3]), BlendMode::Normal, st.common.opacity, flags, clip, sb);
+                // The stroke's mode rides along only for Dissolve, whose coverage is all or
+                // nothing in this pass as in the colour pass.
+                let mut p = self.fx_pass_kernel(Kernel::FxStroke, w, content, &Paint::Color([0.0; 3]), st.common.blend, st.common.opacity, flags, clip, sb);
                 p.adjust_kind = 1;
                 p.map = Some(map(i, 0));
                 p.c = cover;
@@ -1788,9 +1822,9 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photospli
             p[0] = [hue, saturation / 100.0, lightness / 100.0, if *colorize { 1.0 } else { 0.0 }];
             // 32-bit documents don't hold the smallest channel at 0 (compose::adjust::hue_saturation_in).
             p[1][1] = if depth == photosplice_color::SampleType::F32 { 1.0 } else { 0.0 };
-            // p1.z: 8-bit Colorize in whole levels (compose::adjust::colorize_lightness_8bit);
-            // p1.w: the slider's whole levels, signed.
-            if *colorize && depth == photosplice_color::SampleType::U8 {
+            // p1.z: an 8-bit document's lightness in whole levels (compose::adjust::
+            // colorize_lightness_8bit, lightness_8bit); p1.w: the slider's whole levels, signed.
+            if depth == photosplice_color::SampleType::U8 {
                 let l = if lightness.is_finite() { lightness.clamp(-100.0, 100.0) } else { 0.0 };
                 p[1][2] = 1.0;
                 p[1][3] = (f64::from(l.abs()) * 255.0 / 100.0 + 1e-9).floor() as f32 * l.signum();
@@ -1888,14 +1922,35 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photospli
     }
 }
 
-/// A gradient's colour and alpha as four 4096-entry LUT rows (`lut_tex`).
+/// A gradient's colour and alpha as LUT rows (`lut_tex`, see [`ramp_rows`]).
 fn gradient_rows(g: &Gradient) -> Vec<[f32; 4096]> {
-    let mut rows = vec![[0.0f32; 4096]; 4];
+    let per_location = per_location_ramp(&g.stops) && (g.opacity_stops.is_empty() || per_location_ramp(&g.opacity_stops));
+    ramp_rows(|t| photosplice_compose::effects::sample_gradient(g, t), per_location)
+}
+
+/// Stops one per location 0..=4096 (a generated noise gradient's ramp), which the CPU samples
+/// between neighbouring entries: the GPU reads them per location too ([`ramp_rows`]).
+fn per_location_ramp<T>(stops: &[(f32, T)]) -> bool {
+    stops.len() == 4097 && stops.iter().enumerate().all(|(i, s)| (s.0 - i as f32 / 4096.0).abs() < 1e-6)
+}
+
+/// A ramp's colour and alpha as five LUT rows: rows 0..3 hold R, G, B, A. Ordinarily they are
+/// `sample` at `k / 4095` and row 4 is zero. A per-location ramp ([`per_location_ramp`]) keeps
+/// its entries: rows 0..3 at `k / 4096`, row 4 = (1, then entry 4096's R, G, B, A); the
+/// shader's `ramp` then interpolates at `t · 4096` as the CPU does between stops.
+fn ramp_rows(sample: impl Fn(f32) -> [f32; 4], per_location: bool) -> Vec<[f32; 4096]> {
+    let mut rows = vec![[0.0f32; 4096]; 5];
+    let step = if per_location { 4096.0 } else { 4095.0 };
     for k in 0..4096 {
-        let v = photosplice_compose::effects::sample_gradient(g, k as f32 / 4095.0);
-        for (ch, row) in rows.iter_mut().enumerate() {
+        let v = sample(k as f32 / step);
+        for (ch, row) in rows.iter_mut().take(4).enumerate() {
             row[k] = v[ch];
         }
+    }
+    if per_location && let Some(flag) = rows.get_mut(4) {
+        let end = sample(1.0);
+        flag[0] = 1.0;
+        flag[1..5].copy_from_slice(&end);
     }
     rows
 }
@@ -1907,6 +1962,14 @@ fn gradient_rows(g: &Gradient) -> Vec<[f32; 4096]> {
 fn check_gradient_stops<T>(stops: &[(f32, T)]) -> Result<(), Unsupported> {
     let mut positions: Vec<f32> = stops.iter().map(|s| s.0).collect();
     positions.sort_by(f32::total_cmp);
+    // An evenly spaced ramp over the whole range (a generated noise gradient's 4097 stops) has
+    // no discontinuity: the LUT keeps it ([`ramp_rows`], per location for a noise ramp).
+    let gap = |w: &[f32]| w.get(1).zip(w.first()).map_or(0.0, |(b, a)| b - a);
+    let first = positions.get(..2).map_or(0.0, gap);
+    let spans = positions.first().is_some_and(|p| *p <= 1e-6) && positions.last().is_some_and(|p| *p >= 1.0 - 1e-6);
+    if positions.len() > 2 && spans && first > 0.0 && positions.windows(2).all(|w| (gap(w) - first).abs() < 1e-6) {
+        return Ok(());
+    }
     // A 4096-entry LUT cannot keep two stops that fall in the same entry apart (#3053).
     if positions.windows(2).any(|w| (w[1] - w[0]).abs() < 1.0 / 4095.0) {
         return Err(Unsupported("coincident gradient stops (composited on the CPU)".into()));
@@ -2001,6 +2064,12 @@ mod tests {
     fn stops_closer_than_one_lut_step_stay_on_the_cpu() {
         assert!(check_gradient_stops(&[(0.4999_f32, ()), (0.5, ())]).is_err());
         assert!(check_gradient_stops(&[(0.0_f32, ()), (1.0, ())]).is_ok());
+        // A noise gradient's evenly spaced 4097 stops are a smooth ramp, not coincident stops.
+        let dense: Vec<(f32, ())> = (0..=4096).map(|i| (i as f32 / 4096.0, ())).collect();
+        assert!(check_gradient_stops(&dense).is_ok());
+        let mut uneven = dense.clone();
+        uneven.push((0.5, ()));
+        assert!(check_gradient_stops(&uneven).is_err());
     }
 
     #[test]
@@ -2010,7 +2079,7 @@ mod tests {
             Adjustment::Posterize { levels: 4 },
             Adjustment::Threshold { level: 0.5 },
             Adjustment::BrightnessContrast { brightness: 10.0, contrast: 5.0, legacy: false },
-            Adjustment::GradientMap { stops: vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])], reverse: false, dither: false, ink_stops: Vec::new() },
+            Adjustment::GradientMap { stops: vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])], reverse: false, dither: false, ink_stops: Vec::new(), source: None },
         ];
         for adj in &lab_rules {
             assert!(!adjustment_on_gpu(adj, ColorMode::Lab), "{adj:?}");

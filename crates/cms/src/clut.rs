@@ -17,6 +17,8 @@ pub struct Clut {
     /// Normalised node values, `outputs` per node.
     pub data: Vec<f32>,
     strides: Vec<usize>,
+    /// A 3-input table interpolated trilinearly, not tetrahedrally ([`Clut::lab_input`]).
+    trilinear: bool,
 }
 
 impl Clut {
@@ -31,7 +33,21 @@ impl Clut {
             s *= grid[i].max(1);
         }
         assert_eq!(data.len(), s, "CLUT data length");
-        Clut { inputs, outputs, grid, data, strides }
+        Clut { inputs, outputs, grid, data, strides, trilinear: false }
+    }
+
+    /// The table read from Lab: a 3-input one interpolates trilinearly, as Reference's colour
+    /// engine (and LittleCMS) reads a Lab-indexed table; tetrahedral cells cut across a and b
+    /// unevenly (Reference adjustment kit cmyk8prof-pf-*, Photo Filter through our own embedded
+    /// CMYK profile: mean ink error 3.2–7.3 → 1.7–4.7 levels, worst 47 → 18).
+    pub fn lab_input(mut self) -> Self {
+        self.trilinear = self.inputs == 3;
+        self
+    }
+
+    /// Whether [`Clut::eval`] interpolates this table trilinearly.
+    pub fn is_trilinear(&self) -> bool {
+        self.trilinear
     }
 
     /// Number of nodes.
@@ -76,6 +92,7 @@ impl Clut {
     pub fn eval(&self, input: &[f32], out: &mut [f32]) {
         match self.inputs {
             1 => self.eval1(input[0], out),
+            3 if self.trilinear => self.eval_multilinear(input, out),
             3 => {
                 let (b0, r0, s0) = self.locate(0, input[0]);
                 let (b1, r1, s1) = self.locate(1, input[1]);
@@ -216,6 +233,24 @@ mod tests {
         // Linear function is reproduced exactly anywhere.
         c.eval(&[0.13, 0.77, 0.41], &mut o);
         assert!((o[0] - (0.13 * 0.5 + 0.77 * 0.3 + 0.41 * 0.2)).abs() < 1e-6);
+    }
+
+    /// A Lab-indexed table reads trilinearly: a product of two inputs is bilinear in a cell, so
+    /// trilinear reproduces it inside the cell where tetrahedral cuts it into planes.
+    #[test]
+    fn lab_input_tables_interpolate_trilinearly() {
+        let tetra = Clut::sample(vec![3, 3, 3], 3, f3);
+        let tri = tetra.clone().lab_input();
+        assert!(tri.is_trilinear() && !tetra.is_trilinear());
+        let p = [0.3, 0.2, 0.0];
+        let (mut a, mut b, mut c) = ([0.0; 3], [0.0; 3], [0.0; 3]);
+        tetra.eval(&p, &mut a);
+        tri.eval(&p, &mut b);
+        tetra.eval_trilinear(&p, &mut c);
+        assert_eq!(b, c);
+        assert!((b[1] - 0.06).abs() < 1e-6 && (a[1] - 0.06).abs() > 1e-3, "{a:?} {b:?}");
+        // Only 3-input tables change.
+        assert!(!Clut::sample(vec![3, 3, 3, 3], 1, |p, o| o[0] = p[0]).lab_input().is_trilinear());
     }
 
     #[test]

@@ -153,10 +153,14 @@ fn text_shape_smart_raw_blocks_survive() {
     if let LayerContent::Shape(s) = &bsh.content {
         assert_eq!(s.psd_raw.as_deref(), Some(&vec![7u8; 8]));
     }
-    // Plus the advanced-blending defaults Photoshop writes on every non-group layer.
-    let mut expected = d.layers[n - 1].psd_blocks.clone();
-    expected.extend([(*b"clbl", std::sync::Arc::new(vec![1u8, 0, 0, 0])), (*b"infx", std::sync::Arc::new(vec![0u8; 4])), (*b"knko", std::sync::Arc::new(vec![0u8; 4]))]);
-    assert_eq!(bsh.psd_blocks, expected);
+    // Plus a stroke style saying "no fill" (Reference's shapes always carry one; without it the
+    // kept vscg would paint) and the advanced-blending defaults Reference writes on every
+    // non-group layer.
+    let keys: Vec<&[u8; 4]> = bsh.psd_blocks.iter().map(|(k, _)| k).collect();
+    assert_eq!(keys, [b"vscg", b"vmsk", b"vstk", b"clbl", b"infx", b"knko"]);
+    assert_eq!(bsh.psd_blocks[..2], d.layers[n - 1].psd_blocks[..]);
+    let vstk = photosplice_io::vector_map::parse_vstk(&bsh.psd_blocks[2].1, 72.0).expect("a stroke style");
+    assert!(vstk.stroke.is_none() && !vstk.fill_enabled);
 }
 
 #[test]
@@ -170,12 +174,12 @@ fn raster_layer_blocks_preserved() {
     d.layers[1].set_advanced(photosplice_doc::AdvancedBlending { blend_clipped: false, ..Default::default() });
     d.layers[1].vector_mask = photosplice_io::vector_map::vector_mask_from_block(&[0; 12], d.size.width, d.size.height);
     let back = roundtrip(&d);
-    // An odd-length layer block comes back with its pad byte inside the length (as Photoshop
-    // lays layer blocks out, #200); everything else is verbatim.
+    // A layer block comes back zero-padded to four bytes inside its length (as Reference lays
+    // layer blocks out, #200); everything else is verbatim.
     // The layer's own `clbl` is kept; the other advanced-blending defaults are added, as
     // Photoshop writes them on every non-group layer.
     let mut expected = blocks.clone();
-    expected[2].1 = std::sync::Arc::new(vec![1u8, 0]);
+    expected[2].1 = std::sync::Arc::new(vec![1u8, 0, 0, 0]);
     expected.extend([(*b"infx", std::sync::Arc::new(vec![0u8; 4])), (*b"knko", std::sync::Arc::new(vec![0u8; 4]))]);
     assert_eq!(back.layers[1].psd_blocks, expected);
     assert_eq!(roundtrip(&back).layers[1].psd_blocks, expected, "stable after the first save");
@@ -274,6 +278,8 @@ fn effects_raw_roundtrip() {
     let mut d = gen_doc(ColorMode::Rgb, SampleType::U8, Features::PIXELS);
     let mut lfx = vec![0, 0, 0, 0];
     lfx.extend(photosplice_psd::testgen::sample_descriptor().to_bytes());
+    // Padded to four bytes, as Reference writes the block (and the export saves it).
+    lfx.resize(lfx.len().next_multiple_of(4), 0);
     // Typed items and the raw block must agree; the raw bytes are then kept.
     let (master, items) = photosplice_io::effects_map::parse_lfx2(&lfx).unwrap();
     d.layers[1].effects.enabled = master;

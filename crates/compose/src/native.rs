@@ -189,7 +189,10 @@ impl<'a> InkStack<'a> {
             match item {
                 Item::Layer(surf, opacity, mask) => {
                     let opacity = *opacity;
-                    if opacity <= 0.0 || (surf.content_bounds().intersect(&rect).is_empty() && surf.default_pixel().iter().all(|v| *v == 0.0)) {
+                    // Nothing to draw only where the surface is transparent: without an alpha
+                    // channel its default pixel is opaque (no ink is blank paper, not nothing).
+                    let clear = surf.format().alpha && surf.default_pixel().last().is_some_and(|a| *a <= 0.0);
+                    if opacity <= 0.0 || (clear && surf.content_bounds().intersect(&rect).is_empty()) {
                         continue;
                     }
                     let sf = surf.format();

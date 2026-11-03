@@ -87,6 +87,9 @@ pub struct PsdSubpath {
     /// Path operation (bytes 2–3 of the length record data): `-1`/`1`
     /// combine, `2` subtract, `3` intersect, `0` exclude.
     pub operation: i16,
+    /// Fill rule (bytes 4–5): `1` even-odd, `2` non-zero winding, `0` on a subpath that
+    /// continues the previous one's component.
+    pub winding: u16,
     /// Knots in order.
     pub knots: Vec<PsdKnot>,
 }
@@ -155,13 +158,14 @@ impl PathData {
                 out.push(PsdSubpath {
                     closed: r.selector == selector::CLOSED_LENGTH,
                     operation: r.u16_at(2) as i16,
+                    winding: r.u16_at(4),
                     // No preallocation: the count is untrusted (u16) and PsdKnot is 56 bytes.
                     knots: Vec::new(),
                 });
             } else if r.is_knot() {
                 let closed = r.selector <= 2;
                 if remaining == 0 && out.last().is_none_or(|s| s.closed != closed) {
-                    out.push(PsdSubpath { closed, operation: -1, knots: Vec::new() });
+                    out.push(PsdSubpath { closed, operation: -1, winding: 0, knots: Vec::new() });
                 }
                 remaining = remaining.saturating_sub(1);
                 let pt = |i: usize| (fixed_to_f64(r.i32_at(i * 8 + 4)), fixed_to_f64(r.i32_at(i * 8)));
@@ -182,8 +186,7 @@ impl PathData {
             let mut data = [0u8; 24];
             data[..2].copy_from_slice(&(s.knots.len().min(u16::MAX as usize) as u16).to_be_bytes());
             data[2..4].copy_from_slice(&s.operation.to_be_bytes());
-            // Photoshop writes 1 here (psd-tools default); meaning unknown.
-            data[4..6].copy_from_slice(&1u16.to_be_bytes());
+            data[4..6].copy_from_slice(&s.winding.to_be_bytes());
             records.push(PathRecord { selector: if s.closed { selector::CLOSED_LENGTH } else { selector::OPEN_LENGTH }, data });
             for k in s.knots.iter().take(u16::MAX as usize) {
                 let sel = match (s.closed, k.linked) {
@@ -252,13 +255,14 @@ mod tests {
             PsdSubpath {
                 closed: true,
                 operation: 1,
+                winding: 2,
                 knots: vec![
                     PsdKnot { linked: false, pre: (0.25, 0.25), anchor: (0.25, 0.25), post: (0.25, 0.25) },
                     PsdKnot { linked: true, pre: (0.625, 0.125), anchor: (0.75, 0.25), post: (0.875, 0.375) },
                     PsdKnot { linked: false, pre: (0.5, 0.75), anchor: (0.5, 0.75), post: (0.5, 0.75) },
                 ],
             },
-            PsdSubpath { closed: false, operation: 2, knots: vec![PsdKnot { linked: false, pre: (-0.5, 1.5), anchor: (0.0, 1.0), post: (0.0625, 0.9375) }] },
+            PsdSubpath { closed: false, operation: 2, winding: 1, knots: vec![PsdKnot { linked: false, pre: (-0.5, 1.5), anchor: (0.0, 1.0), post: (0.0625, 0.9375) }] },
         ]
     }
 

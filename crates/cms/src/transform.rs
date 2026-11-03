@@ -100,10 +100,26 @@ impl Transform {
     }
 
     pub fn with_options(src: &Profile, dst: &Profile, opts: TransformOptions) -> Result<Transform, CmsError> {
-        let stages = link_stages(src, dst, opts.intent, opts.bpc)?;
+        let mut stages = link_stages(src, dst, opts.intent, opts.bpc)?;
+        // A Lab source reads its 3-input tables (the destination's Lab-indexed BToA) and the
+        // grid built from them trilinearly, not tetrahedrally (`Clut::lab_input`). Only there:
+        // separating an RGB colour keeps tetrahedral cells (nothing measured says otherwise).
+        let lab_source = src.color_space == ColorSpace::Lab;
+        if lab_source {
+            for s in &mut stages {
+                if let Stage::Clut(c) = s {
+                    *c = c.clone().lab_input();
+                }
+            }
+        }
         let mut t = Self::from_pipeline(Pipeline::new(src.channels(), stages), opts);
         if opts.intent != Intent::AbsoluteColorimetric {
             t.fix_white(src.color_space, dst.color_space);
+        }
+        if lab_source
+            && let Core::Grid(c) = &mut t.core
+        {
+            *c = c.clone().lab_input();
         }
         Ok(t)
     }
@@ -320,7 +336,7 @@ impl Transform {
         let mut mid = [0.0f32; 16];
         let mut out = [0.0f32; 16];
         match &self.core {
-            Core::Grid(c) if c.inputs == 3 => {
+            Core::Grid(c) if c.inputs == 3 && !c.is_trilinear() => {
                 let (g0, g1, g2) = (&self.grid8[0], &self.grid8[1], &self.grid8[2]);
                 let s1 = c.outputs * c.grid[2];
                 let s0 = s1 * c.grid[1];

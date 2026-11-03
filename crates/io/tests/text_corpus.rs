@@ -202,6 +202,9 @@ fn created_text_layer_roundtrips_through_psd() {
         v.into_iter()
             .map(|mut r| {
                 r.style.postscript_name = None;
+                // The document `Txt2` says Contextual Alternates are on where the style leaves
+                // them to the shaper (which applies them): read back as an explicit `calt`.
+                r.style.features.retain(|f| !(f.tag == "calt" && f.value > 0));
                 r.style.color.c = r.style.color.c.map(|c| (c * 1000.0).round() / 1000.0);
                 r
             })

@@ -105,9 +105,10 @@ pub(crate) fn display_doc(app: &mut PhotospliceApp, idx: usize) -> Option<(Arc<D
         return Some((p.shown.clone(), p.key));
     }
     let mut doc = (*st.doc).clone();
-    if let LayerContent::Shape(sh) = &mut doc.layer_mut(layer)?.content {
+    let l = doc.layer_mut(layer)?;
+    if let LayerContent::Shape(sh) = &mut l.content {
         sh.fill = Some(Fill::Solid(color));
-        photosplice_engine::vector_cmds::refresh_shape(&st.doc, sh);
+        photosplice_engine::vector_cmds::refresh_shape(&st.doc, l.effects.reference, sh);
     }
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     (st.doc.id.0, st.revision, d.id, layer.0).hash(&mut hash);

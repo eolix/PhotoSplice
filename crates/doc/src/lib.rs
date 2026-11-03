@@ -31,7 +31,8 @@ pub use blend_if::{BlendIf, BlendRange, Knockout};
 pub use comps::{Artboard, ArtboardBackground, CompAppearance, CompLayerState, LayerComp};
 pub use effects::{
     Bevel, BevelContour, BevelStyle, BevelTechnique, BevelTexture, Contour, Effect, FxCommon, FxPaint, GlobalLight, Glow, GlowSource, GlowTechnique, Gradient,
-    GradientStyle, Satin, Shadow, StrokeFx, StrokePosition,
+    GradientColorStop, GradientForm, GradientMethod, GradientNoise, GradientOpacityStop, GradientSource, GradientStopKind, GradientStyle, NoiseModel, Satin,
+    Shadow, StrokeFx, StrokePosition,
 };
 pub use mode::{ColorTable, Duotone, DuotoneInk, StackMode};
 pub use pattern::Pattern;
@@ -328,6 +329,10 @@ pub struct Group {
     /// A PSD's group-end divider record blocks the model doesn't regenerate (`shmd` with its
     /// comp settings and layer time, `fxrp`, `lnsr`…), written back on that record.
     pub divider_blocks: Vec<([u8; 4], Arc<Vec<u8>>)>,
+    /// A Reference Frame's stroke (Properties › Stroke; PSD `vstk` on the frame group): drawn
+    /// along the group's enabled vector mask (the frame outline), above the framed content and
+    /// not clipped by the frame. Ignored without a vector mask.
+    pub frame_stroke: Option<ShapeStroke>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -358,6 +363,11 @@ pub enum Fill {
         /// "Align with layer": lay out in the layer's frame (its masks' bounds), else the canvas.
         #[serde(default = "effects::yes")]
         align: bool,
+        /// The gradient as the file defined it, which `stops`, `opacity_stops` and `midpoints`
+        /// were read or baked from ([`GradientSource`]); `None` for gradients made here. PSD data:
+        /// not serialized (the native format and the control channel carry the stops alone).
+        #[serde(skip)]
+        source: Option<Box<GradientSource>>,
     },
     /// A pattern from [`Document::patterns`] (looked up by `id`, then `name`).
     Pattern {
@@ -381,7 +391,19 @@ impl Fill {
     /// A gradient fill with the classic settings: opaque stops at their alpha, 50 % midpoints,
     /// centred, no dither, aligned with the layer.
     pub fn gradient(stops: Vec<(f32, Color)>, angle: f32, scale: f32, style: GradientStyle, reverse: bool) -> Fill {
-        Fill::Gradient { stops, angle, scale, style, reverse, opacity_stops: Vec::new(), midpoints: Vec::new(), offset: (0.0, 0.0), dither: false, align: true }
+        Fill::Gradient {
+            stops,
+            angle,
+            scale,
+            style,
+            reverse,
+            opacity_stops: Vec::new(),
+            midpoints: Vec::new(),
+            offset: (0.0, 0.0),
+            dither: false,
+            align: true,
+            source: None,
+        }
     }
 
     /// This fill with its colours in `mode`'s model (see [`Color::in_mode`]): a fill layer's
@@ -819,7 +841,7 @@ impl Layer {
         Self::new(name, LayerContent::Raster(Surface::new(format)))
     }
     pub fn group(name: impl Into<String>, children: Vec<Layer>) -> Self {
-        let mut l = Self::new(name, LayerContent::Group(Group { children, expanded: true, artboard: None, divider_blocks: Vec::new() }));
+        let mut l = Self::new(name, LayerContent::Group(Group { children, expanded: true, artboard: None, divider_blocks: Vec::new(), frame_stroke: None }));
         l.blend = BlendMode::PassThrough;
         l
     }
@@ -1635,7 +1657,7 @@ mod tests {
         assert_eq!(LayerContent::Adjustment(Adjustment::Invert).article(), "an");
         assert_eq!(LayerContent::Adjustment(Adjustment::Invert).kind_name(), "Adjustment");
         assert_eq!(LayerContent::Raster(Surface::new(PixelFormat::RGBA8)).article(), "a");
-        assert_eq!(LayerContent::Group(Group { children: Vec::new(), expanded: true, artboard: None, divider_blocks: Vec::new() }).article(), "a");
+        assert_eq!(LayerContent::Group(Group { children: Vec::new(), expanded: true, artboard: None, divider_blocks: Vec::new(), frame_stroke: None }).article(), "a");
     }
 }
 

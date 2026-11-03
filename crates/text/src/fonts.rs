@@ -169,6 +169,17 @@ pub struct FaceInfo {
     pub axes: Vec<(String, f32, f32, f32)>,
 }
 
+/// What a PSD's document `Txt2` font list keeps of a face beside its PostScript name (see
+/// [`FontDb::txt2_font_details`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FontDetails {
+    /// A variable face's axis values for the name, in the font's `fvar` order; empty for a static
+    /// face.
+    pub axes: Vec<f32>,
+    /// The face's version string (`name` 5).
+    pub version: Option<String>,
+}
+
 /// Result of a PostScript-name lookup.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedFont {
@@ -454,10 +465,31 @@ impl FontDb {
     /// Select an exact face for shaping. Private aliases are runtime-only: the document keeps
     /// its public family and PostScript name. CSS matching alone cannot distinguish e.g. the
     /// numeric subfamilies of Yoon fonts, all of which declare weight 400 / normal.
+    ///
+    /// A PostScript name that no face has may name an instance of a variable face
+    /// ("Bahnschrift-LightCondensed", which a PSD keeps with no variations): that face is selected
+    /// and the instance's axis values are added to the style's variations, keeping any axis the
+    /// style sets itself; at the default instance the type was about 35 % wider than Reference
+    /// draws it. Faces are tried in this order: exact PostScript name, named instance, then style,
+    /// weight and italic.
     pub(crate) fn select_named_face(&mut self, style: &mut photosplice_doc::text::CharStyle) {
         let family = style.font_family.clone();
         let faces = self.faces(&family);
-        let index = style.postscript_name.as_ref().and_then(|ps| faces.iter().position(|f| f.postscript_name.as_ref() == Some(ps))).or_else(|| {
+        let index = style.postscript_name.as_ref().and_then(|ps| faces.iter().position(|f| f.postscript_name.as_ref() == Some(ps)));
+        // Before the style-and-weight fallback: a variable face's own style ("Regular") can match
+        // a populated `font_style` and would drop the instance's axes.
+        let instance = match (index, &style.postscript_name) {
+            (None, Some(ps)) => self.named_instance(&family, &faces, ps, false),
+            _ => None,
+        };
+        if let Some((_, axes)) = &instance {
+            for (axis, value) in axes {
+                if !style.variations.iter().any(|v| &v.axis == axis) {
+                    style.variations.push(photosplice_doc::text::FontVariation { axis: axis.clone(), value: *value });
+                }
+            }
+        }
+        let index = index.or(instance.map(|(i, _)| i)).or_else(|| {
             faces.iter().position(|f| {
                 !style.font_style.is_empty()
                     && f.style.eq_ignore_ascii_case(&style.font_style)
@@ -483,6 +515,83 @@ impl FontDb {
         style.font_family = alias;
         style.weight = face.weight.round() as u16;
         style.italic = face.italic;
+    }
+
+    /// The variable face of `family` (index into `faces`) with a named instance whose PostScript
+    /// name is `ps`, and that instance's axis values. An instance without a PostScript name of its
+    /// own is named as Adobe Technical Note #5902 derives it: the variations prefix (name 25, else
+    /// the family name) and the subfamily name without spaces, joined by a hyphen. Names compare
+    /// without punctuation or case, and the subfamily alone matches the part of `ps` after the
+    /// first hyphen, since the prefix a document stored can differ from the font's (not when
+    /// `strict`, for a search across families that names none).
+    fn named_instance(&mut self, family: &str, faces: &[FaceInfo], ps: &str, strict: bool) -> Option<(usize, Vec<(String, f32)>)> {
+        let key = |s: &str| s.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect::<String>();
+        let wanted = key(ps);
+        let wanted_style = ps.split_once('-').map(|(_, s)| key(s));
+        let info = self.fcx.collection.family_by_name(family)?;
+        for (index, face) in info.fonts().iter().enumerate() {
+            if faces.get(index).is_none_or(|f| f.axes.is_empty()) {
+                continue;
+            }
+            let Some(blob) = face.load(Some(&mut self.fcx.source_cache)) else { continue };
+            let Ok(font) = skrifa::FontRef::from_index(blob.as_ref(), face.index()) else { continue };
+            let name = |id: StringId| font.localized_strings(id).english_or_first().map(|s| s.to_string()).filter(|s| !s.is_empty());
+            let prefix = name(StringId::VARIATIONS_POSTSCRIPT_NAME_PREFIX)
+                .or_else(|| name(StringId::TYPOGRAPHIC_FAMILY_NAME))
+                .or_else(|| name(StringId::FAMILY_NAME))
+                .unwrap_or_default();
+            for instance in font.named_instances().iter() {
+                let subfamily = name(instance.subfamily_name_id()).unwrap_or_default();
+                let own = instance.postscript_name_id().and_then(name);
+                let matches = match own {
+                    Some(own) => key(&own) == wanted,
+                    None => {
+                        key(&prefix) + &key(&subfamily) == wanted || (!strict && !subfamily.is_empty() && wanted_style.as_deref() == Some(key(&subfamily).as_str()))
+                    }
+                };
+                if matches {
+                    let axes = font.axes().iter().map(|a| a.tag().to_string()).zip(instance.user_coords()).collect();
+                    return Some((index, axes));
+                }
+            }
+        }
+        None
+    }
+
+    /// The face the PostScript name `ps` picks in `family` (else in the family `ps` resolves to)
+    /// as a PSD's `Txt2` font list describes it: its version string and, for a variable face, the
+    /// axis values the name stands for, in `fvar` order. Reference keeps a variable font's
+    /// instance only there (`/4`, each value × 65536): without it the type opens in the font's
+    /// default instance. A named instance gives its own coordinates (see
+    /// [`Self::select_named_face`]), a face named exactly its axis defaults; an axis
+    /// `variations` sets wins either way. Empty when no installed face has the name.
+    pub fn txt2_font_details(&mut self, family: &str, ps: &str, variations: &[photosplice_doc::text::FontVariation]) -> FontDetails {
+        let family = if !family.is_empty() && self.has_family(family) { family.to_string() } else { self.resolve_postscript(ps).family };
+        let faces = self.faces(&family);
+        let instance = self.named_instance(&family, &faces, ps, false);
+        let Some(index) = instance.as_ref().map(|i| i.0).or_else(|| faces.iter().position(|f| f.postscript_name.as_deref() == Some(ps))) else {
+            return FontDetails::default();
+        };
+        let Some(info) = self.fcx.collection.family_by_name(&family) else { return FontDetails::default() };
+        let Some(face) = info.fonts().get(index) else { return FontDetails::default() };
+        let Some(blob) = face.load(Some(&mut self.fcx.source_cache)) else { return FontDetails::default() };
+        let Ok(font) = skrifa::FontRef::from_index(blob.as_ref(), face.index()) else { return FontDetails::default() };
+        let version = font.localized_strings(StringId::VERSION_STRING).english_or_first().map(|s| s.to_string()).filter(|s| !s.is_empty());
+        let named: &[(String, f32)] = instance.as_ref().map_or(&[], |i| i.1.as_slice());
+        let axes = font
+            .axes()
+            .iter()
+            .map(|a| {
+                let tag = a.tag().to_string();
+                variations
+                    .iter()
+                    .find(|v| v.axis == tag && v.value.is_finite())
+                    .map(|v| v.value)
+                    .or_else(|| named.iter().find(|(t, _)| *t == tag).map(|(_, v)| *v))
+                    .unwrap_or(a.default_value())
+            })
+            .collect();
+        FontDetails { axes, version }
     }
 
     /// Whether a run naming `family` (and, from PSDs, the PostScript name `ps`) renders in its
@@ -567,6 +676,21 @@ impl FontDb {
                     return Some(resolved);
                 }
             }
+        }
+        // A variable font's named instance ("STIXTwoTextRoman-Bold", the variations prefix and the
+        // subfamily: what Reference names a type layer set in it) is no face's own name: its
+        // family, the weight its `wght` sets and the face's slant.
+        let mut candidates = self.families();
+        candidates.sort_by_key(|f| !f.to_lowercase().replace(' ', "").starts_with(&first_word));
+        for fam in candidates {
+            let faces = self.faces(&fam);
+            if faces.iter().all(|f| f.axes.is_empty()) {
+                continue;
+            }
+            let Some((index, axes)) = self.named_instance(&fam, &faces, ps, true) else { continue };
+            let Some(face) = faces.get(index) else { continue };
+            let weight = axes.iter().find(|(t, _)| t == "wght").map_or(face.weight, |(_, w)| *w);
+            return Some(ResolvedFont { family: face.family.clone(), weight: weight.round().clamp(1.0, 1000.0) as u16, italic: face.italic, exact: true });
         }
         None
     }

@@ -430,6 +430,8 @@ pub(crate) fn encode(doc: &Document, path: &str, save: impl Into<SaveOpts>) -> R
         tga_bits: save.tga_bits,
         image_previews: save.image_previews,
         psd_maximize_compatibility: save.psd_maximize_compatibility,
+        // Linked files a PSD embeds are resolved against the document being worked on.
+        document_path: crate::doc_path::current(),
         ..Default::default()
     };
     // No quality chosen: write the file the way it was opened (a JPEG at its own quality, a WebP
@@ -849,7 +851,16 @@ fn place(s: &mut Session, p: &Value, linked: bool) -> Result<Value> {
     let cmd = if linked { "file.placeLinked" } else { "file.placeEmbedded" };
     let path = str_param(p, "path", cmd)?.to_string();
     let bytes = read_file(&path)?;
-    place_bytes(s, &path, bytes, linked.then(|| path.clone()), p)
+    // The link is stored absolute: a relative one would later be taken from the document's
+    // folder (`doc_path`), not the working directory the path was given in.
+    let link = linked.then(|| {
+        if std::path::Path::new(&path).is_relative() {
+            std::path::absolute(&path).map_or_else(|_| path.clone(), |a| a.to_string_lossy().into_owned())
+        } else {
+            path.clone()
+        }
+    });
+    place_bytes(s, &path, bytes, link, p)
 }
 
 // ---------- File Info (XMP) ----------
@@ -1507,10 +1518,12 @@ fn has_live_effects(l: &Layer) -> bool {
     l.effects.enabled && l.effects.items.iter().any(|e| e.enabled())
 }
 
-/// The layer rendered alone (keeping what `keep` says), as a surface in `fmt`. With `apply_mask`
-/// off the layer's pixel and vector masks are left out of the render, so a caller that keeps them
-/// live on the baked raster does not mask the pixels twice.
-fn bake(l: &Layer, canvas: Rect, fmt: PixelFormat, keep_effects: bool, apply_mask: bool) -> Surface {
+/// The layer of `doc` rendered alone (keeping what `keep` says) with the document's Global Light,
+/// patterns and canvas, as a surface in the document's format. With `apply_mask` off the layer's
+/// pixel and vector masks are left out of the render, so a caller that keeps them live on the
+/// baked raster does not mask the pixels twice.
+fn bake(doc: &Document, l: &Layer, keep_effects: bool, apply_mask: bool) -> Surface {
+    let canvas = doc.bounds();
     let mut tmp = l.clone();
     tmp.opacity = 1.0;
     tmp.blend = photosplice_color::BlendMode::Normal;
@@ -1527,7 +1540,7 @@ fn bake(l: &Layer, canvas: Rect, fmt: PixelFormat, keep_effects: bool, apply_mas
     // Render over the union of the canvas and the content so off-canvas pixels survive.
     let area = l.surface().map_or(canvas, |s| s.content_bounds().union(&canvas));
     let area = if keep_effects { area.inflate(256) } else { area };
-    buffer_surface(&photosplice_compose::render_layer(&tmp, area), fmt)
+    buffer_surface(&photosplice_compose::render_layer_in(doc, &tmp, area), doc.pixel_format())
 }
 
 fn walk_ids(doc: &Document) -> Vec<LayerId> {
@@ -1537,8 +1550,6 @@ fn walk_ids(doc: &Document) -> Vec<LayerId> {
 fn flatten_all_effects(s: &mut Session) -> Result<Value> {
     let mut n = 0;
     s.edit("Flatten All Layer Effects", |doc, _| {
-        let canvas = doc.bounds();
-        let fmt = doc.pixel_format();
         for id in walk_ids(doc) {
             let Some(l) = doc.layer(id) else { continue };
             if !has_live_effects(l) || matches!(l.content, LayerContent::Group(_) | LayerContent::Adjustment(_)) {
@@ -1546,7 +1557,7 @@ fn flatten_all_effects(s: &mut Session) -> Result<Value> {
             }
             // The pixel and vector masks stay on the layer (baking must not destroy them), so the
             // pixels are baked without them and each mask then applies once to the baked raster.
-            let px = bake(l, canvas, fmt, true, false);
+            let px = bake(doc, l, true, false);
             let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
             l.content = LayerContent::Raster(px);
             l.effects = Default::default();
@@ -1563,8 +1574,6 @@ fn flatten_all_effects(s: &mut Session) -> Result<Value> {
 fn flatten_all_masks(s: &mut Session) -> Result<Value> {
     let (mut n, mut skipped) = (0, 0);
     s.edit("Flatten All Masks", |doc, _| {
-        let canvas = doc.bounds();
-        let fmt = doc.pixel_format();
         for id in walk_ids(doc) {
             let Some(l) = doc.layer(id) else { continue };
             let masked = l.mask.as_ref().is_some_and(|m| m.enabled) || l.vector_mask.is_some();
@@ -1577,7 +1586,7 @@ fn flatten_all_masks(s: &mut Session) -> Result<Value> {
                 skipped += 1;
                 continue;
             }
-            let px = bake(l, canvas, fmt, false, true);
+            let px = bake(doc, l, false, true);
             let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
             l.content = LayerContent::Raster(px);
             l.mask = None;

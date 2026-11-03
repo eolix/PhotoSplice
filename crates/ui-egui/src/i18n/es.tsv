@@ -4119,3 +4119,5 @@ navigator	Zoom	Zoom
 	This document's layers: {needed} of {budget} for layers	Capas de este documento: {needed} de {budget} para capas
 	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	Las capas de este documento necesitan {needed} pero pueden ocupar {budget}: los redibujados de todo el documento usan la CPU
 	GPU Memory (MB, 0 = Automatic)	Memoria de GPU (MB, 0 = Automático)
+	Automatic (Coated FOGRA39 if installed)	Automático (Coated FOGRA39 si está instalado)
+	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (integrado)

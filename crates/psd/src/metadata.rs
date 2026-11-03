@@ -50,7 +50,9 @@ pub fn parse_shmd(data: &[u8]) -> Result<Vec<MetadataItem>> {
         let data = r.bytes_u64(u64::from(len))?.to_vec();
         out.push(MetadataItem { signature, key, copy, reserved, data });
     }
-    if !r.is_empty() {
+    // Zero padding to four bytes (the block is padded inside its length) is not an item.
+    let rest = r.peek_rest();
+    if rest.len() > 3 || rest.iter().any(|&b| b != 0) {
         return Err(PsdError::invalid("trailing bytes after metadata items"));
     }
     Ok(out)
@@ -89,7 +91,13 @@ mod tests {
         assert!(parse_shmd(&[]).is_err());
         assert!(parse_shmd(&[0, 0, 0, 9]).is_err());
         let mut b = write_shmd(&[MetadataItem::new(*b"cmls", vec![0; 2])]);
-        b.push(0);
+        // Zero padding to four bytes reads as nothing; anything else is an error.
+        let mut padded = b.clone();
+        padded.extend([0; 3]);
+        assert_eq!(parse_shmd(&padded).unwrap(), parse_shmd(&b).unwrap());
+        padded.push(0);
+        assert!(parse_shmd(&padded).is_err());
+        b.push(7);
         assert!(parse_shmd(&b).is_err());
         b.truncate(b.len() - 3);
         assert!(parse_shmd(&b).is_err());

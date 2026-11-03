@@ -48,6 +48,11 @@
 //!
 //! `*_mutations_never_panic` truncates and corrupts every corpus file and
 //! asserts import + flatten return (Ok or Err) without panicking.
+//!
+//! CMYK files without an embedded profile are in Reference's working CMYK. The oracles were made
+//! with its North America settings, U.S. Web Coated (SWOP) v2 (the application defaults to Europe
+//! General Purpose 3's Coated FOGRA39), so the oracle runs use SWOP v2 when it is installed, else
+//! the built-in coated CMYK. The floors are what the built-in profile reaches (CI has no SWOP).
 #![cfg(feature = "corpus")]
 
 mod common;
@@ -164,7 +169,7 @@ const PSD_TOOLS: Source = Source { label: "psd-tools corpus", dir: "corpus/psd-t
 
 /// Our Reference-authored oracles (271 files; https://github.com/storytold/photocraft-corpus),
 /// grouped by feature (`smart-filters`, `effects`, `text`, `adjustments/<mode><bits>`).
-const PHOTOSHOP: Source = Source { label: "photoshop oracles", dir: "corpus/photoshop", group_depth: 2, pass_floor: 243, roundtrip_floor: 271 };
+const PHOTOSHOP: Source = Source { label: "photoshop oracles", dir: "corpus/photoshop", group_depth: 2, pass_floor: 249, roundtrip_floor: 271 };
 
 /// The corpus directory; a missing corpus fails the test.
 fn locate(src: &Source) -> PathBuf {
@@ -441,7 +446,16 @@ fn check_file(name: &str, bytes: &[u8]) -> (Outcome, Option<f32>) {
     (outcome, Some(rt))
 }
 
+/// The working CMYK the oracles were made with: the installed U.S. Web Coated (SWOP) v2, else
+/// the built-in coated CMYK. Every oracle run sets the same one.
+fn use_installed_working_cmyk() {
+    let found = photosplice_cms::installed::swop_v2();
+    eprintln!("working CMYK: {}", found.as_ref().map_or_else(|| "built-in coated CMYK".to_string(), |f| f.path.display().to_string()));
+    photosplice_color::convert::set_working_cmyk(found.map(|f| f.profile));
+}
+
 fn run_oracle(src: &Source) {
+    use_installed_working_cmyk();
     let root = locate(src);
     let files = files_in(&root);
     BLOCK_ERRORS.with(|b| b.borrow_mut().clear());

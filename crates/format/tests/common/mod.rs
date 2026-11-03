@@ -108,6 +108,7 @@ pub fn rich_doc(mode: ColorMode, depth: SampleType) -> Document {
             offset: (0.1, -0.2),
             dither: true,
             align: false,
+            source: None,
         }),
     );
 
@@ -157,8 +158,11 @@ pub fn rich_doc(mode: ColorMode, depth: SampleType) -> Document {
                 dash_offset: 0.5,
             }),
             live: Some(LiveShape::Rect { rect: [1.0, 2.0, 30.0, 40.0], radii: [4.0, 0.0, 4.0, 0.0] }),
+            align_edges: false,
             cache: Some(cache.clone()),
             psd_raw: Some(blob(10, 30)),
+            density: 1.0,
+            feather: 0.0,
         }),
     );
     shape.label = LabelColor::Green;

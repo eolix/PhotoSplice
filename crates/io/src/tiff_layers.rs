@@ -213,6 +213,7 @@ pub(crate) fn export_layered(doc: &Document, opts: &ExportOptions, ctl: &photosp
         selected_layers: opts.selected_layers.clone(),
         maximize_compatibility: true,
         image_previews: opts.image_previews,
+        document_path: opts.document_path.clone(),
     };
     let (file, w) = crate::with_span(ctl, 0.0, TIFF_MODEL_DONE, |ctl| crate::psd_export::document_to_psd_interruptible(doc, &psd_opts, ctl));
     // A cancelled conversion stops early with an incomplete model: never encode it.

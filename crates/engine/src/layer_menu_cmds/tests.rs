@@ -400,7 +400,7 @@ fn stack_modes_render_from_the_nested_layers() {
             surf.write_region(Rect::new(3, 3, 4, 4), &photosplice_raster::from_rgba(&fmt, [v, v, v, 1.0]));
             kids.push(l);
         }
-        let g = Layer::new("stack", LayerContent::Group(photosplice_doc::Group { children: kids, expanded: true, artboard: None, divider_blocks: Vec::new() }));
+        let g = Layer::new("stack", LayerContent::Group(photosplice_doc::Group { children: kids, expanded: true, artboard: None, divider_blocks: Vec::new(), frame_stroke: None }));
         let smart = crate::smart_cmds::layer_to_smart(doc, &g)?;
         let id = smart.id;
         doc.layers = vec![smart];
@@ -465,16 +465,13 @@ fn stack_mode_rejects_sources_without_visible_layers() {
 
 #[test]
 fn reveal_in_finder_dry_run_and_enabled() {
+    let link = std::env::temp_dir().join("pics").join("a.png").to_string_lossy().into_owned();
     let mut s = session(8, "rgb");
     assert!(!s.is_enabled("layer.smartObjects.revealInFinder"));
     s.edit("linked", |doc, active| {
         let mut l = Layer::new(
             "linked",
-            LayerContent::Smart(photosplice_doc::SmartObject::new(
-                SmartSource::Linked { path: "/tmp/pics/a.png".into() },
-                photosplice_geom::Affine::IDENTITY,
-                None,
-            )),
+            LayerContent::Smart(photosplice_doc::SmartObject::new(SmartSource::Linked { path: link.clone() }, photosplice_geom::Affine::IDENTITY, None)),
         );
         l.visible = true;
         *active = Some(doc.insert_above(*active, l));
@@ -483,9 +480,40 @@ fn reveal_in_finder_dry_run_and_enabled() {
     .unwrap();
     assert!(s.is_enabled("layer.smartObjects.revealInFinder"));
     let r = s.execute("layer.smartObjects.revealInFinder", json!({"dryRun": true})).unwrap();
-    let (prog, args) = reveal_command("/tmp/pics/a.png");
+    let (prog, args) = reveal_command(&link).unwrap();
     assert_eq!(r["program"], json!(prog));
     assert_eq!(r["args"], json!(args));
+}
+
+#[test]
+fn reveal_follows_linked_paths_like_the_link_and_passes_paths_as_paths() {
+    let mut s = session(8, "rgb");
+    let folder = std::env::temp_dir().join("pics");
+    s.active_mut().unwrap().path = Some(folder.join("doc.pcraft").to_string_lossy().into_owned());
+    let mut link = |path: &str| {
+        s.edit("linked", |doc, active| {
+            let so = photosplice_doc::SmartObject::new(SmartSource::Linked { path: path.into() }, photosplice_geom::Affine::IDENTITY, None);
+            *active = Some(doc.insert_above(*active, Layer::new("linked", LayerContent::Smart(so))));
+            Ok(())
+        })
+        .unwrap();
+        s.execute("layer.smartObjects.revealInFinder", json!({"dryRun": true})).map_err(|e| e.to_string())
+    };
+    let err = link(r"\\192.0.2.1\share\x.png").unwrap_err();
+    assert!(err.contains("is not opened: the path is on another computer"), "{err}");
+    assert!(link("https://192.0.2.1/x.png").is_err());
+    // A relative link is shown next to the document.
+    let r = link("a.png").unwrap();
+    assert_eq!(r["args"], json!(reveal_command(&folder.join("a.png").to_string_lossy()).unwrap().1));
+    // The document's own file is shown wherever it is, a network share included.
+    s.active_mut().unwrap().path = Some(r"\\192.0.2.1\share\doc.psd".into());
+    s.execute("file.revealInFinder", json!({"dryRun": true})).unwrap();
+
+    assert_eq!(reveal_command_on("macos", "-a.png").unwrap(), ("open", vec!["-R".to_string(), "--".into(), "-a.png".into()]));
+    assert_eq!(reveal_command_on("windows", r"C:\pics\a.png").unwrap(), ("explorer", vec![r"/select,C:\pics\a.png".to_string()]));
+    for path in [r"C:\pics\a,b.png", r#"C:\pics\a".png"#] {
+        assert!(reveal_command_on("windows", path).is_err(), "{path}");
+    }
 }
 
 #[test]

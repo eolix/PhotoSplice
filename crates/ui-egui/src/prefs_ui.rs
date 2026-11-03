@@ -1391,7 +1391,7 @@ fn appearance_rows(ui: &mut egui::Ui, obj: &mut Map<String, Value>, _system: Opt
 
 /// A titled, outlined group of settings (Photoshop's Interface page has Appearance,
 /// Presentation and Options).
-fn pref_group(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+pub(crate) fn pref_group(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
     let t = Tokens::get(ui.ctx());
     egui::Frame::new().stroke(egui::Stroke::new(1.0, t.card_border)).corner_radius(t.radius).inner_margin(10.0).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -3037,7 +3037,7 @@ mod tests {
         assert!(has_visible_fields(&values, "fileHandling"));
         // Every setting of these sections is unimplemented or hidden in PhotoSplice
         // (`prefs::HIDDEN_IN_PHOTOSPLICE`).
-        for section in ["type", "enhancedControls", "rawDefaults", "integrations", "scratchDisks"] {
+        for section in ["type", "enhancedControls", "rawDefaults", "scratchDisks"] {
             assert!(!has_visible_fields(&values, section), "{section}");
         }
         assert!(prefs::is_hidden("rawDefaults.applyAutoTone"));

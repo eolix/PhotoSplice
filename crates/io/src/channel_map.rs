@@ -72,6 +72,29 @@ pub(crate) fn encode_color(c: &Color) -> (u16, [u16; 4]) {
     }
 }
 
+/// Which channels a DisplayInfo resource (`versioned` = 1077) marks as spot channels (kind 2),
+/// in file order after the first `skip` records, as [`apply_display_info`] reads them.
+pub(crate) fn spot_flags(data: &[u8], versioned: bool, skip: usize) -> Vec<bool> {
+    let body = if versioned { data.get(4..).unwrap_or(&[]) } else { data };
+    let size = if versioned { 13 } else { 14 };
+    body.chunks_exact(size).skip(skip).map(|rec| rec.get(12) == Some(&2)).collect()
+}
+
+/// The kind byte of each DisplayInfo record (`versioned` = 1077) in file order (0 / 1 = an
+/// alpha-type channel, 2 = a spot), `None` for a record cut short.
+pub(crate) fn display_kinds(data: &[u8], versioned: bool) -> Vec<Option<u8>> {
+    let body = if versioned { data.get(4..).unwrap_or(&[]) } else { data };
+    let size = if versioned { 13 } else { 14 };
+    body.chunks_exact(size).map(|rec| rec.get(12).copied()).collect()
+}
+
+/// Whether a DisplayInfo resource 1077 marks any channel as a spot (kind 2), in 13-byte records
+/// (Reference's) or in the 14-byte padded records some earlier writers used.
+pub(crate) fn display_info_marks_spot(data: &[u8]) -> bool {
+    let body = data.get(4..).unwrap_or_default();
+    [13, 14].into_iter().any(|size| body.chunks_exact(size).any(|rec| rec.get(12) == Some(&2)))
+}
+
 /// Applies a DisplayInfo resource (`versioned` = 1077) to the imported channels in order, after
 /// the first `skip` records (the merged transparency's).
 pub(crate) fn apply_display_info(data: &[u8], versioned: bool, skip: usize, channels: &mut [AlphaChannel]) {

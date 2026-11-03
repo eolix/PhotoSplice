@@ -19,6 +19,7 @@ pub mod builtin;
 pub mod clut;
 pub mod curve;
 pub mod gamut;
+pub mod installed;
 pub mod lut3d;
 pub mod lutfile;
 pub mod math;

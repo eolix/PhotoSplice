@@ -384,3 +384,55 @@ fn stop_rejects_huge_indices_without_panicking() {
     assert_eq!(midpoints, vec![0.25]);
     assert_eq!(s.active().unwrap().history.past_len(), h + 1);
 }
+
+/// A gradient fill opened from a file keeps the file's definition (smoothness, method) through
+/// edits that leave its stops alone, and is written as it once the file's own block is gone; an
+/// edit of its stops leaves the definition behind, and the stops are written instead.
+#[test]
+fn stop_edits_leave_the_files_gradient_definition_behind() {
+    use photosplice_psd::descriptor::{Descriptor, Id, UnicodeString, Value as DValue, VersionedDescriptor};
+    let rgb = |r: f64, b: f64| Descriptor::new("RGBC").with("Rd  ", DValue::Double(r)).with("Grn ", DValue::Double(0.0)).with("Bl  ", DValue::Double(b));
+    let stop = |c: Descriptor, at: i32| {
+        DValue::Descriptor(
+            Descriptor::new("Clrt")
+                .with("Clr ", DValue::Descriptor(c))
+                .with("Type", DValue::Enumerated { type_id: Id::new("Clry"), value: Id::new("UsrS") })
+                .with("Lctn", DValue::Integer(at))
+                .with("Mdpn", DValue::Integer(50)),
+        )
+    };
+    let grad = Descriptor::new("Grdn")
+        .with("Nm  ", DValue::Text(UnicodeString::new_nul("Custom")))
+        .with("GrdF", DValue::Enumerated { type_id: Id::new("GrdF"), value: Id::new("CstS") })
+        .with("Intr", DValue::Double(4096.0))
+        .with("Clrs", DValue::List(vec![stop(rgb(255.0, 0.0), 0), stop(rgb(0.0, 255.0), 4096)]))
+        .with("Trns", DValue::List(Vec::new()));
+    let gdfl = Descriptor::new("null")
+        .with("gradientsInterpolationMethod", DValue::Enumerated { type_id: Id::new("gradientInterpolationMethodType"), value: Id::new("Smoo") })
+        .with("Angl", DValue::UnitFloat { unit: *b"#Ang", value: 0.0 })
+        .with("Type", DValue::Enumerated { type_id: Id::new("GrdT"), value: Id::new("Lnr ") })
+        .with("Grad", DValue::Descriptor(grad));
+    let fill = photosplice_io::blocks::parse_fill(b"GdFl", &VersionedDescriptor::new(gdfl).to_bytes()).unwrap();
+    let mut doc = Document::new("g", photosplice_geom::Size::new(48, 32), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+    doc.layers.push(Layer::new("Gradient Fill", LayerContent::Fill(fill)));
+    let psd = photosplice_io::export(&doc, "g.psd", &Default::default()).unwrap().bytes;
+    let mut s = Session::new();
+    crate::file_cmds::open_bytes_as(&mut s, "g.psd", &psd, None, None).unwrap();
+    // Written with no block of the file's to keep: is the Smooth method named?
+    let written_method = |s: &Session| {
+        let mut doc: Document = (*s.active().unwrap().doc).clone();
+        doc.layers.iter_mut().for_each(|l| l.psd_blocks.clear());
+        let out = photosplice_io::export(&doc, "g.psd", &Default::default()).unwrap().bytes;
+        let f = photosplice_psd::PsdFile::from_bytes(&out).unwrap();
+        let data = f.layers().iter().find_map(|l| l.block(b"GdFl")).unwrap().data.clone();
+        let (d, _) = VersionedDescriptor::parse_prefix(&data).unwrap();
+        d.descriptor.get("gradientsInterpolationMethod").is_some()
+    };
+    assert!(matches!(active_fill(&s), Fill::Gradient { source: Some(_), .. }), "opened with its definition");
+    assert!(written_method(&s), "unedited: the definition is written");
+    s.execute(SET, json!({"angle": 45, "reverse": true})).unwrap();
+    assert!(written_method(&s), "the stops are untouched: still the definition");
+    s.execute(STOP, json!({"action": "color", "index": 0, "color": "#00ff00"})).unwrap();
+    assert!(matches!(active_fill(&s), Fill::Gradient { source: Some(_), .. }), "the stale definition stays");
+    assert!(!written_method(&s), "edited: the baked stops are written, Classic");
+}

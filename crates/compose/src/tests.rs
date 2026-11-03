@@ -508,9 +508,9 @@ fn solid_and_gradient_fill_layers() {
 
     let g = Fill::gradient(vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], 0.0, 1.0, photosplice_doc::GradientStyle::Linear, false);
     let patterns = pattern::PreparedPatterns::new(&[], pattern::PREPARED_PATTERN_BYTES);
-    let buf = render_fill_quantized(&g, Rect::new(0, 0, 10, 1), Rect::new(0, 0, 10, 1), &patterns, None);
+    let buf = render_fill_quantized(&g, Rect::new(0, 0, 10, 1), Rect::new(0, 0, 10, 1), (0.0, 0.0), &patterns, None);
     // tile independence: a 1px render of the right edge equals the full render
-    let one = render_fill_quantized(&g, Rect::new(9, 0, 10, 1), Rect::new(0, 0, 10, 1), &patterns, None);
+    let one = render_fill_quantized(&g, Rect::new(9, 0, 10, 1), Rect::new(0, 0, 10, 1), (0.0, 0.0), &patterns, None);
     assert_eq!(one.px[0], buf.px[9]);
     assert!(buf.px[0][0] < buf.px[9][0], "left dark, right light");
 }
@@ -1472,6 +1472,105 @@ fn shapeless_effect_maps_cover_only_the_band_being_rendered() {
     );
 }
 
+/// [`shapeless_fx_doc`] with Transparency Shapes Layer back on everywhere: ordinary layers, whose
+/// effect regions are their own bounds grown by the effects' reach.
+fn ordinary_fx_doc(depth: SampleType) -> Document {
+    fn shaped(layers: &mut [Layer]) {
+        for l in layers {
+            l.transparency_shapes = true;
+            if let LayerContent::Group(g) = &mut l.content {
+                shaped(&mut g.children);
+            }
+        }
+    }
+    let mut d = shapeless_fx_doc(depth);
+    shaped(&mut d.layers);
+    d
+}
+
+#[test]
+fn effect_maps_over_the_cache_budget_are_built_over_the_render_rect() {
+    // An ordinary layer's maps cover its whole region, so on a large document a render's layers
+    // can need more than the effect cache holds; building one then evicts the next one needed,
+    // and every render, however small, builds them all again. Over the budget, local maps are
+    // built over the render rect (plus twice the reach), as a shapeless layer's are (#1909).
+    let d = ordinary_fx_doc(SampleType::U8);
+    let patterns = pattern::PreparedPatterns::new(&d.patterns, pattern::PREPARED_PATTERN_BYTES);
+    // A row through fx8 (pixels at y 552..570, an outside stroke and an inner glow).
+    let band = Rect::new(0, 561, 48, 562);
+    let mut cx = Ctx::for_doc(&d, &patterns);
+    assert!(!cx.fx_over_budget, "a small document fits");
+    let l = &d.layers[9];
+    let whole = effect_region(l, band, &cx);
+    cx.set_fx_clip(band);
+    assert_eq!(effect_region(l, band, &cx), whole, "under the budget: the whole region");
+    cx.fx_over_budget = true;
+    let (part, clipped) = effect_region(l, band, &cx);
+    assert_eq!(part, whole.0.intersect(&band.inflate(2 * effects::margin(l))));
+    assert!(clipped && part.height() < whole.0.height(), "{part:?} vs {:?}", whole.0);
+    let built = effect_maps_in(l, band, &cx).bytes();
+    cx.fx_over_budget = false;
+    cx.set_fx_clip(Rect::new(0, 0, 1, 1));
+    cx.set_fx_clip(band);
+    assert!(built < effect_maps_in(l, band, &cx).bytes());
+    cx.fx_over_budget = true;
+    // Composited over more than the band, and maps that aren't local: the whole region.
+    assert_eq!(effect_region(l, Rect::new(0, 500, 48, 600), &cx), whole);
+    let noisy = &d.layers[2];
+    assert!(!effects::maps_are_local(noisy));
+    cx.set_fx_clip(Rect::new(0, 100, 48, 140));
+    assert!(!effect_region(noisy, Rect::new(0, 100, 48, 140), &cx).1);
+}
+
+#[test]
+fn renders_with_maps_clipped_over_the_budget_match_the_whole_maps() {
+    for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        let d = ordinary_fx_doc(depth);
+        let patterns = pattern::PreparedPatterns::new(&d.patterns, pattern::PREPARED_PATTERN_BYTES);
+        purge_effect_cache();
+        let whole = render(&d, d.bounds());
+        let mut cx = Ctx::for_doc(&d, &patterns);
+        cx.fx_over_budget = true;
+        // Bands, edit-sized parts and single tiles, each from maps built over it alone.
+        purge_effect_cache();
+        let bands = (0..10).map(|i| Rect::new(0, i * 64, 48, (i + 1) * 64));
+        let parts = [Rect::new(3, 290, 41, 333), Rect::new(0, 0, 48, 20), Rect::new(20, 600, 48, 640), Rect::new(0, 296, 20, 312), Rect::new(10, 425, 40, 445)];
+        for r in bands.chain(parts) {
+            let p = render_tiled_with(&d, r, RENDER_TILE, &cx);
+            for y in r.y0..r.y1 {
+                for x in r.x0..r.x1 {
+                    assert_eq!(p.get(x, y), whole.get(x, y), "{depth:?}: {r:?} differs at ({x},{y})");
+                }
+            }
+        }
+        assert!(render_tiled_with(&d, d.bounds(), 16, &cx).px == whole.px, "{depth:?}: tiled render differs");
+    }
+}
+
+#[test]
+fn the_effect_map_estimate_is_a_lower_bound() {
+    // fx_over_budget compares a lower bound of the maps' bytes with the budget: it must not
+    // exceed what building them takes, or a document that fits would lose its shared maps.
+    let d = ordinary_fx_doc(SampleType::U8);
+    let patterns = pattern::PreparedPatterns::new(&d.patterns, pattern::PREPARED_PATTERN_BYTES);
+    let cx = Ctx::for_doc(&d, &patterns);
+    let mut todo = Vec::new();
+    effect_layers(&d.layers, d.bounds(), 0, &mut todo);
+    let built: usize = todo.iter().map(|l| effect_maps_in(l, d.bounds(), &cx).bytes()).sum();
+    let estimate = fx_region_bytes(&d.layers, d.bounds());
+    assert!(estimate > 0 && estimate <= built as u64, "estimate {estimate} B, built {built} B");
+    // A 9000 x 6000 document with three full layers, each with a drop shadow: about 1.3 GB, over
+    // the default 768 MB. One such layer fits.
+    let mut big = Document::with_background("big", Size::new(9000, 6000), ColorMode::Rgb, SampleType::U8, Color::WHITE);
+    let mut l = Layer::raster("fill", big.pixel_format());
+    l.surface_mut().unwrap().fill_rect(big.bounds(), &photosplice_raster::from_rgba(&big.pixel_format(), [0.8, 0.5, 0.3, 1.0]));
+    l.effects.items = vec![Effect::DropShadow(Shadow { size: 40.0, ..shadow(20.0, 120.0) })];
+    big.layers.push(l.clone());
+    assert!(fx_region_bytes(&big.layers, big.bounds()) < DEFAULT_FX_CACHE_BUDGET as u64);
+    big.layers.extend([l.clone(), l]);
+    assert!(fx_region_bytes(&big.layers, big.bounds()) > DEFAULT_FX_CACHE_BUDGET as u64);
+}
+
 // ---------- PSD-fidelity effect semantics (fitted on Photoshop composites) ----------
 
 #[test]
@@ -2204,7 +2303,7 @@ fn levels_steps_match_photoshop() {
 // jump where it meets the power curve.
 #[test]
 fn levels_gamma_toe_is_monotone_for_any_gamma() {
-    for g in [1.0001, 1.05, 1.5, 3.0, 9.99, 1e6, f32::INFINITY] {
+    for g in [1.0001, 1.01, 1.0105422, 1.02, 1.05, 1.5, 3.0, 9.99, 1e6, f32::INFINITY] {
         let mut last = 0.0f32;
         for k in 0..=4096 {
             let u = k as f32 / 4096.0;
@@ -2266,6 +2365,57 @@ fn exposure_scales_32_bit_samples_as_stored() {
     for mode in [ColorMode::Rgb, ColorMode::Grayscale] {
         assert_eq!(adjust::Transfer::for_document(mode, SampleType::F32), adjust::Transfer::Gamma(1.0));
     }
+}
+
+/// Measured on Reference 27.11: an edited Curves in a 32-bit RGB document continues past 0..1
+/// along its end segments instead of clipping. The straight curve `[[0,0],[255,128]]` maps -0.5,
+/// 0.5 and 2 to -0.250980407, 0.250980407 and 1.003921628, through Image › Adjustments and
+/// through an adjustment layer alike. 8/16-bit documents still clip to the table.
+#[test]
+fn float_curves_extend_past_the_unit_range_like_reference() {
+    let line = vec![CurvePoint { input: 0.0, output: 0.0 }, CurvePoint { input: 1.0, output: 128.0 / 255.0 }];
+    let ident = vec![CurvePoint { input: 0.0, output: 0.0 }, CurvePoint { input: 1.0, output: 1.0 }];
+    let adj = Adjustment::Curves { master: line, per_channel: std::array::from_fn(|_| ident.clone()), space: photosplice_doc::adjust::ToneSpace::Rgb, black: Vec::new(), pencil: false };
+    let input = Buffer { rect: Rect::new(0, 0, 3, 1), px: vec![[-0.5, -0.5, -0.5, 1.0], [0.5, 0.5, 0.5, 1.0], [2.0, 2.0, 2.0, 1.0]] };
+    // Reference's samples, compared in f64 so they keep their printed digits.
+    let want = [-0.250980407f64, 0.250980407, 1.003921628];
+    let check = |got: &Buffer, what: &str| {
+        for (p, w) in got.px.iter().zip(want) {
+            assert!(p[..3].iter().all(|v| (f64::from(*v) - w).abs() < 2e-5), "{what}: {p:?} vs {w}");
+            assert_eq!(p[3], 1.0);
+        }
+    };
+    let mut destructive = input.clone();
+    adjust::apply_depth(&adj, &mut destructive, adjust::Transfer::Gamma(1.0), Some(SampleType::F32));
+    check(&destructive, "Image › Adjustments");
+    let doc = Document::new("hdr", Size::new(3, 1), ColorMode::Rgb, SampleType::F32);
+    let patterns = pattern::PreparedPatterns::new(&[], pattern::PREPARED_PATTERN_BYTES);
+    let cx = Ctx::for_doc(&doc, &patterns);
+    let mut layer = input.clone();
+    apply_adjustment(&adj, &mut layer, &cx);
+    check(&layer, "adjustment layer");
+    // Not at 8 or 16 bits: those samples never leave 0..1, and the table's ends hold.
+    for depth in [SampleType::U8, SampleType::U16] {
+        let mut clipped = input.clone();
+        adjust::apply_depth(&adj, &mut clipped, adjust::Transfer::for_document(ColorMode::Rgb, depth), Some(depth));
+        assert!(clipped.px[2][..3].iter().all(|v| *v <= 128.0 / 255.0 + 1e-4), "{depth:?}: {:?}", clipped.px[2]);
+    }
+    // Only in RGB documents: a 32-bit grayscale document keeps the table's end.
+    let mut gray = input.clone();
+    adjust::apply_in(&adj, &mut gray, adjust::Transfer::Gamma(1.0), Some(SampleType::F32), ColorMode::Grayscale);
+    assert!(gray.px[2][..3].iter().all(|v| *v <= 128.0 / 255.0 + 1e-4), "grayscale: {:?}", gray.px[2]);
+    let gray_doc = Document::new("hdr", Size::new(3, 1), ColorMode::Grayscale, SampleType::F32);
+    let cx = Ctx::for_doc(&gray_doc, &patterns);
+    let mut gray_layer = input.clone();
+    apply_adjustment(&adj, &mut gray_layer, &cx);
+    assert!(gray_layer.px[2][..3].iter().all(|v| *v <= 128.0 / 255.0 + 1e-4), "grayscale layer: {:?}", gray_layer.px[2]);
+    let mut rgb = input.clone();
+    adjust::apply_in(&adj, &mut rgb, adjust::Transfer::Gamma(1.0), Some(SampleType::F32), ColorMode::Rgb);
+    check(&rgb, "apply_in in RGB");
+    // Infinite samples don't become NaN on the way out.
+    let mut odd = Buffer { rect: Rect::new(0, 0, 1, 1), px: vec![[f32::INFINITY, f32::NEG_INFINITY, 0.5, 1.0]] };
+    adjust::apply_depth(&adj, &mut odd, adjust::Transfer::Gamma(1.0), Some(SampleType::F32));
+    assert!(odd.px[0].iter().all(|v| !v.is_nan()), "{:?}", odd.px[0]);
 }
 
 #[test]
@@ -2410,7 +2560,7 @@ fn shape_layer_gradients_match_fill_layers() {
         if unsorted {
             stops.reverse();
         }
-        Fill::Gradient { stops, angle: 30.0, scale: 1.7, style, reverse: false, opacity_stops, midpoints, offset, dither, align }
+        Fill::Gradient { stops, angle: 30.0, scale: 1.7, style, reverse: false, opacity_stops, midpoints, offset, dither, align, source: None }
     };
     let styles = [GradientStyle::Linear, GradientStyle::Radial, GradientStyle::Angle, GradientStyle::Reflected, GradientStyle::Diamond];
     // (name, midpoints, opacity stops, centre offset, dither, unsorted stops) per case.
@@ -3076,7 +3226,13 @@ fn lab_documents_evaluate_invert_threshold_and_gradient_map_on_lab() {
         assert!(near(inv, want, 0.5), "{depth:?}: {inv:?}");
         let th = render(Adjustment::Threshold { level: 0.25 });
         assert!(near(th, [100.0, 0.0, 0.0], 0.5), "{depth:?}: L 30 is above level 64: {th:?}");
-        let gm = render(Adjustment::GradientMap { stops: vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])], reverse: false, dither: false, ink_stops: Vec::new() });
+        let gm = render(Adjustment::GradientMap {
+            stops: vec![(0.0, [0.0; 3]), (1.0, [1.0; 3])],
+            reverse: false,
+            dither: false,
+            ink_stops: Vec::new(),
+            source: None,
+        });
         let want = srgb_to_lab([0.3; 3]);
         assert!(near(gm, want, 1.0), "{depth:?}: L 30 → 30 % of the way: {gm:?} vs {want:?}");
     }
@@ -3225,7 +3381,7 @@ fn lab_documents_gradient_map_follows_lightness() {
     let grey = photosplice_color::convert::lab_to_srgb([l, 0.0, 0.0]);
     for depth in SampleType::ALL {
         for reverse in [false, true] {
-            let adj = Adjustment::GradientMap { stops: stops.clone(), reverse, dither: false, ink_stops: Vec::new() };
+            let adj = Adjustment::GradientMap { stops: stops.clone(), reverse, dither: false, ink_stops: Vec::new(), source: None };
             let a = lab_doc_adjusted(red, adj.clone(), depth);
             let b = lab_doc_adjusted(grey, adj.clone(), depth);
             near3(a, b, 1.0, &format!("{depth:?} reverse {reverse}"));
@@ -3236,7 +3392,7 @@ fn lab_documents_gradient_map_follows_lightness() {
     }
     // In RGB documents the map still follows RGB luminance: red and grey differ there.
     let mut buf = Buffer::filled(Rect::new(0, 0, 1, 1), [red[0], red[1], red[2], 1.0]);
-    let adj = Adjustment::GradientMap { stops, reverse: false, dither: false, ink_stops: Vec::new() };
+    let adj = Adjustment::GradientMap { stops, reverse: false, dither: false, ink_stops: Vec::new(), source: None };
     adjust::apply_in(&adj, &mut buf, adjust::Transfer::Srgb, None, ColorMode::Rgb);
     let mut grey_buf = Buffer::filled(Rect::new(0, 0, 1, 1), [grey[0], grey[1], grey[2], 1.0]);
     adjust::apply_in(&adj, &mut grey_buf, adjust::Transfer::Srgb, None, ColorMode::Rgb);

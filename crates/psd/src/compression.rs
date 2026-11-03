@@ -224,6 +224,41 @@ pub fn decode_planes(compression: Compression, data: &[u8], layout: &PlaneLayout
     }
 }
 
+/// Checks that `data` starts with a PSD (two-byte) RLE row-count table of `rows` entries and
+/// reserves the room [`widen_rle_counts`] needs, so the widening itself cannot fail.
+pub(crate) fn reserve_rle_widening(data: &mut Vec<u8>, rows: usize) -> Result<()> {
+    let table = rows.checked_mul(2).ok_or(PsdError::LimitExceeded("row count overflow"))?;
+    if data.len() < table {
+        return Err(PsdError::UnexpectedEof { offset: data.len(), needed: table - data.len() });
+    }
+    data.try_reserve_exact(table).map_err(|_| PsdError::LimitExceeded("not enough memory to widen the RLE row counts"))
+}
+
+/// Rewrites a PSD RLE stream (two-byte row counts) as the PSB one (four-byte row counts) in
+/// place: the packed rows are identical in both versions, only the count table widens.
+pub(crate) fn widen_rle_counts(data: &mut Vec<u8>, rows: usize) -> Result<()> {
+    let table = rows.checked_mul(2).ok_or(PsdError::LimitExceeded("row count overflow"))?;
+    let old_len = data.len();
+    if old_len < table {
+        return Err(PsdError::UnexpectedEof { offset: old_len, needed: table - old_len });
+    }
+    let new_len = old_len.checked_add(table).ok_or(PsdError::LimitExceeded("RLE stream too large"))?;
+    data.resize(new_len, 0);
+    data.copy_within(table..old_len, table * 2);
+    // Back to front, so no count is overwritten before it is read: count `i` moves from
+    // `2i..2i + 2` to `4i..4i + 4`, at or after where counts `0..i` still are.
+    for i in (0..rows).rev() {
+        let (Some(&hi), Some(&lo)) = (data.get(2 * i), data.get(2 * i + 1)) else {
+            return Err(PsdError::invalid("RLE row-count table out of range"));
+        };
+        let Some(dst) = data.get_mut(4 * i..4 * i + 4) else {
+            return Err(PsdError::invalid("RLE row-count table out of range"));
+        };
+        dst.copy_from_slice(&[0, 0, hi, lo]);
+    }
+    Ok(())
+}
+
 /// Encodes planar data (excluding the 2-byte compression field).
 pub fn encode_planes(compression: Compression, decoded: &[u8], layout: &PlaneLayout) -> Result<Vec<u8>> {
     let total = layout.decoded_len()?;

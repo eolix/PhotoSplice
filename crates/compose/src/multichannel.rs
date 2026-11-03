@@ -5,6 +5,8 @@
 //! (solidity 0) multiply like overprinted process inks, opaque ones cover what is below, which is
 //! how Photoshop previews spot channels. An alpha-type channel of a Multichannel document
 //! (selected / masked areas) still prints, as a transparent black ink, like Photoshop shows it.
+//! Its value is stored as-is (1 = selected, white in the Channels panel), so its ink is `1 − value`
+//! (storytold/photocraft#5790).
 
 use photosplice_doc::Document;
 use photosplice_geom::Rect;
@@ -18,8 +20,10 @@ pub fn inks(doc: &Document, rect: Rect) -> Buffer {
     for ch in &doc.channels {
         // Alpha-type channels print as black ink, as Photoshop shows a Multichannel document's
         // "Masked Areas" channels (gray).
+        let alpha = ch.spot.is_none();
         let (ink, solidity) = ch.spot.unwrap_or((photosplice_doc::Color::BLACK, 0.0));
-        if ch.surface.content_bounds().intersect(&rect).is_empty() {
+        // An empty alpha channel (all black, nothing selected) is solid black ink: never skipped.
+        if !alpha && ch.surface.content_bounds().intersect(&rect).is_empty() {
             continue;
         }
         let c = ink.to_rgb();
@@ -27,7 +31,7 @@ pub fn inks(doc: &Document, rect: Rect) -> Buffer {
         let n = ch.surface.channels();
         ch.surface.read_region_into(rect, &mut vals);
         for (p, v) in buf.px.iter_mut().zip(vals.chunks_exact(n)) {
-            let v = v[0].clamp(0.0, 1.0);
+            let v = if alpha { 1.0 - v[0] } else { v[0] }.clamp(0.0, 1.0);
             if v <= 0.0 {
                 continue;
             }
@@ -68,14 +72,20 @@ mod tests {
         assert_eq!(r.px[1], [0.0, 1.0, 1.0, 1.0]);
         assert_eq!(r.px[2], [0.0, 0.0, 1.0, 1.0]);
         assert_eq!(r.px[3], [1.0, 0.0, 1.0, 1.0]);
-        // An alpha-type channel prints as a black ink.
+        // An alpha-type channel (stored as-is: 1 = selected) prints as a black ink where it is
+        // unselected, as Reference shows it.
         let mut k = Surface::new(fmt);
-        k.write_region(Rect::new(0, 0, 4, 1), &[0.5, 0.0, 0.0, 0.0]);
+        k.write_region(Rect::new(0, 0, 4, 1), &[0.5, 1.0, 1.0, 0.0]);
         doc.channels.push(AlphaChannel::new("Alpha", k));
         let r = crate::flatten(&doc);
         // 0.5 is stored as 128/255 in an 8-bit channel: within one 8-bit step.
         assert!((r.px[0][0] - 0.5).abs() <= 1.0 / 255.0 && (r.px[0][1] - 0.5).abs() <= 1.0 / 255.0, "{:?}", r.px[0]);
         assert_eq!(r.px[1], [0.0, 1.0, 1.0, 1.0]);
+        assert_eq!(r.px[3], [0.0, 0.0, 0.0, 1.0]);
+        // An empty alpha channel (nothing selected) prints solid black.
+        doc.channels.truncate(2);
+        doc.channels.push(AlphaChannel::new("Empty", Surface::new(fmt)));
+        assert!(crate::flatten(&doc).px.iter().all(|p| p[..3] == [0.0; 3]));
         // Other modes have no inks.
         doc.mode = ColorMode::Rgb;
         assert_eq!(crate::flatten(&doc).px[1][3], 0.0);

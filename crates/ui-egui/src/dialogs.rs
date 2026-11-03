@@ -605,6 +605,9 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
         if crate::duplicate_layer_ui::owns(&d.fields) {
             (min_w, max_w) = (360.0, 360.0);
         }
+        if crate::color_settings_ui::owns(&d.fields) {
+            (min_w, max_w) = (crate::color_settings_ui::WIDTH, crate::color_settings_ui::WIDTH);
+        }
         // Only the last dialog takes input, and egui only lets the modal drawn on top take input,
         // so the last one must be drawn above the others. egui can raise an older one (it raises an
         // area that is pressed or wasn't drawn the frame before), which left a greyed-out dialog
@@ -676,7 +679,9 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
                 DialogKind::Command if crate::file_ui::owns(&fields) => crate::file_ui::body(app, ui, &mut fields),
                 // The Color Picker draws its own OK / Cancel, top right as in Photoshop.
                 DialogKind::Command if crate::color_picker_ui::owns(&fields) => {
-                    outcome = crate::color_picker_ui::body(ui, &mut fields);
+                    // CMYK values are the document's CMYK profile's, else the working CMYK's.
+                    let cmyk = photosplice_engine::working_cmyk::values_space(&app.session);
+                    outcome = photosplice_color::convert::with_cmyk_space(cmyk.as_ref(), || crate::color_picker_ui::body(ui, &mut fields));
                     crate::color_picker_ui::take_add_swatch(app, &mut fields);
                 }
                 DialogKind::Command if crate::color_range_ui::owns(&fields) => crate::color_range_ui::body(app, ui, &mut fields),
@@ -687,11 +692,8 @@ pub fn show(app: &mut PhotospliceApp, ctx: &egui::Context) {
                 DialogKind::Command if crate::adjust_ui::owns_lookup(&fields) => crate::adjust_ui::lookup_dialog_body(app, ui, &mut fields),
                 DialogKind::Command if crate::adjust_dialog::owns(&fields) => crate::adjust_dialog::body(app, ui, &mut fields),
                 DialogKind::Command if crate::blur_pins::owns(&fields) => crate::blur_pins::body(ui, &mut fields),
+                DialogKind::Command if crate::color_settings_ui::owns(&fields) => crate::color_settings_ui::body(app, ui, &mut fields),
                 DialogKind::Command if fields.contains_key("__filter") => {
-                    // Color Settings: the monitor profile in use can change while it is open.
-                    if fields.get("__command").and_then(Value::as_str) == Some("edit.colorSettings") {
-                        fields.insert("__note".into(), Value::String(crate::monitor_status::note(app)));
-                    }
                     // Long parameter lists (Flame, Lighting Effects) scroll, so the title and the
                     // OK / Cancel buttons stay inside a small window.
                     // The preview window below the parameters reserves its own space (#3769).
@@ -938,7 +940,10 @@ pub fn confirm(app: &mut PhotospliceApp, id: u64) -> Result<Value, String> {
         DialogKind::Command if crate::variables_ui::owns(&d.fields) => crate::variables_ui::confirm(app, &d.fields),
         DialogKind::Command if crate::file_ui::owns(&d.fields) => crate::file_ui::confirm(app, &d.fields),
         DialogKind::Command if crate::new_guide_ui::owns(&d.fields) => crate::new_guide_ui::confirm(app, &d.fields),
-        DialogKind::Command if crate::color_picker_ui::owns(&d.fields) => crate::color_picker_ui::confirm(app, &d.fields),
+        DialogKind::Command if crate::color_picker_ui::owns(&d.fields) => {
+            let cmyk = photosplice_engine::working_cmyk::values_space(&app.session);
+            photosplice_color::convert::with_cmyk_space(cmyk.as_ref(), || crate::color_picker_ui::confirm(app, &d.fields))
+        }
         DialogKind::Command if crate::color_range_ui::owns(&d.fields) => crate::color_range_ui::confirm(app, &d.fields),
         DialogKind::Command if crate::prefs_ui::owns(&d.fields) => crate::prefs_ui::confirm(app, &d.fields),
         DialogKind::Command if d.fields.contains_key("__export") => crate::export_dialog::confirm(app, &d.fields),

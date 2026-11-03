@@ -272,6 +272,7 @@ fn gradient_midpoints_opacity_stops_offset_and_sorted_stops() {
         offset,
         dither: false,
         align: true,
+        source: None,
     };
     // Midpoint 0.25: the colour is half-way at t = 0.25 (pixel 25).
     let px = grad(g(vec![0.25], vec![], (0.0, 0.0), vec![(0.0, Color::BLACK), (1.0, Color::WHITE)]), Rect::new(0, 0, 100, 10));
@@ -301,6 +302,7 @@ fn gradient_without_align_with_layer_uses_the_canvas_frame() {
         offset: (0.0, 0.0),
         dither: false,
         align,
+        source: None,
     };
     // Aligned: the 100-px path bounds are the frame, pixel 55 sits at t = 0.55.
     let px = grad(g(true), canvas);
@@ -323,6 +325,7 @@ fn gradient_dither_is_deterministic_and_one_level() {
         offset: (0.1, -0.1),
         dither,
         align: true,
+        source: None,
     };
     let a = grad(g(true), Rect::new(0, 0, 100, 10));
     let b = grad(g(true), Rect::new(0, 0, 100, 10));
@@ -588,4 +591,86 @@ fn thin_antialiased_edges_still_count_toward_bounds() {
     let r = fill_rasterizer(&shapes::rect(0.0, 0.0, 100.0001, 10.0), DEFAULT_TOLERANCE);
     let c = r.render(Rect::new(0, 0, 102, 10));
     assert!(c[100] > 5e-5 && c[101] == 0.0, "{} {}", c[100], c[101]);
+}
+
+#[test]
+fn tile_bands_and_band_tiles_near_i32_max_do_not_overflow() {
+    let r = Rect::new(0, i32::MAX - 10, 10, i32::MAX);
+    let bands = tile_bands(r);
+    assert_eq!(bands, vec![r]);
+
+    let band = Rect::new(i32::MAX - 10, 0, i32::MAX, 2);
+    let data = vec![1.0f32; (band.width() * band.height()) as usize];
+    let tiles = band_tiles(band, &data, 1, |p| p[0] > 0.0);
+    assert_eq!(tiles.len(), 1);
+    assert_eq!(tiles[0].0, band);
+}
+
+#[test]
+fn soft_fills_show_beyond_the_path_and_keep_aligned_strokes_crisp() {
+    let square = Path::new(vec![Subpath::polygon(&[(10.0, 10.0), (30.0, 10.0), (30.0, 30.0), (10.0, 30.0)])]);
+    let clip = Rect::new(0, 0, 40, 40);
+    for align in [StrokeAlign::Inside, StrokeAlign::Outside] {
+        let sh = ShapeLayer {
+            path: square.clone(),
+            fill: Some(Fill::Solid(Color::rgb(0.0, 0.0, 0.0))),
+            stroke: Some(ShapeStroke { width: 2.0, align, paint: Fill::Solid(Color::rgb(1.0, 0.0, 0.0)), ..ShapeStroke::default() }),
+            density: 0.5,
+            ..ShapeLayer::default()
+        };
+        let c = CompiledShape::new(&sh, DEFAULT_TOLERANCE, clip);
+        assert_eq!(c.bounds(), Some(Rect::new(i32::MIN / 4, i32::MIN / 4, i32::MAX / 4, i32::MAX / 4)), "{align:?}");
+        let rgba = c.render_rgba(clip);
+        let at = |x: usize, y: usize| rgba[y * 40 + x];
+        // Beyond the path and the stroke: the fill at half density; inside: opaque black.
+        assert!((at(2, 2)[3] - 0.5).abs() < 1e-4 && at(2, 2)[0] == 0.0, "{align:?}: {:?}", at(2, 2));
+        assert!((at(20, 20)[3] - 1.0).abs() < 1e-4 && at(20, 20)[0] == 0.0);
+        // The stroke stays opaque red on its side of the path.
+        let s = if align == StrokeAlign::Inside { at(10, 20) } else { at(9, 20) };
+        assert!(s[0] > 0.999 && s[3] > 0.999, "{align:?}: {s:?}");
+    }
+    // Hostile density and feather render as the defaults or nearest valid values.
+    for (density, feather) in [(f32::NAN, f32::NAN), (-1.0, -5.0), (7.0, f32::INFINITY)] {
+        let sh = ShapeLayer { path: square.clone(), fill: Some(Fill::Solid(Color::rgb(0.0, 0.0, 0.0))), density, feather, ..ShapeLayer::default() };
+        let rgba = CompiledShape::new(&sh, DEFAULT_TOLERANCE, clip).render_rgba(clip);
+        assert!(rgba.iter().all(|p| p.iter().all(|v| v.is_finite())), "{density} {feather}");
+    }
+}
+
+/// A pattern paint for tests: red on even columns, blue on odd ones.
+struct Columns;
+
+impl PatternPaint for Columns {
+    fn at(&self, x: i32, _y: i32) -> [f32; 4] {
+        if x.rem_euclid(2) == 0 { [1.0, 0.0, 0.0, 1.0] } else { [0.0, 0.0, 1.0, 1.0] }
+    }
+}
+
+#[test]
+fn pattern_paint_comes_from_the_resolver() {
+    let pattern = Fill::Pattern { name: "P".into(), scale: 1.0, id: "p".into(), angle: 0.0, link: true, phase: (0.0, 0.0) };
+    let sh = ShapeLayer {
+        path: shapes::rect(2.0, 2.0, 12.0, 12.0),
+        fill: Some(pattern.clone()),
+        stroke: Some(ShapeStroke { width: 2.0, paint: pattern, align: StrokeAlign::Outside, ..Default::default() }),
+        ..Default::default()
+    };
+    let clip = Rect::new(0, 0, 16, 16);
+    // Without the document's patterns: transparent, as before.
+    assert!(CompiledShape::new(&sh, DEFAULT_TOLERANCE, clip).render_rgba(clip).iter().all(|p| p[3] == 0.0));
+    let resolve = |f: &Fill| matches!(f, Fill::Pattern { .. }).then(|| PatternSource(std::sync::Arc::new(Columns)));
+    let rgba = CompiledShape::with_patterns(&sh, DEFAULT_TOLERANCE, clip, &resolve).render_rgba(clip);
+    let at = |x: usize, y: usize| rgba[y * 16 + x];
+    // Fill (inside) and outside stroke (x = 0, 1) both sample the pattern at their own pixel.
+    for (x, y) in [(6, 6), (7, 6), (0, 6), (1, 6)] {
+        let want = if x % 2 == 0 { [1.0, 0.0, 0.0, 1.0] } else { [0.0, 0.0, 1.0, 1.0] };
+        assert_eq!(at(x, y), want, "({x},{y})");
+    }
+    let s = render_shape_with(&sh, PixelFormat::RGBA8, clip, &resolve);
+    assert_eq!(s.pixel(4, 4), vec![1.0, 0.0, 0.0, 1.0]);
+    // A gradient position means nothing to a pattern.
+    assert_eq!(Paint::Pattern(PatternSource(std::sync::Arc::new(Columns))).sample(0.5), [0.0; 4]);
+    // Hostile coordinates stay in range.
+    assert_eq!(px_of(f64::NAN), 0);
+    assert_eq!(px_of(1e300), i32::MAX);
 }

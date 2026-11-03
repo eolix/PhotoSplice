@@ -877,21 +877,6 @@ impl Default for RawDefaults {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct Integrations {
-    /// Allow agents to drive the app over the loopback control channel.
-    pub allow_agent_control: bool,
-    /// Default control port (0 = only when `--control` is given).
-    pub control_port: u32,
-}
-
-impl Default for Integrations {
-    fn default() -> Self {
-        Self { allow_agent_control: true, control_port: 0 }
-    }
-}
-
 /// Edit › Menus: hidden items and item colours, by command id.
 ///
 /// `hidden` defaults to [`crate::prefs_hidden::HIDDEN_MENU_ITEMS`] rather than to nothing: this
@@ -1024,7 +1009,6 @@ pub struct Preferences {
     pub type_: TypePrefs,
     pub enhanced_controls: EnhancedControls,
     pub raw_defaults: RawDefaults,
-    pub integrations: Integrations,
     /// Edit › Keyboard Shortcuts: command id → shortcut (`Cmd+Shift+N` notation); an empty
     /// string removes the default shortcut.
     pub shortcuts: BTreeMap<String, String>,
@@ -1082,7 +1066,7 @@ pub struct Preferences {
 }
 
 /// Preferences dialog sections in Photoshop's order: (id, title).
-pub const SECTIONS: [(&str, &str); 18] = [
+pub const SECTIONS: [(&str, &str); 17] = [
     ("general", "General"),
     ("interface", "Interface"),
     ("workspace", "Workspace"),
@@ -1100,7 +1084,6 @@ pub const SECTIONS: [(&str, &str); 18] = [
     ("type", "Type"),
     ("enhancedControls", "Enhanced Controls"),
     ("rawDefaults", "Camera Raw Defaults"),
-    ("integrations", "Integrations"),
 ];
 
 /// Preferences that nothing reads yet, so Edit › Preferences doesn't show them: a control that
@@ -1139,10 +1122,6 @@ pub const HIDDEN_UNTIL_IMPLEMENTED: &[&str] = &[
     "rawDefaults.sharpenFor",
     "rawDefaults.openAsSmartObject",
     "rawDefaults.applyAutoTone",
-    // Agent access is governed by the launch flags (`--control`, the automation roots), not
-    // by these yet.
-    "integrations.allowAgentControl",
-    "integrations.controlPort",
 ];
 
 /// Preferences that work but PhotoSplice keeps out of Edit › Preferences, so the dialog stays the
@@ -1277,7 +1256,6 @@ pub fn range(path: &str) -> Option<(f64, f64)> {
         "guidesGridAndSlices.gridlineEvery" => (0.001, 10_000.0),
         "guidesGridAndSlices.subdivisions" => (1.0, 100.0),
         "type.recentFonts" => (0.0, 50.0),
-        "integrations.controlPort" => (0.0, 65535.0),
         _ => return None,
     })
 }
@@ -1838,8 +1816,13 @@ impl Session {
         let mut prefs: Preferences = serde_json::from_value(v).map_err(|e| format!("preferences: {e}"))?;
         merge_shipped_defaults(&mut prefs);
         if let Some(c) = color {
+            let cmyk_before = self.color.settings.working_cmyk.clone();
             self.color.settings = serde_json::from_value(c).unwrap_or_default();
+            self.color.settings.migrate();
             photosplice_compose::psblend::set_text_gamma(self.color.settings.blend_text_gamma);
+            if self.color.settings.working_cmyk != cmyk_before {
+                self.apply_working_cmyk();
+            }
         }
         self.prefs.edit(|p| *p = prefs);
         if let Some(v) = presets {
@@ -2022,8 +2005,12 @@ fn prefs_set(s: &mut Session, p: &Value) -> Result<Value> {
         s.color.settings = saved_color;
         return Err(bad(cmd, e));
     }
-    // `colorSettings.blendTextGamma` lives in the compositor too, as `edit.colorSettings` sets it.
+    // `colorSettings.blendTextGamma` lives in the compositor too, as `edit.colorSettings` sets it;
+    // so does the working CMYK.
     photosplice_compose::psblend::set_text_gamma(s.color.settings.blend_text_gamma);
+    if s.color.settings.working_cmyk != saved_color.working_cmyk {
+        s.apply_working_cmyk();
+    }
     s.apply_prefs();
     let view = s.prefs_view();
     let out: Map<String, Value> = changes.iter().map(|(k, _)| (k.clone(), get_path(&view, k).cloned().unwrap_or(Value::Null))).collect();
@@ -2032,6 +2019,7 @@ fn prefs_set(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn prefs_reset(s: &mut Session, p: &Value) -> Result<Value> {
     let path = p.get("path").or_else(|| p.get("section")).and_then(Value::as_str);
+    let cmyk_before = s.color.settings.working_cmyk.clone();
     match path {
         Some("colorSettings") => s.color.settings = Default::default(),
         // One colour setting: `Preferences` has no `colorSettings`, so take the default
@@ -2054,6 +2042,9 @@ fn prefs_reset(s: &mut Session, p: &Value) -> Result<Value> {
     }
     s.prefs.edit(|_| ());
     photosplice_compose::psblend::set_text_gamma(s.color.settings.blend_text_gamma);
+    if s.color.settings.working_cmyk != cmyk_before {
+        s.apply_working_cmyk();
+    }
     s.apply_prefs();
     if path.is_some_and(|path| keyed(path).is_some()) {
         // The removed override is absent, so reading its old path would report an error.
@@ -2646,7 +2637,6 @@ pub fn specs() -> Vec<CommandSpec> {
         section!("edit.preferences.type", "Type…"),
         section!("edit.preferences.enhancedControls", "Enhanced Controls…"),
         section!("edit.preferences.rawDefaults", "Camera Raw…"),
-        section!("edit.preferences.integrations", "Integrations…"),
         spec!(
             "edit.keyboardShortcuts",
             "Keyboard Shortcuts…",

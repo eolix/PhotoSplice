@@ -70,11 +70,17 @@ pub fn smart_warp_doc_space(layer: &Layer) -> Option<Warp> {
     Some(Warp::custom(mesh, b))
 }
 
+/// Cylinder warps are read from and written to PSD placed layers, not applied by commands yet.
+const CYLINDER_UNSUPPORTED: &str = "a Cylinder warp is not supported by this command yet";
+
 /// Parses the warp params: a full `"warp"` object, or `"style"` (+ `"bend"`, `"hDistort"`,
 /// `"vDistort"`, `"vertical"`), `"mesh"` and `"grid"` over `rect`.
 pub fn warp_from_params(cmd: &str, p: &Value, rect: [f64; 4]) -> Result<Warp> {
     if let Some(w) = p.get("warp") {
         let w: Warp = serde_json::from_value(w.clone()).map_err(|e| bad(cmd, format!("bad `warp`: {e}")))?;
+        if w.style == WarpStyle::Cylinder {
+            return Err(bad(cmd, CYLINDER_UNSUPPORTED));
+        }
         if w.mesh.as_ref().is_some_and(|m| !m.is_valid()) {
             return Err(bad(cmd, "malformed warp mesh"));
         }
@@ -86,6 +92,9 @@ pub fn warp_from_params(cmd: &str, p: &Value, rect: [f64; 4]) -> Result<Warp> {
         None if p.get("mesh").is_some() || p.get("grid").is_some() => WarpStyle::Custom,
         None => return Err(bad(cmd, "pass `style` (arc, flag, …, custom), `mesh` or `warp`")),
     };
+    if style == WarpStyle::Cylinder {
+        return Err(bad(cmd, CYLINDER_UNSUPPORTED));
+    }
     let mut w = Warp::preset(style, num("bend", 50.0), rect);
     w.h_distort = num("hDistort", 0.0);
     w.v_distort = num("vDistort", 0.0);
@@ -302,6 +311,7 @@ fn type_warp(cmd: &str, w: &Warp) -> Result<Option<photosplice_doc::text::TextWa
         WarpStyle::None => Ok(None),
         WarpStyle::Custom if w.is_identity() => Ok(None),
         WarpStyle::Custom => Err(bad(cmd, "type can only take a warp style (arc, flag, …); a custom mesh needs rasterized type")),
+        WarpStyle::Cylinder => Err(bad(cmd, "type can only take a warp style (arc, flag, …); a cylinder needs rasterized type")),
         s => Ok(Some(photosplice_doc::text::TextWarp {
             style: s.psd_name().into(),
             value: clamp(w.bend),
@@ -666,6 +676,18 @@ mod tests {
         assert_eq!(st.history.past_len(), n + 1);
         let mesh = BezierMesh::identity([0.0, 0.0, 10.0, 10.0], 1, 1).map_points(|p| [p[0] * 2.0, p[1]]);
         assert!(s.execute("edit.transform.warp", json!({"warp": Warp::custom(mesh, [0.0, 0.0, 10.0, 10.0])})).is_err());
+    }
+
+    /// The Cylinder style PSD placed layers carry is refused by the command (it has no editor
+    /// yet) instead of applying as no warp, on pixels and on type alike.
+    #[test]
+    fn cylinder_warp_is_refused_by_the_command() {
+        let mut s = session(8);
+        let before = active_surface(&s);
+        assert!(s.execute("edit.transform.warp", json!({"style": "cylinder"})).is_err());
+        let cyl = Warp::cylinder(&[10.0, 50.0, 60.0, 10.0, 0.3, 0.3, 0.5], [10.0, 10.0, 60.0, 40.0]).unwrap();
+        assert!(s.execute("edit.transform.warp", json!({"warp": cyl})).is_err());
+        assert_eq!(active_surface(&s).read_region(Rect::new(0, 0, 80, 60)), before.read_region(Rect::new(0, 0, 80, 60)));
     }
 
     #[test]

@@ -155,10 +155,18 @@ fn uncached_cmyk_gradient_corpus_roundtrip() {
     let expected = photosplice_compose::flatten(&doc).px;
     let saved = export(&doc, "x.psd", &ExportOptions::default()).unwrap().bytes;
     let back = import("x.psd", &saved).unwrap().document;
+    // The file stores the fill's inks rounded to 16 bits: flattened to the document's own 16-bit
+    // inks, the round trip is exact.
+    let inks = |d: &photosplice_doc::Document| photosplice_compose::flatten_to_surface(d, d.pixel_format(), None).read_region(d.bounds());
+    let (a, b) = (inks(&doc), inks(&back));
+    let ink_diff = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+    eprintln!("uncached 16-bit CMYK gradient round-trip max ink error: {ink_diff:.8}");
+    assert!(ink_diff <= 1e-7, "ink round-trip error {ink_diff}");
+    // Seen in float RGB, the rounding to 16-bit inks (up to half a level) goes through the
+    // profile, which steepens it: up to 2.1 levels for these inks, so within 3.
     let diff = max_diff(&expected, &photosplice_compose::flatten(&back).px);
     eprintln!("uncached 16-bit CMYK gradient round-trip max error: {diff:.8}");
-    // Within one 16-bit level (the file stores quantized inks).
-    assert!(diff <= 1.0 / 65535.0, "round-trip error {diff}");
+    assert!(diff <= 3.0 / 65535.0, "round-trip error {diff}");
     assert_eq!(back.icc_profile, doc.icc_profile);
 }
 
@@ -239,6 +247,8 @@ fn gradient_maps_with_cmyk_lab_gray_stops_import_and_keep_their_space() {
     for depth in SampleType::ALL {
         for (mode, stops) in [(ColorMode::Cmyk, (cmyk_stop, paper)), (ColorMode::Lab, (lab_dark, lab_red)), (ColorMode::Grayscale, (gray_white, gray_black))] {
             let block = grdm_block(stops.0, stops.1);
+            // As saved: zero-padded to four bytes inside the block, as Reference writes blocks.
+            let padded = [block.clone(), vec![0; block.len().next_multiple_of(4) - block.len()]].concat();
             let mut doc = Document::new("map", photosplice_geom::Size::new(4, 2), mode, depth);
             if mode == ColorMode::Cmyk {
                 doc.icc_profile = Some(profile.to_bytes());
@@ -275,7 +285,7 @@ fn gradient_maps_with_cmyk_lab_gray_stops_import_and_keep_their_space() {
             assert!(max_diff(&with_map, &photosplice_compose::flatten(&hidden).px) > 0.01, "{mode:?} {depth:?}");
             // Saving again keeps the block (and so the stops' colour space) byte for byte...
             let again = export(&back, "x.psd", &ExportOptions::default()).unwrap().bytes;
-            assert_eq!(saved_grdm(&again), block, "{mode:?} {depth:?}");
+            assert_eq!(saved_grdm(&again), padded, "{mode:?} {depth:?}");
             // ...and so does toggling Reverse and Dither, which only flip their flags.
             if let LayerContent::Adjustment(Adjustment::GradientMap { reverse, dither, .. }) = &mut back.layers[1].content {
                 *reverse = true;
@@ -284,7 +294,7 @@ fn gradient_maps_with_cmyk_lab_gray_stops_import_and_keep_their_space() {
             let flipped_file = export(&back, "x.psd", &ExportOptions::default()).unwrap().bytes;
             let flipped = saved_grdm(&flipped_file);
             assert_eq!(&flipped[2..4], &[1, 1]);
-            assert_eq!(flipped[4..], block[4..], "{mode:?} {depth:?}: stops keep their colour space");
+            assert_eq!(flipped[4..], padded[4..], "{mode:?} {depth:?}: stops keep their colour space");
             let reopened = import("x.psd", &flipped_file).unwrap().document;
             assert_eq!(reopened.layers[1].content, back.layers[1].content);
         }

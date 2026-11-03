@@ -3965,3 +3965,5 @@ cameraData	Lens	Lens
 	This document's layers: {needed} of {budget} for layers	Bu belgenin katmanları: katmanlar için {budget} içinden {needed}
 	This document's layers need {needed} but may hold {budget}: whole-document redraws use the CPU	Bu belgenin katmanlarının {needed} belleğe ihtiyacı var ama en fazla {budget} kullanabilirler: tüm belgenin yeniden çizimi CPU'yu kullanır
 	GPU Memory (MB, 0 = Automatic)	GPU Belleği (MB, 0 = Otomatik)
+	Automatic (Coated FOGRA39 if installed)	Otomatik (yüklüyse Coated FOGRA39)
+	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (yerleşik)

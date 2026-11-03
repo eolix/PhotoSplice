@@ -66,7 +66,9 @@ fn assert_structurally_equal(a: &PsdFile, b: &PsdFile) {
         assert_eq!(ra.fill_opacity(), rb.fill_opacity(), "{n}: fill");
         assert_eq!(ra.is_visible(), rb.is_visible(), "{n}: visible");
         assert_eq!(ra.clipping, rb.clipping, "{n}: clipping");
-        assert_eq!(ra.block(b"lfx2").map(|x| &x.data), rb.block(b"lfx2").map(|x| &x.data), "{n}: lfx2");
+        // Saved blocks are zero-padded to four bytes inside their length, as Reference writes them.
+        let unpadded = |d: &[u8]| d[..d.len() - d.iter().rev().take(3).take_while(|&&x| x == 0).count()].to_vec();
+        assert_eq!(ra.block(b"lfx2").map(|x| unpadded(&x.data)), rb.block(b"lfx2").map(|x| unpadded(&x.data)), "{n}: lfx2");
         if ra.section_type().is_folder() {
             continue;
         }
@@ -684,9 +686,78 @@ fn duotone_keeps_layers_mode_and_inks() {
     assert_eq!(back.mode, Mode::Duotone);
     assert_eq!(back.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["one", "two"]);
     assert_eq!(back.duotone.and_then(|d| d.psd_raw), Some(inks));
-    // Made here without Photoshop's ink data: its gray plate, as Grayscale.
+    // Made here: written as Duotone with an ink block made from its inks
+    // (storytold/photocraft@772cf39c; it used to go out as its gray plate, as Grayscale).
     d.duotone = Some(photosplice_doc::Duotone { inks: vec![photosplice_doc::DuotoneInk::new("Black", [0.0; 3])], psd_raw: None });
-    assert_eq!(document_to_psd(&d).header.color_mode, ColorMode::Grayscale);
+    let f = document_to_psd(&d);
+    assert_eq!((f.header.color_mode, f.color_mode_data.len()), (ColorMode::Duotone, 524));
+}
+
+fn duotone_doc(sample: photosplice_color::SampleType) -> photosplice_doc::Document {
+    use photosplice_doc::{Duotone, DuotoneInk};
+    let mut d = photosplice_doc::Document::with_background(
+        "d",
+        photosplice_doc::Size::new(4, 2),
+        photosplice_color::ColorMode::Grayscale,
+        sample,
+        photosplice_color::Color::rgba(0.5, 0.5, 0.5, 1.0),
+    );
+    d.mode = photosplice_color::ColorMode::Duotone;
+    d.duotone = Some(Duotone { inks: vec![DuotoneInk::new("Black", [0.0; 3]), DuotoneInk::new("Orange", [1.0, 0.5, 0.0])], psd_raw: None });
+    d
+}
+
+/// storytold/photocraft@772cf39c: a Duotone made here is written with its ink block (names,
+/// colours, curves) and reopens with its inks; unedited, the block read is written back.
+#[test]
+fn a_duotone_made_here_is_written_with_its_inks() {
+    let d = duotone_doc(photosplice_color::SampleType::U8);
+    let out = export(&d, "x.psd", &ExportOptions::default()).unwrap();
+    assert!(out.warnings.iter().all(|w| !w.contains("written as")), "{:?}", out.warnings);
+    let f = PsdFile::from_bytes(&out.bytes).unwrap();
+    assert_eq!((f.header.color_mode, f.color_mode_data.len()), (ColorMode::Duotone, 524));
+    let (back, w) = psd_to_document(&f);
+    assert!(w.iter().all(|w| !w.contains("duotone")), "{w:?}");
+    let inks = &back.duotone.as_ref().unwrap().inks;
+    assert_eq!(inks.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["Black", "Orange"]);
+    assert!((inks[1].color[1] - 0.5).abs() < 1e-4, "{:?}", inks[1].color);
+    // Re-exported unedited, the block is the one read.
+    let again = PsdFile::from_bytes(&export(&back, "x.psd", &ExportOptions::default()).unwrap().bytes).unwrap();
+    assert_eq!(again.color_mode_data, f.color_mode_data);
+}
+
+/// storytold/photocraft#4935: Reference has only 8-bit Duotone and refuses to open a 16-bit
+/// Duotone PSD.
+#[test]
+fn a_16_bit_duotone_is_written_as_grayscale() {
+    let out = export(&duotone_doc(photosplice_color::SampleType::U16), "x.psd", &ExportOptions::default()).unwrap();
+    let f = PsdFile::from_bytes(&out.bytes).unwrap();
+    assert_eq!((f.header.color_mode, f.header.depth), (ColorMode::Grayscale, 16));
+    assert!(out.warnings.iter().any(|w| w == "Duotone document written as Grayscale"), "{:?}", out.warnings);
+}
+
+/// storytold/photocraft#4935: a colour-book ink is stored by its book key; Reference's resource
+/// 1066 gives its Lab equivalent. Without it the gray plate is shown, not a black ink.
+#[test]
+fn a_colour_book_ink_shows_its_lab_equivalent_or_the_gray_plate() {
+    let out = export(&duotone_doc(photosplice_color::SampleType::U8), "x.psd", &ExportOptions::default()).unwrap();
+    let mut f = PsdFile::from_bytes(&out.bytes).unwrap();
+    // The second ink becomes PANTONE 327 CVC, stored by its book key as Reference does.
+    f.color_mode_data[14..24].copy_from_slice(&[0, 3, 0x20, 0x20, 0x33, 0x32, 0x37, 0x43, 0, 0]);
+    let (d, w) = psd_to_document(&f);
+    let inks = &d.duotone.as_ref().unwrap().inks;
+    assert_eq!((inks.len(), inks[0].color), (1, [0.0; 3]), "{inks:?}");
+    assert!(w.iter().any(|w| w.contains("shown as grayscale")), "{w:?}");
+    // With Reference's Lab equivalents (black, then the PANTONE teal) it shows in colour.
+    let lab = vec![0, 1, 0, 2, 0, 7, 0x03, 0xB9, 0x01, 0xF2, 0x01, 0xA9, 0, 0, 0, 7, 0x11, 0xC5, 0xE6, 0x38, 0xFE, 0x0C, 0, 0];
+    f.resources.push(photosplice_psd::ImageResource::new(1066, lab));
+    let (d, w) = psd_to_document(&f);
+    assert!(w.iter().all(|w| !w.contains("duotone")), "{w:?}");
+    let duo = d.duotone.as_ref().unwrap();
+    assert_eq!(duo.inks.len(), 2);
+    let [r, g, b] = duo.inks[1].color;
+    assert!(r < 0.1 && g > 0.4 && b > 0.35, "{:?}", duo.inks[1].color);
+    assert_eq!(duo.psd_raw.as_ref(), Some(&f.color_mode_data), "the block is kept raw");
 }
 
 /// Indexed Color and Bitmap files go back in their own mode while they are one plain image:

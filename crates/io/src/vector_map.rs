@@ -41,12 +41,16 @@ fn op_to_psd(op: PathOp) -> i16 {
     }
 }
 
-/// Path records → model path in document pixels (`w`×`h` canvas).
+/// Path records → model path in document pixels (`w`×`h` canvas). The fill rule is the one its
+/// components' length records give (Reference fills a self-crossing star solid under 2, with a
+/// hole under 1); records without one (older writers' 0) read as non-zero.
 pub fn path_from_records(p: &PathData, w: u32, h: u32) -> Path {
     let (w, h) = (f64::from(w), f64::from(h));
     let pt = |q: (f64, f64)| Point::new(q.0 * w, q.1 * h);
-    let subpaths = p
-        .subpaths()
+    let subs = p.subpaths();
+    let even_odd = subs.iter().any(|s| s.winding == 1) && !subs.iter().any(|s| s.winding == 2);
+    let fill_rule = if even_odd { FillRule::EvenOdd } else { FillRule::NonZero };
+    let subpaths = subs
         .into_iter()
         .map(|s| Subpath {
             closed: s.closed,
@@ -54,7 +58,7 @@ pub fn path_from_records(p: &PathData, w: u32, h: u32) -> Path {
             knots: s.knots.iter().map(|k| Knot { anchor: pt(k.anchor), in_ctrl: pt(k.pre), out_ctrl: pt(k.post), smooth: k.linked }).collect(),
         })
         .collect();
-    Path { subpaths, fill_rule: FillRule::NonZero, inverted: p.initial_fill() }
+    Path { subpaths, fill_rule, inverted: p.initial_fill() }
 }
 
 /// Model path → path records.
@@ -64,9 +68,16 @@ pub fn path_to_records(p: &Path, w: u32, h: u32) -> PathData {
     let subs: Vec<PsdSubpath> = p
         .subpaths
         .iter()
-        .map(|s| PsdSubpath {
+        .enumerate()
+        .map(|(i, s)| PsdSubpath {
             closed: s.closed,
             operation: op_to_psd(s.op),
+            // Each component states the rule; subpaths continuing one carry 0, as Reference writes.
+            winding: match (s.op, p.fill_rule) {
+                (PathOp::Join, _) if i > 0 => 0,
+                (_, FillRule::EvenOdd) => 1,
+                (_, FillRule::NonZero) => 2,
+            },
             knots: s.knots.iter().map(|k| PsdKnot { linked: k.smooth, pre: fr(k.in_ctrl), anchor: fr(k.anchor), post: fr(k.out_ctrl) }).collect(),
         })
         .collect();
@@ -142,6 +153,29 @@ pub fn vmsk_bytes(path: &Path, flags: u32, w: u32, h: u32) -> Vec<u8> {
         first.op = PathOp::Combine;
     }
     VectorMaskBlock { version: 3, flags, path: path_to_records(&p, w, h) }.to_bytes()
+}
+
+/// A shape layer's `vsms`/`vmsk` block for `path`. An inverted shape is written as Reference
+/// writes one, with a leading subtract (and the later operations as their duals, undoing
+/// [`layer_path_from_records`]) rather than the invert flag: Reference reads both as the same
+/// coverage but strokes a flag-inverted shape on the other side of its edge.
+pub fn shape_path_bytes(path: &Path, w: u32, h: u32) -> Vec<u8> {
+    if !path.inverted || path.subpaths.is_empty() {
+        return vmsk_bytes(path, 0, w, h);
+    }
+    let mut p = path.clone();
+    p.inverted = false;
+    for s in p.subpaths.iter_mut().skip(1) {
+        s.op = match s.op {
+            PathOp::Combine => PathOp::Subtract,
+            PathOp::Subtract => PathOp::Combine,
+            op => op,
+        };
+    }
+    if let Some(first) = p.subpaths.first_mut() {
+        first.op = PathOp::Subtract;
+    }
+    VectorMaskBlock { version: 3, flags: 0, path: path_to_records(&p, w, h) }.to_bytes()
 }
 
 /// A layer's vector mask from its `vmsk`/`vsms` block. A vector mask without subpaths reveals
@@ -264,10 +298,20 @@ pub fn parse_vstk(data: &[u8], dpi: f32) -> Option<VstkInfo> {
         _ => Vec::new(),
     };
     let paint = get_desc(&d, "strokeStyleContent").and_then(content_fill).unwrap_or(Fill::Solid(photosplice_color::Color::BLACK));
+    let mut opacity = num(d.get("strokeStyleOpacity")).map_or(1.0, |v| v as f32 / 100.0);
+    // A translucent colour (its alpha in `pcAl`) was folded into the opacity Reference reads
+    // ([`vstk_bytes`]): unfold it, so the stroke keeps both.
+    if let Fill::Solid(c) = &paint
+        && c.alpha.is_finite()
+        && c.alpha > 1e-6
+        && (c.alpha - 1.0).abs() > 1e-6
+    {
+        opacity = (opacity / c.alpha).clamp(0.0, 1.0);
+    }
     let stroke = ShapeStroke {
         width: unit_px(d.get("strokeStyleLineWidth"), dpi).unwrap_or(1.0) as f32,
         paint,
-        opacity: num(d.get("strokeStyleOpacity")).map_or(1.0, |v| v as f32 / 100.0),
+        opacity,
         align,
         cap,
         join,
@@ -282,10 +326,26 @@ fn en(ty: &str, v: &str) -> Value {
     Value::Enumerated { type_id: Id::new(ty), value: Id::new(v) }
 }
 
+/// Reference's stroke colour has no alpha: a translucent solid colour's alpha is folded into
+/// `strokeStyleOpacity`, so Reference draws the stroke as we do.
+fn fold_stroke_color_alpha(s: &ShapeStroke) -> ShapeStroke {
+    let mut out = s.clone();
+    if let Fill::Solid(c) = &mut out.paint
+        && c.alpha.is_finite()
+        && (c.alpha - 1.0).abs() > 1e-6
+    {
+        out.opacity = (out.opacity * c.alpha).clamp(0.0, 1.0);
+        c.alpha = 1.0;
+    }
+    out
+}
+
 pub fn vstk_bytes(stroke: Option<&ShapeStroke>, fill_enabled: bool, dpi: f32) -> Vec<u8> {
     let default = ShapeStroke::default();
-    let s = stroke.unwrap_or(&default);
-    let (_, content) = fill_to_desc(&s.paint);
+    let folded = stroke.map(fold_stroke_color_alpha);
+    let s = folded.as_ref().unwrap_or(&default);
+    // The colour keeps its alpha as `pcAl` so a read can unfold the opacity ([`parse_vstk`]).
+    let (_, content) = fill_to_desc(stroke.map_or(&s.paint, |st| &st.paint));
     let class = match s.paint {
         Fill::Solid(_) => "solidColorLayer",
         Fill::Gradient { .. } => "gradientLayer",
@@ -407,7 +467,21 @@ const VSTK_UNMODELLED: [&str; 3] = ["strokeStyleBlendMode", "strokeStyleScaleLoc
 pub fn vstk_bytes_onto(stroke: Option<&ShapeStroke>, fill_enabled: bool, dpi: f32, old: Option<&[u8]>) -> Vec<u8> {
     let fresh = vstk_bytes(stroke, fill_enabled, dpi);
     match (old.and_then(parse_prefix_versioned), parse_prefix_versioned(&fresh)) {
-        (Some(base), Some(new)) => VersionedDescriptor::new(crate::blocks::merge_descriptor(&base, new, &VSTK_UNMODELLED)).to_bytes(),
+        (Some(base), Some(new)) => {
+            let mut merged = crate::blocks::merge_descriptor(&base, new, &VSTK_UNMODELLED);
+            // An opaque colour over a file's translucent one: the file's `pcAl` must not survive.
+            let opaque = !matches!(stroke.map(|s| &s.paint), Some(Fill::Solid(c)) if (c.alpha - 1.0).abs() > 1e-6);
+            if opaque {
+                for (k, v) in &mut merged.items {
+                    if k.is("strokeStyleContent")
+                        && let Value::Descriptor(content) = v
+                    {
+                        crate::blocks::clear_pc_alpha(content);
+                    }
+                }
+            }
+            VersionedDescriptor::new(merged).to_bytes()
+        }
         _ => fresh,
     }
 }
@@ -505,6 +579,12 @@ pub fn shape_from_blocks(sh: &mut ShapeLayer, block: &dyn Fn(&[u8; 4]) -> Option
         }
     }
     sh.live = block(b"vogk").and_then(|d| live_from_vogk(&d));
+    sh.align_edges = block(b"sn2P").is_some_and(|d| sn2p_on(&d));
+}
+
+/// An `sn2P` (Align Edges) block's flag: a u32, non-zero when on.
+fn sn2p_on(d: &[u8]) -> bool {
+    d.get(..4).is_some_and(|b| b.iter().any(|&x| x != 0))
 }
 
 fn has_fill_block(raw: &[([u8; 4], Vec<u8>)]) -> bool {
@@ -530,7 +610,7 @@ pub fn shape_blocks(sh: &ShapeLayer, raw: &mut Vec<([u8; 4], Vec<u8>)>, w: u32, 
             // The layer's own raw copy may still be valid (psd_raw is the principal block).
             let data = match &sh.psd_raw {
                 Some(r) if keep(r) => r.to_vec(),
-                _ => vmsk_bytes(&sh.path, 0, w, h),
+                _ => shape_path_bytes(&sh.path, w, h),
             };
             // A shape in the CS6 form (fill in `vscg`, or a new shape) keeps its path under
             // `vsms`, as Photoshop writes it; legacy shapes (top-level fill) under `vmsk`.
@@ -564,10 +644,24 @@ pub fn shape_blocks(sh: &ShapeLayer, raw: &mut Vec<([u8; 4], Vec<u8>)>, w: u32, 
     match find(raw, b"vstk") {
         Some(i) if parse_vstk(&raw[i].1, dpi).as_ref().is_some_and(same) => {}
         Some(i) => raw[i].1 = vstk_bytes_onto(sh.stroke.as_ref(), sh.fill.is_some(), dpi, Some(&raw[i].1)),
-        // "No fill" needs a vstk only when a fill block would otherwise paint.
-        None if sh.stroke.is_some() || (sh.fill.is_none() && has_fill_block(raw)) => {
+        // Reference's own shapes always carry one (stroke off when unstroked): a fill-only shape
+        // written without it came back from Reference as a fill layer with a vector mask (pattern
+        // kit). A legacy shape (fill in a top-level block) keeps its form, needing one only for a
+        // stroke, or for "no fill" where its fill block would otherwise paint.
+        None if sh.stroke.is_some() || (sh.fill.is_none() && has_fill_block(raw)) || !raw.iter().any(|(k, _)| matches!(k, b"SoCo" | b"GdFl" | b"PtFl")) => {
             raw.push((*b"vstk", vstk_bytes(sh.stroke.as_ref(), sh.fill.is_some(), dpi)));
         }
+        None => {}
+    }
+    // Align Edges: Reference writes `sn2P` 1 on a shape that has it and leaves the block out
+    // otherwise; a block that already says what the model does stays as it is.
+    match find(raw, b"sn2P") {
+        Some(i) if sn2p_on(&raw[i].1) == sh.align_edges => {}
+        Some(i) if sh.align_edges => raw[i].1 = vec![0, 0, 0, 1],
+        Some(i) => {
+            raw.remove(i);
+        }
+        None if sh.align_edges => raw.push((*b"sn2P", vec![0, 0, 0, 1])),
         None => {}
     }
     // Live shape origination. One we can't read (a polygon, a star, several shapes) stays while
@@ -630,10 +724,35 @@ mod tests {
         assert_eq!(op_from_psd(7), PathOp::Combine);
     }
 
+    /// ag-psd winding-non-zero.psd: a self-crossing star Reference fills solid stores 2 in its
+    /// length record; it shows the centre as a hole under 1. Continuing subpaths store 0.
+    #[test]
+    fn fill_rule_round_trips_through_the_length_records() {
+        for rule in [FillRule::NonZero, FillRule::EvenOdd] {
+            let mut p = sample_path();
+            p.fill_rule = rule;
+            if let Some(s) = p.subpaths.get_mut(1) {
+                s.op = PathOp::Join;
+            }
+            let rec = path_to_records(&p, 64, 64);
+            let words: Vec<u16> = rec.subpaths().iter().map(|s| s.winding).collect();
+            let first = if rule == FillRule::NonZero { 2 } else { 1 };
+            assert_eq!(words.first(), Some(&first));
+            assert!(words.iter().skip(1).all(|&w| w == 0), "{words:?}");
+            assert_eq!(path_from_records(&rec, 64, 64), p);
+        }
+        // Records without a rule (0 throughout) read as non-zero.
+        let mut rec = path_to_records(&sample_path(), 64, 64);
+        let subs: Vec<PsdSubpath> = rec.subpaths().into_iter().map(|s| PsdSubpath { winding: 0, ..s }).collect();
+        rec = PathData::from_subpaths(&subs, false);
+        assert_eq!(path_from_records(&rec, 64, 64).fill_rule, FillRule::NonZero);
+    }
+
     fn vmsk_with(initial_fill: bool, ops: &[i16]) -> Vec<u8> {
         let square = |x: f64| PsdSubpath {
             closed: true,
             operation: 0,
+            winding: 1,
             knots: [(x, 0.25), (x + 0.25, 0.25), (x + 0.25, 0.5), (x, 0.5)].iter().map(|&p| PsdKnot { linked: false, pre: p, anchor: p, post: p }).collect(),
         };
         let subs: Vec<PsdSubpath> = ops.iter().enumerate().map(|(i, &op)| PsdSubpath { operation: op, ..square(0.1 * i as f64) }).collect();
@@ -675,6 +794,22 @@ mod tests {
         lead.subpaths[0].op = PathOp::Subtract;
         let back = path_from_vmsk(&vmsk_bytes(&lead, 0, 64, 64), 64, 64).unwrap().0;
         assert!(!back.inverted, "a stored leading subtract is drawn as combine by the model");
+    }
+
+    #[test]
+    fn inverted_shapes_are_written_with_a_leading_subtract() {
+        // As Reference stores a shape whose first component subtracts: op 2 first, no flag.
+        let src = vmsk_with(false, &[2, -1, 1]);
+        let (p, _) = path_from_vmsk(&src, 100, 100).unwrap();
+        assert!(p.inverted);
+        let b = shape_path_bytes(&p, 100, 100);
+        let blk = VectorMaskBlock::from_bytes(&b).unwrap();
+        assert_eq!(blk.flags & VectorMaskBlock::FLAG_INVERT, 0);
+        assert_eq!(blk.path.subpaths().iter().map(|s| s.operation).collect::<Vec<_>>(), [2, -1, 1]);
+        assert_eq!(path_from_vmsk(&b, 100, 100).unwrap().0, p);
+        // A plain shape is unchanged.
+        let plain = sample_path();
+        assert_eq!(shape_path_bytes(&plain, 64, 64), vmsk_bytes(&plain, 0, 64, 64));
     }
 
     #[test]
@@ -753,6 +888,26 @@ mod tests {
     }
 
     #[test]
+    fn vstk_folds_color_alpha_into_stroke_opacity() {
+        let s = ShapeStroke { width: 2.0, paint: Fill::Solid(Color::rgba(0.0, 0.0, 1.0, 0.4)), opacity: 0.5, ..ShapeStroke::default() };
+        let bytes = vstk_bytes(Some(&s), true, 72.0);
+        let raw = crate::blocks::parse_prefix_versioned(&bytes).unwrap();
+        let file_opacity = crate::blocks::num(raw.get("strokeStyleOpacity")).unwrap() as f32 / 100.0;
+        assert!((file_opacity - 0.2).abs() < 1e-4, "Reference sees the product in strokeStyleOpacity");
+        let got = parse_vstk(&bytes, 72.0).unwrap().stroke.unwrap();
+        assert!((got.opacity - 0.5).abs() < 1e-4);
+        let Fill::Solid(c) = got.paint else { panic!("solid") };
+        assert!((c.alpha - 0.4).abs() < 1e-5);
+        assert!((c.to_rgb()[2] - 1.0).abs() < 1e-3);
+        // Made opaque and merged onto that file: neither the old alpha nor the folded opacity stays.
+        let opaque = ShapeStroke { paint: Fill::Solid(Color::rgb(0.0, 0.0, 1.0)), ..s };
+        let merged = parse_vstk(&vstk_bytes_onto(Some(&opaque), true, 72.0, Some(&bytes)), 72.0).unwrap().stroke.unwrap();
+        let Fill::Solid(c) = merged.paint else { panic!("solid") };
+        assert_eq!(c.alpha, 1.0);
+        assert!((merged.opacity - 0.5).abs() < 1e-4);
+    }
+
+    #[test]
     fn vogk_roundtrip() {
         for s in [
             LiveShape::Rect { rect: [1.0, 2.0, 30.0, 40.0], radii: [0.0; 4] },
@@ -764,6 +919,47 @@ mod tests {
             assert_eq!(live_from_vogk(&b), Some(s));
         }
         assert!(vogk_bytes(&LiveShape::Polygon { rect: [0.0; 4], sides: 5, star_ratio: 1.0 }, 72.0).is_none());
+    }
+
+    /// Reference's shapes carry a `vstk` even unstroked (stroke off); without one, Reference turned
+    /// a fill-only shape into a fill layer with a vector mask. Legacy shapes keep their form.
+    #[test]
+    fn fill_only_shapes_get_a_stroke_style_with_the_stroke_off() {
+        let sh = ShapeLayer { path: sample_path(), fill: Some(Fill::Solid(Color::BLACK)), ..Default::default() };
+        let mut raw = Vec::new();
+        shape_blocks(&sh, &mut raw, 64, 64, 72.0);
+        let vstk = raw.iter().find(|(k, _)| k == b"vstk").map(|(_, d)| d.clone()).expect("a vstk");
+        let info = parse_vstk(&vstk, 72.0).unwrap();
+        assert!(info.stroke.is_none() && info.fill_enabled);
+        let mut legacy = vec![(*b"SoCo", VersionedDescriptor::new(crate::blocks::fill_to_desc(&Fill::Solid(Color::BLACK)).1).to_bytes())];
+        shape_blocks(&sh, &mut legacy, 64, 64, 72.0);
+        assert!(!legacy.iter().any(|(k, _)| k == b"vstk"), "a legacy shape keeps its form");
+    }
+
+    /// Reference writes `sn2P` 1 on an Align Edges shape and leaves it out otherwise.
+    #[test]
+    fn align_edges_round_trips_through_sn2p() {
+        let mut sh = ShapeLayer { path: sample_path(), fill: Some(Fill::Solid(Color::BLACK)), align_edges: true, ..Default::default() };
+        let mut raw = Vec::new();
+        shape_blocks(&sh, &mut raw, 64, 64, 72.0);
+        assert!(raw.contains(&(*b"sn2P", vec![0, 0, 0, 1])));
+        let lookup = |raw: &Vec<([u8; 4], Vec<u8>)>| {
+            let raw = raw.clone();
+            let mut back = ShapeLayer::default();
+            shape_from_blocks(&mut back, &move |k: &[u8; 4]| raw.iter().find(|(key, _)| key == k).map(|(_, d)| d.clone()), 64, 64, 72.0);
+            back.align_edges
+        };
+        assert!(lookup(&raw));
+        // A stored block that agrees stays as it is; turning the flag off drops it.
+        let before = raw.clone();
+        shape_blocks(&sh, &mut raw, 64, 64, 72.0);
+        assert_eq!(raw, before);
+        sh.align_edges = false;
+        shape_blocks(&sh, &mut raw, 64, 64, 72.0);
+        assert!(!raw.iter().any(|(k, _)| k == b"sn2P"));
+        assert!(!lookup(&raw));
+        // A short or zero block reads as off.
+        assert!(!sn2p_on(&[0, 0, 0, 0]) && !sn2p_on(&[1]) && sn2p_on(&[0, 0, 0, 1]));
     }
 
     #[test]
@@ -872,5 +1068,23 @@ mod csh_tests {
         assert!(shapes.iter().all(|(_, p)| !p.subpaths.is_empty()));
         assert!(super::read_csh(b"cush\0\0\0\x02\0\0\0\x05").is_err(), "truncated");
         assert!(super::read_csh(b"nope").is_err());
+    }
+}
+
+#[cfg(test)]
+mod gradient_source_tests {
+    /// A shape's gradient stroke read from a file is written fresh as the file's definition.
+    #[test]
+    fn gradient_stroke_is_written_as_its_definition() {
+        let d = crate::blocks::more_tests::noise_gdfl();
+        let paint = crate::blocks::fill_from_desc(b"GdFl", &d).unwrap();
+        let stroke = photosplice_doc::ShapeStroke { paint, ..photosplice_doc::ShapeStroke::default() };
+        let v = crate::vector_map::vstk_bytes(Some(&stroke), true, 72.0);
+        let (vd, _) = photosplice_psd::descriptor::VersionedDescriptor::parse_prefix(&v).unwrap();
+        let content = crate::blocks::get_desc(&vd.descriptor, "strokeStyleContent").unwrap();
+        assert_eq!(crate::blocks::get_desc(content, "Grad"), crate::blocks::get_desc(&d, "Grad"));
+        assert!(content.get("gradientsInterpolationMethod").is_some());
+        let back = crate::vector_map::parse_vstk(&v, 72.0).and_then(|i| i.stroke).unwrap();
+        assert_eq!(back.paint, stroke.paint);
     }
 }

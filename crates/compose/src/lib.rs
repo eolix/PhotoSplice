@@ -32,6 +32,7 @@ pub mod native_lab;
 pub mod pattern;
 pub mod proxy;
 pub mod psblend;
+pub mod shape_paint;
 pub mod shape_split;
 
 use photosplice_color::blend::BlendMode;
@@ -270,9 +271,10 @@ fn in_blend_space<R>(lab: bool, hdr: bool, f: impl FnOnce() -> R) -> R {
     psblend::with_lab_mix(lab, || psblend::with_hdr(hdr, f))
 }
 
-/// The document's own CMYK profile for reading its CMYK pixels (`None`: not a CMYK document,
-/// untagged, or the built-in coated CMYK). Enter it with `photosplice_color::convert::with_cmyk_space`
-/// around code that converts the document's CMYK pixels or colours to RGB.
+/// The document's own CMYK profile for reading its CMYK pixels, or the working CMYK when it has
+/// none (`photosplice_color::convert::set_working_cmyk`); `None`: not a CMYK document, or the
+/// built-in coated CMYK. Enter it with `photosplice_color::convert::with_cmyk_space` around code
+/// that converts the document's CMYK pixels or colours to RGB.
 pub fn cmyk_space(doc: &Document) -> Option<std::sync::Arc<photosplice_color::convert::CmykSpace>> {
     if doc.mode != photosplice_color::ColorMode::Cmyk {
         return None;
@@ -409,11 +411,43 @@ pub fn render_layer(layer: &Layer, rect: Rect) -> Buffer {
             vector_masks: RenderVectorMasks::default(),
             fx_maps: Default::default(),
             fx_clip: Default::default(),
+            fx_over_budget: false,
             doc: None,
             layer_keys: Default::default(),
         },
     );
     buf
+}
+
+/// [`render_layer`] in `doc`'s context: the layer alone over `rect`, with the document's patterns,
+/// Global Light, colour mode, depth and canvas (fill layers and gradients are laid out on it), as
+/// the canvas composites it. Bakes (Scripts › Flatten All Layer Effects) render through this so
+/// the pixels match what was on screen. Rects past [`MAX_RENDER_PIXELS`] give an empty buffer.
+pub fn render_layer_in(doc: &Document, layer: &Layer, rect: Rect) -> Buffer {
+    if rect.is_empty() {
+        return Buffer::transparent(rect);
+    }
+    if u64::from(rect.width()) * u64::from(rect.height()) > MAX_RENDER_PIXELS {
+        return Buffer::transparent(Rect::EMPTY);
+    }
+    let patterns = pattern::PreparedPatterns::new(&doc.patterns, pattern::PREPARED_PATTERN_BYTES).in_mode(doc.pixel_format().mode);
+    // A lone layer, not one of the document's own (no per-document memo).
+    let cx = Ctx { doc: None, ..Ctx::for_doc(doc, &patterns) };
+    let lab = doc.mode == photosplice_color::ColorMode::Lab;
+    let hdr = doc.depth == photosplice_color::SampleType::F32;
+    let cmyk = cmyk_space(doc);
+    let layers = std::slice::from_ref(layer);
+    photosplice_color::convert::with_cmyk_space(cmyk.as_ref(), || {
+        in_blend_space(lab, hdr, || {
+            // CMYK documents composite in CMYK, as the canvas does.
+            if doc.mode == photosplice_color::ColorMode::Cmyk {
+                return cmyk::render(layers, rect, &cx);
+            }
+            let mut buf = Buffer::transparent(rect);
+            composite_stack(layers, &mut buf, &cx);
+            buf
+        })
+    })
 }
 
 /// Documents above this many pixels get thumbnails from a proxy (see [`proxy`]) when that is
@@ -605,6 +639,9 @@ struct Ctx<'a> {
     fx_maps: std::sync::Mutex<std::collections::HashMap<u64, (std::sync::Arc<effects::FxMaps>, bool)>>,
     /// The rectangle being rendered (a band of [`render_bands`]); see [`effect_region`].
     fx_clip: std::sync::Mutex<Option<Rect>>,
+    /// The whole-region effect maps of this render's layers wouldn't fit in the effect cache
+    /// together ([`fx_over_budget`]), so local ones are clipped to the render rect.
+    fx_over_budget: bool,
     /// The document being rendered (its layer tree keys [`LayerKeys`]); `None` for a lone layer.
     doc: Option<&'a Document>,
     /// Effect-map identities of this render's document layers (see [`LayerKeys`]).
@@ -676,6 +713,7 @@ impl<'a> Ctx<'a> {
             vector_masks: RenderVectorMasks::default(),
             fx_maps: Default::default(),
             fx_clip: Default::default(),
+            fx_over_budget: fx_over_budget(&doc.layers, doc.bounds()),
             layer_keys: Default::default(),
         }
     }
@@ -738,14 +776,17 @@ pub fn effects_unmasked(layer: &Layer) -> Option<Layer> {
 /// Whether Blending Options › Advanced Blending changes how `layer` (with its clipping group
 /// `clipped`) composites: a knockout, clipped layers blended one by one (Blend Clipped Layers as
 /// Group off), interior effects blended as a group, Transparency Shapes Layer off on a layer with
-/// effects, or masks that hide its effects. The GPU compositor sends such documents to this CPU
-/// compositor. Layers at the defaults never are.
+/// effects or in one of the special eight blend modes ([`blend_layer_into`]), or masks that hide
+/// its effects. The GPU compositor sends such documents to this CPU compositor. Layers at the
+/// defaults never are.
 pub fn advanced_active(layer: &Layer, clipped: &[Layer]) -> bool {
     let fx = effects::has_effects(layer);
+    // Transparency Shapes Layer off changes the special eight's blend itself.
+    let shapeless_blend = psblend::fill_is_special(layer.blend) && !matches!(layer.content, LayerContent::Adjustment(_));
     layer.knockout != photosplice_doc::Knockout::None
         || (!layer.blend_clipped && !matches!(layer.content, LayerContent::Adjustment(_)) && clipped.iter().any(|c| c.visible))
         || (layer.blend_interior && fx)
-        || (!layer.transparency_shapes && fx)
+        || (!layer.transparency_shapes && (fx || shapeless_blend))
         || effects_unmasked(layer).is_some()
 }
 
@@ -826,7 +867,7 @@ fn apply_adjustment(adj: &photosplice_doc::Adjustment, buf: &mut Buffer, cx: &Ct
             // The others work on the screen colour: clip what lies outside sRGB first.
             lab::clip(buf);
         }
-        adjust::apply_depth(adj, buf, cx.transfer, Some(cx.depth));
+        adjust::apply_depth_mode(adj, buf, cx.transfer, Some(cx.depth), cx.mode);
     }
 }
 
@@ -877,7 +918,7 @@ pub fn layer_bounds(layer: &Layer, canvas: Rect) -> Rect {
     }
     match &layer.content {
         LayerContent::Group(g) if g.artboard.is_some() => g.artboard.as_ref().map_or(Rect::EMPTY, |a| a.rect),
-        LayerContent::Group(g) => g.children.iter().filter(|c| c.visible).fold(Rect::EMPTY, |acc, c| {
+        LayerContent::Group(g) => g.children.iter().filter(|c| c.visible).fold(frame_stroke_bounds(layer, canvas), |acc, c| {
             let b = layer_bounds(c, canvas);
             if b.is_empty() {
                 acc
@@ -913,6 +954,12 @@ pub fn layer_bounds(layer: &Layer, canvas: Rect) -> Rect {
     }
 }
 
+/// Where a Reference Frame's stroke ([`shape_split::frame_shape`]) draws, within `canvas`; empty
+/// for other layers.
+fn frame_stroke_bounds(layer: &Layer, canvas: Rect) -> Rect {
+    shape_split::frame_shape(layer).and_then(|sh| shape_bounds(&sh)).map_or(Rect::EMPTY, |r| r.intersect(&canvas))
+}
+
 /// Where a layer's effects take their shape from: [`layer_bounds`], except that a group's
 /// children count with their own effects (a child's outside stroke shapes the group's drop
 /// shadow and must not be cut off at the child's pixels, #3274).
@@ -938,11 +985,13 @@ pub fn effect_source_bounds(layer: &Layer, canvas: Rect) -> Rect {
 /// shape's layer effects from its vector outline, not from its pixels: a stroke runs along the
 /// whole path even where a gradient fill fades out (psd-tools stroke-effects). `None` for other
 /// layers, shapes without fill, empty and inverted paths, and shapes whose vector stroke reaches
-/// past the path (their pixels give the outline: psd-tools double-stroke-effects).
+/// past the path (their pixels give the outline: psd-tools double-stroke-effects), and shapes
+/// with a density or feather.
 pub fn effect_outline(layer: &Layer) -> Option<&photosplice_doc::vector::Path> {
     let LayerContent::Shape(sh) = &layer.content else { return None };
     let stroke_inside = sh.stroke.as_ref().is_none_or(|s| s.width <= 0.0 || s.align == photosplice_doc::vector::StrokeAlign::Inside);
-    (sh.fill.is_some() && stroke_inside && !sh.path.is_empty() && !sh.path.inverted).then_some(&sh.path)
+    // A soft (feathered or less dense) fill's own alpha is its outline.
+    (sh.fill.is_some() && stroke_inside && !sh.path.is_empty() && !sh.path.inverted && !sh.has_soft_mask()).then_some(&sh.path)
 }
 
 /// The shape a layer's effects are built from over `rect` (row-major): its content's alpha
@@ -1062,7 +1111,8 @@ pub fn paint_bounds(layer: &Layer) -> Option<Rect> {
     (!r.is_empty()).then_some(r)
 }
 
-/// The bounding box of a shape layer's vector content: its path control bounds plus stroke width.
+/// The bounding box of a shape layer's vector content: its path control bounds plus stroke width
+/// (and the reach of a soft fill).
 pub fn shape_bounds(sh: &photosplice_doc::ShapeLayer) -> Option<Rect> {
     if sh.fill.is_none() && sh.stroke.as_ref().is_none_or(|s| s.width <= 0.0 || s.opacity <= 0.0) {
         return None;
@@ -1070,7 +1120,18 @@ pub fn shape_bounds(sh: &photosplice_doc::ShapeLayer) -> Option<Rect> {
     let (x0, y0, x1, y1) = sh.path.control_bounds()?;
     let stroke_margin = sh.stroke.as_ref().filter(|s| s.opacity > 0.0).map_or(0.0, |s| s.width.ceil()) as i32;
     let r = Rect::new(x0.floor() as i32, y0.floor() as i32, x1.ceil() as i32, y1.ceil() as i32).inflate(stroke_margin);
-    (!r.is_empty()).then_some(r)
+    if r.is_empty() {
+        return None;
+    }
+    // A soft fill reaches past the path: by its feather, or everywhere below 100 % density.
+    if sh.fill.is_some() && sh.has_soft_mask() {
+        if sh.density.is_finite() && sh.density < 1.0 {
+            return Some(Rect::new(i32::MIN / 4, i32::MIN / 4, i32::MAX / 4, i32::MAX / 4));
+        }
+        let feather = photosplice_vector::feather::feather_sigma(sh.feather);
+        return Some(r.union(&photosplice_vector::feather::path_area(&sh.path, feather)));
+    }
+    Some(r)
 }
 
 /// The layer's effective mask over `rect` (row-major), read once per tile: the pixel mask
@@ -1118,7 +1179,10 @@ fn render_content(layer: &Layer, rect: Rect, cx: &Ctx) -> Option<Buffer> {
         LayerContent::Fill(f) => match &layer.fill_cache {
             // Photoshop's own rendering, valid while the fill is unchanged.
             Some(c) if c.fill == *f => surface_to_buffer(&c.surface, rect),
-            _ => render_fill_quantized(f, rect, fill_frame(layer, cx.canvas), cx.patterns, adjustment_quantum(cx.depth)),
+            _ => {
+                let frame = fill_frame(layer, cx.canvas);
+                render_fill_quantized(f, rect, frame, fill_pattern_anchor(layer, frame), cx.patterns, adjustment_quantum(cx.depth))
+            }
         },
         LayerContent::Adjustment(_) => return None,
         _ => match layer.surface() {
@@ -1130,6 +1194,10 @@ fn render_content(layer: &Layer, rect: Rect, cx: &Ctx) -> Option<Buffer> {
         for (p, k) in buf.px.iter_mut().zip(&m) {
             p[3] *= k;
         }
+    }
+    // A Frame's stroke lies over its masked content; the frame doesn't clip it.
+    if let Some(stroke) = shape_split::frame_stroke(layer, cx.canvas, cx.depth, shape_patterns(cx, layer)) {
+        blend_into(&mut buf, &surface_to_buffer(&stroke, rect), BlendMode::Normal, 1.0);
     }
     Some(buf)
 }
@@ -1198,7 +1266,22 @@ pub fn fill_frame(layer: &Layer, canvas: Rect) -> Rect {
 /// compositor does) but without applying the masks: the pixels a PSD fill layer stores.
 pub fn render_fill_content(layer: &Layer, f: &Fill, canvas: Rect, patterns: &[Pattern]) -> Buffer {
     let prepared = pattern::PreparedPatterns::new(patterns, pattern::PREPARED_PATTERN_BYTES);
-    render_fill(f, canvas, fill_frame(layer, canvas), &prepared)
+    let frame = fill_frame(layer, canvas);
+    render_fill(f, canvas, frame, fill_pattern_anchor(layer, frame), &prepared)
+}
+
+/// Where a fill layer's linked pattern tiles from (before its phase): the layer's effects
+/// reference point (PSD `fxrp`), which moves with the layer, else the top-left of its `frame`
+/// ([`fill_frame`]). Measured on the pattern kit's fill layers clipped by a vector mask at
+/// (20, 20): Reference tiles from `fxrp` plus the phase, exactly, before and after a move by
+/// (13, 7) (which moves `fxrp` and keeps the phase); an unlinked pattern stays at the canvas
+/// origin plus the phase.
+pub fn fill_pattern_anchor(layer: &Layer, frame: Rect) -> (f64, f64) {
+    match layer.effects.reference {
+        Some((x, y)) if x.is_finite() && y.is_finite() => (x, y),
+        _ if frame.is_empty() => (0.0, 0.0),
+        _ => (f64::from(frame.x0), f64::from(frame.y0)),
+    }
 }
 
 /// A fill layer's pixels over `canvas` in a CMYK document, as ink amounts `[C, M, Y, K, alpha]`
@@ -1211,13 +1294,14 @@ pub fn render_fill_inks(layer: &Layer, f: &Fill, canvas: Rect, patterns: &[Patte
 }
 
 /// [`render_fill_quantized`] with a dithered gradient kept in float.
-fn render_fill(f: &Fill, rect: Rect, canvas: Rect, patterns: &pattern::PreparedPatterns<'_>) -> Buffer {
-    render_fill_quantized(f, rect, canvas, patterns, None)
+fn render_fill(f: &Fill, rect: Rect, canvas: Rect, anchor: (f64, f64), patterns: &pattern::PreparedPatterns<'_>) -> Buffer {
+    render_fill_quantized(f, rect, canvas, anchor, patterns, None)
 }
 
 /// `quantum`: the document depth's levels, which a dithered gradient is rounded to
-/// ([`gradient_fill::render_quantized`]); `None` keeps it in float.
-fn render_fill_quantized(f: &Fill, rect: Rect, canvas: Rect, patterns: &pattern::PreparedPatterns<'_>, quantum: Option<f32>) -> Buffer {
+/// ([`gradient_fill::render_quantized`]); `None` keeps it in float. A linked pattern tiles from
+/// `anchor` ([`fill_pattern_anchor`]).
+fn render_fill_quantized(f: &Fill, rect: Rect, canvas: Rect, anchor: (f64, f64), patterns: &pattern::PreparedPatterns<'_>, quantum: Option<f32>) -> Buffer {
     match f {
         Fill::Solid(c) => {
             let rgb = c.to_rgb_unclamped();
@@ -1225,9 +1309,9 @@ fn render_fill_quantized(f: &Fill, rect: Rect, canvas: Rect, patterns: &pattern:
         }
         // Gradient geometry relative to the layer's frame, independent of the render rect.
         Fill::Gradient { .. } => Buffer { rect, px: gradient_fill::render_quantized(f, rect, canvas, quantum) },
-        // Laid out from the layer's frame when linked; transparent if the pattern is missing.
+        // Laid out from the anchor when linked; transparent if the pattern is missing.
         Fill::Pattern { name, scale, id, angle, link, phase } => match patterns.get(id, name) {
-            Some(tile) => Buffer { rect, px: pattern::render(&tile, &pattern::Placement::new(canvas, *link, *phase, *scale, *angle), rect) },
+            Some(tile) => Buffer { rect, px: pattern::render(&tile, &pattern::Placement::anchored(anchor, *link, *phase, *scale, *angle), rect) },
             None => Buffer::transparent(rect),
         },
     }
@@ -1337,7 +1421,7 @@ pub fn composite_bounds(layer: &Layer, canvas: Rect) -> Option<Rect> {
     }
     let own = match &layer.content {
         LayerContent::Group(g) if g.artboard.is_none() => {
-            let mut acc = Rect::EMPTY;
+            let mut acc = frame_stroke_bounds(layer, canvas);
             for c in g.children.iter().filter(|c| c.visible) {
                 let b = composite_bounds(c, canvas)?;
                 if !b.is_empty() {
@@ -1438,9 +1522,9 @@ fn blend_if_weight(layer: &Layer, mode: photosplice_color::ColorMode, this: Opti
         let Some(p) = px else { continue };
         let v = |c: usize| blend_if_level(p[c]);
         match mode {
-            // Gray is the colour channels' luma (Rec. 601 weights), then R, G, B.
+            // Gray, then R, G, B.
             M::Rgb => {
-                let gray = 0.299 * v(0) + 0.587 * v(1) + 0.114 * v(2);
+                let gray = blend_if_gray(v(0), v(1), v(2));
                 k *= bi.get(0)[side].weight(gray);
                 for c in 0..3 {
                     k *= bi.get(c + 1)[side].weight(v(c));
@@ -1457,15 +1541,28 @@ fn blend_if_weight(layer: &Layer, mode: photosplice_color::ColorMode, this: Opti
     k
 }
 
-/// A channel value on Blend If's 0..=255 scale. Compositing can leave an 8- or 16-bit level a few
-/// millionths off (a level-20 backdrop composited at partial alpha reads 19.999998), which would
-/// put it on the wrong side of a hard point at that level: a value that close to a level is that
-/// level. Values of those depths that aren't on a level are at least 1/257 away from one. The GPU
-/// compositor (`compose.wgsl` `blend_if_weight`) snaps alike.
+/// A channel value on Blend If's 0..=255 scale. Reference compares Blend If at its 16-bit
+/// precision (0..=32768): a cutoff at level `c` falls on the step `round(c · 32768 / 255)`, and a
+/// value on that step is exactly level `c`, inside both a black point and a white point there
+/// (RGB16 32895 is step 16448, level 128's, so it passes a hard black point at 128; read as
+/// 127.996 it didn't). Every 8-bit level is on its own step, which also absorbs compositing's few
+/// millionths of drift (a level-20 backdrop at partial alpha reads 19.999998). The GPU compositor
+/// (`compose.wgsl` `blend_if_weight`) snaps alike.
 fn blend_if_level(x: f32) -> f32 {
-    let v = x.clamp(0.0, 1.0) * 255.0;
-    let r = v.round();
-    if (v - r).abs() < 1e-4 { r } else { v }
+    let x = x.clamp(0.0, 1.0);
+    let v = x * 255.0;
+    let level = v.round();
+    if (x * 32768.0).round() == (level * 32768.0 / 255.0).round() { level } else { v }
+}
+
+/// Blend If's Gray from channel levels: Reference's (30 R + 59 G + 11 B) / 100, rounded half down
+/// on 8-bit levels. Measured: pure red passes a black point at 20 from 66 (19.8) but not 65
+/// (19.5), pure blue at 28 from 251 (27.61) but not 250 (27.5); (123, 126, 151) is 128 (127.85)
+/// and (120, 129, 149) is 128 (128.5), where Rec. 601 luma gave 127.95 and 128.59. Levels between
+/// whole ones (deeper documents) keep the unrounded weighting.
+fn blend_if_gray(r: f32, g: f32, b: f32) -> f32 {
+    let sum = 30.0 * r + 59.0 * g + 11.0 * b;
+    if [r, g, b].iter().all(|c| c.fract() == 0.0) { ((sum + 49.0) / 100.0).floor() } else { sum / 100.0 }
 }
 
 /// Apply `layer`'s Blend If to a finished composite: `out` (the backdrop with the layer drawn)
@@ -1473,9 +1570,17 @@ fn blend_if_level(x: f32) -> f32 {
 /// Mixing premultiplied colour by `k` equals compositing the layer at `k` × its alpha, since
 /// every blend mode's source-over result is linear in the source alpha.
 fn apply_blend_if(layer: &Layer, before: &Buffer, out: &mut Buffer, cx: &Ctx) {
-    // "This Layer" is the layer's own colour; adjustment layers (no content of their own) are
-    // judged by their result.
-    let own = if matches!(layer.content, LayerContent::Adjustment(_)) { None } else { render_content(layer, out.rect, cx) };
+    // "This Layer" is the layer's own colour. An adjustment layer (no content of its own) is
+    // judged by its result at full strength, before Opacity and its mask mix it in, as Reference
+    // does (Invert at 40 % over (64, 128, 192) with Red › This Layer black at 150 keeps the
+    // effect: Invert's red 191 passes 150).
+    let own = if let LayerContent::Adjustment(adj) = &layer.content {
+        let mut result = before.clone();
+        apply_adjustment(adj, &mut result, cx);
+        Some(result)
+    } else {
+        render_content(layer, out.rect, cx)
+    };
     for (i, (p, b)) in out.px.iter_mut().zip(&before.px).enumerate() {
         let this = match &own {
             Some(o) => Some(o.px[i]).filter(|q| q[3] > 0.0),
@@ -1493,6 +1598,19 @@ fn apply_blend_if(layer: &Layer, before: &Buffer, out: &mut Buffer, cx: &Ctx) {
         } else {
             [0.0; 4]
         };
+    }
+}
+
+/// An adjustment layer's mix coverage and Fill: below 100% Fill the special eight
+/// ([`psblend::fill_is_special`]) blend at Opacity a result pulled toward the mode's neutral
+/// colour, as a pixel layer does ([`psblend::blend_rgb_fill`]); every other mode takes Fill as
+/// coverage (Reference: a 40% Fill Color Dodge of a constant 0.5 over (64, 128, 192) gives
+/// (80, 160, 240), not (90, 179, 217)). The GPU compositor's adjustment mix takes the same pair.
+pub fn adjustment_fill(layer: &Layer) -> (f32, f32) {
+    if layer.fill_opacity < 1.0 && psblend::fill_is_special(layer.blend) {
+        (layer.opacity, layer.fill_opacity)
+    } else {
+        (layer.opacity * layer.fill_opacity, 1.0)
     }
 }
 
@@ -1562,10 +1680,14 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
     // Pass-through groups composite their children straight into the backdrop. Below 100% fill
     // Photoshop renders the group isolated, like Normal (psd-tools passthrough_fill_*: an
     // adjustment inside no longer reaches the layers beneath).
+    // A group with Blend If renders isolated too: an adjustment inside it no longer changes the
+    // layers beneath (Reference: (64, 128, 192) under such a group holding an Invert, with Red ›
+    // Underlying Layer white at 110, stays (64, 128, 192)).
     if let LayerContent::Group(g) = &layer.content
         && layer.blend == BlendMode::PassThrough
         && layer.fill_opacity >= 1.0
         && !effects::has_effects(layer)
+        && !blend_if_active(layer, cx.mode)
     {
         let needs_mix = opacity < 1.0 || layer.mask.is_some() || layer.vector_mask.is_some();
         let has_clipped = clipped.iter().any(|c| c.visible);
@@ -1610,6 +1732,10 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
                 };
             }
         }
+        // A Frame's stroke over the frame's content, at the group's opacity.
+        if let Some(stroke) = shape_split::frame_stroke(layer, cx.canvas, cx.depth, shape_patterns(cx, layer)) {
+            blend_into(backdrop, &surface_to_buffer(&stroke, rect), BlendMode::Normal, opacity);
+        }
         // Layers clipped to a pass-through group sit atop the group's
         // isolated rendering; their effect (isolated result with vs. without
         // them, each placed over the original backdrop) is added to the
@@ -1648,6 +1774,7 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
             composite_atop(c, &mut adjusted, cx);
         }
         let mv = mask_vals(layer, rect, cx);
+        let (opacity, fill) = adjustment_fill(layer);
         for y in rect.y0..rect.y1 {
             for x in rect.x0..rect.x1 {
                 let i = ((y - rect.y0) as usize) * rect.width() as usize + (x - rect.x0) as usize;
@@ -1658,7 +1785,15 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
                 // Only `adjusted` has changed; this pixel's original backdrop is still in place.
                 let b = backdrop.px[i];
                 let a = adjusted.px[i];
-                let blended = blend::blend_rgb(layer.blend, [b[0], b[1], b[2]], [a[0], a[1], a[2]]);
+                if layer.blend == BlendMode::Dissolve {
+                    // An adjustment has no source alpha of its own: its coverage (opacity and
+                    // mask) picks the adjusted pixel or the backdrop, not a continuous mix.
+                    if dissolve_noise(x, y) < k {
+                        backdrop.px[i] = [a[0], a[1], a[2], b[3]];
+                    }
+                    continue;
+                }
+                let blended = blend::blend_rgb_fill(layer.blend, [b[0], b[1], b[2]], [a[0], a[1], a[2]], fill);
                 backdrop.px[i] = [b[0] + (blended[0] - b[0]) * k, b[1] + (blended[1] - b[1]) * k, b[2] + (blended[2] - b[2]) * k, b[3]];
             }
         }
@@ -1724,7 +1859,7 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
             *p = psblend::composite(BlendMode::Normal, *p, *s, 1.0);
             p[3] *= mask_k(&mask, i);
         }
-        blend_into_fill(backdrop, &content, layer.blend, layer.opacity, layer.fill_opacity, 1.0);
+        blend_layer_into(backdrop, &content, layer, cx, 1.0);
         return;
     }
     let Some(mut content) = render_content(layer, rect, cx) else { return };
@@ -1762,7 +1897,7 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
         }
         return;
     }
-    blend_into_fill(backdrop, &content, layer.blend, layer.opacity, layer.fill_opacity, text_gamma(layer));
+    blend_layer_into(backdrop, &content, layer, cx, text_gamma(layer));
 }
 
 
@@ -1801,8 +1936,13 @@ fn shape_parts(layer: &Layer, clipped: &[Layer], rect: Rect, cx: &Ctx) -> Option
 fn split_parts(layer: &Layer, rect: Rect, cx: &Ctx) -> Option<(Buffer, Buffer, Option<Vec<f32>>)> {
     let LayerContent::Shape(sh) = &layer.content else { return None };
     sh.stroke.as_ref()?;
-    let (fs, ss) = shape_split::split(sh, cx.canvas, cx.depth)?;
+    let (fs, ss) = shape_split::split(sh, cx.canvas, cx.depth, shape_patterns(cx, layer))?;
     Some((surface_to_buffer(&fs, rect), surface_to_buffer(&ss, rect), mask_vals(layer, rect, cx)))
+}
+
+/// The patterns `layer`'s shape paint samples in this render (see [`shape_paint`]).
+fn shape_patterns<'a>(cx: &Ctx<'a>, layer: &Layer) -> shape_paint::ShapePatterns<'a> {
+    shape_paint::ShapePatterns { patterns: cx.patterns.source(), mode: cx.mode, reference: layer.effects.reference }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1846,7 +1986,7 @@ fn layer_identity(layer: &Layer, h: &mut std::collections::hash_map::DefaultHash
                 format!("{:?}", c.blend).hash(h);
                 layer_identity(c, h, pin);
             }
-            format!("{:?}", g.artboard).hash(h);
+            format!("{:?}{:?}", g.artboard, g.frame_stroke).hash(h);
         }
         LayerContent::Fill(f) => {
             format!("{f:?}").hash(h);
@@ -1934,20 +2074,55 @@ fn fx_cache() -> &'static std::sync::Mutex<FxCache> {
 /// 1920 × 103675 webtoon page each such layer's maps took about 2.4 GB, and a render held them for
 /// every layer at once (60 GB with 25 stroked type layers, #1909). When its effects are local
 /// ([`effects::maps_are_local`]), such a layer's maps are built over the render rectangle padded
-/// by twice the effect reach instead, which gives the same pixels there. Only when `rect`, what
-/// the caller composites the layer over, lies within the render rectangle: a group's effect shape
-/// (or anything else rendering children over a wider area) gets the whole region.
+/// by twice the effect reach instead, which gives the same pixels there. So are any layer's local
+/// maps when the render's whole-region maps wouldn't fit in the effect cache ([`fx_over_budget`]).
+/// Only when `rect`, what the caller composites the layer over, lies within the render rectangle:
+/// a group's effect shape (or anything else rendering children over a wider area) gets the whole
+/// region.
 fn effect_region(layer: &Layer, rect: Rect, cx: &Ctx) -> (Rect, bool) {
     let m = effects::margin(layer);
     let region = effect_source_bounds(layer, cx.canvas).inflate(m).intersect(&cx.canvas.inflate(m));
     let clip = *cx.fx_clip.lock().unwrap_or_else(|e| e.into_inner());
     match clip {
-        Some(c) if c.contains_rect(&rect) && shapeless(layer) && effects::maps_are_local(layer) => {
+        Some(c) if c.contains_rect(&rect) && (shapeless(layer) || cx.fx_over_budget) && effects::maps_are_local(layer) => {
             let part = region.intersect(&c.inflate(m.saturating_mul(2)));
             (part, part != region)
         }
         _ => (region, false),
     }
+}
+
+/// Whether the effect maps of the visible layers of `layers` (groups included), each over its
+/// whole region, would take more than the effect cache budget together. A render needs all of
+/// them, so when they don't fit, building one evicts the next one needed and every render builds
+/// them all again, seconds even for a small rect (1.8-4.4 s per render on a 9000 × 6000 document
+/// with three full drop-shadowed layers). Counted as [`effects::FxMaps::bytes`] counts them, with
+/// only the shape and one map per enabled effect: a lower bound.
+fn fx_over_budget(layers: &[Layer], canvas: Rect) -> bool {
+    fx_region_bytes(layers, canvas) > effect_cache_budget() as u64
+}
+
+/// The lower bound [`fx_over_budget`] compares with the budget.
+fn fx_region_bytes(layers: &[Layer], canvas: Rect) -> u64 {
+    fn bytes(layers: &[Layer], canvas: Rect, depth: u32) -> u64 {
+        let mut total = 0u64;
+        for l in layers.iter().filter(|l| l.visible) {
+            if effects::has_effects(l) {
+                let m = effects::margin(l);
+                let region = effect_source_bounds(l, canvas).inflate(m).intersect(&canvas.inflate(m));
+                let maps = 1 + l.effects.items.iter().filter(|e| e.enabled()).count() as u64;
+                let px = u64::from(region.width()) * u64::from(region.height());
+                total = total.saturating_add(maps.saturating_mul(px).saturating_mul(4));
+            }
+            if let LayerContent::Group(g) = &l.content
+                && depth < PREPARE_DEPTH
+            {
+                total = total.saturating_add(bytes(&g.children, canvas, depth + 1));
+            }
+        }
+        total
+    }
+    bytes(layers, canvas, 0)
 }
 
 /// The layer's effect maps over its whole region (layer bounds grown by the effect reach, within
@@ -2073,10 +2248,20 @@ fn composite_atop_any(layer: &Layer, base: &mut Buffer, cx: &Ctx) {
         let mut adjusted = base.clone();
         apply_adjustment(adj, &mut adjusted, cx);
         let mv = mask_vals(layer, rect, cx);
+        let (opacity, fill) = adjustment_fill(layer);
         for (i, p) in base.px.iter_mut().enumerate() {
-            let k = layer.opacity * layer.fill_opacity * mask_k(&mv, i);
+            let k = opacity * mask_k(&mv, i);
             let a = adjusted.px[i];
-            let bl = blend::blend_rgb(layer.blend, [p[0], p[1], p[2]], [a[0], a[1], a[2]]);
+            if layer.blend == BlendMode::Dissolve {
+                // Dissolve picks the adjusted pixel or the base, as for an unclipped adjustment.
+                let x = rect.x0 + (i % rect.width() as usize) as i32;
+                let y = rect.y0 + (i / rect.width() as usize) as i32;
+                if k > 0.0 && dissolve_noise(x, y) < k {
+                    *p = [a[0], a[1], a[2], p[3]];
+                }
+                continue;
+            }
+            let bl = blend::blend_rgb_fill(layer.blend, [p[0], p[1], p[2]], [a[0], a[1], a[2]], fill);
             for c in 0..3 {
                 p[c] += (bl[c] - p[c]) * k;
             }
@@ -2132,6 +2317,16 @@ fn composite_atop_any(layer: &Layer, base: &mut Buffer, cx: &Ctx) {
             continue;
         }
         let s = content.px[i];
+        if layer.blend == BlendMode::Dissolve {
+            // Clipping preserves the base's alpha. Dissolve still picks source pixels by their
+            // coverage instead of mixing the colours continuously.
+            let x = rect.x0 + (i % rect.width() as usize) as i32;
+            let y = rect.y0 + (i / rect.width() as usize) as i32;
+            if dissolve_noise(x, y) < s[3] * opacity {
+                *p = [s[0], s[1], s[2], alpha];
+            }
+            continue;
+        }
         // Blend as if the base were opaque, then keep the base's alpha.
         let r = blend::composite_gamma(layer.blend, [p[0], p[1], p[2], 1.0], s, opacity, gamma);
         *p = [r[0], r[1], r[2], alpha];
@@ -2141,6 +2336,31 @@ fn composite_atop_any(layer: &Layer, base: &mut Buffer, cx: &Ctx) {
 /// Blend an isolated layer buffer into the backdrop.
 fn blend_into(backdrop: &mut Buffer, src: &Buffer, mode: BlendMode, opacity: f32) {
     blend_into_g(backdrop, src, mode, opacity, 1.0);
+}
+
+/// `layer`'s masked content `src` blended into the backdrop with its own mode, Opacity and Fill
+/// ([`blend_into_fill`]). With Transparency Shapes Layer off, the special eight
+/// ([`psblend::fill_is_special`]) take the layer's own transparency (its content's alpha, not its
+/// masks) inside the blend, as Fill: Reference composites a pixel of alpha `a` at Fill `f` as an
+/// opaque one at Fill `a × f`, covering the backdrop with Opacity × masks only (measured on
+/// generated documents: 12 modes, Opacity 100/53, Fill 100/50, alpha 10-100 %, a 10-100 % mask,
+/// within 2 levels). Other modes look the same either way.
+fn blend_layer_into(backdrop: &mut Buffer, src: &Buffer, layer: &Layer, cx: &Ctx, gamma: f32) {
+    let (mode, opacity, fill) = (layer.blend, layer.opacity, layer.fill_opacity);
+    if layer.transparency_shapes || !psblend::fill_is_special(mode) {
+        return blend_into_fill(backdrop, src, mode, opacity, fill, gamma);
+    }
+    let mv = mask_vals(layer, backdrop.rect, cx);
+    let fill = fill.clamp(0.0, 1.0);
+    for (i, (b, s)) in backdrop.px.iter_mut().zip(&src.px).enumerate() {
+        // `src` carries alpha × masks; split them again.
+        let m = mv.as_ref().map_or(1.0, |v| v.get(i).copied().unwrap_or(1.0));
+        if s[3] <= 0.0 || m <= 0.0 {
+            continue;
+        }
+        let alpha = (s[3] / m).clamp(0.0, 1.0);
+        *b = psblend::composite_fill(mode, *b, [s[0], s[1], s[2], m], opacity, fill * alpha, gamma);
+    }
 }
 
 /// [`blend_into_g`] for a layer's own `opacity` and `fill`: Fill is part of the blend for
@@ -2190,6 +2410,10 @@ fn blend_into_g(backdrop: &mut Buffer, src: &Buffer, mode: BlendMode, opacity: f
     }
 }
 
+#[cfg(test)]
+mod blending_tests;
+#[cfg(test)]
+mod soft_shape_tests;
 #[cfg(test)]
 mod stroke_tests;
 #[cfg(test)]
