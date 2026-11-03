@@ -155,10 +155,18 @@ fn uncached_cmyk_gradient_corpus_roundtrip() {
     let expected = photosplice_compose::flatten(&doc).px;
     let saved = export(&doc, "x.psd", &ExportOptions::default()).unwrap().bytes;
     let back = import("x.psd", &saved).unwrap().document;
+    // The file stores the fill's inks rounded to 16 bits: flattened to the document's own 16-bit
+    // inks, the round trip is exact.
+    let inks = |d: &photosplice_doc::Document| photosplice_compose::flatten_to_surface(d, d.pixel_format(), None).read_region(d.bounds());
+    let (a, b) = (inks(&doc), inks(&back));
+    let ink_diff = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0.0f32, f32::max);
+    eprintln!("uncached 16-bit CMYK gradient round-trip max ink error: {ink_diff:.8}");
+    assert!(ink_diff <= 1e-7, "ink round-trip error {ink_diff}");
+    // Seen in float RGB, the rounding to 16-bit inks (up to half a level) goes through the
+    // profile, which steepens it: up to 2.1 levels for these inks, so within 3.
     let diff = max_diff(&expected, &photosplice_compose::flatten(&back).px);
     eprintln!("uncached 16-bit CMYK gradient round-trip max error: {diff:.8}");
-    // Within one 16-bit level (the file stores quantized inks).
-    assert!(diff <= 1.0 / 65535.0, "round-trip error {diff}");
+    assert!(diff <= 3.0 / 65535.0, "round-trip error {diff}");
     assert_eq!(back.icc_profile, doc.icc_profile);
 }
 
