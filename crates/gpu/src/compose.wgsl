@@ -108,6 +108,25 @@ fn lut(row: i32, v: f32) -> f32 {
     return textureLoad(lut_tex, vec2(i, row), 0).r * (1.0 - f) + textureLoad(lut_tex, vec2(j, row), 0).r * f;
 }
 
+// A gradient's colour and alpha at `t` (plan::ramp_rows): rows 0..3 of `lut_tex` sampled at
+// `t · 4095`, or, when row 4 starts with 1, one entry per location read at `t · 4096` (entry 4096
+// in row 4's texels 1..4), as the CPU interpolates a noise gradient's 4097 stops.
+fn ramp_entry(i: i32) -> vec4<f32> {
+    if (i >= 4096) {
+        return vec4(textureLoad(lut_tex, vec2(1, 4), 0).r, textureLoad(lut_tex, vec2(2, 4), 0).r, textureLoad(lut_tex, vec2(3, 4), 0).r, textureLoad(lut_tex, vec2(4, 4), 0).r);
+    }
+    return vec4(textureLoad(lut_tex, vec2(i, 0), 0).r, textureLoad(lut_tex, vec2(i, 1), 0).r, textureLoad(lut_tex, vec2(i, 2), 0).r, textureLoad(lut_tex, vec2(i, 3), 0).r);
+}
+
+fn ramp(t: f32) -> vec4<f32> {
+    if (textureLoad(lut_tex, vec2(0, 4), 0).r < 0.5) {
+        return vec4(lut(0, t), lut(1, t), lut(2, t), lut(3, t));
+    }
+    let x = clamp(t, 0.0, 1.0) * 4096.0;
+    let i = min(i32(floor(x)), 4096);
+    return mix(ramp_entry(i), ramp_entry(min(i + 1, 4096)), x - f32(i));
+}
+
 fn gray(c: vec3<f32>) -> f32 { return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b; }
 
 // ---- blend modes (photosplice_color::blend + compose::psblend) ------------------------------
@@ -926,7 +945,7 @@ fn dither_noise(d: vec2<i32>) -> f32 {
 fn layer_texel(d: vec2<i32>) -> vec4<f32> {
     if ((op.flags & F_GRADIENT) != 0u) {
         let t = gradient_t(d);
-        var c = vec4(lut(0, t), lut(1, t), lut(2, t), lut(3, t));
+        var c = ramp(t);
         // p2.w: dither (gradient fills), rounded to p2.z levels on integer documents.
         if (op.p2.w > 0.5) {
             var rgb = clamp(c.rgb + (dither_noise(d) - 0.5) / 255.0, vec3(0.0), vec3(1.0));
@@ -1213,7 +1232,7 @@ fn fx_color(d: vec2<i32>) -> vec4<f32> {
     let kind = i32(op.p2.z);
     if (kind == 1) {
         let t = gradient_t(d);
-        return vec4(lut(0, t), lut(1, t), lut(2, t), lut(3, t));
+        return ramp(t);
     }
     if (kind == 2) {
         return pattern_sample(d);
@@ -1299,7 +1318,7 @@ fn fs_fxpaint(in: VOut) -> @location(0) vec4<f32> {
         let k = min(base * op.p0.x, 1.0) * keep * op.opacity;
         if (k <= 0.0) { return dst; }
         let t = 1.0 - clamp(base, 0.0, 1.0);
-        return fx_composite(d, dst, vec4(lut(0, t), lut(1, t), lut(2, t), lut(3, t)), k);
+        return fx_composite(d, dst, ramp(t), k);
     }
     let k = m * op.opacity;
     if (k <= 0.0) { return dst; }

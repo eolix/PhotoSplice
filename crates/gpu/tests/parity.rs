@@ -3065,3 +3065,63 @@ fn frame_strokes() {
         }
     }
 }
+
+/// Colour and opacity stops.
+type Ramp = (Vec<(f32, Color)>, Vec<(f32, f32)>);
+
+/// A noise gradient's ramp at 100 % roughness as `photosplice-io` generates it: 4097 stops, one
+/// per location, 8-bit levels jumping up to ~100 between neighbours (51 sines on the minimal
+/// standard generator's draws, falloff (0.2 + 0.7)^0.15 per term).
+fn rough_noise_ramp(seed: u64) -> Ramp {
+    let mut x = seed % 2_147_483_647;
+    let draws: Vec<f64> = (0..51 * 8)
+        .map(|_| {
+            x = x * 16_807 % 2_147_483_647;
+            x as f64 / 2_147_483_647.0
+        })
+        .collect();
+    let q = 0.9f64.powf(0.15);
+    let channel = |c: usize, p: f64| {
+        let v = (0..51).fold(127.5, |v, j| {
+            let turns = 0.12 * f64::from(1.18f32).powi(j as i32) * p / 4096.0 + draws[8 * j + 4 + c];
+            v + 127.5 * q.powi(j as i32) * (1.0 - 2.0 * draws[8 * j + c]) * (std::f64::consts::TAU * turns).sin()
+        });
+        (v.clamp(0.0, 255.0).round() / 255.0) as f32
+    };
+    let at = |i: usize| i as f32 / 4096.0;
+    let stops = (0..=4096).map(|i| (at(i), Color::rgb(channel(0, i as f64), channel(1, i as f64), channel(2, i as f64)))).collect();
+    let opacity = (0..=4096).map(|i| (at(i), channel(3, i as f64))).collect();
+    (stops, opacity)
+}
+
+/// Noise gradients render on the GPU as the CPU reads their 4097 stops, per location (a 4096-px
+/// fill takes each entry exactly), in fills and gradient effects, opaque and transparent, while
+/// a dense ramp that isn't one stop per location keeps the ordinary LUT.
+#[test]
+fn rough_noise_gradients_match_cpu_per_location() {
+    let Some(mut g) = gpu() else { return };
+    let (stops, opacity) = rough_noise_ramp(9_052_369);
+    let steps = stops.windows(2).map(|w| (0..3).map(|c| (w[1].1.c[c] - w[0].1.c[c]).abs()).fold(0.0, f32::max)).fold(0.0, f32::max);
+    assert!(steps > 60.0 / 255.0, "rough ramp: largest step {}", steps * 255.0);
+    for (w, h, style, angle) in [(4096, 2, GradientStyle::Linear, 0.0), (1000, 3, GradientStyle::Linear, 0.0), (96, 80, GradientStyle::Radial, 0.0), (90, 70, GradientStyle::Linear, 30.0)] {
+        for (depth, transparent) in [(SampleType::U8, false), (SampleType::F32, false), (SampleType::U16, true)] {
+            let mut d = Document::new("noise", Size::new(w, h), ColorMode::Rgb, depth);
+            let mut fill = Fill::gradient(stops.clone(), angle, 1.0, style, false);
+            if transparent && let Fill::Gradient { opacity_stops, .. } = &mut fill {
+                *opacity_stops = opacity.clone();
+            }
+            d.layers.push(Layer::new("noise", LayerContent::Fill(fill)));
+            assert!(g.comp.supports(&d).is_ok(), "noise fill on the GPU");
+            check(&mut g, &d, &format!("noise fill {w}x{h} {style:?} {depth:?} transparent {transparent}"));
+        }
+    }
+    let mut d = base_doc(256, 24);
+    let gradient = Gradient { stops: stops.clone(), opacity_stops: opacity.clone(), angle: 0.0, scale: 1.0, offset: (0.0, 0.0), ..gradient() };
+    d.layers[0].effects.items = vec![Effect::GradientOverlay { common: FxCommon::new(BlendMode::Normal, 1.0), gradient, dither: false }];
+    check(&mut g, &d, "noise gradient overlay");
+    // 4097 stops not on the locations: the ordinary LUT, still on the GPU.
+    let shifted: Vec<(f32, Color)> = stops.iter().map(|(t, c)| (t * 0.5, *c)).chain([(1.0, Color::WHITE)]).collect();
+    let mut d = Document::new("dense", Size::new(64, 2), ColorMode::Rgb, SampleType::F32);
+    d.layers.push(Layer::new("dense", LayerContent::Fill(Fill::gradient(shifted, 0.0, 1.0, GradientStyle::Linear, false))));
+    assert!(photosplice_gpu::plan(&d).is_err() || g.comp.supports(&d).is_ok());
+}

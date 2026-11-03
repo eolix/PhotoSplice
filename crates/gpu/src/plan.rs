@@ -1029,14 +1029,8 @@ impl<'a> Planner<'a> {
                 let quantum = photosplice_compose::adjustment_quantum(self.cx.depth).unwrap_or(0.0);
                 p.params[2] = [offset.0, offset.1, quantum, if *dither { 1.0 } else { 0.0 }];
                 let ramp = photosplice_compose::gradient_fill::Ramp::new(f);
-                let mut rows = vec![[0.0f32; 4096]; 4];
-                for k in 0..4096 {
-                    let v = ramp.as_ref().map_or([0.0; 4], |r| r.sample(k as f32 / 4095.0));
-                    for (ch, row) in rows.iter_mut().enumerate() {
-                        row[k] = v[ch];
-                    }
-                }
-                p.lut = Some(rows);
+                let per_location = per_location_ramp(stops) && (opacity_stops.is_empty() || per_location_ramp(opacity_stops));
+                p.lut = Some(ramp_rows(|t| ramp.as_ref().map_or([0.0; 4], |r| r.sample(t)), per_location));
             }
             // Pattern fills fall back to the CPU compositor (see `check`).
             Fill::Pattern { .. } => {}
@@ -1928,14 +1922,35 @@ pub fn adjustment_program(adj: &Adjustment, transfer: Transfer, depth: photospli
     }
 }
 
-/// A gradient's colour and alpha as four 4096-entry LUT rows (`lut_tex`).
+/// A gradient's colour and alpha as LUT rows (`lut_tex`, see [`ramp_rows`]).
 fn gradient_rows(g: &Gradient) -> Vec<[f32; 4096]> {
-    let mut rows = vec![[0.0f32; 4096]; 4];
+    let per_location = per_location_ramp(&g.stops) && (g.opacity_stops.is_empty() || per_location_ramp(&g.opacity_stops));
+    ramp_rows(|t| photosplice_compose::effects::sample_gradient(g, t), per_location)
+}
+
+/// Stops one per location 0..=4096 (a generated noise gradient's ramp), which the CPU samples
+/// between neighbouring entries: the GPU reads them per location too ([`ramp_rows`]).
+fn per_location_ramp<T>(stops: &[(f32, T)]) -> bool {
+    stops.len() == 4097 && stops.iter().enumerate().all(|(i, s)| (s.0 - i as f32 / 4096.0).abs() < 1e-6)
+}
+
+/// A ramp's colour and alpha as five LUT rows: rows 0..3 hold R, G, B, A. Ordinarily they are
+/// `sample` at `k / 4095` and row 4 is zero. A per-location ramp ([`per_location_ramp`]) keeps
+/// its entries: rows 0..3 at `k / 4096`, row 4 = (1, then entry 4096's R, G, B, A); the
+/// shader's `ramp` then interpolates at `t · 4096` as the CPU does between stops.
+fn ramp_rows(sample: impl Fn(f32) -> [f32; 4], per_location: bool) -> Vec<[f32; 4096]> {
+    let mut rows = vec![[0.0f32; 4096]; 5];
+    let step = if per_location { 4096.0 } else { 4095.0 };
     for k in 0..4096 {
-        let v = photosplice_compose::effects::sample_gradient(g, k as f32 / 4095.0);
-        for (ch, row) in rows.iter_mut().enumerate() {
+        let v = sample(k as f32 / step);
+        for (ch, row) in rows.iter_mut().take(4).enumerate() {
             row[k] = v[ch];
         }
+    }
+    if per_location && let Some(flag) = rows.get_mut(4) {
+        let end = sample(1.0);
+        flag[0] = 1.0;
+        flag[1..5].copy_from_slice(&end);
     }
     rows
 }
@@ -1948,7 +1963,7 @@ fn check_gradient_stops<T>(stops: &[(f32, T)]) -> Result<(), Unsupported> {
     let mut positions: Vec<f32> = stops.iter().map(|s| s.0).collect();
     positions.sort_by(f32::total_cmp);
     // An evenly spaced ramp over the whole range (a generated noise gradient's 4097 stops) has
-    // no discontinuity: the LUT resamples it.
+    // no discontinuity: the LUT keeps it ([`ramp_rows`], per location for a noise ramp).
     let gap = |w: &[f32]| w.get(1).zip(w.first()).map_or(0.0, |(b, a)| b - a);
     let first = positions.get(..2).map_or(0.0, gap);
     let spans = positions.first().is_some_and(|p| *p <= 1e-6) && positions.last().is_some_and(|p| *p >= 1.0 - 1e-6);
