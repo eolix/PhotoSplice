@@ -1645,6 +1645,15 @@ fn effect_cases() -> Vec<(&'static str, Vec<Effect>)> {
             "bevel pillow chisel hard",
             vec![Effect::BevelEmboss(Bevel { technique: BevelTechnique::ChiselHard, ..bevel(BevelStyle::PillowEmboss, false, 7.0, 0.0) })],
         ),
+        // The outer ramp running on inside the shape, and the pixel past the reach by a corner.
+        (
+            "bevel outer chisel hard",
+            vec![Effect::BevelEmboss(Bevel { technique: BevelTechnique::ChiselHard, ..bevel(BevelStyle::OuterBevel, true, 6.0, 0.0) })],
+        ),
+        (
+            "bevel emboss chisel hard",
+            vec![Effect::BevelEmboss(Bevel { technique: BevelTechnique::ChiselHard, ..bevel(BevelStyle::Emboss, true, 8.0, 0.0) })],
+        ),
         ("bevel emboss smooth wide", vec![Effect::BevelEmboss(bevel(BevelStyle::Emboss, true, 21.0, 0.0))]),
         // With an inside stroke (the case the GPU draws; outside strokes and none go to the CPU).
         (

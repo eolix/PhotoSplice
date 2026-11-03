@@ -765,7 +765,8 @@ fn lut_at(l: &[f32], v: f32) -> f32 {
 }
 
 /// Whether `e` reads a contour with the Anti-aliased option on, which takes its input a third of a
-/// pixel away ([`CONTOUR_AA_SHIFT`]; the GPU leaves such layers to the CPU).
+/// pixel away ([`CONTOUR_AA_SHIFT`]; a bevel samples a grid, [`BEVEL_AA_SUBSAMPLES`]): the GPU
+/// leaves such layers to the CPU.
 pub fn has_anti_aliased_contour(e: &Effect) -> bool {
     match e {
         Effect::OuterGlow(g) | Effect::InnerGlow(g) => g.anti_alias && glow_lut(g).is_some(),
@@ -794,12 +795,16 @@ pub fn glow_lut(g: &Glow) -> Option<Vec<f32>> {
 /// The bevel's Contour element as a height transfer over the Range. The height is first taken
 /// as a place `u` on the style's own profile, 0 at its foot and 1 at its top: a Smooth inner bevel
 /// runs from ½ at the edge to 1 (`u = 2h − 1`), a Smooth outer one from 0 to ½ at the edge
-/// (`u = 2h`), Smooth emboss styles and every Chisel profile from 0 to 1 (`u = h`). The Range then
-/// picks the top of it, `contour((u − 1 + 2·range) / (2·range))`, so the default 50 % spans the
-/// whole profile. Reference corpus bevel-inner-contour-ramp-peak: lit for 4 px from the edge,
-/// shaded to 14 px (the size), as a ramp peak over the inner bevel gives;
-/// bevel-pillow-chisel-hard-gloss-and-contour: the contour spans both halves of the pillow, out
-/// past the edge (taken over the inner half only, its bands sat 2 px inside).
+/// (`u = 2h`), Smooth emboss styles and every Chisel profile from 0 to 1 (`u = h`). A Range above
+/// the default 50 % spans the profile over the top of the contour, `contour((u − 1 + 2·range) /
+/// (2·range))`; at 50 % and below the contour spans the whole profile. Reference corpus
+/// bevel-inner-contour-ramp-peak (50 %): lit for 4 px from the edge, shaded to 14 px (the size), as
+/// a ramp peak over the inner bevel gives; bevel-inner-contour-double-ring-aa-r70 (70 %): the rings
+/// sit where the formula puts them (a range of ±0.03 around it doubles the pixels off);
+/// bevel-pillow-chisel-hard-gloss-and-contour (40 %): the contour spans both halves of the pillow,
+/// out past the edge, as at 50 % (stretched over the top 80 % of the profile as the formula has it,
+/// its bands sat a pixel inside: 7.34 % of pixels off, worst 0.75 → 0 %). Whether a range below
+/// 50 % does anything else no oracle tells yet.
 pub fn bevel_contour_lut(c: &photosplice_doc::effects::BevelContour, b: &Bevel) -> Vec<f32> {
     let base = contour_lut(&c.contour);
     let r = if c.range.is_finite() { c.range.clamp(0.01, 1.0) } else { 1.0 };
@@ -816,7 +821,7 @@ pub fn bevel_contour_lut(c: &photosplice_doc::effects::BevelContour, b: &Bevel) 
     (0..n)
         .map(|k| {
             let u = scale * (k as f32 / (n - 1) as f32) + offset;
-            let v = ((u - 1.0 + 2.0 * r) / (2.0 * r)).min(1.0);
+            let v = (1.0 - (1.0 - u) * (0.5 / r).min(1.0)).min(1.0);
             if v < 0.0 { at(0.0) + v * slope } else { at(v) }
         })
         .collect()
@@ -825,12 +830,18 @@ pub fn bevel_contour_lut(c: &photosplice_doc::effects::BevelContour, b: &Bevel) 
 /// A bevel's lighting through its Gloss Contour. The shading runs 0 (full shadow) .. ½ (facing
 /// the light as a flat surface does) .. 1 (full highlight); the contour maps it, and what lands
 /// above ½ is highlight, below shadow. A flat area under a peaked contour turns highlight
-/// (Photoshop corpus bevel-inner-gloss-ramp-peak: the interior 0.35 → 0.84, Screen white at
+/// (Reference corpus bevel-inner-gloss-ramp-peak: the interior 0.35 → 0.84, Screen white at
 /// 75 %); a linear contour leaves the shading as it is. Returns `(highlight, shadow)`.
 pub fn gloss(k: f32, se: f32, lut: Option<&[f32]>) -> (f32, f32) {
-    let s = if k > 0.0 { 0.5 + 0.5 * (k / (1.0 - se).max(1e-3)).clamp(0.0, 1.0) } else { 0.5 - 0.5 * (-k / se.max(1e-3)).clamp(0.0, 1.0) };
+    let s = gloss_shading(k, se);
     let c = lut.map_or(s, |l| lut_at(l, s));
     ((2.0 * c - 1.0).max(0.0), (1.0 - 2.0 * c).max(0.0))
+}
+
+/// The shading [`gloss`] reads: `k` (the lighting less sin(altitude) `se`, what a flat surface
+/// receives) as 0 (full shadow) .. ½ .. 1 (full highlight).
+pub fn gloss_shading(k: f32, se: f32) -> f32 {
+    if k > 0.0 { 0.5 + 0.5 * (k / (1.0 - se).max(1e-3)).clamp(0.0, 1.0) } else { 0.5 - 0.5 * (-k / se.max(1e-3)).clamp(0.0, 1.0) }
 }
 
 /// A contour applied over a Range (`contour(min(v / range, 1))`, `range` in `0.01..=2`: past 1
@@ -1549,8 +1560,17 @@ pub fn chisel_distances_at(soft: bool, a: f32, din: f32, dout: f32) -> (f32, f32
 /// pillow 11.59 → 1.90 %, stroke 6.17 → 0.78 %, stroke emboss 11.77 → 2.33 %); along a straight,
 /// pixel-aligned edge both draw the same facets.
 /// Soften blurs a Smooth bevel's shading maps (`bevel_maps`) and a chiselled one's height.
+#[cfg(test)]
 fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, patterns: &PreparedPatterns<'_>) -> Map {
-    let mut h = if b.technique == BevelTechnique::Smooth {
+    let contour = b.contour.as_ref().map(|c| bevel_contour_lut(c, b));
+    let texture = bevel_texture(shape.w, shape.h, b, g, tex, patterns);
+    bevel_height_at(&bevel_profile(shape, b, g), b, contour.as_deref(), texture.as_ref(), (0.0, 0.0))
+}
+
+/// The bevel's height profile before its Contour, Texture and (chiselled) Soften elements: see
+/// [`bevel_height`].
+fn bevel_profile(shape: &Map, b: &Bevel, g: &BevelGeom) -> Map {
+    if b.technique == BevelTechnique::Smooth {
         let mut h = shape.clone();
         tent(&mut h, g.width);
         h
@@ -1563,26 +1583,30 @@ fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, pattern
             *v = bevel_chisel_h(g.paint, g.chisel, di, dou);
         }
         h
-    };
-    // Contour element: the height profile through the contour over its range.
-    if let Some(c) = &b.contour {
-        h = apply_lut_aa(h, Some(bevel_contour_lut(c, b)), c.anti_alias);
     }
-    // Texture element: the pattern's luminance as extra height, scaled so a full-contrast step
-    // at 100 % depth slopes like the bevel at its depth.
-    if let Some(t) = &b.texture
-        && let Some(tile) = patterns.get(&t.id, &t.name)
-    {
-        let unit = if b.depth.abs() > 1e-6 { (g.depth / b.depth).abs().max(1e-3) } else { g.width.max(1.0) };
-        let place = Placement::anchored(tex.anchor, t.link, t.phase, t.scale, 0.0);
-        let k = t.depth / unit;
-        let (x0, y0) = (tex.rect.x0, tex.rect.y0);
-        for y in 0..h.h {
-            for x in 0..h.w {
-                let p = tile.sample_area(&place, f64::from(x0 + x as i32), f64::from(y0 + y as i32));
-                let l = (0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2]) * p[3];
-                h.v[y * h.w + x] += k * if t.invert { 1.0 - l } else { l };
-            }
+}
+
+/// Where Reference's Anti-aliased bevel contours sample a pixel: a 3 × 3 grid at 0, ⅓ and ⅔ of a
+/// pixel right of and below its centre, the results averaged (their mean is the ⅓-pixel shift of
+/// [`CONTOUR_AA_SHIFT`]). Reference corpus, against reading the input ⅓ px away:
+/// bevel-inner-contour-double-ring-aa-r70 6.18 → 2.18 % of pixels off (worst 82 → 11/255; the
+/// rings turned a pixel sharper), bevel-inner-gloss-double-ring-aa 5.35 → 4.56 % (worst 26 →
+/// 5/255, the rest within 3/255; that oracle alone would put the grid at 0, 0.3 and 0.6: 1.6 %).
+const BEVEL_AA_SUBSAMPLES: [f32; 3] = [0.0, 1.0 / 3.0, 2.0 / 3.0];
+
+/// [`bevel_height`] from its `profile` ([`bevel_profile`]), the profile read `at` a sub-pixel
+/// offset (right, down) before the Contour element (`contour`, [`bevel_contour_lut`]): the samples
+/// of an anti-aliased contour ([`BEVEL_AA_SUBSAMPLES`]). `texture` is the Texture element's height
+/// ([`bevel_texture`]).
+fn bevel_height_at(profile: &Map, b: &Bevel, contour: Option<&[f32]>, texture: Option<&Map>, at: (f32, f32)) -> Map {
+    let mut h = if at == (0.0, 0.0) { profile.clone() } else { profile.shifted(-at.0, -at.1, 0.0) };
+    // Contour element: the height profile through the contour over its range.
+    if let Some(l) = contour {
+        h = h.map(|v| lut_at(l, v));
+    }
+    if let Some(t) = texture {
+        for (v, t) in h.v.iter_mut().zip(&t.v) {
+            *v += t;
         }
     }
     // A chiselled bevel's Soften blurs its height (Reference kit hard- / soft-inner-s20-soften4:
@@ -1591,6 +1615,27 @@ fn bevel_height(shape: &Map, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, pattern
         tent(&mut h, b.soften);
     }
     h
+}
+
+/// The Texture element's extra height over a `w` × `h` map: the pattern's luminance, scaled so a
+/// full-contrast step at 100 % depth slopes like the bevel at its depth. `None` without a texture
+/// (or its pattern).
+fn bevel_texture(w: usize, h: usize, b: &Bevel, g: &BevelGeom, tex: &TextureCtx, patterns: &PreparedPatterns<'_>) -> Option<Map> {
+    let t = b.texture.as_ref()?;
+    let tile = patterns.get(&t.id, &t.name)?;
+    let unit = if b.depth.abs() > 1e-6 { (g.depth / b.depth).abs().max(1e-3) } else { g.width.max(1.0) };
+    let place = Placement::anchored(tex.anchor, t.link, t.phase, t.scale, 0.0);
+    let k = t.depth / unit;
+    let (x0, y0) = (tex.rect.x0, tex.rect.y0);
+    let mut m = Map::new(w, h, 0.0);
+    for y in 0..h {
+        for x in 0..w {
+            let p = tile.sample_area(&place, f64::from(x0 + x as i32), f64::from(y0 + y as i32));
+            let l = (0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2]) * p[3];
+            m.v[y * w + x] = k * if t.invert { 1.0 - l } else { l };
+        }
+    }
+    Some(m)
 }
 
 /// Where a bevel texture tiles: the maps' rectangle, the document's patterns and the linked
@@ -1604,12 +1649,17 @@ pub struct TextureCtx<'a> {
 /// Chiselled height from the inside / outside distances and the ramp lengths `[inside,
 /// outside]` ([`BevelGeom::chisel`]; keep in sync with `fs_mbevelh`). Clamped only at the far
 /// end of each ramp: across the shape's edge the ramp runs on, so the edge pixels shade at the full
-/// facet slope as Photoshop's do.
+/// facet slope as Reference's do. An outer bevel's ramp runs on inside the shape too, by the inside
+/// distance: the edge pixels' 3 × 3 slope reads the pixels within, and held at the edge's height
+/// they flattened it on curves and slants (Reference corpus bevel-outer-chisel-hard: edge pixels
+/// up to 22/255 light, 0.70 → 0 % of pixels off; bevel-stroke-chisel-hard 0.84 → 0 %, its outside
+/// stroke shaded as an outer bevel; Chisel Soft outer 0.68 → 0.23 %, stroke 0.78 → 0.33 %).
 pub fn bevel_chisel_h(paint: BevelPaint, ramp: [f32; 2], din: f32, dout: f32) -> f32 {
     let [rin, rout] = ramp.map(|r| r.max(1e-3));
     match paint {
+        BevelPaint::Outer if din > 0.0 => 1.0 + din / rout,
         BevelPaint::Outer => (1.0 - dout / rout).max(0.0),
-        // Emboss: one slope across both halves (Photoshop's outside facet is as steep as the
+        // Emboss: one slope across both halves (Reference's outside facet is as steep as the
         // inside one, and longer), from 0 at the end of the outside ramp to 1 at the end of the
         // inside one.
         BevelPaint::Both => {
@@ -1623,73 +1673,121 @@ pub fn bevel_chisel_h(paint: BevelPaint, ramp: [f32; 2], din: f32, dout: f32) ->
     }
 }
 
+/// A bevel's shading over height map `h` for gradient scale `depth`, light vector `light_v` and
+/// sin(altitude) `se`, as [`gloss_shading`] places it: 0 full shadow, ½ flat, 1 full highlight.
+fn bevel_shading(h: &Map, depth: f32, light_v: [f32; 3], se: f32) -> Map {
+    // Heights past the maps' edge continue the edge's (a contour can raise the whole outside: a
+    // zero read there would be a slope along the region's border).
+    let (mw, mh) = (h.w as i64 - 1, h.h as i64 - 1);
+    let hc = |x: i64, y: i64| h.get(x.clamp(0, mw.max(0)), y.clamp(0, mh.max(0)));
+    let mut out = Map::new(h.w, h.h, 0.5);
+    for y in 0..h.h as i64 {
+        for x in 0..h.w as i64 {
+            // The height's slope over the 3 × 3 neighbourhood, all six neighbours weighted
+            // alike (Prewitt; Reference corpus bevel-emboss-smooth 1.7 % of pixels off → 0, a
+            // pillow chisel 0.23 → 0.07 max; a centre difference along each axis left
+            // diagonal edges and corners off).
+            let gx = (hc(x + 1, y - 1) + hc(x + 1, y) + hc(x + 1, y + 1) - hc(x - 1, y - 1) - hc(x - 1, y) - hc(x - 1, y + 1)) / 6.0 * depth;
+            let gy = (hc(x - 1, y + 1) + hc(x, y + 1) + hc(x + 1, y + 1) - hc(x - 1, y - 1) - hc(x, y - 1) - hc(x + 1, y - 1)) / 6.0 * depth;
+            let n = [-gx, -gy, 1.0];
+            let len = (n[0] * n[0] + n[1] * n[1] + 1.0).sqrt();
+            let shade = (n[0] * light_v[0] + n[1] * light_v[1] + n[2] * light_v[2]) / len;
+            out.v[y as usize * h.w + x as usize] = gloss_shading(shade - se, se);
+        }
+    }
+    out
+}
+
 /// Bevel highlight and shadow maps: `[hi, sh]` (inner or outer) or `[hi, sh, hi_out, sh_out]`
 /// (emboss styles).
 fn bevel_maps(shape: &Map, b: &Bevel, light: &GlobalLight, tex: &TextureCtx, patterns: &PreparedPatterns<'_>) -> (Vec<Map>, BevelPaint) {
     let g = bevel_geom(b);
-    let hmap = bevel_height(shape, b, &g, tex, patterns);
+    let profile = bevel_profile(shape, b, &g);
+    let contour = b.contour.as_ref().map(|c| bevel_contour_lut(c, b));
+    let texture = bevel_texture(shape.w, shape.h, b, &g, tex, patterns);
+    let hmap = bevel_height_at(&profile, b, contour.as_deref(), texture.as_ref(), (0.0, 0.0));
     let (angle, altitude) = if b.use_global_light { (light.angle, light.altitude) } else { (b.angle, b.altitude) };
     let (sa, ca) = angle.to_radians().sin_cos();
     let (se, ce) = altitude.to_radians().sin_cos();
     let light_v = [ca * ce, -sa * ce, se];
     // Region: 0 = inside (× the shape's alpha), 1 = under the layer's edge and outside.
     // A pixel is on the bevel where its height is raised. Emboss styles and outer bevels also
-    // shade the last pixel past the height's reach (a raised 4-neighbour: it still slopes;
+    // shade the last pixel past the height's reach (a raised neighbour: it still slopes;
     // psd-tools layer_effects' emboss shadow runs one row past it, Reference corpus
     // bevel-outer-smooth and -on-gradient-bg shade the row at the size, and a chisel's facet
-    // fades out one pixel further along a slanted edge: kit hard-outer-* 104 → 31/255).
+    // fades out one pixel further along a slanted edge: kit hard-outer-* 104 → 31/255). The
+    // 8-neighbours, as the 3 × 3 slope reads them: along a diagonal edge the pixel past the reach
+    // touches the ramp only by its corner (Reference corpus bevel-emboss-chisel-hard 24/255 light
+    // there, 0.15 → 0 % of pixels off; bevel-pillow-chisel-hard 0.09 → 0 %).
     let reach_past = outer_reaches_past(&g);
     let on_bevel = |x: i64, y: i64| {
-        hmap.get(x, y) > BEVEL_H_EPS || (reach_past && [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dy)| hmap.get(x + dx, y + dy) > BEVEL_H_EPS))
+        hmap.get(x, y) > BEVEL_H_EPS || (reach_past && (-1..=1).any(|dy| (-1..=1).any(|dx| hmap.get(x + dx, y + dy) > BEVEL_H_EPS)))
     };
     let gloss_lut = contour_lut(&b.gloss_contour);
-    // Heights past the maps' edge continue the edge's (a contour can raise the whole outside: a
-    // zero read there would be a slope along the region's border).
-    let (mw, mh) = (hmap.w as i64 - 1, hmap.h as i64 - 1);
-    let hc = |x: i64, y: i64| hmap.get(x.clamp(0, mw.max(0)), y.clamp(0, mh.max(0)));
+    let through_gloss = |s: f32| gloss_lut.as_deref().map_or(s, |l| lut_at(l, s));
+    // Anti-aliased contours sample each pixel on a 3 × 3 grid ([`BEVEL_AA_SUBSAMPLES`]): the
+    // Contour element reads the height profile there (each sample shaded on its own grid), the
+    // Gloss Contour the shading; a linear gloss contour has nothing to smooth.
+    let contour_aa = b.contour.as_ref().is_some_and(|c| c.anti_alias);
+    let gloss_aa = b.gloss_anti_alias && gloss_lut.is_some();
+    let samples: Vec<(f32, f32)> = if contour_aa || gloss_aa {
+        BEVEL_AA_SUBSAMPLES.iter().flat_map(|&dy| BEVEL_AA_SUBSAMPLES.iter().map(move |&dx| (dx, dy))).collect()
+    } else {
+        vec![(0.0, 0.0)]
+    };
+    let heights: Vec<Map> = if contour_aa {
+        samples.iter().map(|&at| if at == (0.0, 0.0) { hmap.clone() } else { bevel_height_at(&profile, b, contour.as_deref(), texture.as_ref(), at) }).collect()
+    } else {
+        Vec::new()
+    };
     let shade_into = |depth: f32, region_kind: u8| -> (Map, Map) {
-        let (mut hi, mut sh) = (Map::new(shape.w, shape.h, 0.0), Map::new(shape.w, shape.h, 0.0));
-        // The shading and the region first, then the gloss over them.
-        let (mut sm, mut rg) = (Map::new(shape.w, shape.h, 0.0), Map::new(shape.w, shape.h, 0.0));
+        let mut rg = Map::new(shape.w, shape.h, 0.0);
         for y in 0..shape.h as i64 {
             for x in 0..shape.w as i64 {
                 let i = y as usize * shape.w + x as usize;
-                // The height's slope over the 3 × 3 neighbourhood, all six neighbours weighted
-                // alike (Prewitt; Reference corpus bevel-emboss-smooth 1.7 % of pixels off → 0, a
-                // pillow chisel 0.23 → 0.07 max; a centre difference along each axis left
-                // diagonal edges and corners off).
-                let gx = (hc(x + 1, y - 1) + hc(x + 1, y) + hc(x + 1, y + 1) - hc(x - 1, y - 1) - hc(x - 1, y) - hc(x - 1, y + 1)) / 6.0 * depth;
-                let gy = (hc(x - 1, y + 1) + hc(x, y + 1) + hc(x + 1, y + 1) - hc(x - 1, y - 1) - hc(x, y - 1) - hc(x + 1, y - 1)) / 6.0 * depth;
-                let n = [-gx, -gy, 1.0];
-                let len = (n[0] * n[0] + n[1] * n[1] + 1.0).sqrt();
-                let shade = (n[0] * light_v[0] + n[1] * light_v[1] + n[2] * light_v[2]) / len;
-                let region = match region_kind {
+                rg.v[i] = match region_kind {
                     0 => shape.v[i],
                     1 => f32::from(shape.v[i] < 1.0 - INSIDE_EPS && on_bevel(x, y)),
                     _ => f32::from(shape.v[i] > INSIDE_EPS),
                 };
-                sm.v[i] = shade;
-                rg.v[i] = region;
             }
         }
-        // Gloss Contour › Anti-aliased reads the shading a third of a pixel away, as the other
-        // anti-aliased contours read their input; a linear contour has nothing to smooth (Reference corpus bevel-inner-gloss-double-ring-aa:
-        // within 2/255 on 31 616 → 35 557 pixels, worst 55 → 25/255).
-        let sm = if b.gloss_anti_alias && gloss_lut.is_some() { sm.shifted(-CONTOUR_AA_SHIFT, -CONTOUR_AA_SHIFT, 0.0) } else { sm };
-        for i in 0..sm.v.len() {
-            (hi.v[i], sh.v[i]) = gloss(sm.v[i] - se, se, gloss_lut.as_deref());
+        // The gloss contour's output, averaged over the samples, as highlight (above 0) less
+        // shadow: `2 c − 1` (see [`gloss`]).
+        let mut d = Map::new(shape.w, shape.h, 0.0);
+        let mut add = |s: &Map| {
+            for (o, v) in d.v.iter_mut().zip(&s.v) {
+                *o += through_gloss(*v);
+            }
+        };
+        if contour_aa {
+            for h in &heights {
+                add(&bevel_shading(h, depth, light_v, se));
+            }
+        } else {
+            let s = bevel_shading(&hmap, depth, light_v, se);
+            for &(dx, dy) in &samples {
+                if (dx, dy) == (0.0, 0.0) {
+                    add(&s);
+                } else {
+                    add(&s.shifted(-dx, -dy, 0.5));
+                }
+            }
         }
-        // Soften blurs the highlight and shadow, after the gloss clamps them (Reference corpus
+        let n = samples.len().max(1) as f32;
+        for v in &mut d.v {
+            *v = 2.0 * *v / n - 1.0;
+        }
+        // Soften blurs the gloss's output, after it clamps the shading (Reference corpus
         // bevel-inner-smooth-down-soften4: a full shadow's edge rounds off, 23 23 24 26 30 36 for
-        // a blurred height's 23 23 23 23 26 34; pixels off 3.64 % → 0.79 %).
+        // a blurred height's 23 23 23 23 26 34; pixels off 3.64 % → 0.79 %), highlight and shadow
+        // as one: where they meet, a blurred pair each kept a share and dipped below both sides
+        // (0.79 → 0 %, worst 10/255 → 1.6).
         if b.soften >= 1.0 && b.technique == BevelTechnique::Smooth {
-            tent(&mut hi, b.soften);
-            tent(&mut sh, b.soften);
+            tent(&mut d, b.soften);
         }
-        for ((h, s), r) in hi.v.iter_mut().zip(sh.v.iter_mut()).zip(&rg.v) {
-            *h *= r;
-            *s *= r;
-        }
+        let hi = Map { w: shape.w, h: shape.h, v: d.v.iter().zip(&rg.v).map(|(d, r)| d.max(0.0) * r).collect() };
+        let sh = Map { w: shape.w, h: shape.h, v: d.v.iter().zip(&rg.v).map(|(d, r)| (-d).max(0.0) * r).collect() };
         (hi, sh)
     };
     let maps = match g.paint {
@@ -3184,11 +3282,11 @@ mod tests {
         assert!(soft[0] > 0.99 && soft[2] < 0.99 && soft[3] < plain[3] - 0.02, "{soft:?} vs {plain:?}");
     }
 
-    /// Gloss Contour › Anti-aliased reads the shading a third of a pixel away (Reference corpus
+    /// Gloss Contour › Anti-aliased samples the shading on a 3 × 3 grid (Reference corpus
     /// bevel-inner-gloss-double-ring-aa); with a linear contour it changes nothing, and either
     /// way such a layer is left to the CPU.
     #[test]
-    fn gloss_anti_alias_reads_the_shading_a_third_of_a_pixel_away() {
+    fn gloss_anti_alias_samples_the_shading_on_a_grid() {
         let shape = square(48, 8, 40);
         let l = GlobalLight::default();
         let pp = PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES);
@@ -3209,6 +3307,143 @@ mod tests {
             assert_eq!(most > 0.01, differs, "{most}");
             assert_eq!(has_anti_aliased_contour(&Effect::BevelEmboss(b.clone())), differs);
         }
+    }
+
+    /// The gloss contour's output down a straight edge, `0.5 + (hi − sh) / 2` (inside, where the
+    /// region is 1).
+    fn gloss_column(m: &[Map], n: usize, x: usize, y0: usize, len: usize) -> Vec<f32> {
+        (y0..y0 + len).map(|y| 0.5 + 0.5 * (m[0].v[y * n + x] - m[1].v[y * n + x])).collect()
+    }
+
+    fn double_ring() -> Contour {
+        Contour::Custom {
+            name: "double ring".into(),
+            points: [(0.0, 0.0), (64.0, 255.0), (128.0, 40.0), (192.0, 255.0), (255.0, 0.0)]
+                .iter()
+                .map(|(i, o)| photosplice_doc::adjust::CurvePoint { input: i / 255.0, output: o / 255.0 })
+                .collect(),
+            corners: Vec::new(),
+        }
+    }
+
+    /// Reference corpus bevel-inner-gloss-double-ring-aa (inner smooth, size 12, angle 120°,
+    /// altitude 30°, an anti-aliased double-ring Gloss Contour), down from the square's top edge:
+    /// the gloss's output as Reference draws it. Reading the shading ⅓ px away (unclamped) left
+    /// up to 26/255 off where the shading saturates.
+    #[test]
+    fn anti_aliased_gloss_matches_reference() {
+        let shape = square(64, 8, 56);
+        let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::Smooth);
+        (b.size, b.angle, b.gloss_contour, b.gloss_anti_alias) = (12.0, 120.0, double_ring(), true);
+        let (m, _) = bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        let reference = [0.734, 0.782, 0.839, 0.9, 0.957, 0.997, 0.997, 0.924, 0.767, 0.537, 0.306, 0.174, 0.158, 0.158];
+        let ours = gloss_column(&m, 64, 32, 8, reference.len());
+        assert!(ours.iter().zip(reference).all(|(o, r)| (o - r).abs() < 0.012), "{ours:?}");
+    }
+
+    /// Reference corpus bevel-inner-contour-double-ring-aa-r70 (inner smooth, size 14, an
+    /// anti-aliased double-ring Contour at Range 70 %), down from the square's top edge: each of
+    /// the 3 × 3 samples shaded on its own. Reading the height ⅓ px away lit the pixel where the
+    /// second ring turns (row 5) at 0.86 for Reference's 0.75.
+    #[test]
+    fn anti_aliased_contour_matches_reference() {
+        let shape = square(64, 8, 56);
+        let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::Smooth);
+        (b.size, b.angle) = (14.0, 120.0);
+        b.contour = Some(photosplice_doc::BevelContour { contour: double_ring(), range: 0.7, anti_alias: true });
+        let (m, _) = bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        let reference = [0.002, 0.002, 0.87, 0.843, 0.863, 0.748, 0.002, 0.002, 0.002, 0.002, 0.002, 0.002, 0.021, 0.323, 0.5];
+        let ours = gloss_column(&m, 64, 32, 8, reference.len());
+        assert!(ours.iter().zip(reference).all(|(o, r)| (o - r).abs() < 0.012), "{ours:?}");
+    }
+
+    /// A Range of 50 % or less spans the contour over the whole profile; above it the profile
+    /// takes the contour's top (Reference corpus bevel-pillow-chisel-hard-gloss-and-contour at
+    /// 40 %, bevel-inner-contour-double-ring-aa-r70 at 70 %).
+    #[test]
+    fn bevel_contour_range_below_half_spans_the_whole_profile() {
+        let at = |range: f32, style: BevelStyle, technique: BevelTechnique, h: f32| {
+            let c = photosplice_doc::BevelContour { contour: double_ring(), range, anti_alias: false };
+            let l = bevel_contour_lut(&c, &bevel_of(style, technique));
+            l[(h * (l.len() - 1) as f32).round() as usize]
+        };
+        for (style, technique) in [(BevelStyle::PillowEmboss, BevelTechnique::ChiselHard), (BevelStyle::InnerBevel, BevelTechnique::Smooth)] {
+            for h in [0.55, 0.6, 0.7, 0.8, 0.9] {
+                for range in [0.01, 0.2, 0.4] {
+                    assert!((at(range, style, technique, h) - at(0.5, style, technique, h)).abs() < 1e-6, "{style:?} {h} {range}");
+                }
+            }
+        }
+        // 70 %: a Smooth inner bevel's edge (h ½, the foot of its profile) reads the contour at
+        // 1 − 1 / 1.4.
+        let lut = contour_lut(&double_ring()).unwrap_or_default();
+        assert!((at(0.7, BevelStyle::InnerBevel, BevelTechnique::Smooth, 0.5) - lut_at(&lut, 1.0 - 1.0 / 1.4)).abs() < 1e-3);
+    }
+
+    /// An outer chisel's facet runs on into the shape: a partly covered edge pixel on a diagonal
+    /// edge shades like the facet beside it (Reference corpus bevel-outer-chisel-hard), not lighter.
+    #[test]
+    fn outer_chisel_edge_pixels_shade_like_their_facet() {
+        let n = 48;
+        let mut shape = Map::new(n, n, 0.0);
+        for y in 0..n {
+            for x in 0..n {
+                let mut cov = 0.0;
+                for sy in 0..4 {
+                    for sx in 0..4 {
+                        let (px, py) = (x as f32 + (sx as f32 + 0.5) / 4.0, y as f32 + (sy as f32 + 0.5) / 4.0);
+                        cov += f32::from(px + py < 49.0) / 16.0;
+                    }
+                }
+                shape.v[y * n + x] = cov;
+            }
+        }
+        let mut b = bevel_of(BevelStyle::OuterBevel, BevelTechnique::ChiselHard);
+        (b.size, b.angle) = (10.0, 45.0);
+        let (m, _) = bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        let shade = |x: usize, y: usize| m[0].v[y * n + x] - m[1].v[y * n + x];
+        // The edge crosses (24, 24) through its middle; (27, 27) lies on the outer facet.
+        let (a, edge, facet) = (shape.v[24 * n + 24], shade(24, 24), shade(27, 27));
+        assert!(a > 0.3 && a < 0.7, "{a}");
+        assert!(facet < -0.05 && (edge - facet).abs() < 0.03, "edge {edge}, facet {facet}");
+        assert!((bevel_chisel_h(BevelPaint::Outer, [5.0, 4.0], 2.0, -0.5) - 1.5).abs() < 1e-6);
+    }
+
+    /// Emboss styles and outer bevels shade the pixel past the height's reach that touches the
+    /// ramp only by a corner, as the 3 × 3 slope sees it (Reference corpus
+    /// bevel-emboss-chisel-hard: 24/255 light along the ring's diagonals).
+    #[test]
+    fn emboss_shades_the_pixel_past_its_reach_by_a_corner() {
+        let n = 64;
+        let mut shape = Map::new(n, n, 0.0);
+        for y in 0..n {
+            for x in 0..n {
+                shape.v[y * n + x] = f32::from(x + y < 40);
+            }
+        }
+        let pp = PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES);
+        let mut b = bevel_of(BevelStyle::Emboss, BevelTechnique::ChiselHard);
+        b.size = 10.0;
+        let h = bevel_height(&shape, &b, &bevel_geom(&b), &no_tex(), &pp);
+        let (m, _) = bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &pp);
+        let y = 20;
+        let last = (0..n).take_while(|&x| h.v[y * n + x] > BEVEL_H_EPS).last().unwrap_or(0);
+        let at = |x: usize| m[2].v[y * n + x] + m[3].v[y * n + x];
+        // The next pixel has a raised 4-neighbour, the one after only a raised corner.
+        assert!(at(last + 1) > 1e-4 && at(last + 2) > 1e-4 && at(last + 3) < 1e-6, "{:?}", (last..last + 4).map(at).collect::<Vec<_>>());
+    }
+
+    /// Soften blurs the gloss's output, highlight and shadow as one: no pixel keeps both
+    /// (Reference corpus bevel-inner-smooth-down-soften4: where they met, a blurred pair dipped
+    /// below both sides, 10/255 dark).
+    #[test]
+    fn soften_blurs_highlight_and_shadow_as_one() {
+        let shape = square(64, 16, 48);
+        let mut b = bevel_of(BevelStyle::InnerBevel, BevelTechnique::Smooth);
+        (b.size, b.soften, b.angle) = (12.0, 4.0, 120.0);
+        let (m, _) = bevel_maps(&shape, &b, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES));
+        assert!(m[0].v.iter().zip(&m[1].v).all(|(h, s)| h.min(*s) <= 0.0));
+        assert!(m[0].v.iter().any(|v| *v > 0.1) && m[1].v.iter().any(|v| *v > 0.1));
     }
 
     /// The Contour's Range spans each style's own profile: a Smooth inner bevel's from ½ at the

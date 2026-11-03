@@ -1548,7 +1548,8 @@ fn fs_mbevelh(in: VOut) -> @location(0) vec4<f32> {
     let rout = max(op.p0.z, 1e-3);
     var h: f32;
     switch i32(op.p0.x) {
-        case 0: { h = max(1.0 - dout / rout, 0.0); }
+        // An outer bevel's ramp runs on inside the shape by the inside distance.
+        case 0: { h = select(max(1.0 - dout / rout, 0.0), 1.0 + din / rout, din > 0.0); }
         case 1: {
             if (din > 0.0) {
                 h = (rout + min(din, rin)) / (rin + rout);
@@ -1565,18 +1566,23 @@ fn fs_mbevelh(in: VOut) -> @location(0) vec4<f32> {
 // sin(altitude); p1 = (depth, region, shadow (else highlight), contour (LUT row 0)). Regions
 // (`bevel_maps`' shade_into): 0 inside × alpha, 1 under the edge and outside, 4 inside at full
 // strength (emboss styles). Softened bevels (Soften blurs the shading before the region) take
-// two steps, by p3.y: 1 the shading alone, 2 the region over B, the blurred shading.
+// two steps, by p3.y: 1 the gloss's output as highlight less shadow (`2 c − 1`), 2 the region
+// over B, that blurred.
 @fragment
 fn fs_mbevelshade(in: VOut) -> @location(0) vec4<f32> {
     let p = local(in.pos);
     let s = textureLoad(layer_tex, p, 0).r;
     let mode = i32(op.p3.y + 0.5);
-    if (mode == 1) { return mout(bevel_part(p, op.p1.x, 1.0)); }
+    if (mode == 1) { return mout(2.0 * bevel_gloss(p, op.p1.x) - 1.0); }
     // effects::bevel_maps' on_bevel: the height above BEVEL_H_EPS, or (p3.x: emboss styles and
-    // Smooth outer bevels, effects::outer_reaches_past) a 4-neighbour's.
+    // outer bevels, effects::outer_reaches_past) an 8-neighbour's.
     var hmax = ra(p);
     if (op.p3.x > 0.5) {
-        hmax = max(max(hmax, max(ra(p + vec2(1, 0)), ra(p - vec2(1, 0)))), max(ra(p + vec2(0, 1)), ra(p - vec2(0, 1))));
+        for (var dy = -1; dy <= 1; dy++) {
+            for (var dx = -1; dx <= 1; dx++) {
+                hmax = max(hmax, ra(p + vec2(dx, dy)));
+            }
+        }
     }
     var region = s;
     if (op.p1.y > 3.5) {
@@ -1584,7 +1590,10 @@ fn fs_mbevelshade(in: VOut) -> @location(0) vec4<f32> {
     } else if (op.p1.y > 0.5) {
         region = select(0.0, 1.0, s < 1.0 - INSIDE_EPS && hmax > 1e-5);
     }
-    if (mode == 2) { return mout(textureLoad(tex_b, p, 0).r * region); }
+    if (mode == 2) {
+        let d = textureLoad(tex_b, p, 0).r;
+        return mout(select(max(d, 0.0), max(-d, 0.0), op.p1.z > 0.5) * region);
+    }
     return mout(bevel_part(p, op.p1.x, region));
 }
 
@@ -1596,6 +1605,13 @@ fn ra_clamped(p: vec2<i32>) -> f32 {
 }
 
 fn bevel_part(p: vec2<i32>, depth: f32, region: f32) -> f32 {
+    let s = bevel_gloss(p, depth);
+    if (op.p1.z > 0.5) { return max(1.0 - 2.0 * s, 0.0) * region; }
+    return max(2.0 * s - 1.0, 0.0) * region;
+}
+
+// The gloss contour's output (`bevel_maps`): 0 full shadow .. ½ flat .. 1 full highlight.
+fn bevel_gloss(p: vec2<i32>, depth: f32) -> f32 {
     // Prewitt over the 3 × 3 neighbourhood, as `shade_into`.
     let gx = (ra_clamped(p + vec2(1, -1)) + ra_clamped(p + vec2(1, 0)) + ra_clamped(p + vec2(1, 1))
         - ra_clamped(p + vec2(-1, -1)) - ra_clamped(p + vec2(-1, 0)) - ra_clamped(p + vec2(-1, 1))) / 6.0 * depth;
@@ -1611,8 +1627,7 @@ fn bevel_part(p: vec2<i32>, depth: f32, region: f32) -> f32 {
     var s = 0.5 - 0.5 * clamp(-k / max(se, 1e-3), 0.0, 1.0);
     if (k > 0.0) { s = 0.5 + 0.5 * clamp(k / max(1.0 - se, 1e-3), 0.0, 1.0); }
     if (op.p1.w > 0.5) { s = lut(0, s); }
-    if (op.p1.z > 0.5) { return max(1.0 - 2.0 * s, 0.0) * region; }
-    return max(2.0 * s - 1.0, 0.0) * region;
+    return s;
 }
 
 // Bevel texture (`effects::bevel_height`): A + k × luminance of the pattern (× its alpha; 1 −

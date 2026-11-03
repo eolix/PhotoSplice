@@ -436,7 +436,7 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
                 s.s = Some(In::Shape);
                 s
             };
-            // Soften: a Smooth bevel's shading blurred, a chiselled one's height
+            // Soften: a Smooth bevel's gloss output blurred, a chiselled one's height
             // (compose::effects::bevel_maps / bevel_height).
             let smooth = bv.technique == BevelTechnique::Smooth;
             if bv.soften >= 1.0 && !smooth {
@@ -448,7 +448,8 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
                 for which in [0.0, 1.0] {
                     let mut s = match &soften {
                         None => shade(h, None, *depth, *region, which, 0.0),
-                        // Soften blurs the shading, then the region applies (`bevel_maps`).
+                        // Soften blurs the gloss's output (highlight less shadow), then the
+                        // region applies (`bevel_maps`).
                         Some(k) => {
                             let raw = b.push(shade(h, None, *depth, *region, which, 1.0));
                             let blurred = b.conv(raw, k.clone());
