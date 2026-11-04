@@ -1444,8 +1444,10 @@ mod tests {
     #[test]
     fn grayscale_conversion_matches_photoshop() {
         // Photoshop 27.11, default Color Settings (working gray Dot Gain 20 %): Image > Mode >
-        // Grayscale turns sRGB 64 / 128 / 192 grey and pure red into 46 / 105 / 177 / 107.
+        // Grayscale turns sRGB 64 / 128 / 192 grey and pure red into 46 / 105 / 177 / 107. Our
+        // defaults are Europe General Purpose 3 (Dot Gain 15 %), so the measured setting is set.
         let mut s = Session::new();
+        s.execute("edit.colorSettings", json!({"workingGray": "dot-gain-20-compat"})).unwrap();
         s.execute("file.new", json!({"width": 4, "height": 1, "background": "white"})).unwrap();
         s.edit("paint", |doc, _| {
             let l = doc.layers.first_mut().unwrap();

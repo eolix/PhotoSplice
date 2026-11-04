@@ -792,7 +792,13 @@ pub fn convert_document(doc: &mut Document, dst: &Profile, intent: Intent, bpc: 
     if to_mode != ColorMode::Grayscale {
         ink_duotone(doc);
     }
-    let src = document_profile(doc);
+    // Duotone and Bitmap pixels are ink coverage, not colorimetric gray: going to Grayscale keeps
+    // them as they are and drops the inks, as Reference does.
+    let src = if to_mode == ColorMode::Grayscale && matches!(doc.mode, ColorMode::Duotone | ColorMode::Bitmap) {
+        Arc::new(dst.clone())
+    } else {
+        document_profile(doc)
+    };
     let from_mode = doc.pixel_format().mode;
     let t = Transform::new(&src, dst, intent, bpc).map_err(cms_err)?;
     let fmt = PixelFormat::new(to_mode, doc.depth, true);
