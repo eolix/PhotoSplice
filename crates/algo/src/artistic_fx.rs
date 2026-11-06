@@ -19,8 +19,8 @@ use crate::image::Image;
 mod artistic;
 mod brush;
 mod px8;
+mod response;
 mod sketch;
-mod tables;
 mod texture;
 
 /// An effect's renderer: the effect applied to the whole image, 8-bit straight RGBA in and out.

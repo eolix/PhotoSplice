@@ -2,7 +2,7 @@
 //! value.
 
 use super::super::px8::{self, Img};
-use super::super::tables::RELIEF_FACTOR;
+use super::super::response;
 use super::{index, param, rng, with_value};
 use crate::artistic::GalleryEffect;
 
@@ -73,7 +73,7 @@ const TILE_WOBBLE: f64 = 0.06;
 pub(super) fn patchwork(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
     let d = param(e, "squareSize", 0.0, 10.0) as usize + 5;
-    let wr = RELIEF_FACTOR[index(e, "relief", RELIEF_FACTOR.len())];
+    let wr = response::relief_factor_25(index(e, "relief", 26));
     let (inset, ms, bs) = (d / 5 + 1, d / 2 + 1, d / 3);
     let mut t = block_average(img, d);
     px8::to_hsv(&mut t);

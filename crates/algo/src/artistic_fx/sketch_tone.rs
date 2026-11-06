@@ -2,7 +2,7 @@
 //! Photocopy, Reticulation, Stamp, Torn Edges.
 
 use super::super::px8::{self, Img};
-use super::super::tables;
+use super::super::response;
 use super::{ink_paper, int};
 use crate::artistic::GalleryEffect;
 
@@ -217,7 +217,7 @@ pub(in super::super) fn torn_edges(e: &GalleryEffect, img: &Img) -> Img {
     // The reference's threshold is a whole level: gray 127 is light at the default balance (25).
     let t = if px8::defects() { t } else { t.floor() };
     let bw = (16 - int(e, "smoothness").min(15)).max(1);
-    let k = tables::TORN_EDGES_CONTRAST[int(e, "contrast").min(25)];
+    let k = response::torn_edges_contrast(int(e, "contrast").min(25));
     let mut m = px8::gray_mean(img);
     px8::threshold(&mut m, t, 0, 255);
     let s = px8::box_mean(&m, w, h, bw, bw);

@@ -1,7 +1,7 @@
 //! Sketch filters drawing a pattern over the image: Graphic Pen, Halftone Pattern, Water Paper.
 
 use super::super::px8::{self, Img};
-use super::super::tables;
+use super::super::response;
 use super::{ink_paper, int};
 use crate::artistic::GalleryEffect;
 use crate::photo_util::par_rows;
@@ -26,9 +26,7 @@ pub(in super::super) fn graphic_pen(e: &GalleryEffect, img: &Img) -> Img {
     let len = int(e, "strokeLength").min(1000);
     let bal = int(e, "lightDarkBalance").min(100);
     let quirk = px8::defects();
-    // The reference stops darkening at balance 50: 100 draws exactly what 50 does.
-    let bal = if quirk { bal } else { bal.min(50) };
-    let tau = if bal <= 50 { tables::GRAPHIC_PEN_DENSITY[bal] / 255.0 } else { 1.0 + (255.0 - tables::GRAPHIC_PEN_DENSITY[101 - bal]) / 255.0 };
+    let tau = response::graphic_pen_threshold(bal);
     // The reference's ramp narrows with the stroke length, from the whole gray range at length 1
     // (ink in proportion to darkness) to [`GP_RAMP`] at 15, about the same centre; its draw goes
     // from one uniform to the mean of two.

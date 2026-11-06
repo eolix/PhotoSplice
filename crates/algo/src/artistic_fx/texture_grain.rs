@@ -371,10 +371,17 @@ mod tests {
     #[test]
     fn additive_grain_keeps_the_mean_of_flat_areas() {
         let img = flat(96, 96, [120, 128, 136]);
+        // Averaged over a few seeds: one 96 × 96 render's mean still wanders with its seed.
+        let seeds = [1_u32, 2, 3, 4];
         for kind in ["regular", "soft"] {
-            let out = super::grain(&effect(kind), &img);
             for c in 0..3 {
-                let d = mean(&out, c) - img.d[c] as f64;
+                let mut d = 0.0;
+                for &seed in &seeds {
+                    let mut e = effect(kind);
+                    e.seed = Some(seed);
+                    d += mean(&super::grain(&e, &img), c) - img.d[c] as f64;
+                }
+                let d = d / seeds.len() as f64;
                 assert!(d.abs() < 0.6, "{kind}: channel {c} moved by {d}");
             }
         }

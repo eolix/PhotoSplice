@@ -147,30 +147,41 @@ impl GalleryFilter {
         out
     }
 
-    /// The random seed a new effect of this filter gets (`FlRs` in PSD descriptors); 0
-    /// for filters that draw no random numbers.
-    pub fn default_seed(self) -> u32 {
-        match self {
-            Self::FilmGrain => 23_068_185,
-            Self::SmudgeStick => 6_399_750,
-            Self::Sponge => 218_877_241,
-            Self::Spatter => 10_738_420,
-            Self::SprayedStrokes => 893_120_664,
-            Self::DiffuseGlow => 325_892_160,
-            Self::OceanRipple => 64_008_840,
-            Self::ChalkCharcoal => 314_004_633,
-            Self::GraphicPen => 55_993_248,
-            Self::NotePaper => 52_642_770,
-            Self::Reticulation => 301_835_400,
-            Self::TornEdges => 461_109_340,
-            Self::WaterPaper => 83_852_682,
-            Self::Craquelure => 495_615_720,
-            Self::Grain => 217_582_197,
-            Self::MosaicTiles => 25_445_584,
-            Self::Patchwork => 383_529_723,
-            Self::StainedGlass => 319_935_998,
-            _ => 0,
+    /// Whether the filter draws random numbers, and so has a seed (`FlRs` in PSD
+    /// descriptors). Reference picks a new seed for every new effect (two files saved
+    /// from the same settings carry different seeds), so the seed belongs to the effect.
+    pub fn draws_random(self) -> bool {
+        matches!(
+            self,
+            Self::ChalkCharcoal
+                | Self::Craquelure
+                | Self::DiffuseGlow
+                | Self::FilmGrain
+                | Self::Grain
+                | Self::GraphicPen
+                | Self::MosaicTiles
+                | Self::NotePaper
+                | Self::OceanRipple
+                | Self::Patchwork
+                | Self::Reticulation
+                | Self::SmudgeStick
+                | Self::Spatter
+                | Self::Sponge
+                | Self::SprayedStrokes
+                | Self::StainedGlass
+                | Self::TornEdges
+                | Self::WaterPaper
+        )
+    }
+
+    /// The seed of an effect stored without one: a fixed hash (FNV-1a) of the filter key,
+    /// so it renders the same every time; 0 for filters that draw no random numbers.
+    pub fn fallback_seed(self) -> u32 {
+        if !self.draws_random() {
+            return 0;
         }
+        let h = self.key().bytes().fold(0x811c_9dc5_u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193));
+        h.max(1)
     }
 
     /// Whether the filter reads the foreground / background colours. Derived
@@ -200,7 +211,7 @@ pub struct GalleryEffect {
     #[serde(default = "neon")]
     pub color: [f32; 4],
     /// The random seed of filters that draw random numbers (PSD `FlRs`); 0 for the
-    /// others. Missing in older documents: the filter's default.
+    /// others. Missing in older documents: [`GalleryFilter::fallback_seed`].
     #[serde(default)]
     pub seed: Option<u32>,
 }
@@ -230,9 +241,9 @@ impl GalleryEffect {
         GalleryEffect { filter, values, foreground: black(), background: white(), color: neon(), seed: None }
     }
 
-    /// The random seed: the one set, else the filter's default.
+    /// The random seed: the one set, else the filter's fallback.
     pub fn seed(&self) -> u32 {
-        self.seed.unwrap_or_else(|| self.filter.default_seed())
+        self.seed.unwrap_or_else(|| self.filter.fallback_seed())
     }
 
     /// Sets a numeric value (clamped to its range), a choice by index, or a bool.

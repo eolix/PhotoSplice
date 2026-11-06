@@ -44,11 +44,26 @@ pub struct EffectLayer {
 
 impl EffectLayer {
     fn new(filter: GalleryFilter) -> Self {
-        EffectLayer { filter, params: default_params(filter), visible: true }
+        let mut params = default_params(filter);
+        if filter.draws_random() {
+            // Reference gives every new effect its own seed.
+            params.insert("seed".into(), json!(fresh_seed()));
+        }
+        EffectLayer { filter, params, visible: true }
     }
     fn to_json(&self) -> Value {
         json!({"filter": self.filter.key(), "params": self.params, "visible": self.visible})
     }
+}
+
+/// A new random seed for an effect (never 0), from the standard library's per-process
+/// random hash keys and a counter.
+fn fresh_seed() -> u32 {
+    use std::hash::BuildHasher;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    (std::collections::hash_map::RandomState::new().hash_one(n) as u32).max(1)
 }
 
 /// The filter's defaults in command-param form (choices by name).

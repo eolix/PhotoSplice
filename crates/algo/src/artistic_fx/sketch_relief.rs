@@ -2,7 +2,7 @@
 //! Paper, Plaster.
 
 use super::super::px8::{self, Img};
-use super::super::tables;
+use super::super::response;
 use super::{ink_paper, int, light_index};
 use crate::artistic::GalleryEffect;
 use crate::photo_util::{par_rows, par_rows2};
@@ -195,7 +195,7 @@ pub(in super::super) fn note_paper(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
     let t = 5.1 * e.get("imageBalance") as f64;
     let gamma = e.get("graininess") as f64 / 100.0;
-    let wt = tables::RELIEF_FACTOR[int(e, "relief").min(25)];
+    let wt = response::relief_factor_25(int(e, "relief").min(25));
     let gray = px8::gray_mean(img);
     let mut rng = px8::Rng::new(e.seed() >> 1);
     let noise = rng.fill(img.n());
