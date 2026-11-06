@@ -373,8 +373,8 @@ pub(super) fn export(f: &SmartFilter) -> Option<Result<Descriptor, String>> {
             };
             d = d.with(psd, v);
         }
-        let seed = p.get("seed").and_then(J::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or_else(|| g.default_seed());
-        if g.default_seed() != 0 || p.get("seed").is_some() {
+        let seed = p.get("seed").and_then(J::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or_else(|| g.fallback_seed());
+        if g.draws_random() || p.get("seed").is_some() {
             d = d.with("FlRs", Value::Integer(seed as i32));
         }
         Ok(Descriptor::new("filterFX")
