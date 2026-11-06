@@ -8,7 +8,7 @@
 
 use super::Render;
 use super::px8::{self, Img};
-use super::tables::{FIELD_SIGMA, SPRAYED_STRENGTH, STROKE_AMOUNT};
+use super::response;
 use crate::artistic::{GalleryEffect, GalleryFilter as F};
 use crate::photo_util::par_rows;
 
@@ -246,7 +246,7 @@ fn ink_outlines(e: &GalleryEffect, img: &Img) -> Img {
 fn sumi_e(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
     let wb = int(e, "strokeWidth", 0, 50);
-    let kappa = STROKE_AMOUNT[int(e, "strokePressure", 0, 15)];
+    let kappa = response::stroke_amount(int(e, "strokePressure", 0, 15));
     let c = real(e, "contrast", 0.0, 50.0);
     let mut dm = px8::rank_dir(&px8::max_channel(img), w, h, 15, 2, true, 15.0);
     let mut st = dm.clone();
@@ -284,7 +284,8 @@ fn spatter(e: &GalleryEffect, img: &Img) -> Img {
     let strength = if r < 20.0 { 0.018 * r } else { 0.36 + 0.128 * (r - 20.0) };
     let (mut fx, mut fy) = spray_field(e.seed(), strength, w, h);
     let j = int(e, "smoothness", 1, 15) - 1;
-    if let Some(&sigma) = FIELD_SIGMA.get(j).filter(|_| j != 0) {
+    let sigma = response::field_sigma(j);
+    if sigma > 0.0 {
         fx = px8::field_gauss13(&fx, w, h, sigma);
         fy = px8::field_gauss13(&fy, w, h, sigma);
     }
@@ -297,10 +298,10 @@ fn sprayed_strokes(e: &GalleryEffect, img: &Img) -> Img {
     if img.n() == 0 {
         return img.clone();
     }
-    let strength = 0.07 + SPRAYED_STRENGTH.get(int(e, "sprayRadius", 0, 25)).copied().unwrap_or(0.0);
+    let strength = 0.07 + response::sprayed_strength(int(e, "sprayRadius", 0, 25));
     let (fx, fy) = spray_field(e.seed(), strength, w, h);
     let half = int(e, "strokeLength", 0, 20) >> 1;
-    let sigma = FIELD_SIGMA[if half == 0 { 2 } else { 1 }];
+    let sigma = response::field_sigma(if half == 0 { 2 } else { 1 });
     let (mut fx, mut fy) = (px8::field_gauss13(&fx, w, h, sigma), px8::field_gauss13(&fy, w, h, sigma));
     if half != 0 {
         let dir = match e.choice("strokeDirection") {

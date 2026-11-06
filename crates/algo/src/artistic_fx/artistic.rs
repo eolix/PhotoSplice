@@ -5,7 +5,7 @@
 
 use super::Render;
 use super::px8::{self, Img};
-use super::tables;
+use super::response;
 use crate::artistic::GalleryEffect;
 use crate::artistic::GalleryFilter as F;
 use crate::photo_util::{par_map, par_rows, par_rows2};
@@ -161,7 +161,7 @@ fn blend_into(top: [f64; 3], base: &mut [u8], m: f64) {
 fn colored_pencil(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
     let n = 2 * int(e, "pencilWidth", 1.0, 24.0) + 1;
-    let gain = tables::STROKE_AMOUNT[int(e, "strokePressure", 0.0, 15.0).min(15)];
+    let gain = response::stroke_amount(int(e, "strokePressure", 0.0, 15.0));
     let lp = (num(e, "paperBrightness", 0.0, 50.0) * 5.1).trunc();
     // Paper: the background colour at Paper Brightness (the spec ignores the colour).
     let bg = px8::rgb8(e.background);
@@ -232,7 +232,7 @@ fn neon_glow(e: &GalleryEffect, img: &Img) -> Img {
     let size = num(e, "glowSize", -24.0, 24.0).trunc();
     let a = size.abs() as usize;
     let beta = num(e, "glowBrightness", 0.0, 50.0) / 10.0;
-    let wo = a + tables::NEON_GLOW_INCREMENT[a.min(24)] as usize;
+    let wo = a + response::neon_glow_increment(a);
     let wi = 2 * a + 1;
     let (fg, bg, glow) = (px8::rgb8(e.foreground), px8::rgb8(e.background), px8::rgb8(e.color));
     let f = |c: [u8; 3]| c.map(f64::from);
@@ -273,24 +273,20 @@ fn neon_glow(e: &GalleryEffect, img: &Img) -> Img {
 /// glints along edges; Wide Blurry barely sharpens.
 fn paint_daubs(e: &GalleryEffect, img: &Img) -> Img {
     const BRUSHES: [&str; 6] = ["simple", "lightRough", "darkRough", "wideSharp", "wideBlurry", "sparkle"];
-    /// Per brush type: percentile, disc radius factor, noise amplitude, edge glint, sharpen factor.
-    const LOOK: [(f64, f64, f64, f64, f64); 6] = [
-        (0.78, 1.0, 0.0, 0.0, 1.0),
-        (0.97, 1.0, 10.0, 0.15, 1.0),
-        (0.02, 0.5, 10.0, 0.0, 1.0),
-        (0.78, 1.0, 0.0, 0.0, 1.0),
-        (0.78, 1.0, 0.0, 0.0, 0.25),
-        (0.9, 1.0, 10.0, 0.3, 1.0),
-    ];
+    /// Per brush type: disc radius factor, noise amplitude, edge glint, sharpen factor; the
+    /// percentile comes from [`response::paint_daubs_percentile`].
+    const LOOK: [(f64, f64, f64, f64); 6] =
+        [(1.0, 0.0, 0.0, 1.0), (1.0, 10.0, 0.15, 1.0), (0.5, 10.0, 0.0, 1.0), (1.0, 0.0, 0.0, 1.0), (1.0, 0.0, 0.0, 0.25), (1.0, 10.0, 0.3, 1.0)];
     let size = num(e, "brushSize", 1.0, 50.0);
     let gain = num(e, "sharpness", 0.0, 40.0) * 0.4;
     let ty = BRUSHES.iter().position(|b| *b == e.choice("brushType")).unwrap_or(0);
     let (d, gain) = if px8::defects() {
         // The spec ranks a square.
         let r = px8::rhu(size * 0.5) as usize;
-        (px8::clipped_rank_rgb(img, r, px8::Clipped::Percentile(tables::PAINT_DAUBS_PERCENTILE[ty])), gain)
+        (px8::clipped_rank_rgb(img, r, px8::Clipped::Percentile(response::paint_daubs_percentile(BRUSHES[ty]))), gain)
     } else {
-        let (p, rk, na, glint, gk) = LOOK[ty];
+        let (rk, na, glint, gk) = LOOK[ty];
+        let p = response::paint_daubs_percentile(BRUSHES[ty]);
         // Bigger brushes rank a little higher; Brush Size 1 leaves the image to the sharpen.
         let p = (p + 0.03 * (size - 8.0) / 42.0).clamp(0.0, 1.0);
         let r = ((size * 0.5).trunc() * rk).round() as usize;

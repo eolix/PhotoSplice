@@ -1,7 +1,7 @@
 //! Diffuse Glow, Glass, Ocean Ripple (Distort) and Glowing Edges (Stylize).
 
 use super::super::px8::{self, Clipped, Img, TEX, Texture};
-use super::super::tables::{DIFFUSE_GLOW_CLEAR, DIFFUSE_GLOW_GLOW, GLASS_TEXTURE_FACTOR};
+use super::super::response;
 use super::{index, param, rng};
 use crate::artistic::GalleryEffect;
 use crate::photo_util::par_rows;
@@ -11,8 +11,8 @@ use crate::photo_util::par_rows;
 pub(super) fn diffuse_glow(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
     let gs = param(e, "graininess", 0.0, 10.0) / 20.0;
-    let ga = DIFFUSE_GLOW_GLOW[index(e, "glowAmount", DIFFUSE_GLOW_GLOW.len())];
-    let ca = DIFFUSE_GLOW_CLEAR[index(e, "clearAmount", DIFFUSE_GLOW_CLEAR.len())];
+    let ga = response::diffuse_glow_glow(index(e, "glowAmount", 21));
+    let ca = response::diffuse_glow_clear(index(e, "clearAmount", 21));
     let mut m = px8::box_mean(&px8::gray_mean(img), w, h, 25, 25);
     px8::scale(&mut m, ga);
     px8::inverse_scale(&mut m, ca);
@@ -64,7 +64,7 @@ pub(super) fn glass(e: &GalleryEffect, img: &Img) -> Img {
     if t == Texture::TinyLens {
         sc *= 32.0 / 22.2;
     }
-    let k = GLASS_TEXTURE_FACTOR.get(t.index()).copied().unwrap_or(1.0);
+    let k = response::glass_texture_factor(t);
     let mut s = k * ((0.155 * dist).exp() - 1.0);
     if e.flag("invert") {
         s = -s;

@@ -1314,10 +1314,6 @@ impl Texture {
             _ => Texture::Canvas,
         }
     }
-    /// Position in the global list (blocks, canvas, frosted, tinyLens, brick, burlap, sandstone).
-    pub fn index(self) -> usize {
-        self as usize
-    }
     /// The 128 × 128 gray height map.
     pub fn plane(self) -> &'static [u8] {
         match self {
@@ -1375,14 +1371,9 @@ pub(super) fn pattern(t: Texture, scale: f64, invert: bool, w: usize, h: usize) 
     out
 }
 
-/// The relief factor of a 0–50 slider (`φ(r)`): `r/40` up to 40, then the table.
+/// The relief factor of a 0–50 slider (`φ(r)`, see [`super::response::relief_factor`]).
 pub(super) fn relief_factor(r: f64) -> f64 {
-    if r <= 40.0 {
-        r / 40.0
-    } else {
-        let i = (r - 41.0).round().clamp(0.0, 9.0) as usize;
-        super::tables::RELIEF_TAIL[i]
-    }
+    super::response::relief_factor(r)
 }
 
 #[cfg(test)]
