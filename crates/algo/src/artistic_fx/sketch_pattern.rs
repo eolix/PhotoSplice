@@ -1,7 +1,6 @@
 //! Sketch filters drawing a pattern over the image: Graphic Pen, Halftone Pattern, Water Paper.
 
 use super::super::px8::{self, Img};
-use super::super::response;
 use super::{ink_paper, int};
 use crate::artistic::GalleryEffect;
 use crate::photo_util::par_rows;
@@ -10,33 +9,35 @@ use crate::photo_util::par_rows;
 /// streak starts inked or blank by comparing a random number with the pixel's darkness, and
 /// continues while the gray stays close, ending at random or after a random length.
 ///
-/// A streak inks when `r / rs + ro ≤ τ − (gray + shift)`. The spec used the absolute gray
-/// (shift 0), a uniform `r`, a ramp as wide as `1/rs` with `rs = 1 + length/10`, centred
-/// (`ro = (1 − 1/rs)/2`), and streaks of `trunc(r·length)` more pixels.
+/// A streak inks when `u·ramp ≤ c + ramp/2 − gray`: a draw `u` in 0–1 spread over a ramp of
+/// grays centred on `c`. The spec used a uniform `u`, a ramp `1/rs` wide with `rs = 1 + length/10`
+/// and a tabled threshold, and streaks of `trunc(r·length)` more pixels.
 ///
-/// The reference's ink follows the gray relative to the image's mean instead: at balance 50 a
-/// little under half the pixels at the mean gray are inked, and none from about 65 levels above
-/// it, on dark and bright images alike (the parrot, mean 60, and the beach, mean 130, give the
-/// same curve). So the gray is shifted by [`GP_CENTRE`] − mean, the ramp is [`GP_RAMP`] wide
-/// whatever the length, and `r` is the mean of two uniforms, which softens the ends of the ramp
-/// the way the reference's are. Its streaks are mostly short with a long tail (four in ten are
-/// one pixel long, some run past the length setting): `trunc(r³·1.3·length)` more pixels.
+/// The Reference's ramp has the same width wherever it sits and only its centre moves with the
+/// Light/Dark Balance: the centre is where the expected share of inked pixels is the balance (in
+/// percent), so the ink share grows linearly with the balance on any image, up to a centre of
+/// mid-gray ([`GP_CAP`]), past which it stays put. A dark image reaches it late (the parrot at 88,
+/// with 87.5 % ink), a bright one early (the boat at 45, with 45 % ink, so its 50 and 100 render
+/// the same). The ramp is [`GP_RAMP`] wide at length 15, and `u` is the mean of two uniforms there,
+/// which softens the ends of the ramp the way the Reference's are. Its streaks are mostly short
+/// with a long tail (four in ten are one pixel long, some run past the length setting):
+/// `trunc(r³·1.3·(length − 1))` more pixels, so that at length 1 every pixel draws on its own,
+/// as the Reference's do (its streaks there are no longer along the stroke direction than across).
 pub(in super::super) fn graphic_pen(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
     let len = int(e, "strokeLength").min(1000);
     let bal = int(e, "lightDarkBalance").min(100);
     let quirk = px8::defects();
-    let tau = response::graphic_pen_threshold(bal);
-    // The reference's ramp narrows with the stroke length, from the whole gray range at length 1
-    // (ink in proportion to darkness) to [`GP_RAMP`] at 15, about the same centre; its draw goes
-    // from one uniform to the mean of two.
-    let k = (len.clamp(1, 15) - 1) as f64 / 14.0;
-    let ramp = 1.0 + (GP_RAMP - 1.0) * k;
-    let rs = if quirk { 1.0 + 0.1 * len as f64 } else { 1.0 / ramp };
-    let ro = if quirk { (1.0 - 1.0 / rs) / 2.0 } else { 1.0 - (GP_RAMP + ramp) / 2.0 };
+    // The Reference's ramp narrows with the stroke length, from the whole gray range at length 1
+    // (ink in proportion to darkness) to [`GP_RAMP`] at 15, most of the way by 8 (its ramp there is
+    // 0.68 wide, measured on how far apart the grays inked a quarter and three quarters of the
+    // time are, and on the 10 % and 90 % points); its draw goes from one uniform to the mean of two
+    // at the same pace.
+    let k = ((len.clamp(1, 15) - 1) as f64 / 14.0).sqrt();
+    let (ramp, mix) = if quirk { (1.0 / (1.0 + 0.1 * len as f64), 0.0) } else { (1.0 + (GP_RAMP - 1.0) * k, k / 2.0) };
     let gray = px8::gray_mean(img);
     let n: Vec<f32> = gray.iter().map(|&g| (g as f64 / 255.0) as f32).collect();
-    let shift = if quirk { 0.0 } else { GP_CENTRE - GP_FOLLOW * alpha_mean(&gray, img) / 255.0 };
+    let top = gp_centre(&gray, img, bal as f64 / 100.0, ramp, mix) + ramp / 2.0;
     let mut rng = px8::Rng::new(e.seed() >> 1);
     // 0 = ink, 255 = paper, None = not drawn yet.
     let mut pen: Vec<Option<u8>> = vec![None; w * h];
@@ -53,14 +54,14 @@ pub(in super::super) fn graphic_pen(e: &GalleryEffect, img: &Img) -> Img {
             return;
         }
         let nv = n[i];
-        let d = tau - (nv as f64 + shift);
+        let d = top - nv as f64;
         let r = rng.next();
         let jump = st.pg.is_some_and(|pg| ((pg - nv) as f64).abs() > 0.0625);
         if st.c == 0 || jump {
-            let u = if quirk { r } else { r + (rng.next() - r) * k / 2.0 };
-            st.pv = if u / rs + ro <= d { 0 } else { 255 };
+            let u = if quirk { r } else { r + (rng.next() - r) * mix };
+            st.pv = if u * ramp <= d { 0 } else { 255 };
             let r2 = rng.next();
-            st.c = if quirk { (r2 * len as f64) as i64 } else { (r2 * r2 * r2 * 1.3 * len as f64) as i64 };
+            st.c = if quirk { (r2 * len as f64) as i64 } else { (r2 * r2 * r2 * 1.3 * len.saturating_sub(1) as f64) as i64 };
         } else if r > 0.1 {
             st.c -= 1;
         } else {
@@ -110,23 +111,57 @@ pub(in super::super) fn graphic_pen(e: &GalleryEffect, img: &Img) -> Img {
     px8::colourise(&g, fg, bg, img)
 }
 
-/// Graphic Pen's ink ramp width (gray 0–1) in the reference's model.
+/// Graphic Pen's ink ramp width (gray 0–1) at stroke length 15 and over.
 const GP_RAMP: f64 = 0.55;
-/// Where a mid-dark image's mean gray (95) lands on Graphic Pen's ramp (just past its middle).
-const GP_CENTRE: f64 = 0.321;
-/// How far Graphic Pen's ramp follows the image's mean gray: a little further than the mean
-/// moves (the beach, mean 130, inks a little more than the parrot, mean 61, at its mean).
-const GP_FOLLOW: f64 = 1.07;
+/// The darkest Graphic Pen's ramp centre goes (gray 0–1): mid-gray.
+const GP_CAP: f64 = 0.5;
 
-/// The alpha-weighted mean of a gray plane (128 when fully transparent).
-fn alpha_mean(g: &[u8], img: &Img) -> f64 {
-    let (mut s, mut ws) = (0.0, 0.0);
-    for (v, px) in g.iter().zip(img.d.chunks_exact(4)) {
-        let a = px[3] as f64;
-        s += *v as f64 * a;
-        ws += a;
+/// Graphic Pen's ramp centre: where the alpha-weighted expected share of inked pixels is `share`,
+/// for a draw `(1 − mix)·U₁ + mix·U₂` (two uniforms) spread over `ramp`, capped at [`GP_CAP`].
+/// Below any ink at share 0 or less, or on an empty image.
+fn gp_centre(gray: &[u8], img: &Img, share: f64, ramp: f64, mix: f64) -> f64 {
+    let none = -ramp;
+    let mut hist = [0f64; 256];
+    for (v, px) in gray.iter().zip(img.d.chunks_exact(4)) {
+        hist[*v as usize] += px[3] as f64;
     }
-    if ws > 0.0 { s / ws } else { 128.0 }
+    let total: f64 = hist.iter().sum();
+    // NaN fails every comparison, so it lands here too.
+    let usable = share > 0.0 && total > 0.0 && ramp > 0.0;
+    if !usable {
+        return none;
+    }
+    let ink = |c: f64| {
+        let s: f64 = hist.iter().enumerate().map(|(g, w)| w * draw_cdf((c + ramp / 2.0 - g as f64 / 255.0) / ramp, mix)).sum();
+        s / total
+    };
+    if ink(GP_CAP) <= share {
+        return GP_CAP;
+    }
+    let (mut lo, mut hi) = (none, GP_CAP);
+    for _ in 0..40 {
+        let m = (lo + hi) / 2.0;
+        if ink(m) < share { lo = m } else { hi = m }
+    }
+    (lo + hi) / 2.0
+}
+
+/// `P((1 − m)·U₁ + m·U₂ ≤ x)` for two uniforms on 0–1, `m` in 0–½ (a trapezoid's CDF).
+fn draw_cdf(x: f64, m: f64) -> f64 {
+    let (a, b) = (1.0 - m, m.clamp(0.0, 0.5));
+    if x.is_nan() || x <= 0.0 {
+        0.0
+    } else if x >= 1.0 {
+        1.0
+    } else if b <= 0.0 {
+        x
+    } else if x < b {
+        x * x / (2.0 * a * b)
+    } else if x < a {
+        (x - b / 2.0) / a
+    } else {
+        1.0 - (1.0 - x) * (1.0 - x) / (2.0 * a * b)
+    }
 }
 
 /// The pen's state carried along the walk.
@@ -202,13 +237,14 @@ pub(in super::super) fn halftone(e: &GalleryEffect, img: &Img) -> Img {
         _ => 0.24,
     };
     let blurred = px8::box_pass_f32(&big, pw, ph, r2);
-    let mut v = vec![0u8; w * h];
-    for (y, row) in v.chunks_exact_mut(w.max(1)).enumerate() {
+    let mut fine = vec![0f64; w * h];
+    for (y, row) in fine.chunks_exact_mut(w.max(1)).enumerate() {
         for (x, p) in row.iter_mut().enumerate() {
             let b = blurred.get((y + r2) * pw + x + r2).copied().unwrap_or(0.0);
-            *p = px8::clamp255((b as f64 * scale).floor());
+            *p = b as f64 * scale;
         }
     }
+    let v: Vec<u8> = fine.iter().map(|&b| px8::clamp255(b.floor())).collect();
     // The clip levels, from a histogram weighted by alpha.
     let mut hist = [0f64; 256];
     for (p, px) in v.iter().zip(img.d.chunks_exact(4)) {
@@ -217,13 +253,14 @@ pub(in super::super) fn halftone(e: &GalleryEffect, img: &Img) -> Img {
     let cut = clip * hist.iter().sum::<f64>();
     let lo = clip_level(&hist, cut, 0..256).unwrap_or(0) as f64;
     let hi = clip_level(&hist, cut, (0..256).rev()).unwrap_or(255) as f64;
-    let out: Vec<u8> = v
-        .iter()
-        .map(|&p| {
-            let p = p as f64;
-            if hi <= lo { if p > lo { 255 } else { 0 } } else { px8::clamp255(((p - lo).clamp(0.0, hi - lo) * 255.0 / (hi - lo)).round()) }
-        })
-        .collect();
+    let out: Vec<u8> = if hi <= lo {
+        // Two tones: the Reference splits at the median of the unrounded plane (half the pixels
+        // light, not every pixel of the median level dark).
+        let t = weighted_median(&fine, img).unwrap_or(lo + 1.0);
+        fine.iter().map(|&p| if p > t { 255 } else { 0 }).collect()
+    } else {
+        v.iter().map(|&p| px8::clamp255(((p as f64 - lo).clamp(0.0, hi - lo) * 255.0 / (hi - lo)).round())).collect()
+    };
     let (fg, bg) = ink_paper(e);
     px8::colourise_direct(&out, fg, bg, img)
 }
@@ -234,6 +271,20 @@ const HT_AMP: f64 = 0.374;
 const HT_AMP_GROWTH: f64 = (0.8 / HT_AMP - 1.0) / 11.0;
 /// The exponent narrowing the dot and line screens' peaks.
 const HT_PEAK: f64 = 1.64;
+
+/// The alpha-weighted median of a plane (None when fully transparent).
+fn weighted_median(p: &[f64], img: &Img) -> Option<f64> {
+    let mut v: Vec<(f64, f64)> = p.iter().zip(img.d.chunks_exact(4)).filter(|(_, px)| px[3] > 0).map(|(&p, px)| (p, px[3] as f64)).collect();
+    v.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let half = v.iter().map(|x| x.1).sum::<f64>() / 2.0;
+    let mut acc = 0.0;
+    v.into_iter()
+        .find(|&(_, a)| {
+            acc += a;
+            acc >= half
+        })
+        .map(|x| x.0)
+}
 
 /// The first level in `order` past which the histogram's running sum exceeds `cut`.
 fn clip_level(hist: &[f64; 256], cut: f64, order: impl Iterator<Item = usize>) -> Option<usize> {
@@ -372,4 +423,78 @@ fn transpose(p: &[u8], w: usize, h: usize) -> Vec<u8> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::artistic::GalleryFilter as F;
+
+    /// An opaque `w × h` image whose gray runs over `lo..=hi` in a smooth diagonal ramp.
+    fn ramp_image(w: usize, h: usize, lo: u8, hi: u8) -> Img {
+        let mut img = Img::new(w, h);
+        for (i, px) in img.d.chunks_exact_mut(4).enumerate() {
+            let t = ((i % w) + (i / w)) as f64 / (w + h - 2) as f64;
+            let v = (lo as f64 + t * (hi - lo) as f64).round() as u8;
+            px.copy_from_slice(&[v, v, v, 255]);
+        }
+        img
+    }
+
+    fn ink_share(out: &Img) -> f64 {
+        out.d.chunks_exact(4).filter(|p| p[0] < 128).count() as f64 / out.d.len().max(1) as f64 * 4.0
+    }
+
+    fn pen(img: &Img, balance: f32) -> Img {
+        let mut e = GalleryEffect::new(F::GraphicPen);
+        e.set("lightDarkBalance", balance);
+        graphic_pen(&e, img)
+    }
+
+    #[test]
+    fn graphic_pen_inks_the_balance_share_until_mid_gray() {
+        // A dark image: the ink share follows the balance, as the Reference's does.
+        let dark = ramp_image(160, 120, 0, 160);
+        for b in [10.0, 30.0, 50.0, 70.0] {
+            let s = ink_share(&pen(&dark, b));
+            assert!((s - b as f64 / 100.0).abs() < 0.04, "balance {b}: ink {s}");
+        }
+        assert_eq!(ink_share(&pen(&dark, 0.0)), 0.0);
+        // A bright image reaches the mid-gray ceiling before 50: 50 and 100 draw the same.
+        let bright = ramp_image(160, 120, 90, 255);
+        assert_eq!(pen(&bright, 50.0).d, pen(&bright, 100.0).d);
+        assert!(ink_share(&pen(&bright, 50.0)) < 0.4);
+    }
+
+    #[test]
+    fn graphic_pen_centre_and_draw_stay_bounded() {
+        let img = ramp_image(8, 8, 0, 255);
+        let gray = px8::gray_mean(&img);
+        for share in [f64::NAN, -1.0, 0.0, 0.3, 1.0, 1e9] {
+            let c = gp_centre(&gray, &img, share, GP_RAMP, 0.5);
+            assert!(c.is_finite() && c <= GP_CAP, "{share}: {c}");
+        }
+        let mut prev = 0.0;
+        for m in [0.0, 0.25, 0.5] {
+            for i in -10..=110 {
+                let p = draw_cdf(i as f64 / 100.0, m);
+                assert!((0.0..=1.0).contains(&p) && (i <= -10 || p >= prev), "m {m} at {i}: {p}");
+                prev = p;
+            }
+            prev = 0.0;
+        }
+        assert_eq!(draw_cdf(f64::NAN, 0.5), 0.0);
+        assert!((draw_cdf(0.5, 0.5) - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn halftone_at_full_contrast_splits_at_the_median() {
+        let img = ramp_image(90, 60, 20, 230);
+        let mut e = GalleryEffect::new(F::HalftonePattern);
+        e.set("contrast", 50.0);
+        let out = halftone(&e, &img);
+        let light = 1.0 - ink_share(&out);
+        assert!((light - 0.5).abs() < 0.02, "light share {light}");
+        assert!(out.d.chunks_exact(4).all(|p| p[0] == 0 || p[0] == 255));
+    }
 }

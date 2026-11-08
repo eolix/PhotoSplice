@@ -50,57 +50,111 @@ fn detail_blur(g: Vec<u8>, w: usize, h: usize, detail: f64) -> Vec<u8> {
     px8::gauss_u8(&g, w, h, px8::rhu((15.0 - detail) * 0.5).min(500.0), 3)
 }
 
-/// Bas Relief: quantised forward-difference slopes lit by the sign of the light direction,
-/// blurred before (detail) and after (smoothness).
+/// Bas Relief: quantised slopes lit by the sign of the light direction, blurred before (detail)
+/// and after (smoothness).
+///
+/// The reference works on the plain mean gray and blurs it by two box means of width
+/// 16 − detail, then blurs the shading (before it is stored in 8 bits) by two box means of width
+/// smoothness; even widths reach one further up/left, so the relief shifts with them. A
+/// diagonal light weighs its two slopes by the image's height and width, as in Plaster.
 pub(in super::super) fn bas_relief(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
     let detail = e.get("detail") as f64;
     let smooth = e.get("smoothness") as f64;
-    // The reference blurs before and after by σ ≈ 0.95·(15 − detail)^¾ and 0.75·(s − 1)^0.8:
-    // more than the spec at the extremes, about the same near the defaults.
-    let g = if px8::defects() {
-        detail_blur(px8::gray_weighted(img), w, h, detail)
-    } else {
-        let sigma = 0.95 * (15.0 - detail).clamp(0.0, 500.0).powf(0.75);
-        let g = px8::gray_weighted(img);
-        if sigma > 0.0 { px8::gauss_u8(&g, w, h, sigma, 3) } else { g }
-    };
+    let g = if px8::defects() { detail_blur(px8::gray_weighted(img), w, h, detail) } else { box_means(px8::gray_mean(img), w, h, 16.0 - detail) };
     let k = light_index(e.choice("light")) as f64;
     let th = (2.0 + k) * std::f64::consts::FRAC_PI_4;
     let sign = |v: f64| if v.abs() < 0.1 { 0.0 } else { v.signum() };
     let (cx, sy) = (sign(th.cos()), sign(th.sin()));
     let norm = 1.0 / (cx * cx + sy * sy);
-    let lit = |gx: &[f32], gy: &[f32], centre: f64, amp: f64| -> Vec<u8> {
+    // The weights of the horizontal and vertical slopes.
+    let (wx, wy) = if px8::defects() || cx == 0.0 || sy == 0.0 {
+        (1.0, 1.0)
+    } else {
+        let s = (w + h).max(1) as f64;
+        (2.0 * w as f64 / s, 2.0 * h as f64 / s)
+    };
+    let lit = |gx: &[f32], gy: &[f32], centre: f64, amp: f64| -> Vec<f64> {
         gx.iter()
             .zip(gy)
             .map(|(&gx, &gy)| {
                 let lx = (cx * gx as f64).clamp(-1.0, 1.0);
                 let ly = (sy * gy as f64).clamp(-1.0, 1.0);
-                let v = centre + amp * (lx + ly) * norm;
-                if px8::defects() { px8::wrap(v) } else { px8::clamp255(v) }
+                centre + amp * (wx * lx + wy * ly) * norm
             })
             .collect()
     };
-    let mut r = if px8::defects() {
+    let r: Vec<u8> = if px8::defects() {
         let (gx, gy) = slopes(&g, w, h, false);
-        lit(&gx, &gy, 128.0, 127.0)
+        let mut r: Vec<u8> = lit(&gx, &gy, 128.0, 127.0).into_iter().map(px8::wrap).collect();
+        if smooth > 1.0 {
+            r = px8::gauss_u8(&r, w, h, px8::rhu((smooth - 1.0) * 0.5).min(500.0), 3);
+        }
+        r
     } else {
         // The reference takes backward differences (its relief sits a pixel further along the
         // slope) and shades a difference d by its angle, (2/π)·atan(d), not the spec's 0.4·d.
         let (gx, gy) = slopes_by(&g, w, h, true, |d| std::f64::consts::FRAC_2_PI * (d as f64).atan());
-        lit(&gx, &gy, 127.5, 127.5)
+        let v = lit(&gx, &gy, 127.5, 127.5);
+        let v = box_twice(&v, w, h, box_width(smooth));
+        v.into_iter().map(px8::clamp255).collect()
     };
-    if smooth > 1.0 {
-        let sigma = if px8::defects() { px8::rhu((smooth - 1.0) * 0.5) } else { 0.75 * (smooth - 1.0).powf(0.8) };
-        r = px8::gauss_u8(&r, w, h, sigma.min(500.0), 3);
-    }
     let (fg, bg) = ink_paper(e);
     px8::colourise_direct(&r, fg, bg, img)
 }
 
+/// A box width from a slider-derived value: rounded, 1 … 1000 (NaN → 1).
+fn box_width(v: f64) -> usize {
+    if v.is_finite() { v.round().clamp(1.0, 1000.0) as usize } else { 1 }
+}
+
+/// Two byte box means (truncating) of width `width` (see [`box_width`]); none below 2. Even
+/// widths reach one further up/left.
+fn box_means(g: Vec<u8>, w: usize, h: usize, width: f64) -> Vec<u8> {
+    let k = box_width(width);
+    if k < 2 {
+        return g;
+    }
+    let g = px8::box_mean(&g, w, h, k, k);
+    px8::box_mean(&g, w, h, k, k)
+}
+
+/// Two box means of width `k` over a float plane, clamped at the edges; even widths reach one
+/// further up/left.
+fn box_twice(p: &[f64], w: usize, h: usize, k: usize) -> Vec<f64> {
+    if w == 0 || h == 0 || k < 2 {
+        return p.to_vec();
+    }
+    let half = (k >> 1) as i64;
+    let inv = 1.0 / k as f64;
+    let at = |v: i64, n: usize| v.clamp(0, n as i64 - 1) as usize;
+    // One box mean along the rows of a `w`-wide plane, stored transposed.
+    let pass = |src: &[f64], w: usize, h: usize| -> Vec<f64> {
+        let mut out = vec![0.0; w * h];
+        for y in 0..h {
+            let row = &src[y * w..(y + 1) * w];
+            let mut s: f64 = (0..k as i64).map(|j| row[at(j - half, w)]).sum();
+            out[y] = s * inv;
+            for x in 1..w {
+                s += row[at(x as i64 - 1 - half + k as i64, w)] - row[at(x as i64 - 1 - half, w)];
+                out[x * h + y] = s * inv;
+            }
+        }
+        out
+    };
+    let mut a = p.to_vec();
+    for _ in 0..2 {
+        a = pass(&a, w, h);
+        a = pass(&a, h, w);
+    }
+    a
+}
+
 /// Chrome: the blurred gray reflected through a heavily smoothed slope field, looked up around
-/// the image centre. The reference takes backward slopes shaded by their angle before
-/// smoothing, from a lighter pre-blur than the gray it reflects.
+/// the image centre. The reference works on the plain mean gray (the weighted one misplaces
+/// nearly every reflection), blurs it by two box means of width 15 − detail, takes backward
+/// slopes shaded by their angle, smooths them by two box means of width smoothness + 5, and
+/// reflects that same blurred gray.
 pub(in super::super) fn chrome(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
     let detail = e.get("detail") as f64;
@@ -111,15 +165,15 @@ pub(in super::super) fn chrome(e: &GalleryEffect, img: &Img) -> Img {
         let sigma = ((smooth + 4.0) * 0.42).clamp(0.0, 500.0);
         (g, px8::gauss_f32(&gx, w, h, sigma), px8::gauss_f32(&gy, w, h, sigma))
     } else {
-        let gray = px8::gray_weighted(img);
-        let blur = |k: f64| {
-            let sigma = ((15.0 - detail) * k).clamp(0.0, 500.0);
-            if sigma > 0.0 { px8::gauss_u8(&gray, w, h, sigma, 3) } else { gray.clone() }
-        };
+        let g = box_means(px8::gray_mean(img), w, h, 15.0 - detail);
         // As in Bas Relief, a difference d becomes the slope (2/π)·atan(d).
-        let (gx, gy) = slopes_by(&blur(0.45), w, h, true, |d| std::f64::consts::FRAC_2_PI * (d as f64).atan());
-        let sigma = ((smooth + 4.0) * 0.48).clamp(0.0, 500.0);
-        (blur(0.75), px8::gauss_f32(&gx, w, h, sigma), px8::gauss_f32(&gy, w, h, sigma))
+        let (gx, gy) = slopes_by(&g, w, h, true, |d| std::f64::consts::FRAC_2_PI * (d as f64).atan());
+        let k = box_width(smooth + 5.0);
+        let smooth = |p: Vec<f32>| -> Vec<f32> {
+            let p: Vec<f64> = p.into_iter().map(f64::from).collect();
+            box_twice(&p, w, h, k).into_iter().map(|v| v as f32).collect()
+        };
+        (g, smooth(gx), smooth(gy))
     };
     let (hw, hh) = ((w / 2) as f64, (h / 2) as f64);
     let (wm, hm) = (w.saturating_sub(1) as f64, h.saturating_sub(1) as f64);

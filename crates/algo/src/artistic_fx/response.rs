@@ -28,14 +28,21 @@ fn interpolate(knots: &[(f64, f64)], x: f64) -> f64 {
     knots[knots.len() - 1].1
 }
 
-/// Colored Pencil and Sumi-e › Stroke Pressure 0–15: the gain on the detail plane. Both effects
-/// measure the same curve (within 2 %): about 4.9 per step to 5, 9.8 per step to 7, then 20.
+/// Colored Pencil and Sumi-e › Stroke Pressure 0–15: the gain on the detail plane, about 4.9 per
+/// step to 5, 9.8 per step to 7, then 20. Sumi-e takes 0.85 of it.
 const STROKE_AMOUNT: [(f64, f64); 4] = [(0.0, 0.0), (5.0, 24.46), (7.0, 44.1), (15.0, 204.67)];
 
-/// Spatter › Smoothness 1–15 (index = Smoothness − 1): the σ of the 13-tap smoothing of the
-/// jitter field, matched on how fine the grain is; it levels off near 1.25. Above about 10 the
-/// Reference's spatter turns into larger, gentler wobbles that one σ cannot give.
+/// Sprayed Strokes' jitter smoothing (indices 1 and 2): the σ of the 13-tap smoothing first
+/// measured on Spatter's Smoothness − 1, matched on how fine the grain is.
 const FIELD_SIGMA: [(f64, f64); 8] = [(0.0, 0.3662), (1.0, 0.5254), (4.0, 0.8645), (6.0, 1.035), (7.0, 1.1), (8.0, 1.147), (10.0, 1.201), (14.0, 1.247)];
+
+/// Spatter › Smoothness 1–15: the σ of the 13-tap smoothing of the jitter field and the gain
+/// applied after it. Matched on how far the Reference's render moves from the source, per pixel
+/// and over 8 × 8 blocks (the reach and the coarseness of the jitter), at every Smoothness of the
+/// parrot sweep, then smoothed: its jitter keeps its reach while it coarsens to 4, then shrinks.
+/// The boat renders at 1 and 15 confirm both ends.
+const SPATTER_SIGMA: [(f64, f64); 9] = [(1.0, 0.6), (2.0, 0.9), (3.0, 1.0), (4.0, 1.1), (6.0, 1.3), (8.0, 1.45), (10.0, 1.55), (11.0, 1.6), (15.0, 1.6)];
+const SPATTER_GAIN: [(f64, f64); 7] = [(1.0, 2.2), (4.0, 2.2), (6.0, 2.0), (8.0, 1.75), (10.0, 1.55), (12.0, 1.35), (15.0, 1.1)];
 
 /// Sprayed Strokes › Spray Radius 0–25: the jitter strength added to the base 0.07, matched on
 /// how fine the grain is: slow to 17, then much faster.
@@ -49,12 +56,6 @@ const RELIEF_TAIL_RATE: f64 = 0.172;
 /// Note Paper and Patchwork › Relief 0–25: the relief weight; ~0.1 per step to 13, then steeper.
 const RELIEF_25: [(f64, f64); 10] =
     [(0.0, 0.0), (2.0, 0.3832), (13.0, 1.398), (14.0, 1.576), (15.0, 1.856), (18.0, 3.082), (19.0, 3.398), (21.0, 4.977), (22.0, 5.986), (25.0, 8.485)];
-
-/// Graphic Pen › Light/Dark Balance 0–100: the ink threshold (on a 0–1 gray). The Reference keeps
-/// darkening past 50 up to 88; 88–100 render the same. At 0 it draws blank paper, which any
-/// threshold below about 0.55 gives.
-const GRAPHIC_PEN: [(f64, f64); 10] =
-    [(0.0, 0.5), (2.0, 0.6362), (4.0, 0.6858), (7.0, 0.7329), (18.0, 0.8272), (66.0, 1.094), (77.0, 1.176), (84.0, 1.244), (87.0, 1.289), (100.0, 1.293)];
 
 /// Torn Edges › Contrast 1–25: the contrast stretch, from 1 (none) to 10.
 const TORN_EDGES: [(f64, f64); 9] =
@@ -84,6 +85,11 @@ pub(super) fn field_sigma(j: usize) -> f64 {
     interpolate(&FIELD_SIGMA, j as f64)
 }
 
+/// Spatter › Smoothness 1–15 → (σ, gain) of the jitter field.
+pub(super) fn spatter_field(s: usize) -> (f64, f64) {
+    (interpolate(&SPATTER_SIGMA, s as f64), interpolate(&SPATTER_GAIN, s as f64))
+}
+
 /// Sprayed Strokes › Spray Radius 0–25 → added jitter strength.
 pub(super) fn sprayed_strength(r: usize) -> f64 {
     interpolate(&SPRAYED_STRENGTH, r as f64)
@@ -105,11 +111,6 @@ pub(super) fn relief_factor_25(r: usize) -> f64 {
     interpolate(&RELIEF_25, r as f64)
 }
 
-/// Light/Dark Balance 0–100 → ink threshold.
-pub(super) fn graphic_pen_threshold(bal: usize) -> f64 {
-    interpolate(&GRAPHIC_PEN, bal as f64)
-}
-
 /// Contrast 1–25 → stretch.
 pub(super) fn torn_edges_contrast(c: usize) -> f64 {
     interpolate(&TORN_EDGES, c as f64)
@@ -125,11 +126,15 @@ pub(super) fn diffuse_glow_clear(c: usize) -> f64 {
     interpolate(&DIFFUSE_GLOW_CLEAR, c as f64)
 }
 
-/// Glass › the depth factor of a texture (Frosted has its own model outside the spec mode). No
-/// Reference render of Glass with another texture was measured, so every texture keeps the plain
-/// depth until one is.
-pub(super) fn glass_texture_factor(_texture: Texture) -> f64 {
-    1.0
+/// Glass › the depth factor of a texture (Frosted has its own model outside the spec mode).
+/// Measured on the Reference's boat renders (the spread of its displacements): Tiny Lens moves
+/// pixels 0.69 (median) to 0.83 (spread) times as far as the plain depth; Blocks and Canvas
+/// match it within 10 %.
+pub(super) fn glass_texture_factor(texture: Texture) -> f64 {
+    match texture {
+        Texture::TinyLens => 0.75,
+        _ => 1.0,
+    }
 }
 
 /// Paint Daubs › brush type → percentile at Brush Size 8. Dark Rough measures below the disc
@@ -173,10 +178,11 @@ mod tests {
     fn rises_where_the_measurements_rise() {
         rising("stroke_amount", stroke_amount, 0, 15);
         rising("field_sigma", field_sigma, 0, 14);
+        rising("spatter σ", |s| spatter_field(s).0, 1, 11);
+        rising("spatter gain falls", |s| -spatter_field(s).1, 4, 15);
         rising("sprayed_strength", sprayed_strength, 0, 25);
         rising("relief_factor", |r| relief_factor(r as f64), 0, 50);
         rising("relief_factor_25", relief_factor_25, 0, 25);
-        rising("graphic_pen_threshold", graphic_pen_threshold, 0, 100);
         rising("torn_edges_contrast", torn_edges_contrast, 1, 25);
         rising("diffuse_glow_glow", diffuse_glow_glow, 0, 20);
         rising("diffuse_glow_clear", diffuse_glow_clear, 0, 20);
@@ -195,7 +201,6 @@ mod tests {
         assert_eq!(diffuse_glow_clear(0), 0.0);
         assert_eq!(torn_edges_contrast(1), 1.0);
         assert!(stroke_amount(1000) <= 255.0);
-        assert!(graphic_pen_threshold(1000) < 2.0);
         assert!(torn_edges_contrast(1000) < 12.0);
     }
 
@@ -219,5 +224,6 @@ mod tests {
         assert!(paint_daubs_percentile("simple") > paint_daubs_percentile("darkRough"));
         assert_eq!(paint_daubs_percentile("nope"), paint_daubs_percentile("simple"));
         assert_eq!(glass_texture_factor(Texture::Canvas), 1.0);
+        assert!((0.0..1.0).contains(&glass_texture_factor(Texture::TinyLens)));
     }
 }

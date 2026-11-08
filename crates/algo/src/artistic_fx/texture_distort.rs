@@ -35,19 +35,27 @@ pub(super) fn diffuse_glow(e: &GalleryEffect, img: &Img) -> Img {
 const FROSTED_AMP: f64 = 5.8;
 const FROSTED_SAT: f64 = 4.0;
 const FROSTED_SIGMA: f64 = 0.58;
+/// Where the reference's glass bumps are flat (smoothness 15, distortion 1) its render is the
+/// image shifted one pixel down and right: it samples half a pixel further up and left than the
+/// nearest-below pixel of ours. Where the bumps are deep its displacements are no longer biased
+/// that way, so the offset fades out between 1 and 4 px of depth.
+const GLASS_OFFSET: f64 = -0.5;
 /// The rate of the reference's distortion curve: 7.2 times the default depth at 20.
 const FROSTED_RATE: f64 = 0.069;
 /// The reference's Ocean Ripple: the same field over texels of `1 + 0.1·(size − 1)` px smoothed
 /// with σ = 1.67 texels, each axis bounded on its own (so the ripples lean diagonal and run flat,
-/// a median of 6.3 px at the defaults), its depth proportional to the texel. The reference also
-/// magnifies the image about a point `RIPPLE_CENTER` px in from the origin, by a fraction that
-/// follows the magnitude's strength curve (2.3 % at the defaults, about 15 % at magnitude 20, on
-/// any image size), less for larger ripples ([`ripple_zoom_size`]).
+/// a median of 6.3 px at the defaults), its depth set by the size ([`ripple_depth_size`]). The
+/// reference also magnifies the image about a point `RIPPLE_CENTER` px in from the origin, by a
+/// fraction that follows the magnitude's curve (2.3 % at the defaults, about 13 % at magnitude
+/// 20, on any image size), less for larger ripples ([`ripple_zoom_size`]).
 const RIPPLE_AMP: f64 = 6.6;
 const RIPPLE_SAT: f64 = 1.4;
 const RIPPLE_SIGMA: f64 = 1.67;
 const RIPPLE_ZOOM: f64 = 0.023 / RIPPLE_AMP;
 const RIPPLE_CENTER: f64 = 230.0;
+/// The rate of the reference's magnitude curve: 6.5 times the default depth at 20 (its spread of
+/// displacements there, measured, is 7 % below the 0.155 rate's).
+const RIPPLE_RATE: f64 = 0.147;
 
 /// Glass: the image seen through the chosen texture's bumps.
 pub(super) fn glass(e: &GalleryEffect, img: &Img) -> Img {
@@ -59,7 +67,8 @@ pub(super) fn glass(e: &GalleryEffect, img: &Img) -> Img {
         // Deeper for larger bumps (the square root of the scaling) and for sharper ones.
         let a = FROSTED_AMP * curve(dist, 5.0, FROSTED_RATE) * frosted_smooth_depth(smooth) / sc.sqrt();
         let (p, fx, fy) = frosted_field(1.0 / sc, FROSTED_SIGMA * smooth, FROSTED_SAT, false);
-        return warp_tiled(img, p, &fx, &fy, if e.flag("invert") { -a } else { a }, 0.0);
+        let off = if a == 0.0 { 0.0 } else { GLASS_OFFSET * ((4.0 - a) / 3.0).clamp(0.0, 1.0) };
+        return warp_tiled(img, p, &fx, &fy, if e.flag("invert") { -a } else { a }, 0.0, off);
     }
     if t == Texture::TinyLens {
         sc *= 32.0 / 22.2;
@@ -85,11 +94,11 @@ pub(super) fn ocean_ripple(e: &GalleryEffect, img: &Img) -> Img {
     let mag = param(e, "rippleMagnitude", 0.0, 20.0);
     let texel = 1.0 + 0.1 * (size - 1.0);
     if !px8::defects() {
-        // The ripples' depth grows with their size (1.8 px texels at the default size, 9); the
-        // magnification does not follow it.
-        let k = RIPPLE_AMP * strength(mag, 9.0);
+        // The ripples' depth and the magnification follow the magnitude's curve, and each
+        // changes with the size on its own curve.
+        let k = RIPPLE_AMP * curve(mag, 9.0, RIPPLE_RATE);
         let (p, fx, fy) = frosted_field(texel, RIPPLE_SIGMA * texel, RIPPLE_SAT, true);
-        return warp_tiled(img, p, &fx, &fy, k * texel / 1.8, RIPPLE_ZOOM * k * ripple_zoom_size(size));
+        return warp_tiled(img, p, &fx, &fy, k * ripple_depth_size(size), RIPPLE_ZOOM * k * ripple_zoom_size(size), 0.0);
     }
     // The spec: the forward texel gradient, clamped, smoothed and scaled.
     let sc = 1.0 / texel;
@@ -97,15 +106,17 @@ pub(super) fn ocean_ripple(e: &GalleryEffect, img: &Img) -> Img {
     displace(img, Texture::Frosted.plane(), sc, 3.5 / sc, s)
 }
 
+/// The reference's ripple depth relative to the default size, 9: the spread of its displacements,
+/// measured on its parrot renders, is 0.70 times the default's at size 1, the same at 8 and 0.85
+/// at 15. The boat's renders favour a deeper ripple at 15, so the curve meets them at 0.935.
+fn ripple_depth_size(size: f64) -> f64 {
+    (0.6314 + 0.07202 * size - 0.003452 * size * size).max(0.0)
+}
+
 /// The reference's magnification relative to the default ripple size (measured 1.25 at size 1,
 /// 1 at 9 and 0.45 at 15).
 fn ripple_zoom_size(size: f64) -> f64 {
     (1.2424 + 0.0119 * size - 0.004315 * size * size).max(0.0)
-}
-
-/// The exponential strength curve of a 0–20 slider, 1 at `at`.
-fn strength(v: f64, at: f64) -> f64 {
-    curve(v, at, 0.155)
 }
 
 /// `(e^(rate·v) − 1) / (e^(rate·at) − 1)`: 0 at 0, 1 at `at`.
@@ -166,12 +177,13 @@ fn blur_wrap(f: &[f64], p: usize, sigma: f64, rows: bool) -> Vec<f64> {
     out
 }
 
-/// Each pixel takes the source pixel (nearest) at `c·z + x·(1 − z) + a·f(x)`, where `f` is the
-/// tiled `p × p` field, `z` the magnification and `c` = `RIPPLE_CENTER` its fixed point.
-fn warp_tiled(img: &Img, p: usize, fx: &[f32], fy: &[f32], a: f64, zoom: f64) -> Img {
+/// Each pixel takes the source pixel (nearest below) at `c·z + x·(1 − z) + a·f(x) + off`, where
+/// `f` is the tiled `p × p` field, `z` the magnification and `c` = `RIPPLE_CENTER` its fixed
+/// point.
+fn warp_tiled(img: &Img, p: usize, fx: &[f32], fy: &[f32], a: f64, zoom: f64, off: f64) -> Img {
     let (w, h) = (img.w, img.h);
     let z = if zoom.is_finite() { zoom.clamp(0.0, 0.5) } else { 0.0 };
-    let (m, k) = (RIPPLE_CENTER * z, 1.0 - z);
+    let (m, k) = (RIPPLE_CENTER * z + off, 1.0 - z);
     let (wm, hm) = (w.saturating_sub(1) as f64, h.saturating_sub(1) as f64);
     let mut out = img.clone();
     par_rows(&mut out.d, w, 4, |y, row| {
@@ -231,15 +243,16 @@ pub(super) fn unzip(p: &[f32]) -> (Vec<f32>, Vec<f32>) {
     p.chunks_exact(2).map(|c| (c[0], c[1])).unzip()
 }
 
-/// Glowing Edges: median pre-filter, per-channel Sobel magnitude times the brightness, widened
-/// by a maximum filter.
+/// Glowing Edges: a median pre-filter, then each channel's local range (maximum − minimum) times
+/// the brightness.
 pub(super) fn glowing_edges(e: &GalleryEffect, img: &Img) -> Img {
-    let r1 = param(e, "smoothness", 1.0, 15.0) as usize >> 1;
+    let smooth = param(e, "smoothness", 1.0, 15.0) as usize;
     let width = param(e, "edgeWidth", 1.0, 14.0) as usize;
     let b = param(e, "edgeBrightness", 0.0, 20.0);
-    let a = px8::clipped_rank_rgb(img, r1, Clipped::Percentile(0.5));
     if px8::defects() {
-        // The spec: magnitude saturated at 255 before a gain of b/10, one more pixel of width.
+        // The spec: a clipped median, the Sobel magnitude saturated at 255 before a gain of
+        // b/10, widened by a maximum filter one pixel wider.
+        let a = px8::clipped_rank_rgb(img, smooth >> 1, Clipped::Percentile(0.5));
         let (r2, k) = (width >> 1, b / 10.0);
         let mut edges = px8::sobel_rgb(&a);
         edges.d.chunks_exact_mut(4).for_each(|p| {
@@ -257,13 +270,12 @@ pub(super) fn glowing_edges(e: &GalleryEffect, img: &Img) -> Img {
         }
         return out;
     }
-    // The reference: the raw magnitude times b/6 (fitted on its render), no widening at width 2.
-    // Its edges are half as bright at width 1, 20 % brighter at 14 and 30 % brighter with no
-    // smoothing (measured on its renders; linear in between).
-    let gain = b / 6.0 * glow_gain(width as f64, param(e, "smoothness", 1.0, 15.0));
-    let mut edges = sobel_mag(&a, |m| px8::clamp255(m * gain));
-    edges.d.chunks_exact_mut(4).for_each(|p| p[3] = 255);
-    let f = px8::clipped_rank_rgb(&edges, width.saturating_sub(1) >> 1, Clipped::Max);
+    // The reference (matched to within 0.1 level per pixel on its renders at every slider's
+    // ends): the median over a `smoothness`-square window, then the range over a window one
+    // wider than the edge width, times half the brightness. Both windows clamp at the edges, and
+    // an even one reaches one further up and left.
+    let a = if smooth > 1 { px8::rank_rect_rgb(img, smooth, smooth, (smooth * smooth) as f64 * 0.5) } else { img.clone() };
+    let f = morph_range(&a, width + 1, b / 2.0);
     let mut out = img.clone();
     for (o, f) in out.d.chunks_exact_mut(4).zip(f.d.chunks_exact(4)) {
         o[..3].copy_from_slice(&f[..3]);
@@ -271,25 +283,42 @@ pub(super) fn glowing_edges(e: &GalleryEffect, img: &Img) -> Img {
     out
 }
 
-/// The reference's edge gain relative to the defaults (width 2, smoothness 5).
-fn glow_gain(width: f64, smooth: f64) -> f64 {
-    let w = if width < 2.0 { 0.5 + 0.5 * (width - 1.0).max(0.0) } else { 1.0 + 0.2 * (width - 2.0) / 12.0 };
-    w * (1.0 + 0.075 * (5.0 - smooth).max(0.0))
-}
-
-/// Per-channel Sobel gradient magnitude (un-normalised, clamped edges) through `f`; alpha kept.
-fn sobel_mag(img: &Img, f: impl Fn(f64) -> u8 + Sync) -> Img {
+/// The per-channel range (maximum − minimum) of `img` over an `n × n` window (an even window
+/// reaches one further up and left; edges clamped), times `gain`, truncated; alpha kept.
+fn morph_range(img: &Img, n: usize, gain: f64) -> Img {
     let (w, h) = (img.w, img.h);
+    let lo = (n >> 1) as i64;
+    let hi = n.saturating_sub(1) as i64 - lo;
+    let clampi = |v: i64, m: usize| v.clamp(0, m as i64 - 1) as usize;
+    // Rows first: each channel's maximum and minimum over the row's window.
+    let mut hx = vec![[0u8; 6]; w * h];
+    par_rows(&mut hx, w, 1, |y, row| {
+        for (x, m) in row.iter_mut().enumerate() {
+            *m = [0, 0, 0, 255, 255, 255];
+            for k in -lo..=hi {
+                let j = (y * w + clampi(x as i64 + k, w)) * 4;
+                for c in 0..3 {
+                    let v = img.d.get(j + c).copied().unwrap_or(0);
+                    m[c] = m[c].max(v);
+                    m[c + 3] = m[c + 3].min(v);
+                }
+            }
+        }
+    });
     let mut out = img.clone();
     par_rows(&mut out.d, w, 4, |y, row| {
-        let (ya, yb) = (y.saturating_sub(1), (y + 1).min(h - 1));
         for x in 0..w {
-            let (xa, xb) = (x.saturating_sub(1), (x + 1).min(w - 1));
-            let at = |xx: usize, yy: usize, c: usize| img.d[(yy * w + xx) * 4 + c] as f64;
+            let mut m = [0u8, 0, 0, 255, 255, 255];
+            for k in -lo..=hi {
+                if let Some(v) = hx.get(clampi(y as i64 + k, h) * w + x) {
+                    for c in 0..3 {
+                        m[c] = m[c].max(v[c]);
+                        m[c + 3] = m[c + 3].min(v[c + 3]);
+                    }
+                }
+            }
             for c in 0..3 {
-                let gx = at(xb, ya, c) + 2.0 * at(xb, y, c) + at(xb, yb, c) - at(xa, ya, c) - 2.0 * at(xa, y, c) - at(xa, yb, c);
-                let gy = at(xa, ya, c) + 2.0 * at(x, ya, c) + at(xb, ya, c) - at(xa, yb, c) - 2.0 * at(x, yb, c) - at(xb, yb, c);
-                row[x * 4 + c] = f((gx * gx + gy * gy).sqrt());
+                row[x * 4 + c] = px8::clamp255(m[c].saturating_sub(m[c + 3]) as f64 * gain);
             }
         }
     });
@@ -324,15 +353,53 @@ mod tests {
     #[test]
     fn frosted_glass_flattens_as_it_smooths() {
         let img = image(80, 64);
-        let moved = |smooth: f32| {
+        // How far each pixel came from (the nearest source pixel with its colour).
+        let (w, h) = (img.w as i64, img.h as i64);
+        let reach = |smooth: f32| {
             let mut g = GalleryEffect::new(F::Glass);
             g.set_choice("texture", "frosted");
             g.set("smoothness", smooth);
             let out = super::glass(&g, &img);
-            out.d.iter().zip(&img.d).filter(|(a, b)| a != b).count()
+            let mut total = 0i64;
+            for y in 0..h {
+                for x in 0..w {
+                    let at = |xx: i64, yy: i64| ((yy * w + xx) * 4) as usize;
+                    let px = &out.d[at(x, y)..at(x, y) + 3];
+                    let d = (0..=12i64)
+                        .find(|&r| {
+                            (-r..=r).any(|dy| {
+                                (-r..=r).any(|dx| {
+                                    let (sx, sy) = (x + dx, y + dy);
+                                    (0..w).contains(&sx) && (0..h).contains(&sy) && &img.d[at(sx, sy)..at(sx, sy) + 3] == px
+                                })
+                            })
+                        })
+                        .unwrap_or(13);
+                    total += d;
+                }
+            }
+            total
         };
-        let (sharp, default, smooth) = (moved(1.0), moved(3.0), moved(15.0));
+        let (sharp, default, smooth) = (reach(1.0), reach(3.0), reach(15.0));
         assert!(sharp > default && default > smooth, "{sharp} {default} {smooth}");
+        // The flattest glass moves pixels about one pixel on average.
+        assert!(smooth * 5 <= w * h * 6, "{smooth}");
+    }
+
+    #[test]
+    fn glowing_edges_lights_a_square_one_wider_than_the_edge() {
+        let mut img = Img::new(21, 21);
+        img.d.chunks_exact_mut(4).for_each(|p| p.copy_from_slice(&[40, 40, 40, 255]));
+        img.d[(10 * 21 + 10) * 4..(10 * 21 + 10) * 4 + 3].copy_from_slice(&[140, 140, 140]);
+        let mut g = GalleryEffect::new(F::GlowingEdges);
+        g.set("smoothness", 1.0);
+        g.set("edgeWidth", 4.0);
+        g.set("edgeBrightness", 2.0);
+        let out = super::glowing_edges(&g, &img);
+        let lit: Vec<(usize, usize)> = (0..21 * 21).filter(|i| out.d[i * 4] > 0).map(|i| (i % 21, i / 21)).collect();
+        assert_eq!(lit.len(), 25);
+        assert!(lit.iter().all(|&(x, y)| (8..=12).contains(&x) && (8..=12).contains(&y)));
+        assert!(lit.iter().all(|&(x, y)| out.d[(y * 21 + x) * 4] == 100));
     }
 
     #[test]

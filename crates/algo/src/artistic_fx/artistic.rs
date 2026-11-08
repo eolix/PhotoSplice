@@ -221,6 +221,15 @@ fn fresco(e: &GalleryEffect, img: &Img) -> Img {
     let dd = d * d;
     let mask = edge_mask(&base, w, h, d as usize, dd / 2.0 + dd % 2.0);
     let bu = b as usize;
+    // Reference's light rank sits lower than Dry Brush's, the more so the smaller the brush: its
+    // fraction drops by 0.012 per Brush Size step below 10 (fitted over the parrot sweep and the
+    // boat's slider renders together).
+    let kl = if px8::defects() {
+        kl
+    } else {
+        let t = 1.0 - (3.0 - num(e, "texture", 1.0, 3.0).trunc()) / 10.0 - 0.012 * (15.0 - d);
+        (b * b * t - 1.0).trunc().max(1.0)
+    };
     let v = pick_plane(&mask, &px8::rank_rect(&base, w, h, bu, bu, kl), &px8::rank_rect(&base, w, h, bu, bu, kd));
     with_value(img, &v)
 }
@@ -268,15 +277,16 @@ fn neon_glow(e: &GalleryEffect, img: &Img) -> Img {
 
 /// Paint Daubs: a per-channel percentile filter (fraction by brush type) with a fixed 3×3
 /// sharpen blended back in by Sharpness. In the reference the brush type sets more than the
-/// fraction: the rough and sparkle brushes rank a lightly noised copy and soften it (mottled,
-/// lighter or darker daubs), Dark Rough with a smaller disc; Light Rough and Sparkle add coloured
-/// glints along edges; Wide Blurry barely sharpens.
+/// fraction: the rough and sparkle brushes rank a lightly noised copy (mottled, lighter or darker
+/// daubs), Dark Rough and Sparkle with a smaller disc and all three with a softer sharpen; Light
+/// Rough and Sparkle add coloured glints along edges; Wide Blurry barely sharpens.
 fn paint_daubs(e: &GalleryEffect, img: &Img) -> Img {
     const BRUSHES: [&str; 6] = ["simple", "lightRough", "darkRough", "wideSharp", "wideBlurry", "sparkle"];
     /// Per brush type: disc radius factor, noise amplitude, edge glint, sharpen factor; the
-    /// percentile comes from [`response::paint_daubs_percentile`].
+    /// percentile comes from [`response::paint_daubs_percentile`]. The rough and sparkle values
+    /// were fitted on the 8 × 8 block error of the parrot sweep and the boat's renders together.
     const LOOK: [(f64, f64, f64, f64); 6] =
-        [(1.0, 0.0, 0.0, 1.0), (1.0, 10.0, 0.15, 1.0), (0.5, 10.0, 0.0, 1.0), (1.0, 0.0, 0.0, 1.0), (1.0, 0.0, 0.0, 0.25), (1.0, 10.0, 0.3, 1.0)];
+        [(1.0, 0.0, 0.0, 1.0), (1.0, 10.0, 0.2, 0.5), (0.5, 10.0, 0.0, 0.7), (1.0, 0.0, 0.0, 1.0), (1.0, 0.0, 0.0, 0.25), (0.5, 10.0, 0.25, 0.5)];
     let size = num(e, "brushSize", 1.0, 50.0);
     let gain = num(e, "sharpness", 0.0, 40.0) * 0.4;
     let ty = BRUSHES.iter().position(|b| *b == e.choice("brushType")).unwrap_or(0);
@@ -298,19 +308,16 @@ fn paint_daubs(e: &GalleryEffect, img: &Img) -> Img {
                     *v = px8::clamp255(*v as f64 + (rng.next() * 2.0 - 1.0) * na);
                 }
             }
-            let d = disc_percentile_rgb(&m, r, p).map_rgb(|pl| px8::gauss_u8(pl, img.w, img.h, 0.7, 3));
+            let mut d = disc_percentile_rgb(&m, r, p);
             if glint > 0.0 {
                 let edges = px8::sobel_rgb(&d);
-                let mut d = d;
                 for (o, s) in d.d.chunks_exact_mut(4).zip(edges.d.chunks_exact(4)) {
                     for c in 0..3 {
                         o[c] = px8::clamp255(o[c] as f64 + glint * (255 - s[c]) as f64);
                     }
                 }
-                d
-            } else {
-                d
             }
+            d
         } else {
             disc_percentile_rgb(img, r, p)
         };
@@ -347,17 +354,19 @@ fn palette_knife(e: &GalleryEffect, img: &Img) -> Img {
     out
 }
 
-/// Plastic Wrap: a highlight `c¹⁰` from the slope of the blurred luma (flat regions take a
+/// Plastic Wrap: a highlight `cⁿ` from the slope of the blurred luma (flat regions take a
 /// coordinate ramp), composited over the image at Highlight Strength. The reference takes
 /// backward differences, clamps each slope before smoothing it (so busy texture averages out and
-/// catches highlights too) and composites at Highlight Strength / 25.
+/// catches highlights too), raises `c` to the 9th power (the spec: 10th) and composites at
+/// Highlight Strength / 24 (fitted with the slope gain, clamp and smoothing on the 8 × 8 block
+/// error of the parrot sweep and the boat's renders together).
 fn plastic_wrap(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
     if img.n() == 0 {
         return img.clone();
     }
     let spec = px8::defects();
-    let opacity = num(e, "highlightStrength", 0.0, 20.0) / if spec { 20.0 } else { 25.0 };
+    let opacity = num(e, "highlightStrength", 0.0, 20.0) / if spec { 20.0 } else { 24.0 };
     let detail = num(e, "detail", 1.0, 15.0).trunc();
     let smooth = num(e, "smoothness", 1.0, 15.0).trunc();
     let mut y = px8::gray_weighted(img);
@@ -368,7 +377,8 @@ fn plastic_wrap(e: &GalleryEffect, img: &Img) -> Img {
     // the right/bottom): flat regions shine near the centre only. The reference's falls off
     // faster than the spec's ±0.7.
     let ramp = if spec { 0.7 } else { 1.1 };
-    let limit = if spec { f64::INFINITY } else { 0.8 };
+    let limit = if spec { f64::INFINITY } else { 0.85 };
+    let gain = if spec { 0.4 } else { 0.465 };
     let (mut gx, mut gy) = (vec![0f32; w * h], vec![0f32; w * h]);
     par_rows2(&mut gx, &mut gy, w, |yy, rx, ry| {
         for x in 0..w {
@@ -383,8 +393,8 @@ fn plastic_wrap(e: &GalleryEffect, img: &Img) -> Img {
                 _ => 0.0,
             };
             let (sx, sy) = (slope(x, w, 1), slope(yy, h, w));
-            let ax = if sx != 0.0 { (0.4 * sx).clamp(-limit, limit) } else { x as f64 * (2.0 * ramp / w as f64) - ramp };
-            let ay = if sy != 0.0 { (0.4 * sy).clamp(-limit, limit) } else { yy as f64 * (2.0 * ramp / h as f64) - ramp };
+            let ax = if sx != 0.0 { (gain * sx).clamp(-limit, limit) } else { x as f64 * (2.0 * ramp / w as f64) - ramp };
+            let ay = if sy != 0.0 { (gain * sy).clamp(-limit, limit) } else { yy as f64 * (2.0 * ramp / h as f64) - ramp };
             rx[x] = ax as f32;
             ry[x] = ay as f32;
         }
@@ -394,8 +404,8 @@ fn plastic_wrap(e: &GalleryEffect, img: &Img) -> Img {
             gx = px8::field_smooth(&gx, w, h, smooth - 1.0);
             gy = px8::field_smooth(&gy, w, h, smooth - 1.0);
         } else {
-            gx = px8::gauss_f32(&gx, w, h, 0.5 * (smooth - 1.0));
-            gy = px8::gauss_f32(&gy, w, h, 0.5 * (smooth - 1.0));
+            gx = px8::gauss_f32(&gx, w, h, 0.45 * (smooth - 1.0));
+            gy = px8::gauss_f32(&gy, w, h, 0.45 * (smooth - 1.0));
         }
     }
     let mut out = img.clone();
@@ -404,7 +414,8 @@ fn plastic_wrap(e: &GalleryEffect, img: &Img) -> Img {
         let c = 1.0 / ((1.0 + ax * ax).sqrt() * (1.0 + ay * ay).sqrt());
         let c2 = c * c;
         let c4 = c2 * c2;
-        composite_white(px, (255.0 * (c4 * c4 * c2)).trunc(), opacity);
+        let cn = if spec { c4 * c4 * c2 } else { c4 * c4 * c };
+        composite_white(px, (255.0 * cn).trunc(), opacity);
     });
     out
 }

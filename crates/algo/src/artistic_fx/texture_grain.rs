@@ -134,16 +134,18 @@ fn reference(g: &Grain, e: &GalleryEffect, img: &Img) -> Img {
         }
         Kind::Stippled => {
             // The chance of the background colour, as measured on the reference: 20/256 even
-            // in black, rising with a soft maximum (the quadratic mean) of per-channel ramps,
-            // so a saturated colour reads lighter than its gray. Intensity slides the ramps
-            // toward the light, as the spec did, and scales the floor.
+            // in black, rising with a soft maximum (the cubic mean) of linear per-channel ramps,
+            // so a saturated colour reads lighter than its gray but never as light as its
+            // brightest channel. Fitted on the reference's render of a photograph, binned by
+            // colour. Intensity slides the ramps toward the light, as the spec did, and scales
+            // the floor.
             let shift = 2.0 * i - 80.0;
-            let (lo, hi) = (52.0 - shift, 183.0 - shift);
+            let (lo, hi) = (58.0 - shift, 182.0 - shift);
             let floor = 0.195 * f; // 20/256 at the default intensity, 40
-            let ramp = |v: u8| ((v as f64 - lo) / (hi - lo)).clamp(0.0, 1.0).powi(2);
+            let ramp = |v: u8| ((v as f64 - lo) / (hi - lo)).clamp(0.0, 1.0).powi(3);
             let mut out = img.clone();
             for p in out.d.chunks_exact_mut(4) {
-                let m = ((ramp(p[0]) + ramp(p[1]) + ramp(p[2])) / 3.0).sqrt();
+                let m = ((ramp(p[0]) + ramp(p[1]) + ramp(p[2])) / 3.0).cbrt();
                 let t = floor + (1.0 - floor) * m;
                 p[..3].copy_from_slice(if r.next() < t { &g.bg } else { &g.fg });
             }

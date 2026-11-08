@@ -241,12 +241,17 @@ fn ink_outlines(e: &GalleryEffect, img: &Img) -> Img {
     keep_alpha(edit_value(c, |v| px8::auto_levels(v, dk, lt, Some(&alpha))), img)
 }
 
+/// Sumi-e › the factor on [`response::stroke_amount`].
+const SUMI_E_PRESSURE: f64 = 0.85;
+
 /// A stroked, auto-levelled max-channel value darkened where strokes beat their surroundings,
 /// over the hue and saturation of a heavy blur.
 fn sumi_e(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
     let wb = int(e, "strokeWidth", 0, 50);
-    let kappa = response::stroke_amount(int(e, "strokePressure", 0, 15));
+    // Reference's Sumi-e takes 0.85 of the shared Stroke Pressure gain (the best factor at every
+    // pressure of the sweep, 1 to 15).
+    let kappa = SUMI_E_PRESSURE * response::stroke_amount(int(e, "strokePressure", 0, 15));
     let c = real(e, "contrast", 0.0, 50.0);
     let mut dm = px8::rank_dir(&px8::max_channel(img), w, h, 15, 2, true, 15.0);
     let mut st = dm.clone();
@@ -274,23 +279,34 @@ fn spray_field(seed: u32, strength: f64, w: usize, h: usize) -> (Vec<f32>, Vec<f
     ((0..n).map(|p| at(2 * p)).collect(), (0..n).map(|p| at(2 * p + 1)).collect())
 }
 
-/// Random per-pixel jitter, smoothed by a 13-tap Gaussian.
+/// Random per-pixel jitter, smoothed by a 13-tap Gaussian and scaled by a gain; both grow with
+/// Smoothness as Reference's do (see [`response::spatter_field`]).
 fn spatter(e: &GalleryEffect, img: &Img) -> Img {
     let (w, h) = (img.w, img.h);
     if img.n() == 0 {
         return img.clone();
     }
     let r = real(e, "sprayRadius", 0.0, 25.0);
-    let strength = if r < 20.0 { 0.018 * r } else { 0.36 + 0.128 * (r - 20.0) };
-    let (mut fx, mut fy) = spray_field(e.seed(), strength, w, h);
-    let j = int(e, "smoothness", 1, 15) - 1;
-    let sigma = response::field_sigma(j);
-    if sigma > 0.0 {
-        fx = px8::field_gauss13(&fx, w, h, sigma);
-        fy = px8::field_gauss13(&fy, w, h, sigma);
-    }
-    keep_alpha(px8::warp(img, &fx, &fy), img)
+    let spec = px8::defects();
+    // Reference's: matched on how far its render moves from the source (per pixel and over
+    // 8 × 8 blocks) at Spray Radius 10, 12 and 25, on both test images.
+    let strength = match (spec, r < 20.0) {
+        (true, true) => 0.018 * r,
+        (true, false) => 0.36 + 0.128 * (r - 20.0),
+        (false, true) => 0.0162 * r,
+        (false, false) => 0.324 + 0.065 * (r - 20.0),
+    };
+    let (fx, fy) = spray_field(e.seed(), strength, w, h);
+    let s = int(e, "smoothness", 1, 15);
+    let (sigma, gain) = if spec { (response::field_sigma(s - 1), 1.0) } else { response::spatter_field(s) };
+    let smooth = |p: &[f32]| -> Vec<f32> { px8::field_gauss13(p, w, h, sigma).into_iter().map(|v| v * gain as f32).collect() };
+    keep_alpha(nearest_warp(img, &smooth(&fx), &smooth(&fy)), img)
 }
+
+/// Sprayed Strokes › the gain on the jitter, measured like Spatter's (how far the render moves
+/// from the source): a little stronger than the plain field with strokes, weaker without.
+const SPRAYED_GAIN: f32 = 1.1;
+const SPRAYED_GAIN_NO_STROKE: f32 = 0.9;
 
 /// Random jitter averaged along the stroke direction over a trailing window.
 fn sprayed_strokes(e: &GalleryEffect, img: &Img) -> Img {
@@ -313,7 +329,41 @@ fn sprayed_strokes(e: &GalleryEffect, img: &Img) -> Img {
         fx = trailing_mean(&fx, w, h, half, dir);
         fy = trailing_mean(&fy, w, h, half, dir);
     }
-    keep_alpha(px8::warp(img, &fx, &fy), img)
+    let g = match (px8::defects(), half) {
+        (true, _) => 1.0,
+        (false, 0) => SPRAYED_GAIN_NO_STROKE,
+        _ => SPRAYED_GAIN,
+    };
+    fx.iter_mut().chain(fy.iter_mut()).for_each(|v| *v *= g);
+    keep_alpha(nearest_warp(img, &fx, &fy), img)
+}
+
+/// Displaces `img` by the field `(dx, dy)`: each pixel copies the source pixel at its own
+/// position plus the displacement truncated toward zero, coordinates clamped. No interpolation:
+/// every pixel of the Reference's Spatter and Sprayed Strokes renders appears verbatim in the
+/// source a few pixels away. Colour only (alpha is the caller's). The spec interpolates.
+fn nearest_warp(img: &Img, dx: &[f32], dy: &[f32]) -> Img {
+    if px8::defects() {
+        return px8::warp(img, dx, dy);
+    }
+    let (w, h) = (img.w, img.h);
+    let mut out = img.clone();
+    if w == 0 || h == 0 {
+        return out;
+    }
+    let at = |p: &[f32], i: usize| p.get(i).copied().unwrap_or(0.0) as f64;
+    par_rows(&mut out.d, w, 4, |y, row| {
+        for x in 0..w {
+            let i = y * w + x;
+            let sx = (x as f64 + at(dx, i).trunc()).clamp(0.0, (w - 1) as f64) as usize;
+            let sy = (y as f64 + at(dy, i).trunc()).clamp(0.0, (h - 1) as f64) as usize;
+            let s = (sy * w + sx) * 4;
+            if let (Some(src), Some(dst)) = (img.d.get(s..s + 3), row.get_mut(x * 4..x * 4 + 3)) {
+                dst.copy_from_slice(src);
+            }
+        }
+    });
+    out
 }
 
 /// Mean of the `2·half + 1` samples at offsets `half … 3·half` behind each pixel along

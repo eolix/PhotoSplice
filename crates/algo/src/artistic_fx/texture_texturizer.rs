@@ -13,10 +13,10 @@ pub(super) fn texturizer(e: &GalleryEffect, img: &Img) -> Img {
     let sc = 100.0 / scaling;
     let rlf = param(e, "relief", 0.0, 50.0);
     let spec = px8::defects();
-    // The relief's curve: a quarter per step, steeper above 35 (the reference's, at 50, leaves
-    // 4 % of the pixels short of black or white).
-    let steep = if spec { 2.0 } else { 6.0 };
-    let mut kr = rlf / 4.0 + (steep * (rlf - 35.0)).max(0.0);
+    // The relief's curve: a quarter per step to 40, then the gallery's relief tail (the
+    // reference's, at 50, leaves 4 % of the pixels short of black or white). The spec's turns
+    // steeper above 35.
+    let mut kr = if spec { rlf / 4.0 + (2.0 * (rlf - 35.0)).max(0.0) } else { 10.0 * px8::relief_factor(rlf) };
     let theta = (2.0 + light_index(e.choice("light")) as f64) * std::f64::consts::FRAC_PI_4;
     let (lx, ly) = (theta.cos(), theta.sin());
     let sigma = if e.flag("invert") { -1.0 } else { 1.0 };
@@ -98,17 +98,22 @@ fn relief_texture(t: Texture) -> f64 {
     }
 }
 
-/// The reference's relief depth over the scaling, relative to 100 %: the deepest at 100 %, about
-/// half at 50 % and three quarters at 200 % (linear in the octave in between).
+/// The reference's relief depth over the scaling, relative to 100 % (piecewise linear in the
+/// octave): the deepest at 100 %, about half at 50 %, and falling fast above 100 % (0.82 at
+/// 125 %) then slowly (0.73 at 200 %).
 fn relief_scaling(scaling: f64) -> f64 {
+    const KNOTS: [(f64, f64); 4] = [(-1.0, 0.525), (0.0, 1.0), (0.322, 0.815), (1.0, 0.73)];
     let o = (scaling / 100.0).log2();
     if !o.is_finite() {
         return 1.0;
     }
-    if o < 0.0 { (1.0 + 0.48 * o).max(0.0) } else { 1.0 - 0.25 * o }
+    let o = o.clamp(-1.0, 1.0);
+    KNOTS.windows(2).find(|k| o <= k[1].0).map_or(KNOTS[3].1, |k| k[0].1 + (k[1].1 - k[0].1) * (o - k[0].0) / (k[1].0 - k[0].0))
 }
 
-/// Strength of the reference's relief relative to the spec's curve.
+/// Strength of the reference's relief relative to the spec's curve. Its shading spreads about
+/// 1.15 times as far as ours at this gain (its texture is not ours), but ours puts more of its
+/// spread into 8 × 8 block means, so a deeper relief scores worse block by block.
 const RELIEF_GAIN: f64 = 1.3;
 
 /// The light direction's position in the reference's list (bottom, bottom left … bottom right).
