@@ -8,7 +8,8 @@
 //! the GPU upload and composite exports enter it); otherwise the built-in profiles apply.
 //! Documents without a CMYK profile are in the working CMYK ([`set_working_cmyk`]: Reference's
 //! Coated FOGRA39 when the application finds it installed), which
-//! [`CmykSpace::for_profile`] hands out the same way.
+//! [`CmykSpace::for_profile`] hands out the same way. Gray documents without a profile are in the
+//! working gray ([`set_working_gray`]), which the engine's colour management reads.
 //! Lab uses the exact D50 formulas; gray is treated as sGray (gray `v` = sRGB `(v, v, v)`).
 
 use std::cell::RefCell;
@@ -117,6 +118,37 @@ pub fn working_cmyk_profile() -> Arc<Profile> {
         .as_ref()
         .map(|(p, _)| p.clone())
         .unwrap_or_else(|| BUILTIN.get_or_init(|| Arc::new(Builtin::CoatedCmyk.profile().clone())).clone())
+}
+
+fn gray_slot() -> &'static RwLock<Option<Arc<Profile>>> {
+    static WORKING: OnceLock<RwLock<Option<Arc<Profile>>>> = OnceLock::new();
+    WORKING.get_or_init(Default::default)
+}
+
+/// Sets the working gray: the profile Grayscale (and Bitmap and Duotone) documents without one of
+/// their own are in (Edit › Color Settings › Working Gray). `None` or a profile that is not gray
+/// mean the built-in Dot Gain 15 %-compatible gray, the default of Reference's Europe General
+/// Purpose 3 settings. Process-wide like [`set_working_cmyk`]. Returns whether it changed.
+pub fn set_working_gray(profile: Option<Arc<Profile>>) -> bool {
+    let next = profile.filter(|p| p.color_space == ColorSpace::Gray);
+    let mut w = gray_slot().write().unwrap_or_else(|e| e.into_inner());
+    let id = |w: &Option<Arc<Profile>>| w.as_ref().map_or_else(|| builtin_gray().content_hash(), |p| p.content_hash());
+    if id(&w) == id(&next) {
+        return false;
+    }
+    *w = next;
+    true
+}
+
+fn builtin_gray() -> &'static Arc<Profile> {
+    static BUILTIN: OnceLock<Arc<Profile>> = OnceLock::new();
+    BUILTIN.get_or_init(|| Arc::new(Builtin::DotGain15Compat.profile().clone()))
+}
+
+/// The working gray profile (the built-in Dot Gain 15 %-compatible gray unless
+/// [`set_working_gray`] chose another).
+pub fn working_gray_profile() -> Arc<Profile> {
+    gray_slot().read().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(|| builtin_gray().clone())
 }
 
 thread_local! {

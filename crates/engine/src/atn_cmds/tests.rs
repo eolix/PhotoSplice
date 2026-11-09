@@ -876,8 +876,9 @@ fn distressing_and_remove_white_shapes_import_and_play() {
     assert_eq!(st.channel_view.target, crate::channel_cmds::ChannelTarget::LayerMask);
 
     let mut s = Session::new();
-    // Measured with Reference's North America defaults: working gray Dot Gain 20 %.
-    s.execute("edit.colorSettings", json!({"workingGray": "dot-gain-20-compat"})).unwrap();
+    // Measured with Reference's North America defaults: working gray Dot Gain 20 % (set on this
+    // session only: `edit.colorSettings` would move the process-wide working gray).
+    s.color.settings.working_gray = "dot-gain-20-compat".into();
     s.execute("file.new", json!({"width": 40, "height": 30})).unwrap();
     s.execute("select.rect", json!({"x": 10, "y": 10, "width": 20, "height": 10})).unwrap();
     s.execute("edit.fill", json!({"contents": "color", "color": "#202020"})).unwrap();
