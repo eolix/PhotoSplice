@@ -89,7 +89,9 @@ fn composite_profile(doc: &Document) -> Profile {
     let own = doc.icc_profile.as_ref().and_then(|b| Profile::parse(b).ok()).filter(|p| p.color_space == space);
     match space {
         ColorSpace::Gray => {
-            own.and_then(|p| p.gray_as_rgb()).or_else(|| Builtin::SGray.profile().gray_as_rgb()).unwrap_or_else(|| Builtin::Srgb.profile().clone())
+            // Untagged gray is in the working gray, as on the canvas.
+            let own = own.unwrap_or_else(|| (*photosplice_color::convert::working_gray_profile()).clone());
+            own.gray_as_rgb().or_else(|| Builtin::SGray.profile().gray_as_rgb()).unwrap_or_else(|| Builtin::Srgb.profile().clone())
         }
         _ => own.unwrap_or_else(|| Builtin::Srgb.profile().clone()),
     }
