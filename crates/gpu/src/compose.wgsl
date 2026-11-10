@@ -1318,16 +1318,19 @@ fn fs_fxpaint(in: VOut) -> @location(0) vec4<f32> {
     // The strength `k` acts as Fill does (composite_fill: the special eight pull the colour toward
     // neutral and blend it at full coverage); one call keeps a single blend_rgb copy inlined.
     if (i32(op.p2.z) == 4) {
-        // effects::paint_glow: the gradient at 1 - strength, opaque from strength 1 / gain (p0.x).
+        // effects::paint_glow: the gradient at 1 - strength, its alpha strength × gain (p0.x) up
+        // to the gradient's own (effects::glow_gradient_strength).
         // compose::effects::paint_glow: the gain on the map before the knock-out (relative to the
         // layer's alpha for inner glows), then what the knock-out leaves.
         let base = select(raw, m, (op.flags & F_REL) != 0u);
         var keep = 1.0;
         if ((op.flags & F_KNOCKOUT) != 0u) { keep = 1.0 - a * op.p4.w; }
-        let k = min(base * op.p0.x, 1.0) * keep * op.opacity;
-        if (k <= 0.0) { return dst; }
         let t = 1.0 - clamp(base, 0.0, 1.0);
-        return fx_composite(d, dst, ramp(t), k);
+        let c = ramp(t);
+        if (c.a <= 0.0) { return dst; }
+        let k = min(base * op.p0.x / c.a, 1.0) * keep * op.opacity;
+        if (k <= 0.0) { return dst; }
+        return fx_composite(d, dst, c, k);
     }
     let k = m * op.opacity;
     if (k <= 0.0) { return dst; }

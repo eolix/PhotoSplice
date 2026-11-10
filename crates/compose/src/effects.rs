@@ -1208,8 +1208,11 @@ pub fn glow_gradient<'a>(g: &Glow, gradient: &'a Gradient) -> std::borrow::Cow<'
 /// A glow's paint over its map `m`. A gradient runs along the glow rather than across the
 /// canvas: Reference colours the glow where its (ranged, contoured) strength is `v` with the
 /// gradient at `1 - v`, so the first stop hugs the edge, and its opacity is `v` × the
-/// [`glow_gradient_gain`] (Reference corpus outer-glow-gradient.psd, against bands across the
-/// canvas; psd-tools layer_params.psd). `pos` is the map before the layer knocks it out (under a
+/// [`glow_gradient_gain`] up to the gradient's own opacity there, which caps it rather than
+/// scaling it (Reference corpus outer-glow-gradient.psd, against bands across the canvas; temp
+/// kit 15, white gradients whose opacity stops are flat 10, 25 and 50 % or ramps: the glow rises
+/// at the same slope whatever the opacity and levels off at it, 24–35 → 0.8 % of pixels off;
+/// psd-tools layer_params.psd). `pos` is the map before the layer knocks it out (under a
 /// see-through fill the edge pixels keep their place at the gradient's start) and `keep` what
 /// the knock-out leaves of each pixel, applied after the gain. Glows have no gradient angle,
 /// style or Reverse.
@@ -1221,8 +1224,16 @@ fn paint_glow(dst: &mut Buffer, m: &Map, pos: &Map, keep: &Map, g: &Glow, shape_
     let gradient = glow_gradient(g, gradient);
     let prepared = PreparedGradient::new(&gradient);
     let gain = glow_gradient_gain(g);
-    let strength = Map { w: m.w, h: m.h, v: pos.v.iter().zip(&keep.v).map(|(v, k)| (v * gain).min(1.0) * k).collect() };
-    paint(dst, &strength, |i| prepared.sample(1.0 - pos.v.get(i).copied().unwrap_or(0.0).clamp(0.0, 1.0)), g.common.blend, g.common.opacity);
+    let colors: Vec<[f32; 4]> = pos.v.iter().map(|v| prepared.sample(1.0 - v.clamp(0.0, 1.0))).collect();
+    // `paint` scales the colour's alpha by the strength: min(v × gain, alpha) is alpha × this.
+    let strength = Map { w: m.w, h: m.h, v: pos.v.iter().zip(&keep.v).zip(&colors).map(|((v, k), c)| glow_gradient_strength(*v, gain, c[3]) * k).collect() };
+    paint(dst, &strength, |i| colors.get(i).copied().unwrap_or([0.0; 4]), g.common.blend, g.common.opacity);
+}
+
+/// The share of a gradient glow's colour drawn where its strength is `v` and the gradient's
+/// opacity there is `alpha`: the glow's alpha is `min(v × gain, alpha)` (see [`paint_glow`]).
+pub fn glow_gradient_strength(v: f32, gain: f32, alpha: f32) -> f32 {
+    if alpha > 0.0 { (v * gain / alpha).min(1.0) } else { 0.0 }
 }
 
 /// A box width as the blurs use it: at least 1, at most [`MAX_REACH`] (an effect never reaches
