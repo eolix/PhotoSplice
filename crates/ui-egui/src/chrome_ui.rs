@@ -377,7 +377,7 @@ mod tests {
         let mut gray = doc();
         gray.mode = photosplice_doc::ColorMode::Grayscale;
         gray.icc_profile = Some(photosplice_engine::color_cmds::working_profile(gray.mode).to_bytes());
-        assert_eq!(profile_name(&gray), "Dot Gain 20%-compatible (gamma 1.732, PhotoSplice)");
+        assert_eq!(profile_name(&gray), "Dot Gain 15%-compatible (gamma 1.515, PhotoSplice)");
 
         let mut custom = (*photosplice_engine::color_cmds::working_profile(photosplice_doc::ColorMode::Cmyk)).clone();
         custom.description = "PhotoSplice Studio CMYK".into();

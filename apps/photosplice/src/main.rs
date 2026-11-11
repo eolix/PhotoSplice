@@ -461,8 +461,10 @@ fn main() -> eframe::Result {
             }
             let mut app = PhotospliceApp::new(Session::new(), services);
             // Color Settings › Working CMYK (Reference's Coated FOGRA39 when it is installed)
-            // separates untagged CMYK documents from the first one opened.
+            // separates untagged CMYK documents from the first one opened; Working Gray shows
+            // untagged gray ones.
             app.session.apply_working_cmyk();
+            app.session.apply_working_gray();
             app.bundled = photosplice_ui_egui::bundled::State::new(services::bundled_libraries());
             app.min_frame_ms = uncapped.then_some(1000.0 / 240.0);
             app.integrated_titlebar = cfg!(target_os = "macos");

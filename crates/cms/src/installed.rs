@@ -33,10 +33,13 @@ pub struct Found {
 }
 
 /// Folders scanned at most this deep below a search folder.
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_DEPTH: usize = 2;
 /// At most this many profile files are looked at per scan.
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_FILES: usize = 2000;
 /// Larger files are not output profiles.
+#[cfg(not(target_arch = "wasm32"))]
 const MAX_BYTES: u64 = 32 << 20;
 
 /// Where Reference and the operating systems keep CMYK profiles, in the order they are searched:

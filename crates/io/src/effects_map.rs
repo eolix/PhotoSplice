@@ -219,14 +219,11 @@ fn parse_shadow(d: &Descriptor, inner: bool) -> Shadow {
 }
 
 fn parse_glow(d: &Descriptor, inner: bool) -> Glow {
+    // A gradient's opacity follows its smoothness here too (temp kit 15: an opacity ramp from 0
+    // to 100 % at Smoothness 100 % eases as baked, 16.8 → 0.1 % of pixels off against the stops
+    // as stored).
     let paint = match get_desc(d, "Grad") {
-        Some(grad) => {
-            // A glow samples its gradient by strength, not position: Reference takes the opacity
-            // stops as stored there, without the smoothness (layer_params' gradient glow).
-            let mut g = gradient_from(d);
-            g.opacity_stops = crate::blocks::gradient_stops_raw(grad).opacity;
-            FxPaint::Gradient(g)
-        }
+        Some(_) => FxPaint::Gradient(gradient_from(d)),
         None => FxPaint::Color(color(d, "Clr ")),
     };
     Glow {
@@ -1387,9 +1384,9 @@ mod tests {
     }
 
     /// Smoothness shapes an overlay's opacity stops as it does its colours (psd-tools
-    /// clipping-mask2.psd: 40 % of pixels off with a linear ramp); a glow keeps them as stored.
+    /// clipping-mask2.psd: 40 % of pixels off with a linear ramp), and a glow's (temp kit 15).
     #[test]
-    fn gradient_opacity_follows_smoothness_except_in_glows() {
+    fn gradient_opacity_follows_smoothness_in_overlays_and_glows() {
         let enumv = |t: &str, v: &str| Value::Enumerated { type_id: Id::new(t), value: Id::new(v) };
         let rgb = |v: f64| Value::Descriptor(Descriptor::new("RGBC").with("Rd  ", Value::Double(v)).with("Grn ", Value::Double(v)).with("Bl  ", Value::Double(v)));
         let stop = |l: i32| {
@@ -1410,7 +1407,7 @@ mod tests {
         assert!(at(&overlay.opacity_stops, 0.25) > 0.76 && at(&overlay.opacity_stops, 0.75) < 0.24, "{:?}", overlay.opacity_stops);
         let glow = parse_glow(&Descriptor::new("OrGl").with("Grad", Value::Descriptor(grad)), false);
         let FxPaint::Gradient(g) = glow.paint else { panic!("{:?}", glow.paint) };
-        assert_eq!(g.opacity_stops, vec![(0.0, 1.0), (1.0, 0.0)]);
+        assert_eq!(g.opacity_stops, overlay.opacity_stops);
     }
 
     /// A gradient baked to dense stops remembers how many colour stops it had (glows sample a
@@ -1492,10 +1489,6 @@ mod tests {
         let (_, fx) = parse_lfx2(&data).unwrap();
         let Some(Effect::GradientOverlay { gradient, .. }) = fx.first() else { panic!("{fx:?}") };
         let (Some(src), true) = (gradient.source.clone(), gradient.stops.len() > 2) else { panic!("baked, with its definition") };
-        let file_grad = {
-            let (v, _) = VersionedDescriptor::parse_prefix(&data[4..]).unwrap();
-            get_desc(get_desc(&v.descriptor, "GrFl").unwrap(), "Grad").unwrap().clone()
-        };
         let paint = FxPaint::Gradient(gradient.clone());
         let glow = Glow {
             common: FxCommon::new(BlendMode::Screen, 0.75),
@@ -1517,18 +1510,7 @@ mod tests {
             Effect::Stroke(StrokeFx { common: FxCommon::new(BlendMode::Normal, 1.0), size: 3.0, position: StrokePosition::Outside, paint }),
         ];
         for e in &effects {
-            // A glow reads its opacity stops unbaked: the same definition gives them.
-            let e = match e.clone() {
-                Effect::OuterGlow(mut g) | Effect::InnerGlow(mut g) if matches!(e, Effect::OuterGlow(_) | Effect::InnerGlow(_)) => {
-                    let outer = matches!(e, Effect::OuterGlow(_));
-                    if let FxPaint::Gradient(gr) = &mut g.paint {
-                        gr.opacity_stops = crate::blocks::gradient_stops_raw(&file_grad).opacity;
-                    }
-                    if outer { Effect::OuterGlow(g) } else { Effect::InnerGlow(g) }
-                }
-                other => other,
-            };
-            let (key, d) = write_one(&e);
+            let (key, d) = write_one(e);
             assert_eq!(get_desc(&d, "Grad"), Some(&crate::gradient_source::to_desc(&src)), "{key}");
             let method_key = if key == "GrFl" { "gs99" } else { "gradientsInterpolationMethod" };
             assert!(matches!(d.get(method_key), Some(Value::Enumerated { value, .. }) if value.is("Smoo")), "{key}");

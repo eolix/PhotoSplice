@@ -1816,12 +1816,15 @@ impl Session {
         let mut prefs: Preferences = serde_json::from_value(v).map_err(|e| format!("preferences: {e}"))?;
         merge_shipped_defaults(&mut prefs);
         if let Some(c) = color {
-            let cmyk_before = self.color.settings.working_cmyk.clone();
+            let (cmyk_before, gray_before) = (self.color.settings.working_cmyk.clone(), self.color.settings.working_gray.clone());
             self.color.settings = serde_json::from_value(c).unwrap_or_default();
             self.color.settings.migrate();
             photosplice_compose::psblend::set_text_gamma(self.color.settings.blend_text_gamma);
             if self.color.settings.working_cmyk != cmyk_before {
                 self.apply_working_cmyk();
+            }
+            if self.color.settings.working_gray != gray_before {
+                self.apply_working_gray();
             }
         }
         self.prefs.edit(|p| *p = prefs);
@@ -2011,6 +2014,9 @@ fn prefs_set(s: &mut Session, p: &Value) -> Result<Value> {
     if s.color.settings.working_cmyk != saved_color.working_cmyk {
         s.apply_working_cmyk();
     }
+    if s.color.settings.working_gray != saved_color.working_gray {
+        s.apply_working_gray();
+    }
     s.apply_prefs();
     let view = s.prefs_view();
     let out: Map<String, Value> = changes.iter().map(|(k, _)| (k.clone(), get_path(&view, k).cloned().unwrap_or(Value::Null))).collect();
@@ -2019,7 +2025,7 @@ fn prefs_set(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn prefs_reset(s: &mut Session, p: &Value) -> Result<Value> {
     let path = p.get("path").or_else(|| p.get("section")).and_then(Value::as_str);
-    let cmyk_before = s.color.settings.working_cmyk.clone();
+    let (cmyk_before, gray_before) = (s.color.settings.working_cmyk.clone(), s.color.settings.working_gray.clone());
     match path {
         Some("colorSettings") => s.color.settings = Default::default(),
         // One colour setting: `Preferences` has no `colorSettings`, so take the default
@@ -2044,6 +2050,9 @@ fn prefs_reset(s: &mut Session, p: &Value) -> Result<Value> {
     photosplice_compose::psblend::set_text_gamma(s.color.settings.blend_text_gamma);
     if s.color.settings.working_cmyk != cmyk_before {
         s.apply_working_cmyk();
+    }
+    if s.color.settings.working_gray != gray_before {
+        s.apply_working_gray();
     }
     s.apply_prefs();
     if path.is_some_and(|path| keyed(path).is_some()) {

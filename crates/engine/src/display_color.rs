@@ -413,7 +413,10 @@ impl ColorState {
     /// profile).
     pub fn canvas_display_for(&self, doc: &Document, display: Option<u32>) -> Result<Arc<CanvasDisplay>> {
         let space = mode_space(doc.mode);
-        let doc_hash = doc.icc_profile.as_ref().and_then(|b| profile_from_bytes(b).ok()).filter(|p| p.color_space == space).map_or(0, |p| p.content_hash());
+        let own = doc.icc_profile.as_ref().and_then(|b| profile_from_bytes(b).ok()).filter(|p| p.color_space == space);
+        // An untagged gray document shows in the working gray, which Color Settings can change.
+        let working_gray = || (space == ColorSpace::Gray).then(|| photosplice_color::convert::working_gray_profile().content_hash());
+        let doc_hash = own.map(|p| p.content_hash()).or_else(working_gray).unwrap_or(0);
         let monitor = self.monitor_for(display);
         let key = (space, doc_hash, monitor.content_hash());
         if let Some(d) = self.display.canvas.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {

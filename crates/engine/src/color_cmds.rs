@@ -544,11 +544,14 @@ fn space_mode(cs: ColorSpace) -> Option<ColorMode> {
     })
 }
 
-/// Working (default) profile of a mode; CMYK's is the process-wide working CMYK
-/// (`photosplice_color::convert::working_cmyk_profile`, set from Color Settings).
+/// Working (default) profile of a mode; CMYK's and Gray's are the process-wide working CMYK and
+/// working gray (`photosplice_color::convert::working_cmyk_profile` and `working_gray_profile`,
+/// set from Color Settings).
 pub fn working_profile(mode: ColorMode) -> Arc<Profile> {
-    if mode_space(mode) == ColorSpace::Cmyk {
-        return photosplice_color::convert::working_cmyk_profile();
+    match mode_space(mode) {
+        ColorSpace::Cmyk => return photosplice_color::convert::working_cmyk_profile(),
+        ColorSpace::Gray => return photosplice_color::convert::working_gray_profile(),
+        _ => {}
     }
     Arc::new(photosplice_cms::builtin::default_for(mode_space(mode)).unwrap_or(Builtin::Srgb.profile()).clone())
 }
@@ -1107,11 +1110,15 @@ fn color_settings(s: &mut Session, p: &Value) -> Result<Value> {
     if next != s.color.settings {
         photosplice_compose::psblend::set_text_gamma(next.blend_text_gamma);
         let cmyk_changed = next.working_cmyk != s.color.settings.working_cmyk;
+        let gray_changed = next.working_gray != s.color.settings.working_gray;
         s.color.settings = next;
         // Persisted with the preferences.
         s.prefs.edit(|_| ());
         if cmyk_changed {
             s.apply_working_cmyk();
+        }
+        if gray_changed {
+            s.apply_working_gray();
         }
     }
     let c = &s.color.settings;
@@ -1168,6 +1175,29 @@ impl Session {
     pub fn open_document(&mut self, mut doc: Document, path: Option<String>) -> (usize, Value) {
         let report = self.color.open_policy(&mut doc, self.prefs().file_handling.ignore_exif_profile_tag);
         (self.add_document(doc, path), report)
+    }
+
+    /// Makes Color Settings › Working Gray the process-wide working gray (the profile untagged
+    /// Grayscale, Bitmap and Duotone documents display and convert in, as in Reference) and
+    /// redraws those documents when it changed. The application calls it once at startup.
+    pub fn apply_working_gray(&mut self) {
+        let profile = self
+            .color
+            .settings
+            .working_spec(ColorSpace::Gray)
+            .and_then(|spec| resolve_profile(spec, None, Some(ColorMode::Grayscale)).ok())
+            .filter(|p| p.color_space == ColorSpace::Gray);
+        if photosplice_color::convert::set_working_gray(profile) {
+            for st in self.docs.iter_mut().filter(|st| mode_space(st.doc.mode) == ColorSpace::Gray) {
+                // Not an edit: a clean document stays clean.
+                let clean = st.saved_revision == st.revision;
+                st.revision += 1;
+                if clean {
+                    st.saved_revision = st.revision;
+                }
+                st.last_damage = None;
+            }
+        }
     }
 }
 
@@ -1428,10 +1458,10 @@ mod tests {
         let t = s.color.display_transform(doc(&s)).unwrap();
         let mut o = [0.0f32; 3];
         t.eval(&[0.5, 0.5, 0.5], &mut o);
-        // The default working gray (Dot Gain 20 %-compatible, gamma 1.732) shows gray 0.5 as the
-        // sRGB value of linear 0.5^1.732, as Photoshop does: lighter than sGray's 0.5.
-        let want = photosplice_color::convert::linear_to_srgb(0.5f32.powf(1.732));
-        assert!(o.iter().all(|v| (v - want).abs() < 2e-3), "Dot Gain 20 % gray displays as {want}: {o:?}");
+        // The default working gray (Dot Gain 15 %-compatible, gamma 1.515) shows gray 0.5 as the
+        // sRGB value of linear 0.5^1.515, as Reference does: lighter than sGray's 0.5.
+        let want = photosplice_color::convert::linear_to_srgb(0.5f32.powf(1.515));
+        assert!(o.iter().all(|v| (v - want).abs() < 2e-3), "Dot Gain 15 % gray displays as {want}: {o:?}");
         let s = session("cmyk", 8);
         assert_eq!(composite_profile(doc(&s)).description, "sRGB IEC61966-2.1");
     }
