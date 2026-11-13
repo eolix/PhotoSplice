@@ -100,7 +100,7 @@ If you know Photoshop ~CS6, you already know PhotoSplice.
 
 ## What this is not
 
-Gimp. Or Affinity. I'm certain they have great features, but my goal is not to make a mega-app with a billion functions (however, feel free to create any [plugins](docs/pliugins.md) you want!) - but to offer graphic designers a legal way to edit PSDs for free.
+Gimp. Or Affinity. I'm certain they have great features, but my goal is not to make a mega-app with a billion functions (however, feel free to create any [plugins](docs/plugins.md) you want!) - but to offer graphic designers a legal way to edit PSDs for free.
 
 ## Features
 
