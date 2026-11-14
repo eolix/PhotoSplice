@@ -89,8 +89,9 @@ notarize() {
   echo "==> notarizing $(basename "$file") (this can take a few minutes)"
   out="$(xcrun notarytool submit "$file" "${NOTARY_AUTH[@]}" --wait --timeout 1h --output-format json)" || true
   echo "$out"
-  id="$(printf '%s' "$out" | plutil -extract id raw -o - - 2>/dev/null || true)"
-  status="$(printf '%s' "$out" | plutil -extract status raw -o - - 2>/dev/null || true)"
+  # plutil prints its parse errors to stdout, so keep a value only when extraction succeeds.
+  id="$(printf '%s' "$out" | plutil -extract id raw -o - - 2>/dev/null)" || id=""
+  status="$(printf '%s' "$out" | plutil -extract status raw -o - - 2>/dev/null)" || status=""
   if [ "$status" != "Accepted" ]; then
     if [ -n "$id" ]; then
       xcrun notarytool log "$id" "${NOTARY_AUTH[@]}" || true
