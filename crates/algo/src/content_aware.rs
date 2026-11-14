@@ -14,7 +14,13 @@
 //!   another texture is left out along its edges, wherever it lies (a bright band through the
 //!   window is excluded, the matching area beyond it is not).
 //! * **The fill** copies pieces of the sampling area pixel for pixel (15–40 px across), joined by
-//!   seams a few pixels wide: see [`crate::inpaint`].
+//!   seams a few pixels wide: see [`crate::inpaint`]. The matches also compare local texture
+//!   ([`with_texture_features`]), so a hole in foliage, gravel or terrain fills with that texture
+//!   rather than with the flattest area that matches a smooth first guess, and the pyramid stops
+//!   higher ([`COARSEST_PATCHES`]) so a horizon through the hole carries straight on. Both were
+//!   compared with Reference 23 on public-domain photos (an aircraft against mountains, a tree on
+//!   a horizon, a ribbon on a trunk, a pipe on gravel, a lake in terrain, an animal on bokeh,
+//!   handwriting on paper): before them the fills were flat smears where Reference's are textured.
 //! * **Colour adaptation** None / Default / High / Very High: with None the copies are exact; the
 //!   others let each copied patch take a gain and a bias towards its surroundings, more at each
 //!   level ([`color_level`]). The patch transform is that of S. Darabi et al., *Image Melding*,
@@ -34,7 +40,7 @@ use std::borrow::Cow;
 
 use photosplice_raster::{Cancelled, Interrupt};
 
-use crate::inpaint::{Adapt, CompleteParams, Px, complete_masked, complete_masked_owned};
+use crate::inpaint::{Adapt, CompleteParams, Px, complete_masked_owned};
 use crate::par;
 use crate::poisson::membrane_fill_with;
 
@@ -239,7 +245,7 @@ fn fill_cow(
     if !hole.iter().any(|h| *h) {
         return Ok(img.into_owned());
     }
-    let params = CompleteParams { seed: opts.seed, adapt: opts.color_adaptation, ..Default::default() };
+    let params = CompleteParams { seed: opts.seed, adapt: opts.color_adaptation, coarsest_patches: COARSEST_PATCHES, ..Default::default() };
     let gap = 2 * params.patch_radius + 2;
     let ok: Vec<bool> = par::map(w * h, true, |i| !hole[i] && source[i]);
     let src = Src { w, h, ch, img: &img, ok: &ok };
@@ -300,41 +306,141 @@ fn fill_cow(
     };
     drop((extra, ok));
     ctl.check()?;
-    // The completion is nearly all the work.
+    // The completion is nearly all the work: on the image (or mosaic) with its texture features
+    // as two more channels.
+    let base: &[f32] = mosaic.as_deref().unwrap_or(&img);
+    let work = with_texture_features(mw, mh, ch, base, &roles, params.patch_radius.max(1), ctl)?;
+    drop(mosaic);
+    ctl.check()?;
     let cancel = || ctl.cancelled();
     let progress = |f: f32| ctl.progress(f * 0.99);
     let inner = photosplice_raster::Interrupt::new(&cancel, &progress);
-    let out = match mosaic {
-        // Without variants the image itself is completed (it changes only in the hole).
-        None => {
-            let filled: Result<Vec<f32>, Cow<[f32]>> = match img {
-                Cow::Owned(v) => complete_masked_owned(w, h, ch, v, &roles, &params, &inner)?.map_err(Cow::Owned),
-                Cow::Borrowed(b) => complete_masked(w, h, ch, b, &roles, &params, &inner)?.ok_or(Cow::Borrowed(b)),
-            };
-            match filled {
-                Ok(f) => f,
-                Err(img) => membrane_fill_with(w, h, ch, &img, hole, ctl)?,
-            }
-        }
-        Some(mimg) => match complete_masked(mw, mh, ch, &mimg, &roles, &params, &inner)? {
-            Some(f) => {
-                let mut out = img.into_owned();
-                for y in 0..h {
-                    for x in 0..w {
-                        if hole[y * w + x] {
-                            let (s, d) = ((y * mw + x) * ch, (y * w + x) * ch);
-                            out[d..d + ch].copy_from_slice(&f[s..s + ch]);
-                        }
+    let wch = ch + TEXTURE_CHANNELS;
+    let out = match complete_masked_owned(mw, mh, wch, work, &roles, &params, &inner)? {
+        Ok(f) => {
+            let mut out = img.into_owned();
+            for y in 0..h {
+                for x in 0..w {
+                    if hole[y * w + x] {
+                        let (s, d) = ((y * mw + x) * wch, (y * w + x) * ch);
+                        out[d..d + ch].copy_from_slice(&f[s..s + ch]);
                     }
                 }
-                out
             }
-            None => membrane_fill_with(w, h, ch, &img, hole, ctl)?,
-        },
+            out
+        }
+        // Nothing to copy from.
+        Err(_) => membrane_fill_with(w, h, ch, &img, hole, ctl)?,
     };
     ctl.check()?;
     ctl.progress(1.0);
     Ok(out)
+}
+
+/// The pyramid's coarsest level for the fill ([`CompleteParams::coarsest_patches`]): where the
+/// hole is about eight patches across. At four (the completion's default) a horizon or shoreline
+/// through the hole is a pixel or two thick, the fill grows the ground up into the sky from the
+/// hole's bottom edge, and the finer levels keep that mound; Reference carries the line straight
+/// through.
+const COARSEST_PATCHES: usize = 8;
+
+/// Texture feature channels added for the completion ([`with_texture_features`]).
+const TEXTURE_CHANNELS: usize = 2;
+
+/// How much the texture features weigh against the colour channels in a match. Measured against
+/// Reference on public-domain photos (sky, foliage, gravel, terrain): without them the fill's
+/// first, smooth estimate keeps matching smooth sources and the hole comes out flat; at 2 some
+/// textured areas still fill flat, at 5 they fill with the texture around them.
+const TEXTURE_WEIGHT: f32 = 5.0;
+
+/// `img` (`w × h × ch`) with two texture channels appended to every pixel: the mean absolute
+/// horizontal and vertical gradient (over the colour channels, [`colour_channels`]) in the
+/// `(2r+1)²` box around it, from known pixels only, times [`TEXTURE_WEIGHT`]. In the hole they
+/// start at zero and are filled with the colours, so a hole surrounded by texture is matched to
+/// textured sources rather than flat ones: the texture features of Y. Newson, A. Almansa,
+/// M. Fradet, Y. Gousseau, P. Pérez, *Video Inpainting of Complex Scenes*, SIAM Journal on Imaging
+/// Sciences 2014. Row-parallel, two short separable box passes; `Err` when `ctl` is cancelled.
+fn with_texture_features(w: usize, h: usize, ch: usize, img: &[f32], roles: &[Px], r: usize, ctl: &Interrupt) -> Result<Vec<f32>, Cancelled> {
+    let known = |i: usize| roles.get(i).is_some_and(|k| matches!(k, Px::Source | Px::Known));
+    let n = w * h;
+    let par = n >= 1 << 16;
+    let cc = colour_channels(ch);
+    let inv = 1.0 / cc.max(1) as f32;
+    // Per pixel: |∂x|, |∂y| and 1 where both are measured from known pixels, else zeros.
+    let mut grad = vec![0.0f32; n * 3];
+    par::chunks_mut(&mut grad, w * 3, par, |y, row| {
+        if y == 0 || y + 1 >= h || ctl.cancelled() {
+            return;
+        }
+        for x in 1..w.saturating_sub(1) {
+            let i = y * w + x;
+            let (l, rt, u, d) = (i - 1, i + 1, i - w, i + w);
+            if !(known(i) && known(l) && known(rt) && known(u) && known(d)) {
+                continue;
+            }
+            let (mut sx, mut sy) = (0.0f32, 0.0f32);
+            for c in 0..cc {
+                sx += (img[rt * ch + c] - img[l * ch + c]).abs();
+                sy += (img[d * ch + c] - img[u * ch + c]).abs();
+            }
+            row[x * 3..x * 3 + 3].copy_from_slice(&[0.5 * sx * inv, 0.5 * sy * inv, 1.0]);
+        }
+    });
+    ctl.check()?;
+    // Box sums: along the rows, then down the columns (each a few taps: `r` is a patch radius).
+    let mut across = vec![0.0f32; n * 3];
+    par::chunks_mut(&mut across, w * 3, par, |y, row| {
+        if ctl.cancelled() {
+            return;
+        }
+        let src = &grad[y * w * 3..(y + 1) * w * 3];
+        for x in 0..w {
+            let mut acc = [0.0f32; 3];
+            for xx in x.saturating_sub(r)..(x + r + 1).min(w) {
+                for (a, v) in acc.iter_mut().zip(&src[xx * 3..xx * 3 + 3]) {
+                    *a += v;
+                }
+            }
+            row[x * 3..x * 3 + 3].copy_from_slice(&acc);
+        }
+    });
+    drop(grad);
+    ctl.check()?;
+    let wch = ch + TEXTURE_CHANNELS;
+    let mut out = vec![0.0f32; n * wch];
+    par::chunks_mut(&mut out, w * wch, par, |y, row| {
+        if ctl.cancelled() {
+            return;
+        }
+        for x in 0..w {
+            let mut acc = [0.0f32; 3];
+            for yy in y.saturating_sub(r)..(y + r + 1).min(h) {
+                let k = (yy * w + x) * 3;
+                for (a, v) in acc.iter_mut().zip(&across[k..k + 3]) {
+                    *a += v;
+                }
+            }
+            let (i, o) = (y * w + x, x * wch);
+            row[o..o + ch].copy_from_slice(&img[i * ch..(i + 1) * ch]);
+            if acc[2] > 0.5 {
+                row[o + ch] = acc[0] / acc[2] * TEXTURE_WEIGHT;
+                row[o + ch + 1] = acc[1] / acc[2] * TEXTURE_WEIGHT;
+            }
+        }
+    });
+    ctl.check()?;
+    Ok(out)
+}
+
+/// The leading channels that carry colour in a `ch`-channel buffer: a trailing alpha (gray +
+/// alpha, RGB or Lab + alpha) is flat in a photo and would only dilute the texture, so it is left
+/// out; CMYK keeps its three inks for the same reason as RGB keeps three.
+fn colour_channels(ch: usize) -> usize {
+    match ch {
+        0..=1 => ch,
+        2 => 1,
+        _ => 3,
+    }
 }
 
 /// Box mean of radius `r` over a `w × h` plane (edge-clamped), by summed areas.
@@ -792,6 +898,39 @@ mod tests {
         assert!(thin_band(w, h, &hole) >= 20.0, "{}", thin_band(w, h, &hole));
         let disc: Vec<bool> = (0..w * h).map(|i| ((i % w) as f32 - 450.0).hypot((i / w) as f32 - 300.0) < 90.0).collect();
         assert_eq!(thin_band(w, h, &disc), 1.5);
+    }
+
+    /// Mean gradient magnitude (first channel) over the pixels where `pick` holds.
+    fn detail(w: usize, h: usize, v: &[f32], pick: impl Fn(usize, usize) -> bool) -> f32 {
+        let (mut sum, mut n) = (0.0f32, 0usize);
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                if pick(x, y) {
+                    let p = |x: usize, y: usize| v[(y * w + x) * 3];
+                    sum += (p(x + 1, y) - p(x - 1, y)).abs() + (p(x, y + 1) - p(x, y - 1)).abs();
+                    n += 1;
+                }
+            }
+        }
+        sum / n.max(1) as f32
+    }
+
+    /// A hole in textured ground (gravel, foliage) with a flat area elsewhere in the window fills
+    /// with the texture around it. Matched on colour alone, the fill's smooth first estimate kept
+    /// finding the flat area (a pipe on gravel came out as a flat beige band; Reference copies the
+    /// gravel).
+    #[test]
+    fn a_hole_in_texture_fills_with_texture_not_the_flat_area_beside_it() {
+        let (w, h) = (160, 120);
+        let grain = noise(w, h, 21);
+        // Left: flat, the textured ground's mean. Right: the textured ground.
+        let img: Vec<f32> = (0..w * h * 3).map(|i| if (i / 3) % w < 50 { 0.5 } else { 0.5 + (grain[i] - 0.5) * 0.5 }).collect();
+        let inside = |x: usize, y: usize| (x as f32 - 110.0).hypot(y as f32 - 60.0) < 22.0;
+        let hole: Vec<bool> = (0..w * h).map(|i| inside(i % w, i / w)).collect();
+        let out = fill(w, h, 3, &img, &hole, &vec![true; w * h], &FillOptions { color_adaptation: Adapt::NONE, ..Default::default() });
+        let filled = detail(w, h, &out, |x, y| (x as f32 - 110.0).hypot(y as f32 - 60.0) < 18.0);
+        let around = detail(w, h, &img, |x, y| x >= 60 && !inside(x, y));
+        assert!(filled > 0.6 * around, "fill detail {filled} against the ground's {around}");
     }
 
     #[test]

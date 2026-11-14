@@ -128,12 +128,18 @@ pub struct CompleteParams {
     pub refine_extent: usize,
     /// Colour adaptation of the copies.
     pub adapt: Adapt,
+    /// The pyramid's coarsest level: where the hole is about this many patches across (a thin
+    /// hole stops at two patches through it, whatever this is; a hole more than four patches
+    /// across always gets at least one level below the image). Fewer decides the structure where
+    /// the texture has averaged out; more keeps thin structures (a horizon, a shoreline) that a
+    /// coarser level loses.
+    pub coarsest_patches: usize,
     pub seed: u64,
 }
 
 impl Default for CompleteParams {
     fn default() -> Self {
-        Self { patch_radius: 3, em_iters: 10, min_em_iters: 3, pm_iters: 2, refine_extent: 192, adapt: Adapt::NONE, seed: 1 }
+        Self { patch_radius: 3, em_iters: 10, min_em_iters: 3, pm_iters: 2, refine_extent: 192, adapt: Adapt::NONE, coarsest_patches: 4, seed: 1 }
     }
 }
 
@@ -1615,9 +1621,9 @@ fn complete_cow<'a>(
     }
     let r = p.patch_radius.max(1);
     let psz = 2 * r + 1;
-    // Pyramid: shrink until the hole is about four patches across (a deeper pyramid decides the
-    // structure where the texture has averaged out, and fills flat). A thin hole stops while it
-    // is still about two patches thick: through it, not along it, is what counts (#1366).
+    // Pyramid: shrink until the hole is about `coarsest_patches` patches across (a deeper pyramid
+    // decides the structure where the texture has averaged out, and fills flat). A thin hole stops
+    // while it is still about two patches thick: through it, not along it, is what counts (#1366).
     let mut levels = vec![Level { w, h, img, px: Cow::Borrowed(px) }];
     let mut boxes = vec![hb0];
     let mut ext = hb0.width().max(hb0.height());
@@ -1629,7 +1635,9 @@ fn complete_cow<'a>(
     let mut exts = vec![ext];
     while let Some(l) = levels.last() {
         ctl.check()?;
-        if ext <= if thin { 2 * psz } else { 4 * psz } || l.w / 2 < 3 * psz || l.h / 2 < 3 * psz {
+        // Below the image itself: a hole more than four patches across always gets a coarser level.
+        let coarsest = if levels.len() == 1 { 4 } else { p.coarsest_patches.max(1) };
+        if ext <= if thin { 2 * psz } else { coarsest.saturating_mul(psz) } || l.w / 2 < 3 * psz || l.h / 2 < 3 * psz {
             break;
         }
         let d = downsample(l, ch);
