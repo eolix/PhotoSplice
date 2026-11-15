@@ -222,6 +222,10 @@ pub(crate) fn invoke_unguarded(app: &mut PhotospliceApp, ctx: &egui::Context, id
     }
     // View/Window/Type shell items, and dialogs/pickers in front of File commands.
     // Edit › Preferences, Keyboard Shortcuts, Color Settings and other Edit dialogs.
+    // Content-Aware Fill workspace (and its control params).
+    if let Some(r) = crate::caf_ui::menu(app, ctx, id, &params) {
+        return r;
+    }
     if let Some(r) = crate::prefs_ui::invoke(app, ctx, id, &params) {
         return r;
     }

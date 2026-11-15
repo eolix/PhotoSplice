@@ -564,3 +564,55 @@ fn fade_allocation_failure_keeps_document_and_history() {
         assert_eq!(*s.active().unwrap().doc, *before);
     }
 }
+
+/// The workspace's preview is the command's own result: the same pixels in the selection, the
+/// rest of the window as it was; and its sampling area never includes the selection.
+#[test]
+fn content_aware_preview_is_the_commands_fill() {
+    let mut s = session(8);
+    // Texture to copy from: a gradient with a stripe.
+    s.execute("select.rect", json!({"x": 0, "y": 0, "width": 64, "height": 20})).unwrap();
+    s.execute("edit.fill", json!({"color": "#3070b0"})).unwrap();
+    s.execute("select.rect", json!({"x": 24, "y": 18, "width": 14, "height": 12})).unwrap();
+    let doc = s.active().unwrap().doc.clone();
+    let layer = s.active().unwrap().active_layer.unwrap();
+    let p = json!({"colorAdaptation": "none", "seed": 3});
+    let (win, mask) = content_aware_sampling(&doc, layer, &p, &|| false).unwrap();
+    assert_eq!(mask.len(), win.width() as usize * win.height() as usize);
+    let w = win.width() as usize;
+    let selected = |x: i32, y: i32| (24..38).contains(&x) && (18..30).contains(&y);
+    assert!(mask.iter().enumerate().all(|(i, m)| !*m || !selected(win.x0 + (i % w) as i32, win.y0 + (i / w) as i32)), "the selection is never sampled");
+    assert!(mask.iter().any(|m| *m));
+    let (pwin, fmt, filled) = content_aware_fill_preview(&doc, layer, &p, &crate::jobs::JobCtx::new()).unwrap();
+    assert_eq!(pwin, win);
+    s.execute("edit.contentAwareFill", p).unwrap();
+    let n = fmt.channels();
+    for y in win.y0..win.y1 {
+        for x in win.x0..win.x1 {
+            let i = ((y - win.y0) as usize * w + (x - win.x0) as usize) * n;
+            // The layer stores 8-bit values; the preview is the fill before they are rounded.
+            let got = px(&s, x, y);
+            assert!(filled[i..i + n].iter().zip(&got).all(|(a, b)| (a - b).abs() < 0.5 / 255.0), "({x},{y}): {:?} vs {got:?}", &filled[i..i + n]);
+        }
+    }
+}
+
+/// Bad params reach the preview functions as errors, not panics; a cancelled preview stops.
+#[test]
+fn content_aware_preview_refuses_bad_params_and_stops_when_cancelled() {
+    let mut s = session(8);
+    s.execute("select.rect", json!({"x": 10, "y": 10, "width": 8, "height": 8})).unwrap();
+    let doc = s.active().unwrap().doc.clone();
+    let layer = s.active().unwrap().active_layer.unwrap();
+    for p in [json!({"sampling": "nope"}), json!({"output": "elsewhere"}), json!({"sampling": "custom"}), json!({"sampling": "custom", "area": [1e30, 0, -5, "x"]})] {
+        assert!(content_aware_sampling(&doc, layer, &p, &|| false).is_err(), "{p}");
+        assert!(content_aware_fill_preview(&doc, layer, &p, &crate::jobs::JobCtx::new()).is_err(), "{p}");
+    }
+    assert!(content_aware_sampling(&doc, LayerId(999_999), &json!({}), &|| false).is_err(), "no such layer");
+    let job = crate::jobs::JobCtx::new();
+    job.cancel();
+    assert!(content_aware_fill_preview(&doc, layer, &json!({}), &job).is_err());
+    let mut doc2 = (*doc).clone();
+    doc2.selection = None;
+    assert!(content_aware_sampling(&doc2, layer, &json!({}), &|| false).is_err(), "no selection");
+}

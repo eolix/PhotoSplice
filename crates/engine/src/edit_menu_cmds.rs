@@ -360,17 +360,42 @@ fn delete_and_fill(s: &mut Session, _: &Value) -> Result<Value> {
 }
 
 fn content_aware_fill_as(s: &mut Session, p: &Value, cmd: &'static str, label: &'static str) -> Result<Value> {
-    use photosplice_algo::content_aware::{FillOptions, auto_sampling_with, color_level, fill_owned, rotation_level};
     let id = pixel_layer(s).map_err(EngineError::Other)?;
-    let st = s.active().ok_or(EngineError::NoDocument)?;
-    let doc = st.doc.clone();
+    let doc = s.active().ok_or(EngineError::NoDocument)?.doc.clone();
+    let plan = caf_plan(&doc, id, p, cmd)?;
+    let (output, fmt, window) = (plan.output.clone(), plan.fmt, plan.window);
+    // A background job when started with `Session::start` (#210): reading the window and the
+    // PatchMatch fill run on a worker against the document snapshot, cancellable per row band.
+    crate::jobs::run(s, label, true, move |ctx| caf_compute(&doc, &plan, ctx, label), move |s, done| {
+        apply_content_aware_fill(s, label, id, &output, fmt, window, done)
+    })
+}
+
+/// What a Content-Aware Fill reads and how, worked out from its params against the document.
+struct CafPlan {
+    layer: LayerId,
+    selection: Surface,
+    /// The window the fill reads and may copy from (Reference's sampling window, a margin
+    /// around the selection, or the custom area and the selection).
+    window: Rect,
+    sampling: String,
+    custom_rect: Option<Rect>,
+    custom_mask: Option<Surface>,
+    opts: photosplice_algo::content_aware::FillOptions,
+    sample_all: bool,
+    output: String,
+    fmt: PixelFormat,
+}
+
+fn caf_plan(doc: &Document, id: LayerId, p: &Value, cmd: &str) -> Result<CafPlan> {
+    use photosplice_algo::content_aware::{FillOptions, color_level, rotation_level};
     let sel = doc.selection.clone().ok_or_else(|| bad(cmd, "no selection"))?;
     let hb = sel.content_bounds().intersect(&doc.bounds());
     if hb.is_empty() {
         return Err(bad(cmd, "the selection is outside the canvas"));
     }
     let sampling = str_or(p, "sampling", "auto").to_string();
-    let custom_mask: Option<Surface> = p.get("channel").and_then(|v| channel_mask(&doc, v)).cloned();
+    let custom_mask: Option<Surface> = p.get("channel").and_then(|v| channel_mask(doc, v)).cloned();
     let custom_rect = if p.get("area").is_some() { Some(rect_param(p, "area", cmd)?) } else { None };
     // Photoshop's window (`content_aware::sampling_window`) for Auto and Rectangular; `margin`
     // asks for a rectangle that far around the selection instead.
@@ -411,59 +436,100 @@ fn content_aware_fill_as(s: &mut Session, p: &Value, cmd: &'static str, label: &
         Some(v) => v,
         None => surf.content_bounds().intersect(&window).is_empty(),
     };
-    let n = fmt.channels();
     // Refuse a window too large to read before allocating for it, whatever the sampling (#963).
-    let (w, h) = crate::fill_cmds::window_size(window)?;
-    // A background job when started with `Session::start` (#210): reading the window and the
-    // PatchMatch fill run on a worker against the document snapshot, cancellable per row band.
-    crate::jobs::run(
-        s,
-        label,
-        true,
-        move |ctx| {
-            use rayon::prelude::*;
+    crate::fill_cmds::window_size(window)?;
+    Ok(CafPlan { layer: id, selection: sel, window, sampling, custom_rect, custom_mask, opts, sample_all, output, fmt })
+}
 
-            use crate::fill_cmds::{read_window, read_window_cover, read_window_mask};
-            ctx.progress(0.0, label);
-            let cancel = || ctx.cancelled();
-            let surf = doc.layer(id).and_then(|l| l.surface()).ok_or(EngineError::NoLayer(id))?;
-            let img = if sample_all {
-                if cancel() {
-                    return Err(EngineError::Cancelled);
-                }
-                let region = crate::retouch_cmds::composite_region(&doc, None, crate::retouch_cmds::SampleLayers::All, window, fmt);
-                if cancel() {
-                    return Err(EngineError::Cancelled);
-                }
-                region.data
-            } else {
-                read_window(surf, window, &cancel).ok_or(EngineError::Cancelled)?
-            };
-            let hole = read_window_cover(&sel, window, &cancel).ok_or(EngineError::Cancelled)?;
-            let mut source = match (sampling.as_str(), custom_rect, custom_mask.as_ref()) {
-                ("custom", Some(r), _) => (0..w * h).into_par_iter().map(|i| r.contains(window.x0 + (i % w) as i32, window.y0 + (i / w) as i32)).collect(),
-                ("custom", None, Some(m)) => read_window_mask(m, window, &cancel).ok_or(EngineError::Cancelled)?.par_iter().map(|v| *v > 0.5).collect(),
-                _ => vec![true; w * h],
-            };
-            ctx.check()?;
-            // Auto: only what looks like the selection's surroundings.
-            if sampling == "auto" {
-                source = auto_sampling_with(w, h, n, &img, &hole, &photosplice_raster::Interrupt::cancel_only(&cancel)).map_err(|_| EngineError::Cancelled)?;
-            }
-            ctx.check()?;
-            // The fill changes only the selected pixels: keep the original and the coverage over
-            // their bounds for the apply step, and fill the window's pixels themselves.
-            let (bx0, by0, bx1, by1) = mask_bounds(w, h, &hole);
-            let original: Vec<f32> = (by0..by1).flat_map(|y| img[(y * w + bx0) * n..(y * w + bx1) * n].iter().copied()).collect();
-            let at = |x: usize, y: usize| (window.x0 + x as i32, window.y0 + y as i32);
-            let ((x0, y0), (x1, y1)) = (at(bx0, by0), at(bx1, by1));
-            let cover = read_window_mask(&sel, Rect::new(x0, y0, x1, y1), &cancel).ok_or(EngineError::Cancelled)?;
-            let n_hole = cover.iter().filter(|c| **c > 0.0).count();
-            let filled = ctx.stage(0.05, 1.0, label, |ctl| fill_owned(w, h, n, img, &hole, &source, &opts, ctl)).map_err(|_| EngineError::Cancelled)?;
-            Ok(FilledWindow { filled, bounds: (bx0, by0, bx1, by1), original, cover, n_hole })
-        },
-        move |s, done| apply_content_aware_fill(s, label, id, &output, fmt, window, done),
-    )
+/// The fill's inputs over the plan's window: its pixels, the hole (the selection) and what may
+/// be copied (the sampling area), each `w × h`.
+fn caf_inputs(doc: &Document, plan: &CafPlan, cancel: &(dyn Fn() -> bool + Sync)) -> Result<(Vec<f32>, Vec<bool>, Vec<bool>)> {
+    use rayon::prelude::*;
+
+    use crate::fill_cmds::{read_window, read_window_cover, read_window_mask};
+    let window = plan.window;
+    let (w, h) = crate::fill_cmds::window_size(window)?;
+    let n = plan.fmt.channels();
+    let surf = doc.layer(plan.layer).and_then(|l| l.surface()).ok_or(EngineError::NoLayer(plan.layer))?;
+    let img = if plan.sample_all {
+        if cancel() {
+            return Err(EngineError::Cancelled);
+        }
+        let region = crate::retouch_cmds::composite_region(doc, None, crate::retouch_cmds::SampleLayers::All, window, plan.fmt);
+        if cancel() {
+            return Err(EngineError::Cancelled);
+        }
+        region.data
+    } else {
+        read_window(surf, window, cancel).ok_or(EngineError::Cancelled)?
+    };
+    let hole = read_window_cover(&plan.selection, window, cancel).ok_or(EngineError::Cancelled)?;
+    let source = match (plan.sampling.as_str(), plan.custom_rect, plan.custom_mask.as_ref()) {
+        ("custom", Some(r), _) => (0..w * h).into_par_iter().map(|i| r.contains(window.x0 + (i % w) as i32, window.y0 + (i / w) as i32)).collect(),
+        ("custom", None, Some(m)) => read_window_mask(m, window, cancel).ok_or(EngineError::Cancelled)?.par_iter().map(|v| *v > 0.5).collect(),
+        // Auto: only what looks like the selection's surroundings.
+        ("auto", _, _) => photosplice_algo::content_aware::auto_sampling_with(w, h, n, &img, &hole, &photosplice_raster::Interrupt::cancel_only(cancel))
+            .map_err(|_| EngineError::Cancelled)?,
+        _ => vec![true; w * h],
+    };
+    if cancel() {
+        return Err(EngineError::Cancelled);
+    }
+    Ok((img, hole, source))
+}
+
+/// The fill itself (the command's worker): the window filled, with what the apply step needs.
+fn caf_compute(doc: &Document, plan: &CafPlan, ctx: &crate::jobs::JobCtx, label: &str) -> Result<FilledWindow> {
+    use crate::fill_cmds::read_window_mask;
+    ctx.progress(0.0, label);
+    let cancel = || ctx.cancelled();
+    let (img, hole, source) = caf_inputs(doc, plan, &cancel)?;
+    ctx.check()?;
+    let window = plan.window;
+    let (w, h) = crate::fill_cmds::window_size(window)?;
+    let n = plan.fmt.channels();
+    // The fill changes only the selected pixels: keep the original and the coverage over
+    // their bounds for the apply step, and fill the window's pixels themselves.
+    let (bx0, by0, bx1, by1) = mask_bounds(w, h, &hole);
+    let original: Vec<f32> = (by0..by1).flat_map(|y| img[(y * w + bx0) * n..(y * w + bx1) * n].iter().copied()).collect();
+    let at = |x: usize, y: usize| (window.x0 + x as i32, window.y0 + y as i32);
+    let ((x0, y0), (x1, y1)) = (at(bx0, by0), at(bx1, by1));
+    let cover = read_window_mask(&plan.selection, Rect::new(x0, y0, x1, y1), &cancel).ok_or(EngineError::Cancelled)?;
+    let n_hole = cover.iter().filter(|c| **c > 0.0).count();
+    let opts = &plan.opts;
+    let filled = ctx
+        .stage(0.05, 1.0, label, |ctl| photosplice_algo::content_aware::fill_owned(w, h, n, img, &hole, &source, opts, ctl))
+        .map_err(|_| EngineError::Cancelled)?;
+    Ok(FilledWindow { filled, bounds: (bx0, by0, bx1, by1), original, cover, n_hole })
+}
+
+/// Where a Content-Aware Fill with `p` (the command's params) on `layer` would copy from: its
+/// window and, over it (`w × h`, row by row), the pixels it may copy. What the Content-Aware Fill
+/// workspace shows as its sampling area.
+pub fn content_aware_sampling(doc: &Document, layer: LayerId, p: &Value, cancel: &(dyn Fn() -> bool + Sync)) -> Result<(Rect, Vec<bool>)> {
+    let plan = caf_plan(doc, layer, p, "edit.contentAwareFill")?;
+    let (_, hole, source) = caf_inputs(doc, &plan, cancel)?;
+    // The hole itself is never copied from.
+    Ok((plan.window, source.iter().zip(&hole).map(|(s, h)| *s && !*h).collect()))
+}
+
+/// What Content-Aware Fill with `p` (the command's params) on `layer` would produce, without
+/// applying it: its window, the layer's pixel format, and the window's pixels with the selection
+/// filled (blended in by its coverage, as the command writes them). The Content-Aware Fill
+/// workspace's Preview. Cancellable through `ctx`.
+pub fn content_aware_fill_preview(doc: &Document, layer: LayerId, p: &Value, ctx: &crate::jobs::JobCtx) -> Result<(Rect, PixelFormat, Vec<f32>)> {
+    let plan = caf_plan(doc, layer, p, "edit.contentAwareFill")?;
+    let (window, fmt) = (plan.window, plan.fmt);
+    let FilledWindow { mut filled, bounds, original, cover, .. } = caf_compute(doc, &plan, ctx, "Content-Aware Fill")?;
+    let n = fmt.channels();
+    let (w, _) = crate::fill_cmds::window_size(window)?;
+    each_selected(w, bounds, &cover, |i, k, c| {
+        for ch in 0..n {
+            let (j, o) = (i * n + ch, k * n + ch);
+            filled[j] = original[o] + (filled[j] - original[o]) * c;
+        }
+    });
+    Ok((window, fmt, filled))
 }
 
 /// A Content-Aware Fill's result for its apply step: the filled window (the same as the

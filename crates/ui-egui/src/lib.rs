@@ -40,6 +40,7 @@ pub(crate) mod cam_preview;
 mod cam_transform;
 pub mod camera_raw_ui;
 pub(crate) mod lens_blur_ui;
+pub mod caf_ui;
 pub mod lens_ui;
 pub mod magnetic_ui;
 pub mod canvas;
@@ -742,6 +743,8 @@ pub struct PhotospliceApp {
     pub bundled: bundled::State,
     /// Filter › Lens Correction dialog (lens_ui).
     pub(crate) lens: Option<lens_ui::LensDialog>,
+    /// Edit › Content-Aware Fill…'s workspace while it is open.
+    pub(crate) caf: Option<caf_ui::CafDialog>,
     /// Magnetic Lasso outline in progress (magnetic_ui).
     pub(crate) magnetic: Option<magnetic_ui::Magnetic>,
     /// A camera raw file just opened interactively: Camera Raw opens on it next frame.
@@ -954,6 +957,7 @@ impl PhotospliceApp {
             camera_raw_on_open: None,
             magnetic: None,
             lens: None,
+            caf: None,
             bundled: Default::default(),
             wide_angle: None,
             dialog_edits: Default::default(),
@@ -2085,6 +2089,7 @@ impl eframe::App for PhotospliceApp {
         distort_ui::show(self, &ctx);
         camera_raw_ui::show(self, &ctx);
         lens_ui::show(self, &ctx);
+        caf_ui::show(self, &ctx);
         wide_angle_ui::show(self, &ctx);
         canvas::extra_windows(self, &ctx);
         notices::show(self, &ctx);
