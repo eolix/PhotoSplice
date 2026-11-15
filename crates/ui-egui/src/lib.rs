@@ -2281,13 +2281,15 @@ impl PhotospliceApp {
         self.checker = None;
     }
 
-    /// Cached 64px thumbnail of a pixel-ish layer, letterboxed in a square, and the document
-    /// area it frames: the canvas, or with Clip Thumbnails to Layer Bounds the layer's pixels.
+    /// Cached thumbnail of a pixel-ish layer (64 px, 128 for Large Thumbnails), letterboxed in a
+    /// square, and the document area it frames: the canvas, or with Clip Thumbnails to Layer
+    /// Bounds the layer's pixels.
     pub fn layer_thumb(&mut self, ctx: &egui::Context, doc: &Document, layer: &photosplice_doc::Layer) -> (egui::TextureId, photosplice_geom::Rect) {
         let clip = self.session.prefs().interface.clip_thumbnails_to_layer_bounds;
+        let side = layer_row_ui::thumb_texture_side(self.session.prefs().interface.layer_thumbnails);
         // Key by content, not document revision: COW tiles change pointer only when their pixels
         // change, so unrelated edits (e.g. painting another layer) don't rebuild this thumbnail.
-        let rev = layer.surface().map_or(0, surface_fingerprint) ^ (doc.size.width as u64) << 40 ^ u64::from(clip) << 63;
+        let rev = layer.surface().map_or(0, surface_fingerprint) ^ (doc.size.width as u64) << 40 ^ u64::from(clip) << 63 ^ (side as u64) << 48;
         let key = (layer.id, mask_thumbs_ui::THUMB_LAYER);
         if let Some((r, tex)) = self.thumbs.get(&key)
             && *r == rev
@@ -2298,7 +2300,7 @@ impl PhotospliceApp {
         let canvas = doc.bounds();
         let frame = layer_thumb_frame(layer, canvas, clip);
         let mut px = [0.0f32; 8];
-        let img = thumb_image(frame, 64, |x, y| {
+        let img = thumb_image(frame, side, |x, y| {
             let Some(s) = layer.surface() else { return [0.0; 4] };
             let n = s.channels();
             s.read_pixel(x, y, &mut px[..n]);
@@ -2332,7 +2334,8 @@ impl PhotospliceApp {
     }
 
     pub fn mask_thumb(&mut self, ctx: &egui::Context, doc: &Document, id: photosplice_doc::LayerId, mask: &photosplice_doc::LayerMask) -> egui::TextureId {
-        let rev = surface_fingerprint(&mask.surface) ^ (doc.size.width as u64) << 40;
+        let side = layer_row_ui::thumb_texture_side(self.session.prefs().interface.layer_thumbnails);
+        let rev = surface_fingerprint(&mask.surface) ^ (doc.size.width as u64) << 40 ^ (side as u64) << 48;
         let key = (id, mask_thumbs_ui::THUMB_MASK);
         if let Some((r, tex)) = self.thumbs.get(&key)
             && *r == rev
@@ -2340,7 +2343,7 @@ impl PhotospliceApp {
             return tex.id();
         }
         let mut v = [0.0f32; 1];
-        let img = thumb_image(doc.bounds(), 64, |x, y| {
+        let img = thumb_image(doc.bounds(), side, |x, y| {
             mask.surface.read_pixel(x, y, &mut v);
             [v[0], v[0], v[0], 1.0]
         });

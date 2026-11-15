@@ -595,3 +595,35 @@ fn clicking_the_lock_icon_on_a_row_unlocks_the_layer() {
     assert!(doc.background().is_none(), "the Background became a normal layer");
     assert!(!doc.layer(bg).unwrap().locks.any());
 }
+
+/// Small / Medium / Large Thumbnails (the layer menu) resize the rows and their thumbnails, but
+/// not a group's row; the names still never run under the indicators, and Small (the default)
+/// keeps the rows' old height.
+#[test]
+fn thumbnail_sizes_resize_the_rows() {
+    let mut h = harness(busy(), 1.0, "slate", 290.0);
+    let default = recorded(&h.ctx).iter().map(|r| r.row.height()).collect::<Vec<_>>();
+    let mut heights = Vec::new();
+    for size in ["small", "medium", "large"] {
+        h.state_mut().run("prefs.set", json!({"path": "interface.layerThumbnails", "value": size})).unwrap();
+        h.run_steps(4);
+        let rows = recorded(&h.ctx);
+        check(&rows, size);
+        let pro = crate::theme::Tokens::get(&h.ctx).pro;
+        let size = photosplice_engine::prefs::LayerThumbnails::parse(size).unwrap();
+        let st = h.state().session.active().unwrap();
+        let layer = |id: u64| st.doc.layer(photosplice_doc::LayerId(id)).unwrap();
+        for r in &rows {
+            assert!((r.row.height() - super::row_metrics_for(layer(r.layer), size, pro).0).abs() < 0.5, "{size:?}");
+        }
+        let pixel_row = rows.iter().find(|r| !layer(r.layer).is_group()).unwrap();
+        let group_row = rows.iter().find(|r| layer(r.layer).is_group()).unwrap();
+        heights.push((pixel_row.row.height(), group_row.row.height()));
+        if size == photosplice_engine::prefs::LayerThumbnails::Small {
+            assert_eq!(rows.iter().map(|r| r.row.height()).collect::<Vec<_>>(), default, "Small is the default");
+        }
+    }
+    assert!(heights[0].0 < heights[1].0 && heights[1].0 < heights[2].0, "{heights:?}");
+    assert!(heights.iter().all(|h| h.1 == heights[0].1), "group rows keep their height: {heights:?}");
+    assert!(h.state_mut().run("prefs.set", json!({"path": "interface.layerThumbnails", "value": "none"})).is_err(), "not offered");
+}

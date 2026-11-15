@@ -85,6 +85,11 @@ choice!(
     /// platforms ignore it.
     LinuxDisplayServer { Auto = "auto", X11 = "x11" } default Auto
 );
+choice!(
+    /// Layers panel thumbnail size (Reference's Small / Medium / Large Thumbnails, in the Layers
+    /// panel's context menu): the rows grow and shrink with it.
+    LayerThumbnails { Small = "small", Medium = "medium", Large = "large" } default Small
+);
 choice!(UiFontSize { Tiny = "tiny", Small = "small", Medium = "medium", Large = "large", ExtraLarge = "extraLarge" } default Small);
 choice!(LogDestination { Metadata = "metadata", TextFile = "textFile", Both = "both" } default Metadata);
 choice!(LogDetail { SessionsOnly = "sessionsOnly", Concise = "concise", Detailed = "detailed" } default Concise);
@@ -278,6 +283,8 @@ pub struct Interface {
     /// Layers panel thumbnails frame the layer's own pixels instead of the whole canvas, so small
     /// objects in a large document stay visible (Photoshop's Clip Thumbnails to Layer Bounds; #4281).
     pub clip_thumbnails_to_layer_bounds: bool,
+    /// Layers panel thumbnail size.
+    pub layer_thumbnails: LayerThumbnails,
     pub show_tooltips: bool,
     /// Menus, popups and collapsing sections fade and slide, and scroll areas glide to a new
     /// position. Off, everything changes at once (a reduced-motion mode; #1218, #3273).
@@ -316,6 +323,7 @@ impl Default for Interface {
             dynamic_color_sliders: true,
             show_menu_colors: true,
             clip_thumbnails_to_layer_bounds: false,
+            layer_thumbnails: LayerThumbnails::Small,
             show_tooltips: true,
             enable_animations: true,
             show_bounding_box_when_dragging_layer: false,
@@ -1165,6 +1173,8 @@ pub const HIDDEN_IN_PHOTOSPLICE: &[&str] = &[
     "fileHandling.rasterizeSvgGroupsDeeperThan",
     "interface.clipThumbnailsToLayerBounds",
     "interface.enableAnimations",
+    // Set from the Layers panel's context menu, as in Reference.
+    "interface.layerThumbnails",
     "interface.notificationAutoHide",
     "interface.notificationDurationSeconds",
     "interface.showCanvasDots",
@@ -1208,6 +1218,7 @@ pub fn choices(path: &str) -> Option<&'static [&'static str]> {
         "interface.canvasBorder" => CanvasBorder::NAMES,
         "interface.uiScale" => UiScale::NAMES,
         "interface.uiFontSize" => UiFontSize::NAMES,
+        "interface.layerThumbnails" => LayerThumbnails::NAMES,
         "historyLog.destination" => LogDestination::NAMES,
         "historyLog.detail" => LogDetail::NAMES,
         "fileHandling.imagePreviews" | "fileHandling.maximizePsdCompatibility" => Ask::NAMES,

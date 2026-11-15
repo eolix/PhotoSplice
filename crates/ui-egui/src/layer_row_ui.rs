@@ -10,6 +10,7 @@
 use egui::{Align2, FontId, Galley, Painter, Pos2, Rect, Sense, Shape, Stroke, pos2, vec2};
 use photosplice_color::BlendMode;
 use photosplice_doc::Layer;
+use photosplice_engine::prefs::LayerThumbnails;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -26,6 +27,34 @@ const ICON_W: f32 = 14.0;
 const TRIANGLE_W: f32 = 10.0;
 /// The blend-mode label is shown only while the name keeps at least this much room.
 pub const MIN_NAME_W: f32 = 64.0;
+
+/// A Layers panel row's height and its thumbnails' side (points) for the thumbnail size
+/// preference, in the Pro theme (Reference's rows) or the Studio one. Small, the default, is the
+/// size rows always had; Medium and Large are measured on Reference's panel (64 and 88 pt rows).
+/// A group's row keeps the Small height whatever the size, as Reference's does.
+pub fn row_metrics(size: LayerThumbnails, pro: bool) -> (f32, f32) {
+    let (row, thumb) = match size {
+        LayerThumbnails::Small => (32.0, 24.0),
+        LayerThumbnails::Medium => (64.0, 58.0),
+        LayerThumbnails::Large => (88.0, 82.0),
+    };
+    if pro { (row, thumb) } else { (row + 14.0, thumb + 10.0) }
+}
+
+/// [`row_metrics`] for `l`'s row: a group's stays Small.
+pub fn row_metrics_for(l: &Layer, size: LayerThumbnails, pro: bool) -> (f32, f32) {
+    row_metrics(if l.is_group() { LayerThumbnails::Small } else { size }, pro)
+}
+
+/// The pixel side of cached layer and mask thumbnails at `size`: enough for a sharp thumbnail
+/// on a high-density screen.
+pub fn thumb_texture_side(size: LayerThumbnails) -> usize {
+    match size {
+        LayerThumbnails::Small => 64,
+        LayerThumbnails::Medium => 128,
+        LayerThumbnails::Large => 192,
+    }
+}
 
 /// A right-hand row indicator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
