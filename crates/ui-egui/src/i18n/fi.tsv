@@ -2039,3 +2039,28 @@
 	Working…	Käsitellään…
 	Automatic (Coated FOGRA39 if installed)	Automaattinen (Coated FOGRA39, jos asennettu)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (sisäänrakennettu)
+	Layer thumbnails	Tasojen pikkukuvat
+	Small Thumbnails	Pienet pikkukuvat
+	Medium Thumbnails	Keskikokoiset pikkukuvat
+	Large Thumbnails	Suuret pikkukuvat
+	Clip Thumbnails to Layer Bounds	Rajaa pikkukuvat tason rajoihin
+	Clip Thumbnails to Document Bounds	Rajaa pikkukuvat dokumentin rajoihin
+	Depth Map	Syvyyskartta
+	Set Focal Point	Aseta polttopiste
+	Blur Focal Distance	Sumennuksen polttoetäisyys
+	Iris	Iiris
+	Triangle (3)	Kolmio (3)
+	Square (4)	Neliö (4)
+	Pentagon (5)	Viisikulmio (5)
+	Hexagon (6)	Kuusikulmio (6)
+	Heptagon (7)	Seitsenkulmio (7)
+	Octagon (8)	Kahdeksankulmio (8)
+	Blade Curvature	Lamellien kaarevuus
+	Specular Highlights	Peiliheijastuskorostukset
+	Distribution	Jakauma
+	Uniform	Tasainen
+	Gaussian	Gaussin
+	Monochromatic	Yksivärinen
+	Faster	Nopeampi
+	More Accurate	Tarkempi
+	Reset	Palauta

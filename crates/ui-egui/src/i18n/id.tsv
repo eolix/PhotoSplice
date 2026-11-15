@@ -3176,3 +3176,25 @@ curves	Smooth	Haluskan
 	GPU Memory (MB, 0 = Automatic)	Memori GPU (MB, 0 = Otomatis)
 	Automatic (Coated FOGRA39 if installed)	Otomatis (Coated FOGRA39 jika terpasang)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (bawaan)
+	Layer thumbnails	Thumbnail layer
+	Small Thumbnails	Thumbnail Kecil
+	Medium Thumbnails	Thumbnail Sedang
+	Large Thumbnails	Thumbnail Besar
+	Clip Thumbnails to Document Bounds	Pangkas Thumbnail ke Batas Dokumen
+	Depth Map	Peta Kedalaman
+	Set Focal Point	Atur Titik Fokus
+	Blur Focal Distance	Jarak Fokus Buram
+	Iris	Iris
+	Triangle (3)	Segitiga (3)
+	Square (4)	Persegi (4)
+	Pentagon (5)	Segi Lima (5)
+	Hexagon (6)	Segi Enam (6)
+	Heptagon (7)	Segi Tujuh (7)
+	Octagon (8)	Segi Delapan (8)
+	Blade Curvature	Kelengkungan Bilah
+	Specular Highlights	Sorotan Spekular
+	Distribution	Distribusi
+	Uniform	Seragam
+	Monochromatic	Monokromatik
+	Faster	Lebih Cepat
+	More Accurate	Lebih Akurat

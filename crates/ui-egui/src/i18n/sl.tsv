@@ -2039,3 +2039,28 @@
 	Working…	Obdelava…
 	Automatic (Coated FOGRA39 if installed)	Samodejno (Coated FOGRA39, če je nameščen)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (vgrajen)
+	Layer thumbnails	Sličice plasti
+	Small Thumbnails	Majhne sličice
+	Medium Thumbnails	Srednje sličice
+	Large Thumbnails	Velike sličice
+	Clip Thumbnails to Layer Bounds	Obreži sličice na meje plasti
+	Clip Thumbnails to Document Bounds	Obreži sličice na meje dokumenta
+	Depth Map	Globinska karta
+	Set Focal Point	Nastavi goriščno točko
+	Blur Focal Distance	Goriščna razdalja zameglitve
+	Iris	Zaslonka
+	Triangle (3)	Trikotnik (3)
+	Square (4)	Kvadrat (4)
+	Pentagon (5)	Petkotnik (5)
+	Hexagon (6)	Šestkotnik (6)
+	Heptagon (7)	Sedemkotnik (7)
+	Octagon (8)	Osemkotnik (8)
+	Blade Curvature	Ukrivljenost lamel
+	Specular Highlights	Zrcalni odsevi
+	Distribution	Porazdelitev
+	Uniform	Enakomerno
+	Gaussian	Gaussovo
+	Monochromatic	Enobarvno
+	Faster	Hitreje
+	More Accurate	Natančneje
+	Reset	Ponastavi

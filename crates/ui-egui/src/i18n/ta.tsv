@@ -2039,3 +2039,28 @@
 	Working…	செயல்படுகிறது…
 	Automatic (Coated FOGRA39 if installed)	தானியங்கி (நிறுவப்பட்டிருந்தால் Coated FOGRA39)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (உள்ளமைந்தது)
+	Layer thumbnails	அடுக்கு சிறுபடங்கள்
+	Small Thumbnails	சிறிய சிறுபடங்கள்
+	Medium Thumbnails	நடுத்தர சிறுபடங்கள்
+	Large Thumbnails	பெரிய சிறுபடங்கள்
+	Clip Thumbnails to Layer Bounds	சிறுபடங்களை அடுக்கு எல்லைகளுக்குள் வெட்டு
+	Clip Thumbnails to Document Bounds	சிறுபடங்களை ஆவண எல்லைகளுக்குள் வெட்டு
+	Depth Map	ஆழ வரைபடம்
+	Set Focal Point	குவியப் புள்ளியை அமை
+	Blur Focal Distance	மங்கல் குவியத் தூரம்
+	Iris	ஐரிஸ்
+	Triangle (3)	முக்கோணம் (3)
+	Square (4)	சதுரம் (4)
+	Pentagon (5)	ஐங்கோணம் (5)
+	Hexagon (6)	அறுகோணம் (6)
+	Heptagon (7)	எழுகோணம் (7)
+	Octagon (8)	எண்கோணம் (8)
+	Blade Curvature	இதழ் வளைவு
+	Specular Highlights	பிரதிபலிப்பு ஒளிர்வுகள்
+	Distribution	பரவல்
+	Uniform	சீரான
+	Gaussian	காசியன்
+	Monochromatic	ஒரே வண்ணம்
+	Faster	வேகமான
+	More Accurate	அதிகத் துல்லியமான
+	Reset	மீட்டமை

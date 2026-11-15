@@ -3791,3 +3791,20 @@ curves	Smooth	Згладити
 	GPU Memory (MB, 0 = Automatic)	Пам'ять GPU (МБ, 0 = автоматично)
 	Automatic (Coated FOGRA39 if installed)	Автоматично (Coated FOGRA39, якщо встановлено)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (вбудований)
+	Layer thumbnails	Мініатюри шарів
+	Small Thumbnails	Малі мініатюри
+	Medium Thumbnails	Середні мініатюри
+	Large Thumbnails	Великі мініатюри
+	Clip Thumbnails to Document Bounds	Обрізати мініатюри до меж документа
+	Set Focal Point	Встановити точку фокусування
+	Blur Focal Distance	Фокусна відстань розмиття
+	Iris	Діафрагма
+	Triangle (3)	Трикутник (3)
+	Square (4)	Квадрат (4)
+	Pentagon (5)	П'ятикутник (5)
+	Hexagon (6)	Шестикутник (6)
+	Heptagon (7)	Семикутник (7)
+	Octagon (8)	Восьмикутник (8)
+	Specular Highlights	Дзеркальні відблиски
+	Faster	Швидше
+	More Accurate	Точніше

@@ -2039,3 +2039,28 @@
 	Working…	กำลังทำงาน…
 	Automatic (Coated FOGRA39 if installed)	อัตโนมัติ (Coated FOGRA39 หากติดตั้งไว้)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (ในตัว)
+	Layer thumbnails	ภาพขนาดย่อของเลเยอร์
+	Small Thumbnails	ภาพขนาดย่อขนาดเล็ก
+	Medium Thumbnails	ภาพขนาดย่อขนาดกลาง
+	Large Thumbnails	ภาพขนาดย่อขนาดใหญ่
+	Clip Thumbnails to Layer Bounds	ตัดภาพขนาดย่อตามขอบเขตเลเยอร์
+	Clip Thumbnails to Document Bounds	ตัดภาพขนาดย่อตามขอบเขตเอกสาร
+	Depth Map	แผนที่ความลึก
+	Set Focal Point	ตั้งจุดโฟกัส
+	Blur Focal Distance	ระยะโฟกัสของการเบลอ
+	Iris	ไอริส
+	Triangle (3)	สามเหลี่ยม (3)
+	Square (4)	สี่เหลี่ยม (4)
+	Pentagon (5)	ห้าเหลี่ยม (5)
+	Hexagon (6)	หกเหลี่ยม (6)
+	Heptagon (7)	เจ็ดเหลี่ยม (7)
+	Octagon (8)	แปดเหลี่ยม (8)
+	Blade Curvature	ความโค้งของใบม่านรับแสง
+	Specular Highlights	ไฮไลต์สะท้อนแสง
+	Distribution	การกระจาย
+	Uniform	สม่ำเสมอ
+	Gaussian	เกาส์เซียน
+	Monochromatic	สีเดียว
+	Faster	เร็วกว่า
+	More Accurate	แม่นยำกว่า
+	Reset	รีเซ็ต

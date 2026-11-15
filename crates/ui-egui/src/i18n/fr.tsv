@@ -3178,3 +3178,25 @@ curves	Smooth	Lisser
 	GPU Memory (MB, 0 = Automatic)	Mémoire GPU (Mo, 0 = Automatique)
 	Automatic (Coated FOGRA39 if installed)	Automatique (Coated FOGRA39 s'il est installé)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (intégré)
+	Layer thumbnails	Vignettes des calques
+	Small Thumbnails	Petites vignettes
+	Medium Thumbnails	Vignettes moyennes
+	Large Thumbnails	Grandes vignettes
+	Clip Thumbnails to Document Bounds	Rogner les vignettes aux limites du document
+	Depth Map	Carte de profondeur
+	Set Focal Point	Définir le point focal
+	Blur Focal Distance	Distance focale du flou
+	Iris	Iris
+	Triangle (3)	Triangle (3)
+	Square (4)	Carré (4)
+	Pentagon (5)	Pentagone (5)
+	Hexagon (6)	Hexagone (6)
+	Heptagon (7)	Heptagone (7)
+	Octagon (8)	Octogone (8)
+	Blade Curvature	Courbure des lames
+	Specular Highlights	Reflets spéculaires
+	Distribution	Répartition
+	Uniform	Uniforme
+	Monochromatic	Monochromatique
+	Faster	Plus rapide
+	More Accurate	Plus précis

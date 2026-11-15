@@ -2030,3 +2030,28 @@
 	Working…	Vykdoma…
 	Automatic (Coated FOGRA39 if installed)	Automatiškai (Coated FOGRA39, jei įdiegtas)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (integruotas)
+	Layer thumbnails	Sluoksnių miniatiūros
+	Small Thumbnails	Mažos miniatiūros
+	Medium Thumbnails	Vidutinės miniatiūros
+	Large Thumbnails	Didelės miniatiūros
+	Clip Thumbnails to Layer Bounds	Apkirpti miniatiūras iki sluoksnio ribų
+	Clip Thumbnails to Document Bounds	Apkirpti miniatiūras iki dokumento ribų
+	Depth Map	Gylio žemėlapis
+	Set Focal Point	Nustatyti židinio tašką
+	Blur Focal Distance	Liejimo židinio atstumas
+	Iris	Diafragma
+	Triangle (3)	Trikampis (3)
+	Square (4)	Kvadratas (4)
+	Pentagon (5)	Penkiakampis (5)
+	Hexagon (6)	Šešiakampis (6)
+	Heptagon (7)	Septynkampis (7)
+	Octagon (8)	Aštuonkampis (8)
+	Blade Curvature	Lamelių išlinkimas
+	Specular Highlights	Veidrodinės šviesumos
+	Distribution	Pasiskirstymas
+	Uniform	Tolygus
+	Gaussian	Gauso
+	Monochromatic	Vienspalvis
+	Faster	Greitesnis
+	More Accurate	Tikslesnis
+	Reset	Atstatyti

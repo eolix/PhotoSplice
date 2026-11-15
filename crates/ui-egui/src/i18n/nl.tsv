@@ -3974,3 +3974,20 @@ curves	Smooth	Vloeiend maken
 	GPU Memory (MB, 0 = Automatic)	GPU-geheugen (MB, 0 = Automatisch)
 	Automatic (Coated FOGRA39 if installed)	Automatisch (Coated FOGRA39 indien geïnstalleerd)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (ingebouwd)
+	Layer thumbnails	Laagminiaturen
+	Small Thumbnails	Kleine miniaturen
+	Medium Thumbnails	Middelgrote miniaturen
+	Large Thumbnails	Grote miniaturen
+	Clip Thumbnails to Document Bounds	Miniaturen bijsnijden tot documentgrenzen
+	Set Focal Point	Brandpunt instellen
+	Blur Focal Distance	Scherpstelafstand vervaging
+	Iris	Iris
+	Triangle (3)	Driehoek (3)
+	Square (4)	Vierkant (4)
+	Pentagon (5)	Vijfhoek (5)
+	Hexagon (6)	Zeshoek (6)
+	Heptagon (7)	Zevenhoek (7)
+	Octagon (8)	Achthoek (8)
+	Specular Highlights	Spiegelende hooglichten
+	Faster	Sneller
+	More Accurate	Nauwkeuriger

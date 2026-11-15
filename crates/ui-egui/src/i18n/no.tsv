@@ -2039,3 +2039,28 @@
 	Working…	Arbeider…
 	Automatic (Coated FOGRA39 if installed)	Automatisk (Coated FOGRA39 hvis installert)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (innebygd)
+	Layer thumbnails	Lagminiatyrbilder
+	Small Thumbnails	Små miniatyrbilder
+	Medium Thumbnails	Mellomstore miniatyrbilder
+	Large Thumbnails	Store miniatyrbilder
+	Clip Thumbnails to Layer Bounds	Klipp miniatyrbilder til laggrenser
+	Clip Thumbnails to Document Bounds	Klipp miniatyrbilder til dokumentgrenser
+	Depth Map	Dybdekart
+	Set Focal Point	Angi fokuspunkt
+	Blur Focal Distance	Fokusavstand for uskarphet
+	Iris	Iris
+	Triangle (3)	Trekant (3)
+	Square (4)	Kvadrat (4)
+	Pentagon (5)	Femkant (5)
+	Hexagon (6)	Sekskant (6)
+	Heptagon (7)	Sjukant (7)
+	Octagon (8)	Åttekant (8)
+	Blade Curvature	Bladkrumming
+	Specular Highlights	Speilende høylys
+	Distribution	Fordeling
+	Uniform	Jevn
+	Gaussian	Gaussisk
+	Monochromatic	Monokromatisk
+	Faster	Raskere
+	More Accurate	Mer nøyaktig
+	Reset	Tilbakestill

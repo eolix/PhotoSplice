@@ -2039,3 +2039,28 @@
 	Working…	Töötlemine…
 	Automatic (Coated FOGRA39 if installed)	Automaatne (Coated FOGRA39, kui see on paigaldatud)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (sisseehitatud)
+	Layer thumbnails	Kihtide pisipildid
+	Small Thumbnails	Väikesed pisipildid
+	Medium Thumbnails	Keskmised pisipildid
+	Large Thumbnails	Suured pisipildid
+	Clip Thumbnails to Layer Bounds	Kärbi pisipildid kihi piiridele
+	Clip Thumbnails to Document Bounds	Kärbi pisipildid dokumendi piiridele
+	Depth Map	Sügavuskaart
+	Set Focal Point	Määra fookuspunkt
+	Blur Focal Distance	Udu fookuskaugus
+	Iris	Iiris
+	Triangle (3)	Kolmnurk (3)
+	Square (4)	Ruut (4)
+	Pentagon (5)	Viisnurk (5)
+	Hexagon (6)	Kuusnurk (6)
+	Heptagon (7)	Seitsenurk (7)
+	Octagon (8)	Kaheksanurk (8)
+	Blade Curvature	Lamellide kumerus
+	Specular Highlights	Peegelduvad heledad
+	Distribution	Jaotus
+	Uniform	Ühtlane
+	Gaussian	Gaussi
+	Monochromatic	Ühevärviline
+	Faster	Kiirem
+	More Accurate	Täpsem
+	Reset	Lähtesta

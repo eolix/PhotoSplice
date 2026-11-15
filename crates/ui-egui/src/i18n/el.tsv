@@ -3897,3 +3897,20 @@ curves	Smooth	Εξομάλυνση
 	GPU Memory (MB, 0 = Automatic)	Μνήμη GPU (MB, 0 = Αυτόματο)
 	Automatic (Coated FOGRA39 if installed)	Αυτόματο (Coated FOGRA39, αν είναι εγκατεστημένο)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (ενσωματωμένο)
+	Layer thumbnails	Μικρογραφίες επιπέδων
+	Small Thumbnails	Μικρές μικρογραφίες
+	Medium Thumbnails	Μεσαίες μικρογραφίες
+	Large Thumbnails	Μεγάλες μικρογραφίες
+	Clip Thumbnails to Document Bounds	Περικοπή μικρογραφιών στα όρια του εγγράφου
+	Set Focal Point	Ορισμός σημείου εστίασης
+	Blur Focal Distance	Απόσταση εστίασης θόλωσης
+	Iris	Ίριδα
+	Triangle (3)	Τρίγωνο (3)
+	Square (4)	Τετράγωνο (4)
+	Pentagon (5)	Πεντάγωνο (5)
+	Hexagon (6)	Εξάγωνο (6)
+	Heptagon (7)	Επτάγωνο (7)
+	Octagon (8)	Οκτάγωνο (8)
+	Specular Highlights	Κατοπτρικές φωτεινές περιοχές
+	Faster	Ταχύτερο
+	More Accurate	Πιο ακριβές

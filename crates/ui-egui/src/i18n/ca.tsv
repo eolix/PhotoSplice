@@ -2039,3 +2039,28 @@
 	Working…	S'està processant…
 	Automatic (Coated FOGRA39 if installed)	Automàtic (Coated FOGRA39 si està instal·lat)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (integrat)
+	Layer thumbnails	Miniatures de les capes
+	Small Thumbnails	Miniatures petites
+	Medium Thumbnails	Miniatures mitjanes
+	Large Thumbnails	Miniatures grans
+	Clip Thumbnails to Layer Bounds	Retalla les miniatures als límits de la capa
+	Clip Thumbnails to Document Bounds	Retalla les miniatures als límits del document
+	Depth Map	Mapa de profunditat
+	Set Focal Point	Defineix el punt focal
+	Blur Focal Distance	Distància focal del difuminat
+	Iris	Iris
+	Triangle (3)	Triangle (3)
+	Square (4)	Quadrat (4)
+	Pentagon (5)	Pentàgon (5)
+	Hexagon (6)	Hexàgon (6)
+	Heptagon (7)	Heptàgon (7)
+	Octagon (8)	Octàgon (8)
+	Blade Curvature	Curvatura de les làmines
+	Specular Highlights	Ressaltats especulars
+	Distribution	Distribució
+	Uniform	Uniforme
+	Gaussian	Gaussiana
+	Monochromatic	Monocromàtic
+	Faster	Més ràpid
+	More Accurate	Més precís
+	Reset	Restableix

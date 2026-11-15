@@ -4120,3 +4120,20 @@ cameraRaw	Yellow	Sárga
 	GPU Memory (MB, 0 = Automatic)	GPU-memória (MB, 0 = Automatikus)
 	Automatic (Coated FOGRA39 if installed)	Automatikus (Coated FOGRA39, ha telepítve van)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (beépített)
+	Layer thumbnails	Rétegbélyegképek
+	Small Thumbnails	Kis bélyegképek
+	Medium Thumbnails	Közepes bélyegképek
+	Large Thumbnails	Nagy bélyegképek
+	Clip Thumbnails to Document Bounds	Bélyegképek levágása a dokumentum határaira
+	Set Focal Point	Fókuszpont beállítása
+	Blur Focal Distance	Elmosás fókusztávolsága
+	Iris	Írisz
+	Triangle (3)	Háromszög (3)
+	Square (4)	Négyzet (4)
+	Pentagon (5)	Ötszög (5)
+	Hexagon (6)	Hatszög (6)
+	Heptagon (7)	Hétszög (7)
+	Octagon (8)	Nyolcszög (8)
+	Specular Highlights	Tükröződő csúcsfények
+	Faster	Gyorsabb
+	More Accurate	Pontosabb

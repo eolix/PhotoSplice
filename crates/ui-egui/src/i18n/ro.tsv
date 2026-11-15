@@ -2039,3 +2039,28 @@
 	Working…	Se procesează…
 	Automatic (Coated FOGRA39 if installed)	Automat (Coated FOGRA39, dacă este instalat)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (încorporat)
+	Layer thumbnails	Miniaturile straturilor
+	Small Thumbnails	Miniaturi mici
+	Medium Thumbnails	Miniaturi medii
+	Large Thumbnails	Miniaturi mari
+	Clip Thumbnails to Layer Bounds	Decupează miniaturile la limitele stratului
+	Clip Thumbnails to Document Bounds	Decupează miniaturile la limitele documentului
+	Depth Map	Hartă de adâncime
+	Set Focal Point	Setare punct focal
+	Blur Focal Distance	Distanța focală a estompării
+	Iris	Diafragmă
+	Triangle (3)	Triunghi (3)
+	Square (4)	Pătrat (4)
+	Pentagon (5)	Pentagon (5)
+	Hexagon (6)	Hexagon (6)
+	Heptagon (7)	Heptagon (7)
+	Octagon (8)	Octogon (8)
+	Blade Curvature	Curbura lamelelor
+	Specular Highlights	Reflexii speculare
+	Distribution	Distribuție
+	Uniform	Uniformă
+	Gaussian	Gaussiană
+	Monochromatic	Monocromatic
+	Faster	Mai rapid
+	More Accurate	Mai precis
+	Reset	Resetare
