@@ -155,7 +155,7 @@ pub fn apply_depth_mode(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, 
                         // in full however dull the colour (Reference's merged images, #4089).
                         // Greys stay grey: no hue to shift, no saturation to scale, and the range
                         // Lightness moves towards a channel they share.
-                        let h0 = range_hue(rgb_to_hsl(c).0);
+                        let h0 = range_hue_depth(rgb_to_hsl(c).0, depth == Some(SampleType::U8) && !INK_SPACE.with(|i| i.get()));
                         (lut(&t[0], h0), lut(&t[1], h0), lut(&t[2], h0))
                     }
                     None => (0.0, 0.0, 0.0),
@@ -689,10 +689,20 @@ fn tone_in_space(space: ToneSpace, luts: &[Vec<f32>; 4], c: [f32; 3]) -> [f32; 3
 /// 180–240°), whatever the saturation and lightness (16-bit Lightness +40 curves of all six
 /// ranges: the falloffs move by up to 0.94°).
 pub fn range_hue(h: f32) -> f32 {
+    range_hue_depth(h, false)
+}
+
+/// [`range_hue`] for a document of `eight_bit` samples: there Reference's hue runs half a step
+/// less behind in the sextants past the first and a whole step less in the last (f, ½, 1½,
+/// 1½ + f, 2½, 3 steps), the 16-bit hue as it is (temp kit 16, each default range turned 180°
+/// alone at 8 and 16 bits: the 16-bit falloffs sit within 0.01° of [`range_hue`], the 8-bit ones
+/// 0.10–0.12° earlier and 0.22° in the last sextant; Reds +180° under a +66° master, 5.4 → 0 %
+/// of pixels off).
+pub fn range_hue_depth(h: f32, eight_bit: bool) -> f32 {
     let deg = h.rem_euclid(1.0) * 360.0;
     let k = ((deg / 60.0).floor() as usize).min(5);
     let f = deg / 60.0 - k as f32;
-    let steps = [f, 1.0, 2.0, 2.0 + f, 3.0, 4.0][k];
+    let steps = if eight_bit { [f, 0.5, 1.5, 1.5 + f, 2.5, 3.0][k] } else { [f, 1.0, 2.0, 2.0 + f, 3.0, 4.0][k] };
     (deg - steps * 60.0 / 255.0).rem_euclid(360.0) / 360.0
 }
 

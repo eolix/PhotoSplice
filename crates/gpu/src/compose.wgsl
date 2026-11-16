@@ -240,14 +240,15 @@ fn blend_channel(mode: i32, cb: f32, cs: f32) -> f32 {
     }
 }
 
-// adjust::range_hue: where a hue (turns) falls among Hue/Saturation's colour ranges.
-fn range_hue(h: f32) -> f32 {
+// adjust::range_hue_depth: where a hue (turns) falls among Hue/Saturation's colour ranges.
+fn range_hue(h: f32, eight_bit: bool) -> f32 {
     let deg = rem_euclid(h, 1.0) * 360.0;
     let k = min(floor(deg / 60.0), 5.0);
     let f = deg / 60.0 - k;
-    // Steps behind per sextant: f, 1, 2, 2 + f, 3, 4.
+    // Steps behind per sextant: f, 1, 2, 2 + f, 3, 4 (8 bits: f, ½, 1½, 1½ + f, 2½, 3).
     var steps = k - select(0.0, 1.0, k >= 3.0);
     if (k < 1.0 || (k >= 3.0 && k < 4.0)) { steps = steps + f; }
+    if (eight_bit) { steps = steps - select(0.0, 0.5, k >= 1.0) - select(0.0, 0.5, k >= 5.0); }
     return rem_euclid(deg - steps * 60.0 / 255.0, 360.0) / 360.0;
 }
 
@@ -708,7 +709,7 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
             var ds = 0.0;
             var dl = 0.0;
             if (p1.x > 0.5) {
-                let rh = range_hue(hsl.x);
+                let rh = range_hue(hsl.x, p1.z > 0.5);
                 dh = lut(0, rh);
                 // Row 1 holds the ranges' saturation factor excess.
                 ds = lut(1, rh);
