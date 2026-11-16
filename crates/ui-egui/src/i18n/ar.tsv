@@ -2039,3 +2039,28 @@
 	Working…	جارٍ العمل…
 	Automatic (Coated FOGRA39 if installed)	تلقائي (Coated FOGRA39 إن كان مثبتًا)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (مدمج)
+	Layer thumbnails	الصور المصغرة للطبقات
+	Small Thumbnails	صور مصغرة صغيرة
+	Medium Thumbnails	صور مصغرة متوسطة
+	Large Thumbnails	صور مصغرة كبيرة
+	Clip Thumbnails to Layer Bounds	قص الصور المصغرة إلى حدود الطبقة
+	Clip Thumbnails to Document Bounds	قص الصور المصغرة إلى حدود المستند
+	Depth Map	خريطة العمق
+	Set Focal Point	تعيين النقطة البؤرية
+	Blur Focal Distance	المسافة البؤرية للتمويه
+	Iris	القزحية
+	Triangle (3)	مثلث (3)
+	Square (4)	مربع (4)
+	Pentagon (5)	خماسي (5)
+	Hexagon (6)	سداسي (6)
+	Heptagon (7)	سباعي (7)
+	Octagon (8)	ثماني (8)
+	Blade Curvature	انحناء الشفرات
+	Specular Highlights	الإضاءات البراقة
+	Distribution	التوزيع
+	Uniform	منتظم
+	Gaussian	غاوسي
+	Monochromatic	أحادي اللون
+	Faster	أسرع
+	More Accurate	أكثر دقة
+	Reset	إعادة تعيين

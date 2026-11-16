@@ -153,8 +153,36 @@ pub fn show(app: &crate::PhotospliceApp, ui: &mut egui::Ui, l: &Layer, on_set: b
             ui.close();
         }
         color_swatches(app, ui, l, on_set, actions);
+        thumbnail_items(app, ui, actions);
         rename
     })
+}
+
+/// The thumbnail settings at the end of the layer menu, as in Reference: their size, then what
+/// they frame. Checked items show the current setting.
+pub(crate) fn thumbnail_items(app: &crate::PhotospliceApp, ui: &mut egui::Ui, actions: &mut Vec<(String, Value)>) {
+    use photosplice_engine::prefs::LayerThumbnails;
+    let prefs = &app.session.prefs().interface;
+    let check = |ui: &mut egui::Ui, on: bool, label: &str| ui.button(format!("{}{}", if on { "✔ " } else { "   " }, tl!(label))).clicked();
+    ui.separator();
+    for (size, label) in [
+        (LayerThumbnails::Small, "Small Thumbnails"),
+        (LayerThumbnails::Medium, "Medium Thumbnails"),
+        (LayerThumbnails::Large, "Large Thumbnails"),
+    ] {
+        if check(ui, prefs.layer_thumbnails == size, label) {
+            actions.push(("prefs.set".into(), json!({"path": "interface.layerThumbnails", "value": size.name()})));
+            ui.close();
+        }
+    }
+    ui.separator();
+    let clip = prefs.clip_thumbnails_to_layer_bounds;
+    for (to_layer, label) in [(true, "Clip Thumbnails to Layer Bounds"), (false, "Clip Thumbnails to Document Bounds")] {
+        if check(ui, clip == to_layer, label) {
+            actions.push(("prefs.set".into(), json!({"path": "interface.clipThumbnailsToLayerBounds", "value": to_layer})));
+            ui.close();
+        }
+    }
 }
 
 /// The menu's colour labels: one row of swatches that labels the clicked layer, or every
@@ -451,6 +479,44 @@ mod tests {
             assert!(!h.state().session.active().unwrap().doc.layer(other).unwrap().mask.as_ref().unwrap().enabled);
             h.get_by_label(enabled_label);
         }
+    }
+
+    /// The layer menu ends with Reference's thumbnail settings: the size, then what they frame,
+    /// each with the current one checked.
+    #[test]
+    fn thumbnail_settings_from_the_layer_menu() {
+        use egui_kittest::{Harness, kittest::Queryable};
+        use photosplice_engine::prefs::LayerThumbnails;
+        let mut s = photosplice_engine::Session::new();
+        s.execute("file.new", json!({"width": 10, "height": 10})).unwrap();
+        s.execute("layer.new.layer", json!({})).unwrap();
+        let layer = s.active().unwrap().active_layer.unwrap();
+        let app = crate::PhotospliceApp::new(s, Default::default());
+        let mut h = Harness::builder().with_size(egui::vec2(400.0, 1200.0)).build_ui_state(
+            move |ui, app| {
+                let l = app.session.active().unwrap().doc.layer(layer).unwrap().clone();
+                let mut actions = Vec::new();
+                show(app, ui, &l, false, &mut actions);
+                for (id, params) in actions {
+                    crate::menus::invoke(app, ui.ctx(), &id, params).unwrap();
+                }
+            },
+            app,
+        );
+        h.run_steps(3);
+        h.get_by_label("✔ Small Thumbnails");
+        h.get_by_label("✔ Clip Thumbnails to Document Bounds");
+        assert!(h.query_by_label("   No Thumbnails").is_none(), "not offered yet");
+        h.get_by_label("   Large Thumbnails").click();
+        h.run_steps(3);
+        assert_eq!(h.state().session.prefs().interface.layer_thumbnails, LayerThumbnails::Large);
+        h.get_by_label("✔ Large Thumbnails");
+        h.get_by_label("   Clip Thumbnails to Layer Bounds").click();
+        h.run_steps(3);
+        assert!(h.state().session.prefs().interface.clip_thumbnails_to_layer_bounds);
+        h.get_by_label("   Clip Thumbnails to Document Bounds").click();
+        h.run_steps(3);
+        assert!(!h.state().session.prefs().interface.clip_thumbnails_to_layer_bounds);
     }
 
     /// With several layers selected there is no single mask to toggle, apply or delete: the menu

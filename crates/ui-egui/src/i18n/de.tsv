@@ -3177,3 +3177,20 @@ curves	Smooth	Glätten
 	GPU Memory (MB, 0 = Automatic)	GPU-Speicher (MB, 0 = Automatisch)
 	Automatic (Coated FOGRA39 if installed)	Automatisch (Coated FOGRA39, falls installiert)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (integriert)
+	Layer thumbnails	Ebenen-Miniaturbilder
+	Small Thumbnails	Kleine Miniaturbilder
+	Medium Thumbnails	Mittlere Miniaturbilder
+	Large Thumbnails	Große Miniaturbilder
+	Clip Thumbnails to Document Bounds	Miniaturbilder auf Dokumentbegrenzung beschneiden
+	Set Focal Point	Fokuspunkt festlegen
+	Blur Focal Distance	Fokusabstand für Weichzeichnung
+	Iris	Iris
+	Triangle (3)	Dreieck (3)
+	Square (4)	Quadrat (4)
+	Pentagon (5)	Fünfeck (5)
+	Hexagon (6)	Sechseck (6)
+	Heptagon (7)	Siebeneck (7)
+	Octagon (8)	Achteck (8)
+	Specular Highlights	Spiegelnde Lichter
+	Faster	Schneller
+	More Accurate	Genauer

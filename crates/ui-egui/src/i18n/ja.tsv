@@ -3842,3 +3842,20 @@ curves	Smooth	スムーズ
 	GPU Memory (MB, 0 = Automatic)	GPU メモリ（MB、0 = 自動）
 	Automatic (Coated FOGRA39 if installed)	自動 (インストールされていれば Coated FOGRA39)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (内蔵)
+	Layer thumbnails	レイヤーのサムネール
+	Small Thumbnails	小さいサムネール
+	Medium Thumbnails	中くらいのサムネール
+	Large Thumbnails	大きいサムネール
+	Clip Thumbnails to Document Bounds	サムネールをドキュメントの境界でクリップ
+	Set Focal Point	焦点を設定
+	Blur Focal Distance	ぼかしのピント距離
+	Iris	虹彩
+	Triangle (3)	三角形 (3)
+	Square (4)	四角形 (4)
+	Pentagon (5)	五角形 (5)
+	Hexagon (6)	六角形 (6)
+	Heptagon (7)	七角形 (7)
+	Octagon (8)	八角形 (8)
+	Specular Highlights	反射光
+	Faster	高速
+	More Accurate	高精度

@@ -3976,3 +3976,20 @@ layerLabel	No Color	Sem cor
 	GPU Memory (MB, 0 = Automatic)	Memória da GPU (MB, 0 = Automático)
 	Automatic (Coated FOGRA39 if installed)	Automático (Coated FOGRA39, se instalado)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (integrado)
+	Layer thumbnails	Miniaturas das camadas
+	Small Thumbnails	Miniaturas pequenas
+	Medium Thumbnails	Miniaturas médias
+	Large Thumbnails	Miniaturas grandes
+	Clip Thumbnails to Document Bounds	Recortar miniaturas aos limites do documento
+	Set Focal Point	Definir ponto focal
+	Blur Focal Distance	Distância focal do desfoque
+	Iris	Íris
+	Triangle (3)	Triângulo (3)
+	Square (4)	Quadrado (4)
+	Pentagon (5)	Pentágono (5)
+	Hexagon (6)	Hexágono (6)
+	Heptagon (7)	Heptágono (7)
+	Octagon (8)	Octógono (8)
+	Specular Highlights	Realces especulares
+	Faster	Mais rápido
+	More Accurate	Mais preciso

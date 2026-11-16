@@ -2039,3 +2039,28 @@
 	Working…	עובד…
 	Automatic (Coated FOGRA39 if installed)	אוטומטי (Coated FOGRA39 אם מותקן)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (מובנה)
+	Layer thumbnails	תמונות ממוזערות של שכבות
+	Small Thumbnails	תמונות ממוזערות קטנות
+	Medium Thumbnails	תמונות ממוזערות בינוניות
+	Large Thumbnails	תמונות ממוזערות גדולות
+	Clip Thumbnails to Layer Bounds	חתוך תמונות ממוזערות לגבולות השכבה
+	Clip Thumbnails to Document Bounds	חתוך תמונות ממוזערות לגבולות המסמך
+	Depth Map	מפת עומק
+	Set Focal Point	הגדר נקודת מוקד
+	Blur Focal Distance	מרחק מוקד הטשטוש
+	Iris	צמצם
+	Triangle (3)	משולש (3)
+	Square (4)	מרובע (4)
+	Pentagon (5)	מחומש (5)
+	Hexagon (6)	משושה (6)
+	Heptagon (7)	משובע (7)
+	Octagon (8)	מתומן (8)
+	Blade Curvature	עקמומיות להבים
+	Specular Highlights	אזורי אור בוהקים
+	Distribution	התפלגות
+	Uniform	אחידה
+	Gaussian	גאוסיאנית
+	Monochromatic	מונוכרומטי
+	Faster	מהיר יותר
+	More Accurate	מדויק יותר
+	Reset	אפס

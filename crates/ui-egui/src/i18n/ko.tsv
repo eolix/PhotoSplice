@@ -3363,3 +3363,20 @@ curves	Smooth	매끄럽게
 	GPU Memory (MB, 0 = Automatic)	GPU 메모리(MB, 0 = 자동)
 	Automatic (Coated FOGRA39 if installed)	자동 (설치되어 있으면 Coated FOGRA39)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (내장)
+	Layer thumbnails	레이어 썸네일
+	Small Thumbnails	작은 썸네일
+	Medium Thumbnails	중간 썸네일
+	Large Thumbnails	큰 썸네일
+	Clip Thumbnails to Document Bounds	썸네일을 문서 경계로 자르기
+	Set Focal Point	초점 설정
+	Blur Focal Distance	흐림 효과 초점 거리
+	Iris	조리개
+	Triangle (3)	삼각형(3)
+	Square (4)	사각형(4)
+	Pentagon (5)	오각형(5)
+	Hexagon (6)	육각형(6)
+	Heptagon (7)	칠각형(7)
+	Octagon (8)	팔각형(8)
+	Specular Highlights	반사 하이라이트
+	Faster	더 빠르게
+	More Accurate	더 정확하게

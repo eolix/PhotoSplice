@@ -2039,3 +2039,28 @@
 	Working…	ལས་ཀ་བྱེད་བཞིན།…
 	Automatic (Coated FOGRA39 if installed)	རང་འགུལ། (Coated FOGRA39 སྒྲིག་འཇུག་བྱས་ཡོད་ན།)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (ནང་འདྲེས།)
+	Layer thumbnails	ངོས་ཀྱི་མཐེབ་གཞོང་།
+	Small Thumbnails	མཐེབ་གཞོང་ཆུང་བ།
+	Medium Thumbnails	མཐེབ་གཞོང་འབྲིང་བ།
+	Large Thumbnails	མཐེབ་གཞོང་ཆེ་བ།
+	Clip Thumbnails to Layer Bounds	མཐེབ་གཞོང་ངོས་ཀྱི་མཐའ་མཚམས་སུ་གཅོད།
+	Clip Thumbnails to Document Bounds	མཐེབ་གཞོང་ཡིག་ཆའི་མཐའ་མཚམས་སུ་གཅོད།
+	Depth Map	གཏིང་ཚད་ས་ཁྲ།
+	Set Focal Point	དམིགས་ཚེག་སྒྲིག
+	Blur Focal Distance	རབ་རིབ་ཕོ་ཀལ་ཐག་ཚད།
+	Iris	འོད་སྒོ།
+	Triangle (3)	ཟུར་གསུམ (3)
+	Square (4)	གྲུ་བཞི (4)
+	Pentagon (5)	ཟུར་ལྔ (5)
+	Hexagon (6)	ཟུར་དྲུག (6)
+	Heptagon (7)	ཟུར་བདུན (7)
+	Octagon (8)	ཟུར་བརྒྱད (8)
+	Blade Curvature	འདབ་མའི་གུག་ཚད།
+	Specular Highlights	འོད་ལྡོག་དཀར་ཆ།
+	Distribution	ཁྱབ་ཚུལ།
+	Uniform	ཆ་མཉམ།
+	Gaussian	ག་ཤན།
+	Monochromatic	ཁ་དོག་གཅིག་པོ།
+	Faster	དེ་བས་མགྱོགས།
+	More Accurate	དེ་བས་ཏག་ཏག
+	Reset	སླར་སྒྲིག

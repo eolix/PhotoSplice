@@ -3967,3 +3967,20 @@ cameraData	Lens	Lens
 	GPU Memory (MB, 0 = Automatic)	GPU Belleği (MB, 0 = Otomatik)
 	Automatic (Coated FOGRA39 if installed)	Otomatik (yüklüyse Coated FOGRA39)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (yerleşik)
+	Layer thumbnails	Katman küçük resimleri
+	Small Thumbnails	Küçük Boyutlu Küçük Resimler
+	Medium Thumbnails	Orta Boyutlu Küçük Resimler
+	Large Thumbnails	Büyük Boyutlu Küçük Resimler
+	Clip Thumbnails to Document Bounds	Küçük resimleri belge sınırlarına kırp
+	Set Focal Point	Odak Noktasını Ayarla
+	Blur Focal Distance	Bulanıklık Odak Mesafesi
+	Iris	İris
+	Triangle (3)	Üçgen (3)
+	Square (4)	Kare (4)
+	Pentagon (5)	Beşgen (5)
+	Hexagon (6)	Altıgen (6)
+	Heptagon (7)	Yedigen (7)
+	Octagon (8)	Sekizgen (8)
+	Specular Highlights	Aynasal Vurgular
+	Faster	Daha Hızlı
+	More Accurate	Daha Doğru

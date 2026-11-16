@@ -4121,3 +4121,20 @@ navigator	Zoom	Zoom
 	GPU Memory (MB, 0 = Automatic)	Memoria de GPU (MB, 0 = Automático)
 	Automatic (Coated FOGRA39 if installed)	Automático (Coated FOGRA39 si está instalado)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (integrado)
+	Layer thumbnails	Miniaturas de capas
+	Small Thumbnails	Miniaturas pequeñas
+	Medium Thumbnails	Miniaturas medianas
+	Large Thumbnails	Miniaturas grandes
+	Clip Thumbnails to Document Bounds	Recortar miniaturas a los límites del documento
+	Set Focal Point	Definir punto focal
+	Blur Focal Distance	Distancia focal de desenfoque
+	Iris	Iris
+	Triangle (3)	Triángulo (3)
+	Square (4)	Cuadrado (4)
+	Pentagon (5)	Pentágono (5)
+	Hexagon (6)	Hexágono (6)
+	Heptagon (7)	Heptágono (7)
+	Octagon (8)	Octágono (8)
+	Specular Highlights	Reflejos especulares
+	Faster	Más rápida
+	More Accurate	Más precisa

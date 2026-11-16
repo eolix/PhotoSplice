@@ -4271,3 +4271,20 @@ shape	Appearance	Aspetto
 	GPU Memory (MB, 0 = Automatic)	Memoria GPU (MB, 0 = Automatico)
 	Automatic (Coated FOGRA39 if installed)	Automatico (Coated FOGRA39 se installato)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (integrato)
+	Layer thumbnails	Miniature dei livelli
+	Small Thumbnails	Miniature piccole
+	Medium Thumbnails	Miniature medie
+	Large Thumbnails	Miniature grandi
+	Clip Thumbnails to Document Bounds	Ritaglia le miniature ai limiti del documento
+	Set Focal Point	Imposta punto focale
+	Blur Focal Distance	Distanza focale sfocatura
+	Iris	Diaframma
+	Triangle (3)	Triangolo (3)
+	Square (4)	Quadrato (4)
+	Pentagon (5)	Pentagono (5)
+	Hexagon (6)	Esagono (6)
+	Heptagon (7)	Ettagono (7)
+	Octagon (8)	Ottagono (8)
+	Specular Highlights	Luci speculari
+	Faster	Più veloce
+	More Accurate	Più preciso

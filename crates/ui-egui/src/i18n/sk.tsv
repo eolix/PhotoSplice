@@ -2039,3 +2039,28 @@
 	Working…	Prebieha spracovanie…
 	Automatic (Coated FOGRA39 if installed)	Automaticky (Coated FOGRA39, ak je nainštalovaný)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (vstavaný)
+	Layer thumbnails	Miniatúry vrstiev
+	Small Thumbnails	Malé miniatúry
+	Medium Thumbnails	Stredné miniatúry
+	Large Thumbnails	Veľké miniatúry
+	Clip Thumbnails to Layer Bounds	Orezať miniatúry podľa okrajov vrstvy
+	Clip Thumbnails to Document Bounds	Orezať miniatúry podľa okrajov dokumentu
+	Depth Map	Mapa hĺbky
+	Set Focal Point	Nastaviť ohniskový bod
+	Blur Focal Distance	Ohnisková vzdialenosť rozostrenia
+	Iris	Clona
+	Triangle (3)	Trojuholník (3)
+	Square (4)	Štvorec (4)
+	Pentagon (5)	Päťuholník (5)
+	Hexagon (6)	Šesťuholník (6)
+	Heptagon (7)	Sedemuholník (7)
+	Octagon (8)	Osemuholník (8)
+	Blade Curvature	Zakrivenie lamiel
+	Specular Highlights	Zrkadlové odlesky
+	Distribution	Rozloženie
+	Uniform	Rovnomerné
+	Gaussian	Gaussovské
+	Monochromatic	Monochromatický
+	Faster	Rýchlejšie
+	More Accurate	Presnejšie
+	Reset	Obnoviť

@@ -45,5 +45,7 @@ fn inverting_a_tileless_mask_refreshes_its_thumbnail() {
     assert_eq!(mask.surface.default_pixel(), vec![0.0], "and now hides everything");
     let after = h.state().thumbs.get(&key).map(|(r, _)| *r).expect("mask thumbnail drawn");
     assert_ne!(before, after, "the thumbnail was rebuilt after Invert");
-    assert_eq!(after, surface_fingerprint(&mask.surface) ^ 200u64 << 40, "keyed on the inverted mask");
+    // The key also carries the texture's side (the thumbnail size preference, Small by default).
+    let side = crate::layer_row_ui::thumb_texture_side(Default::default()) as u64;
+    assert_eq!(after, surface_fingerprint(&mask.surface) ^ 200u64 << 40 ^ side << 48, "keyed on the inverted mask");
 }

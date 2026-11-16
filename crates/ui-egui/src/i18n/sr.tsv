@@ -4205,3 +4205,20 @@ shape	Appearance	Izgled
 	GPU Memory (MB, 0 = Automatic)	GPU memorija (MB, 0 = Automatski)
 	Automatic (Coated FOGRA39 if installed)	Аутоматски (Coated FOGRA39 ако је инсталиран)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (уграђени)
+	Layer thumbnails	Sličice slojeva
+	Small Thumbnails	Male sličice
+	Medium Thumbnails	Srednje sličice
+	Large Thumbnails	Velike sličice
+	Clip Thumbnails to Document Bounds	Iseci sličice prema granicama dokumenta
+	Set Focal Point	Postavi žižnu tačku
+	Blur Focal Distance	Žižna udaljenost zamućenja
+	Iris	Blenda
+	Triangle (3)	Trougao (3)
+	Square (4)	Kvadrat (4)
+	Pentagon (5)	Petougao (5)
+	Hexagon (6)	Šestougao (6)
+	Heptagon (7)	Sedmougao (7)
+	Octagon (8)	Osmougao (8)
+	Specular Highlights	Spekularni odsjaji
+	Faster	Brže
+	More Accurate	Preciznije

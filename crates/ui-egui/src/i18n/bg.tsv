@@ -2039,3 +2039,28 @@
 	Working…	Обработка…
 	Automatic (Coated FOGRA39 if installed)	Автоматично (Coated FOGRA39, ако е инсталиран)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (вграден)
+	Layer thumbnails	Миниатюри на слоевете
+	Small Thumbnails	Малки миниатюри
+	Medium Thumbnails	Средни миниатюри
+	Large Thumbnails	Големи миниатюри
+	Clip Thumbnails to Layer Bounds	Изрязване на миниатюрите до границите на слоя
+	Clip Thumbnails to Document Bounds	Изрязване на миниатюрите до границите на документа
+	Depth Map	Карта на дълбочината
+	Set Focal Point	Задаване на фокусна точка
+	Blur Focal Distance	Фокусно разстояние на замъгляването
+	Iris	Бленда
+	Triangle (3)	Триъгълник (3)
+	Square (4)	Квадрат (4)
+	Pentagon (5)	Петоъгълник (5)
+	Hexagon (6)	Шестоъгълник (6)
+	Heptagon (7)	Седмоъгълник (7)
+	Octagon (8)	Осмоъгълник (8)
+	Blade Curvature	Кривина на ламелите
+	Specular Highlights	Огледални отблясъци
+	Distribution	Разпределение
+	Uniform	Равномерно
+	Gaussian	Гаусово
+	Monochromatic	Едноцветен
+	Faster	По-бързо
+	More Accurate	По-точно
+	Reset	Нулиране

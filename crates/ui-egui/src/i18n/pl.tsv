@@ -3770,3 +3770,20 @@ curves	Smooth	Wygładź
 	GPU Memory (MB, 0 = Automatic)	Pamięć GPU (MB, 0 = Automatycznie)
 	Automatic (Coated FOGRA39 if installed)	Automatycznie (Coated FOGRA39, jeśli jest zainstalowany)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (wbudowany)
+	Layer thumbnails	Miniatury warstw
+	Small Thumbnails	Małe miniatury
+	Medium Thumbnails	Średnie miniatury
+	Large Thumbnails	Duże miniatury
+	Clip Thumbnails to Document Bounds	Przycinaj miniatury do granic dokumentu
+	Set Focal Point	Ustaw punkt ogniskowania
+	Blur Focal Distance	Odległość ogniskowania rozmycia
+	Iris	Przysłona
+	Triangle (3)	Trójkąt (3)
+	Square (4)	Kwadrat (4)
+	Pentagon (5)	Pięciokąt (5)
+	Hexagon (6)	Sześciokąt (6)
+	Heptagon (7)	Siedmiokąt (7)
+	Octagon (8)	Ośmiokąt (8)
+	Specular Highlights	Odblaski zwierciadlane
+	Faster	Szybciej
+	More Accurate	Dokładniej

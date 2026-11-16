@@ -3616,3 +3616,20 @@ curves	Smooth	Làm mượt
 	GPU Memory (MB, 0 = Automatic)	Bộ nhớ GPU (MB, 0 = Tự động)
 	Automatic (Coated FOGRA39 if installed)	Tự động (Coated FOGRA39 nếu đã cài đặt)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (tích hợp sẵn)
+	Layer thumbnails	Hình thu nhỏ của lớp
+	Small Thumbnails	Hình thu nhỏ cỡ nhỏ
+	Medium Thumbnails	Hình thu nhỏ cỡ trung bình
+	Large Thumbnails	Hình thu nhỏ cỡ lớn
+	Clip Thumbnails to Document Bounds	Cắt hình thu nhỏ theo biên của tài liệu
+	Set Focal Point	Đặt điểm lấy nét
+	Blur Focal Distance	Khoảng cách lấy nét làm mờ
+	Iris	Mống mắt
+	Triangle (3)	Tam giác (3)
+	Square (4)	Hình vuông (4)
+	Pentagon (5)	Ngũ giác (5)
+	Hexagon (6)	Lục giác (6)
+	Heptagon (7)	Thất giác (7)
+	Octagon (8)	Bát giác (8)
+	Specular Highlights	Điểm sáng phản chiếu
+	Faster	Nhanh hơn
+	More Accurate	Chính xác hơn

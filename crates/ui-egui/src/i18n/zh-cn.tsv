@@ -2802,3 +2802,25 @@ curves	Smooth	平滑
 	GPU Memory (MB, 0 = Automatic)	GPU 内存（MB，0 = 自动）
 	Automatic (Coated FOGRA39 if installed)	自动（如已安装则为 Coated FOGRA39）
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK（内置）
+	Layer thumbnails	图层缩略图
+	Small Thumbnails	小缩略图
+	Medium Thumbnails	中缩略图
+	Large Thumbnails	大缩略图
+	Clip Thumbnails to Document Bounds	将缩略图裁剪到文档边界
+	Depth Map	深度映射
+	Set Focal Point	设置焦点
+	Blur Focal Distance	模糊焦距
+	Iris	光圈
+	Triangle (3)	三角形 (3)
+	Square (4)	正方形 (4)
+	Pentagon (5)	五边形 (5)
+	Hexagon (6)	六边形 (6)
+	Heptagon (7)	七边形 (7)
+	Octagon (8)	八边形 (8)
+	Blade Curvature	叶片弯度
+	Specular Highlights	镜面高光
+	Distribution	分布
+	Uniform	平均
+	Monochromatic	单色
+	Faster	更快
+	More Accurate	更加准确

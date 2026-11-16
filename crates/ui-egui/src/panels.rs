@@ -2485,8 +2485,8 @@ fn layer_row(
 ) -> Rect {
     let selected = row.selected;
     let t = Tokens::get(ctx);
-    // Photoshop's default (medium) thumbnails: 32 pt rows.
-    let row_h = if t.pro { 32.0 } else { 46.0 };
+    // Rows follow the thumbnail size (Small / Medium / Large Thumbnails, the layer menu).
+    let (row_h, base_ts) = crate::layer_row_ui::row_metrics_for(l, app.session.prefs().interface.layer_thumbnails, t.pro);
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click_and_drag());
     // A drag from a mask's thumbnail drags that mask, not the layer (#3113, #3119).
     let mask_drag = starts_mask_drag(ctx, l, &resp);
@@ -2567,7 +2567,7 @@ fn layer_row(
         + if l.is_group() { crate::layer_tree_ui::TRIANGLE_W } else { 0.0 }
         + if l.clipped { 12.0 } else { 0.0 }
         + crate::layer_row_ui::reserved_width(l);
-    let ts = crate::mask_thumbs_ui::thumb_size(l, if t.pro { 24.0 } else { 34.0 }, rect.width() - others);
+    let ts = crate::mask_thumbs_ui::thumb_size(l, base_ts, rect.width() - others);
     let fixed = others + ts + 6.0 + crate::mask_thumbs_ui::width(l, ts);
     x += 28.0 + crate::layer_row_ui::indent(depth, rect.width(), fixed);
     let toggled = crate::layer_tree_ui::disclosure(ui, rect, &mut x, l, actions);

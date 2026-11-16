@@ -3755,3 +3755,20 @@ navigator	Zoom	Zvětšení
 	GPU Memory (MB, 0 = Automatic)	Paměť GPU (MB, 0 = Automaticky)
 	Automatic (Coated FOGRA39 if installed)	Automaticky (Coated FOGRA39, je-li nainstalován)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (vestavěný)
+	Layer thumbnails	Miniatury vrstev
+	Small Thumbnails	Malé miniatury
+	Medium Thumbnails	Střední miniatury
+	Large Thumbnails	Velké miniatury
+	Clip Thumbnails to Document Bounds	Oříznout miniatury na hranice dokumentu
+	Set Focal Point	Nastavit ohnisko
+	Blur Focal Distance	Ohnisková vzdálenost rozostření
+	Iris	Clona
+	Triangle (3)	Trojúhelník (3)
+	Square (4)	Čtverec (4)
+	Pentagon (5)	Pětiúhelník (5)
+	Hexagon (6)	Šestiúhelník (6)
+	Heptagon (7)	Sedmiúhelník (7)
+	Octagon (8)	Osmiúhelník (8)
+	Specular Highlights	Zrcadlová světla
+	Faster	Rychlejší
+	More Accurate	Přesnější
