@@ -3968,9 +3968,9 @@ cameraData	Lens	Lens
 	Automatic (Coated FOGRA39 if installed)	Otomatik (yüklüyse Coated FOGRA39)
 	PhotoSplice Coated CMYK (built-in)	PhotoSplice Coated CMYK (yerleşik)
 	Layer thumbnails	Katman küçük resimleri
-	Small Thumbnails	Küçük Boyutlu Küçük Resimler
-	Medium Thumbnails	Orta Boyutlu Küçük Resimler
-	Large Thumbnails	Büyük Boyutlu Küçük Resimler
+	Small Thumbnails	Küçük resimler: Küçük
+	Medium Thumbnails	Küçük resimler: Orta
+	Large Thumbnails	Küçük resimler: Büyük
 	Clip Thumbnails to Document Bounds	Küçük resimleri belge sınırlarına kırp
 	Set Focal Point	Odak Noktasını Ayarla
 	Blur Focal Distance	Bulanıklık Odak Mesafesi
