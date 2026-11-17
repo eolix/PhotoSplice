@@ -721,7 +721,7 @@ pub fn hue_range_tables(ranges: &[HueRange; 6]) -> [Vec<f32>; 3] {
         let deg = k as f32 / (LUT_SIZE - 1) as f32 * 360.0;
         ranges.iter().filter(|r| !r.is_neutral()).fold([0.0f32; 3], |acc, r| {
             let w = r.weight(deg);
-            let ds = saturation_excess(r.saturation / 100.0).min(RANGE_SATURATION_MAX);
+            let ds = range_saturation_excess(r.saturation / 100.0).min(RANGE_SATURATION_MAX);
             [acc[0] + w * r.hue, (acc[1] + w * ds).max(-1.0), (acc[2] + w * r.lightness / 100.0).clamp(-1.0, 1.0)]
         })
     };
@@ -733,6 +733,16 @@ pub fn hue_range_tables(ranges: &[HueRange; 6]) -> [Vec<f32>; 3] {
 /// huesaturation_rgb: a +100 % range 9–22 % into its falloff, under a −97 % master, leaves
 /// the ratios of a 135–143 excess at every hue, where 999 kept the colours whole).
 pub const RANGE_SATURATION_MAX: f32 = 135.0;
+
+/// A colour range's saturation slider (−1..=1) as its factor's excess at full weight: a raise is
+/// `s / (1 − s + 0.0055)`, a little short of the master's `s / (1 − s)` (temp kit 19, one range
+/// with 60° falloffs, 16 bits: excess 2.92, 8.43, 12.41 and 27.3 at +75, +90, +93 and +97 %,
+/// the same at every weight; 0.6–1.4 % of pixels off → 0, psd-tools huesaturation_saturation_rgb
+/// 2.3 → 0.08 %). Cuts are the master's.
+fn range_saturation_excess(s: f32) -> f32 {
+    let s = if s.is_finite() { s.clamp(-1.0, 1.0) } else { 0.0 };
+    if s > 0.0 { s / (1.0 - s + 0.0055) } else { saturation_excess(s) }
+}
 
 /// A saturation slider (−1..=1) as its factor's excess `k − 1` ([`hue_saturation_scale`]).
 fn saturation_excess(s: f32) -> f32 {
@@ -2713,7 +2723,7 @@ mod tone_tests {
         r[5] = HueRange { hue: 0.0, saturation: 49.0, lightness: 0.0, bounds: [100.0, 110.0, 170.0, 180.0] };
         let t = hue_range_tables(&r);
         let at = |row: usize| lut(&t[row], 140.0 / 360.0);
-        assert!((at(1) - (-1.0 + 0.49 / 0.51)).abs() < 1e-4, "{}", at(1));
+        assert!((at(1) - (-1.0 + range_saturation_excess(0.49))).abs() < 1e-4, "{}", at(1));
         assert!((at(2) + 1.0).abs() < 1e-6, "{}", at(2));
         r[5].saturation = 100.0;
         assert!((lut(&hue_range_tables(&r)[1], 140.0 / 360.0) - (RANGE_SATURATION_MAX - 1.0)).abs() < 1e-2);
