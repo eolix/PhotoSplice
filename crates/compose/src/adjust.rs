@@ -1077,6 +1077,14 @@ pub fn color_balance_luts(shadows: &[f32; 3], midtones: &[f32; 3], highlights: &
                 others.iter().for_each(|&k| white[k] -= hi[ch] / 255.0);
             }
         }
+        // What all three channels share cancels too, as for the midtones: two highlights cuts
+        // (or two shadows raises) move the third channel's point only (temp kit 21, Preserve
+        // Luminosity: highlights green −20 blue −20 98 → 0 % of pixels off, all three −20 40/255
+        // → exact, shadows raises alike; one slider, or two of opposite sign, are unchanged).
+        for points in [&mut black, &mut white] {
+            let common = points.iter().copied().fold(f32::MAX, f32::min);
+            points.iter_mut().for_each(|p| *p -= common);
+        }
         let shift = (mids.iter().copied().fold(f32::MIN, f32::max) + mids.iter().copied().fold(f32::MAX, f32::min)) / 2.0;
         mids.map(|s| (s - shift) / 100.0)
     } else {
@@ -1139,7 +1147,15 @@ pub fn vibrance_tables(vibrance: f32) -> VibranceTables {
                 let (lo_v, lo) = if pos == 4 && v > 0.0 { (0.0, ident) } else if pos == 0 { (VIB_V[0], node(0, bi, ki)) } else { (VIB_V[pos - 1], node(pos - 1, bi, ki)) };
                 let (hi_v, hi) = if v < 0.0 && pos == 4 { (0.0, ident) } else { (VIB_V[pos], node(pos, bi, ki)) };
                 let t = if hi_v > lo_v { ((v - lo_v) / (hi_v - lo_v)).clamp(0.0, 1.0) } else { 1.0 };
-                [lo[0] + (hi[0] - lo[0]) * t, lo[1] + (hi[1] - lo[1]) * t]
+                // The darkest share moves linearly in light, as the darkest channel over the brightest
+                // decoded at the row's brightness (temp kit 21: pure red's darkest channel at −6, −20,
+                // −50 and −100 is 0.0025 × |v| of the brightest in linear light, rows of 127 alike; the
+                // encoded share between the −25 node and none left −6 up to 16/255 short, 37.5 → 0 % of
+                // pixels off, psd-tools fill_adjustments' Vibrance 23 → 0 %).
+                let bb = VIB_B[bi] / 255.0;
+                let lin = |sh: f32| photosplice_color::convert::srgb_to_linear(sh * bb);
+                let share = photosplice_color::convert::linear_to_srgb((lin(lo[1]) + (lin(hi[1]) - lin(lo[1])) * t).max(0.0)) / bb;
+                [lo[0] + (hi[0] - lo[0]) * t, share]
             })
         })
     })
