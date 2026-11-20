@@ -1068,6 +1068,11 @@ fn fs_lerp(in: VOut) -> @location(0) vec4<f32> {
     let a = textureLoad(tex_a, p, 0);
     let b = textureLoad(tex_b, p, 0);
     if ((op.flags & F_QUANT) != 0u) {
+        // p0.y: only the colour of opaque pixels (compose::quantize_opaque).
+        if (op.p0.y > 0.5) {
+            if (a.a < 1.0) { return a; }
+            return vec4(floor(a.rgb * op.p0.x + 0.5) / op.p0.x, a.a);
+        }
         return floor(a * op.p0.x + 0.5) / op.p0.x;
     }
     if ((op.flags & F_COVER_MIX) != 0u) {

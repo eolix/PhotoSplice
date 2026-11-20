@@ -110,7 +110,8 @@ fn parity(depth: u32, background: &str, extra: Value, select: bool, tol: f32) {
 fn live_gradient_renders_like_the_classic_gradient() {
     let stops = json!({"stops": [[0, "#ff2000"], [0.4, "#20c040"], [1, "#1010e0"]], "dither": false});
     parity(32, "transparent", stops.clone(), false, 1e-4);
-    parity(8, "transparent", stops.clone(), false, 0.51 / 255.0);
+    // 8 bits: both are stored in whole levels, so samples a hair apart can round to neighbours.
+    parity(8, "transparent", stops.clone(), false, 1.01 / 255.0);
     parity(8, "white", json!({"stops": [[0, "#ff2000"], [1, "#1010e0"]], "reverse": true, "dither": true}), true, 1.01 / 255.0);
     parity(16, "transparent", json!({"gradient": "Foreground to Transparent", "dither": true}), false, 1.01 / 255.0);
     parity(32, "transparent", json!({"gradient": "Black, White", "transparency": [[0, 65], [1, 0]], "dither": false}), false, 1e-4);

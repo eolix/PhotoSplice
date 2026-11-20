@@ -185,6 +185,10 @@ fn worst_diff(cpu: &[[f32; 4]], gpu: &[[f32; 4]]) -> (f32, usize) {
 /// GPU (whole textures, then pages) vs CPU over `rect`: Err with the worst pixel if over the
 /// tolerance, else the stats of the unpaged render.
 fn diff_rect(g: &mut Gpu, doc: &Document, rect: Rect, what: &str) -> Result<photosplice_gpu::Stats, String> {
+    diff_rect_within(g, doc, rect, what, TOL)
+}
+
+fn diff_rect_within(g: &mut Gpu, doc: &Document, rect: Rect, what: &str, tol: f32) -> Result<photosplice_gpu::Stats, String> {
     let cpu = photosplice_compose::render(doc, rect);
     let mut first = None;
     for (label, comp) in [("", &mut g.comp), (" (paged)", &mut g.paged)] {
@@ -192,7 +196,7 @@ fn diff_rect(g: &mut Gpu, doc: &Document, rect: Rect, what: &str) -> Result<phot
         let worst = worst_diff(&cpu.px, &out);
         let w = rect.width() as usize;
         let (x, y) = (rect.x0 + (worst.1 % w) as i32, rect.y0 + (worst.1 / w) as i32);
-        if worst.0 > TOL {
+        if worst.0 > tol {
             return Err(format!("{what}{label}: max diff {:.2}/255 at ({x},{y}): cpu {:?} gpu {:?}", worst.0 * 255.0, cpu.px[worst.1], out[worst.1]));
         }
         first.get_or_insert(stats);
@@ -2909,6 +2913,15 @@ fn unbuildable_pipelines_are_an_error_not_a_panic() {
 /// A document several pages wide under [`PAGED_LIMIT`]: pixel layers crossing page borders (one
 /// masked, one off-canvas), a big effect layer whose region exceeds the limit (maps built per
 /// page cell), a type layer with a shadow, an adjustment, a clipped group and a gradient fill.
+/// [`big_doc`]'s tolerance: an 8-bit document rounds every layer's result to its depth, and its
+/// stack of effect-heavy layers rounds sub-level CPU/GPU differences twice, so a pixel can land
+/// two levels apart (compose::quantize_opaque).
+const BIG_TOL: f32 = 2.0 / 255.0 + 4.0 * f32::EPSILON;
+
+fn check_big(g: &mut Gpu, doc: &Document, what: &str) {
+    diff_rect_within(g, doc, doc.bounds(), what, BIG_TOL).unwrap_or_else(|e| panic!("{e}"));
+}
+
 fn big_doc() -> Document {
     let (w, h) = (1100, 900);
     let mut d = fx_doc(w, h, SampleType::U8);
@@ -2952,18 +2965,18 @@ fn documents_larger_than_the_texture_limit() {
     let mut d = big_doc();
     assert!(g.paged.supports(&d).is_ok());
     // Every pass sees page borders, and effect maps and blurs crossing them.
-    check(&mut g, &d, "big document");
+    check_big(&mut g, &d, "big document");
     let s = photosplice_gpu::render_to_vec_stats(&mut g.paged, &g.device, &g.queue, &d, d.bounds()).unwrap().1;
     assert!(s.cells >= 20 && s.chunks == s.cells, "{s:?}");
     // A viewport off the page grid covers only its cells.
     let view = Rect::new(300, 330, 790, 610);
-    diff_rect(&mut g, &d, view, "viewport").unwrap_or_else(|e| panic!("{e}"));
+    diff_rect_within(&mut g, &d, view, "viewport", BIG_TOL).unwrap_or_else(|e| panic!("{e}"));
     let s = photosplice_gpu::render_to_vec_stats(&mut g.paged, &g.device, &g.queue, &d, view).unwrap().1;
     assert_eq!(s.cells, 6, "{s:?}");
     // A dab across a page corner on the effect layer, and an edit elsewhere.
     d.layers[3].surface_mut().unwrap().fill_rect(Rect::new(500, 490, 530, 530), &[0.1, 0.1, 0.9, 1.0]);
     d.layers[2].surface_mut().unwrap().fill_rect(Rect::new(250, 250, 270, 270), &[0.0, 0.0, 0.0, 0.0]);
-    check(&mut g, &d, "after dabs");
+    check_big(&mut g, &d, "after dabs");
     let s = photosplice_gpu::render_to_vec_stats(&mut g.paged, &g.device, &g.queue, &d, d.bounds()).unwrap().1;
     assert_eq!((s.tiles_uploaded, s.fx_shapes), (0, 0), "nothing changed since the last render: {s:?}");
 }
@@ -2973,7 +2986,7 @@ fn pages_are_evicted_under_the_budget() {
     let _gamma = TEXT_GAMMA.lock().unwrap_or_else(|e| e.into_inner());
     let Some(mut g) = gpu() else { return };
     let mut d = big_doc();
-    check(&mut g, &d, "warm");
+    check_big(&mut g, &d, "warm");
     let all = g.paged.resident_bytes();
     // A budget of one page: everything but the cell being drawn is evicted as the render goes.
     let page = u64::from(g.paged.page_size()).pow(2) * 4;
@@ -2982,14 +2995,14 @@ fn pages_are_evicted_under_the_budget() {
         let cpu = photosplice_compose::flatten(&d);
         let (out, s) = photosplice_gpu::render_to_vec_stats(&mut g.paged, &g.device, &g.queue, &d, d.bounds()).unwrap();
         let worst = worst_diff(&cpu.px, &out);
-        assert!(worst.0 <= TOL, "round {round}: max diff {:.2}/255 at {}", worst.0 * 255.0, worst.1);
+        assert!(worst.0 <= BIG_TOL, "round {round}: max diff {:.2}/255 at {}", worst.0 * 255.0, worst.1);
         assert!(s.evicted > 0, "round {round}: {s:?}");
         assert!(g.paged.resident_bytes() < all / 4, "{} of {all}", g.paged.resident_bytes());
         // Evicted pages come back with the edits made meanwhile.
         d.layers[2].surface_mut().unwrap().fill_rect(Rect::new(10 + round * 300, 300, 60 + round * 300, 340), &[0.9, 0.9, 0.1, 1.0]);
         d.layers[3].surface_mut().unwrap().fill_rect(Rect::new(200 + round * 200, 420, 240 + round * 200, 470), &[0.0, 0.0, 0.0, 0.0]);
     }
-    check(&mut g, &d, "after eviction");
+    check_big(&mut g, &d, "after eviction");
 }
 
 #[test]
@@ -3017,7 +3030,7 @@ fn the_focused_view_stays_resident_after_a_full_refresh() {
         let (out, s) = photosplice_gpu::render_to_vec_stats(&mut comp, &g.device, &g.queue, &d, view).unwrap();
         assert_eq!(s.tiles_uploaded, 0, "{s:?}");
         let cpu = photosplice_compose::render(&d, view);
-        assert!(worst_diff(&cpu.px, &out).0 <= TOL);
+        assert!(worst_diff(&cpu.px, &out).0 <= BIG_TOL);
     }
 }
 

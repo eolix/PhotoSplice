@@ -279,7 +279,9 @@ mod tests {
                             assert!(proxy_faithful(&doc));
                             let coverage = if inverted { 1.0 - density } else { 1.0 };
                             let coverage = if feather > 0.0 { u16_coverage(coverage) } else { coverage };
-                            let expected = [coverage, 0.0, 1.0 - coverage, 1.0];
+                            // Integer documents store each layer's result at their depth.
+                            let stored = |v: f32| crate::adjustment_quantum(depth).map_or(v, |q| (v * q + 0.5).floor() / q);
+                            let expected = [stored(coverage), 0.0, stored(1.0 - coverage), 1.0];
                             let full = crate::render(&doc, doc.bounds());
                             for pixel in &full.px {
                                 assert!(pixel.iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-6), "{depth:?} {inverted} {density} {feather}: {pixel:?}");

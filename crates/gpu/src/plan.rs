@@ -577,6 +577,17 @@ impl<'a> Planner<'a> {
             let clipped = &layers[i + 1..j];
             if base.visible {
                 backdrop = self.layer(base, clipped, backdrop)?;
+                if let (false, Some(q)) = (matches!(base.content, LayerContent::Adjustment(_)), photosplice_compose::adjustment_quantum(self.cx.depth))
+                    && self.cx.mode != photosplice_color::ColorMode::Lab
+                {
+                    // compose::quantize_opaque: every layer's result is rounded to the document's
+                    // depth where it is opaque.
+                    let mut p = Pass::new(Kernel::Lerp, 0);
+                    p.a = Some(backdrop);
+                    p.flags = F_QUANT;
+                    p.params[0] = [q, 1.0, 0.0, 0.0];
+                    backdrop = self.emit(p);
+                }
                 if let (LayerContent::Adjustment(_), Some(q)) = (&base.content, photosplice_compose::adjustment_quantum(self.cx.depth)) {
                     // compose: adjustment results are rounded to the document's depth.
                     let mut p = Pass::new(Kernel::Lerp, 0);
