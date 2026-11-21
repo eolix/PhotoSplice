@@ -205,7 +205,10 @@ fn blend_channel(mode: i32, cb: f32, cs: f32) -> f32 {
             return max(cb, 2.0 * cs - 1.0);
         }
         case 19: {                                              // HardMix (Photoshop)
-            return select(0.0, 1.0, vivid_light_generic(cb, cs) >= 0.5 - 1e-6);
+            // compose::psblend::hard_mix_ps: reaching the middle on the burn side, passing it on
+            // the dodge side.
+            let v = vivid_light_generic(cb, cs);
+            return select(0.0, 1.0, (cs <= 0.5 && v >= 0.5 - 1e-6) || v > 0.5 + 1e-6);
         }
         case 20: { return abs(cb - cs); }                       // Difference
         case 21: { return cb + cs - 2.0 * cb * cs; }            // Exclusion

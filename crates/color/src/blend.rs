@@ -223,7 +223,10 @@ fn channel(mode: BlendMode, cb: f32, cs: f32, hi: f32) -> f32 {
             }
         }
         BlendMode::HardMix => {
-            if vivid_light_hard_mix(cb, cs) >= 0.5 - 1e-6 {
+            // Reaching the middle on the burn side, passing it on the dodge side (Reference:
+            // source + backdrop = 1 is white for sources up to ½, black above).
+            let v = vivid_light_hard_mix(cb, cs);
+            if (cs <= 0.5 && v >= 0.5 - 1e-6) || v > 0.5 + 1e-6 {
                 1.0
             } else {
                 0.0
@@ -613,6 +616,8 @@ mod tests {
         assert_eq!(blend_channel(BlendMode::HardMix, 1.0 - 1e-5, 0.0), 1.0);
         assert_eq!(blend_channel(BlendMode::HardMix, 1e-5, 1.0), 0.0);
         assert_eq!(blend_channel(BlendMode::HardMix, 0.6, 0.4), 1.0);
+        assert_eq!(blend_channel(BlendMode::HardMix, 0.4, 0.6), 0.0);
+        assert_eq!(blend_channel(BlendMode::HardMix, 0.4, 0.61), 1.0);
         assert_eq!(blend_channel(BlendMode::HardMix, 0.6, 0.3), 0.0);
     }
 
