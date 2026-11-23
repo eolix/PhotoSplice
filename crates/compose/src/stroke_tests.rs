@@ -84,6 +84,8 @@ fn split_cache_keeps_same_shape_separate_at_each_document_depth() {
         let mut d = Document::with_background("t", Size::new(64, 8), ColorMode::Rgb, depth, Color::WHITE);
         d.layers.push(layer.clone());
         let expected = photosplice_vector::render_shape(&sh, PixelFormat::RGBA8.with_sample(depth), canvas).pixel(17, 4)[0];
+        // An integer document stores the composite at its depth (`quantize_opaque`).
+        let expected = crate::adjustment_quantum(depth).map_or(expected, |q| (expected * q + 0.5).floor() / q);
         let actual = px(&d, 17, 4)[0];
         assert!((actual - expected).abs() < 1e-6, "{depth:?}: got {actual}, expected {expected}; split cache must include document depth");
     }

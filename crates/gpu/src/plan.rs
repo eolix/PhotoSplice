@@ -472,6 +472,10 @@ pub const F_TEXT_GAMMA: u32 = 8192;
 /// Lerp: A towards B by C's alpha, premultiplied, where C covers more than `INSIDE_EPS`
 /// (emboss styles' two shaded halves).
 pub const F_COVER_MIX: u32 = 2097152;
+/// The pass finishing a layer rounds its opaque colour to the document's depth
+/// (compose::quantize_opaque): 8 bits, or 16 bits (32768 levels).
+pub const F_ROUND8: u32 = 4194304;
+pub const F_ROUND16: u32 = 8388608;
 
 /// A layer's Blend If ranges for `F_BLEND_IF`: Gray, then the colour channels, each as
 /// [this layer, underlying layer]; every range as two floats, `black low × 256 + black high` and
@@ -576,17 +580,42 @@ impl<'a> Planner<'a> {
             }
             let clipped = &layers[i + 1..j];
             if base.visible {
+                let passes_before = self.passes.len();
                 backdrop = self.layer(base, clipped, backdrop)?;
                 if let (false, Some(q)) = (matches!(base.content, LayerContent::Adjustment(_)), photosplice_compose::adjustment_quantum(self.cx.depth))
                     && self.cx.mode != photosplice_color::ColorMode::Lab
                 {
                     // compose::quantize_opaque: every layer's result is rounded to the document's
-                    // depth where it is opaque.
-                    let mut p = Pass::new(Kernel::Lerp, 0);
-                    p.a = Some(backdrop);
-                    p.flags = F_QUANT;
-                    p.params[0] = [q, 1.0, 0.0, 0.0];
-                    backdrop = self.emit(p);
+                    // depth where it is opaque, by the pass that finished the layer when it can
+                    // (no extra pass), else by a pass of its own.
+                    let bit = if q < 256.0 { F_ROUND8 } else { F_ROUND16 };
+                    let rounds = |p: &Pass<'_>| {
+                        matches!(p.kernel, Kernel::Blend | Kernel::Atop | Kernel::AdjMix | Kernel::Lerp | Kernel::FxMerge | Kernel::FxStrokeEnd)
+                    };
+                    // The pass that finished the layer: the last one, or for a layer composited
+                    // over its bounds only, the one whose result the last copied into place.
+                    let n = self.passes.len();
+                    let finisher = match self.passes.last() {
+                        Some(last) if last.dst == backdrop && rounds(last) => n.checked_sub(1),
+                        Some(last) if last.dst == backdrop && last.kernel == Kernel::CopyRect => last
+                            .a
+                            .and_then(|src| self.passes.iter().rposition(|p| p.dst == src))
+                            .filter(|&i| self.passes.get(i).is_some_and(rounds)),
+                        _ => None,
+                    };
+                    // A layer that drew nothing (no pass) leaves the backdrop as rounded as it was.
+                    let fused = self.passes.len() == passes_before
+                        || finisher.and_then(|i| self.passes.get_mut(i)).is_some_and(|p| {
+                            p.flags |= bit;
+                            true
+                        });
+                    if !fused {
+                        let mut p = Pass::new(Kernel::Lerp, 0);
+                        p.a = Some(backdrop);
+                        p.flags = F_QUANT;
+                        p.params[0] = [q, 1.0, 0.0, 0.0];
+                        backdrop = self.emit(p);
+                    }
                 }
                 if let (LayerContent::Adjustment(_), Some(q)) = (&base.content, photosplice_compose::adjustment_quantum(self.cx.depth)) {
                     // compose: adjustment results are rounded to the document's depth.
