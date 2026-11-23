@@ -1167,7 +1167,8 @@ pub fn glow_gradient_gain(g: &Glow) -> f32 {
 
 /// The gradient a glow colours with. A gradient of more than two colour stops is sampled at
 /// `K = 2 · ⌊size · range⌋` points, at the centres of `K` equal steps, then interpolated
-/// linearly between them and held past the first and last, read a level further along: the
+/// linearly between them (from the start at half slope, see below) and held past the last, read
+/// a level further along: the
 /// gradient's corners round over and its ends never show (temp kit 12, Smoothness 0 on a
 /// concave L and a disc: red-yellow-blue at size 10 peaks at 244, 230, 11, not yellow, and where
 /// the glow is saturated stays 0.5/K along, green 26, 13 and 7 at sizes 10, 20 and 40; ranges
@@ -1186,16 +1187,19 @@ pub fn glow_gradient<'a>(g: &Glow, gradient: &'a Gradient) -> std::borrow::Cow<'
     let samples: Vec<[f32; 4]> = (0..k).map(|j| prepared.sample((j as f32 + 0.5) / k as f32)).collect();
     let Some(last) = samples.last().copied() else { return Cow::Borrowed(gradient) };
     let shift = 1.0 / 255.0;
-    // The sampled gradient at `u` (sample `j` sits at (j + ½) / K).
-    let at = |u: f32| -> [f32; 4] {
-        let x = (u * k as f32 - 0.5).clamp(0.0, (k - 1) as f32);
-        let i = (x.floor() as usize).min(k - 1);
-        let (a, b) = (samples.get(i).copied().unwrap_or(last), samples.get(i + 1).copied().unwrap_or(last));
-        let f = x - i as f32;
-        std::array::from_fn(|c| a[c] + (b[c] - a[c]) * f)
-    };
-    let mut points = vec![(0.0, at(shift))];
-    points.extend(samples.iter().enumerate().map(|(j, c)| ((j as f32 + 0.5) / k as f32 - shift, *c)).filter(|(t, _)| *t > 0.0 && *t < 1.0));
+    // From the glow's full strength (the gradient's start) the colour rises at half the slope to
+    // the middle of the first two samples, one step along, then follows the samples (temp kit
+    // 12 red-yellow-blue against kit 13's strength maps: green 14, 20 and 23 at 0.2, 2.6 and 3.7 %
+    // along at size 20, where the first sample was held flat at 13; the outer-glow-gradient
+    // oracle's worst 6 → 4/255).
+    let first = samples.first().copied().unwrap_or(last);
+    let second = samples.get(1).copied().unwrap_or(first);
+    let mut points = vec![(0.0, first)];
+    let step = 1.0 / k as f32 - shift;
+    if step > 0.0 {
+        points.push((step, std::array::from_fn(|c| (first[c] + second[c]) / 2.0)));
+    }
+    points.extend(samples.iter().enumerate().skip(1).map(|(j, c)| ((j as f32 + 0.5) / k as f32 - shift, *c)).filter(|(t, _)| *t > step.max(0.0) && *t < 1.0));
     points.push((1.0, last));
     Cow::Owned(Gradient {
         stops: points.iter().map(|(t, c)| (*t, photosplice_doc::Color::rgb(c[0], c[1], c[2]))).collect(),
