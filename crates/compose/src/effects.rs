@@ -795,20 +795,24 @@ pub fn glow_lut(g: &Glow) -> Option<Vec<f32>> {
 /// The bevel's Contour element as a height transfer over the Range. The height is first taken
 /// as a place `u` on the style's own profile, 0 at its foot and 1 at its top: a Smooth inner bevel
 /// runs from ½ at the edge to 1 (`u = 2h − 1`), a Smooth outer one from 0 to ½ at the edge
-/// (`u = 2h`), Smooth emboss styles and every Chisel profile from 0 to 1 (`u = h`). A Range above
-/// the default 50 % spans the profile over the top of the contour, `contour((u − 1 + 2·range) /
-/// (2·range))`; at 50 % and below the contour spans the whole profile. Reference corpus
+/// (`u = 2h`), Smooth emboss styles and every Chisel profile from 0 to 1 (`u = h`). The Range
+/// scales the contour by `0.5 / range` about the profile's top for inner bevels,
+/// `contour(1 − (1 − u)·0.5/range)`, about its foot for outer bevels, `contour(u·0.5/range)`, and
+/// not at all for the emboss styles (temp kit 26, the Ring contour at 25, 40 and 70 % on every
+/// style and technique: Emboss and Pillow exact at all three, which a 70 % range had put 21–26 %
+/// of pixels off; a Smooth inner bevel at 40 % 12.8 → 0 %; outer bevels 12–33 → 2–9 %; Chisel Hard
+/// inner bevels stay 11–14 % off, unexplained). Reference corpus
 /// bevel-inner-contour-ramp-peak (50 %): lit for 4 px from the edge, shaded to 14 px (the size), as
 /// a ramp peak over the inner bevel gives; bevel-inner-contour-double-ring-aa-r70 (70 %): the rings
 /// sit where the formula puts them (a range of ±0.03 around it doubles the pixels off);
 /// bevel-pillow-chisel-hard-gloss-and-contour (40 %): the contour spans both halves of the pillow,
 /// out past the edge, as at 50 % (stretched over the top 80 % of the profile as the formula has it,
-/// its bands sat a pixel inside: 7.34 % of pixels off, worst 0.75 → 0 %). Whether a range below
-/// 50 % does anything else no oracle tells yet.
+/// its bands sat a pixel inside: 7.34 % of pixels off, worst 0.75 → 0 %).
 pub fn bevel_contour_lut(c: &photosplice_doc::effects::BevelContour, b: &Bevel) -> Vec<f32> {
     let base = contour_lut(&c.contour);
     let r = if c.range.is_finite() { c.range.clamp(0.01, 1.0) } else { 1.0 };
-    let (scale, offset) = match (b.technique == BevelTechnique::Smooth, bevel_geom(b).paint) {
+    let paint = bevel_geom(b).paint;
+    let (scale, offset) = match (b.technique == BevelTechnique::Smooth, paint) {
         (true, BevelPaint::Inner | BevelPaint::Stroke) => (2.0, -1.0),
         (true, BevelPaint::Outer) => (2.0, 0.0),
         _ => (1.0, 0.0),
@@ -821,7 +825,15 @@ pub fn bevel_contour_lut(c: &photosplice_doc::effects::BevelContour, b: &Bevel) 
     (0..n)
         .map(|k| {
             let u = scale * (k as f32 / (n - 1) as f32) + offset;
-            let v = (1.0 - (1.0 - u) * (0.5 / r).min(1.0)).min(1.0);
+            let v = match paint {
+                // Inner bevels hold the contour's top at the profile's top and stretch it down by
+                // 0.5 / range: over the top 70 % at 70 %, past the foot below 50 %.
+                BevelPaint::Inner | BevelPaint::Stroke => (1.0 - (1.0 - u) * (0.5 / r)).min(1.0),
+                // Outer bevels hold its foot at the profile's foot.
+                BevelPaint::Outer => (u * (0.5 / r)).min(1.0),
+                // Emboss styles span the whole profile at any range.
+                BevelPaint::Both => u.min(1.0),
+            };
             if v < 0.0 { at(0.0) + v * slope } else { at(v) }
         })
         .collect()
@@ -3376,18 +3388,30 @@ mod tests {
     /// takes the contour's top (Reference corpus bevel-pillow-chisel-hard-gloss-and-contour at
     /// 40 %, bevel-inner-contour-double-ring-aa-r70 at 70 %).
     #[test]
-    fn bevel_contour_range_below_half_spans_the_whole_profile() {
+    fn bevel_contour_range_scales_inner_and_outer_bevels_only() {
         let at = |range: f32, style: BevelStyle, technique: BevelTechnique, h: f32| {
             let c = photosplice_doc::BevelContour { contour: double_ring(), range, anti_alias: false };
             let l = bevel_contour_lut(&c, &bevel_of(style, technique));
             l[(h * (l.len() - 1) as f32).round() as usize]
         };
-        for (style, technique) in [(BevelStyle::PillowEmboss, BevelTechnique::ChiselHard), (BevelStyle::InnerBevel, BevelTechnique::Smooth)] {
-            for h in [0.55, 0.6, 0.7, 0.8, 0.9] {
-                for range in [0.01, 0.2, 0.4] {
-                    assert!((at(range, style, technique, h) - at(0.5, style, technique, h)).abs() < 1e-6, "{style:?} {h} {range}");
-                }
+        let lut = contour_lut(&double_ring()).unwrap_or_default();
+        // The emboss styles ignore the range.
+        for h in [0.2, 0.55, 0.6, 0.7, 0.8, 0.9] {
+            for range in [0.01, 0.2, 0.4, 0.7, 1.0] {
+                let style = BevelStyle::PillowEmboss;
+                assert!((at(range, style, BevelTechnique::ChiselHard, h) - at(0.5, style, BevelTechnique::ChiselHard, h)).abs() < 1e-6, "{h} {range}");
             }
+        }
+        // 40 %: a Smooth inner bevel (u = 2h − 1) reads 1 − (1 − u)·1.25, an outer one (u = 2h)
+        // reads u·1.25.
+        for h in [0.6, 0.7, 0.8, 0.9] {
+            let u: f32 = 2.0 * h - 1.0;
+            let want = lut_at(&lut, (1.0 - (1.0 - u) * 1.25).max(0.0));
+            assert!((at(0.4, BevelStyle::InnerBevel, BevelTechnique::Smooth, h) - want).abs() < 2e-3, "inner {h}");
+        }
+        for h in [0.1f32, 0.2, 0.3] {
+            let want = lut_at(&lut, (2.0 * h * 1.25).min(1.0));
+            assert!((at(0.4, BevelStyle::OuterBevel, BevelTechnique::Smooth, h) - want).abs() < 2e-3, "outer {h}");
         }
         // 70 %: a Smooth inner bevel's edge (h ½, the foot of its profile) reads the contour at
         // 1 − 1 / 1.4.
