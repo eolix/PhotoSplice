@@ -1795,12 +1795,17 @@ pub(crate) fn style_sheet_data(s: &CharStyle, font: usize, k: f32) -> E {
         ("Strikethrough".into(), E::Bool(s.strikethrough)),
         ("Ligatures".into(), E::Bool(s.ligatures)),
         ("DLigatures".into(), E::Bool(s.discretionary_ligatures)),
-        // Some readers lay out edited text without painting it unless its fill is enabled.
-        ("FillFlag".into(), E::Bool(true)),
         ("FillColor".into(), E::Dict(vec![("Type".into(), E::Int(color_type)), ("Values".into(), E::Array(values))])),
-        // Some readers lay edited text out without painting it unless its fill is on
+        // The character stroke as Reference writes it, off. Without these keys Reference strokes
+        // the glyphs and the text renders bolder (psd-tools text, masks2, artboard and
+        // blend-and-clipping saved without their own type data: glyph edges up to 40/255 dark).
+        // Some readers also skip painting edited text unless its fill is on
         // (storytold/photocraft@7bb971f7).
+        ("StrokeColor".into(), E::Dict(vec![("Type".into(), E::Int(1)), ("Values".into(), E::Array(vec![real(1.0), real(1.0), real(1.0), real(1.0)]))])),
         ("FillFlag".into(), E::Bool(true)),
+        ("StrokeFlag".into(), E::Bool(false)),
+        ("FillFirst".into(), E::Bool(true)),
+        ("OutlineWidth".into(), real(1.0)),
     ];
     if let Some(l) = s.leading_pt {
         dict.insert(5, ("Leading".into(), real(l / k)));
