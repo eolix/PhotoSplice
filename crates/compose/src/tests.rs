@@ -266,7 +266,8 @@ fn non_separable_modes_keep_values_above_one_in_32_bit() {
         for m in modes {
             let got = blend_px(depth, m, bg, top);
             let want = photosplice_color::blend::blend_rgb(m, bg, top);
-            assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() <= 1.0 / 255.0), "{m:?} {depth:?}: {got:?} vs {want:?}");
+            // Within a level, plus the half level of storing the result at the depth.
+            assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() <= 1.5 / 255.0), "{m:?} {depth:?}: {got:?} vs {want:?}");
         }
         let got = blend_px(depth, BlendMode::Color, bg, top);
         assert!(got[0] <= 1.0 && got[0] > 0.9, "{depth:?}: {got:?}");
@@ -1679,7 +1680,9 @@ fn emboss_shades_the_composited_layer() {
         texture: None,
     });
     let make = |text: bool, fx: bool| {
+        // 16 bits: the ratios below compare small differences that 8-bit storage would round.
         let mut d = doc_white(40, 40);
+        d.depth = SampleType::U16;
         let mut l = solid_layer("sq", Rect::new(10, 10, 30, 30), [0.2, 0.1, 0.6, 1.0]);
         l.surface_mut().unwrap().fill_rect(Rect::new(10, 10, 30, 11), &[0.2, 0.1, 0.6, 0.5]);
         if text {

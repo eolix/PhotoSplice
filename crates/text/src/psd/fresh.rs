@@ -421,19 +421,19 @@ fn text_object(txt2: &E, layer: &TextLayer, written: &[u8], index: usize) -> Opt
         ("5", dict(vec![("0", E::Array(paragraph_runs(txt2, written, &lens)?))])),
         ("6", dict(vec![("0", E::Array(style_runs(txt2, layer, written)?))])),
     ];
-    // EngineData's numbering of the modes; Smooth (Reference's default) is written as no entry.
+    // EngineData's numbering of the modes, Smooth included: Reference draws a text object
+    // without one darker than Smooth (psd-tools text.psd saved with a fresh Txt2: glyph edges
+    // 40/255 dark until Smooth was written as 3).
     let aa = match layer.antialias {
-        AntiAlias::None => Some(0),
-        AntiAlias::Crisp => Some(1),
-        AntiAlias::Strong => Some(2),
-        AntiAlias::Smooth => None,
-        AntiAlias::Sharp => Some(4),
-        AntiAlias::Windows => Some(5),
-        AntiAlias::WindowsLcd => Some(6),
+        AntiAlias::None => 0,
+        AntiAlias::Crisp => 1,
+        AntiAlias::Strong => 2,
+        AntiAlias::Smooth => 3,
+        AntiAlias::Sharp => 4,
+        AntiAlias::Windows => 5,
+        AntiAlias::WindowsLcd => 6,
     };
-    if let Some(aa) = aa {
-        model.push(("10", dict(vec![("0", E::Int(aa)), ("2", E::Bool(true))])));
-    }
+    model.push(("10", dict(vec![("0", E::Int(aa)), ("2", E::Bool(true))])));
     let lines = lens.iter().map(|len| dict(vec![("0", dict(vec![("1", E::Int(1))])), ("1", int(*len))])).collect();
     let frame_strike = dict(vec![("99", E::Name("F".into())), ("10", int(index)), ("5", E::Int(2)), ("6", E::Array(Vec::new()))]);
     let layout = dict(vec![("99", E::Name("PC".into())), ("5", E::Int(0)), ("6", E::Array(vec![frame_strike]))]);

@@ -55,6 +55,8 @@ const F_ADD_DIFF: u32 = 16384u;  // lerp: A + (B - C) premultiplied (clips on pa
 const F_BLEND_IF: u32 = 524288u; // lerp: B back towards A by the Blend If ranges in p0..p3
 const F_TEXT_GAMMA: u32 = 8192u; // blend / atop / fx merge: type layer, mix coverage at gamma p4.w
 const F_COVER_MIX: u32 = 2097152u; // lerp: A towards B by C's alpha (emboss halves, effects::mix_premul)
+const F_ROUND8: u32 = 4194304u;  // layer result: opaque colour rounded to 8-bit levels (compose::quantize_opaque)
+const F_ROUND16: u32 = 8388608u; // layer result: opaque colour rounded to 16-bit (32768) levels
 
 @group(0) @binding(0) var<uniform> chunk: Chunk;
 @group(0) @binding(1) var<uniform> op: Op;
@@ -205,7 +207,10 @@ fn blend_channel(mode: i32, cb: f32, cs: f32) -> f32 {
             return max(cb, 2.0 * cs - 1.0);
         }
         case 19: {                                              // HardMix (Photoshop)
-            return select(0.0, 1.0, vivid_light_generic(cb, cs) >= 0.5 - 1e-6);
+            // compose::psblend::hard_mix_ps: reaching the middle on the burn side, passing it on
+            // the dodge side.
+            let v = vivid_light_generic(cb, cs);
+            return select(0.0, 1.0, (cs <= 0.5 && v >= 0.5 - 1e-6) || v > 0.5 + 1e-6);
         }
         case 20: { return abs(cb - cs); }                       // Difference
         case 21: { return cb + cs - 2.0 * cb * cs; }            // Exclusion
@@ -240,14 +245,15 @@ fn blend_channel(mode: i32, cb: f32, cs: f32) -> f32 {
     }
 }
 
-// adjust::range_hue: where a hue (turns) falls among Hue/Saturation's colour ranges.
-fn range_hue(h: f32) -> f32 {
+// adjust::range_hue_depth: where a hue (turns) falls among Hue/Saturation's colour ranges.
+fn range_hue(h: f32, eight_bit: bool) -> f32 {
     let deg = rem_euclid(h, 1.0) * 360.0;
     let k = min(floor(deg / 60.0), 5.0);
     let f = deg / 60.0 - k;
-    // Steps behind per sextant: f, 1, 2, 2 + f, 3, 4.
+    // Steps behind per sextant: f, 1, 2, 2 + f, 3, 4 (8 bits: f, ½, 1½, 1½ + f, 2½, 3).
     var steps = k - select(0.0, 1.0, k >= 3.0);
     if (k < 1.0 || (k >= 3.0 && k < 4.0)) { steps = steps + f; }
+    if (eight_bit) { steps = steps - select(0.0, 0.5, k >= 1.0) - select(0.0, 0.5, k >= 5.0); }
     return rem_euclid(deg - steps * 60.0 / 255.0, 360.0) / 360.0;
 }
 
@@ -708,7 +714,7 @@ fn adjust(c: vec3<f32>) -> vec3<f32> {
             var ds = 0.0;
             var dl = 0.0;
             if (p1.x > 0.5) {
-                let rh = range_hue(hsl.x);
+                let rh = range_hue(hsl.x, p1.z > 0.5);
                 dh = lut(0, rh);
                 // Row 1 holds the ranges' saturation factor excess.
                 ds = lut(1, rh);
@@ -993,8 +999,19 @@ fn fs_mask(in: VOut) -> @location(0) vec4<f32> {
 }
 
 // blend_into(backdrop = A, src = B, mode, opacity), including Dissolve.
+// compose::quantize_opaque: an integer document stores each layer's result at its depth where
+// it is opaque; the plan sets F_ROUND8 / F_ROUND16 on the pass that finishes a layer.
+fn round_out(v: vec4<f32>) -> vec4<f32> {
+    var q = 0.0;
+    if ((op.flags & F_ROUND8) != 0u) { q = 255.0; } else if ((op.flags & F_ROUND16) != 0u) { q = 32768.0; }
+    if (q <= 0.0 || v.a < 1.0) { return v; }
+    return vec4(floor(v.rgb * q + 0.5) / q, v.a);
+}
+
 @fragment
-fn fs_blend(in: VOut) -> @location(0) vec4<f32> {
+fn fs_blend(in: VOut) -> @location(0) vec4<f32> { return round_out(fs_blend_body(in)); }
+
+fn fs_blend_body(in: VOut) -> vec4<f32> {
     let p = local(in.pos);
     let b = textureLoad(tex_a, p, 0);
     var s = textureLoad(tex_b, p, 0);
@@ -1008,7 +1025,9 @@ fn fs_blend(in: VOut) -> @location(0) vec4<f32> {
 
 // composite_atop(base = A, src = B): blend as if the base were opaque, keep its alpha.
 @fragment
-fn fs_atop(in: VOut) -> @location(0) vec4<f32> {
+fn fs_atop(in: VOut) -> @location(0) vec4<f32> { return round_out(fs_atop_body(in)); }
+
+fn fs_atop_body(in: VOut) -> vec4<f32> {
     let p = local(in.pos);
     let base = textureLoad(tex_a, p, 0);
     if (base.a <= 0.0) { return base; }
@@ -1033,7 +1052,9 @@ fn fs_adjust(in: VOut) -> @location(0) vec4<f32> {
 
 // Mix an adjusted result B back over the original A with blend mode, opacity and mask.
 @fragment
-fn fs_adjmix(in: VOut) -> @location(0) vec4<f32> {
+fn fs_adjmix(in: VOut) -> @location(0) vec4<f32> { return round_out(fs_adjmix_body(in)); }
+
+fn fs_adjmix_body(in: VOut) -> vec4<f32> {
     let p = local(in.pos);
     let b = textureLoad(tex_a, p, 0);
     let k = op.opacity * mask_value(doc_px(p));
@@ -1062,11 +1083,18 @@ fn fs_adjmix(in: VOut) -> @location(0) vec4<f32> {
 
 // Pass-through group coverage mixes premultiplied colour, then returns straight alpha.
 @fragment
-fn fs_lerp(in: VOut) -> @location(0) vec4<f32> {
+fn fs_lerp(in: VOut) -> @location(0) vec4<f32> { return round_out(fs_lerp_body(in)); }
+
+fn fs_lerp_body(in: VOut) -> vec4<f32> {
     let p = local(in.pos);
     let a = textureLoad(tex_a, p, 0);
     let b = textureLoad(tex_b, p, 0);
     if ((op.flags & F_QUANT) != 0u) {
+        // p0.y: only the colour of opaque pixels (compose::quantize_opaque).
+        if (op.p0.y > 0.5) {
+            if (a.a < 1.0) { return a; }
+            return vec4(floor(a.rgb * op.p0.x + 0.5) / op.p0.x, a.a);
+        }
         return floor(a * op.p0.x + 0.5) / op.p0.x;
     }
     if ((op.flags & F_COVER_MIX) != 0u) {
@@ -1404,7 +1432,9 @@ fn fs_fxstroke(in: VOut) -> @location(0) vec4<f32> {
 
 // Resolve outside strokes: A = exterior result, B = accumulated colour, C = coverage.
 @fragment
-fn fs_fxstrokeend(in: VOut) -> @location(0) vec4<f32> {
+fn fs_fxstrokeend(in: VOut) -> @location(0) vec4<f32> { return round_out(fs_fxstrokeend_body(in)); }
+
+fn fs_fxstrokeend_body(in: VOut) -> vec4<f32> {
     let p = local(in.pos);
     let w = textureLoad(tex_a, p, 0);
     let cover = textureLoad(tex_c, p, 0).r;
@@ -1426,7 +1456,9 @@ fn mix_premul(a: vec4<f32>, b: vec4<f32>, k: f32) -> vec4<f32> {
 // layer opacity against the backdrop C. F_ATOP: C is a clipping base: effects were painted over
 // it as if opaque and the base keeps its alpha.
 @fragment
-fn fs_fxmerge(in: VOut) -> @location(0) vec4<f32> {
+fn fs_fxmerge(in: VOut) -> @location(0) vec4<f32> { return round_out(fs_fxmerge_body(in)); }
+
+fn fs_fxmerge_body(in: VOut) -> vec4<f32> {
     let p = local(in.pos);
     var w = textureLoad(tex_a, p, 0);
     let l = textureLoad(tex_b, p, 0);

@@ -845,6 +845,11 @@ fn composite_stack(layers: &[Layer], backdrop: &mut Buffer, cx: &Ctx) {
         let clipped = &layers[i + 1..j];
         if base.visible {
             composite_layer(base, clipped, backdrop, cx);
+            if let (false, Some(q)) = (matches!(base.content, LayerContent::Adjustment(_)), adjustment_quantum(cx.depth))
+                && cx.mode != photosplice_color::ColorMode::Lab
+            {
+                quantize_opaque(backdrop, q);
+            }
             if let (LayerContent::Adjustment(_), Some(q)) = (&base.content, adjustment_quantum(cx.depth)) {
                 if cx.mode == photosplice_color::ColorMode::Lab {
                     lab::quantize(backdrop, q);
@@ -882,6 +887,22 @@ pub fn adjustment_quantum(depth: photosplice_color::SampleType) -> Option<f32> {
         photosplice_color::SampleType::U8 => Some(255.0),
         photosplice_color::SampleType::U16 => Some(32768.0),
         photosplice_color::SampleType::F32 => None,
+    }
+}
+
+/// Rounds the colour of fully opaque pixels to `q` steps: Photoshop composites an integer
+/// document's layers into buffers of its depth, so every layer's result is rounded there; pixels
+/// still see-through keep theirs (their straight colour isn't what is stored). Steep curves above
+/// then amplify the same roundings (psd-tools adjustment_nested_composition_2 and _4: 1.1 → 0 and
+/// 3.2 → 0.1 % of pixels off; Reference corpus bevel and glow combinations within a level; rounding
+/// the see-through pixels too broke passthrough_blendmodes3).
+fn quantize_opaque(b: &mut Buffer, q: f32) {
+    for p in &mut b.px {
+        if p[3] >= 1.0 {
+            for v in p.iter_mut().take(3) {
+                *v = (*v * q + 0.5).floor() / q;
+            }
+        }
     }
 }
 

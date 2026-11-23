@@ -155,7 +155,7 @@ pub fn apply_depth_mode(adj: &Adjustment, buf: &mut Buffer, transfer: Transfer, 
                         // in full however dull the colour (Reference's merged images, #4089).
                         // Greys stay grey: no hue to shift, no saturation to scale, and the range
                         // Lightness moves towards a channel they share.
-                        let h0 = range_hue(rgb_to_hsl(c).0);
+                        let h0 = range_hue_depth(rgb_to_hsl(c).0, depth == Some(SampleType::U8) && !INK_SPACE.with(|i| i.get()));
                         (lut(&t[0], h0), lut(&t[1], h0), lut(&t[2], h0))
                     }
                     None => (0.0, 0.0, 0.0),
@@ -689,10 +689,20 @@ fn tone_in_space(space: ToneSpace, luts: &[Vec<f32>; 4], c: [f32; 3]) -> [f32; 3
 /// 180–240°), whatever the saturation and lightness (16-bit Lightness +40 curves of all six
 /// ranges: the falloffs move by up to 0.94°).
 pub fn range_hue(h: f32) -> f32 {
+    range_hue_depth(h, false)
+}
+
+/// [`range_hue`] for a document of `eight_bit` samples: there Reference's hue runs half a step
+/// less behind in the sextants past the first and a whole step less in the last (f, ½, 1½,
+/// 1½ + f, 2½, 3 steps), the 16-bit hue as it is (temp kit 16, each default range turned 180°
+/// alone at 8 and 16 bits: the 16-bit falloffs sit within 0.01° of [`range_hue`], the 8-bit ones
+/// 0.10–0.12° earlier and 0.22° in the last sextant; Reds +180° under a +66° master, 5.4 → 0 %
+/// of pixels off).
+pub fn range_hue_depth(h: f32, eight_bit: bool) -> f32 {
     let deg = h.rem_euclid(1.0) * 360.0;
     let k = ((deg / 60.0).floor() as usize).min(5);
     let f = deg / 60.0 - k as f32;
-    let steps = [f, 1.0, 2.0, 2.0 + f, 3.0, 4.0][k];
+    let steps = if eight_bit { [f, 0.5, 1.5, 1.5 + f, 2.5, 3.0][k] } else { [f, 1.0, 2.0, 2.0 + f, 3.0, 4.0][k] };
     (deg - steps * 60.0 / 255.0).rem_euclid(360.0) / 360.0
 }
 
@@ -711,7 +721,7 @@ pub fn hue_range_tables(ranges: &[HueRange; 6]) -> [Vec<f32>; 3] {
         let deg = k as f32 / (LUT_SIZE - 1) as f32 * 360.0;
         ranges.iter().filter(|r| !r.is_neutral()).fold([0.0f32; 3], |acc, r| {
             let w = r.weight(deg);
-            let ds = saturation_excess(r.saturation / 100.0).min(RANGE_SATURATION_MAX);
+            let ds = range_saturation_excess(r.saturation / 100.0).min(RANGE_SATURATION_MAX);
             [acc[0] + w * r.hue, (acc[1] + w * ds).max(-1.0), (acc[2] + w * r.lightness / 100.0).clamp(-1.0, 1.0)]
         })
     };
@@ -723,6 +733,16 @@ pub fn hue_range_tables(ranges: &[HueRange; 6]) -> [Vec<f32>; 3] {
 /// huesaturation_rgb: a +100 % range 9–22 % into its falloff, under a −97 % master, leaves
 /// the ratios of a 135–143 excess at every hue, where 999 kept the colours whole).
 pub const RANGE_SATURATION_MAX: f32 = 135.0;
+
+/// A colour range's saturation slider (−1..=1) as its factor's excess at full weight: a raise is
+/// `s / (1 − s + 0.0055)`, a little short of the master's `s / (1 − s)` (temp kit 19, one range
+/// with 60° falloffs, 16 bits: excess 2.92, 8.43, 12.41 and 27.3 at +75, +90, +93 and +97 %,
+/// the same at every weight; 0.6–1.4 % of pixels off → 0, psd-tools huesaturation_saturation_rgb
+/// 2.3 → 0.08 %). Cuts are the master's.
+fn range_saturation_excess(s: f32) -> f32 {
+    let s = if s.is_finite() { s.clamp(-1.0, 1.0) } else { 0.0 };
+    if s > 0.0 { s / (1.0 - s + 0.0055) } else { saturation_excess(s) }
+}
 
 /// A saturation slider (−1..=1) as its factor's excess `k − 1` ([`hue_saturation_scale`]).
 fn saturation_excess(s: f32) -> f32 {
@@ -1057,6 +1077,14 @@ pub fn color_balance_luts(shadows: &[f32; 3], midtones: &[f32; 3], highlights: &
                 others.iter().for_each(|&k| white[k] -= hi[ch] / 255.0);
             }
         }
+        // What all three channels share cancels too, as for the midtones: two highlights cuts
+        // (or two shadows raises) move the third channel's point only (temp kit 21, Preserve
+        // Luminosity: highlights green −20 blue −20 98 → 0 % of pixels off, all three −20 40/255
+        // → exact, shadows raises alike; one slider, or two of opposite sign, are unchanged).
+        for points in [&mut black, &mut white] {
+            let common = points.iter().copied().fold(f32::MAX, f32::min);
+            points.iter_mut().for_each(|p| *p -= common);
+        }
         let shift = (mids.iter().copied().fold(f32::MIN, f32::max) + mids.iter().copied().fold(f32::MAX, f32::min)) / 2.0;
         mids.map(|s| (s - shift) / 100.0)
     } else {
@@ -1119,7 +1147,15 @@ pub fn vibrance_tables(vibrance: f32) -> VibranceTables {
                 let (lo_v, lo) = if pos == 4 && v > 0.0 { (0.0, ident) } else if pos == 0 { (VIB_V[0], node(0, bi, ki)) } else { (VIB_V[pos - 1], node(pos - 1, bi, ki)) };
                 let (hi_v, hi) = if v < 0.0 && pos == 4 { (0.0, ident) } else { (VIB_V[pos], node(pos, bi, ki)) };
                 let t = if hi_v > lo_v { ((v - lo_v) / (hi_v - lo_v)).clamp(0.0, 1.0) } else { 1.0 };
-                [lo[0] + (hi[0] - lo[0]) * t, lo[1] + (hi[1] - lo[1]) * t]
+                // The darkest share moves linearly in light, as the darkest channel over the brightest
+                // decoded at the row's brightness (temp kit 21: pure red's darkest channel at −6, −20,
+                // −50 and −100 is 0.0025 × |v| of the brightest in linear light, rows of 127 alike; the
+                // encoded share between the −25 node and none left −6 up to 16/255 short, 37.5 → 0 % of
+                // pixels off, psd-tools fill_adjustments' Vibrance 23 → 0 %).
+                let bb = VIB_B[bi] / 255.0;
+                let lin = |sh: f32| photosplice_color::convert::srgb_to_linear(sh * bb);
+                let share = photosplice_color::convert::linear_to_srgb((lin(lo[1]) + (lin(hi[1]) - lin(lo[1])) * t).max(0.0)) / bb;
+                [lo[0] + (hi[0] - lo[0]) * t, share]
             })
         })
     })
@@ -2703,7 +2739,7 @@ mod tone_tests {
         r[5] = HueRange { hue: 0.0, saturation: 49.0, lightness: 0.0, bounds: [100.0, 110.0, 170.0, 180.0] };
         let t = hue_range_tables(&r);
         let at = |row: usize| lut(&t[row], 140.0 / 360.0);
-        assert!((at(1) - (-1.0 + 0.49 / 0.51)).abs() < 1e-4, "{}", at(1));
+        assert!((at(1) - (-1.0 + range_saturation_excess(0.49))).abs() < 1e-4, "{}", at(1));
         assert!((at(2) + 1.0).abs() < 1e-6, "{}", at(2));
         r[5].saturation = 100.0;
         assert!((lut(&hue_range_tables(&r)[1], 140.0 / 360.0) - (RANGE_SATURATION_MAX - 1.0)).abs() < 1e-2);

@@ -67,8 +67,14 @@ fn vivid_light_generic(cb: f32, cs: f32) -> f32 {
     }
 }
 
+/// Hard Mix: white where Vivid Light reaches the middle on its burn side (source up to ½) and
+/// where it passes it on its dodge side (temp kit 24, every 8-bit grey pair: where source +
+/// backdrop = 255 exactly, Reference is white for sources up to 127 and black from 128; the
+/// dodge half of that diagonal was white).
 fn hard_mix_ps(cb: f32, cs: f32) -> f32 {
-    if vivid_light_generic(cb, cs) >= 0.5 - 1e-6 { 1.0 } else { 0.0 }
+    let v = vivid_light_generic(cb, cs);
+    let white = if cs <= 0.5 { v >= 0.5 - 1e-6 } else { v > 0.5 + 1e-6 };
+    if white { 1.0 } else { 0.0 }
 }
 
 thread_local! {
