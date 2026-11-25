@@ -372,9 +372,10 @@ fn blend_if_16_bit_cutoffs_follow_reference_steps() {
     assert!(shown(32895, 128, 255) && !shown(32894, 128, 255), "the RGB16 boundary at 128");
 }
 
-/// Blend If's Gray is Reference's (30 R + 59 G + 11 B) / 100 rounded half down, measured with a
-/// white layer over one 8-bit backdrop colour and a hard Gray point on Underlying Layer. Rec. 601
-/// luma hid both mixed colours below.
+/// Blend If's Gray is Reference's 30/59/11 weighting on its 16-bit scale (9830, 19334, 3604),
+/// rounded to a level, measured with a white layer over one 8-bit backdrop colour and a hard Gray
+/// point on Underlying Layer. Rec. 601 luma hid both mixed colours below; (30 R + 59 G + 11 B) /
+/// 100 rounded half down missed the half-level ties that round up (kit of 389 803 colours).
 #[test]
 fn blend_if_gray_follows_reference_weights_and_rounding() {
     let shown = |rgb: [u8; 3], black: u8, white: u8| {
@@ -403,6 +404,33 @@ fn blend_if_gray_follows_reference_weights_and_rounding() {
     assert!(shown([123, 126, 151], 128, 255), "127.85 is 128");
     assert!(shown([120, 129, 149], 0, 128), "128.5 is 128");
     assert!(!shown([121, 129, 149], 0, 128), "128.8 is 129");
+    // Half-level ties that round up: 11 G > 5 R + 6 B.
+    assert!(shown([216, 230, 0], 201, 255), "200.5 is 201");
+    assert!(shown([221, 180, 0], 173, 255), "172.5 is 173");
+    assert!(!shown([0, 100, 50], 0, 64), "64.5 is 65");
+}
+
+/// 8-bit split points fade one level wider than the sliders, and a range's black and white ramps
+/// meet by their minimum. Reference, grey over black with This Layer's Gray split: 32/96 shows 17
+/// of level 52 (21/65), 160/224 shows 30 of level 216 (9/65); split 0/255 on both points shows
+/// 64 of level 128 (the product of the ramps gave 32).
+#[test]
+fn blend_if_8_bit_split_ramps_follow_reference() {
+    let over_black = |v: u8, r: photosplice_doc::BlendRange| {
+        let mut d = Document::new("t", Size::new(1, 1), ColorMode::Rgb, SampleType::U8);
+        d.layers.push(opaque_px(Rect::new(0, 0, 1, 1), [0.0, 0.0, 0.0, 1.0]));
+        let c = f32::from(v) / 255.0;
+        let mut l = opaque_px(Rect::new(0, 0, 1, 1), [c, c, c, 1.0]);
+        l.blend_if.set(0, [r, FULL]);
+        d.layers.push(l);
+        levels(px(&d, 0, 0))[0]
+    };
+    let split = range([32, 96], [160, 224]);
+    assert_eq!(over_black(52, split), 17);
+    assert_eq!(over_black(216, split), 30);
+    assert_eq!(over_black(32, split), 0, "1/65 of level 32 rounds to 0");
+    assert_eq!(over_black(225, split), 0);
+    assert_eq!(over_black(128, range([0, 255], [0, 255])), 64);
 }
 
 /// An adjustment layer's "This Layer" range judges its result at full strength, before Opacity

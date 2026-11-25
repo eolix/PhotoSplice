@@ -1877,8 +1877,9 @@ fn blend_if_hard_point_includes_its_own_level() {
 
 #[test]
 fn blend_if_split_point_fades_like_opacity() {
-    // A split black point (Alt-drag) at 50/150 shows a value-100 layer at half strength, which
-    // is exactly the layer at 50% opacity, also over a semi-transparent backdrop.
+    // A split black point (Alt-drag) at 51/150 (fading over 50..150 in 8 bits) shows a value-100
+    // layer at half strength, which is exactly the layer at 50% opacity, also over a
+    // semi-transparent backdrop.
     let v = 100.0 / 255.0;
     let mut d = doc_white(4, 4);
     d.layers[0].surface_mut().unwrap().fill_rect(Rect::new(0, 0, 4, 4), &[0.0, 0.2, 1.0, 0.5]);
@@ -1886,7 +1887,7 @@ fn blend_if_split_point_fades_like_opacity() {
     l.blend = BlendMode::Multiply;
     let mut half = l.clone();
     half.opacity = 0.5;
-    l.blend_if.set(0, [range([50, 150], [255, 255]), FULL]);
+    l.blend_if.set(0, [range([51, 150], [255, 255]), FULL]);
     let mut d2 = d.clone();
     d.layers.push(l);
     d2.layers.push(half);

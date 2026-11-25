@@ -2285,7 +2285,7 @@ fn blend_if() {
     let Some(mut g) = gpu() else { return };
     let r = |b0: u8, b1: u8, w0: u8, w1: u8| BlendRange { black: [b0, b1], white: [w0, w1] };
     // (name, entry, [this layer, underlying], has a hard point)
-    let cases: [(&str, usize, [BlendRange; 2], bool); 7] = [
+    let cases: [(&str, usize, [BlendRange; 2], bool); 8] = [
         ("gray this hard", 0, [r(90, 90, 255, 255), BlendRange::FULL], true),
         ("gray under split", 0, [BlendRange::FULL, r(30, 140, 150, 230)], false),
         ("red both", 1, [r(0, 60, 200, 200), r(20, 20, 180, 250)], true),
@@ -2293,6 +2293,7 @@ fn blend_if() {
         ("green white split", 2, [r(0, 0, 100, 220), BlendRange::FULL], false),
         ("blue under hard", 3, [BlendRange::FULL, r(128, 128, 255, 255)], true),
         ("everything hidden", 0, [r(255, 255, 0, 0), BlendRange::FULL], true),
+        ("gray split across the scale", 0, [r(0, 255, 0, 255), BlendRange::FULL], false),
     ];
     for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
         let fmt = PixelFormat { sample: depth, ..PixelFormat::RGBA8 };
@@ -2373,10 +2374,10 @@ fn pass_through_group_with_blend_if_is_isolated() {
 fn blend_if_gray_rounding() {
     let Some(mut g) = gpu() else { return };
     let r = |b: u8, w: u8| photosplice_doc::BlendRange { black: [b, b], white: [w, w] };
-    // RGB8: mixed colours around a hard Gray point at 128.
-    let colours: [[u8; 3]; 4] = [[123, 126, 151], [120, 129, 149], [121, 129, 149], [65, 0, 0]];
-    for (black, white) in [(128u8, 255u8), (0, 128), (20, 255)] {
-        let mut d = Document::new("bi8", Size::new(4, 1), ColorMode::Rgb, SampleType::U8);
+    // RGB8: mixed colours around hard Gray points, half-level ties among them (200.5, 64.5).
+    let colours: [[u8; 3]; 6] = [[123, 126, 151], [120, 129, 149], [121, 129, 149], [65, 0, 0], [216, 230, 0], [0, 100, 50]];
+    for (black, white) in [(128u8, 255u8), (0, 128), (20, 255), (201, 255), (0, 64)] {
+        let mut d = Document::new("bi8", Size::new(6, 1), ColorMode::Rgb, SampleType::U8);
         let mut under = Layer::raster("under", PixelFormat::RGBA8);
         for (x, c) in colours.iter().enumerate() {
             let c = c.map(|v| f32::from(v) / 255.0);
@@ -2384,7 +2385,7 @@ fn blend_if_gray_rounding() {
         }
         d.layers.push(under);
         let mut top = Layer::raster("top", PixelFormat::RGBA8);
-        top.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 4, 1), &[1.0, 1.0, 1.0, 1.0]);
+        top.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 6, 1), &[1.0, 1.0, 1.0, 1.0]);
         top.blend_if.set(0, [photosplice_doc::BlendRange::FULL, r(black, white)]);
         d.layers.push(top);
         check(&mut g, &d, &format!("gray point {black}..{white}"));

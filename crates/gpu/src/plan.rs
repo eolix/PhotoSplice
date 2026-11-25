@@ -480,7 +480,7 @@ pub const F_ADD_DIFF: u32 = 16384;
 /// (`compose::apply_blend_if`), from C ("This Layer": an adjustment layer's unmixed result; B when
 /// `p4.y` is set)
 /// and A ("Underlying Layer"). The ranges are packed in `p0..p3` (`blend_if_params`); `p4.x` marks
-/// a one-channel document.
+/// a one-channel document, `p4.z` is the document's value step (`compose::blend_if_step`).
 pub const F_BLEND_IF: u32 = 524288;
 /// Blend / Atop / FxMerge of a type layer: coverage mixed at `psblend::TEXT_GAMMA`.
 pub const F_TEXT_GAMMA: u32 = 8192;
@@ -692,7 +692,7 @@ impl<'a> Planner<'a> {
         p.flags = F_BLEND_IF;
         p.params = blend_if_params(&layer.blend_if);
         let one_channel = self.cx.mode != photosplice_color::ColorMode::Rgb;
-        p.extra = [f32::from(u8::from(one_channel)), f32::from(u8::from(own.is_none())), 0.0, 0.0];
+        p.extra = [f32::from(u8::from(one_channel)), f32::from(u8::from(own.is_none())), photosplice_compose::blend_if_step(self.cx.depth), 0.0];
         Ok(self.emit(p))
     }
 

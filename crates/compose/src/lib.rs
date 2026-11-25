@@ -1534,10 +1534,12 @@ pub fn blend_if_active(layer: &Layer, mode: photosplice_color::ColorMode) -> boo
 
 /// How much of a pixel shows through `layer`'s Blend If ranges, given the layer's own colour
 /// (`this`, `None` where the layer has no content of its own there) and the colour beneath it
-/// (`under`, `None` where nothing is beneath). Every range multiplies in.
-fn blend_if_weight(layer: &Layer, mode: photosplice_color::ColorMode, this: Option<[f32; 4]>, under: Option<[f32; 4]>) -> f32 {
+/// (`under`, `None` where nothing is beneath). Every range multiplies in, each widened by the
+/// document's value step ([`blend_if_step`]).
+fn blend_if_weight(layer: &Layer, cx: &Ctx, this: Option<[f32; 4]>, under: Option<[f32; 4]>) -> f32 {
     use photosplice_color::ColorMode as M;
     let bi = &layer.blend_if;
+    let (mode, step) = (cx.mode, blend_if_step(cx.depth));
     let mut k = 1.0;
     for (side, px) in [this, under].into_iter().enumerate() {
         let Some(p) = px else { continue };
@@ -1546,20 +1548,33 @@ fn blend_if_weight(layer: &Layer, mode: photosplice_color::ColorMode, this: Opti
             // Gray, then R, G, B.
             M::Rgb => {
                 let gray = blend_if_gray(v(0), v(1), v(2));
-                k *= bi.get(0)[side].weight(gray);
+                k *= bi.get(0)[side].weight_at(gray, step);
                 for c in 0..3 {
-                    k *= bi.get(c + 1)[side].weight(v(c));
+                    k *= bi.get(c + 1)[side].weight_at(v(c), step);
                 }
             }
             // One channel: the PSD spec marks the composite-gray entry irrelevant here, so the
             // channel's own entry carries the setting; both are honoured.
-            _ => k *= bi.get(0)[side].weight(v(0)) * bi.get(1)[side].weight(v(0)),
+            _ => k *= bi.get(0)[side].weight_at(v(0), step) * bi.get(1)[side].weight_at(v(0), step),
         }
         if k <= 0.0 {
             return 0.0;
         }
     }
     k
+}
+
+/// The document's smallest value step on Blend If's 0..=255 scale ([`BlendRange::weight_at`]):
+/// a level for 8-bit, Reference's 16-bit step (1/32768) for 16-bit, none for 32-bit.
+///
+/// [`BlendRange::weight_at`]: photosplice_doc::BlendRange::weight_at
+pub fn blend_if_step(depth: photosplice_color::SampleType) -> f32 {
+    use photosplice_color::SampleType as S;
+    match depth {
+        S::U8 => 1.0,
+        S::U16 => 255.0 / 32768.0,
+        _ => 0.0,
+    }
 }
 
 /// A channel value on Blend If's 0..=255 scale. Reference compares Blend If at its 16-bit
@@ -1576,14 +1591,19 @@ fn blend_if_level(x: f32) -> f32 {
     if (x * 32768.0).round() == (level * 32768.0 / 255.0).round() { level } else { v }
 }
 
-/// Blend If's Gray from channel levels: Reference's (30 R + 59 G + 11 B) / 100, rounded half down
-/// on 8-bit levels. Measured: pure red passes a black point at 20 from 66 (19.8) but not 65
-/// (19.5), pure blue at 28 from 251 (27.61) but not 250 (27.5); (123, 126, 151) is 128 (127.85)
-/// and (120, 129, 149) is 128 (128.5), where Rec. 601 luma gave 127.95 and 128.59. Levels between
-/// whole ones (deeper documents) keep the unrounded weighting.
+/// Blend If's Gray from channel levels: Reference's 30 % R + 59 % G + 11 % B on its 16-bit
+/// scale, weights 9830 + 19334 + 3604 = 32768, rounded to a whole level. Measured on 389 803
+/// colours against hard thresholds (no misses): ties at half a level go by the weights' rounding,
+/// up when 11 G > 5 R + 6 B ((216, 230, 0) is 201, (120, 129, 149) 128), and pure red passes a
+/// black point at 20 from 66, pure blue at 28 from 251. Levels between whole ones (deeper
+/// documents) keep the unrounded weighting.
 fn blend_if_gray(r: f32, g: f32, b: f32) -> f32 {
-    let sum = 30.0 * r + 59.0 * g + 11.0 * b;
-    if [r, g, b].iter().all(|c| c.fract() == 0.0) { ((sum + 49.0) / 100.0).floor() } else { sum / 100.0 }
+    if [r, g, b].iter().all(|c| c.fract() == 0.0) {
+        let sum = 9830 * r as u32 + 19334 * g as u32 + 3604 * b as u32;
+        ((sum + 16384) >> 15) as f32
+    } else {
+        (9830.0 * r + 19334.0 * g + 3604.0 * b) / 32768.0
+    }
 }
 
 /// Apply `layer`'s Blend If to a finished composite: `out` (the backdrop with the layer drawn)
@@ -1608,7 +1628,7 @@ fn apply_blend_if(layer: &Layer, before: &Buffer, out: &mut Buffer, cx: &Ctx) {
             None => Some(*p),
         };
         let under = Some(*b).filter(|q| q[3] > 0.0);
-        let k = blend_if_weight(layer, cx.mode, this, under);
+        let k = blend_if_weight(layer, cx, this, under);
         if k >= 1.0 {
             continue;
         }

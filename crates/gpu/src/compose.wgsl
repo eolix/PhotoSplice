@@ -1171,7 +1171,12 @@ fn bi_weight(e: u32, s: u32, v: f32) -> f32 {
     let b_hi = black - b_lo * 256.0;
     let w_lo = floor(white / 256.0);
     let w_hi = white - w_lo * 256.0;
-    return bi_ramp(b_lo, b_hi, v) * bi_ramp(255.0 - w_hi, 255.0 - w_lo, 255.0 - v);
+    // BlendRange::weight_at: each ramp widened by the document's step (`p4.z`), meeting by their
+    // minimum.
+    let step = op.p4.z;
+    let lo = bi_ramp(min(max(b_lo - step, 0.0), b_lo), b_hi, v);
+    let hi = bi_ramp(255.0 - max(min(w_hi + step, 255.0), w_hi), 255.0 - w_lo, 255.0 - v);
+    return min(lo, hi);
 }
 
 // The product of every range over the layer's own colour and the colour beneath it (a side
@@ -1193,9 +1198,12 @@ fn blend_if_weight(this_px: vec4<f32>, under: vec4<f32>) -> f32 {
         if (op.p4.x > 0.5) {
             k = k * bi_weight(0u, s, v.r) * bi_weight(1u, s, v.r);
         } else {
-            // compose::blend_if_gray: (30 R + 59 G + 11 B) / 100, rounded half down on whole levels.
-            let sum = 30.0 * v.r + 59.0 * v.g + 11.0 * v.b;
-            let gray = select(sum / 100.0, floor((sum + 49.0) / 100.0), all(v == round(v)));
+            // compose::blend_if_gray: 9830 R + 19334 G + 3604 B on the 16-bit scale, rounded to a
+            // whole level on whole levels.
+            let wsum = 9830.0 * v.r + 19334.0 * v.g + 3604.0 * v.b;
+            let ui = vec3<u32>(round(v));
+            let whole = f32((9830u * ui.r + 19334u * ui.g + 3604u * ui.b + 16384u) >> 15u);
+            let gray = select(wsum / 32768.0, whole, all(v == round(v)));
             k = k * bi_weight(0u, s, gray) * bi_weight(1u, s, v.r) * bi_weight(2u, s, v.g) * bi_weight(3u, s, v.b);
         }
         if (k <= 0.0) {

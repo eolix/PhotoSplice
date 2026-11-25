@@ -43,17 +43,29 @@ impl BlendRange {
     /// How much of a pixel with value `v` (0..=255, fractional for deep documents) shows:
     /// 0 below the black point or above the white point, 1 between them, and a linear ramp across
     /// a split point. An unsplit black point at `b` shows `v >= b`; an unsplit white point at `w`
-    /// shows `v <= w`.
+    /// shows `v <= w`. The exact sliders, without the document's step ([`BlendRange::weight_at`]).
     pub fn weight(&self, v: f32) -> f32 {
-        let ramp = |lo: u8, hi: u8, x: f32| -> f32 {
+        self.weight_at(v, 0.0)
+    }
+
+    /// [`BlendRange::weight`] as Reference evaluates it on a document whose smallest value step
+    /// is `step` (on the 0..=255 scale: 1 for 8-bit, 255/32768 for 16-bit, 0 for 32-bit). The
+    /// black ramp starts one step below its low half and the white ramp ends one step above its
+    /// high half, so an 8-bit split black point at 32/96 fades over 31..96 and a split white point
+    /// at 160/224 over 160..225 (measured on 256-level grids; the ends of the scale clamp, so 0/255
+    /// fades over 0..255). The two ramps meet by their minimum: black and white both split across
+    /// the whole scale show half of level 128, not a quarter.
+    pub fn weight_at(&self, v: f32, step: f32) -> f32 {
+        let ramp = |lo: f32, hi: f32, x: f32| -> f32 {
             // 0 at or below `lo`, 1 at or above `hi`.
-            let (lo, hi) = (f32::from(lo), f32::from(hi));
             if hi <= lo { if x >= lo { 1.0 } else { 0.0 } } else { ((x - lo) / (hi - lo)).clamp(0.0, 1.0) }
         };
-        let lo = ramp(self.black[0], self.black[1], v);
+        let [b0, b1] = self.black.map(f32::from);
+        let [w0, w1] = self.white.map(f32::from);
+        let lo = ramp((b0 - step).max(0.0).min(b0), b1, v);
         // Mirror for the white point: 1 at or below its low half, 0 above its high half.
-        let hi = ramp(255 - self.white[1], 255 - self.white[0], 255.0 - v);
-        lo * hi
+        let hi = ramp(255.0 - (w1 + step).min(255.0).max(w1), 255.0 - w0, 255.0 - v);
+        lo.min(hi)
     }
 }
 
@@ -124,6 +136,27 @@ mod tests {
         assert!((r.weight(205.0) - 0.5).abs() < 1e-6);
         assert_eq!(r.weight(255.0), 0.0);
         assert!(!r.is_full());
+    }
+
+    #[test]
+    fn eight_bit_ramps_widen_by_a_level_and_meet_by_their_minimum() {
+        // Reference grids: 32/96 fades over 31..96, 160/224 over 160..225.
+        let r = BlendRange { black: [32, 96], white: [160, 224] };
+        assert!((r.weight_at(64.0, 1.0) - 33.0 / 65.0).abs() < 1e-6);
+        assert!((r.weight_at(32.0, 1.0) - 1.0 / 65.0).abs() < 1e-6);
+        assert_eq!(r.weight_at(31.0, 1.0), 0.0);
+        assert!((r.weight_at(224.0, 1.0) - 1.0 / 65.0).abs() < 1e-6);
+        assert_eq!(r.weight_at(225.0, 1.0), 0.0);
+        // Unsplit points stay hard thresholds on whole levels.
+        let hard = BlendRange { black: [50, 50], white: [200, 200] };
+        assert_eq!(hard.weight_at(49.0, 1.0), 0.0);
+        assert_eq!(hard.weight_at(50.0, 1.0), 1.0);
+        assert_eq!(hard.weight_at(201.0, 1.0), 0.0);
+        // Split across the whole scale: the ends clamp and the two ramps meet by their minimum.
+        let wide = BlendRange { black: [0, 255], white: [0, 255] };
+        assert!((wide.weight_at(128.0, 1.0) - 127.0 / 255.0).abs() < 1e-6);
+        assert!((wide.weight_at(64.0, 1.0) - 64.0 / 255.0).abs() < 1e-6);
+        assert!((wide.weight_at(192.0, 1.0) - 63.0 / 255.0).abs() < 1e-6);
     }
 
     #[test]
