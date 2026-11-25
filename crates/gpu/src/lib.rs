@@ -868,14 +868,7 @@ impl Compositor {
     /// How far beyond a page cell the effect maps of `f` must be computed to be exact in it.
     fn fx_apron(doc: &Document, f: &plan::FxLayer<'_>) -> i32 {
         let vector_shape = matches!(f.layer.content, LayerContent::Shape(_)) && photosplice_compose::effect_outline(f.layer).is_none();
-        let progs: Vec<fx::MapProgram> = f
-            .layer
-            .effects
-            .items
-            .iter()
-            .filter(|e| e.enabled())
-            .map(|e| fx::program_with(e, &doc.global_light, vector_shape, &doc.patterns, (0.0, 0.0)))
-            .collect();
+        let progs = fx::layer_programs(f.layer, &doc.global_light, vector_shape, &doc.patterns, (0.0, 0.0));
         let want = field_reaches(&progs);
         // Distance fields are exact one pixel inside the window they are computed from.
         progs.iter().map(|p| p.reach(&|k| want.get(&k).copied().unwrap_or(0))).max().unwrap_or(0).saturating_add(2)
@@ -905,10 +898,10 @@ impl Compositor {
                 if noisy {
                     return Err(Unsupported(format!("effect noise on `{}` uses the CPU path", f.layer.name)));
                 }
-                for s in fx::program_with(e, &doc.global_light, false, &doc.patterns, (0.0, 0.0)).stages {
-                    if s.lut.as_ref().is_some_and(|l| l.len() > 4096) {
-                        return Err(Unsupported(format!("effect blur on `{}` too wide for the GPU path", f.layer.name)));
-                    }
+            }
+            for prog in fx::layer_programs(f.layer, &doc.global_light, false, &doc.patterns, (0.0, 0.0)) {
+                if prog.stages.iter().any(|s| s.lut.as_ref().is_some_and(|l| l.len() > 4096)) {
+                    return Err(Unsupported(format!("effect blur on `{}` too wide for the GPU path", f.layer.name)));
                 }
             }
         }
@@ -1855,8 +1848,7 @@ impl Compositor {
         // Filled shapes stroke their outline (the effect shape); others estimate it.
         let vector_shape = matches!(layer.content, LayerContent::Shape(_)) && photosplice_compose::effect_outline(layer).is_none();
         let anchor = layer.effects.reference.unwrap_or((f64::from(f.bounds.x0), f64::from(f.bounds.y0)));
-        let progs: Vec<fx::MapProgram> =
-            layer.effects.items.iter().filter(|e| e.enabled()).map(|e| fx::program_with(e, &doc.global_light, vector_shape, &doc.patterns, anchor)).collect();
+        let progs = fx::layer_programs(layer, &doc.global_light, vector_shape, &doc.patterns, anchor);
         let want = field_reaches(&progs);
         e.fields.retain(|k, _| want.contains_key(k));
         for (&kind, &reach) in &want {

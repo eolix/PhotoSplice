@@ -27,7 +27,9 @@ use std::sync::Arc;
 
 use photosplice_compose::effects::BevelPaint;
 use photosplice_compose::effects::FieldKind;
-use photosplice_doc::{BevelTechnique, Contour, Effect, GlobalLight, GlowSource, GlowTechnique, Layer, LayerContent, Pattern};
+use photosplice_doc::{
+    Bevel, BevelStyle, BevelTechnique, Contour, Effect, GlobalLight, GlowSource, GlowTechnique, Layer, LayerContent, Pattern, StrokeFx, StrokePosition,
+};
 use photosplice_geom::{Rect, TileCoord};
 use photosplice_raster::{Surface, Tile};
 
@@ -506,6 +508,110 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
     }
     (maps, &b.fields).hash(&mut h);
     MapProgram { key: h.finish() | 1, maps, stages: b.stages, fields: b.fields }
+}
+
+/// The map programs of a layer's enabled effects, in order (`build_maps`): Stroke Emboss reads
+/// the layer's strokes; every other effect stands alone.
+pub(crate) fn layer_programs(layer: &Layer, light: &GlobalLight, vector_shape: bool, patterns: &[Pattern], anchor: (f64, f64)) -> Vec<MapProgram> {
+    let items: Vec<&Effect> = layer.effects.items.iter().filter(|e| e.enabled()).collect();
+    let strokes: Vec<&StrokeFx> = items.iter().filter_map(|e| if let Effect::Stroke(st) = e { Some(st) } else { None }).collect();
+    items
+        .iter()
+        .map(|e| match e {
+            Effect::BevelEmboss(bv) if bv.style == BevelStyle::StrokeEmboss => stroke_emboss_program(bv, &strokes, light, patterns, anchor),
+            _ => program_with(e, light, vector_shape, patterns, anchor),
+        })
+        .collect()
+}
+
+/// Stroke Emboss (`build_maps`): the shape's own bevel over the union of every enabled stroke.
+/// Four maps, the inside highlight and shadow, then the outside ones: an emboss of the shape when
+/// any stroke is centred, else an inner bevel inside and an outer bevel outside, each zero where
+/// no stroke reaches. No strokes, no maps.
+fn stroke_emboss_program(bv: &Bevel, strokes: &[&StrokeFx], light: &GlobalLight, patterns: &[Pattern], anchor: (f64, f64)) -> MapProgram {
+    if strokes.is_empty() {
+        return MapProgram::empty();
+    }
+    let mut b = B { stages: Vec::new(), fields: Vec::new() };
+    // The strokes' union: inside the shape their widest inside band, outside it their widest
+    // outside band (none when no stroke reaches outside, as the CPU has no outside field then).
+    let widths: Vec<(f32, f32)> = strokes.iter().map(|st| stroke_widths(st)).collect();
+    let band = |b: &mut B, kind: FieldKind, w: f32| {
+        let f = b.field(kind, w);
+        b.push(stage(Kernel::MStroke, Some(f), None, [w, 0.0, 0.0, 0.0], 0))
+    };
+    let union = |b: &mut B, kind: FieldKind, ws: &mut dyn Iterator<Item = f32>| {
+        let mut acc: Option<In> = None;
+        for w in ws {
+            let v = band(b, kind, w);
+            acc = Some(match acc {
+                None => v,
+                Some(prev) => b.push(stage(Kernel::MRing, Some(prev), Some(v), [0.0, 0.0, 0.0, 0.0], 0)),
+            });
+        }
+        acc
+    };
+    let inner = union(&mut b, FieldKind::StrokeInside, &mut widths.iter().map(|w| w.0));
+    let outer = if widths.iter().any(|w| w.1 > 0.0) { union(&mut b, FieldKind::StrokeOutside, &mut widths.iter().map(|w| w.1)) } else { None };
+    let mut ring = stage(Kernel::MRing, inner, outer, [1.0, f32::from(u8::from(outer.is_some())), 0.0, 0.0], 0);
+    ring.s = Some(In::Shape);
+    let ring = b.push(ring);
+    // The shading: whole bevel programs, their final maps made temporaries and gated by the ring.
+    let styled = |style: BevelStyle| program_with(&Effect::BevelEmboss(Bevel { style, ..bv.clone() }), light, false, patterns, anchor);
+    let center = strokes.iter().any(|st| st.position == StrokePosition::Center);
+    let parts = if center { vec![styled(BevelStyle::Emboss)] } else { vec![styled(BevelStyle::InnerBevel), styled(BevelStyle::OuterBevel)] };
+    let mut first = 0;
+    for part in parts {
+        let off = b.stages.len();
+        let shift = |i: Option<In>| match i {
+            Some(In::Val(k)) => Some(In::Val(k + off)),
+            other => other,
+        };
+        let mut finals: Vec<(usize, In)> = Vec::new();
+        for (k, mut st) in part.stages.into_iter().enumerate() {
+            (st.a, st.b, st.s) = (shift(st.a), shift(st.b), shift(st.s));
+            if let Some(o) = st.out.take() {
+                finals.push((o, In::Val(off + k)));
+            }
+            b.stages.push(st);
+        }
+        b.fields.extend(part.fields);
+        finals.sort_by_key(|(o, _)| *o);
+        for (o, mut v) in finals {
+            if center && o < 2 {
+                // The emboss's inside half (full strength) × the shape's alpha, as an inner
+                // bevel's, since the strokes take it relative to it (`build_maps`).
+                let mut st = stage(Kernel::MFinish, Some(v), None, [0.0, 0.0, 0.0, 1.0], 0);
+                st.s = Some(In::Shape);
+                v = b.push(st);
+            }
+            let mut g = stage(Kernel::MRing, Some(v), Some(ring), [2.0, 0.0, 0.0, 0.0], 0);
+            g.out = Some(first + o);
+            b.stages.push(g);
+        }
+        first += part.maps;
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    "stroke-emboss".hash(&mut h);
+    for s in &b.stages {
+        (format!("{:?}", s.kernel), s.a, s.b, s.s, s.radius, s.out).hash(&mut h);
+        for v in s.p0.iter().chain(&s.p1).chain(&s.p3).chain(&s.p4) {
+            v.to_bits().hash(&mut h);
+        }
+        if let Some(l) = &s.lut {
+            for v in l.iter() {
+                v.to_bits().hash(&mut h);
+            }
+        }
+        if let Some(p) = &s.pattern {
+            (&p.id, &p.name, p.width, p.height).hash(&mut h);
+            for (c, t) in p.surface.tiles() {
+                (c.tx, c.ty, Arc::as_ptr(t) as usize).hash(&mut h);
+            }
+        }
+    }
+    (first, &b.fields).hash(&mut h);
+    MapProgram { key: h.finish() | 1, maps: first, stages: b.stages, fields: b.fields }
 }
 
 // ---------------------------------------------------------------------------------------------

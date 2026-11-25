@@ -2059,6 +2059,7 @@ pub(crate) fn build_maps_prepared(
     } else {
         (None, None)
     };
+    let strokes: Vec<&photosplice_doc::StrokeFx> = items.iter().filter_map(|e| if let Effect::Stroke(st) = e { Some(st) } else { None }).collect();
     let mut bevel_paint = vec![BevelPaint::Inner; items.len()];
     let per: Vec<Vec<Map>> = items
         .iter()
@@ -2069,61 +2070,72 @@ pub(crate) fn build_maps_prepared(
             Effect::OuterGlow(g) => vec![glow_map(&shape, g, false, (rect.x0, rect.y0))],
             Effect::InnerGlow(g) => vec![glow_map(&shape, g, true, (rect.x0, rect.y0))],
             Effect::Satin(s) => vec![satin_map(&shape, s)],
-            // Stroke Emboss: the shape's own bevel, painted over the stroke effect's area
-            // (Photoshop corpus bevel-stroke-*: the stroke is shaded, the layer stays flat). An
-            // inside stroke is the shape's inner band, shaded as an inner bevel of the shape
-            // (bevel-stroke-emboss-inside-stroke 3.6 %). Without a stroke there is nothing to emboss.
-            Effect::BevelEmboss(b)
-                if b.style == BevelStyle::StrokeEmboss
-                    && items.iter().find_map(|e| if let Effect::Stroke(st) = e { Some(st.position) } else { None }) != Some(StrokePosition::Inside) =>
-            {
+            // Stroke Emboss: the shape's own bevel, painted over the area of every enabled stroke
+            // (Reference corpus bevel-stroke-*: the strokes are shaded, the layer stays flat).
+            // Reference shades the union of the strokes, whatever their order, and anchors the
+            // bevel at the layer's edge, not at a stroke's (temp kit stroke-emboss: Outside 3 +
+            // Inside 6 shades d ∈ [−5.9, +3.3], Outside 3 + Outside 8 the same as Outside 8
+            // alone, Inside 3 stops at −3.5, a disabled stroke not at all). Without a stroke
+            // there is nothing to emboss.
+            Effect::BevelEmboss(b) if b.style == BevelStyle::StrokeEmboss => {
                 bevel_paint[i] = BevelPaint::Stroke;
-                let stroke = items.iter().find_map(|e| if let Effect::Stroke(st) = e { Some(st) } else { None });
-                match (stroke, &din, dout.as_ref()) {
-                    (Some(st), Some(di), Some(dou)) => {
-                        let (in_w, out_w) = stroke_widths(st);
+                match &din {
+                    Some(di) if !strokes.is_empty() => {
+                        let widths: Vec<(f32, f32)> = strokes.iter().map(|st| stroke_widths(st)).collect();
+                        // The strokes' union: inside the shape, out to their widest inside part;
+                        // outside it, out to their widest outside part.
                         let ring = Map {
                             w,
                             h,
                             v: shape
                                 .v
                                 .iter()
-                                .zip(di.iter().zip(dou))
-                                .map(|(a, (di, dou))| if *a > INSIDE_EPS { (in_w + 0.5 - di).clamp(0.0, 1.0) } else { (out_w + 0.5 - dou).clamp(0.0, 1.0) })
+                                .enumerate()
+                                .map(|(k, a)| {
+                                    let inside = *a > INSIDE_EPS;
+                                    let d = if inside { di.get(k).copied().unwrap_or(FAR) } else { dout.as_ref().and_then(|v| v.get(k)).copied().unwrap_or(FAR) };
+                                    widths.iter().fold(0.0f32, |m, (in_w, out_w)| m.max((if inside { *in_w } else { *out_w } + 0.5 - d).clamp(0.0, 1.0)))
+                                })
                                 .collect(),
                         };
-                        // The slope is the shape's own, steepest at its edge: an outside stroke is
-                        // shaded as an outer bevel of the shape, a centre stroke as an emboss of it,
-                        // shown over the stroke only (Photoshop corpus, pixels off: bevel-stroke-smooth
-                        // 13.1 → 1.7 %, -chisel-hard 10.3 → 4.0 %, centre stroke 20.3 → 12.3 %; as
-                        // an inner bevel of the ring the slope fell and rose again across it).
-                        let union = Map { w, h, v: shape.v.iter().zip(&ring.v).map(|(a, r)| a.max(*r)).collect() };
-                        let style = if st.position == StrokePosition::Center { BevelStyle::Emboss } else { BevelStyle::OuterBevel };
-                        let mut maps = bevel_maps(&shape, &Bevel { style, ..(*b).clone() }, light, tex, patterns).0;
-                        // The emboss's halves as one map per colour: the inside where the shape is
-                        // (× its alpha), the outside for the rest of each pixel.
-                        if let [hi, sh, ho, so] = maps.as_slice() {
-                            let mix = |a: &Map, o: &Map| Map {
-                                w,
-                                h,
-                                v: a.v.iter().zip(&o.v).zip(&shape.v).map(|((x, y), s)| if *s > INSIDE_EPS { x * s } else { 0.0 } + y * (1.0 - s.min(1.0))).collect(),
-                            };
-                            maps = vec![mix(hi, ho), mix(sh, so)];
-                        }
-                        // An outside stroke is shaded in its own colour before it is mixed over the
-                        // backdrop ([`composite_with_effects_prepared`]), so the maps run at full
-                        // strength wherever the ring reaches; a centre stroke is shaded over the
-                        // composite, weighted by the ring's share.
-                        let outside = st.position != StrokePosition::Inside;
+                        // The slope is the shape's own, steepest at its edge (Reference corpus,
+                        // pixels off: bevel-stroke-smooth 13.1 → 1.7 %, -chisel-hard 10.3 → 4.0 %,
+                        // centre stroke 20.3 → 12.3 %; as an inner bevel of the ring the slope fell
+                        // and rose again across it). Any centre stroke makes it an emboss of the
+                        // shape, whatever the other strokes; otherwise an inner bevel inside and an
+                        // outer bevel outside, each at full size (temp kit stroke-emboss, lit side
+                        // at d = −3 / +3: Center 8 17.8 / 11.0, and so with an Outside 3 listed
+                        // either side of it; Outside 3 + Inside 6 59.9 / 21.2 = Inside 6's and
+                        // Outside 3's).
+                        let styled = |style: BevelStyle| bevel_maps(&shape, &Bevel { style, ..(*b).clone() }, light, tex, patterns).0;
+                        let mut maps = if strokes.iter().any(|st| st.position == StrokePosition::Center) {
+                            // The emboss's inside half runs at full strength; like an inner bevel's
+                            // it is × the shape's alpha here, as the strokes take it relative to it
+                            // (temp kit stroke-emboss one-ctr8: half-covered edge pixels shaded
+                            // 0.77 where Reference shades 0.54).
+                            let mut m = styled(BevelStyle::Emboss);
+                            for half in m.iter_mut().take(2) {
+                                for (v, a) in half.v.iter_mut().zip(&shape.v) {
+                                    *v *= a.min(1.0);
+                                }
+                            }
+                            m
+                        } else {
+                            let mut m = styled(BevelStyle::InnerBevel);
+                            m.extend(styled(BevelStyle::OuterBevel));
+                            m
+                        };
+                        // Four maps: the inside highlight and shadow, then the outside ones. Each
+                        // stroke is shaded in its own colour before it is laid down
+                        // ([`composite_with_effects_prepared`]): its inside part by the inside maps,
+                        // its outside part by the outside ones, at full strength wherever the
+                        // strokes reach (an edge pixel of Outside 3 + Inside 6 darkens both parts
+                        // to a quarter, where maps mixed by coverage left its outside part lighter).
                         for m in &mut maps {
-                            for ((v, r), u) in m.v.iter_mut().zip(&ring.v).zip(&union.v) {
-                                *v *= if *u <= 1e-6 || *r <= 1e-6 {
-                                    0.0
-                                } else if outside {
-                                    1.0
-                                } else {
-                                    (r / u).min(1.0)
-                                };
+                            for (v, r) in m.v.iter_mut().zip(&ring.v) {
+                                if *r <= 1e-6 {
+                                    *v = 0.0;
+                                }
                             }
                         }
                         maps
@@ -2205,17 +2217,30 @@ pub fn premerges_layer(layer: &Layer) -> bool {
         }
 }
 
+/// `true` if there are strokes and none reaches outside the layer: Stroke Emboss then shades with
+/// the layer, as an inner bevel does.
+fn strokes_all_inside(strokes: &[&photosplice_doc::StrokeFx]) -> bool {
+    !strokes.is_empty() && strokes.iter().all(|st| st.position == StrokePosition::Inside)
+}
+
 /// `true` if an enabled effect painted inside the layer (with its content) blends in a mode
 /// other than Normal.
 fn blends_inside(layer: &Layer) -> bool {
     let blends = |m: BlendMode| m != BlendMode::Normal;
+    // Stroke Emboss shades with the layer only when every stroke is inside it.
+    let strokes: Vec<&photosplice_doc::StrokeFx> =
+        layer.effects.items.iter().filter(|e| e.enabled()).filter_map(|e| if let Effect::Stroke(st) = e { Some(st) } else { None }).collect();
+    let stroke_inside = strokes_all_inside(&strokes);
     layer.effects.items.iter().filter(|e| e.enabled()).any(|e| match e {
         Effect::ColorOverlay { common, .. } | Effect::GradientOverlay { common, .. } | Effect::PatternOverlay { common, .. } => blends(common.blend),
         Effect::Satin(s) => blends(s.common.blend),
         Effect::InnerGlow(g) => blends(g.common.blend),
         Effect::InnerShadow(s) => blends(s.common.blend),
         Effect::Stroke(s) => stroke_widths(s).0 > 0.0 && blends(s.common.blend),
-        Effect::BevelEmboss(b) => bevel_geom(b).paint == BevelPaint::Inner && (blends(b.highlight.blend) || blends(b.shadow.blend)),
+        Effect::BevelEmboss(b) => {
+            let inner = if b.style == BevelStyle::StrokeEmboss { stroke_inside } else { bevel_geom(b).paint == BevelPaint::Inner };
+            inner && (blends(b.highlight.blend) || blends(b.shadow.blend))
+        }
         Effect::DropShadow(_) | Effect::OuterGlow(_) => false,
     })
 }
@@ -2435,16 +2460,18 @@ pub(crate) fn composite_with_effects_prepared(
         for ((mv, a), dv) in m.v.iter_mut().zip(&shape.v).zip(&din) {
             *mv = if inside(*a) { (in_w + 0.5 - dv).clamp(0.0, 1.0) } else { 0.0 };
         }
-        let embossed: Vec<usize> = if st.position == StrokePosition::Center {
-            rev().filter(|(i, e)| matches!(e, Effect::BevelEmboss(_)) && maps.bevel_paint[*i] == BevelPaint::Stroke && !maps.per.get(*i).is_none_or(Vec::is_empty)).map(|(i, _)| i).collect()
+        // Stroke Emboss shades the inside part of a centre stroke, or of an inside stroke beside
+        // outside ones, in its own colour; strokes wholly inside shade with the layer instead.
+        let embossed: Vec<usize> = if st.position != StrokePosition::Outside {
+            rev().filter(|(i, e)| matches!(e, Effect::BevelEmboss(_)) && maps.bevel_paint[*i] == BevelPaint::Stroke && maps.per.get(*i).is_some_and(|m| m.len() == 4)).map(|(i, _)| i).collect()
         } else {
             Vec::new()
         };
         if embossed.is_empty() {
             paint_fx(&mut lay, &m, &st.paint, frame(st), canvas, anchor, big, st.common.blend, st.common.opacity, patterns);
         } else {
-            // Stroke Emboss on a centre stroke: the inside half shaded in its own colour too,
-            // then laid over the layer by its coverage.
+            // Stroke Emboss: the stroke's inside part shaded in its own colour too, then laid over
+            // the layer by its coverage.
             let mut stroked = lay.clone();
             let ones = Map { w, h, v: m.v.iter().map(|&v| if v > 0.0 { 1.0 } else { 0.0 }).collect() };
             paint_fx(&mut stroked, &ones, &st.paint, frame(st), canvas, anchor, big, st.common.blend, 1.0, patterns);
@@ -2454,10 +2481,13 @@ pub(crate) fn composite_with_effects_prepared(
                     paint_color(&mut stroked, &rel(fx(i, 1)), rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
                 }
             }
+            // Premultiplied: at Fill 0 % the layer pixel is clear and its colour must not leak
+            // into the stroke's (temp kit stroke-emboss fill0-two-out3-in6: Inside 6's inner edge
+            // pixels took the shape's blue, 20/255 off).
             for ((p, q), k) in lay.px.iter_mut().zip(&stroked.px).zip(&m.v) {
                 let k = k * st.common.opacity;
                 if k > 0.0 {
-                    *p = std::array::from_fn(|c| p[c] + (q[c] - p[c]) * k);
+                    *p = mix_premul(*p, *q, k);
                 }
             }
         }
@@ -2487,6 +2517,13 @@ pub(crate) fn composite_with_effects_prepared(
         let base = work.clone();
         let mut acc = vec![[0.0f32; 4]; w * h]; // premultiplied Σ share·blended
         let mut cover = vec![0.0f32; w * h];
+        // What the strokes above take of each pixel as they stack among themselves: their whole
+        // band, before the layer's edge pixels hide part of it. Reference stacks the strokes first
+        // and shows the stack only where the shape leaves room (temp kit stroke-emboss
+        // fill0-two-out3-out8: a half-covered edge pixel at Fill 0 % is half the top stroke, half
+        // backdrop, none of the stroke beneath; sharing what the top stroke left of the edge gave
+        // the lower one a quarter).
+        let mut stacked = vec![0.0f32; w * h];
         for st in strokes.iter().copied() {
             let (_, out_w) = widths(st);
             if out_w <= 0.0 {
@@ -2504,19 +2541,23 @@ pub(crate) fn composite_with_effects_prepared(
                 // beneath a fully covered pixel, whatever the layer's fill and blend mode (a
                 // Multiply layer blending its interior effects as a group would otherwise multiply
                 // the stroke there), and the interior stays clear at 0 % fill.
-                let k = if inside(shape.v[i]) {
-                    if vector_shape && !maps.outline { 0.0 } else { band * outline_share(shape.v[i], lay.px[i][3]) }
+                let (k, whole) = if inside(shape.v[i]) {
+                    if vector_shape && !maps.outline { (0.0, 0.0) } else { (band * outline_share(shape.v[i], lay.px[i][3]), band) }
                 } else {
-                    band
+                    (band, band)
                 };
                 let mut k = k * st.common.opacity;
+                let mut whole = whole * st.common.opacity;
                 if st.common.blend == BlendMode::Dissolve {
                     // A Dissolve stroke covers each pixel fully or not at all.
                     let (x, y) = (i64::from(big.x0) + (i % w) as i64, i64::from(big.y0) + (i / w) as i64);
                     k = if k > 0.0 && dissolves_in(x, y, k) { 1.0 } else { 0.0 };
+                    whole = k;
                 }
-                *sh = k * (1.0 - cover[i]);
+                let free = 1.0 - stacked[i];
+                *sh = k * free;
                 cover[i] += *sh;
+                stacked[i] += whole * free;
             }
             // The stroke blended over the backdrop at full coverage. The share already carries
             // the Dissolve choice, so the paint itself composites as Normal.
@@ -2531,10 +2572,10 @@ pub(crate) fn composite_with_effects_prepared(
                 for (i, e) in rev() {
                     if let Effect::BevelEmboss(b) = e
                         && maps.bevel_paint[i] == BevelPaint::Stroke
-                        && !maps.per.get(i).is_none_or(Vec::is_empty)
+                        && maps.per.get(i).is_some_and(|m| m.len() == 4)
                     {
-                        paint_color(&mut blended, &fx(i, 0), rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
-                        paint_color(&mut blended, &fx(i, 1), rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
+                        paint_color(&mut blended, &fx(i, 2), rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
+                        paint_color(&mut blended, &fx(i, 3), rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
                     }
                 }
             }
@@ -2581,34 +2622,29 @@ pub(crate) fn composite_with_effects_prepared(
             *wp = psblend::composite_gamma(mode, *wp, *lp, 1.0, gamma);
         }
     }
-    // An outside stroke's Stroke Emboss was shaded with the stroke itself, above.
-    let outside_stroke = strokes.first().is_some_and(|st| st.position != StrokePosition::Inside);
     // Emboss styles shade the composited layer (their maps cover inside and outside). Painting
     // them into the layer before its (text-gamma) composite left a type layer's lit top edges up
     // to 6/255 dark (psd-tools layer_effects Emboss: 7.8 → 5.7/255).
     for (i, e) in rev() {
+        // Stroke Emboss was shaded with each stroke itself, above.
         if let Effect::BevelEmboss(b) = e
-            && ((maps.bevel_paint[i] == BevelPaint::Both && b.style != BevelStyle::PillowEmboss) || (maps.bevel_paint[i] == BevelPaint::Stroke && !outside_stroke))
+            && maps.bevel_paint[i] == BevelPaint::Both
+            && b.style != BevelStyle::PillowEmboss
             && !maps.per.get(i).is_none_or(Vec::is_empty)
         {
-            if maps.bevel_paint[i] == BevelPaint::Both {
-                // Each half shades the composited pixel on its own; an edge pixel takes the inside
-                // result for its coverage and the outside one for the rest (temp kit 8 pillow-*:
-                // a half-covered pixel between a black inside and a lit outside is the lit value
-                // × ½, not the colour of the averaged shading). Plain emboss halves shade alike.
-                let mut inside = work.clone();
-                paint_color(&mut inside, &fx(i, 0), rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
-                paint_color(&mut inside, &fx(i, 1), rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
-                paint_color(&mut work, &fx(i, 2), rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
-                paint_color(&mut work, &fx(i, 3), rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
-                for ((o, p), a) in work.px.iter_mut().zip(&inside.px).zip(&shape.v) {
-                    if *a > INSIDE_EPS {
-                        *o = mix_premul(*o, *p, a.min(1.0));
-                    }
+            // Each half shades the composited pixel on its own; an edge pixel takes the inside
+            // result for its coverage and the outside one for the rest (temp kit 8 pillow-*: a
+            // half-covered pixel between a black inside and a lit outside is the lit value × ½,
+            // not the colour of the averaged shading). Plain emboss halves shade alike.
+            let mut inside = work.clone();
+            paint_color(&mut inside, &fx(i, 0), rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
+            paint_color(&mut inside, &fx(i, 1), rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
+            paint_color(&mut work, &fx(i, 2), rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
+            paint_color(&mut work, &fx(i, 3), rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
+            for ((o, p), a) in work.px.iter_mut().zip(&inside.px).zip(&shape.v) {
+                if *a > INSIDE_EPS {
+                    *o = mix_premul(*o, *p, a.min(1.0));
                 }
-            } else {
-                paint_color(&mut work, &fx(i, 0), rgb(&b.highlight_color), b.highlight.blend, b.highlight.opacity);
-                paint_color(&mut work, &fx(i, 1), rgb(&b.shadow_color), b.shadow.blend, b.shadow.opacity);
             }
         }
     }
@@ -3109,13 +3145,15 @@ mod tests {
         let mut layer = Layer::raster("l", photosplice_color::PixelFormat::RGBA8);
         layer.effects.items = vec![stroke, emboss.clone()];
         let maps = build_maps(&layer, shape.v.clone(), Rect::new(0, 0, n as i32, n as i32), &GlobalLight::default(), &no_tex());
-        let (hi, sh) = (&maps.per[1][0], &maps.per[1][1]);
+        // The outside maps (2, 3) shade an outside stroke; the inside ones (0, 1) stay clear.
+        assert!(maps.per[1][0].v.iter().chain(&maps.per[1][1].v).all(|v| *v == 0.0));
+        let (hi, sh) = (&maps.per[1][2], &maps.per[1][3]);
         let at = |m: &Map, x: usize, y: usize| m.v[y * n + x];
         // The ring's lit and shaded sides are painted; the middle of the shape isn't.
         assert!(at(hi, 8, 24) > 0.05 || at(sh, 8, 24) > 0.05 || at(hi, 24, 8) > 0.05 || at(sh, 24, 8) > 0.05);
         assert_eq!((at(hi, 24, 24), at(sh, 24, 24)), (0.0, 0.0));
         // Lit from above, the top of the ring is lit most by the shape's edge, where the shape's
-        // own slope is steepest (Photoshop corpus bevel-stroke-smooth: 0.87 at the ring's outer
+        // own slope is steepest (Reference corpus bevel-stroke-smooth: 0.87 at the ring's outer
         // edge → 0.91 by the shape), and the ring past the size isn't shaded.
         assert!(at(hi, 24, 11) > at(hi, 24, 8) && at(hi, 24, 8) > 0.0, "{:?}", (5..12).map(|y| at(hi, 24, y)).collect::<Vec<_>>());
         assert!(at(sh, 24, 36) > at(sh, 24, 39) && at(sh, 24, 39) > 0.0, "shaded below, most by the shape: {:?}", (36..43).map(|y| at(sh, 24, y)).collect::<Vec<_>>());
@@ -3123,6 +3161,93 @@ mod tests {
         layer.effects.items = vec![emboss];
         let maps = build_maps(&layer, shape.v.clone(), Rect::new(0, 0, n as i32, n as i32), &GlobalLight::default(), &no_tex());
         assert!(maps.per[0].is_empty());
+    }
+
+    /// Stroke Emboss with several strokes, as Reference renders it (temp kit stroke-emboss: a
+    /// disc of radius 13, size 5, Smooth; lit-side shading in levels by distance d from the edge).
+    #[test]
+    fn stroke_emboss_shades_the_union_of_the_strokes() {
+        let n = 64;
+        let shape = square(n, 20, 44);
+        let stroke = |size: f32, position: StrokePosition, enabled: bool| {
+            let mut common = photosplice_doc::FxCommon::new(BlendMode::Normal, 1.0);
+            common.enabled = enabled;
+            Effect::Stroke(photosplice_doc::StrokeFx { common, size, position, paint: FxPaint::Color(photosplice_doc::Color::BLACK) })
+        };
+        let emboss = Effect::BevelEmboss(Bevel { size: 5.0, ..bevel_of(BevelStyle::StrokeEmboss, BevelTechnique::Smooth) });
+        let maps = |strokes: Vec<Effect>| {
+            let mut layer = Layer::raster("l", photosplice_color::PixelFormat::RGBA8);
+            let k = strokes.iter().filter(|e| e.enabled()).count();
+            layer.effects.items = strokes;
+            layer.effects.items.push(emboss.clone());
+            let fx = build_maps(&layer, shape.v.clone(), Rect::new(0, 0, n as i32, n as i32), &GlobalLight::default(), &no_tex());
+            fx.per[k].iter().map(|m| m.v.clone()).collect::<Vec<Vec<f32>>>()
+        };
+        // Shading (highlight + shadow) above the square's top edge at x = 32: row y is at
+        // d = 19.5 − y outside, y − 19.5 inside.
+        let shade = |m: &[Vec<f32>], y: usize| m.iter().map(|m| m[y * n + 32]).sum::<f32>();
+        // The union: Outside 3 + Outside 8, either order, shades as far as Outside 8 alone
+        // (Reference at d = +4: 22.4 and 23.4; Outside 3 alone stops at +3.3).
+        let out3 = maps(vec![stroke(3.0, StrokePosition::Outside, true)]);
+        let out8 = maps(vec![stroke(8.0, StrokePosition::Outside, true)]);
+        let pair = maps(vec![stroke(3.0, StrokePosition::Outside, true), stroke(8.0, StrokePosition::Outside, true)]);
+        assert_eq!(shade(&out3, 15), 0.0);
+        assert!(shade(&out8, 15) > 0.05);
+        assert_eq!(pair, out8);
+        assert_eq!(maps(vec![stroke(8.0, StrokePosition::Outside, true), stroke(3.0, StrokePosition::Outside, true)]), out8);
+        // A disabled stroke takes no part (Reference: Outside 8 off + Outside 3 = Outside 3).
+        assert_eq!(maps(vec![stroke(8.0, StrokePosition::Outside, false), stroke(3.0, StrokePosition::Outside, true)]), out3);
+        // Inside strokes shade only their band (Reference: Inside 3 stops at d = −3.5, Inside 6
+        // shades 23.3 at −4.5).
+        let in3 = maps(vec![stroke(3.0, StrokePosition::Inside, true)]);
+        let in6 = maps(vec![stroke(6.0, StrokePosition::Inside, true)]);
+        assert_eq!(shade(&in3, 24), 0.0);
+        assert!(shade(&in6, 24) > 0.05 && shade(&in3, 21) > 0.05);
+        // Any centre stroke makes it the emboss of the shape, whatever is listed with it
+        // (Reference: Outside 3 + Center 8 and Center 8 + Outside 3 shade exactly as Center 8).
+        let ctr8 = maps(vec![stroke(8.0, StrokePosition::Center, true)]);
+        assert_eq!(maps(vec![stroke(3.0, StrokePosition::Outside, true), stroke(8.0, StrokePosition::Center, true)]), ctr8);
+        assert_eq!(maps(vec![stroke(8.0, StrokePosition::Center, true), stroke(3.0, StrokePosition::Outside, true)]), ctr8);
+        // Inside and outside strokes together: a full-size inner bevel inside and outer bevel
+        // outside (Reference: Outside 3 + Inside 6 shades 59.9 at d = −3, as Inside 6 does, where
+        // the half-size emboss of a centre stroke shades 17.8).
+        let mixed = maps(vec![stroke(3.0, StrokePosition::Outside, true), stroke(6.0, StrokePosition::Inside, true)]);
+        assert_eq!(mixed[..2], in6[..2]);
+        assert_eq!(mixed[2..], out3[2..]);
+        assert!(shade(&mixed, 22) > 2.0 * shade(&ctr8, 22), "{} vs {}", shade(&mixed, 22), shade(&ctr8, 22));
+    }
+
+    /// A centre stroke's emboss shades a half-covered edge pixel in proportion to the shape there,
+    /// as an inner bevel's inside does (Reference, temp kit stroke-emboss one-ctr8: such a pixel
+    /// shaded 0.54 of full strength where full-strength maps taken relative to the shape gave 0.77).
+    #[test]
+    fn centre_stroke_emboss_inside_follows_the_shape() {
+        let n = 48;
+        // A square with a half-covered top row.
+        let mut shape = square(n, 12, 36);
+        for x in 12..36 {
+            shape.v[11 * n + x] = 0.5;
+        }
+        let stroke = Effect::Stroke(photosplice_doc::StrokeFx {
+            common: photosplice_doc::FxCommon::new(BlendMode::Normal, 1.0),
+            size: 8.0,
+            position: StrokePosition::Center,
+            paint: FxPaint::Color(photosplice_doc::Color::BLACK),
+        });
+        let b = Bevel { size: 5.0, ..bevel_of(BevelStyle::StrokeEmboss, BevelTechnique::Smooth) };
+        let mut layer = Layer::raster("l", photosplice_color::PixelFormat::RGBA8);
+        layer.effects.items = vec![stroke, Effect::BevelEmboss(b.clone())];
+        let maps = build_maps(&layer, shape.v.clone(), Rect::new(0, 0, n as i32, n as i32), &GlobalLight::default(), &no_tex());
+        let emboss = bevel_maps(&shape, &Bevel { style: BevelStyle::Emboss, ..b }, &GlobalLight::default(), &no_tex(), &PreparedPatterns::new(&[], PREPARED_PATTERN_BYTES)).0;
+        for (k, (ours, half)) in maps.per[1].iter().zip(&emboss).take(2).enumerate() {
+            for (i, (v, e)) in ours.v.iter().zip(&half.v).enumerate() {
+                if shape.v[i] > INSIDE_EPS && *e > 0.0 {
+                    assert!((v - e * shape.v[i]).abs() < 1e-6, "map {k} pixel {i}: {v} vs {e} × {}", shape.v[i]);
+                }
+            }
+        }
+        // The edge row is shaded at all (the light from above reaches it).
+        assert!(maps.per[1][0].v[11 * n + 24] > 0.0);
     }
 
     /// Chisel Soft draws the same facets as Chisel Hard along straight edges (Reference corpus

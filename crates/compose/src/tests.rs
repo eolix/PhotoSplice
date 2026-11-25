@@ -3127,6 +3127,47 @@ fn stroke_emboss_leaves_the_backdrop_share_alone() {
     assert!(shaded > 50, "the stroke is shaded at all ({shaded} pixels)");
 }
 
+/// Outside strokes stack among themselves before the layer's edge pixels hide part of them
+/// (Reference, temp kit stroke-emboss fill0-two-out3-out8: at Fill 0 % a half-covered edge pixel
+/// is half the top stroke and half backdrop, with none of the wider stroke beneath; sharing what
+/// the top stroke left of the pixel gave the lower one a quarter).
+#[test]
+fn outside_strokes_stack_before_the_edge_hides_them() {
+    use photosplice_color::BlendMode;
+    let n = 64u32;
+    let mut d = doc_white(n, n);
+    let mut l = Layer::raster("disc", PixelFormat::RGBA8);
+    let s = l.surface_mut().unwrap();
+    let alpha = |x: i32, y: i32| (14.5 - ((x as f32 + 0.5 - 32.0).powi(2) + (y as f32 + 0.5 - 32.0).powi(2)).sqrt()).clamp(0.0, 1.0);
+    for y in 0..n as i32 {
+        for x in 0..n as i32 {
+            if alpha(x, y) > 0.0 {
+                s.write_pixel(x, y, &[0.3, 0.5, 0.8, alpha(x, y)]);
+            }
+        }
+    }
+    let stroke = |size: f32, c: Color| {
+        Effect::Stroke(StrokeFx { common: FxCommon::new(BlendMode::Normal, 1.0), size, position: StrokePosition::Outside, paint: FxPaint::Color(c) })
+    };
+    l.effects.items = vec![stroke(3.0, Color::rgb(1.0, 0.0, 0.0)), stroke(8.0, Color::rgb(0.0, 0.0, 1.0))];
+    l.fill_opacity = 0.0;
+    d.layers.push(l);
+    let px = flatten(&d).px;
+    let mut seen = 0;
+    for y in 0..n as i32 {
+        for x in 0..n as i32 {
+            let a = alpha(x, y);
+            if (0.2..0.8).contains(&a) {
+                // The top (red) stroke over the part outside the shape, white backdrop for the rest.
+                let p = px[(y * n as i32 + x) as usize];
+                assert!((p[1] - a).abs() < 0.02 && (p[2] - p[1]).abs() < 0.01, "({x},{y}) coverage {a}: {p:?}");
+                seen += 1;
+            }
+        }
+    }
+    assert!(seen > 20, "{seen} edge pixels");
+}
+
 #[test]
 fn rendering_restores_the_lab_mix_flag_it_found() {
     // #1112: a render set LAB_MIX for its document, then cleared it. A nested rayon job (a

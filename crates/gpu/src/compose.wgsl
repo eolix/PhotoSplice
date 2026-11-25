@@ -57,6 +57,7 @@ const F_TEXT_GAMMA: u32 = 8192u; // blend / atop / fx merge: type layer, mix cov
 const F_COVER_MIX: u32 = 2097152u; // lerp: A towards B by C's alpha (emboss halves, effects::mix_premul)
 const F_ROUND8: u32 = 4194304u;  // layer result: opaque colour rounded to 8-bit levels (compose::quantize_opaque)
 const F_ROUND16: u32 = 8388608u; // layer result: opaque colour rounded to 16-bit (32768) levels
+const F_MAP_MIX: u32 = 16777216u; // lerp: A towards B by the effect map × opacity (Stroke Emboss)
 
 @group(0) @binding(0) var<uniform> chunk: Chunk;
 @group(0) @binding(1) var<uniform> op: Op;
@@ -1101,6 +1102,13 @@ fn fs_lerp_body(in: VOut) -> vec4<f32> {
         }
         return floor(a * op.p0.x + 0.5) / op.p0.x;
     }
+    if ((op.flags & F_MAP_MIX) != 0u) {
+        // Stroke Emboss: the shaded inside stroke B over A by its band × opacity
+        // (effects::composite_with_effects, mix_premul).
+        let k = map_value(doc_px(p), 0.0) * op.opacity;
+        if (k <= 0.0) { return a; }
+        return mix_premul(a, b, k);
+    }
     if ((op.flags & F_COVER_MIX) != 0u) {
         let k = min(textureLoad(tex_c, p, 0).a, 1.0);
         if (k <= INSIDE_EPS) { return a; }
@@ -1391,32 +1399,43 @@ fn fs_fxstroke(in: VOut) -> @location(0) vec4<f32> {
     let a = textureLoad(tex_b, p, 0).a;
     let outline = (op.flags & F_OUTLINE) != 0u;
     let first = (op.flags & F_FIRST) != 0u;
+    // C: r = coverage taken so far, g = the layer's alpha, b = what the strokes above take as
+    // they stack among themselves (their whole band).
     var cover = 0.0;
     var lay_a = 0.0;
+    var stacked = 0.0;
     let vector = (op.flags & F_VECTOR) != 0u;
     if (!first || outline || !vector) {
         let cv = textureLoad(tex_c, p, 0);
         cover = cv.r;
         lay_a = cv.g;
+        stacked = cv.b;
     }
     var k = map_value(d, 0.0);
+    var whole = k;
     if (a > INSIDE_EPS) {
         // The stroke shows beneath the layer only through the part the shape leaves
         // (`effects.rs`, outline_share): none beneath a fully covered pixel; never inside an
         // unoutlined vector shape.
         if (vector && !outline) {
             k = 0.0;
+            whole = 0.0;
         } else {
             k = k * outline_share(a, lay_a);
         }
     }
     var cov = k * op.opacity;
+    var wcov = whole * op.opacity;
     if (op.mode == M_DISSOLVE) {
         // effects.rs: a Dissolve stroke covers each pixel fully or not at all.
         cov = select(0.0, 1.0, cov > 0.0 && dissolve_noise(d) < cov);
+        wcov = cov;
     }
-    let share = cov * (1.0 - cover);
-    if (op.kind == 1) { return vec4(cover + share, lay_a, 0.0, 0.0); }
+    // The strokes stack among themselves first, then show where the shape leaves room
+    // (`effects.rs`: a lower stroke takes nothing under the top one's band at an edge pixel).
+    let free = 1.0 - stacked;
+    let share = cov * free;
+    if (op.kind == 1) { return vec4(cover + share, lay_a, stacked + wcov * free, 0.0); }
     var acc = vec4(0.0);
     if (!first) { acc = textureLoad(layer_tex, p, 0); }
     if (share > 0.0) {
@@ -1685,4 +1704,22 @@ fn fs_mbeveltex(in: VOut) -> @location(0) vec4<f32> {
 fn fs_mstroke(in: VOut) -> @location(0) vec4<f32> {
     let d = textureLoad(tex_a, local(in.pos), 0).r;
     return mout(clamp(op.p0.x + 0.5 - d, 0.0, 1.0));
+}
+
+// Stroke Emboss's strokes (`effects::build_maps`): p0.x = 0: max(A, B), their union; 1: A inside
+// the shape S (`layer_tex`), else B (0 when p0.y = 0: no stroke reaches outside); 2: A where the
+// ring B is above 1e-6, else 0.
+@fragment
+fn fs_mring(in: VOut) -> @location(0) vec4<f32> {
+    let p = local(in.pos);
+    let a = textureLoad(tex_a, p, 0).r;
+    let mode = i32(op.p0.x);
+    if (mode == 0) { return mout(max(a, textureLoad(tex_b, p, 0).r)); }
+    if (mode == 1) {
+        if (textureLoad(layer_tex, p, 0).r > INSIDE_EPS) { return mout(a); }
+        if (op.p0.y > 0.5) { return mout(textureLoad(tex_b, p, 0).r); }
+        return mout(0.0);
+    }
+    if (textureLoad(tex_b, p, 0).r > 1e-6) { return mout(a); }
+    return mout(0.0);
 }
