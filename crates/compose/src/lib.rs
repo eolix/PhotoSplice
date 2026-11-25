@@ -1523,39 +1523,62 @@ pub fn occludes_below(layer: &Layer, mode: photosplice_color::ColorMode) -> bool
         && !blend_if_active(layer, mode)
 }
 
-/// Whether Blending Options › Blend If changes how `layer` composites in a `mode` document.
-/// RGB documents test Gray and R, G, B; grayscale (and duotone) documents their one channel.
-/// Other modes composite in display RGB, where ranges over their own channels have no exact
-/// equivalent, so (like channel restrictions) the setting round-trips but isn't applied there.
+/// Whether Blending Options › Blend If changes how `layer` composites in a `mode` document on
+/// this (screen colour) compositor. RGB documents test Gray and R, G, B; Lab documents their
+/// stored L, a, b; grayscale (and duotone) documents their one channel. CMYK documents apply it
+/// on their inks (`cmyk`); other modes keep the setting without applying it.
 pub fn blend_if_active(layer: &Layer, mode: photosplice_color::ColorMode) -> bool {
     use photosplice_color::ColorMode as M;
-    matches!(mode, M::Rgb | M::Grayscale | M::Duotone) && !layer.blend_if.is_default()
+    matches!(mode, M::Rgb | M::Lab | M::Grayscale | M::Duotone) && !layer.blend_if.is_default()
 }
 
 /// How much of a pixel shows through `layer`'s Blend If ranges, given the layer's own colour
 /// (`this`, `None` where the layer has no content of its own there) and the colour beneath it
-/// (`under`, `None` where nothing is beneath). Every range multiplies in, each widened by the
-/// document's value step ([`blend_if_step`]).
+/// (`under`, `None` where nothing is beneath), as screen colour ([`blend_if_weight_levels`]).
 fn blend_if_weight(layer: &Layer, cx: &Ctx, this: Option<[f32; 4]>, under: Option<[f32; 4]>) -> f32 {
+    let levels = |p: [f32; 4]| -> [f32; 4] {
+        if cx.mode == photosplice_color::ColorMode::Lab {
+            // The stored L, a, b; an 8-bit document holds whole levels.
+            let n = adjust::lab_norm([p[0], p[1], p[2]]);
+            let v = n.map(|x| (x * 255.0).clamp(0.0, 255.0));
+            let v = if cx.depth == photosplice_color::SampleType::U8 { v.map(f32::round) } else { v };
+            [v[0], v[1], v[2], 0.0]
+        } else {
+            [blend_if_level(p[0]), blend_if_level(p[1]), blend_if_level(p[2]), 0.0]
+        }
+    };
+    blend_if_weight_levels(&layer.blend_if, cx.mode, blend_if_step(cx.depth), this.map(levels), under.map(levels))
+}
+
+/// Blend If's weight from the channel levels (0..=255, as the document stores them) of the
+/// layer's own colour and of the colour beneath it. Every range multiplies in, each widened by
+/// the document's value `step` ([`blend_if_step`]). RGB and Lab test Gray ([`blend_if_gray`] of
+/// their three channels: Reference weighs L, a, b as R, G, B) and each channel; CMYK tests Gray
+/// ([`blend_if_cmyk_gray`]) and C, M, Y, K, all on stored values (255 = no ink); one-channel
+/// modes their channel.
+pub(crate) fn blend_if_weight_levels(bi: &photosplice_doc::BlendIf, mode: photosplice_color::ColorMode, step: f32, this: Option<[f32; 4]>, under: Option<[f32; 4]>) -> f32 {
     use photosplice_color::ColorMode as M;
-    let bi = &layer.blend_if;
-    let (mode, step) = (cx.mode, blend_if_step(cx.depth));
     let mut k = 1.0;
     for (side, px) in [this, under].into_iter().enumerate() {
-        let Some(p) = px else { continue };
-        let v = |c: usize| blend_if_level(p[c]);
-        match mode {
-            // Gray, then R, G, B.
-            M::Rgb => {
-                let gray = blend_if_gray(v(0), v(1), v(2));
-                k *= bi.get(0)[side].weight_at(gray, step);
-                for c in 0..3 {
-                    k *= bi.get(c + 1)[side].weight_at(v(c), step);
-                }
+        let Some(v) = px else { continue };
+        let channels = match mode {
+            M::Rgb | M::Lab => {
+                k *= bi.get(0)[side].weight_at(blend_if_gray(v[0], v[1], v[2]), step);
+                3
+            }
+            M::Cmyk => {
+                k *= bi.get(0)[side].weight_at(blend_if_cmyk_gray(v), step);
+                4
             }
             // One channel: the PSD spec marks the composite-gray entry irrelevant here, so the
             // channel's own entry carries the setting; both are honoured.
-            _ => k *= bi.get(0)[side].weight_at(v(0), step) * bi.get(1)[side].weight_at(v(0), step),
+            _ => {
+                k *= bi.get(0)[side].weight_at(v[0], step);
+                1
+            }
+        };
+        for (c, x) in v.iter().take(channels).enumerate() {
+            k *= bi.get(c + 1)[side].weight_at(*x, step);
         }
         if k <= 0.0 {
             return 0.0;
@@ -1584,7 +1607,7 @@ pub fn blend_if_step(depth: photosplice_color::SampleType) -> f32 {
 /// 127.996 it didn't). Every 8-bit level is on its own step, which also absorbs compositing's few
 /// millionths of drift (a level-20 backdrop at partial alpha reads 19.999998). The GPU compositor
 /// (`compose.wgsl` `blend_if_weight`) snaps alike.
-fn blend_if_level(x: f32) -> f32 {
+pub(crate) fn blend_if_level(x: f32) -> f32 {
     let x = x.clamp(0.0, 1.0);
     let v = x * 255.0;
     let level = v.round();
@@ -1606,6 +1629,14 @@ fn blend_if_gray(r: f32, g: f32, b: f32) -> f32 {
     }
 }
 
+/// Blend If's Gray in a CMYK document from stored levels (255 = no ink): the Gray of C, M, Y
+/// ([`blend_if_gray`]) scaled by K, rounded to a level. Measured on 327 680 colours against hard
+/// thresholds, no misses (K alone gives its stored value; cyan alone 255 − 0.3 C).
+fn blend_if_cmyk_gray(v: [f32; 4]) -> f32 {
+    let g = blend_if_gray(v[0], v[1], v[2]);
+    if v.iter().all(|c| c.fract() == 0.0) { ((g * v[3] + 127.0) / 255.0).floor() } else { g * v[3] / 255.0 }
+}
+
 /// Apply `layer`'s Blend If to a finished composite: `out` (the backdrop with the layer drawn)
 /// is mixed back towards `before` (the backdrop without it) where the ranges hide the layer.
 /// Mixing premultiplied colour by `k` equals compositing the layer at `k` × its alpha, since
@@ -1622,6 +1653,7 @@ fn apply_blend_if(layer: &Layer, before: &Buffer, out: &mut Buffer, cx: &Ctx) {
     } else {
         render_content(layer, out.rect, cx)
     };
+    let lab = cx.mode == photosplice_color::ColorMode::Lab;
     for (i, (p, b)) in out.px.iter_mut().zip(&before.px).enumerate() {
         let this = match &own {
             Some(o) => Some(o.px[i]).filter(|q| q[3] > 0.0),
@@ -1633,11 +1665,17 @@ fn apply_blend_if(layer: &Layer, before: &Buffer, out: &mut Buffer, cx: &Ctx) {
             continue;
         }
         let a = b[3] + (p[3] - b[3]) * k;
-        *p = if a > 0.0 {
+        *p = if a <= 0.0 {
+            [0.0; 4]
+        } else if lab {
+            // A Lab document mixes in CIELAB and keeps colours outside sRGB, as its Normal blending.
+            let (wa, wb) = (b[3] * (1.0 - k) / a, p[3] * k / a);
+            let (lb, lp) = (photosplice_color::convert::srgb_to_lab([b[0], b[1], b[2]]), photosplice_color::convert::srgb_to_lab([p[0], p[1], p[2]]));
+            let r = photosplice_color::convert::lab_to_srgb_unclamped(std::array::from_fn(|c| lb[c] * wa + lp[c] * wb));
+            [r[0], r[1], r[2], a]
+        } else {
             let c = |c: usize| ((b[c] * b[3] + (p[c] * p[3] - b[c] * b[3]) * k) / a).clamp(0.0, 1.0);
             [c(0), c(1), c(2), a]
-        } else {
-            [0.0; 4]
         };
     }
 }

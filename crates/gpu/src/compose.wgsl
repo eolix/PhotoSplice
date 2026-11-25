@@ -1140,6 +1140,11 @@ fn fs_lerp_body(in: VOut) -> vec4<f32> {
         }
         let alpha = a.a + (b.a - a.a) * k;
         if (alpha <= 0.0) { return vec4(0.0); }
+        if (op.p4.x > 1.5) {
+            // A Lab document mixes in CIELAB, unclipped (compose::apply_blend_if).
+            let m = srgb_to_lab(a.rgb) * (a.a * (1.0 - k) / alpha) + srgb_to_lab(b.rgb) * (b.a * k / alpha);
+            return vec4(lab_to_srgb(m), alpha);
+        }
         return vec4(clamp((a.rgb * a.a + (b.rgb * b.a - a.rgb * a.a) * k) / alpha, vec3(0.0), vec3(1.0)), alpha);
     }
     let k = op.opacity * mask_value(doc_px(p));
@@ -1180,7 +1185,7 @@ fn bi_weight(e: u32, s: u32, v: f32) -> f32 {
 }
 
 // The product of every range over the layer's own colour and the colour beneath it (a side
-// without content, alpha 0, doesn't count). `p4.x` marks a one-channel document.
+// without content, alpha 0, doesn't count). `p4.x`: 0 RGB, 1 one channel, 2 Lab.
 fn blend_if_weight(this_px: vec4<f32>, under: vec4<f32>) -> f32 {
     var k = 1.0;
     for (var s = 0u; s < 2u; s = s + 1u) {
@@ -1194,8 +1199,14 @@ fn blend_if_weight(this_px: vec4<f32>, under: vec4<f32>) -> f32 {
         let x = clamp(px.rgb, vec3(0.0), vec3(1.0));
         let raw = x * 255.0;
         let level = round(raw);
-        let v = select(raw, level, round(x * 32768.0) == round(level * 32768.0 / 255.0));
-        if (op.p4.x > 0.5) {
+        var v = select(raw, level, round(x * 32768.0) == round(level * 32768.0 / 255.0));
+        if (op.p4.x > 1.5) {
+            // compose::blend_if_weight on Lab: the stored L, a, b, whole levels in 8 bits.
+            let lab = srgb_to_lab(px.rgb);
+            let n = clamp(vec3(lab.x / 100.0 * 255.0, lab.y + 128.0, lab.z + 128.0), vec3(0.0), vec3(255.0));
+            v = select(n, round(n), op.p4.z == 1.0);
+        }
+        if (op.p4.x > 0.5 && op.p4.x < 1.5) {
             k = k * bi_weight(0u, s, v.r) * bi_weight(1u, s, v.r);
         } else {
             // compose::blend_if_gray: 9830 R + 19334 G + 3604 B on the 16-bit scale, rounded to a

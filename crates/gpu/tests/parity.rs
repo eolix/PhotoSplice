@@ -2977,6 +2977,32 @@ fn lab_documents_mix_in_lab() {
     assert!((p[0] - 0.5).abs() > 0.05 || (p[2] - 0.5).abs() > 0.05, "{p:?}");
 }
 
+/// Lab Blend If tests the stored L, a, b (Gray of the three, as R, G, B) and mixes in Lab, on the
+/// GPU as on the CPU (compose::blend_if_weight).
+#[test]
+fn lab_blend_if() {
+    let Some(mut g) = gpu() else { return };
+    let r = |b0: u8, b1: u8, w0: u8, w1: u8| photosplice_doc::BlendRange { black: [b0, b1], white: [w0, w1] };
+    let full = photosplice_doc::BlendRange::FULL;
+    for depth in [SampleType::U8, SampleType::U16] {
+        for (name, e, pair) in [
+            ("gray this", 0, [r(30, 110, 150, 230), full]),
+            ("lightness under", 1, [full, r(20, 120, 140, 240)]),
+            ("a this", 2, [r(60, 120, 130, 200), full]),
+            ("b both", 3, [r(40, 110, 255, 255), r(0, 0, 120, 220)]),
+        ] {
+            let mut d = Document::new("lab", Size::new(48, 40), ColorMode::Lab, depth);
+            let fmt = d.pixel_format();
+            d.layers.push(noise_layer("bg", fmt, Rect::new(0, 0, 48, 40), 91, 0.7));
+            let mut top = noise_layer("top", fmt, Rect::new(4, 4, 44, 36), 92, 0.0);
+            top.opacity = 0.8;
+            top.blend_if.set(e, pair);
+            d.layers.push(top);
+            check(&mut g, &d, &format!("lab {depth:?} {name}"));
+        }
+    }
+}
+
 #[test]
 fn rgba16f_fallback_path_renders() {
     // Issue #7 / #4: on adapters that can't render Rgba32Float the compositor falls back to

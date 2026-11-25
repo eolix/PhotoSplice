@@ -433,6 +433,66 @@ fn blend_if_8_bit_split_ramps_follow_reference() {
     assert_eq!(over_black(128, range([0, 255], [0, 255])), 64);
 }
 
+/// One CMYK pixel's stored levels (255 = no ink) after `top` (inks) with Blend If entry `e` on
+/// This Layer goes over blank paper.
+fn cmyk_over_paper(top: [f32; 4], e: usize, r: photosplice_doc::BlendRange) -> [i32; 4] {
+    let mut d = Document::new("c", Size::new(1, 1), ColorMode::Cmyk, SampleType::U8);
+    let fmt = PixelFormat::new(ColorMode::Cmyk, SampleType::U8, true);
+    let mut paper = Layer::raster("paper", fmt);
+    paper.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 1, 1), &[0.0, 0.0, 0.0, 0.0, 1.0]);
+    let mut l = Layer::raster("top", fmt);
+    l.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 1, 1), &[top[0], top[1], top[2], top[3], 1.0]);
+    l.blend_if.set(e, [r, FULL]);
+    d.layers = vec![paper, l];
+    let mut out = Vec::new();
+    render_ink_bands::<()>(&d, d.bounds(), 64, |b| {
+        out.extend(b.px);
+        Ok(())
+    })
+    .unwrap();
+    [0, 1, 2, 3].map(|c| 255 - (out[0][c] * 255.0).round() as i32)
+}
+
+/// CMYK Blend If tests the stored values (255 = no ink) with the RGB ramps; Gray is the Gray of
+/// C, M, Y scaled by K. Reference kit 29: Magenta hard 64/192 shows stored 191 and 79, hides 207
+/// and 63; Gray split 32/96 160/224 shows cyan ink 128 as stored 239 and black ink 176 as 125.
+#[test]
+fn cmyk_blend_if_tests_stored_inks() {
+    let hard = range([64, 64], [192, 192]);
+    let split = range([32, 96], [160, 224]);
+    let m = |ink: f32| cmyk_over_paper([0.0, ink / 255.0, 0.0, 0.0], 2, hard)[1];
+    assert_eq!([m(64.0), m(176.0), m(48.0), m(192.0)], [191, 79, 255, 255]);
+    assert_eq!(cmyk_over_paper([128.0 / 255.0, 0.0, 0.0, 0.0], 0, split)[0], 239);
+    assert_eq!(cmyk_over_paper([0.0, 0.0, 0.0, 176.0 / 255.0], 0, split)[3], 125);
+    assert_eq!(cmyk_over_paper([0.0, 0.0, 0.0, 176.0 / 255.0], 4, split)[3], 125);
+}
+
+/// Lab Blend If tests the stored L, a, b; Gray weighs them as R, G, B. Reference kit 29, a layer
+/// over (L 50 %, a −128): a split 32/96 160/224 on This Layer's a shows a stored 176 as 133; the
+/// same split on Gray, over white, partly hides L 0 and 16 (Gray 90 and 94 with neutral a, b:
+/// stored 24 and 23).
+#[test]
+fn lab_blend_if_tests_stored_channels() {
+    let split = range([32, 96], [160, 224]);
+    let stored = |under: [f32; 3], top: [f32; 3], e: usize| {
+        let mut d = Document::new("l", Size::new(1, 1), ColorMode::Lab, SampleType::U8);
+        let fmt = PixelFormat::new(ColorMode::Lab, SampleType::U8, true);
+        let mut b = Layer::raster("b", fmt);
+        b.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 1, 1), &[under[0], under[1], under[2], 1.0]);
+        let mut l = Layer::raster("t", fmt);
+        l.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 1, 1), &[top[0], top[1], top[2], 1.0]);
+        l.blend_if.set(e, [split, FULL]);
+        d.layers = vec![b, l];
+        let p = px(&d, 0, 0);
+        let lab = photosplice_color::convert::srgb_to_lab([p[0], p[1], p[2]]);
+        [lab[0] / 100.0 * 255.0, lab[1] + 128.0, lab[2] + 128.0].map(|v| v.round() as i32)
+    };
+    let n = 128.0 / 255.0;
+    assert_eq!(stored([0.5, 0.0, n], [0.5, 176.0 / 255.0, n], 2)[1], 133);
+    assert_eq!(stored([1.0, n, n], [0.0, n, n], 0)[0], 24);
+    assert_eq!(stored([1.0, n, n], [16.0 / 255.0, n, n], 0)[0], 23);
+}
+
 /// An adjustment layer's "This Layer" range judges its result at full strength, before Opacity
 /// mixes it in. Reference: Invert at 40% over (64, 128, 192) with Red / This Layer black at 150
 /// keeps the effect, (115, 128, 140), as Invert's red (191) passes 150; with white at 150 it

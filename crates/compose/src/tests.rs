@@ -1943,11 +1943,11 @@ fn blend_if_modes() {
     l.blend_if.set(1, [range([10, 10], [255, 255]), FULL]);
     d.layers.push(l);
     assert!(close4(px(&d, 1, 1), [1.0; 4]), "{:?}", px(&d, 1, 1));
-    // CMYK/Lab composite in display RGB: kept for round trip, not applied.
+    // Lab tests its stored channels on this compositor; CMYK on its inks (`cmyk`).
     assert!(blend_if_active(&d.layers[1], ColorMode::Rgb));
     assert!(blend_if_active(&d.layers[1], ColorMode::Grayscale));
+    assert!(blend_if_active(&d.layers[1], ColorMode::Lab));
     assert!(!blend_if_active(&d.layers[1], ColorMode::Cmyk));
-    assert!(!blend_if_active(&d.layers[1], ColorMode::Lab));
     assert!(!blend_if_active(&d.layers[0], ColorMode::Rgb));
 }
 

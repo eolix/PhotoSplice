@@ -357,6 +357,10 @@ pub fn plan(doc: &Document) -> Result<Plan<'_>, Unsupported> {
         if visible.len() > 1 || visible.iter().any(|(_, _, l)| photosplice_compose::effects::has_effects(l)) {
             return Err(Unsupported("CMYK blending (composited in CMYK on the CPU)".into()));
         }
+        // Blend If tests the stored inks (`photosplice_compose`'s CMYK compositor).
+        if visible.iter().any(|(_, _, l)| !l.blend_if.is_default()) {
+            return Err(Unsupported("CMYK Blend If (on the inks, on the CPU)".into()));
+        }
         // A gradient fill without a valid cache interpolates its stops' inks, which the RGB
         // shader can't (storytold/photocraft@5290930e).
         let uncached_gradient = |l: &Layer| match &l.content {
@@ -479,8 +483,9 @@ pub const F_ADD_DIFF: u32 = 16384;
 /// `Lerp`: B mixed back towards A (the backdrop) by the layer's Blend If weight
 /// (`compose::apply_blend_if`), from C ("This Layer": an adjustment layer's unmixed result; B when
 /// `p4.y` is set)
-/// and A ("Underlying Layer"). The ranges are packed in `p0..p3` (`blend_if_params`); `p4.x` marks
-/// a one-channel document, `p4.z` is the document's value step (`compose::blend_if_step`).
+/// and A ("Underlying Layer"). The ranges are packed in `p0..p3` (`blend_if_params`); `p4.x` is
+/// the document's channels (0 RGB, 1 one channel, 2 Lab), `p4.z` its value step
+/// (`compose::blend_if_step`).
 pub const F_BLEND_IF: u32 = 524288;
 /// Blend / Atop / FxMerge of a type layer: coverage mixed at `psblend::TEXT_GAMMA`.
 pub const F_TEXT_GAMMA: u32 = 8192;
@@ -691,8 +696,13 @@ impl<'a> Planner<'a> {
         p.c = own;
         p.flags = F_BLEND_IF;
         p.params = blend_if_params(&layer.blend_if);
-        let one_channel = self.cx.mode != photosplice_color::ColorMode::Rgb;
-        p.extra = [f32::from(u8::from(one_channel)), f32::from(u8::from(own.is_none())), photosplice_compose::blend_if_step(self.cx.depth), 0.0];
+        // 0: R, G, B; 1: one channel; 2: Lab's stored L, a, b.
+        let kind = match self.cx.mode {
+            photosplice_color::ColorMode::Rgb => 0.0,
+            photosplice_color::ColorMode::Lab => 2.0,
+            _ => 1.0,
+        };
+        p.extra = [kind, f32::from(u8::from(own.is_none())), photosplice_compose::blend_if_step(self.cx.depth), 0.0];
         Ok(self.emit(p))
     }
 
@@ -2473,9 +2483,17 @@ mod tests {
         d.layers[1].blend_if = Default::default();
         d.layers.push(l);
         assert_eq!(blend_if(&d), 1);
-        // Outside RGB, Grayscale and Duotone the setting round-trips without applying.
+        // Lab tests its stored L, a, b in the same pass; CMYK tests its inks on the CPU.
         d.mode = ColorMode::Lab;
-        assert_eq!(blend_if(&d), 0);
+        assert_eq!(blend_if(&d), 1);
+        assert!(plan(&d).unwrap().passes.iter().any(|p| p.flags & F_BLEND_IF != 0 && p.extra[0] == 2.0));
+        let mut c = Document::new("c", Size::new(8, 8), ColorMode::Cmyk, SampleType::U8);
+        let mut one = Layer::raster("bi", c.pixel_format());
+        one.surface_mut().unwrap().fill_rect(photosplice_geom::Rect::new(0, 0, 4, 4), &[0.5, 0.0, 0.0, 0.0, 1.0]);
+        c.layers.push(one);
+        assert!(plan(&c).is_ok());
+        c.layers[0].blend_if = d.layers[2].blend_if.clone();
+        assert!(plan(&c).is_err());
     }
 
     #[test]

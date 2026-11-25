@@ -480,9 +480,9 @@ pub fn ink_luma(ink: [f32; 4]) -> f32 {
     rgb_to_gray([0, 1, 2].map(|i| (1.0 - ink[i].clamp(0.0, 1.0)) * paper))
 }
 
-/// Encoded sRGB → Lab normalised the way Photoshop's channels hold it: L/100, (a+128)/255,
+/// Encoded sRGB → Lab normalised the way Reference's channels hold it: L/100, (a+128)/255,
 /// (b+128)/255.
-fn lab_norm(c: [f32; 3]) -> [f32; 3] {
+pub(crate) fn lab_norm(c: [f32; 3]) -> [f32; 3] {
     let l = srgb_to_lab(c);
     [l[0] / 100.0, (l[1] + 128.0) / 255.0, (l[2] + 128.0) / 255.0]
 }

@@ -282,9 +282,9 @@ fn stack(layers: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
 
 /// Whether `l` is composited in CMYK here (else it is an RGB island). Clipped layers are decided
 /// one by one when they are applied.
-fn native(l: &Layer, clipped: &[Layer], cx: &Ctx) -> bool {
+fn native(l: &Layer, clipped: &[Layer]) -> bool {
     let fx = crate::effects::has_effects(l);
-    if crate::blend_if_active(l, cx.mode) || (fx && !effects_native(l)) {
+    if fx && !effects_native(l) {
         return false;
     }
     let any_clipped = clipped.iter().any(|c| c.visible);
@@ -490,10 +490,19 @@ fn adjust(a: &Adjustment, buf: &mut CBuf, cx: &Ctx) {
 }
 
 fn layer(l: &Layer, clipped: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
-    if !native(l, clipped, cx) {
+    // Blend If on the inks, around the layer however it composites ([`blend_if`]).
+    let before = (!l.blend_if.is_default()).then(|| backdrop.px.clone());
+    if native(l, clipped) {
+        layer_native(l, clipped, backdrop, cx);
+    } else {
         island(backdrop, |rgb| crate::composite_layer(l, clipped, rgb, cx));
-        return;
     }
+    if let Some(before) = before {
+        blend_if(l, &before, backdrop, cx);
+    }
+}
+
+fn layer_native(l: &Layer, clipped: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
     // Channel restrictions (Blending Options › Channels: C, M, Y, K).
     let excluded = l.excluded_channels & 0xf;
     let before = (excluded != 0).then(|| backdrop.px.clone());
@@ -511,6 +520,48 @@ fn layer(l: &Layer, clipped: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
                 p[c] = b[c];
             }
         }
+    }
+}
+
+/// Blend If in a CMYK document (`crate::apply_blend_if` on inks): `out` (the backdrop with `l`
+/// drawn) mixed back towards `before` by the weight of the layer's own stored C, M, Y, K and of
+/// those beneath it (Reference kit 29: 255 = no ink, the same ramps as RGB; Gray from
+/// `crate::blend_if_weight_levels`). An adjustment layer is judged by its result at full
+/// strength.
+fn blend_if(l: &Layer, before: &[Px], out: &mut CBuf, cx: &Ctx) {
+    let rect = out.rect;
+    let own = match &l.content {
+        LayerContent::Adjustment(a) => {
+            let mut adjusted = CBuf { rect, px: before.to_vec() };
+            adjust(a, &mut adjusted, cx);
+            Some(adjusted)
+        }
+        _ => content(l, rect, cx),
+    };
+    let step = crate::blend_if_step(cx.depth);
+    let levels = |p: &Px| [0, 1, 2, 3].map(|c| crate::blend_if_level(p[c]));
+    for (i, (p, b)) in out.px.iter_mut().zip(before).enumerate() {
+        let this = match &own {
+            Some(o) => o.px.get(i).filter(|q| q[4] > 0.0).map(levels),
+            None => Some(levels(p)),
+        };
+        let under = Some(b).filter(|q| q[4] > 0.0).map(levels);
+        let k = crate::blend_if_weight_levels(&l.blend_if, ColorMode::Cmyk, step, this, under);
+        if k >= 1.0 {
+            continue;
+        }
+        let (wa, wb) = (b[4] * (1.0 - k), p[4] * k);
+        let alpha = wa + wb;
+        *p = if alpha > 0.0 {
+            let mut o = [0.0; 5];
+            for c in 0..4 {
+                o[c] = (b[c] * wa + p[c] * wb) / alpha;
+            }
+            o[4] = alpha;
+            o
+        } else {
+            [0.0; 5]
+        };
     }
 }
 
@@ -745,10 +796,19 @@ pub(crate) fn fill_in(l: &Layer, f: &Fill, rect: Rect, canvas: Rect, patterns: &
     buf
 }
 
-/// Composites a clipped layer onto its base `base` (as if opaque, keeping the base's alpha).
+/// Composites a clipped layer onto its base `base` (as if opaque, keeping the base's alpha), with
+/// its Blend If ([`blend_if`]).
 fn atop(l: &Layer, base: &mut CBuf, cx: &Ctx) {
+    let before = (!l.blend_if.is_default()).then(|| base.px.clone());
+    atop_plain(l, base, cx);
+    if let Some(before) = before {
+        blend_if(l, &before, base, cx);
+    }
+}
+
+fn atop_plain(l: &Layer, base: &mut CBuf, cx: &Ctx) {
     let rect = base.rect;
-    if !native(l, &[], cx) || crate::effects::has_effects(l) {
+    if !native(l, &[]) || crate::effects::has_effects(l) {
         island(base, |rgb| crate::composite_atop(l, rgb, cx));
         return;
     }
