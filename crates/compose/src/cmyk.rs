@@ -579,18 +579,34 @@ fn plain(l: &Layer, clipped: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
             }
         }
         LayerContent::Adjustment(a) => {
+            // Below 100% Fill the special eight take Fill inside the blend and Opacity as
+            // coverage, as on the RGB compositor ([`crate::adjustment_fill`]).
+            let (opacity, fill) = crate::adjustment_fill(l);
+            if fill <= 0.0 {
+                // Zero Fill is the backdrop: its inks stay exact.
+                return;
+            }
             let mut adjusted = CBuf { rect, px: backdrop.px.clone() };
             adjust(a, &mut adjusted, cx);
             for c in clipped.iter().filter(|c| c.visible) {
                 atop(c, &mut adjusted, cx);
             }
             let mv = crate::mask_vals(l, rect, cx);
+            let w = (rect.width() as usize).max(1);
             for (i, (b, a)) in backdrop.px.iter_mut().zip(&adjusted.px).enumerate() {
                 let k = opacity * crate::mask_k(&mv, i);
                 if k <= 0.0 {
                     continue;
                 }
-                let bl = blend(l.blend, b, a);
+                if l.blend == BlendMode::Dissolve {
+                    // As on the RGB compositor: opacity and mask are the chance a pixel takes the
+                    // adjustment fully, by the same noise.
+                    if dissolve_at(rect, w, i) < k {
+                        *b = [a[0], a[1], a[2], a[3], b[4]];
+                    }
+                    continue;
+                }
+                let bl = blend_fill(l.blend, b, a, fill);
                 for c in 0..4 {
                     b[c] += (bl[c] - b[c]) * k;
                 }
@@ -647,7 +663,7 @@ fn plain(l: &Layer, clipped: &[Layer], backdrop: &mut CBuf, cx: &Ctx) {
                 }
                 return;
             }
-            blend_into(backdrop, &src, l.blend, opacity);
+            blend_layer_into(backdrop, &src, l, cx);
         }
     }
 }
@@ -738,12 +754,25 @@ fn atop(l: &Layer, base: &mut CBuf, cx: &Ctx) {
     }
     let opacity = l.opacity * l.fill_opacity;
     if let LayerContent::Adjustment(a) = &l.content {
+        // Clipped, the special eight take Fill inside the blend too (as `crate::composite_atop_any`).
+        let (opacity, fill) = crate::adjustment_fill(l);
+        if fill <= 0.0 {
+            return;
+        }
         let mut adjusted = CBuf { rect, px: base.px.clone() };
         adjust(a, &mut adjusted, cx);
         let mv = crate::mask_vals(l, rect, cx);
+        let w = (rect.width() as usize).max(1);
         for (i, (p, a)) in base.px.iter_mut().zip(&adjusted.px).enumerate() {
             let k = opacity * crate::mask_k(&mv, i);
-            let bl = blend(l.blend, p, a);
+            if l.blend == BlendMode::Dissolve {
+                // The adjusted pixel or the base, as for an unclipped adjustment.
+                if k > 0.0 && dissolve_at(rect, w, i) < k {
+                    *p = [a[0], a[1], a[2], a[3], p[4]];
+                }
+                continue;
+            }
+            let bl = blend_fill(l.blend, p, a, fill);
             for c in 0..4 {
                 p[c] += (bl[c] - p[c]) * k;
             }
@@ -751,17 +780,93 @@ fn atop(l: &Layer, base: &mut CBuf, cx: &Ctx) {
         return;
     }
     let Some(src) = content(l, rect, cx) else { return };
-    for (p, s) in base.px.iter_mut().zip(&src.px) {
+    let w = (rect.width() as usize).max(1);
+    for (i, (p, s)) in base.px.iter_mut().zip(&src.px).enumerate() {
         let alpha = p[4];
         if alpha <= 0.0 {
             continue;
         }
+        if l.blend == BlendMode::Dissolve {
+            // As on the RGB compositor: the base keeps its alpha and each pixel takes the clipped
+            // layer fully or not at all, by the same noise.
+            if dissolve_at(rect, w, i) < s[4] * opacity {
+                *p = [s[0], s[1], s[2], s[3], alpha];
+            }
+            continue;
+        }
         let mut opaque = *p;
         opaque[4] = 1.0;
-        let mut r = composite_px(l.blend, opaque, *s, opacity);
+        // The special eight take Fill inside the blend here too (Reference, clipped at Fill 40%).
+        let mut r = composite_px_fill(l.blend, opaque, *s, l.opacity, l.fill_opacity);
         r[4] = alpha;
         *p = r;
     }
+}
+
+/// [`crate::dissolve_noise`] at pixel `i` of a row-major buffer over `rect`, `w` pixels wide.
+fn dissolve_at(rect: Rect, w: usize, i: usize) -> f32 {
+    let x = rect.x0.saturating_add(i32::try_from(i % w).unwrap_or(i32::MAX));
+    let y = rect.y0.saturating_add(i32::try_from(i / w).unwrap_or(i32::MAX));
+    crate::dissolve_noise(x, y)
+}
+
+/// `l`'s masked content `src` blended into the backdrop with its own mode, Opacity and Fill, as
+/// `crate::blend_layer_into`: below 100% Fill the special eight ([`crate::psblend::fill_is_special`])
+/// take Fill inside the blend ([`composite_px_fill`]) and, with Transparency Shapes Layer off,
+/// the content's own alpha as Fill too, covering the backdrop with Opacity × masks.
+fn blend_layer_into(backdrop: &mut CBuf, src: &CBuf, l: &Layer, cx: &Ctx) {
+    let (mode, opacity, fill) = (l.blend, l.opacity, l.fill_opacity.clamp(0.0, 1.0));
+    if !crate::psblend::fill_is_special(mode) || (fill >= 1.0 && l.transparency_shapes) {
+        return blend_into(backdrop, src, mode, opacity * fill);
+    }
+    let mv = (!l.transparency_shapes).then(|| crate::mask_vals(l, backdrop.rect, cx)).flatten();
+    for (i, (b, s)) in backdrop.px.iter_mut().zip(&src.px).enumerate() {
+        if s[4] <= 0.0 {
+            continue;
+        }
+        if l.transparency_shapes {
+            *b = composite_px_fill(mode, *b, *s, opacity, fill);
+            continue;
+        }
+        // `src` carries alpha × masks; split them again.
+        let m = mv.as_ref().map_or(1.0, |v| v.get(i).copied().unwrap_or(1.0));
+        if m <= 0.0 {
+            continue;
+        }
+        let alpha = (s[4] / m).clamp(0.0, 1.0);
+        *b = composite_px_fill(mode, *b, [s[0], s[1], s[2], s[3], m], opacity, fill * alpha);
+    }
+}
+
+/// [`composite_px`] for a layer with separate `opacity` and `fill`, as `psblend::composite_fill`
+/// on each ink's complement: for the special eight below 100% Fill the source blends at full
+/// strength pulled toward the mode's neutral colour ([`blend_fill`]) with Opacity as its coverage
+/// over the backdrop; over transparency Fill stays coverage. Other modes take both as coverage.
+pub(crate) fn composite_px_fill(mode: BlendMode, b: Px, s: Px, opacity: f32, fill: f32) -> Px {
+    let f = fill.clamp(0.0, 1.0);
+    if f >= 1.0 || !crate::psblend::fill_is_special(mode) {
+        return composite_px(mode, b, s, opacity * f);
+    }
+    let ab = b[4];
+    let over = s[4] * opacity;
+    let alone = over * f;
+    if over <= 0.0 || f <= 0.0 {
+        // Zero Fill is the backdrop (the blend is neutral, no coverage over transparency): its
+        // inks stay exact.
+        return b;
+    }
+    let ao = ab + (1.0 - ab) * alone;
+    if ao <= 0.0 {
+        return [0.0; 5];
+    }
+    let bl = blend_fill(mode, &b, &s, f);
+    let (wb, wbs, ws) = (ab * (1.0 - over) / ao, ab * over / ao, (1.0 - ab) * alone / ao);
+    let mut out = [0.0; 5];
+    for c in 0..4 {
+        out[c] = wb * b[c] + wbs * bl[c] + ws * s[c];
+    }
+    out[4] = ao;
+    out
 }
 
 /// Blends an isolated layer buffer into the backdrop.
@@ -793,6 +898,20 @@ pub(crate) fn blend(mode: BlendMode, b: &Px, s: &Px) -> [f32; 4] {
     }
     let cmy = crate::psblend::blend_rgb(mode, [b[0], b[1], b[2]], [s[0], s[1], s[2]]);
     let k = crate::psblend::blend_rgb(mode, [b[3]; 3], [s[3]; 3])[0];
+    [cmy[0], cmy[1], cmy[2], k]
+}
+
+/// [`blend`] at layer Fill `fill`: below 100% the special eight ([`crate::psblend::fill_is_special`])
+/// blend a source pulled toward the mode's neutral colour ([`crate::psblend::blend_rgb_fill`], on
+/// C, M, Y's complements and on K's alone); every other mode is plain [`blend`]. Reference's
+/// CMYK merges of Invert and Posterize layers at Fill 40% in each of the eight, unclipped and
+/// clipped, match within 3 of 255 on screen (Fill as coverage was up to 122 off).
+fn blend_fill(mode: BlendMode, b: &Px, s: &Px, fill: f32) -> [f32; 4] {
+    if fill >= 1.0 || !crate::psblend::fill_is_special(mode) {
+        return blend(mode, b, s);
+    }
+    let cmy = crate::psblend::blend_rgb_fill(mode, [b[0], b[1], b[2]], [s[0], s[1], s[2]], fill);
+    let k = crate::psblend::blend_rgb_fill(mode, [b[3]; 3], [s[3]; 3], fill)[0];
     [cmy[0], cmy[1], cmy[2], k]
 }
 
@@ -962,6 +1081,175 @@ mod tests {
         let m = [[0.8, 0.3, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0, 0.1], [0.0; 5]];
         d.layers.push(Layer::new("m", LayerContent::Adjustment(Adjustment::ChannelMixer { matrix: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0]], monochrome: false, cmyk: Some(m) })));
         assert!(close(inks_at(&d, 0), [0.46, 0.2, 0.1, 0.0]), "{:?}", inks_at(&d, 0));
+    }
+
+    fn invert_layer(blend: BlendMode, opacity: f32) -> Layer {
+        let mut l = Layer::new("inv", LayerContent::Adjustment(Adjustment::Invert));
+        l.blend = blend;
+        l.opacity = opacity;
+        l
+    }
+
+    /// Each pixel is `a` or `b` as the Dissolve noise picks at `chance` (`a` where it is below).
+    fn dissolved(d: &Document, chance: f32, a: [f32; 4], b: [f32; 4]) {
+        for x in 0..4 {
+            let want = if crate::dissolve_noise(x as i32, 0) < chance { a } else { b };
+            assert!(close(inks_at(d, x), want), "pixel {x}: {:?}, want {want:?}", inks_at(d, x));
+        }
+    }
+
+    /// A Dissolve adjustment layer takes each pixel fully or not at all by the compositor's noise,
+    /// its opacity the chance, as on the RGB compositor (it used to mix by opacity).
+    #[test]
+    fn a_dissolve_adjustment_takes_whole_pixels() {
+        let base = [0.2, 0.4, 0.6, 0.1];
+        let mut d = doc(base);
+        d.layers.push(invert_layer(BlendMode::Dissolve, 0.5));
+        dissolved(&d, 0.5, [0.8, 0.6, 0.4, 0.9], base);
+    }
+
+    /// A clipped Dissolve layer, raster or adjustment, shows each pixel fully or not at all and
+    /// keeps the base's alpha, as on the RGB compositor (it used to blend like Normal).
+    #[test]
+    fn a_clipped_dissolve_layer_takes_whole_pixels() {
+        let base = [0.2, 0.4, 0.6, 0.1];
+        let mut d = doc(base);
+        let mut clip = Layer::raster("clip", d.pixel_format());
+        if let Some(s) = clip.surface_mut() {
+            s.fill_rect(Rect::new(0, 0, 4, 1), &[0.0, 0.0, 0.0, 1.0, 1.0]);
+        }
+        clip.blend = BlendMode::Dissolve;
+        clip.opacity = 0.5;
+        clip.clipped = true;
+        d.layers.push(clip);
+        dissolved(&d, 0.5, [0.0, 0.0, 0.0, 1.0], base);
+        let mut d = doc(base);
+        let mut adj = invert_layer(BlendMode::Dissolve, 0.5);
+        adj.clipped = true;
+        d.layers.push(top(&d, base, BlendMode::Normal));
+        if let Some(t) = d.layers.last_mut()
+            && let Some(s) = t.surface_mut()
+        {
+            s.fill_rect(Rect::new(0, 0, 4, 1), &[base[0], base[1], base[2], base[3], 1.0]);
+        }
+        d.layers.push(adj);
+        dissolved(&d, 0.5, [0.8, 0.6, 0.4, 0.9], base);
+    }
+
+    /// An adjustment layer at zero Fill leaves the backdrop's inks bit-exact in every blend mode
+    /// (32-bit, where nothing rounds them afterwards).
+    #[test]
+    fn an_adjustment_at_zero_fill_keeps_the_backdrop_inks_exact() {
+        let base = [0.1, 0.4, 0.7, 0.3];
+        for mode in BlendMode::LAYER_MODES {
+            let mut d = doc(base);
+            let mut l = invert_layer(mode, 1.0);
+            l.fill_opacity = 0.0;
+            d.layers.push(l);
+            assert_eq!(inks_at(&d, 0), inks(&from_inks(base, 1.0)), "{mode:?}");
+        }
+    }
+
+    /// An Invert layer at 70% Opacity, 40% Fill in Color Dodge over inks (60, 30, 0, 0)%,
+    /// unclipped and clipped: Fill pulls the source toward the mode's neutral colour and Opacity
+    /// mixes the result in, as on the RGB compositor. Reference's merged CMYK stores
+    /// (124, 196, 255, 255) (as 255 − ink); taking Fill as coverage gave (145, 200, 255, 255).
+    #[test]
+    fn adjustment_fill_changes_the_special_blend_modes_on_the_inks() {
+        let base = [0.6, 0.3, 0.0, 0.0];
+        let want = [124.0, 196.0, 255.0, 255.0].map(|v: f32| 1.0 - v / 255.0);
+        for clipped in [false, true] {
+            let mut d = doc_at(base, SampleType::U8);
+            if clipped {
+                let t = top(&d, base, BlendMode::Normal);
+                d.layers.push(t);
+            }
+            let mut l = invert_layer(BlendMode::ColorDodge, 0.7);
+            l.fill_opacity = 0.4;
+            l.clipped = clipped;
+            d.layers.push(l);
+            let got = inks_at(&d, 0);
+            assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() <= 1.5 / 255.0), "clipped {clipped}: {got:?} vs Reference {want:?}");
+        }
+    }
+
+    /// A pixel layer at 70% Opacity, 40% Fill and half alpha in Color Dodge, unclipped and clipped
+    /// onto an opaque base: Fill pulls the source toward the mode's neutral colour and Opacity ×
+    /// alpha covers the backdrop, as on the RGB compositor (`psblend::composite_fill`).
+    /// Reference's merged CMYK stores (247, 43, 79, 255) over (242, 38, 64, 255) for a source of
+    /// (102, 179, 255, 255) (as 255 − ink); taking Fill as coverage gave (244, 51, 91, 255).
+    #[test]
+    fn pixel_layer_fill_changes_the_special_blend_modes_on_the_inks() {
+        let stored = |v: [f32; 4]| v.map(|v| 1.0 - v / 255.0);
+        let base = stored([242.0, 38.0, 64.0, 255.0]);
+        let src = stored([102.0, 179.0, 255.0, 255.0]);
+        let want = stored([247.0, 43.0, 79.0, 255.0]);
+        for clipped in [false, true] {
+            let mut d = doc_at(base, SampleType::U8);
+            if clipped {
+                let t = top(&d, base, BlendMode::Normal);
+                d.layers.push(t);
+            }
+            let mut l = Layer::raster("top", d.pixel_format());
+            if let Some(s) = l.surface_mut() {
+                s.fill_rect(Rect::new(0, 0, 2, 1), &[src[0], src[1], src[2], src[3], 128.0 / 255.0]);
+            }
+            l.blend = BlendMode::ColorDodge;
+            l.opacity = 0.7;
+            l.fill_opacity = 0.4;
+            l.clipped = clipped;
+            d.layers.push(l);
+            let got = inks_at(&d, 0);
+            assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() <= 1.5 / 255.0), "clipped {clipped}: {got:?} vs Reference {want:?}");
+        }
+    }
+
+    /// A pixel layer in one of the special eight at zero Fill leaves the backdrop's inks exact,
+    /// unclipped and clipped (32-bit, where nothing rounds them afterwards).
+    #[test]
+    fn a_pixel_layer_at_zero_fill_keeps_the_backdrop_inks_exact() {
+        let base = [0.1, 0.4, 0.7, 0.3];
+        for mode in BlendMode::LAYER_MODES.into_iter().filter(|m| crate::psblend::fill_is_special(*m)) {
+            for clipped in [false, true] {
+                let mut d = doc(base);
+                if clipped {
+                    let t = top(&d, base, BlendMode::Normal);
+                    d.layers.push(t);
+                }
+                let mut l = top(&d, [0.6, 0.2, 0.9, 0.5], mode);
+                l.fill_opacity = 0.0;
+                l.clipped = clipped;
+                d.layers.push(l);
+                assert_eq!(inks_at(&d, 0), inks(&from_inks(base, 1.0)), "{mode:?} clipped {clipped}");
+            }
+        }
+    }
+
+    /// Every one of the special eight, unclipped and clipped: the blend at Fill on each ink's
+    /// complement ([`crate::psblend::blend_rgb_fill`], K on its own), mixed in by Opacity alone.
+    #[test]
+    fn special_eight_take_fill_inside_the_blend_on_the_inks() {
+        let base = [0.15, 0.55, 0.8, 0.35];
+        for mode in BlendMode::LAYER_MODES.into_iter().filter(|m| crate::psblend::fill_is_special(*m)) {
+            for clipped in [false, true] {
+                let mut d = doc(base);
+                if clipped {
+                    let t = top(&d, base, BlendMode::Normal);
+                    d.layers.push(t);
+                }
+                let mut l = invert_layer(mode, 0.7);
+                l.fill_opacity = 0.4;
+                l.clipped = clipped;
+                d.layers.push(l);
+                let b = from_inks(base, 1.0);
+                let s = [1.0 - b[0], 1.0 - b[1], 1.0 - b[2], 1.0 - b[3]];
+                let cmy = crate::psblend::blend_rgb_fill(mode, [b[0], b[1], b[2]], [s[0], s[1], s[2]], 0.4);
+                let k = crate::psblend::blend_rgb_fill(mode, [b[3]; 3], [s[3]; 3], 0.4)[0];
+                let want: [f32; 4] = std::array::from_fn(|c| 1.0 - (b[c] + ([cmy[0], cmy[1], cmy[2], k][c] - b[c]) * 0.7));
+                let got = inks_at(&d, 0);
+                assert!(close(got, want), "{mode:?} clipped {clipped}: {got:?} vs {want:?}");
+            }
+        }
     }
 
     /// Blending Options › Channels: a layer that leaves K out keeps the backdrop's K.

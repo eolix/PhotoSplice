@@ -194,7 +194,22 @@ pub fn import_tiff_page(name: &str, bytes: &[u8], page: Option<usize>) -> Result
         }
         return Ok(r);
     }
-    image_to_document(name, &img.oriented(orientation)?)
+    let mut r = image_to_document(name, &img.oriented(orientation)?)?;
+    // A 1-bit black-and-white TIFF opens in Bitmap mode, as in Reference (#10480); like a
+    // Bitmap PSD, its pixels are kept as gray.
+    if r.document.mode == ColorMode::Grayscale && tiff_is_bilevel(bytes, page) {
+        r.document.mode = ColorMode::Bitmap;
+    }
+    Ok(r)
+}
+
+/// Whether the TIFF page that opens (`page`, else the default one) is bilevel: one 1-bit sample
+/// per pixel, black-and-white (PhotometricInterpretation 0 or 1).
+fn tiff_is_bilevel(bytes: &[u8], page: Option<usize>) -> bool {
+    let Ok(info) = codecs::tiff_info(bytes) else { return false };
+    page.or_else(|| info.default_page())
+        .and_then(|i| info.pages.get(i))
+        .is_some_and(|p| p.bits_per_sample == 1 && p.samples_per_pixel == 1 && matches!(p.photometric, Some(0 | 1)))
 }
 
 /// A decoded flat image as a single-layer document: a locked "Background" when it is opaque, a
@@ -240,6 +255,11 @@ pub(crate) fn image_to_document(name: &str, img: &Image) -> Result<ImportResult,
     if let Some((x, y)) = img.meta.dpi {
         doc.resolution_dpi = x;
         warnings.extend(crate::unequal_resolution_warning(f64::from(x), f64::from(y)));
+    }
+    // Guides in the image resources a JPEG (APP13) or flat TIFF carries: resource 1032.
+    let guides = img.meta.photoshop_resources.as_deref().and_then(|r| photosplice_psd::tiff::resources_from_bytes(r).ok());
+    if let Some(g) = guides.as_ref().and_then(|(res, _)| res.iter().find(|r| r.id == 1032)) {
+        crate::psd_import::parse_guides(&g.data, &mut doc);
     }
     Ok(ImportResult { document: doc, warnings, selected: Vec::new(), source_read_only: false, preview_only: false })
 }
@@ -873,5 +893,54 @@ mod cmyk_band_tests {
         let first = out.data().get(..4).unwrap().to_vec();
         assert!(out.data().chunks(4).all(|p| p == first.as_slice()), "{:?}", out.data());
         assert_eq!(first[3], 255);
+    }
+}
+
+#[cfg(test)]
+mod bilevel_tiff_tests {
+    use super::*;
+
+    /// A 16×8 uncompressed TIFF with one `bits`-bit sample per pixel, BlackIsZero, rows of
+    /// alternating stripes.
+    fn tiff(bits: u16) -> Vec<u8> {
+        let (w, h) = (16u32, 8u32);
+        let row: Vec<u8> = if bits == 1 { vec![0b1010_1010, 0b1111_0000] } else { (0..w).map(|x| if x % 2 == 0 { 255 } else { 0 }).collect() };
+        let data: Vec<u8> = (0..h).flat_map(|_| row.clone()).collect();
+        let entries: [(u16, u16, u32); 9] =
+            [(256, 3, w), (257, 3, h), (258, 3, u32::from(bits)), (259, 3, 1), (262, 3, 1), (273, 4, 0), (277, 3, 1), (278, 3, h), (279, 4, data.len() as u32)];
+        let data_at = 8 + 2 + entries.len() as u32 * 12 + 4;
+        let mut out = b"II*\0".to_vec();
+        out.extend(8u32.to_le_bytes());
+        out.extend((entries.len() as u16).to_le_bytes());
+        for (tag, ty, value) in entries {
+            let value = if tag == 273 { data_at } else { value };
+            out.extend(tag.to_le_bytes());
+            out.extend(ty.to_le_bytes());
+            out.extend(1u32.to_le_bytes());
+            if ty == 3 {
+                out.extend((value as u16).to_le_bytes());
+                out.extend([0, 0]);
+            } else {
+                out.extend(value.to_le_bytes());
+            }
+        }
+        out.extend(0u32.to_le_bytes());
+        out.extend(data);
+        out
+    }
+
+    /// #10480: Reference opens a 1-bit TIFF in Bitmap mode; it opened as Grayscale. An 8-bit
+    /// gray TIFF stays Grayscale.
+    #[test]
+    fn a_one_bit_tiff_opens_in_bitmap_mode() {
+        let r = import_flat("bilevel.tif", &tiff(1)).unwrap();
+        assert_eq!(r.document.mode, ColorMode::Bitmap);
+        let gray = import_flat("gray.tif", &tiff(8)).unwrap();
+        assert_eq!(gray.document.mode, ColorMode::Grayscale);
+        // The same black and white pixels either way.
+        let px = |r: &ImportResult, x: i32| r.document.layers[0].surface().unwrap().pixel(x, 3)[0];
+        for x in 0..8 {
+            assert_eq!(px(&r, x), px(&gray, x), "x={x}");
+        }
     }
 }

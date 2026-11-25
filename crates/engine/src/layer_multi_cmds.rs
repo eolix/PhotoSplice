@@ -612,7 +612,7 @@ fn alpha_channels_equal(a: &photosplice_doc::AlphaChannel, b: &photosplice_doc::
 /// compared here: the caller walks into them, so an edit inside a group damages only the
 /// edited child's extent, not the whole group's. The destructure is exhaustive, so a new
 /// `Layer` field fails to compile until it is classified: compared, or explicitly ignored
-/// (name, locks, label, `psd_blocks`, `psd_id`, link group — none of them composite; video
+/// (name, locks, label, `psd_blocks`, `psd_id`, link group, XMP — none of them composite; video
 /// bails out earlier in the walk).
 fn layer_pixels_equal(a: &Layer, b: &Layer) -> bool {
     let Layer {
@@ -642,6 +642,7 @@ fn layer_pixels_equal(a: &Layer, b: &Layer) -> bool {
         vector_mask_hides_effects: _,
         transparency_shapes: _,
         video: _,
+        xmp: _,
     } = a;
     *id == b.id
         && *visible == b.visible

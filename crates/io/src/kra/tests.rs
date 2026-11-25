@@ -285,3 +285,19 @@ fn the_mimetype_wins_over_the_extension() {
     assert!(is_kra(&bytes));
     assert!(crate::import("download", &bytes).is_ok_and(|r| r.source_read_only));
 }
+
+/// maindoc.xml nested 20 000 deep, directly or through an internal-subset entity the depth check
+/// can't see, overflowed the XML parser's recursion (an abort nothing can catch). Both are errors
+/// now (storytold/photocraft@027bfb30); the small stack makes a regression abort instead of
+/// passing.
+#[test]
+fn deeply_nested_maindoc_is_an_error_not_a_stack_overflow() {
+    let (open, close) = ("<layers>".repeat(20_000), "</layers>".repeat(20_000));
+    let direct = maindoc("RGBA", &format!("{open}{close}"));
+    let entity = format!("<!DOCTYPE DOC [<!ENTITY e \"{open}{close}\">]><DOC><IMAGE width=\"4\" height=\"4\">&e;</IMAGE></DOC>");
+    for (xml, why) in [(direct, "nested"), (entity, "internal DTD")] {
+        let bytes = archive(&xml, &[]);
+        let e = std::thread::Builder::new().stack_size(512 * 1024).spawn(move || crate::import("deep.kra", &bytes).err()).unwrap().join().unwrap();
+        assert!(matches!(&e, Some(IoError::Kra(m)) if m.contains(why)), "{why}: {e:?}");
+    }
+}

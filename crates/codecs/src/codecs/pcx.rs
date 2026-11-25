@@ -65,6 +65,9 @@ pub(crate) fn decode(b: &[u8], limits: &Limits) -> Result<Image, CodecError> {
     limits.check(w, h, ChannelLayout::Rgb, SampleType::U8)?;
     let (bits, planes, stride) = (usize::from(b[3]), usize::from(b[65]), usize::from(le16(b, 66)));
     let row_len = stride.checked_mul(planes).ok_or_else(|| bad("row size overflow"))?;
+    // An RLE packet expands two bytes to at most 63, so the file must hold at least 1/32 of
+    // the declared scanlines before the output is allocated (storytold/photocraft@fb04b028).
+    Limits::check_plausible((row_len as u64).saturating_mul(u64::from(h)), b.len(), 32)?;
     let total = (w as usize).checked_mul(h as usize).and_then(|n| n.checked_mul(3)).ok_or_else(|| bad("pixel size overflow"))?;
     // The last 769 bytes are the optional VGA palette for 8-bit indexed images.
     let vga = bits == 8 && planes == 1 && b.len() >= HEADER + 769 && b[b.len() - 769] == 0x0c;

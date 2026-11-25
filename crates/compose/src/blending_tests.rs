@@ -38,6 +38,72 @@ fn adjustment_fill_changes_the_special_blend_modes() {
     }
 }
 
+/// One opaque pixel of `rgb` (0..255) as a raster layer.
+fn solid(name: &str, rgb: [f32; 3]) -> Layer {
+    let mut l = Layer::raster(name, PixelFormat::RGBA8);
+    l.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 1, 1), &[rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0, 1.0]);
+    l
+}
+
+/// A pixel layer clipped to an opaque base at 70% Opacity and 40% Fill in Linear Light takes
+/// Fill inside the blend, as unclipped: Reference gives (86, 35, 12) for (210, 120, 50) over
+/// (40, 40, 40); Fill as coverage gave (86, 36, 29).
+#[test]
+fn clipped_pixel_layer_fill_changes_the_special_blend_modes() {
+    for depth in DEPTHS {
+        let mut d = Document::new("fill", Size::new(1, 1), ColorMode::Rgb, depth);
+        d.layers.push(solid("base", [40.0; 3]));
+        let mut top = solid("top", [210.0, 120.0, 50.0]);
+        top.blend = BlendMode::LinearLight;
+        top.opacity = 0.7;
+        top.fill_opacity = 0.4;
+        top.clipped = true;
+        d.layers.push(top);
+        let got = levels(px(&d, 0, 0));
+        assert!(got.iter().zip([86, 35, 12]).all(|(g, w)| (g - w).abs() <= 1), "{depth:?}: {got:?} vs Reference [86, 35, 12]");
+    }
+}
+
+/// A clipped pixel layer in one of the special eight at zero Fill leaves its base exactly as it
+/// was (32-bit, where nothing rounds it afterwards).
+#[test]
+fn clipped_pixel_layer_at_zero_fill_keeps_the_base_exact() {
+    for mode in BlendMode::LAYER_MODES.into_iter().filter(|m| psblend::fill_is_special(*m)) {
+        let mut d = Document::new("fill", Size::new(1, 1), ColorMode::Rgb, SampleType::F32);
+        d.layers.push(solid("base", [40.0, 100.0, 170.0]));
+        let want = px(&d, 0, 0);
+        let mut top = solid("top", [210.0, 120.0, 50.0]);
+        top.blend = mode;
+        top.fill_opacity = 0.0;
+        top.clipped = true;
+        d.layers.push(top);
+        assert_eq!(px(&d, 0, 0), want, "{mode:?}");
+    }
+}
+
+/// With Transparency Shapes Layer off, a clipped layer in one of the special eight takes its own
+/// alpha inside the blend as Fill, as unclipped ([`blend_layer_into`]): a half-transparent pixel
+/// at Fill 100% is an opaque one at Fill 50%.
+#[test]
+fn clipped_pixel_layer_without_transparency_shapes_takes_alpha_as_fill() {
+    let doc_with = |alpha: f32, fill: f32, shapes: bool| {
+        let mut d = Document::new("fill", Size::new(1, 1), ColorMode::Rgb, SampleType::F32);
+        d.layers.push(solid("base", [40.0, 100.0, 170.0]));
+        let mut top = Layer::raster("top", PixelFormat::RGBA8);
+        top.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 1, 1), &[210.0 / 255.0, 120.0 / 255.0, 50.0 / 255.0, alpha]);
+        top.blend = BlendMode::ColorDodge;
+        top.opacity = 0.7;
+        top.fill_opacity = fill;
+        top.transparency_shapes = shapes;
+        top.clipped = true;
+        d.layers.push(top);
+        px(&d, 0, 0)
+    };
+    // 128 / 255: what an 8-bit surface stores for half alpha.
+    let (half, opaque_at_half_fill) = (doc_with(128.0 / 255.0, 1.0, false), doc_with(1.0, 128.0 / 255.0, true));
+    assert!(half.iter().zip(opaque_at_half_fill).all(|(a, b)| (a - b).abs() < 1e-5), "{half:?} vs {opaque_at_half_fill:?}");
+}
+
 const DEPTHS: [SampleType; 3] = [SampleType::U8, SampleType::U16, SampleType::F32];
 
 fn doc_at(depth: SampleType) -> Document {

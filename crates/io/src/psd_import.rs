@@ -255,7 +255,7 @@ impl Ctx<'_> {
         // Only decoded channel data justifies a buffer: the decoders bound their output by the
         // bytes in the file, but a bare rectangle can declare 300000² pixels in a few bytes (#755).
         if planes.iter().all(Option::is_none) {
-            self.warn(format!("layer \"{name}\": no channel data for its {w}x{h} bounds; treated as empty"));
+            self.warn_unreadable_data(format!("layer \"{name}\": no channel data for its {w}x{h} bounds; treated as empty"));
             return Surface::new(self.fmt);
         }
         let refs: Vec<Option<&[u8]>> = planes.iter().map(|p| p.as_deref()).collect();
@@ -393,6 +393,23 @@ impl Ctx<'_> {
         // Blend If lives in the layer record's blending ranges.
         l.blend_if = crate::blocks::blend_if_from_ranges(&rec.blending_ranges);
         l.psd_id = rec.layer_id();
+        // The layer's XMP packet (`shmd` › `cust` › `layerXMP`) becomes the field; the rest of
+        // `shmd` stays in `psd_blocks`, where export puts the packet back.
+        if let Some(i) = l.psd_blocks.iter().position(|(k, _)| k == b"shmd")
+            && let Some((xmp, rest)) = l.psd_blocks.get(i).and_then(|(_, d)| photosplice_psd::metadata::take_layer_xmp(d))
+        {
+            l.xmp = Some(Arc::from(xmp));
+            match rest {
+                Some(data) => {
+                    if let Some(b) = l.psd_blocks.get_mut(i) {
+                        b.1 = Arc::new(data);
+                    }
+                }
+                None => {
+                    l.psd_blocks.remove(i);
+                }
+            }
+        }
         let name = l.name.clone();
         l.mask = self.record_mask(rec, &name);
     }
@@ -427,10 +444,16 @@ impl Ctx<'_> {
             // Kept verbatim for saving, but it renders as nothing: say so rather than open the
             // layer silently without its effect (#1763).
             if matches!(adj, photosplice_doc::Adjustment::Unsupported { .. }) {
-                let why = adjust_map::unreadable_reason(k, &data).map(|r| format!(" ({r})")).unwrap_or_default();
+                // Reference 2026's Light adjustment shares the Brightness/Contrast key (#6542).
+                let light = k == b"brit" && adjust_map::is_extended_brit(cged);
+                let why = if light {
+                    " (Light adjustments, with Exposure, Highlights, Shadows, Whites and Blacks, aren't supported yet)".to_string()
+                } else {
+                    adjust_map::unreadable_reason(k, &data).map(|r| format!(" ({r})")).unwrap_or_default()
+                };
                 self.warn(format!(
                     "layer \"{name}\": its {} settings could not be read{why}; the layer is kept as saved but has no effect",
-                    adjust_map::label(k)
+                    if light { "Light" } else { adjust_map::label(k) }
                 ));
             }
             LayerContent::Adjustment(adj)
@@ -483,7 +506,7 @@ impl Ctx<'_> {
             {
                 cache = crate::smart_map::filter_mask_mix(&u, &cache, m);
             }
-            LayerContent::Smart(SmartObject {
+            let mut sm = SmartObject {
                 contents_id,
                 source: SmartSource::Linked { path: id },
                 transform,
@@ -495,7 +518,9 @@ impl Ctx<'_> {
                 warp,
                 stack_mode: None,
                 perspective,
-            })
+            };
+            crate::smart_map::pin_puppet_meshes(&mut sm);
+            LayerContent::Smart(sm)
         } else if let Some((f, soft)) = soft_shape_fill(rec, vector_key.is_some(), fill_key) {
             // A shape whose vector mask has a density or feather is a fill layer seen through a
             // soft vector mask: the fill shows beyond the path, which the stored pixels (the
@@ -844,7 +869,7 @@ fn write_rgba8(s: &mut Surface, canvas: Rect, data: &[u8]) {
     }
 }
 
-fn parse_guides(data: &[u8], doc: &mut Document) {
+pub(crate) fn parse_guides(data: &[u8], doc: &mut Document) {
     let rd = |at: usize| data.get(at..at + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
     let Some(count) = rd(12) else { return };
     for i in 0..count as usize {

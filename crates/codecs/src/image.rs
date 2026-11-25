@@ -139,8 +139,9 @@ pub struct Metadata {
     pub dpi: Option<(f32, f32)>,
     /// Free-form key/value text (PNG tEXt/iTXt, TIFF ASCII tags).
     pub text: Vec<(String, String)>,
-    /// Photoshop image resources (`8BIM` resource blocks): TIFF tag 34377. Kept opaque here;
-    /// `photosplice-io` reads and writes them through `photosplice-psd`.
+    /// Image resources (`8BIM` resource blocks): TIFF tag 34377, or a JPEG's APP13 segments
+    /// (read only). Kept opaque here; `photosplice-io` reads and writes them through
+    /// `photosplice-psd`.
     pub photoshop_resources: Option<Vec<u8>>,
     /// Photoshop layer data (TIFF tag 37724 `ImageSourceData`): a layered TIFF's layers. Kept
     /// opaque here; `photosplice-io` reads and writes it through `photosplice-psd`.

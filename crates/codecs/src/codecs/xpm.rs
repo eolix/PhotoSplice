@@ -206,11 +206,15 @@ fn decode_lines(lines: &[Vec<u8>], limits: &Limits) -> Result<Image, CodecError>
         }
     }
     let row_len = width.checked_mul(cpp).ok_or_else(|| bad("row byte count overflow"))?;
+    let rows = lines.get(1 + colours..required).ok_or_else(|| bad("truncated image rows"))?;
+    // The rows are plain text, so check every one before allocating the output: a header
+    // declaring a huge width over short rows must not reserve gigabytes first
+    // (storytold/photocraft@fb04b028).
+    if rows.iter().any(|line| line.len() != row_len) {
+        return Err(bad("XPM row has the wrong width"));
+    }
     let mut pixels = vec![0u8; width.checked_mul(height).and_then(|n| n.checked_mul(4)).ok_or_else(|| bad("pixel size overflow"))?];
-    for (y, line) in lines[1 + colours..required].iter().enumerate() {
-        if line.len() != row_len {
-            return Err(bad("XPM row has the wrong width"));
-        }
+    for (y, line) in rows.iter().enumerate() {
         for x in 0..width {
             let key = &line[x * cpp..(x + 1) * cpp];
             let rgba = palette.get(key).ok_or_else(|| bad("unknown palette key"))?;

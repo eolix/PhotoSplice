@@ -2238,6 +2238,13 @@ fn cached_effect_maps(layer: &Layer, region: Rect, key: u64, cx: &Ctx) -> std::s
             c.bytes = c.bytes.saturating_sub(s.get().map_or(0, |e| e.bytes));
         }
     }
+    // The current entry alone over the budget: its callers hold the maps, the cache must not.
+    if c.bytes > budget
+        && let Some(s) = c.map.remove(&key)
+    {
+        c.order.retain(|k| *k != key);
+        c.bytes = c.bytes.saturating_sub(s.get().map_or(0, |e| e.bytes));
+    }
     maps
 }
 
@@ -2332,12 +2339,34 @@ fn composite_atop_any(layer: &Layer, base: &mut Buffer, cx: &Ctx) {
     let Some(content) = render_content(layer, rect, cx) else { return };
     let opacity = layer.opacity * layer.fill_opacity;
     let gamma = text_gamma(layer);
+    // Clipped, the special eight take Fill inside the blend as unclipped ([`blend_layer_into`]):
+    // Opacity covers the base, and with Transparency Shapes Layer off the layer's own alpha is
+    // Fill too (Reference, a Linear Light layer at Fill 40% clipped to an opaque base).
+    let fill = layer.fill_opacity.clamp(0.0, 1.0);
+    let special = psblend::fill_is_special(layer.blend) && (fill < 1.0 || !layer.transparency_shapes);
+    let mv = (special && !layer.transparency_shapes).then(|| mask_vals(layer, rect, cx)).flatten();
     for (i, p) in base.px.iter_mut().enumerate() {
         let alpha = p[3];
         if alpha <= 0.0 {
             continue;
         }
         let s = content.px[i];
+        if special {
+            // `content` carries alpha × masks; without Transparency Shapes split them again.
+            let (m, f) = if layer.transparency_shapes {
+                (s[3], fill)
+            } else {
+                let m = mv.as_ref().map_or(1.0, |v| v.get(i).copied().unwrap_or(1.0));
+                (m, if m > 0.0 { fill * (s[3] / m).clamp(0.0, 1.0) } else { 0.0 })
+            };
+            if m <= 0.0 || f <= 0.0 {
+                // Zero Fill is the base, exactly.
+                continue;
+            }
+            let r = psblend::composite_fill(layer.blend, [p[0], p[1], p[2], 1.0], [s[0], s[1], s[2], m], layer.opacity, f, gamma);
+            *p = [r[0], r[1], r[2], alpha];
+            continue;
+        }
         if layer.blend == BlendMode::Dissolve {
             // Clipping preserves the base's alpha. Dissolve still picks source pixels by their
             // coverage instead of mixing the colours continuously.

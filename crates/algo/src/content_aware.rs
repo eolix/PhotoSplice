@@ -673,6 +673,10 @@ pub fn level_transform(ch: usize, from: &[f32], to: &[f32], a: Adapt) -> Vec<(f3
 }
 
 #[cfg(test)]
+#[path = "content_aware/structure_continue_tests.rs"]
+mod structure_continue_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

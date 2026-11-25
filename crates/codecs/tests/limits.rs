@@ -456,3 +456,120 @@ fn limits_check_api() {
     assert!(l.check(10, 10, ChannelLayout::Rgba, SampleType::U8).is_err());
     assert!(l.check(10, 10, ChannelLayout::Rgb, SampleType::U8).is_ok());
 }
+
+/// storytold/photocraft@fb04b028: a small file whose header declares about 3 GB, inside the
+/// default limits, is refused by the size-against-file check before the decoder allocates its
+/// output.
+fn refused_as_implausible(f: Format, b: &[u8]) {
+    match decode(b) {
+        Err(CodecError::LimitExceeded(m)) => assert!(m.contains("cannot hold"), "{f:?}: {m}"),
+        other => panic!("{f:?}: expected an implausible-size refusal, got {:?}", other.map(|i| (i.width(), i.height()))),
+    }
+}
+
+fn find(b: &[u8], needle: &[u8]) -> usize {
+    b.windows(needle.len()).position(|w| w == needle).unwrap()
+}
+
+#[test]
+fn jpeg_header_declaring_gigabytes_needs_a_plausible_file_size() {
+    let mut b = encoded(Format::Jpeg);
+    // SOF0: marker, length, precision, then height and width (big-endian).
+    let sof = find(&b, &[0xFF, 0xC0]);
+    b[sof + 5..sof + 7].copy_from_slice(&16000u16.to_be_bytes());
+    b[sof + 7..sof + 9].copy_from_slice(&65000u16.to_be_bytes());
+    // The decoder's scan-size guard refuses it (one refusal path for truncated and complete
+    // files alike), before the backend allocates the frame.
+    match decode(&b) {
+        Err(e) => assert!(e.to_string().contains("too short for the frame"), "{e}"),
+        Ok(i) => panic!("decoded a {}×{} frame from {} bytes", i.width(), i.height(), b.len()),
+    }
+}
+
+#[test]
+fn image_crate_headers_declaring_gigabytes_need_a_plausible_file_size() {
+    let side = 30000u32;
+    let mut bmp = encoded(Format::Bmp);
+    bmp[18..22].copy_from_slice(&(side as i32).to_le_bytes());
+    bmp[22..26].copy_from_slice(&(side as i32).to_le_bytes());
+    refused_as_implausible(Format::Bmp, &bmp);
+    let mut qoi = encoded(Format::Qoi);
+    // The qoi crate refuses more than 400 M pixels itself, so 20000 x 20000 (1.6 GB).
+    qoi[4..8].copy_from_slice(&20000u32.to_be_bytes());
+    qoi[8..12].copy_from_slice(&20000u32.to_be_bytes());
+    refused_as_implausible(Format::Qoi, &qoi);
+    let mut gif = encoded(Format::Gif);
+    gif[6..8].copy_from_slice(&(side as u16).to_le_bytes());
+    gif[8..10].copy_from_slice(&(side as u16).to_le_bytes());
+    refused_as_implausible(Format::Gif, &gif);
+}
+
+#[test]
+fn pcx_header_declaring_gigabytes_needs_a_plausible_file_size() {
+    // 24-bit (three 8-bit planes) 65535 x 16384, with one row of data.
+    let mut b = vec![0u8; 128];
+    b[0] = 0x0a;
+    b[1] = 5;
+    b[2] = 1;
+    b[3] = 8;
+    b[8..10].copy_from_slice(&65534u16.to_le_bytes());
+    b[10..12].copy_from_slice(&16383u16.to_le_bytes());
+    b[65] = 3;
+    b[66..68].copy_from_slice(&65535u16.to_le_bytes());
+    b[68..70].copy_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&[0xff, 0]);
+    refused_as_implausible(Format::Pcx, &b);
+}
+
+#[test]
+fn xpm_rows_shorter_than_the_header_declares_are_refused_before_allocating() {
+    let b = b"/* XPM */\nstatic char *x[] = {\n\"30000 30000 1 1\",\n\". c #000000\",\n\".\",\n};\n".to_vec();
+    match decode(&b) {
+        Err(CodecError::Malformed { .. }) => {}
+        other => panic!("expected a malformed-row error, got {:?}", other.map(|i| (i.width(), i.height()))),
+    }
+}
+
+#[test]
+fn exr_header_declaring_gigabytes_needs_a_plausible_file_size() {
+    let mut b = encoded(Format::OpenExr);
+    // dataWindow: name, type, size, then xMin, yMin, xMax, yMax (little-endian i32).
+    let at = find(&b, b"dataWindow\0box2i\0") + b"dataWindow\0box2i\0".len() + 4;
+    b[at + 8..at + 12].copy_from_slice(&15999i32.to_le_bytes());
+    b[at + 12..at + 16].copy_from_slice(&15999i32.to_le_bytes());
+    refused_as_implausible(Format::OpenExr, &b);
+}
+
+#[test]
+fn highly_compressible_jpeg_and_gif_still_decode() {
+    let img = Image::from_u8(3000, 3000, ChannelLayout::Rgba, vec![255u8; 3000 * 3000 * 4]).unwrap();
+    for f in [Format::Jpeg, Format::Gif, Format::Qoi, Format::OpenExr] {
+        let b = encode(&img, f, &EncodeOptions::default()).unwrap();
+        assert_eq!(decode(&b).unwrap().width(), 3000, "{f:?}");
+    }
+}
+
+/// storytold/photocraft@ab4ba9f3: a 16-bit FITS is admitted against a 16-bit buffer; signed data
+/// with negative values falls back to floats, twice that size, which must be admitted too.
+#[test]
+fn fits_float_fallback_is_checked_against_the_limits() {
+    let card = |k: &str, v: &str| format!("{k:<8}= {v:>20}{:50}", "");
+    let mut header: String = [card("SIMPLE", "T"), card("BITPIX", "16"), card("NAXIS", "2"), card("NAXIS1", "4"), card("NAXIS2", "4")].concat();
+    header.push_str(&format!("{:<80}", "END"));
+    let mut b = header.into_bytes();
+    b.resize(2880, b' ');
+    let mut data: Vec<u8> = (0..16i16).flat_map(|v| (v * 100).to_be_bytes()).collect();
+    data[..2].copy_from_slice(&(-5i16).to_be_bytes());
+    b.extend_from_slice(&data);
+    b.resize(2 * 2880, 0);
+    let unsigned = {
+        let mut u = b.clone();
+        u[2880..2882].copy_from_slice(&0i16.to_be_bytes());
+        u
+    };
+    // 4×4 gray: 32 bytes as u16, 64 as f32.
+    let l = Limits { max_alloc: 40, ..Limits::default() };
+    assert_eq!(decode_with(&unsigned, &opts(l)).unwrap().sample_type(), SampleType::U16);
+    assert!(is_limit(decode_with(&b, &opts(l))), "the float fallback exceeds max_alloc");
+    assert_eq!(decode(&b).unwrap().sample_type(), SampleType::F32);
+}
