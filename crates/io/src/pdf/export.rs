@@ -110,12 +110,29 @@ pub fn export_layered_with(doc: &Document, editing: bool, opts: &PdfOptions) -> 
     }
     let page = flat.as_ref().unwrap_or(doc);
     let mut pdf = new_pdf(&opts, Some(doc))?;
-    let marks = draw_page(&mut pdf, page, &opts, &mut warnings)?;
+    // A page per artboard (a multi-page PDF reopened saves as its pages), else the canvas.
+    let boards = board_pages(doc);
+    let mut marks: Vec<(String, Vec<super::ocg::Mark>)> = Vec::new();
+    if boards.is_empty() {
+        marks.push((String::new(), draw_page(&mut pdf, page, &opts, &mut warnings)?));
+    } else {
+        let mut rastered = 0;
+        for b in &boards {
+            let rect = b.artboard().map(|a| a.rect).unwrap_or_default();
+            // A flattened page shows the composite there; a layered one, the board.
+            let board = flat.is_none().then_some(*b);
+            let (m, n) = draw_region(&mut pdf, page, rect, board, &opts, &mut warnings)?;
+            marks.push((b.name.clone(), m));
+            rastered += n;
+        }
+        rastered_warning(rastered, &mut warnings);
+        warnings.dedup();
+    }
     if flat.is_some() {
         warnings.retain(|w| !w.contains("saved as images") && !w.contains("saved as one image (its layers"));
     }
     let mut bytes = finish(pdf, &doc.name)?;
-    if !marks.is_empty() {
+    if marks.iter().any(|(_, m)| !m.is_empty()) {
         match super::ocg::add_layers(bytes.clone(), &marks) {
             Ok(b) => bytes = b,
             Err(e) => warnings.push(format!("{e}; saved without PDF layers")),
@@ -221,24 +238,92 @@ fn finish(mut pdf: krilla::Document, title: &str) -> Result<Vec<u8>, IoError> {
 /// `doc` as one page of `pdf`, sized so it prints at its resolution.
 /// Returns the PDF layers the page marked (see [`Writer::top_level`]).
 fn draw_page(pdf: &mut krilla::Document, doc: &Document, opts: &PdfOptions, warnings: &mut Vec<String>) -> Result<Vec<super::ocg::Mark>, IoError> {
+    let (marks, rastered) = draw_region(pdf, doc, doc.bounds(), None, opts, warnings)?;
+    rastered_warning(rastered, warnings);
+    Ok(marks)
+}
+
+fn rastered_warning(rastered: usize, warnings: &mut Vec<String>) {
+    if rastered > 0 {
+        warnings.push(format!("PDF: {rastered} layer(s) with no PDF equivalent (effects, masks, gradients, adjustments, …) saved as images"));
+    }
+}
+
+/// The pages a document saves as: one per artboard when every visible top-level layer is one
+/// (a multi-page PDF opens that way), in reading order (rows top to bottom, each left to right);
+/// none (one page of the canvas) otherwise.
+fn board_pages(doc: &Document) -> Vec<&Layer> {
+    let visible: Vec<&Layer> = doc.layers.iter().filter(|l| l.visible).collect();
+    if visible.is_empty() || !visible.iter().all(|l| l.artboard().is_some()) {
+        return Vec::new();
+    }
+    let mut boards = visible;
+    // A board whose top is above the middle of another's starts an earlier row.
+    boards.sort_by(|a, b| {
+        let (ra, rb) = (a.artboard().map(|x| x.rect).unwrap_or_default(), b.artboard().map(|x| x.rect).unwrap_or_default());
+        let same_row = ra.y0 < rb.y1 && rb.y0 < ra.y1;
+        if same_row { ra.x0.cmp(&rb.x0) } else { ra.y0.cmp(&rb.y0) }
+    });
+    boards
+}
+
+/// The part `region` of `doc` as one page of `pdf`: the canvas, or an artboard (`board`, drawn
+/// with its background, its contents clipped to it, each top-level layer in it a PDF layer).
+/// Returns the PDF layers the page marked and how many layers it drew as images.
+fn draw_region(
+    pdf: &mut krilla::Document,
+    doc: &Document,
+    region: photosplice_geom::Rect,
+    board: Option<&Layer>,
+    opts: &PdfOptions,
+    warnings: &mut Vec<String>,
+) -> Result<(Vec<super::ocg::Mark>, usize), IoError> {
     let dpi = if doc.resolution_dpi > 0.0 && doc.resolution_dpi.is_finite() { doc.resolution_dpi } else { 72.0 };
     let k = 72.0 / dpi;
-    let (w, h) = (doc.size.width.max(1) as f32, doc.size.height.max(1) as f32);
+    let region = region.intersect(&doc.bounds());
+    let (w, h) = (region.width().max(1) as f32, region.height().max(1) as f32);
     let settings = PageSettings::from_wh(w * k, h * k).ok_or_else(|| IoError::Unsupported("PDF: the page has no size".into()))?;
     let mut page = pdf.start_page_with(settings);
     let mut surface = page.surface();
     surface.push_transform(&Transform::from_scale(k, k));
+    surface.push_transform(&Transform::from_translate(-(region.x0 as f32), -(region.y0 as f32)));
     let ink = super::ink::Ink::of(doc);
-    let mut w = Writer { doc, rastered: 0, fonts: Vec::new(), ink: ink.clone().unwrap_or(super::ink::Ink::Rgb), opts: *opts, dpi, marks: Vec::new() };
+    let mut w = Writer { doc, rastered: 0, fonts: Vec::new(), ink: ink.clone().unwrap_or(super::ink::Ink::Rgb), opts: *opts, dpi, region, marks: Vec::new() };
+    // An artboard's contents, clipped to it, on its background.
+    let (layers, clipped) = match board.and_then(|b| Some((b, b.artboard()?, b.children()?))) {
+        Some((_, ab, children)) => {
+            let r = ab.rect;
+            let rect = krilla::geom::Rect::from_xywh(r.x0 as f32, r.y0 as f32, r.width() as f32, r.height() as f32).and_then(|r| {
+                let mut b = PathBuilder::new();
+                b.push_rect(r);
+                b.finish()
+            });
+            if let Some(rect) = &rect {
+                surface.push_clip_path(rect, &KFillRule::NonZero);
+                if let Some([r, g, b, a]) = ab.background.rgba() {
+                    surface.set_fill(Some(KFill {
+                        paint: w.ink.rgb([r, g, b]).into(),
+                        opacity: NormalizedF32::new(a.clamp(0.0, 1.0)).unwrap_or(NormalizedF32::ONE),
+                        rule: KFillRule::NonZero,
+                    }));
+                    surface.set_stroke(None);
+                    surface.draw_path(rect);
+                    surface.set_fill(None);
+                }
+            }
+            (children, rect.is_some())
+        }
+        None => (&doc.layers[..], false),
+    };
     if ink.is_some() {
         // Everything up to the topmost layer that works on what is beneath it, as one image.
-        let cut = doc.layers.iter().rposition(|l| l.visible && needs_backdrop(l));
+        let cut = layers.iter().rposition(|l| l.visible && needs_backdrop(l));
         let rest = match cut {
             Some(i) => {
-                w.image_of(&mut surface, &doc.layers[..=i]);
-                &doc.layers[i + 1..]
+                w.image_of(&mut surface, &layers[..=i]);
+                &layers[i + 1..]
             }
-            None => &doc.layers[..],
+            None => layers,
         };
         if opts.pdf_layers {
             w.top_level(&mut surface, rest);
@@ -247,17 +332,18 @@ fn draw_page(pdf: &mut krilla::Document, doc: &Document, opts: &PdfOptions, warn
         }
     } else {
         // Lab, Indexed, Duotone…: the composite, converted for display.
-        w.image_of(&mut surface, &doc.layers);
+        w.image_of(&mut surface, layers);
         warnings.push(format!("PDF: a {:?} document is saved as one image (its layers are in the editing data)", doc.mode));
     }
+    if clipped {
+        surface.pop();
+    }
+    surface.pop();
     surface.pop();
     surface.finish();
     page.finish();
     let marks = std::mem::take(&mut w.marks);
-    if w.rastered > 0 {
-        warnings.push(format!("PDF: {} layer(s) with no PDF equivalent (effects, masks, gradients, adjustments, …) saved as images", w.rastered));
-    }
-    Ok(marks)
+    Ok((marks, w.rastered))
 }
 
 struct Writer<'d> {
@@ -268,6 +354,8 @@ struct Writer<'d> {
     opts: PdfOptions,
     /// The document's resolution.
     dpi: f32,
+    /// The part of the canvas the page shows (the canvas, or one artboard).
+    region: photosplice_geom::Rect,
     /// The PDF layers marked so far, in drawing order.
     marks: Vec<super::ocg::Mark>,
     /// Fonts already handed to krilla, by the face's data pointer and index.
@@ -452,14 +540,14 @@ impl Writer<'_> {
         // Straight 8-bit pixels with alpha last, `n` channels, over `rect`.
         let (pixels, n, rect) = match &self.ink {
             Ink::Rgb => {
-                let buf = photosplice_compose::flatten(&tmp);
+                let buf = photosplice_compose::render(&tmp, self.region);
                 let img = buf.to_rgba8();
                 (img.pixels, 4, buf.rect)
             }
             ink => {
                 let fmt = ink.format();
-                let surface = photosplice_compose::flatten_to_surface(&tmp, fmt, None);
-                let rect = tmp.bounds();
+                let rect = self.region;
+                let surface = photosplice_compose::composite_to_surface(&tmp, rect, fmt, None);
                 let mut f = Vec::new();
                 surface.read_region_into(rect, &mut f);
                 (f.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect(), fmt.channels(), rect)

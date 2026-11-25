@@ -1278,6 +1278,67 @@ fn annotations_and_form_fields_open_as_their_own_layers() {
     assert!(p[0] > 0.9 && p[2] < 0.1 && p[3] > 0.99, "{p:?}");
 }
 
+/// A document of artboards (a multi-page PDF opens as one) saves a page per board, sized to it,
+/// in reading order, each board's layers its PDF layers; it reopens as those pages.
+#[test]
+fn artboards_save_as_pages() {
+    use photosplice_doc::vector::{Path, ShapeLayer, Subpath};
+    use photosplice_doc::{Artboard, Layer};
+    use photosplice_geom::Rect;
+    use photosplice_io::pdf::export::{PdfOptions, export_layered, export_layered_with};
+    let mut doc = Document::new("boards", photosplice_geom::Size::new(330, 100), photosplice_color::ColorMode::Rgb, photosplice_color::SampleType::U8);
+    let fmt = doc.pixel_format();
+    let shape = |x: f64, y: f64, c: photosplice_color::Color, name: &str| {
+        let mut sh = ShapeLayer {
+            path: Path::new(vec![Subpath::polygon(&[(x, y), (x + 50.0, y), (x + 50.0, y + 50.0), (x, y + 50.0)])]),
+            fill: Some(Fill::Solid(c)),
+            ..Default::default()
+        };
+        sh.cache = Some(photosplice_vector::render_shape(&sh, fmt, Rect::new(0, 0, 330, 100)));
+        Layer::new(name, LayerContent::Shape(sh))
+    };
+    let board = |name: &str, r: Rect, kids: Vec<Layer>| {
+        let mut b = Layer::group(name, kids);
+        if let LayerContent::Group(g) = &mut b.content {
+            g.artboard = Some(Artboard::new(r));
+        }
+        b
+    };
+    // The right-hand board first in the stack: pages follow the layout, not the stack.
+    doc.layers.push(board("B", Rect::new(180, 0, 330, 100), vec![shape(200.0, 20.0, photosplice_color::Color::rgb(0.0, 0.0, 1.0), "Blue")]));
+    doc.layers.push(board("A", Rect::new(0, 0, 150, 100), vec![shape(10.0, 10.0, photosplice_color::Color::rgb(1.0, 0.0, 0.0), "Red")]));
+    let bytes = export_layered_with(&doc, false, &PdfOptions::default()).unwrap().bytes;
+    assert_eq!(photosplice_io::pdf::page_count(&bytes).unwrap(), 2);
+    let page = |i: usize| open_page("b.pdf", &bytes, i, 72.0, PageAs::Layers).unwrap().document;
+    let at = |d: &Document, x: usize, y: usize| photosplice_compose::flatten(d).px[y * d.size.width as usize + x];
+    let (a, b) = (page(0), page(1));
+    assert_eq!((a.size.width, a.size.height, b.size.width, b.size.height), (150, 100, 150, 100), "each page its board's size");
+    assert!(at(&a, 30, 30)[0] > 0.9 && at(&a, 30, 30)[2] < 0.1, "page 1 is board A: {:?}", at(&a, 30, 30));
+    assert!(at(&b, 40, 40)[2] > 0.9 && at(&b, 40, 40)[0] < 0.1, "page 2 is board B, from its corner: {:?}", at(&b, 40, 40));
+    assert!(at(&a, 120, 80)[3] > 0.99 && at(&a, 120, 80)[0] > 0.99, "the board's white background");
+    // Each page's layers are its PDF layers, under its board's name.
+    let raw = String::from_utf8_lossy(&bytes).into_owned();
+    assert!(raw.contains("/OCProperties") && raw.matches("/Type /OCG").count() == 2, "{}", raw.matches("/Type /OCG").count());
+    // Reopened whole: the pages as boards again.
+    let back = photosplice_io::import("b.pdf", &bytes).unwrap().document;
+    assert_eq!(back.layers.iter().filter(|l| l.artboard().is_some()).count(), 2);
+    // With the editing data: the document itself.
+    let r = export_layered(&doc, true).unwrap();
+    let back = photosplice_io::import("b.pdf", &r.bytes).unwrap().document;
+    assert_eq!(back.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["B", "A"]);
+    assert_eq!(photosplice_io::pdf::page_count(&r.bytes).unwrap(), 2);
+    // PDF/X: every page gets its trim box; flattened standards a page per board too.
+    for standard in [photosplice_io::pdf::pdfx::Standard::X42010, photosplice_io::pdf::pdfx::Standard::X1a2003] {
+        let x = export_layered_with(&doc, false, &PdfOptions { standard, ..Default::default() }).unwrap().bytes;
+        assert_eq!(photosplice_io::pdf::page_count(&x).unwrap(), 2, "{standard:?}");
+        assert_eq!(String::from_utf8_lossy(&x).matches("/TrimBox").count(), 2, "{standard:?}");
+    }
+    // A layer outside the boards: one page of the canvas, as before.
+    doc.layers.push(shape(150.0, 0.0, photosplice_color::Color::rgb(0.0, 1.0, 0.0), "Loose"));
+    let one = export_layered_with(&doc, false, &PdfOptions::default()).unwrap().bytes;
+    assert_eq!(photosplice_io::pdf::page_count(&one).unwrap(), 1);
+}
+
 /// Opens the Reference's own PDFs from the verification kit (`$PHOTOSPLICE_PDF_KIT_OUT`, the
 /// kit's `out/`): each `ps-*-editing.pdf` against the Reference's PSD of the same document, each
 /// `ps-*-page.pdf` (no editing data) against its flat TIFF.

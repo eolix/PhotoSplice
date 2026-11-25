@@ -221,11 +221,12 @@ pub(super) fn conform(pdf: Vec<u8>, doc: &Document, standard: Standard) -> Resul
     }
     up.replace(catalog, &format!("{body} /OutputIntents [ {intent} 0 R ] /Metadata {metadata} 0 R >>"));
 
-    // The page: its trim box is its media box.
-    let page = up.first_page()?;
-    let media = media_box(&page.1).ok_or_else(|| bad("the page has no media box"))?;
-    if !page.1.contains("/TrimBox") {
-        up.replace_page(page, &format!("/TrimBox {media}"))?;
+    // Each page: its trim box is its media box.
+    for page in up.pages()? {
+        let media = media_box(&page.1).ok_or_else(|| bad("a page has no media box"))?;
+        if !page.1.contains("/TrimBox") {
+            up.replace_page(page, &format!("/TrimBox {media}"))?;
+        }
     }
     up.finish()
 }

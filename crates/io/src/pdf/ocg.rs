@@ -224,60 +224,80 @@ pub(super) struct Mark {
 /// What the exporter wraps each layer's content in (krilla's untyped artifact).
 const MARKER: &[u8] = b"/Artifact BMC";
 
-/// Makes the page's marked sequences (one per [`Mark`], in order) PDF layers, as an incremental
-/// update: the layers, the page's content with each marker replaced by `/OC /psN BDC`, its
-/// resources naming the layers, and the catalog listing them (top layer first, as the Layers
-/// panel shows them; locked ones locked). For the one-page PDF krilla writes.
-pub(super) fn add_layers(pdf: Vec<u8>, marks: &[Mark]) -> Result<Vec<u8>, IoError> {
+/// Makes each page's marked sequences (one per [`Mark`], in order; `pages` holds each page's
+/// label and marks, in page order) PDF layers, as an incremental update: the layers, each page's
+/// content with each marker replaced by `/OC /psN BDC`, its resources naming the layers, and the
+/// catalog listing them (top layer first, as the Layers panel shows them; locked ones locked;
+/// under each page's label when there are several). For the PDF krilla writes.
+pub(super) fn add_layers(pdf: Vec<u8>, pages: &[(String, Vec<Mark>)]) -> Result<Vec<u8>, IoError> {
     let bad = |why: &str| IoError::Unsupported(format!("PDF: can't add the PDF layers ({why})"));
-    let (content, page_num, page_dict, res_text, catalog_num, catalog_text) = {
+    let num = |n: i32| usize::try_from(n).map_err(|_| bad("an object number"));
+    // Each page with marks: its content, number, dictionary and resources.
+    let (found, catalog_num, catalog_text) = {
         let doc = Pdf::new(pdf.clone()).map_err(|_| bad("the page can't be read"))?;
         let xref = doc.xref();
-        let pages = doc.pages();
-        let page = pages.first().ok_or_else(|| bad("no page"))?;
-        let content = page.page_stream().ok_or_else(|| bad("no content"))?.to_vec();
-        let page_id = page.raw().obj_id().ok_or_else(|| bad("the page isn't an object"))?;
-        let dict = std::str::from_utf8(page.raw().data()).map_err(|_| bad("the page dictionary"))?;
-        let (res, dict) = take_ref(dict, "/Resources");
-        let (_, dict) = take_ref(&dict, "/Contents");
-        let res = res.ok_or_else(|| bad("the resources aren't an object"))?;
-        let resources = xref.get::<hayro::hayro_syntax::object::Dict<'_>>(ObjectIdentifier::new(res.0, res.1)).ok_or_else(|| bad("no resources"))?;
-        let res_text = std::str::from_utf8(resources.data()).map_err(|_| bad("the resources"))?.trim().to_string();
+        let all = doc.pages();
+        if all.len() != pages.len() {
+            return Err(bad("the pages don't match"));
+        }
+        let mut found = Vec::new();
+        for (page, (label, marks)) in all.iter().zip(pages) {
+            if marks.is_empty() {
+                continue;
+            }
+            let content = page.page_stream().ok_or_else(|| bad("no content"))?.to_vec();
+            let page_id = page.raw().obj_id().ok_or_else(|| bad("the page isn't an object"))?;
+            let dict = std::str::from_utf8(page.raw().data()).map_err(|_| bad("the page dictionary"))?;
+            let (res, dict) = take_ref(dict, "/Resources");
+            let (_, dict) = take_ref(&dict, "/Contents");
+            let res = res.ok_or_else(|| bad("the resources aren't an object"))?;
+            let resources = xref.get::<hayro::hayro_syntax::object::Dict<'_>>(ObjectIdentifier::new(res.0, res.1)).ok_or_else(|| bad("no resources"))?;
+            let res_text = std::str::from_utf8(resources.data()).map_err(|_| bad("the resources"))?.trim().to_string();
+            if res_text.contains("/Properties") {
+                return Err(bad("the file has some already"));
+            }
+            found.push((content, num(page_id.obj_number)?, dict, res_text, label.clone(), marks.clone()));
+        }
         let root = xref.root_id();
         let catalog = xref.get::<hayro::hayro_syntax::object::Dict<'_>>(root).ok_or_else(|| bad("no catalog"))?;
         let catalog_text = std::str::from_utf8(catalog.data()).map_err(|_| bad("the catalog"))?.trim().to_string();
-        if res_text.contains("/Properties") || catalog_text.contains("/OCProperties") {
+        if catalog_text.contains("/OCProperties") {
             return Err(bad("the file has some already"));
         }
-        let num = |n: i32| usize::try_from(n).map_err(|_| bad("an object number"));
-        (content, num(page_id.obj_number)?, dict, res_text, num(root.obj_number)?, catalog_text)
+        (found, num(root.obj_number)?, catalog_text)
     };
-    // Each marker, in order, becomes its layer's.
-    let mut out = Vec::with_capacity(content.len() + marks.len() * 8);
-    let mut rest = content.as_slice();
-    let mut n = 0;
-    while let Some(at) = rest.windows(MARKER.len()).position(|w| w == MARKER) {
-        out.extend_from_slice(rest.get(..at).unwrap_or_default());
-        let _ = write!(out, "/OC /ps{n} BDC");
-        n += 1;
-        rest = rest.get(at + MARKER.len()..).unwrap_or_default();
-    }
-    out.extend_from_slice(rest);
-    if n != marks.len() {
-        return Err(bad("the page's marks don't match the layers"));
-    }
     let open = |d: &str| d.strip_suffix(">>").map(str::to_string).ok_or_else(|| bad("a malformed dictionary"));
-    let mut up = super::update::Update::new(pdf)?;
-    let ocgs: Vec<usize> = marks.iter().map(|m| up.object(&format!("<< /Type /OCG /Name <{}> >>", utf16_hex(&m.name)))).collect();
-    let contents = up.stream("", &out);
-    let props: String = ocgs.iter().enumerate().map(|(i, o)| format!("/ps{i} {o} 0 R ")).collect();
-    let resources = up.object(&format!("{} /Properties << {props}>> >>", open(&res_text)?));
-    up.replace_page((page_num, page_dict), &format!("/Resources {resources} 0 R /Contents {contents} 0 R"))?;
     let refs = |ids: &mut dyn Iterator<Item = &usize>| ids.map(|o| format!("{o} 0 R ")).collect::<String>();
-    let all = refs(&mut ocgs.iter());
-    let order = refs(&mut ocgs.iter().rev());
-    let locked = refs(&mut ocgs.iter().zip(marks).filter(|(_, m)| m.locked).map(|(o, _)| o));
-    let d = format!("<< /Name (Layers) /BaseState /ON /Order [ {order}] /Locked [ {locked}] >>");
+    let mut up = super::update::Update::new(pdf)?;
+    let (mut all, mut locked, mut orders) = (String::new(), String::new(), Vec::new());
+    let several = found.len() > 1;
+    for (content, page_num, page_dict, res_text, label, marks) in found {
+        // Each marker, in order, becomes its layer's.
+        let mut out = Vec::with_capacity(content.len() + marks.len() * 8);
+        let mut rest = content.as_slice();
+        let mut n = 0;
+        while let Some(at) = rest.windows(MARKER.len()).position(|w| w == MARKER) {
+            out.extend_from_slice(rest.get(..at).unwrap_or_default());
+            let _ = write!(out, "/OC /ps{n} BDC");
+            n += 1;
+            rest = rest.get(at + MARKER.len()..).unwrap_or_default();
+        }
+        out.extend_from_slice(rest);
+        if n != marks.len() {
+            return Err(bad("the page's marks don't match the layers"));
+        }
+        let ocgs: Vec<usize> = marks.iter().map(|m| up.object(&format!("<< /Type /OCG /Name <{}> >>", utf16_hex(&m.name)))).collect();
+        let contents = up.stream("", &out);
+        let props: String = ocgs.iter().enumerate().map(|(i, o)| format!("/ps{i} {o} 0 R ")).collect();
+        let resources = up.object(&format!("{} /Properties << {props}>> >>", open(&res_text)?));
+        up.replace_page((page_num, page_dict), &format!("/Resources {resources} 0 R /Contents {contents} 0 R"))?;
+        all.push_str(&refs(&mut ocgs.iter()));
+        locked.push_str(&refs(&mut ocgs.iter().zip(&marks).filter(|(_, m)| m.locked).map(|(o, _)| o)));
+        let order = refs(&mut ocgs.iter().rev());
+        // Several pages: each page's layers under its label (`[(label) …]`).
+        orders.push(if several { format!("[ <{}> {order}] ", utf16_hex(&label)) } else { order });
+    }
+    let d = format!("<< /Name (Layers) /BaseState /ON /Order [ {}] /Locked [ {locked}] >>", orders.concat());
     up.replace(catalog_num, &format!("{} /OCProperties << /OCGs [ {all}] /D {d} >> >>", open(&catalog_text)?));
     up.finish()
 }

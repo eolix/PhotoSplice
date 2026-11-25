@@ -81,6 +81,20 @@ impl Update {
         Ok((num, dict))
     }
 
+    /// Every page's object number and dictionary, in page order.
+    pub(super) fn pages(&self) -> Result<Vec<(usize, String)>, IoError> {
+        let bad = || IoError::Unsupported("PDF: can't read the pages".into());
+        let pdf = Pdf::new(self.out.clone()).map_err(|_| bad())?;
+        pdf.pages()
+            .iter()
+            .map(|page| {
+                let id = page.raw().obj_id().ok_or_else(bad)?;
+                let num = usize::try_from(id.obj_number).map_err(|_| bad())?;
+                Ok((num, std::str::from_utf8(page.raw().data()).map_err(|_| bad())?.trim().to_string()))
+            })
+            .collect()
+    }
+
     pub(super) fn begin(&mut self, num: usize) {
         self.entries.push((num, self.out.len()));
         let _ = writeln!(self.out, "{num} 0 obj");
