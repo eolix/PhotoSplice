@@ -369,8 +369,23 @@ pub fn plan(doc: &Document) -> Result<Plan<'_>, Unsupported> {
     // layers below can't change the result, so they cost no passes or uploads.
     let start = doc.layers.iter().rposition(|l| photosplice_compose::occludes_below(l, doc.mode)).unwrap_or(0);
     let root = p.stack_inner(doc.layers.get(start..).unwrap_or(&doc.layers), root, Some(start))?;
-    Ok(p.finish(root))
+    let plan = p.finish(root);
+    // Every slot becomes a chunk-sized texture before the first pass runs: a compact document
+    // of deeply nested isolated groups must not ask for hundreds of them.
+    if plan.slots > MAX_PLAN_SLOTS {
+        return Err(Unsupported(format!("{} accumulator slots, more than the {MAX_PLAN_SLOTS} the GPU keeps (composited on the CPU)", plan.slots)));
+    }
+    Ok(plan)
 }
+
+/// Most accumulator slots one plan may hold live at once: every slot is a chunk-sized texture,
+/// and nested isolated groups keep their ancestors' slots live.
+pub(crate) const MAX_PLAN_SLOTS: u32 = 32;
+
+/// Most gradient lookup tables one plan keeps (five 4096-entry RGBA rows, 320 KiB of host memory
+/// each: 80 MiB in all): a document of many gradient fills, or a clipped pass-through group that
+/// plans its fills again at every nesting level, is composited on the CPU instead.
+const MAX_PLAN_LUTS: usize = 256;
 
 /// Why `layers` (a sibling list, groups searched too) need the CPU's clipping or interior-effect
 /// rules, if they do.
@@ -417,6 +432,8 @@ struct Planner<'a> {
     cx: DocCtx<'a>,
     fx: Vec<FxLayer<'a>>,
     checkpoints: Vec<Checkpoint>,
+    /// Gradient lookup tables built so far (see [`MAX_PLAN_LUTS`]).
+    luts: std::cell::Cell<usize>,
 }
 
 /// Coverage source of an effect paint (`kind` in `fs_fxpaint`); flags refine it.
@@ -518,7 +535,7 @@ pub const SHAPE_MAP: usize = usize::MAX;
 
 impl<'a> Planner<'a> {
     fn new(cx: DocCtx<'a>) -> Self {
-        Planner { passes: Vec::new(), free: Vec::new(), refs: Vec::new(), cx, fx: Vec::new(), checkpoints: Vec::new() }
+        Planner { passes: Vec::new(), free: Vec::new(), refs: Vec::new(), cx, fx: Vec::new(), checkpoints: Vec::new(), luts: std::cell::Cell::new(0) }
     }
 
     fn finish(self, root: Slot) -> Plan<'a> {
@@ -1068,6 +1085,10 @@ impl<'a> Planner<'a> {
                 // position hash, see the shader).
                 let quantum = photosplice_compose::adjustment_quantum(self.cx.depth).unwrap_or(0.0);
                 p.params[2] = [offset.0, offset.1, quantum, if *dither { 1.0 } else { 0.0 }];
+                self.luts.set(self.luts.get().saturating_add(1));
+                if self.luts.get() > MAX_PLAN_LUTS {
+                    return Err(Unsupported("too many gradient fills to plan for the GPU (composited on the CPU)".into()));
+                }
                 let ramp = photosplice_compose::gradient_fill::Ramp::new(f);
                 let per_location = per_location_ramp(stops) && (opacity_stops.is_empty() || per_location_ramp(opacity_stops));
                 p.lut = Some(ramp_rows(|t| ramp.as_ref().map_or([0.0; 4], |r| r.sample(t)), per_location));
@@ -1107,7 +1128,13 @@ impl<'a> Planner<'a> {
         p.a = Some(base);
         p.b = Some(content);
         p.mode = layer.blend;
-        p.opacity = opacity;
+        // The special eight take Fill inside the blend here too (compose::composite_atop_any);
+        // Transparency Shapes Layer off is composited on the CPU (check_advanced).
+        (p.opacity, p.fill) = if layer.fill_opacity < 1.0 && photosplice_compose::psblend::fill_is_special(layer.blend) {
+            (layer.opacity, layer.fill_opacity)
+        } else {
+            (opacity, 1.0)
+        };
         p.flags = gamma_flag(layer);
         p.extra[3] = photosplice_compose::text_gamma(layer);
         Ok(self.emit(p))
@@ -2062,6 +2089,50 @@ mod tests {
     use super::*;
     use photosplice_color::{Color, ColorMode, SampleType};
     use photosplice_geom::Size;
+
+    /// A chunk-sized texture per live slot: nesting isolated groups keeps every ancestor's slot
+    /// live, so past a depth the plan is refused and the CPU composites instead.
+    #[test]
+    fn deeply_nested_isolated_groups_are_refused_before_their_slots_are_allocated() {
+        let nested = |depth: usize| {
+            let mut d = Document::with_background("t", Size::new(8, 8), ColorMode::Rgb, SampleType::U8, Color::WHITE);
+            let mut inner = Layer::raster("leaf", d.pixel_format());
+            inner.surface_mut().unwrap().fill_rect(Rect::new(0, 0, 4, 4), &[0.0, 0.0, 1.0, 1.0]);
+            let mut layers = vec![inner];
+            for _ in 0..depth {
+                let mut sibling = Layer::raster("s", d.pixel_format());
+                sibling.surface_mut().unwrap().fill_rect(Rect::new(2, 2, 6, 6), &[1.0, 0.0, 0.0, 0.5]);
+                let mut group = Layer::group("g", vec![sibling, layers.pop().unwrap()]);
+                group.blend = BlendMode::Multiply;
+                group.opacity = 0.5;
+                layers = vec![group];
+            }
+            d.layers.extend(layers);
+            d
+        };
+        assert!(plan(&nested(4)).unwrap().slots <= MAX_PLAN_SLOTS);
+        let e = plan(&nested(200)).unwrap_err().to_string();
+        assert!(e.contains("accumulator slots"), "{e}");
+    }
+
+    /// Every gradient fill planned keeps a lookup table: a document of hundreds of them (or one
+    /// that plans the same fills again at every nesting level) is refused.
+    #[test]
+    fn too_many_gradient_tables_refuse_the_plan() {
+        let doc = |n: usize| {
+            let mut d = Document::with_background("t", Size::new(8, 8), ColorMode::Rgb, SampleType::U8, Color::WHITE);
+            for _ in 0..n {
+                let fill = Fill::gradient(vec![(0.0, Color::BLACK), (1.0, Color::WHITE)], 0.0, 1.0, photosplice_doc::GradientStyle::Linear, false);
+                let mut l = Layer::new("fill", LayerContent::Fill(fill));
+                l.opacity = 0.5;
+                d.layers.push(l);
+            }
+            d
+        };
+        assert!(plan(&doc(16)).is_ok());
+        let e = plan(&doc(MAX_PLAN_LUTS + 50)).unwrap_err().to_string();
+        assert!(e.contains("gradient fills"), "{e}");
+    }
 
     /// A pass-through group with an adjustment inside and a layer clipped to it goes to the CPU,
     /// which keeps the adjustment off the layers beneath.

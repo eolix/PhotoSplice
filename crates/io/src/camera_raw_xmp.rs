@@ -219,7 +219,7 @@ pub fn load(params: &mut CameraRaw, bytes: &[u8]) -> Result<LoadReport, String> 
     let text = std::str::from_utf8(bytes).map_err(|_| "not a Camera Raw settings file (not UTF-8 text)".to_string())?;
     // Some writers put a byte order mark or an `<?xpacket?>` wrapper first; roxmltree takes both.
     let text = text.trim_start_matches('\u{feff}');
-    let doc = roxmltree::Document::parse(text).map_err(|e| format!("not a Camera Raw settings file ({e})"))?;
+    let doc = crate::xml::parse(text, roxmltree::ParsingOptions::default()).map_err(|e| format!("not a Camera Raw settings file ({e})"))?;
     let mut next = params.clone();
     let mut report = LoadReport::default();
     let mut found = false;
@@ -305,6 +305,17 @@ pub fn save(params: &CameraRaw) -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// A settings file nested 20 000 deep overflowed the XML parser's recursion (an abort nothing
+    /// can catch); it is an error now (storytold/photocraft@027bfb30). The small stack makes a
+    /// regression abort instead of passing.
+    #[test]
+    fn deeply_nested_settings_are_an_error_not_a_stack_overflow() {
+        let xml = format!("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">{}{}</x:xmpmeta>", "<a>".repeat(20_000), "</a>".repeat(20_000));
+        let e =
+            std::thread::Builder::new().stack_size(512 * 1024).spawn(move || load(&mut CameraRaw::default(), xml.as_bytes()).err()).unwrap().join().unwrap();
+        assert!(e.as_deref().is_some_and(|m| m.contains("nested")), "{e:?}");
+    }
 
     /// A hand-written settings file laid out as Photoshop 26's Camera Raw Filter saves one (the
     /// field set and order follow Camera Raw 18; the values are synthetic), plus element-form

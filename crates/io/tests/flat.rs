@@ -634,6 +634,37 @@ fn truncated_jpeg_imports_with_a_warning() {
     }
 }
 
+/// Guides Reference stores in a JPEG's APP13 resources (resource 1032) open as document guides.
+#[test]
+fn jpeg_reference_guides_open_as_document_guides() {
+    let full = export(&smooth(ColorMode::Rgb), "jpg", &ExportOptions::default()).unwrap().bytes;
+    assert!(import("x.jpg", &full).unwrap().document.guides.vertical.is_empty());
+    // Version, grid 576 x 576, two guides in 1/32 px: vertical at 10, horizontal at 5.
+    let mut guides = Vec::new();
+    for v in [1u32, 576, 576, 2] {
+        guides.extend_from_slice(&v.to_be_bytes());
+    }
+    guides.extend_from_slice(&(10i32 * 32).to_be_bytes());
+    guides.push(0);
+    guides.extend_from_slice(&(5i32 * 32).to_be_bytes());
+    guides.push(1);
+    let mut res = b"8BIM".to_vec();
+    res.extend_from_slice(&1032u16.to_be_bytes());
+    res.extend_from_slice(&[0, 0]);
+    res.extend_from_slice(&(guides.len() as u32).to_be_bytes());
+    res.extend_from_slice(&guides);
+    let mut seg = b"Photoshop 3.0\0".to_vec();
+    seg.extend_from_slice(&res);
+    let mut jpeg = full[..2].to_vec();
+    jpeg.extend_from_slice(&[0xFF, 0xED]);
+    jpeg.extend_from_slice(&((seg.len() + 2) as u16).to_be_bytes());
+    jpeg.extend_from_slice(&seg);
+    jpeg.extend_from_slice(&full[2..]);
+    let g = import("x.jpg", &jpeg).unwrap().document.guides;
+    assert_eq!(g.vertical, vec![10.0]);
+    assert_eq!(g.horizontal, vec![5.0]);
+}
+
 /// A GIF of `frames` identical 1x1 black frames.
 fn gif_frames(frames: usize) -> Vec<u8> {
     let mut b = b"GIF89a\x01\0\x01\0\x80\0\0\0\0\0\xFF\xFF\xFF".to_vec();

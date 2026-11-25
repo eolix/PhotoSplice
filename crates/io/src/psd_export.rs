@@ -1070,7 +1070,22 @@ impl Ex {
             let id = self.layer_ids.get(&l.id).copied().unwrap_or(0);
             crate::comps_map::set_cmls(&mut raw, crate::comps_map::write_cmls(comps, last.as_ref(), l, id));
         }
+        self.layer_xmp_block(l, &mut raw);
         regenerated.into_iter().chain(raw).map(|(k, d)| TaggedBlock::new(k, d)).collect()
+    }
+
+    /// Writes the layer's XMP packet into its `shmd` block (created when it has none). Import
+    /// takes the packet out of `shmd`, so a layer without one keeps the block as it was.
+    fn layer_xmp_block(&mut self, l: &Layer, raw: &mut Vec<([u8; 4], Vec<u8>)>) {
+        let Some(xmp) = l.xmp.as_deref() else { return };
+        let pos = raw.iter().position(|(k, _)| k == b"shmd");
+        match photosplice_psd::metadata::put_layer_xmp(pos.and_then(|i| raw.get(i)).map(|(_, d)| d.as_slice()), xmp) {
+            Ok(data) => match pos.and_then(|i| raw.get_mut(i)) {
+                Some(b) => b.1 = data,
+                None => raw.push((*b"shmd", data)),
+            },
+            Err(e) => self.warnings.push(format!("layer \"{}\": its XMP metadata was not saved (its metadata block can't be read: {e})", l.name)),
+        }
     }
 
     /// Keeps, regenerates or removes the `vmsk`/`vsms` block of a non-shape layer.
@@ -1241,7 +1256,10 @@ impl Ex {
     /// Whether an imported placed layer still says what the smart object is: transform, warp,
     /// filter stack and filter mask as stored.
     fn placed_unchanged(&self, t: &crate::smart_map::Placed, data: &[u8], sm: &photosplice_doc::SmartObject, stack: &crate::smart_map::FilterStack) -> bool {
-        if t.transform != sm.transform || blocks::parse_placed_warp(b"SoLd", data) != sm.warp || t.stack.clone().unwrap_or_default() != *stack {
+        // The stack as imported: Puppet Warp meshes carry the placement they were read on.
+        let mut imported = t.stack.clone().unwrap_or_default();
+        crate::smart_map::pin_puppet_filters(&mut imported.filters, &sm.placement_json());
+        if t.transform != sm.transform || blocks::parse_placed_warp(b"SoLd", data) != sm.warp || imported != *stack {
             return false;
         }
         if stack.filters.is_empty() {
@@ -2340,7 +2358,7 @@ fn document_to_psd_sized(doc: &Document, opts: &PsdExportOptions, depth: u32, ct
         };
         // A kept merged-transparency marker describes the opened file's composite. Over an opaque
         // one it would make the first alpha channel read back as the transparency, and vanish.
-        if !has_alpha && matches!(key, b"Mtrn" | b"Mt16" | b"Mt32") {
+        if !has_alpha && matches!(key, b"Mtrn" | b"MTrn" | b"Mt16" | b"Mt32") {
             continue;
         }
         global_blocks.push(global_block(block_signature(*sig, *key, version), *key, &data));
@@ -2350,7 +2368,7 @@ fn document_to_psd_sized(doc: &Document, opts: &PsdExportOptions, depth: u32, ct
     if !global_blocks.iter().any(|b| b.key == *b"Txt2") {
         let previous = doc.metadata.psd_global_blocks.iter().find(|(_, k, _)| k == b"Txt2").map(|(_, _, d)| d.as_slice());
         if let Some(txt2) = ex.text.fresh_txt2(previous, &mut ex.records) {
-            let at = global_blocks.iter().rposition(|b| matches!(&b.key, b"Mtrn" | b"Mt16" | b"Mt32" | b"Patt" | b"Pat2" | b"Pat3")).map_or(0, |i| i + 1);
+            let at = global_blocks.iter().rposition(|b| b.is_merged_transparency_marker() || matches!(&b.key, b"Patt" | b"Pat2" | b"Pat3")).map_or(0, |i| i + 1);
             global_blocks.insert(at, global_block(block_signature(*b"8BIM", *b"Txt2", version), *b"Txt2", &txt2));
         }
     }
@@ -2394,10 +2412,10 @@ fn document_to_psd_sized(doc: &Document, opts: &PsdExportOptions, depth: u32, ct
     resources.push(version_info_resource(real_merged));
 
     let has_layers = !ex.records.is_empty();
-    // Photoshop writes a merged-transparency marker (`Mtrn`, `Mt16`, `Mt32`) before the layer
-    // block, and won't open a file whose `Lr32` comes first (#5068): the layer block goes right
-    // after the last kept marker, else first.
-    let index = global_blocks.iter().rposition(|b| matches!(&b.key, b"Mtrn" | b"Mt16" | b"Mt32")).map_or(0, |i| i + 1);
+    // Reference writes a merged-transparency marker (`Mtrn`, `Mt16`, `Mt32`; `MTrn` in a TIFF)
+    // before the layer block, and won't open a file whose `Lr32` comes first (#5068): the layer
+    // block goes right after the last kept marker, else first.
+    let index = global_blocks.iter().rposition(TaggedBlock::is_merged_transparency_marker).map_or(0, |i| i + 1);
     let records = std::mem::take(&mut ex.records);
     let mut layer_info = has_layers.then_some(LayerInfo { merged_alpha: has_alpha, layers: records, padding: None });
     // The layer info is padded to 4 bytes (an even pad misaligns readers after a global
@@ -2685,7 +2703,12 @@ mod tests {
     /// `transparentbg.psd` re-saved both ways). The layer block follows a kept marker.
     #[test]
     fn layer_block_follows_a_kept_merged_transparency_marker() {
-        for (depth, key, marker) in [(SampleType::F32, *b"Lr32", *b"Mt32"), (SampleType::U16, *b"Lr16", *b"Mt16"), (SampleType::F32, *b"Lr32", *b"Mtrn")] {
+        for (depth, key, marker) in [
+            (SampleType::F32, *b"Lr32", *b"Mt32"),
+            (SampleType::U16, *b"Lr16", *b"Mt16"),
+            (SampleType::F32, *b"Lr32", *b"Mtrn"),
+            (SampleType::F32, *b"Lr32", *b"MTrn"),
+        ] {
             let mut doc = Document::new("t", photosplice_geom::Size::new(8, 6), ColorMode::Rgb, depth);
             let mut s = Surface::new(doc.pixel_format());
             s.fill_rect(photosplice_geom::Rect::new(1, 1, 5, 4), &[0.5, 0.2, 0.9, 1.0]);

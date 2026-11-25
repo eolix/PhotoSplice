@@ -436,6 +436,20 @@ fn lens_flare_is_brightest_at_its_centre() {
 }
 
 #[test]
+fn lens_flare_with_an_overflowing_centre_leaves_finite_pixels() {
+    // A centre of 1e300 becomes infinite in f32; NaN must not reach the pixels.
+    let src = flat(SampleType::F32, R, [0.2, 0.3, 0.4, 1.0]);
+    for lens in [LensType::Zoom, LensType::Prime35, LensType::Prime105, LensType::MoviePrime] {
+        for (cx, cy) in [(f32::INFINITY, f32::NEG_INFINITY), (1e38, -1e38), (f32::NAN, 0.5), (5.0, -5.0)] {
+            let out = run(&src, &FilterParams::LensFlare { brightness: 100.0, center_x: cx, center_y: cy, lens });
+            let px = out.read_region(R);
+            assert!(px.iter().all(|v| v.is_finite()), "{lens:?} at ({cx}, {cy})");
+            assert!(px.iter().zip(src.read_region(R)).all(|(a, b)| *a >= b - 1e-6), "{lens:?}: screen never darkens");
+        }
+    }
+}
+
+#[test]
 fn lighting_point_light_falls_off() {
     let s = flat(SampleType::F32, R, [0.8, 0.8, 0.8, 1.0]);
     let light = Light { kind: LightKind::Point, x: 0.1, y: 0.5, z: 0.2, radius: 1.0, intensity: 50.0, ..Light::default() };

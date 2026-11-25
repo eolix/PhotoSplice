@@ -220,6 +220,7 @@ fn layer_m(l: &Layer, sink: &mut dyn Sink) -> LayerM {
         blend_if: l.blend_if.clone(),
         transparency_shapes: l.transparency_shapes,
         video: l.video.as_ref().map(|v| video_m(v, sink)),
+        xmp: l.xmp.as_deref().map(str::to_string),
     }
 }
 
@@ -569,6 +570,7 @@ impl Loader<'_> {
             blend_if: m.blend_if.clone(),
             transparency_shapes: m.transparency_shapes,
             video: m.video.as_ref().map(|v| self.video(v)).transpose()?,
+            xmp: m.xmp.as_deref().map(Arc::from),
         })
     }
 

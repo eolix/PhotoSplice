@@ -51,21 +51,28 @@ impl GamutCheck {
         self.inputs
     }
 
-    /// ΔE76 between the colour and its proof round trip.
+    /// ΔE76 between the colour and its proof round trip. `px` holds the source's `inputs()`
+    /// channels; missing channels read as 0 and extra ones are ignored, so a pixel of another
+    /// colour model (an RGB pixel against a CMYK source) never panics.
     pub fn delta_e(&self, px: &[f32]) -> f32 {
         let mut o = [0.0f32; 1];
+        let mut c = [0.0f32; 16];
+        for (d, s) in c.iter_mut().take(self.inputs).zip(px) {
+            *d = *s;
+        }
+        let c = c.get(..self.inputs).unwrap_or(&c);
         match &self.grid {
             Some(g) => {
-                let mut c = [0.0f32; 16];
-                for (d, s) in c.iter_mut().zip(&px[..self.inputs]) {
+                let mut clamped = [0.0f32; 16];
+                for (d, s) in clamped.iter_mut().zip(c) {
                     *d = s.clamp(0.0, 1.0);
                 }
-                g.eval(&c[..self.inputs], &mut o);
+                g.eval(clamped.get(..self.inputs).unwrap_or(&clamped), &mut o);
             }
             None => {
                 let (mut a, mut b) = ([0.0f32; 16], [0.0f32; 16]);
-                self.exact.0.eval(px, &mut a);
-                self.exact.1.eval(px, &mut b);
+                self.exact.0.eval(c, &mut a);
+                self.exact.1.eval(c, &mut b);
                 o[0] = ((a[0] - b[0]) * 100.0).hypot((a[1] - b[1]) * 255.0).hypot((a[2] - b[2]) * 255.0);
             }
         }
@@ -74,5 +81,25 @@ impl GamutCheck {
 
     pub fn out_of_gamut(&self, px: &[f32]) -> bool {
         self.delta_e(px) > self.threshold
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Builtin;
+
+    #[test]
+    fn a_pixel_of_another_colour_model_does_not_panic() {
+        // An RGB pixel tested against a CMYK (4-channel) source, and a short pixel against RGB,
+        // used to slice past the pixel's end.
+        let cmyk = GamutCheck::new(Builtin::CoatedCmyk.profile(), Builtin::Srgb.profile(), 4.0).unwrap();
+        assert!(cmyk.delta_e(&[0.2, 0.4, 0.6]).is_finite());
+        let rgb = GamutCheck::new(Builtin::Srgb.profile(), Builtin::CoatedCmyk.profile(), 4.0).unwrap();
+        assert!(rgb.delta_e(&[0.5]).is_finite());
+        assert!(rgb.delta_e(&[]).is_finite());
+        // Controls: a full pixel and one with extra (alpha) channels agree.
+        assert_eq!(rgb.delta_e(&[0.0, 1.0, 0.0]), rgb.delta_e(&[0.0, 1.0, 0.0, 1.0]));
+        assert!(rgb.out_of_gamut(&[0.0, 1.0, 0.0]), "sRGB green is outside coated CMYK");
     }
 }

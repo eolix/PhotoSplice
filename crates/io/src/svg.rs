@@ -130,7 +130,7 @@ fn inflate(bytes: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, IoError> {
 /// then `limit + 1`). Comments, CDATA sections, processing instructions and the DOCTYPE add
 /// nothing; quoted attribute values may hold `>` or `/>`. Malformed markup is only counted
 /// loosely: the parser rejects it afterwards.
-fn nesting_depth(xml: &[u8], limit: usize) -> usize {
+pub(crate) fn nesting_depth(xml: &[u8], limit: usize) -> usize {
     let after = |from: usize, pat: &[u8]| -> usize {
         xml.get(from..).and_then(|s| s.windows(pat.len()).position(|w| w == pat)).map_or(xml.len(), |p| from.saturating_add(p).saturating_add(pat.len()))
     };

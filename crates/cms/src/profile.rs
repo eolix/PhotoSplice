@@ -184,6 +184,7 @@ pub struct Profile {
 impl Profile {
     /// Parses ICC profile bytes.
     pub fn parse(bytes: &[u8]) -> Result<Profile, CmsError> {
+        CLUT_VALUES_LEFT.with(|left| left.set(MAX_PROFILE_CLUT_VALUES));
         let mut p = parse_profile(bytes)?;
         p.bytes = Some(Arc::new(bytes.to_vec()));
         Ok(p)
@@ -211,7 +212,9 @@ impl Profile {
         self.color_space.channels()
     }
 
-    /// Hash of the profile's ICC bytes (stable within a process; used as a cache key).
+    /// Hash of the profile's ICC bytes (stable within a process; used as a cache key). It is a
+    /// fixed-key 64-bit hash, so a crafted profile can share another's: equal hashes only narrow
+    /// the search, [`Profile::same_bytes`] decides.
     pub fn content_hash(&self) -> u64 {
         *self.hash.get_or_init(|| {
             use std::hash::{Hash, Hasher};
@@ -221,6 +224,16 @@ impl Profile {
         })
     }
 
+    /// Whether `self` and `other` have the same ICC bytes.
+    pub fn same_bytes(&self, other: &Profile) -> bool {
+        if let (Some(a), Some(b)) = (&self.bytes, &other.bytes)
+            && Arc::ptr_eq(a, b)
+        {
+            return true;
+        }
+        self.content_hash() == other.content_hash() && self.to_bytes() == other.to_bytes()
+    }
+
     /// Whether `self` and `other` describe the same colours: same colour space, and every sample
     /// of a device-value grid has the same colour through both (relative colorimetric, within
     /// [`SAME_COLORS_MAX_DELTA_E`]). Different encodings of one space are the same colours: the
@@ -228,7 +241,7 @@ impl Profile {
     /// parametric curves) differ in every byte. Colours are compared rather than round-tripped
     /// because CMYK → PCS → CMYK is not an identity even through a single profile.
     pub fn same_colors(&self, other: &Profile) -> bool {
-        if self.content_hash() == other.content_hash() {
+        if self.same_bytes(other) {
             return true;
         }
         let n = self.channels();
@@ -448,6 +461,24 @@ fn sig(s: &[u8; 4]) -> u32 {
 /// Upper bound on CLUT nodes × outputs we accept, to reject hostile files.
 const MAX_CLUT_VALUES: usize = 16 * 1024 * 1024;
 
+/// CLUT values one profile may decode in all (128 MB of `f32`): the twelve LUT tags can alias
+/// one table, and each reference decodes its own copy.
+const MAX_PROFILE_CLUT_VALUES: usize = 32 << 20;
+
+thread_local! {
+    /// What is left of [`MAX_PROFILE_CLUT_VALUES`] for the profile being parsed on this thread.
+    static CLUT_VALUES_LEFT: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_PROFILE_CLUT_VALUES) };
+}
+
+/// Charges `n` decoded CLUT values to the profile being parsed.
+fn charge_clut_values(n: usize) -> Result<(), CmsError> {
+    CLUT_VALUES_LEFT.with(|left| {
+        let rest = left.get().checked_sub(n).ok_or_else(|| CmsError::Invalid("the profile's lookup tables hold too many values".into()))?;
+        left.set(rest);
+        Ok(())
+    })
+}
+
 fn parse_profile(bytes: &[u8]) -> Result<Profile, CmsError> {
     let r = Reader { b: bytes };
     if bytes.len() < 132 {
@@ -666,6 +697,7 @@ fn parse_lut(d: &[u8], a2b: bool) -> Result<Lut, CmsError> {
                 return Err(CmsError::Invalid("CLUT too large".into()));
             }
             let total = nodes as usize * o;
+            charge_clut_values(total)?;
             let s = r.slice(off, total * bps)?;
             let data: Vec<f32> = if wide {
                 s.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]]) as f32 / 65535.0).collect()
@@ -771,6 +803,7 @@ fn lut_ab_clut(r: &Reader, off: usize, cin: usize, cout: usize) -> Result<Stage,
         return Err(CmsError::Invalid("CLUT too large".into()));
     }
     let total = nodes as usize * cout;
+    charge_clut_values(total)?;
     let samples = extent(off, 20, 1)?;
     let data: Vec<f32> = match prec {
         1 => r.slice(samples, total)?.iter().map(|b| *b as f32 / 255.0).collect(),
@@ -818,6 +851,23 @@ fn parse_text(d: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builtin::Builtin;
+
+    #[test]
+    fn aliased_cluts_are_charged_for_each_decoded_table() {
+        // A 255³ × 1 CLUT (within one table's limit) referenced by LUT tags three times.
+        let mut element = vec![255u8, 255, 255];
+        element.resize(16, 0);
+        element.extend([1, 0, 0, 0]);
+        element.extend(std::iter::repeat_n(0u8, 255 * 255 * 255));
+        let r = Reader { b: &element };
+        CLUT_VALUES_LEFT.with(|left| left.set(MAX_PROFILE_CLUT_VALUES));
+        assert!(lut_ab_clut(&r, 0, 3, 1).is_ok());
+        assert!(lut_ab_clut(&r, 0, 3, 1).is_ok());
+        assert!(lut_ab_clut(&r, 0, 3, 1).is_err(), "the third decoded copy passes the profile's allowance");
+        CLUT_VALUES_LEFT.with(|left| left.set(MAX_PROFILE_CLUT_VALUES));
+        assert!(lut_ab_clut(&r, 0, 3, 1).is_ok());
+    }
 
     fn be(v: u32) -> [u8; 4] {
         v.to_be_bytes()
@@ -902,5 +952,47 @@ mod tests {
         d.extend(be(u32::MAX));
         d.extend(be(u32::MAX));
         assert_eq!(parse_text(&d), "");
+    }
+
+    /// `p` with the content hash of `other`: the hash is a fixed-key 64-bit SipHash, so a
+    /// crafted profile can have another's. Setting it stands in for finding one.
+    fn with_hash_of(p: &Profile, other: &Profile) -> Profile {
+        let p = Profile { hash: std::sync::OnceLock::from(other.content_hash()), ..p.clone() };
+        assert_eq!(p.content_hash(), other.content_hash());
+        p
+    }
+
+    /// A profile that shares sRGB's hash is not taken for sRGB.
+    #[test]
+    fn a_hash_collision_is_not_the_same_colours() {
+        let srgb = Builtin::Srgb.profile();
+        let p3 = with_hash_of(Builtin::DisplayP3.profile(), srgb);
+        assert!(!p3.same_bytes(srgb));
+        assert!(!p3.same_colors(srgb));
+        // Controls: equal bytes are the same, whatever object holds them.
+        assert!(srgb.same_bytes(srgb));
+        assert!(srgb.same_bytes(&Profile::parse(&srgb.to_bytes()).unwrap()));
+        assert!(Builtin::DisplayP3.profile().same_colors(Builtin::DisplayP3.profile()));
+    }
+
+    /// The transform cache does not hand a colliding profile the other's transform.
+    #[test]
+    fn a_hash_collision_does_not_get_the_cached_transform() {
+        use crate::transform::{Transform, TransformOptions, cached};
+        let (srgb, lab) = (Builtin::Srgb.profile(), Builtin::LabD50.profile());
+        let p3 = with_hash_of(Builtin::DisplayP3.profile(), srgb);
+        let opts = TransformOptions::default();
+        let green = [0.0, 1.0, 0.0];
+        let eval = |t: &Transform| {
+            let mut out = [0f32; 3];
+            t.eval(&green, &mut out);
+            out
+        };
+        let want = eval(&Transform::with_options(Builtin::DisplayP3.profile(), lab, opts).unwrap());
+        assert_ne!(want, eval(&Transform::with_options(srgb, lab, opts).unwrap()), "P3 green is not sRGB green");
+        let sr = eval(&cached(srgb, lab, opts).unwrap());
+        assert_eq!(eval(&cached(&p3, lab, opts).unwrap()), want);
+        // Control: sRGB still gets its own transform after the colliding lookup.
+        assert_eq!(eval(&cached(srgb, lab, opts).unwrap()), sr);
     }
 }

@@ -48,7 +48,15 @@ fn open<'a>(f: Format, bytes: &'a [u8], limits: &Limits) -> Result<impl ImageDec
     reader.limits(il);
     let dec = reader.into_decoder().map_err(|e| map_err(f, e))?;
     let (w, h) = dec.dimensions();
-    limits.check_bytes(w, h, dec.color_type().bytes_per_pixel() as u64)?;
+    let bpp = dec.color_type().bytes_per_pixel() as u64;
+    limits.check_bytes(w, h, bpp)?;
+    // `DynamicImage::from_decoder` allocates the whole image before reading a pixel, so a
+    // header-only file must not be able to ask for gigabytes (storytold/photocraft@fb04b028).
+    // GIF's LZW tops out near 11000:1 of RGBA output and the RLE formats far below; AVIF has
+    // already decoded by now.
+    if f != Format::Avif {
+        Limits::check_plausible(u64::from(w) * u64::from(h) * bpp, bytes.len(), 1 << 14)?;
+    }
     Ok(dec)
 }
 

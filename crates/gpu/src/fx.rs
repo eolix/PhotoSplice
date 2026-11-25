@@ -308,7 +308,7 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
             let angle = if s.use_global_light { light.angle } else { s.angle };
             let (dx, dy) = offset(angle, s.distance);
             let src = b.shift(In::Shape, dx, dy, if inner { 1.0 } else { 0.0 }, inner);
-            let (r, bw) = photosplice_compose::effects::spread_split(s.size, s.spread);
+            let (r, _) = photosplice_compose::effects::spread_split(s.size, s.spread);
             let mut m = src;
             if r > 0.0 {
                 // dist_outside of the shifted map is the shifted field (integer offsets; shifted-in
@@ -321,7 +321,8 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
                 };
                 m = b.dilate(src, d, r);
             }
-            let m = b.blur(m, bw);
+            // `¼ ½ ¼` at Size 1, as the CPU's `shadow_map`.
+            let m = b.blur(m, photosplice_compose::effects::shadow_blur_width(s));
             b.finish(m, None, false, &s.contour, inner, 0);
             1
         }
@@ -336,19 +337,19 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
                     let solid = (g.size * g.spread).floor();
                     let soft = (g.size + 1.0 - solid).max(1e-3);
                     let m = b.push(stage(Kernel::MGlow, Some(d), None, [solid, soft, 0.0, 0.5], 0));
-                    b.finish_glow(m, photosplice_compose::effects::glow_lut(g), inner, center);
+                    b.finish_glow(m, photosplice_compose::effects::glow_paint_lut(g, inner), inner, center);
                 }
                 GlowTechnique::Softer => {
                     // Inner glows (edge, and centre as 1 - the edge result) spread 1 - alpha.
                     let src = if inner { b.shift(In::Shape, 0.0, 0.0, 0.0, true) } else { In::Shape };
-                    let (r, bw) = photosplice_compose::effects::spread_split(g.size, g.spread);
+                    let (r, _) = photosplice_compose::effects::spread_split(g.size, g.spread);
                     let mut m = src;
                     if r > 0.0 {
                         let d = b.field(if inner { FieldKind::ChokeInside } else { FieldKind::StrokeOutside }, r);
                         m = b.dilate(src, d, r);
                     }
-                    let m = b.blur(m, bw);
-                    b.finish_glow(m, photosplice_compose::effects::glow_lut(g), inner, center);
+                    let m = b.blur(m, photosplice_compose::effects::glow_blur_width(g, inner));
+                    b.finish_glow(m, photosplice_compose::effects::glow_paint_lut(g, inner), inner, center);
                 }
             }
             1
@@ -357,9 +358,10 @@ pub(crate) fn program_with(e: &Effect, light: &GlobalLight, vector_shape: bool, 
             // satin_map
             let (dx, dy) = offset(s.angle, photosplice_compose::effects::satin_distance(s));
             let a = b.shift(In::Shape, dx, dy, 0.0, false);
-            let a = b.conv(a, photosplice_compose::effects::tent_kernel(s.size));
+            let k = photosplice_compose::effects::tent_kernel(photosplice_compose::effects::satin_blur_width(s));
+            let a = b.conv(a, k.clone());
             let c = b.shift(In::Shape, -dx, -dy, 0.0, false);
-            let c = b.conv(c, photosplice_compose::effects::tent_kernel(s.size));
+            let c = b.conv(c, k);
             // The contour shapes each copy before the difference (compose::effects::satin_map).
             let a = b.lut_map(a, contour_lut(&s.contour));
             let c = b.lut_map(c, contour_lut(&s.contour));
@@ -870,5 +872,61 @@ mod tests {
         assert_eq!(pins.len(), n);
         drop(group);
         assert!(pins.iter().all(|w| w.strong_count() == 0), "a group's pins keep none of its pixels");
+    }
+
+    /// The blur passes of one effect's map program: (radius, weights) of each `MBlur` stage.
+    fn blurs(e: &Effect) -> Vec<(i32, Vec<f32>)> {
+        program(e, &GlobalLight::default(), false)
+            .stages
+            .into_iter()
+            .filter(|st| st.kernel == crate::plan::Kernel::MBlur)
+            .map(|st| (st.radius, st.lut.map(|l| (*l).clone()).unwrap_or_default()))
+            .collect()
+    }
+
+    /// Size 1 shadows, Softer glows (an Inner Glow from the Edge) and Satins convolve the
+    /// `¼ ½ ¼` taps the CPU maps apply (Reference's measured Size 1 edge), where the width-1 tent
+    /// was the identity and left no blur stage at all; a choked Size 1 shadow and a Center
+    /// Inner Glow keep none, and a Size 6 inner shadow keeps its own tent.
+    #[test]
+    fn size_one_maps_convolve_the_cpus_kernel() {
+        let quarter = (1, vec![0.25, 0.5, 0.25]);
+        let Effect::DropShadow(mut s) = Effect::default_drop_shadow() else { unreachable!() };
+        (s.distance, s.spread, s.size) = (0.0, 0.0, 1.0);
+        assert_eq!(blurs(&Effect::InnerShadow(s.clone())), vec![quarter.clone(), quarter.clone()], "Size 1 inner shadow");
+        assert_eq!(blurs(&Effect::DropShadow(s.clone())), vec![quarter.clone(), quarter.clone()], "Size 1 drop shadow");
+        s.spread = 0.5;
+        assert!(blurs(&Effect::InnerShadow(s.clone())).is_empty(), "a choked Size 1 inner shadow keeps its hard map");
+        s.spread = 0.0;
+        s.size = 6.0;
+        let six = photosplice_compose::effects::tent_kernel(6.0);
+        assert_eq!(blurs(&Effect::InnerShadow(s)), vec![six.clone(), six], "Size 6 stays on its tent");
+        let g = photosplice_doc::Glow {
+            common: FxCommon::new(BlendMode::Normal, 1.0),
+            paint: photosplice_doc::FxPaint::Color(photosplice_color::Color::BLACK),
+            technique: GlowTechnique::Softer,
+            spread: 0.0,
+            size: 1.0,
+            contour: Contour::Linear,
+            anti_alias: false,
+            range: 0.5,
+            jitter: 0.0,
+            noise: 0.0,
+            source: GlowSource::Edge,
+        };
+        assert_eq!(blurs(&Effect::InnerGlow(g.clone())), vec![quarter.clone(), quarter.clone()], "Size 1 inner glow");
+        assert_eq!(blurs(&Effect::OuterGlow(g.clone())), vec![quarter.clone(), quarter.clone()], "Size 1 outer glow");
+        assert!(blurs(&Effect::InnerGlow(photosplice_doc::Glow { source: GlowSource::Center, ..g })).is_empty(), "the Center source keeps its map");
+        let satin = photosplice_doc::Satin {
+            common: FxCommon::new(BlendMode::Normal, 1.0),
+            color: photosplice_color::Color::BLACK,
+            angle: 90.0,
+            distance: 20.0,
+            size: 1.0,
+            contour: Contour::Linear,
+            anti_alias: false,
+            invert: false,
+        };
+        assert_eq!(blurs(&Effect::Satin(satin)), vec![quarter.clone(), quarter.clone(), quarter.clone(), quarter], "both Size 1 satin copies");
     }
 }

@@ -287,7 +287,9 @@ impl Dt1Scratch {
 fn edt_nearest(inside: &[bool], w: usize, h: usize) -> (Vec<f32>, Vec<u32>) {
     const INF: f32 = 1e20;
     let total = w.saturating_mul(h);
-    if total != inside.len() || total > u32::MAX as usize {
+    // No pixels: nothing to transform, and the scratch below is sized from the larger
+    // dimension, which a zero-by-huge plane would still allocate.
+    if total != inside.len() || total > u32::MAX as usize || total == 0 {
         return (vec![INF; inside.len()], vec![0; inside.len()]);
     }
     let n = w.max(h);
@@ -713,6 +715,35 @@ fn blur(m: &mut Map, size: f32) {
     }
 }
 
+/// The tent width a Size 1 effect blurs with. A width-1 box is the identity ([`box_width`]
+/// floors there), so the edge would stay hard, but Reference spreads a quarter of the coverage
+/// one pixel either side of it: on an orange layer (G 128) under black, an Inner Shadow reads
+/// G 96 then 128 inwards, a Softer Inner Glow at Range 50 % 64 then 128, and a Satin's band ends
+/// 32, 96; a white Drop Shadow over black reads 64/255 on the first pixel outside and an Outer
+/// Glow at 50 % 127 (Reference 2022, 16 bits). The width-2 tent is exactly those `¼ ½ ¼` taps
+/// ([`box_even`]). A Size 1 Spread / Choke and an Inner Glow from the Center are unmeasured and
+/// keep their maps.
+const SIZE_ONE_WIDTH: f32 = 2.0;
+
+/// The blur width of a shadow's map ([`spread_split`], or [`SIZE_ONE_WIDTH`] at Size 1 without
+/// Spread / Choke). Shared with the GPU's map program, so both compositors agree.
+pub fn shadow_blur_width(s: &Shadow) -> f32 {
+    if s.size == 1.0 && s.spread == 0.0 { SIZE_ONE_WIDTH } else { spread_split(s.size, s.spread).1 }
+}
+
+/// The blur width of a Softer glow's map ([`spread_split`], or [`SIZE_ONE_WIDTH`] at Size 1
+/// without Spread / Choke, for an Inner Glow from the Edge only). Shared with the GPU's map
+/// program.
+pub fn glow_blur_width(g: &Glow, inner: bool) -> f32 {
+    if (!inner || g.source == GlowSource::Edge) && g.size == 1.0 && g.spread == 0.0 { SIZE_ONE_WIDTH } else { spread_split(g.size, g.spread).1 }
+}
+
+/// The blur width of each of a Satin's two copies (its Size, [`SIZE_ONE_WIDTH`] at Size 1).
+/// Shared with the GPU's map program.
+pub fn satin_blur_width(s: &photosplice_doc::effects::Satin) -> f32 {
+    if s.size == 1.0 { SIZE_ONE_WIDTH } else { s.size }
+}
+
 /// Grows the shape by `r` pixels (anti-aliased), keeping the original soft edge. Distances use
 /// the 5 × 5 chamfer metric, as for strokes: Photoshop's spread of a group drop shadow around an
 /// ellipse (ag-psd group-drop-shadows) is round at 0° and 45° and falls short in between, peaking
@@ -783,13 +814,87 @@ pub fn has_anti_aliased_contour(e: &Effect) -> bool {
 /// started from the blurred edge's 0.5: at 50 % it is taken as it is (Reference corpus
 /// outer-glow-precise-spread40.psd: 94/255 → 20/255), at 100 % it is halved (temp kit 13
 /// map-prec-*: a white glow over black reads 121, 60 where the full ramp gave 241, 120, sizes 5
-/// to 60). `None` = identity.
+/// to 60). A Softer glow's Range is taken in whole 8-bit levels, `round(range × 255) / 255`
+/// (Reference 2022, white Size 10 Softer glows over black in 16 bits, Ranges 1, 2, 3, 4, 6, 8
+/// and 25 %: all within 1/255 of ours where the exact Range was up to 39/255 off at 1 % and 5/255
+/// at 2–8 %, and rounding up instead was 42/255 off at 2 %; kit 13's Size 20 maps at 25 and 50 %,
+/// worst 1.5 → 1/255). Precise glows at other Ranges than 100 % are unmeasured and keep the exact
+/// one. `None` = identity.
 pub fn glow_lut(g: &Glow) -> Option<Vec<f32>> {
+    ranged_lut(&g.contour, glow_range(g))
+}
+
+/// The coverage at which a glow's Linear contour reaches full strength ([`glow_lut`]).
+fn glow_range(g: &Glow) -> f32 {
     let range = if g.range.is_finite() { g.range.clamp(0.01, 1.0) } else { 1.0 };
     match g.technique {
-        GlowTechnique::Precise => ranged_lut(&g.contour, 2.0 * range),
-        GlowTechnique::Softer => ranged_lut(&g.contour, range),
+        GlowTechnique::Precise => 2.0 * range,
+        GlowTechnique::Softer => (range * 255.0).round() / 255.0,
     }
+}
+
+/// The coverage transfer a glow paints through, on the CPU and the GPU alike: [`glow_lut`], and
+/// for an Outer Glow with a custom contour, capped at the glow's reach. A contour that starts
+/// above 0 (the flat "always 100 %" one) would otherwise light every pixel the glow never reaches
+/// (coverage 0) out to the edge of the effect's rectangle, where Reference paints a band along the
+/// shape and nothing beyond it (Reference 2022, white Outer Glows over black with the flat contour
+/// and one rising from 50 %, Sizes 4 and 10, Precise and Softer, on a rectangle and a disc). The
+/// transfer is `min(contour(u), max(edge, u))`, `u` what the Linear contour paints and `edge` how
+/// much of the pixel the reach covers ([`glow_reach_edge`]): coverage 0 paints nothing for any
+/// contour, and nothing paints less than the Linear contour would, so a contour that stays under
+/// the falloff keeps its transfer. Inner Glows keep [`glow_lut`]: their unreached pixels are the
+/// shape's interior, unmeasured. `None` = identity.
+pub fn glow_paint_lut(g: &Glow, inner: bool) -> Option<Vec<f32>> {
+    let lut = glow_lut(g);
+    if inner || matches!(g.contour, Contour::Linear) {
+        return lut;
+    }
+    let lut = lut?;
+    let range = glow_range(g);
+    let per_coverage = glow_edge_per_coverage(g);
+    let n = 4096;
+    Some(
+        (0..n)
+            .map(|k| {
+                let v = k as f32 / (n - 1) as f32;
+                let linear = (v / range).min(1.0);
+                lut_at(&lut, v).min(glow_reach_edge(per_coverage, v).max(linear))
+            })
+            .collect(),
+    )
+}
+
+/// How much of a pixel of glow coverage `v` the glow's reach covers, 0..=1: 0 at and beyond the
+/// reach (coverage 0), else `per_coverage · v` up to 1.
+fn glow_reach_edge(per_coverage: f32, v: f32) -> f32 {
+    let v = if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
+    if v == 0.0 {
+        return 0.0;
+    }
+    let edge = per_coverage * v;
+    if edge.is_finite() { edge.clamp(0.0, 1.0) } else { 1.0 }
+}
+
+/// The slope of [`glow_reach_edge`]: `1 / (the coverage at which the edge reaches 1)`, rounded
+/// down to a whole step of the 4096-entry table so the knee lands on an entry.
+/// - Precise: the ramp `1 − (d − solid) / soft` ends at `d = solid + soft`, so the distance left
+///   to the reach's end is `soft · v`: full at `v = 1 / soft`.
+/// - Softer: full at the coverage one opaque pixel gives one pixel inside the tent's reach along
+///   a row, the tent's centre tap times its last but one.
+fn glow_edge_per_coverage(g: &Glow) -> f32 {
+    let full = match g.technique {
+        GlowTechnique::Precise => {
+            let solid = (g.size * g.spread).floor();
+            1.0 / (g.size + 1.0 - solid).max(1e-3)
+        }
+        GlowTechnique::Softer => {
+            let (r, t) = tent_kernel(glow_blur_width(g, false));
+            let at = |i: i32| usize::try_from(i).ok().and_then(|i| t.get(i)).copied().unwrap_or(0.0);
+            if r < 1 { 0.0 } else { at(r) * at(2 * r - 1) }
+        }
+    };
+    let steps = 4095.0f32;
+    steps / (full * steps).floor().max(1.0)
 }
 
 /// The bevel's Contour element as a height transfer over the Range. The height is first taken
@@ -1044,9 +1149,9 @@ fn shadow_map(shape: &Map, s: &Shadow, light: &GlobalLight, inner: bool, origin:
     let (dx, dy) = offset(angle, s.distance);
     let src = if inner { shape.clone().map(|a| 1.0 - a) } else { shape.clone() };
     let mut m = src.shifted(dx, dy, if inner { 1.0 } else { 0.0 });
-    let (r, bw) = spread_split(s.size, s.spread);
+    let (r, _) = spread_split(s.size, s.spread);
     m = dilate(&m, r);
-    blur(&mut m, bw);
+    blur(&mut m, shadow_blur_width(s));
     let mut m = apply_contour(m, &s.contour, s.anti_alias);
     noise(&mut m, s.noise, origin.0, origin.1);
     if inner {
@@ -1080,13 +1185,13 @@ fn glow_map(shape: &Map, g: &Glow, inner: bool, origin: (i32, i32)) -> Map {
             m
         }
         GlowTechnique::Softer => {
-            let (r, bw) = spread_split(g.size, g.spread);
+            let (r, _) = spread_split(g.size, g.spread);
             let mut m = dilate(&src, r);
-            blur(&mut m, bw);
+            blur(&mut m, glow_blur_width(g, inner));
             m
         }
     };
-    m = apply_lut_aa(m, glow_lut(g), g.anti_alias);
+    m = apply_lut_aa(m, glow_paint_lut(g, inner), g.anti_alias);
     if inner && g.source == GlowSource::Center {
         m = m.map(|v| 1.0 - v);
     }
@@ -1908,9 +2013,10 @@ fn satin_map(shape: &Map, s: &photosplice_doc::effects::Satin) -> Map {
     let (dx, dy) = offset(s.angle, satin_distance(s));
     let mut a = shape.shifted(dx, dy, 0.0);
     let mut b = shape.shifted(-dx, -dy, 0.0);
-    // Two box passes of the satin size (fitted: 0.2 % mean error on psd-tools layer_effects).
-    tent(&mut a, s.size);
-    tent(&mut b, s.size);
+    // Two box passes of the satin size (fitted: 0.2 % mean error on psd-tools layer_effects),
+    // `¼ ½ ¼` at Size 1 (`satin_blur_width`).
+    tent(&mut a, satin_blur_width(s));
+    tent(&mut b, satin_blur_width(s));
     // The contour shapes each blurred copy before they are differenced (Photoshop corpus
     // satin-default.psd, an S contour: 27/255 → 1.1/255; satin-inverted-ramp-peak-aa.psd
     // 112/255 → 19/255); a linear contour is the same either way.
@@ -3560,7 +3666,8 @@ mod tests {
             source: GlowSource::Edge,
         };
         let l = glow_lut(&g).unwrap();
-        assert!((lut_at(&l, 0.25) - 0.5).abs() < 1e-3 && (lut_at(&l, 0.75) - 1.0).abs() < 1e-6);
+        // The Range in whole levels: 50 % is 128/255.
+        assert!((lut_at(&l, 0.25) - 0.25 * 255.0 / 128.0).abs() < 1e-3 && (lut_at(&l, 0.75) - 1.0).abs() < 1e-6);
         g.range = 1.0;
         assert!(glow_lut(&g).is_none());
     }
@@ -3822,6 +3929,14 @@ mod tests {
         }
     }
 
+    /// A plane with no pixels but a huge other dimension must not size scratch from it.
+    #[test]
+    fn an_empty_distance_transform_allocates_nothing() {
+        let (d, n) = edt_nearest(&[], 0, 1 << 30);
+        assert!(d.is_empty() && n.is_empty());
+        assert!(edt(&[], 1 << 30, 0).is_empty());
+    }
+
     /// An anti-aliased contour reads the coverage a third of a pixel down and right, so the glow
     /// sits up and left of the plain one (Reference, the effects kit's square at x 40..80: an
     /// Outer Glow, size 24, range 60 %, a linear custom contour; 2 px out on either side).
@@ -4012,3 +4127,10 @@ mod tests {
         assert!((soft - hard).abs() < 1e-4, "inside: soft {soft} hard {hard}");
     }
 }
+
+#[cfg(test)]
+mod glow_contour_reach_tests;
+#[cfg(test)]
+mod glow_range_tests;
+#[cfg(test)]
+mod size_one_tests;

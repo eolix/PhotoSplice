@@ -91,7 +91,7 @@ impl LutFile {
 /// Parses a LUT, picking the format from `file_name`'s extension (falls back to sniffing).
 pub fn parse(file_name: &str, bytes: &[u8]) -> Result<LutFile, LutError> {
     let lower = file_name.to_ascii_lowercase();
-    let text = String::from_utf8_lossy(bytes);
+    let text = decode_text(bytes);
     if lower.ends_with(".icc") || lower.ends_with(".icm") || bytes.get(36..40) == Some(b"acsp") {
         from_icc(bytes, 33)
     } else if lower.ends_with(".3dl") {
@@ -100,6 +100,19 @@ pub fn parse(file_name: &str, bytes: &[u8]) -> Result<LutFile, LutError> {
         parse_look(&text)
     } else {
         parse_cube(&text)
+    }
+}
+
+/// UTF-16 with a byte-order mark (Reference loads such `.look` files), else UTF-8.
+fn decode_text(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    let utf16 = |rest: &[u8], from: fn([u8; 2]) -> u16| {
+        let units: Vec<u16> = rest.as_chunks::<2>().0.iter().map(|&c| from(c)).collect();
+        String::from_utf16_lossy(&units).into()
+    };
+    match bytes {
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes),
+        _ => String::from_utf8_lossy(bytes),
     }
 }
 
@@ -284,6 +297,15 @@ pub fn parse_3dl(text: &str) -> Result<LutFile, LutError> {
 /// SpeedGrade `.look`: `<size>` and a hex `<data>` string of little-endian float32 RGB triplets
 /// (red fastest).
 pub fn parse_look(text: &str) -> Result<LutFile, LutError> {
+    // Comments may hold tag-like text, so drop them before looking for tags.
+    let mut clean = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find("<!--") {
+        clean.push_str(&rest[..i]);
+        rest = rest[i + 4..].find("-->").map_or("", |e| &rest[i + 4 + e + 3..]);
+    }
+    clean.push_str(rest);
+    let text = clean.as_str();
     let tag = |name: &str| -> Option<String> {
         let open = format!("<{name}>");
         let start = text.find(&open)? + open.len();
@@ -292,7 +314,14 @@ pub fn parse_look(text: &str) -> Result<LutFile, LutError> {
     };
     let size: usize = tag("size").and_then(|s| s.parse().ok()).ok_or_else(|| LutError("no <size> in .look".into()))?;
     let (entries, _) = checked_data_len(size)?;
-    let hex: Vec<u8> = tag("data").ok_or_else(|| LutError("no <data> in .look".into()))?.bytes().filter(u8::is_ascii_hexdigit).collect();
+    let hex: Vec<u8> = tag("data").ok_or_else(|| LutError("no <data> in .look".into()))?.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    if hex.iter().any(|b| !b.is_ascii_hexdigit()) {
+        return err("invalid hexadecimal <data> in .look");
+    }
+    // Each float needs eight hex digits; as_chunks would silently discard a partial value.
+    if !hex.len().is_multiple_of(8) {
+        return err("incomplete float in .look <data>");
+    }
     let nib = |c: u8| (c as char).to_digit(16).unwrap_or(0) as u8;
     let bytes: Vec<u8> = hex.as_chunks::<2>().0.iter().map(|p| nib(p[0]) << 4 | nib(p[1])).collect();
     let floats: Vec<f32> = bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
@@ -526,6 +555,80 @@ DOMAIN_MAX 0.5 1 1
         let l = parse_3dl(&text).unwrap();
         assert_eq!(l.size, 2);
         assert_eq!(l.data, LutFile::identity(2).data);
+    }
+
+    #[test]
+    fn three_dl_malformed_mesh_header_is_ignored() {
+        // A `Mesh` line is not read as a declaration here: a malformed one cannot recover a cube
+        // size from numbers in the wrong positions, and the table is inferred from its rows.
+        for header in ["Mesh invalid 1 12", "Mesh 1 12 13", "Mesh 1 x", "Mesh 1"] {
+            let mut text = format!("3DMESH\n{header}\n");
+            for r in 0..2 {
+                for g in 0..2 {
+                    for b in 0..2 {
+                        text.push_str(&format!("{} {} {}\n", r * 1023, g * 1023, b * 1023));
+                    }
+                }
+            }
+            let l = parse_3dl(&text).unwrap();
+            assert_eq!(l.size, 2, "{header}");
+            assert_eq!(l.data, LutFile::identity(2).data, "{header}");
+        }
+    }
+
+    #[test]
+    fn look_reads_utf16_with_either_byte_order() {
+        let id = LutFile::identity(2);
+        let hex: String = id.data.iter().flat_map(|v| v.to_le_bytes()).map(|b| format!("{b:02X}")).collect();
+        let xml = format!("<?xml version=\"1.0\" encoding=\"UTF-16\"?><look><LUT><size>\"2\"</size><data>\"{hex}\"</data></LUT></look>");
+        let le: Vec<u8> = [0xFF, 0xFE].into_iter().chain(xml.encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        let be: Vec<u8> = [0xFE, 0xFF].into_iter().chain(xml.encode_utf16().flat_map(u16::to_be_bytes)).collect();
+        assert_eq!(parse("a.look", &le).unwrap().data, id.data);
+        assert_eq!(parse("a.look", &be).unwrap().data, id.data);
+    }
+
+    #[test]
+    fn look_ignores_tags_inside_xml_comments() {
+        let hex = |l: &LutFile| -> String { l.data.iter().flat_map(|v| v.to_le_bytes()).map(|b| format!("{b:02X}")).collect() };
+        let inverse = LutFile::from_fn("", 2, |[r, g, b]| [1.0 - r, 1.0 - g, 1.0 - b]);
+        let xml = format!(
+            "<look><!-- <size>\"3\"</size><data>\"{}\"</data> --><LUT><size>\"2\"</size><data>\"{}\"</data></LUT><!-- unterminated <data>00",
+            hex(&LutFile::identity(2)),
+            hex(&inverse)
+        );
+        assert_eq!(parse("commented.look", xml.as_bytes()).unwrap().data, inverse.data);
+    }
+
+    #[test]
+    fn look_rgb_and_rgba_allow_whitespace_in_hex_data() {
+        let id = LutFile::identity(2);
+        for channels in [3, 4] {
+            let mut hex = String::new();
+            for rgb in id.data.as_chunks::<3>().0 {
+                for value in rgb.iter().copied().chain((channels == 4).then_some(1.0)) {
+                    for byte in value.to_le_bytes() {
+                        hex.push_str(&format!("{byte:02x} \t\r\n"));
+                    }
+                }
+            }
+            let xml = format!("<look><size>2</size><data>\"{hex}\"</data></look>");
+            assert_eq!(parse("valid.look", xml.as_bytes()).unwrap().data, id.data);
+        }
+    }
+
+    #[test]
+    fn look_rejects_partial_floats_and_invalid_hex() {
+        let id = LutFile::identity(2);
+        let hex: String = id.data.iter().flat_map(|v| v.to_le_bytes()).map(|b| format!("{b:02X}")).collect();
+        for suffix in ["0", "00", "0000", "000000", "G", "é"] {
+            let xml = format!("<look><size>2</size><data>{hex}{suffix}</data></look>");
+            assert!(parse("bad.look", xml.as_bytes()).is_err(), "accepted malformed suffix {suffix:?}");
+        }
+        let invalid = hex.replacen('0', "G", 1);
+        let xml = format!("<look><size>2</size><data>{invalid}</data></look>");
+        assert!(parse("bad.look", xml.as_bytes()).unwrap_err().0.contains("invalid hexadecimal"));
+        let xml = format!("<look><size>2</size><data>{hex}00</data></look>");
+        assert!(parse("bad.look", xml.as_bytes()).unwrap_err().0.contains("incomplete float"));
     }
 
     #[test]

@@ -582,6 +582,12 @@ impl SmartObject {
             perspective: None,
         }
     }
+
+    /// Where the placed source lands (transform, perspective and warp), as JSON: the placement a
+    /// smart filter stored in document pixels (an imported Puppet Warp mesh) was made for.
+    pub fn placement_json(&self) -> serde_json::Value {
+        serde_json::json!({"transform": self.transform.m, "perspective": self.perspective, "warp": self.warp})
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -775,6 +781,10 @@ pub struct Layer {
     pub transparency_shapes: bool,
     /// Layer › Video Layers frame stack (None for a normal layer).
     pub video: Option<VideoData>,
+    /// The layer's own XMP packet (Reference's `layer.xmpMetadata.rawData`), where scripts and
+    /// embedding apps keep data about the layer under their own namespaces. Copied by
+    /// [`Layer::duplicate`], as in Reference. PSD `shmd` › `cust` › `layerXMP`.
+    pub xmp: Option<Arc<str>>,
 }
 
 impl Layer {
@@ -835,6 +845,7 @@ impl Layer {
             vector_mask_hides_effects: false,
             transparency_shapes: true,
             video: None,
+            xmp: None,
         }
     }
     pub fn raster(name: impl Into<String>, format: PixelFormat) -> Self {

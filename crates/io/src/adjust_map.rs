@@ -1525,7 +1525,7 @@ mod tests {
         };
         let file = PsdFile::from_bytes(&crate::psd_export::document_to_psd(&doc).to_bytes().unwrap()).unwrap();
         let (restored, warnings) = crate::psd_import::psd_to_document(&file);
-        assert!(warnings.iter().any(|w| w.contains("\"Light 1\"")), "{warnings:?}");
+        assert!(warnings.iter().any(|w| w.contains("\"Light 1\"") && w.contains("Light settings")), "{warnings:?}");
         // Saved again unchanged, both blocks are written back byte for byte.
         let again = PsdFile::from_bytes(&crate::psd_export::document_to_psd(&restored).to_bytes().unwrap()).unwrap();
         assert_eq!(block(&again, b"brit").as_deref(), Some(&brit[..]));

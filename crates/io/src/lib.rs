@@ -72,6 +72,7 @@ mod text_import;
 pub mod text_styles_map;
 pub mod tiff_layers;
 pub mod vector_map;
+pub mod xml;
 
 pub use photosplice_codecs::DpxBits;
 use photosplice_codecs::{CodecError, EncodeOptions};

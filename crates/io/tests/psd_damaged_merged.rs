@@ -155,3 +155,16 @@ fn unreadable_layer_channels_open_source_read_only() {
     assert!(opened.warnings.first().is_some_and(|w| w.contains("damaged")), "{:?}", opened.warnings);
     assert!(opened.warnings.iter().any(|w| w.contains("could not be decoded")), "{:?}", opened.warnings);
 }
+
+/// storytold/photocraft@dc1ced70: a layer whose bounds have no channel data the import
+/// recognises opens empty, and the file opens source read-only, so a save can't drop the
+/// channels the import could not read from the original.
+#[test]
+fn layer_without_recognized_channels_opens_source_read_only() {
+    let mut file = layered(SampleType::U8, "x.psd");
+    let record = file.layers_mut().iter_mut().find(|l| !l.rect.is_empty()).unwrap();
+    record.channels.retain(|c| !matches!(c.id, -1..=2));
+    let opened = import("no-channels.psd", &file.to_bytes().unwrap()).unwrap();
+    assert!(opened.source_read_only, "{:?}", opened.warnings);
+    assert!(opened.warnings.iter().any(|w| w.contains("no channel data")), "{:?}", opened.warnings);
+}

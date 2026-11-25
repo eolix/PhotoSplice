@@ -49,6 +49,13 @@ pub(super) fn read_meta(bytes: &[u8], limits: &Limits) -> Result<MetaData, Codec
     if total > limits.max_alloc {
         return Err(CodecError::LimitExceeded(format!("{total} bytes across {} parts exceed max_alloc {}", meta.headers.len(), limits.max_alloc)));
     }
+    // The `exr` crate allocates a flat part's samples before reading its chunks, so the file
+    // must be able to hold them (storytold/photocraft@fb04b028). Lossless EXR compression stays
+    // far below 2^16:1 even against this f32 budget; deep parts size their samples from the
+    // file's own counts.
+    if !meta.requirements.has_deep_data {
+        Limits::check_plausible(total, bytes.len(), 1 << 16)?;
+    }
     Ok(meta)
 }
 
@@ -230,9 +237,15 @@ pub(crate) fn decode_channels(bytes: &[u8], index: usize, names: &[&str], limits
     let (w, h) = (layer.size.0, layer.size.1);
     let channels = &layer.channel_data.list;
     let npx = w * h;
+    // More names than channels can only repeat one: refuse before the per-name lookups multiply
+    // (storytold/photocraft@ab4ba9f3). Each channel's name is rendered once, not once per name.
+    if names.len() > channels.len() {
+        return Err(err("more channel names than the part has channels"));
+    }
+    let have: Vec<String> = channels.iter().map(|c| c.name.to_string()).collect();
     let mut picked: Vec<&AnyChannel<FlatSamples>> = Vec::with_capacity(names.len());
     for name in names {
-        let c = channels.iter().find(|c| c.name.to_string() == *name).ok_or_else(|| err(format!("the part has no channel {name}")))?;
+        let c = have.iter().position(|n| n == name).and_then(|i| channels.get(i)).ok_or_else(|| err(format!("the part has no channel {name}")))?;
         if c.sample_data.len() != npx {
             return Err(err("channel sample count mismatch (subsampled channels are unsupported)"));
         }

@@ -575,7 +575,7 @@ pub fn encode_indexed(
     transparent: Option<u8>,
     dpi: Option<(f32, f32)>,
 ) -> Result<Vec<u8>, CodecError> {
-    if width == 0 || height == 0 || indices.len() != width as usize * height as usize {
+    if width == 0 || height == 0 || (width as usize).checked_mul(height as usize) != Some(indices.len()) {
         return Err(CodecError::InvalidImage("index data does not match the size".into()));
     }
     if palette.is_empty() || palette.len() > 256 || indices.iter().any(|&i| usize::from(i) >= palette.len()) {

@@ -633,12 +633,36 @@ pub fn tone_luts_q(adj: &Adjustment, quantum: Option<f32>) -> [Vec<f32>; 4] {
         }
         Adjustment::Curves { master, per_channel, space, black, pencil } => {
             let m = if *space == ToneSpace::Lab { curve_lut(&[]) } else { curve_lut_mode(master, *pencil) };
-            let row = |c: &[CurvePoint]| curve_lut_mode(c, *pencil).iter().map(|&v| lut(&m, v)).collect();
-            [row(&per_channel[0]), row(&per_channel[1]), row(&per_channel[2]), row(if *space == ToneSpace::Cmyk { black } else { &[] })]
+            // In an 8-bit document the channel curve's output sits on a whole level before the
+            // composite curve is applied to it, as each Levels step does (measured on Reference:
+            // Red 0,0 128,64 255,255 with composite 0,0 128,200 255,255 gives gray 192 as 217,
+            // 128 as 114 and 64 as 37). The channel's input is snapped to its level as well, so
+            // the row is flat across a level and the table can't blend two levels' results at a
+            // document sample, the way [`levels_q`] is exact at every level. 16-bit and float
+            // documents, and CMYK and Lab curves, were not measured: only the 8-bit RGB quantum.
+            let level = (*space == ToneSpace::Rgb && quantum == Some(EIGHT_BIT_LEVELS)).then_some(EIGHT_BIT_LEVELS);
+            let row = |c: &[CurvePoint], level: Option<f32>| match level {
+                Some(q) => {
+                    let channel = curve_lut_mode(c, *pencil);
+                    let at_level = |v: f32| (v * q + 0.5).floor() / q;
+                    (0..LUT_SIZE).map(|k| lut(&m, at_level(lut(&channel, at_level(x(k)))))).collect()
+                }
+                None => curve_lut_mode(c, *pencil).iter().map(|&v| lut(&m, v)).collect(),
+            };
+            [
+                row(&per_channel[0], level),
+                row(&per_channel[1], level),
+                row(&per_channel[2], level),
+                row(if *space == ToneSpace::Cmyk { black } else { &[] }, None),
+            ]
         }
         _ => std::array::from_fn(|_| (0..LUT_SIZE).map(x).collect()),
     }
 }
+
+/// [`crate::adjustment_quantum`]'s 8-bit step: the quantum at which a Curves channel curve lands
+/// on whole levels before the composite curve ([`tone_luts_q`]).
+const EIGHT_BIT_LEVELS: f32 = 255.0;
 
 /// [`tone_luts_q`] in a document of `depth` (`None`: unrounded). 32-bit Levels use
 /// [`levels_float`], sampled on 0..1 and kept in 0..1 for LUT consumers. Float RGB rendering
@@ -2175,6 +2199,9 @@ mod brightness_contrast_tests {
         assert!((at(-23.0, -26.0, 100.0 / 255.0) - want).abs() < 0.01);
     }
 }
+
+#[cfg(test)]
+mod curves_channel_composite_tests;
 
 #[cfg(test)]
 mod tone_tests {

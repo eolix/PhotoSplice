@@ -1036,7 +1036,11 @@ fn fs_atop_body(in: VOut) -> vec4<f32> {
     if (op.mode == M_DISSOLVE) {
         return select(base, vec4(s.rgb, base.a), dissolve_noise(doc_px(p)) < s.a * op.opacity);
     }
-    let r = composite_g(op.mode, vec4(base.rgb, 1.0), s, op.opacity, (op.flags & F_TEXT_GAMMA) != 0u);
+    // Below 100% Fill the special eight take Fill inside the blend (compose::composite_atop_any,
+    // psblend::composite_fill); other modes get Fill 1 with it in the opacity. Zero Fill is the
+    // base, exactly.
+    if (op.fill <= 0.0 && fill_is_special(op.mode)) { return base; }
+    let r = composite_fill(op.mode, vec4(base.rgb, 1.0), s, op.opacity, op.fill, (op.flags & F_TEXT_GAMMA) != 0u);
     return vec4(r.rgb, base.a);
 }
 

@@ -24,7 +24,7 @@
 //! Warp (`perspective_warp_map.rs`), whose quads become the planes of its command.
 
 use photosplice_color::{BlendMode, ColorMode, PixelFormat, SampleType};
-use photosplice_doc::{LayerMask, SmartFilter};
+use photosplice_doc::{LayerMask, SmartFilter, SmartObject};
 use photosplice_geom::warp::{BezierMesh, Warp, WarpStyle};
 use photosplice_geom::{Affine, Rect as GeomRect};
 use photosplice_psd::Compression;
@@ -44,6 +44,8 @@ mod gallery;
 mod displace;
 #[path = "perspective_warp_map.rs"]
 mod perspective_warp;
+#[path = "puppet_map.rs"]
+mod puppet;
 
 pub use displace::{embed_map as displace_embed_map, embedded_map as displace_embedded_map, without_map as displace_without_map};
 
@@ -110,8 +112,47 @@ pub fn parse_sold(data: &[u8]) -> Option<Placed> {
     let d = sold_descriptor(data)?;
     let (idnt, transform) = crate::blocks::parse_smart(b"SoLd", data);
     let placed = text_of(&d, "placed").unwrap_or_default();
-    let stack = get_desc(&d, "filterFX").map(filter_stack);
+    let mut stack = get_desc(&d, "filterFX").map(filter_stack);
+    if let Some(stack) = &mut stack {
+        drop_moved_puppet_meshes(stack, &d);
+    }
     Some(Placed { descriptor: d, idnt, placed, transform, stack })
+}
+
+/// A Puppet Warp's stored mesh sits where the layer was when it was built (document pixels); one
+/// built on other corners than the layer's own doesn't fit it, so its pins are solved instead.
+fn drop_moved_puppet_meshes(stack: &mut FilterStack, d: &Descriptor) {
+    let corners = |k: &str| match d.get(k) {
+        Some(Value::List(v)) if v.len() == 8 => v.iter().map(|x| num(Some(x))).collect::<Option<Vec<f64>>>(),
+        _ => None,
+    };
+    let quad = corners("nonAffineTransform").or_else(|| corners("Trnf"));
+    for f in stack.filters.iter_mut().filter(|f| f.command == puppet::COMMAND) {
+        let fits = match (&quad, puppet::built_on(&f.params)) {
+            (Some(q), Some(b)) => q.iter().zip(b).all(|(a, b)| (a - b).abs() < 0.01),
+            _ => false,
+        };
+        if !fits && let Some(p) = f.params.as_object_mut() {
+            p.remove("mesh");
+        }
+    }
+}
+
+/// Records on each imported Puppet Warp mesh the placement it was solved for (`mesh.placement`,
+/// [`SmartObject::placement_json`]): once the smart object is moved, transformed or warped, the
+/// mesh no longer fits it and the pins are solved instead.
+pub(crate) fn pin_puppet_meshes(sm: &mut SmartObject) {
+    let placement = sm.placement_json();
+    pin_puppet_filters(&mut sm.smart_filters, &placement);
+}
+
+/// [`pin_puppet_meshes`] on a list of filters, for `placement`.
+pub(crate) fn pin_puppet_filters(filters: &mut [SmartFilter], placement: &J) {
+    for f in filters.iter_mut().filter(|f| f.command == puppet::COMMAND) {
+        if let Some(m) = f.params.get_mut("mesh").and_then(J::as_object_mut) {
+            m.insert("placement".into(), placement.clone());
+        }
+    }
 }
 
 /// Reads a `filterFX` object.
@@ -149,7 +190,7 @@ const fn code(c: &[u8; 4]) -> i32 {
     i32::from_be_bytes(*c)
 }
 
-const KNOWN: [Known; 43] = [
+const KNOWN: [Known; 50] = [
     Known { class: "GsnB", filter_id: code(b"GsnB"), name: "Gaussian Blur...", command: "filter.blur.gaussianBlur" },
     Known { class: "boxblur", filter_id: 840, name: "Box Blur...", command: "filter.blur.boxBlur" },
     Known { class: "MtnB", filter_id: code(b"MtnB"), name: "Motion Blur...", command: "filter.blur.motionBlur" },
@@ -160,6 +201,12 @@ const KNOWN: [Known; 43] = [
     Known { class: "Mxm ", filter_id: code(b"Mxm "), name: "Maximum...", command: "filter.other.maximum" },
     Known { class: "Mnm ", filter_id: code(b"Mnm "), name: "Minimum...", command: "filter.other.minimum" },
     Known { class: "Msc ", filter_id: code(b"Msc "), name: "Mosaic...", command: "filter.pixelate.mosaic" },
+    // Mezzotint and Color Halftone (storytold/photocraft@badfd6df), Offset and Custom
+    // (storytold/photocraft@d0899081), measured in Reference.
+    Known { class: "Mztn", filter_id: code(b"Mztn"), name: "Mezzotint...", command: "filter.pixelate.mezzotint" },
+    Known { class: "ClrH", filter_id: code(b"ClrH"), name: "Color Halftone...", command: "filter.pixelate.colorHalftone" },
+    Known { class: "Ofst", filter_id: code(b"Ofst"), name: "Offset...", command: "filter.other.offset" },
+    Known { class: "Cstm", filter_id: code(b"Cstm"), name: "Custom...", command: "filter.other.custom" },
     Known { class: "Embs", filter_id: code(b"Embs"), name: "Emboss...", command: "filter.stylize.emboss" },
     Known { class: "Lvls", filter_id: code(b"Lvls"), name: "Levels...", command: "image.adjustments.levels" },
     Known { class: "Crvs", filter_id: code(b"Crvs"), name: "Curves...", command: "image.adjustments.curves" },
@@ -176,6 +223,10 @@ const KNOWN: [Known; 43] = [
     Known { class: "BlrM", filter_id: code(b"BlrM"), name: "Blur More", command: "filter.blur.blurMore" },
     Known { class: "Dspc", filter_id: code(b"Dspc"), name: "Despeckle", command: "filter.noise.despeckle" },
     Known { class: "FndE", filter_id: code(b"FndE"), name: "Find Edges", command: "filter.stylize.findEdges" },
+    // Measured in Reference (storytold/photocraft@7d36b417).
+    Known { class: "Fct ", filter_id: code(b"Fct "), name: "Facet", command: "filter.pixelate.facet" },
+    Known { class: "Frgm", filter_id: code(b"Frgm"), name: "Fragment", command: "filter.pixelate.fragment" },
+    Known { class: "Slrz", filter_id: code(b"Slrz"), name: "Solarize", command: "filter.stylize.solarize" },
     // Distort, with the keys, enum codes and key order Reference 27 writes (one smart object per
     // filter saved from Reference and read back; ported from storytold/photocraft@b464a334).
     // Shear isn't mapped yet: its curve lives on Reference's own grid.
@@ -238,12 +289,36 @@ const SMART_BLUR_MODE: [(&str, &str); 3] = [("SBMN", "normal"), ("SBME", "edgeOn
 const RADIAL_METHOD: [(&str, &str); 2] = [("Spn ", "spin"), ("Zm  ", "zoom")];
 const RADIAL_QUALITY: [(&str, &str); 3] = [("Drft", "draft"), ("Gd  ", "good"), ("Bst ", "best")];
 
+/// Mezzotint's `MztT` enum codes and our `type` values (measured in Reference by rendering each).
+const MEZZOTINT_TYPES: [(&str, &str); 10] = [
+    ("FnDt", "fineDots"),
+    ("MdmD", "mediumDots"),
+    ("GrnD", "grainyDots"),
+    ("CrsD", "coarseDots"),
+    ("ShrL", "shortLines"),
+    ("MdmL", "mediumLines"),
+    ("LngL", "longLines"),
+    ("ShSt", "shortStrokes"),
+    ("MdmS", "mediumStrokes"),
+    ("LngS", "longStrokes"),
+];
+/// Offset › Undefined Areas: the `FlMd` enum (`Fl  `) and our `undefinedAreas`. On a layer
+/// Reference labels `Bckg` "Set to Transparent"; a smart object is always a layer.
+const OFFSET_FILL: [(&str, &str); 3] = [("Wrp ", "wrap"), ("Rpt ", "repeat"), ("Bckg", "transparent")];
+
 /// `long` ranges, the engine's (and Reference's dialogs').
 const CELL_SIZE: (i32, i32) = (3, 300);
 const EXTRUDE_SIZE: (i32, i32) = (2, 255);
 const EXTRUDE_DEPTH: (i32, i32) = (1, 255);
 const TILE_COUNT: (i32, i32) = (1, 99);
 const TILE_OFFSET: (i32, i32) = (1, 99);
+/// Color Halftone's max radius and screen angles.
+const HALFTONE_RADIUS: (i32, i32) = (4, 127);
+const HALFTONE_ANGLE: (i32, i32) = (-360, 360);
+/// Custom's matrix cells, Scale and Offset.
+const CUSTOM_CELL: (i32, i32) = (-999, 999);
+const CUSTOM_SCALE: (i32, i32) = (1, 9999);
+const CUSTOM_OFFSET: (i32, i32) = (-9999, 9999);
 
 const SMART_SHARPEN: &str = "smartSharpen";
 /// Smart Sharpen's keys: `presetKind` (`presetKindType` enum, only on the default entry),
@@ -368,8 +443,43 @@ fn tiles_params(f: &Descriptor, item: &Descriptor) -> Option<J> {
     Some(J::Object(out))
 }
 
+/// Color Halftone's `Rds ` (max radius) and `Ang1`..`Ang4` (screen angles) longs, read within
+/// the dialog's ranges; anything else is kept verbatim.
+fn color_halftone_params(f: &Descriptor) -> Option<J> {
+    let angle = |k: &str| int_in(f, k, HALFTONE_ANGLE.0, HALFTONE_ANGLE.1);
+    Some(json!({
+        "maxRadius": int_in(f, "Rds ", HALFTONE_RADIUS.0, HALFTONE_RADIUS.1)?,
+        "channel1": angle("Ang1")?,
+        "channel2": angle("Ang2")?,
+        "channel3": angle("Ang3")?,
+        "channel4": angle("Ang4")?,
+    }))
+}
+
+/// `filter.other.custom` params for a `Cstm` filter: `Mtrx` is 25 longs, row-major 5 × 5. Values
+/// outside Reference's ranges are not modelled (the filter stays verbatim).
+fn custom_params(f: &Descriptor) -> Option<J> {
+    let Some(Value::List(m)) = f.get("Mtrx") else { return None };
+    if m.len() != 25 {
+        return None;
+    }
+    let kernel: Option<Vec<J>> = m.iter().map(|v| int_value(v).filter(|v| (CUSTOM_CELL.0..=CUSTOM_CELL.1).contains(v)).map(|v| json!(v))).collect();
+    let scale = int_in(f, "Scl ", CUSTOM_SCALE.0, CUSTOM_SCALE.1)?;
+    let offset = int_in(f, "Ofst", CUSTOM_OFFSET.0, CUSTOM_OFFSET.1)?;
+    Some(json!({"kernel": kernel?, "scale": scale, "offset": offset}))
+}
+
+/// A whole-number setting as a long, clamped to `range` like the engine clamps it; a fraction
+/// has no PSD equivalent (Reference stores these as integers).
+fn whole(v: f64, (lo, hi): (i32, i32), what: &str) -> Result<Value, String> {
+    if v.fract() != 0.0 {
+        return Err(format!("{what} ({v}) is not a whole number"));
+    }
+    Ok(Value::Integer(v.clamp(f64::from(lo), f64::from(hi)) as i32))
+}
+
 /// [`KNOWN`] filters that have no settings.
-const PLAIN: [&str; 8] = ["Invr", "Shrp", "ShrM", "ShrE", "Blr ", "BlrM", "Dspc", "FndE"];
+const PLAIN: [&str; 11] = ["Invr", "Shrp", "ShrM", "ShrE", "Blr ", "BlrM", "Dspc", "FndE", "Fct ", "Frgm", "Slrz"];
 
 /// Hue/Saturation's colour ranges in `LclR` order (1 = reds … 6 = magentas), as the
 /// `image.adjustments.hueSaturation` parameters name them.
@@ -543,6 +653,10 @@ fn known_params(class: &str, f: Option<&Descriptor>, item: &Descriptor) -> Optio
         }
         ("Msc ", Some(f)) => json!({"cellSize": px(f, "ClSz")?}),
         ("Embs", Some(f)) => json!({"angle": int(f, "Angl")?, "height": int(f, "Hght")?, "amount": int(f, "Amnt")?}),
+        ("Mztn", Some(f)) => json!({"type": enum_in(f, "MztT", None, &MEZZOTINT_TYPES)?}),
+        ("ClrH", Some(f)) => color_halftone_params(f)?,
+        ("Ofst", Some(f)) => json!({"horizontal": int(f, "Hrzn")?, "vertical": int(f, "Vrtc")?, "undefinedAreas": enum_in(f, "Fl  ", None, &OFFSET_FILL)?}),
+        ("Cstm", Some(f)) => custom_params(f)?,
         ("Pnch", Some(f)) => json!({"amount": int(f, "Amnt")?}),
         ("Twrl", Some(f)) => json!({"angle": int(f, "Angl")?}),
         ("Rple", Some(f)) => json!({"amount": int(f, "Amnt")?, "size": enum_in(f, "RplS", None, &RIPPLE_SIZE)?}),
@@ -736,6 +850,7 @@ pub fn filter_from_item(item: &Descriptor) -> SmartFilter {
         Some(camera_raw::CLASS) => camera_raw::import_params(item).map(|p| (camera_raw::COMMAND, p)),
         Some(displace::CLASS) => displace::import_params(item).map(|p| (displace::COMMAND, p)),
         Some(perspective_warp::CLASS) => perspective_warp::import_params(item).map(|p| (perspective_warp::COMMAND, p)),
+        Some(puppet::CLASS) => puppet::import_params(item).map(|p| (puppet::COMMAND, p)),
         Some(gallery::CLASS) => fltr.and_then(|f| gallery_import(item, f)),
         c => c.and_then(|c| known_params(c, fltr, item)),
     };
@@ -867,6 +982,38 @@ fn fltr_for(k: &Known, p: &J) -> Result<Option<Descriptor>, String> {
         }
         "Msc " => d.with("ClSz", unit(b"#Pxl", pf(p, "cellSize", 10.0))),
         "Embs" => d.with("Angl", pi(p, "angle", 135.0)).with("Hght", pi(p, "height", 3.0)).with("Amnt", pi(p, "amount", 100.0)),
+        // Reference's Mezzotint has no seed (it is random on every render), so `seed` is not saved.
+        // No type or an unknown one is Fine Dots, as the engine reads it.
+        "Mztn" => {
+            let t = p.get("type").and_then(J::as_str).unwrap_or("fineDots");
+            let code = MEZZOTINT_TYPES.iter().find(|(_, k)| *k == t).map_or("FnDt", |(c, _)| *c);
+            d.with("MztT", enumv("MztT", code))
+        }
+        // Longs within the dialog's ranges (what the engine accepts: radius 4..127, angles ±360).
+        "ClrH" => d
+            .with("Rds ", long_in(p, "maxRadius", 8.0, HALFTONE_RADIUS.0, HALFTONE_RADIUS.1))
+            .with("Ang1", long_in(p, "channel1", 108.0, HALFTONE_ANGLE.0, HALFTONE_ANGLE.1))
+            .with("Ang2", long_in(p, "channel2", 162.0, HALFTONE_ANGLE.0, HALFTONE_ANGLE.1))
+            .with("Ang3", long_in(p, "channel3", 90.0, HALFTONE_ANGLE.0, HALFTONE_ANGLE.1))
+            .with("Ang4", long_in(p, "channel4", 45.0, HALFTONE_ANGLE.0, HALFTONE_ANGLE.1)),
+        "Ofst" => {
+            // As the engine reads it: anything but repeat / transparent wraps.
+            let ours = p.get("undefinedAreas").and_then(J::as_str).unwrap_or("wrap");
+            let fill = OFFSET_FILL.iter().find(|(_, o)| *o == ours).map_or("Wrp ", |(psd, _)| *psd);
+            d.with("Hrzn", pi(p, "horizontal", 0.0)).with("Vrtc", pi(p, "vertical", 0.0)).with("Fl  ", enumv("FlMd", fill))
+        }
+        "Cstm" => {
+            // The engine's identity kernel when none is given; missing cells are 0.
+            let kernel = p.get("kernel").and_then(J::as_array);
+            let cell = |i: usize| match kernel {
+                Some(a) => a.get(i).and_then(J::as_f64).filter(|v| v.is_finite()).unwrap_or(0.0),
+                None => f64::from(u8::from(i == 12)),
+            };
+            let m = (0..25).map(|i| whole(cell(i), CUSTOM_CELL, "a kernel value")).collect::<Result<Vec<_>, _>>()?;
+            d.with("Scl ", whole(pf(p, "scale", 1.0), CUSTOM_SCALE, "Scale")?)
+                .with("Ofst", whole(pf(p, "offset", 0.0), CUSTOM_OFFSET, "Offset")?)
+                .with("Mtrx", Value::List(m))
+        }
         // Keys and order as Reference writes them.
         "Pnch" => d.with("Amnt", pi(p, "amount", 50.0)),
         "Twrl" => d.with("Angl", pi(p, "angle", 50.0)),
@@ -976,6 +1123,12 @@ pub fn item_for_filter(f: &SmartFilter) -> Result<Descriptor, String> {
     }
     if perspective_warp::handles(&f.command) {
         return perspective_warp::export_item(f);
+    }
+    if f.command == puppet::COMMAND && f.params.get(puppet::TEMPLATE_KEY).is_some() {
+        let mut d = puppet::export_item(&f.params)?;
+        set(&mut d, "blendOptions", blend_options(f));
+        set(&mut d, "enab", Value::Boolean(f.visible));
+        return Ok(d);
     }
     if f.command == UNSUPPORTED_FILTER {
         let raw = f.params.get("psd").and_then(J::as_str).and_then(from_hex).ok_or("its filter data is missing")?;
@@ -1624,6 +1777,13 @@ mod tests {
             sf("filter.blur.blurMore", json!({})),
             sf("filter.noise.despeckle", json!({})),
             sf("filter.stylize.findEdges", json!({})),
+            sf("filter.pixelate.facet", json!({})),
+            sf("filter.pixelate.fragment", json!({})),
+            sf("filter.stylize.solarize", json!({})),
+            sf("filter.pixelate.mezzotint", json!({"type": "mediumStrokes"})),
+            sf("filter.pixelate.colorHalftone", json!({"maxRadius": 6, "channel1": 10, "channel2": 20, "channel3": 30, "channel4": 40})),
+            sf("filter.other.offset", json!({"horizontal": 12, "vertical": -7, "undefinedAreas": "transparent"})),
+            sf("filter.other.custom", json!({"kernel": SHARPEN, "scale": 1, "offset": 0})),
             sf("filter.distort.pinch", json!({"amount": -28})),
             sf("filter.distort.polarCoordinates", json!({"mode": "rectangularToPolar"})),
             sf("filter.distort.ripple", json!({"amount": 250, "size": "small"})),
@@ -3171,5 +3331,254 @@ mod tests {
         assert_eq!(u.len(), 36);
         assert_eq!(u, uuid_from(b"x"));
         assert_ne!(u, uuid_from(b"y"));
+    }
+
+    // ---- Facet, Fragment, Solarize; Mezzotint, Color Halftone; Offset, Custom ----
+    // (storytold/photocraft@7d36b417, @badfd6df, @d0899081; measured in Reference: applied through
+    // Action Manager to a smart object, saved, `filterFX` read back.)
+
+    /// A `filterFX` item holding `fltr` with filter id `id` and name `name`, as Reference writes
+    /// a filter with options.
+    fn named_item(id: &[u8; 4], name: &str, fltr: Descriptor) -> Descriptor {
+        Descriptor::new("filterFX")
+            .with("Nm  ", Value::Text(UnicodeString::new_nul(name)))
+            .with("blendOptions", blend_options(&sf("", J::Null)))
+            .with("enab", Value::Boolean(true))
+            .with("hasoptions", Value::Boolean(true))
+            .with("FrgC", rgbc(0.0))
+            .with("BckC", rgbc(255.0))
+            .with("Fltr", Value::Descriptor(fltr))
+            .with("filterID", Value::Integer(code(id)))
+    }
+
+    /// Facet, Fragment and Solarize as Reference saves them: `hasoptions` false, no `Fltr`, only
+    /// the four-char `filterID` (measured ids).
+    #[test]
+    fn reference_filters_without_options_open_editable_and_save_the_same() {
+        for (command, id) in [("filter.pixelate.facet", 1180922912), ("filter.pixelate.fragment", 1181902701), ("filter.stylize.solarize", 1399616122)] {
+            let item = Descriptor::new("filterFX")
+                .with("Nm  ", Value::Text(UnicodeString::new_nul("Localized")))
+                .with("blendOptions", Value::Descriptor(Descriptor::new("blendOptions").with("Opct", unit(b"#Prc", 60.0)).with("Md  ", enumv("BlnM", "Mltp"))))
+                .with("enab", Value::Boolean(false))
+                .with("hasoptions", Value::Boolean(false))
+                .with("FrgC", rgbc(0.0))
+                .with("BckC", rgbc(255.0))
+                .with("filterID", Value::Integer(id));
+            let f = filter_from_item(&Descriptor::from_bytes(&item.to_bytes()).unwrap());
+            assert_eq!((f.command.as_str(), &f.params), (command, &json!({})));
+            assert_eq!((f.visible, f.blend), (false, BlendMode::Multiply));
+            assert!((f.opacity - 0.6).abs() < 1e-6);
+            let d = item_for_filter(&f).unwrap();
+            assert_eq!(d.get("hasoptions"), Some(&Value::Boolean(false)), "{command}");
+            assert!(d.get("Fltr").is_none(), "{command}");
+            assert_eq!(d.get("filterID"), Some(&Value::Integer(id)), "{command}");
+        }
+    }
+
+    #[test]
+    fn mezzotint_round_trips_every_type_and_reads_reference_shape() {
+        for (code, ty) in MEZZOTINT_TYPES {
+            let f = sf("filter.pixelate.mezzotint", json!({"type": ty}));
+            let d = item_for_filter(&f).unwrap();
+            assert_eq!(int(&d, "filterID"), Some(1_299_870_830));
+            let fltr = get_desc(&d, "Fltr").unwrap();
+            assert!(fltr.class_id.is("Mztn"));
+            assert_eq!(enum_of(fltr, "MztT"), Some(code.as_bytes()));
+            assert!(matches!(fltr.get("MztT"), Some(Value::Enumerated { type_id, .. }) if type_id.is("MztT")));
+            assert_eq!(filter_from_item(&Descriptor::from_bytes(&d.to_bytes()).unwrap()), f, "{ty}");
+        }
+        // Measured: `{'_class': 'Mztn', 'MztT': 'MztT.CrsD'}` and `LngS`, filterID 1299870830.
+        for (code, ty) in [("CrsD", "coarseDots"), ("LngS", "longStrokes")] {
+            let item = named_item(b"Mztn", "Mezzotint...", Descriptor::new("Mztn").with("MztT", enumv("MztT", code)));
+            let f = filter_from_item(&item);
+            assert_eq!((f.command.as_str(), &f.params), ("filter.pixelate.mezzotint", &json!({"type": ty})));
+        }
+        // No type or an unknown type is Fine Dots, like the engine; the seed is not saved.
+        for p in [json!({}), json!({"type": "sparkles"}), json!({"type": "fineDots", "seed": 77})] {
+            let d = item_for_filter(&sf("filter.pixelate.mezzotint", p)).unwrap();
+            let fltr = get_desc(&d, "Fltr").unwrap();
+            assert_eq!(enum_of(fltr, "MztT"), Some(&b"FnDt"[..]));
+            assert_eq!(fltr.items.len(), 1);
+        }
+    }
+
+    #[test]
+    fn color_halftone_round_trips_and_reads_reference_shape() {
+        for p in [
+            json!({"maxRadius": 8, "channel1": 108, "channel2": 162, "channel3": 90, "channel4": 45}),
+            json!({"maxRadius": 4, "channel1": -360, "channel2": 0, "channel3": 360, "channel4": -45}),
+            json!({"maxRadius": 127, "channel1": 1, "channel2": 2, "channel3": 3, "channel4": 4}),
+        ] {
+            let f = sf("filter.pixelate.colorHalftone", p);
+            let d = item_for_filter(&f).unwrap();
+            assert_eq!(int(&d, "filterID"), Some(1_131_180_616));
+            let fltr = get_desc(&d, "Fltr").unwrap();
+            assert!(fltr.class_id.is("ClrH"));
+            for k in ["Rds ", "Ang1", "Ang2", "Ang3", "Ang4"] {
+                assert!(matches!(fltr.get(k), Some(Value::Integer(_))), "{k} is a long");
+            }
+            assert_eq!(filter_from_item(&Descriptor::from_bytes(&d.to_bytes()).unwrap()), f);
+        }
+        // Measured: `{'_class': 'ClrH', 'Rds ': 6, 'Ang1': 10, 'Ang2': 20, 'Ang3': 30, 'Ang4': 40}`.
+        let measured = Descriptor::new("ClrH")
+            .with("Rds ", Value::Integer(6))
+            .with("Ang1", Value::Integer(10))
+            .with("Ang2", Value::Integer(20))
+            .with("Ang3", Value::Integer(30))
+            .with("Ang4", Value::Integer(40));
+        let item = named_item(b"ClrH", "Color Halftone...", measured.clone());
+        let f = filter_from_item(&item);
+        assert_eq!(f.command, "filter.pixelate.colorHalftone");
+        assert_eq!(f.params, json!({"maxRadius": 6, "channel1": 10, "channel2": 20, "channel3": 30, "channel4": 40}));
+        assert_eq!(get_desc(&item_for_filter(&f).unwrap(), "Fltr"), Some(&measured));
+        // Defaults and hostile values write longs within the dialog's ranges.
+        let d = item_for_filter(&sf("filter.pixelate.colorHalftone", json!({"maxRadius": f64::NAN, "channel1": 1e12, "channel2": -1e12, "channel3": "x"})))
+            .unwrap();
+        let fltr = get_desc(&d, "Fltr").unwrap();
+        let got: Vec<_> = ["Rds ", "Ang1", "Ang2", "Ang3", "Ang4"].iter().map(|k| int(fltr, k)).collect();
+        assert_eq!(got, [Some(8), Some(360), Some(-360), Some(90), Some(45)]);
+    }
+
+    #[test]
+    fn malformed_pixelate_filters_stay_verbatim() {
+        let mz = |v: Value| Descriptor::new("Mztn").with("MztT", v);
+        let ch = |rds: Value, ang1: Value| {
+            Descriptor::new("ClrH").with("Rds ", rds).with("Ang1", ang1).with("Ang2", Value::Integer(20)).with("Ang3", Value::Integer(30)).with("Ang4", Value::Integer(40))
+        };
+        let cases = [
+            named_item(b"Mztn", "Mezzotint...", Descriptor::new("Mztn")),
+            named_item(b"Mztn", "Mezzotint...", mz(enumv("MztT", "Sprk"))),
+            named_item(b"Mztn", "Mezzotint...", mz(Value::Integer(1))),
+            named_item(b"ClrH", "Color Halftone...", Descriptor::new("ClrH")),
+            named_item(b"ClrH", "Color Halftone...", ch(Value::Double(6.0), Value::Integer(10))),
+            named_item(b"ClrH", "Color Halftone...", ch(unit(b"#Pxl", 6.0), Value::Integer(10))),
+            named_item(b"ClrH", "Color Halftone...", ch(Value::Integer(3), Value::Integer(10))),
+            named_item(b"ClrH", "Color Halftone...", ch(Value::Integer(128), Value::Integer(10))),
+            named_item(b"ClrH", "Color Halftone...", ch(Value::Integer(6), Value::Integer(361))),
+            named_item(b"ClrH", "Color Halftone...", ch(Value::Integer(6), Value::Integer(i32::MIN))),
+            named_item(b"ClrH", "Color Halftone...", ch(Value::Integer(6), Value::Double(f64::NAN))),
+        ];
+        for item in cases {
+            let f = filter_from_item(&item);
+            assert_eq!(f.command, UNSUPPORTED_FILTER, "{:?}", get_desc(&item, "Fltr"));
+            // Written back with its own settings (compared as bytes: a NaN setting is not equal
+            // to itself).
+            let back = item_for_filter(&f).unwrap();
+            let fltr = |d: &Descriptor| get_desc(d, "Fltr").map(Descriptor::to_bytes);
+            assert_eq!((fltr(&back), int(&back, "filterID")), (fltr(&item), int(&item, "filterID")));
+        }
+        // Without a `Fltr` the filter has no settings to read: kept verbatim too.
+        let bare = Descriptor::new("filterFX").with("filterID", Value::Integer(code(b"ClrH")));
+        assert_eq!(filter_from_item(&bare).command, UNSUPPORTED_FILTER);
+    }
+
+    /// Reference's default Custom kernel: a 3 × 3 sharpen centred in the 5 × 5.
+    const SHARPEN: [i32; 25] = [0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 0, -1, 5, -1, 0, 0, 0, -1, 0, 0, 0, 0, 0, 0, 0];
+
+    fn offset_fltr(h: Value, v: Value, fill: Value) -> Descriptor {
+        Descriptor::new("Ofst").with("Hrzn", h).with("Vrtc", v).with("Fl  ", fill)
+    }
+
+    fn custom_fltr(scale: Value, offset: Value, m: Vec<Value>) -> Descriptor {
+        Descriptor::new("Cstm").with("Scl ", scale).with("Ofst", offset).with("Mtrx", Value::List(m))
+    }
+
+    fn longs(m: &[i32]) -> Vec<Value> {
+        m.iter().map(|v| Value::Integer(*v)).collect()
+    }
+
+    #[test]
+    fn offset_round_trips_every_fill_mode() {
+        for (fill, ours) in OFFSET_FILL {
+            for (h, v) in [(0, 0), (12, -7), (5, 3), (i32::MIN, i32::MAX)] {
+                let f = sf("filter.other.offset", json!({"horizontal": h, "vertical": v, "undefinedAreas": ours}));
+                let d = item_for_filter(&f).unwrap();
+                assert_eq!(*get_desc(&d, "Fltr").unwrap(), offset_fltr(Value::Integer(h), Value::Integer(v), enumv("FlMd", fill)));
+                assert_eq!(int(&d, "filterID"), Some(1_332_114_292));
+                assert_eq!(filter_from_item(&Descriptor::from_bytes(&d.to_bytes()).unwrap()), f);
+            }
+        }
+        // The measured descriptors (Wrap 0/0, Set to Background 12/−7, Repeat 5/3) open as Offset
+        // and are written back exactly.
+        for (h, v, fill, ours) in [(0, 0, "Wrp ", "wrap"), (12, -7, "Bckg", "transparent"), (5, 3, "Rpt ", "repeat")] {
+            let item = named_item(b"Ofst", "Offset...", offset_fltr(Value::Integer(h), Value::Integer(v), enumv("FlMd", fill)));
+            let f = filter_from_item(&item);
+            assert_eq!((f.command.as_str(), &f.params), ("filter.other.offset", &json!({"horizontal": h, "vertical": v, "undefinedAreas": ours})));
+            assert_eq!(item_for_filter(&f).unwrap(), item);
+        }
+        // No params: 0, 0, Wrap Around (the engine's defaults); fractional pixels round.
+        let d = item_for_filter(&sf("filter.other.offset", json!({}))).unwrap();
+        assert_eq!(*get_desc(&d, "Fltr").unwrap(), offset_fltr(Value::Integer(0), Value::Integer(0), enumv("FlMd", "Wrp ")));
+        let d = item_for_filter(&sf("filter.other.offset", json!({"horizontal": 2.6, "vertical": 3e12, "undefinedAreas": "bogus"}))).unwrap();
+        assert_eq!(*get_desc(&d, "Fltr").unwrap(), offset_fltr(Value::Integer(3), Value::Integer(i32::MAX), enumv("FlMd", "Wrp ")));
+    }
+
+    #[test]
+    fn custom_round_trips_and_reads_reference_shape() {
+        let full: Vec<i32> = (0..25).map(|i| i * 83 - 999).collect();
+        for (kernel, scale, offset) in [(SHARPEN.to_vec(), 1, 0), (full, 9999, -9999), (vec![999; 25], 1, 9999)] {
+            let f = sf("filter.other.custom", json!({"kernel": kernel, "scale": scale, "offset": offset}));
+            let d = item_for_filter(&f).unwrap();
+            assert_eq!(*get_desc(&d, "Fltr").unwrap(), custom_fltr(Value::Integer(scale), Value::Integer(offset), longs(&kernel)));
+            assert_eq!(int(&d, "filterID"), Some(1_131_639_917));
+            assert_eq!(filter_from_item(&Descriptor::from_bytes(&d.to_bytes()).unwrap()), f);
+        }
+        // The measured descriptors (the default sharpen; a blur at Scale 2, Offset 10).
+        let blur = [0, 0, 0, 0, 0, 0, 1, 2, 1, 0, 0, 2, 4, 2, 0, 0, 1, 2, 1, 0, 0, 0, 0, 0, 0];
+        for (kernel, scale, offset) in [(SHARPEN, 1, 0), (blur, 2, 10)] {
+            let item = named_item(b"Cstm", "Custom...", custom_fltr(Value::Integer(scale), Value::Integer(offset), longs(&kernel)));
+            let f = filter_from_item(&item);
+            assert_eq!((f.command.as_str(), &f.params), ("filter.other.custom", &json!({"kernel": kernel, "scale": scale, "offset": offset})));
+            assert_eq!(item_for_filter(&f).unwrap(), item);
+        }
+        // Written as the engine reads it: no kernel is the identity, short kernels pad with 0,
+        // out-of-range values clamp; fractions have no PSD equivalent.
+        let fltr = |p: J| get_desc(&item_for_filter(&sf("filter.other.custom", p)).unwrap(), "Fltr").cloned().unwrap();
+        let mut id = [0; 25];
+        id[12] = 1;
+        assert_eq!(fltr(json!({})), custom_fltr(Value::Integer(1), Value::Integer(0), longs(&id)));
+        let mut short = [0; 25];
+        short[0] = 3;
+        short[1] = -999;
+        assert_eq!(fltr(json!({"kernel": [3, -5000], "scale": 0, "offset": 20000})), custom_fltr(Value::Integer(1), Value::Integer(9999), longs(&short)));
+        for p in [json!({"kernel": [0.5]}), json!({"scale": 1.5}), json!({"offset": -0.25})] {
+            assert!(item_for_filter(&sf("filter.other.custom", p.clone())).is_err(), "{p}");
+        }
+    }
+
+    #[test]
+    fn malformed_offset_and_custom_are_kept_verbatim() {
+        let i = Value::Integer;
+        let mut wrong_type = longs(&SHARPEN);
+        wrong_type[3] = Value::Double(1.0);
+        let cases = [
+            named_item(b"Ofst", "Offset...", offset_fltr(i(1), i(2), enumv("FlMd", "Xxxx"))),
+            named_item(b"Ofst", "Offset...", offset_fltr(i(1), i(2), Value::Integer(1))),
+            named_item(b"Ofst", "Offset...", offset_fltr(Value::Double(1.5), i(2), enumv("FlMd", "Wrp "))),
+            named_item(b"Ofst", "Offset...", offset_fltr(i(1), unit(b"#Pxl", f64::NAN), enumv("FlMd", "Wrp "))),
+            named_item(b"Ofst", "Offset...", Descriptor::new("Ofst").with("Hrzn", i(1)).with("Fl  ", enumv("FlMd", "Wrp "))),
+            named_item(b"Ofst", "Offset...", Descriptor::new("Ofst")),
+            named_item(b"Cstm", "Custom...", custom_fltr(i(1), i(0), longs(&SHARPEN[..24]))),
+            named_item(b"Cstm", "Custom...", custom_fltr(i(1), i(0), longs(&[0; 26]))),
+            named_item(b"Cstm", "Custom...", custom_fltr(i(1), i(0), wrong_type)),
+            named_item(b"Cstm", "Custom...", custom_fltr(i(1), i(0), longs(&[1000; 25]))),
+            named_item(b"Cstm", "Custom...", custom_fltr(i(0), i(0), longs(&SHARPEN))),
+            named_item(b"Cstm", "Custom...", custom_fltr(i(10_000), i(0), longs(&SHARPEN))),
+            named_item(b"Cstm", "Custom...", custom_fltr(i(1), i(-10_000), longs(&SHARPEN))),
+            named_item(b"Cstm", "Custom...", custom_fltr(Value::Double(f64::NAN), i(0), longs(&SHARPEN))),
+            named_item(b"Cstm", "Custom...", custom_fltr(i(1), unit(b"#Pxl", 1.0), longs(&SHARPEN))),
+            named_item(b"Cstm", "Custom...", Descriptor::new("Cstm").with("Scl ", i(1)).with("Ofst", i(0)).with("Mtrx", i(5))),
+            named_item(b"Cstm", "Custom...", Descriptor::new("Cstm").with("Scl ", i(1)).with("Mtrx", Value::List(longs(&SHARPEN)))),
+            named_item(b"Cstm", "Custom...", Descriptor::new("Cstm")),
+        ];
+        for item in cases {
+            let f = filter_from_item(&item);
+            assert_eq!(f.command, UNSUPPORTED_FILTER, "{item:?}");
+            assert_eq!(item_for_filter(&f).unwrap().to_bytes(), item.to_bytes(), "kept byte for byte");
+        }
+        for id in [b"Ofst", b"Cstm"] {
+            let bare = Descriptor::new("filterFX").with("filterID", Value::Integer(code(id)));
+            assert_eq!(filter_from_item(&bare).command, UNSUPPORTED_FILTER);
+        }
     }
 }

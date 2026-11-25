@@ -9,12 +9,20 @@
 //!
 //! A protect map (`0..=1`, e.g. an alpha channel or detected skin tones) adds a large energy so
 //! seams avoid protected pixels. Buffers are interleaved `w × h × ch` normalised floats of any
-//! colour model and depth (alpha is carried like any other channel). Deterministic.
+//! colour model and depth (alpha is carried like any other channel). Deterministic: a NaN sample
+//! gives its pixels the highest energy and NaN protection protects nothing, so no NaN (whose
+//! payload arithmetic does not keep consistently across builds) ever reaches the seam search.
 
 use photosplice_raster::{Cancelled, Interrupt};
 
 /// Energy added per unit of protection: far above any gradient magnitude.
 const PROTECT_ENERGY: f32 = 1.0e4;
+
+/// The energy protection `p` (`0..=1`) adds. NaN protects nothing.
+#[inline]
+fn protection(p: f32) -> f32 {
+    if p.is_nan() { 0.0 } else { p.clamp(0.0, 1.0) * PROTECT_ENERGY }
+}
 
 /// Keep full horizontal detail while reducing the height used to find vertical seams. At a
 /// 24 MP working size this cuts the dynamic-programming work by about four times without
@@ -47,7 +55,8 @@ pub fn energy(w: usize, h: usize, ch: usize, img: &[f32]) -> Vec<f32> {
 }
 
 /// [`energy`] of one pixel of a `cw`-wide image whose rows are `stride` pixels apart. Shared by
-/// the full map and the per-seam updates so both give bit-identical values.
+/// the full map and the per-seam updates so both give bit-identical values. NaN samples give the
+/// highest energy.
 #[inline]
 fn energy_at(img: &[f32], stride: usize, cw: usize, h: usize, ch: usize, x: usize, y: usize) -> f32 {
     let (xl, xr) = (x.saturating_sub(1), (x + 1).min(cw - 1));
@@ -59,7 +68,8 @@ fn energy_at(img: &[f32], stride: usize, cw: usize, h: usize, ch: usize, x: usiz
         s += (at(xr, y, c) - v).abs() + (v - at(xl, y, c)).abs();
         s += (at(x, yd, c) - v).abs() + (v - at(x, yu, c)).abs();
     }
-    s * 0.5
+    let e = s * 0.5;
+    if e.is_nan() { f32::INFINITY } else { e }
 }
 
 /// The lowest-energy vertical seam: one x per row.
@@ -148,8 +158,8 @@ impl Carver {
     fn new(w: usize, h: usize, ch: usize, img: Vec<f32>, prot: Option<Vec<f32>>, track: bool) -> Self {
         let mut e = energy(w, h, ch, &img);
         if let Some(p) = &prot {
-            for (e, p) in e.iter_mut().zip(p) {
-                *e += p.clamp(0.0, 1.0) * PROTECT_ENERGY;
+            for (e, &p) in e.iter_mut().zip(p) {
+                *e += protection(p);
             }
         }
         let idx = track.then(|| (0..h).flat_map(|_| 0..w).collect());
@@ -193,7 +203,7 @@ impl Carver {
             for x in lo..=hi {
                 let mut v = energy_at(img, stride, cw, h, ch, x, y);
                 if let Some(p) = prot {
-                    v += p[y * stride + x].clamp(0.0, 1.0) * PROTECT_ENERGY;
+                    v += protection(p[y * stride + x]);
                 }
                 e[x] = v;
             }
@@ -230,6 +240,11 @@ fn shift_rows<T: Copy + Send>(buf: &mut [T], row_len: usize, seam: &[usize], n: 
     buf.chunks_mut(row_len).zip(seam).for_each(shift);
 }
 
+/// No pixels or channels to work with, or `img` holds fewer than `w × h × ch` values.
+fn unusable(w: usize, h: usize, ch: usize, img: &[f32]) -> bool {
+    w == 0 || h == 0 || ch == 0 || w.checked_mul(h).and_then(|n| n.checked_mul(ch)).is_none_or(|n| img.len() < n)
+}
+
 fn transpose(w: usize, h: usize, ch: usize, img: &[f32]) -> Vec<f32> {
     let mut out = vec![0.0f32; img.len()];
     for y in 0..h {
@@ -250,9 +265,12 @@ pub fn carve_width(w: usize, h: usize, ch: usize, img: &[f32], protect: Option<&
 /// [`carve_width`] that checks `ctl` before every seam and reports progress per seam.
 pub fn carve_width_with(w: usize, h: usize, ch: usize, img: &[f32], protect: Option<&[f32]>, new_w: usize, ctl: &Interrupt) -> Result<Vec<f32>, Cancelled> {
     let new_w = new_w.max(1);
-    if new_w == w || w == 0 || h == 0 {
+    // Nothing to carve: no pixels or channels, or fewer values than the size says.
+    if new_w == w || unusable(w, h, ch, img) {
         return Ok(img.to_vec());
     }
+    // A protection map that doesn't cover the image protects nothing.
+    let protect = protect.filter(|p| p.len() >= w * h);
     let seams = new_w.abs_diff(w).max(1) as f32;
     if new_w < w {
         if h >= PROXY_SHRINK_MIN_HEIGHT && w - new_w >= PROXY_SHRINK_MIN_SEAMS {
@@ -423,6 +441,10 @@ pub fn carve_with(
     ctl: &Interrupt,
 ) -> Result<Vec<f32>, Cancelled> {
     let (new_w, new_h) = (new_w.max(1), new_h.max(1));
+    if unusable(w, h, ch, img) {
+        return Ok(img.to_vec());
+    }
+    let protect = protect.filter(|p| p.len() >= w * h);
     // Split progress between the passes by their seam counts.
     let (sw, sh) = (new_w.abs_diff(w) as f32, new_h.abs_diff(h) as f32);
     let split = if sw + sh > 0.0 { sw / (sw + sh) } else { 1.0 };
@@ -442,8 +464,11 @@ pub fn carve_with(
 
 /// Plain bilinear resize (the non-content-aware part of the Amount blend).
 pub fn resize_bilinear(w: usize, h: usize, ch: usize, img: &[f32], nw: usize, nh: usize) -> Vec<f32> {
-    let mut out = vec![0.0f32; nw * nh * ch];
-    if w == 0 || h == 0 {
+    let Some(len) = nw.checked_mul(nh).and_then(|n| n.checked_mul(ch)) else {
+        return Vec::new();
+    };
+    let mut out = vec![0.0f32; len];
+    if len == 0 || unusable(w, h, ch, img) {
         return out;
     }
     for y in 0..nh {
@@ -490,7 +515,7 @@ mod tests {
     /// The straightforward implementation the per-seam carver replaced (full energy map, fresh
     /// seam search and a new buffer per seam), kept as the oracle for `carver_matches_reference`.
     mod reference {
-        use super::super::{PROTECT_ENERGY, resize_bilinear, transpose};
+        use super::super::{protection, resize_bilinear, transpose};
 
         pub(super) fn energy(w: usize, h: usize, ch: usize, img: &[f32]) -> Vec<f32> {
             let mut e = vec![0.0f32; w * h];
@@ -505,7 +530,8 @@ mod tests {
                         s += (at(xr, y, c) - v).abs() + (v - at(xl, y, c)).abs();
                         s += (at(x, yd, c) - v).abs() + (v - at(x, yu, c)).abs();
                     }
-                    e[y * w + x] = s * 0.5;
+                    let v = s * 0.5;
+                    e[y * w + x] = if v.is_nan() { f32::INFINITY } else { v };
                 }
             }
             e
@@ -558,8 +584,8 @@ mod tests {
             }
             let protect_e = |e: &mut [f32], p: Option<&Vec<f32>>| {
                 if let Some(p) = p {
-                    for (e, p) in e.iter_mut().zip(p) {
-                        *e += p.clamp(0.0, 1.0) * PROTECT_ENERGY;
+                    for (e, &p) in e.iter_mut().zip(p) {
+                        *e += protection(p);
                     }
                 }
             };
@@ -680,6 +706,65 @@ mod tests {
             let img = noise(w * h * 3, 7, 3 + case);
             let bits = |v: Vec<f32>| v.into_iter().map(f32::to_bits).collect::<Vec<_>>();
             assert_eq!(bits(energy(w, h, 3, &img)), bits(reference::energy(w, h, 3, &img)), "energy case {case}");
+        }
+        // NaN and infinite samples and NaN protection: infinite energies, never NaN costs.
+        let mut odd = noise(40 * 30 * 3, 255, 11);
+        odd.iter_mut().step_by(13).for_each(|v| *v = f32::NAN);
+        odd.iter_mut().skip(5).step_by(17).for_each(|v| *v = f32::INFINITY);
+        let mut odd_prot = noise(40 * 30, 3, 12);
+        odd_prot.iter_mut().step_by(7).for_each(|v| *v = -f32::NAN);
+        let bits = |v: &[f32]| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>();
+        assert!(energy(40, 30, 3, &odd).iter().all(|e| !e.is_nan()));
+        for (nw, nh) in [(15, 30), (40, 18), (55, 30)] {
+            let got = carve(40, 30, 3, &odd, Some(&odd_prot), nw, nh);
+            let want = reference::carve(40, 30, 3, &odd, Some(&odd_prot), nw, nh);
+            assert_eq!(bits(&got), bits(&want), "NaN case -> {nw}x{nh}");
+        }
+    }
+
+    /// Hostile but well-formed shapes return early instead of panicking: no channels, empty
+    /// sizes (also through the height pass), and images or protection maps shorter than their
+    /// size says (a short map protects nothing).
+    #[test]
+    fn degenerate_inputs_do_not_panic() {
+        assert!(carve(3, 3, 0, &[], None, 2, 2).is_empty());
+        assert!(carve(3, 3, 0, &[], None, 5, 5).is_empty());
+        assert!(transpose(3, 3, 0, &[]).is_empty());
+        assert!(resize_bilinear(3, 3, 0, &[], 2, 2).is_empty());
+        assert!(resize_bilinear(3, 3, 1, &[0.5; 9], 0, 2).is_empty());
+        assert!(resize_bilinear(3, 3, 1, &[0.5; 9], 2, 0).is_empty());
+        assert_eq!(resize_bilinear(3, 3, 1, &[0.5; 4], 2, 2), vec![0.0; 4]);
+        assert!(resize_bilinear(3, 3, 1, &[0.5; 9], usize::MAX, 2).is_empty());
+        assert!(carve(0, 5, 3, &[], None, 3, 7).is_empty());
+        assert!(carve(0, 5, 3, &[], None, 3, 2).is_empty());
+        let img = noise(10 * 5, 7, 3);
+        assert_eq!(carve(10, 5, 1, &img, Some(&[0.0; 3]), 4, 5), carve(10, 5, 1, &img, None, 4, 5));
+        assert_eq!(carve(10, 5, 1, &img, Some(&[0.0; 3]), 4, 3), carve(10, 5, 1, &img, None, 4, 3));
+        assert_eq!(carve(10, 5, 3, &[0.5; 20], None, 4, 5), vec![0.5; 20]);
+        assert_eq!(carve_width(usize::MAX, 2, 4, &[0.5; 8], None, 1), vec![0.5; 8]);
+        // No channels on the tall proxy path (its rows are zero values long).
+        assert!(carve_width(128, PROXY_SHRINK_MIN_HEIGHT, 0, &[], None, 32).is_empty());
+    }
+
+    /// NaN samples and NaN protection steer seams the same whatever their sign and payload
+    /// (which arithmetic does not preserve consistently across builds): the same pixels are kept.
+    #[test]
+    fn nan_payloads_do_not_steer_seams() {
+        let (w, h, ch) = (24, 18, 3);
+        let (base, prot_base) = (noise(w * h * ch, 255, 21), noise(w * h, 3, 22));
+        let carve_with_nans = |pixel: f32, prot: f32| {
+            let (mut img, mut p) = (base.clone(), prot_base.clone());
+            img.iter_mut().step_by(37).for_each(|v| *v = pixel);
+            p.iter_mut().step_by(29).for_each(|v| *v = prot);
+            carve(w, h, ch, &img, Some(&p), 15, 11)
+        };
+        let canonical = |v: Vec<f32>| v.into_iter().map(|f| if f.is_nan() { u32::MAX } else { f.to_bits() }).collect::<Vec<_>>();
+        let nans = [f32::NAN, -f32::NAN, f32::from_bits(0x7fc0_1234), f32::from_bits(0xffc0_0001)];
+        let want = canonical(carve_with_nans(nans[0], nans[0]));
+        for &a in &nans {
+            for &b in &nans {
+                assert_eq!(canonical(carve_with_nans(a, b)), want, "pixel NaN {:#x}, protection NaN {:#x}", a.to_bits(), b.to_bits());
+            }
         }
     }
 

@@ -616,6 +616,41 @@ fn special_eight_fill_on_adjustment_layers_matches_cpu() {
     }
 }
 
+/// The same for pixel layers clipped to a part-transparent base: the GPU's atop pass takes Fill
+/// inside the special eight's blend, as compose::composite_atop_any does, at Fill 0 too, in 8-,
+/// 16- and 32-bit documents.
+#[test]
+fn special_eight_fill_on_clipped_layers_matches_cpu() {
+    let Some(mut g) = gpu() else { return };
+    let special = [
+        BlendMode::ColorBurn,
+        BlendMode::LinearBurn,
+        BlendMode::ColorDodge,
+        BlendMode::LinearDodge,
+        BlendMode::VividLight,
+        BlendMode::LinearLight,
+        BlendMode::HardMix,
+        BlendMode::Difference,
+    ];
+    for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        for mode in special {
+            for fill in [0.0, 0.3, 0.6] {
+                let mut d = base_doc(64, 48);
+                d.depth = depth;
+                d.layers[0] = noise_layer("bg", PixelFormat::RGBA8, Rect::from_xywh(0, 0, 64, 48), 5, 1.0);
+                d.layers.push(noise_layer("base", PixelFormat::RGBA8, Rect::new(4, 3, 60, 45), 7, 0.0));
+                let mut l = noise_layer("top", PixelFormat::RGBA8, Rect::new(8, 6, 56, 40), 2, 0.0);
+                l.blend = mode;
+                l.opacity = 0.7;
+                l.fill_opacity = fill;
+                l.clipped = true;
+                d.layers.push(l);
+                check(&mut g, &d, &format!("clipped {mode:?} fill {fill} {depth:?}"));
+            }
+        }
+    }
+}
+
 #[test]
 fn xor_rounding_on_half_float_targets() {
     let Some((_adapter, device, queue, _lock)) = any_device() else { return };
@@ -1606,6 +1641,7 @@ fn effect_cases() -> Vec<(&'static str, Vec<Effect>)> {
         invert: false,
     };
     satin_inv.common.enabled = true;
+    let satin_one = satin.clone();
     let mut bevel_contour = bevel(BevelStyle::InnerBevel, true, 8.0, 3.0);
     bevel_contour.gloss_contour = contour();
     bevel_contour.use_global_light = false;
@@ -1613,6 +1649,7 @@ fn effect_cases() -> Vec<(&'static str, Vec<Effect>)> {
         ("drop shadow", vec![Effect::DropShadow(shadow(BlendMode::Multiply, 0.75, 120.0, 6.0, 8.0, 0.0))]),
         ("drop shadow spread contour", vec![Effect::DropShadow(ds_contour)]),
         ("drop shadow hard", vec![Effect::DropShadow(shadow(BlendMode::Normal, 1.0, 45.0, 3.0, 0.0, 0.0))]),
+        ("drop shadow size 1", vec![Effect::DropShadow(shadow(BlendMode::Normal, 1.0, 45.0, 3.0, 1.0, 0.0))]),
         ("drop shadow global light", vec![Effect::DropShadow(ds_global)]),
         ("inner shadow", vec![Effect::InnerShadow(shadow(BlendMode::Multiply, 0.8, 120.0, 4.0, 6.0, 0.0))]),
         // The special eight take the strength as Fill (pulled toward neutral, blended at full coverage).
@@ -1625,8 +1662,19 @@ fn effect_cases() -> Vec<(&'static str, Vec<Effect>)> {
             })],
         ),
         ("inner shadow choke", vec![Effect::InnerShadow(shadow(BlendMode::Normal, 0.9, 300.0, 3.0, 7.0, 0.4))]),
+        // Size 1 takes the measured `¼ ½ ¼` taps on both compositors (`effects::shadow_blur_width`).
+        ("inner shadow size 1", vec![Effect::InnerShadow(shadow(BlendMode::Normal, 1.0, 120.0, 0.0, 1.0, 0.0))]),
         ("outer glow softer", vec![Effect::OuterGlow(glow(FxPaint::Color(Color::rgb(1.0, 0.9, 0.2)), GlowTechnique::Softer, 10.0, 0.3, GlowSource::Edge))]),
         ("outer glow contour", vec![Effect::OuterGlow(og_contour)]),
+        // A contour above 0 at its start stays within the glow's reach (`effects::glow_paint_lut`).
+        (
+            "outer glow flat contour precise",
+            vec![Effect::OuterGlow(Glow {
+                contour: Contour::Custom { name: "flat".into(), points: vec![Cp { input: 0.0, output: 1.0 }, Cp { input: 1.0, output: 1.0 }], corners: vec![] },
+                ..glow(FxPaint::Color(Color::rgb(1.0, 0.9, 0.2)), GlowTechnique::Precise, 6.0, 0.0, GlowSource::Edge)
+            })],
+        ),
+        ("outer glow size 1", vec![Effect::OuterGlow(glow(FxPaint::Color(Color::rgb(1.0, 0.9, 0.2)), GlowTechnique::Softer, 1.0, 0.0, GlowSource::Edge))]),
         ("outer glow precise gradient", vec![Effect::OuterGlow(glow(FxPaint::Gradient(gradient()), GlowTechnique::Precise, 8.0, 0.25, GlowSource::Edge))]),
         (
             "outer glow softer gradient",
@@ -1634,6 +1682,7 @@ fn effect_cases() -> Vec<(&'static str, Vec<Effect>)> {
         ),
         ("inner glow softer gradient", vec![Effect::InnerGlow(glow(FxPaint::Gradient(gradient()), GlowTechnique::Softer, 7.0, 0.1, GlowSource::Edge))]),
         ("inner glow softer edge", vec![Effect::InnerGlow(glow(FxPaint::Color(Color::rgb(0.9, 1.0, 0.8)), GlowTechnique::Softer, 7.0, 0.2, GlowSource::Edge))]),
+        ("inner glow size 1", vec![Effect::InnerGlow(glow(FxPaint::Color(Color::rgb(0.9, 1.0, 0.8)), GlowTechnique::Softer, 1.0, 0.0, GlowSource::Edge))]),
         (
             "inner glow softer center",
             vec![Effect::InnerGlow(glow(FxPaint::Color(Color::rgb(0.9, 1.0, 0.8)), GlowTechnique::Softer, 6.0, 0.0, GlowSource::Center))],
@@ -1707,6 +1756,7 @@ fn effect_cases() -> Vec<(&'static str, Vec<Effect>)> {
         ("bevel contour own light", vec![Effect::BevelEmboss(bevel_contour)]),
         ("satin", vec![Effect::Satin(satin)]),
         ("satin inverted contour", vec![Effect::Satin(satin_inv)]),
+        ("satin size 1", vec![Effect::Satin(Satin { size: 1.0, ..satin_one })]),
         ("stroke outside colour", vec![Effect::Stroke(stroke(4.0, StrokePosition::Outside, FxPaint::Color(Color::rgb(0.95, 0.85, 0.1))))]),
         ("stroke inside gradient", vec![Effect::Stroke(stroke(3.0, StrokePosition::Inside, FxPaint::Gradient(gradient())))]),
         ("stroke centre pattern", vec![Effect::Stroke(stroke(5.0, StrokePosition::Center, pat_paint.clone()))]),
