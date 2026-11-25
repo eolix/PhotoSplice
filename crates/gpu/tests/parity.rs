@@ -1723,12 +1723,53 @@ fn effect_cases() -> Vec<(&'static str, Vec<Effect>)> {
             vec![Effect::BevelEmboss(Bevel { technique: BevelTechnique::ChiselHard, ..bevel(BevelStyle::Emboss, true, 8.0, 0.0) })],
         ),
         ("bevel emboss smooth wide", vec![Effect::BevelEmboss(bevel(BevelStyle::Emboss, true, 21.0, 0.0))]),
-        // With an inside stroke (the case the GPU draws; outside strokes and none go to the CPU).
+        // Stroke Emboss shades the union of every stroke, each in its own colour.
         (
             "bevel stroke emboss",
             vec![
                 Effect::BevelEmboss(bevel(BevelStyle::StrokeEmboss, true, 6.0, 0.0)),
                 Effect::Stroke(stroke(4.0, StrokePosition::Inside, FxPaint::Color(Color::rgb(0.2, 0.3, 0.8)))),
+            ],
+        ),
+        (
+            "bevel stroke emboss narrow inside stroke",
+            vec![
+                Effect::Stroke(stroke(2.0, StrokePosition::Inside, FxPaint::Color(Color::rgb(0.2, 0.3, 0.8)))),
+                Effect::BevelEmboss(bevel(BevelStyle::StrokeEmboss, true, 6.0, 0.0)),
+            ],
+        ),
+        (
+            "bevel stroke emboss outside stroke",
+            vec![
+                Effect::Stroke(stroke(5.0, StrokePosition::Outside, FxPaint::Color(Color::rgb(0.9, 0.2, 0.2)))),
+                Effect::BevelEmboss(bevel(BevelStyle::StrokeEmboss, true, 6.0, 0.0)),
+            ],
+        ),
+        (
+            "bevel stroke emboss outside and inside strokes",
+            vec![
+                Effect::Stroke(stroke(3.0, StrokePosition::Outside, FxPaint::Color(Color::rgb(0.9, 0.2, 0.2)))),
+                Effect::Stroke(stroke(6.0, StrokePosition::Inside, FxPaint::Color(Color::rgb(0.2, 0.3, 0.9)))),
+                Effect::BevelEmboss(bevel(BevelStyle::StrokeEmboss, false, 5.0, 0.0)),
+            ],
+        ),
+        (
+            "bevel stroke emboss centre and outside strokes",
+            vec![
+                Effect::Stroke(stroke(8.0, StrokePosition::Center, FxPaint::Color(Color::rgb(0.9, 0.2, 0.2)))),
+                Effect::Stroke(stroke(3.0, StrokePosition::Outside, FxPaint::Color(Color::rgb(0.2, 0.8, 0.3)))),
+                Effect::BevelEmboss(bevel(BevelStyle::StrokeEmboss, true, 5.0, 0.0)),
+            ],
+        ),
+        (
+            "bevel stroke emboss gradient multiply stroke",
+            vec![
+                Effect::Stroke(StrokeFx {
+                    common: FxCommon::new(BlendMode::Multiply, 0.8),
+                    ..stroke(6.0, StrokePosition::Outside, FxPaint::Gradient(gradient()))
+                }),
+                Effect::Stroke(stroke(3.0, StrokePosition::Inside, FxPaint::Color(Color::rgb(0.2, 0.3, 0.9)))),
+                Effect::BevelEmboss(Bevel { technique: BevelTechnique::ChiselHard, ..bevel(BevelStyle::StrokeEmboss, true, 5.0, 0.0) }),
             ],
         ),
         (
@@ -1903,6 +1944,32 @@ fn layer_effects_opacity_fill_blend_and_off_canvas() {
         l.fill_opacity = fill;
         d.layers.push(l);
         fx_check(&mut g, &d, &format!("outside stroke at fill {fill}"));
+    }
+    // Two outside strokes with the fill see-through: they stack before the edge hides them.
+    for fill in [0.0, 0.5] {
+        let mut d = fx_doc(80, 80, SampleType::U8);
+        let mut l = blob("rings", d.pixel_format(), 40.0, 40.0, 18.0, [0.2, 0.6, 0.9]);
+        l.effects.items = vec![
+            Effect::Stroke(stroke(3.0, StrokePosition::Outside, FxPaint::Color(Color::rgb(0.9, 0.2, 0.2)))),
+            Effect::Stroke(stroke(8.0, StrokePosition::Outside, FxPaint::Color(Color::rgb(0.2, 0.3, 0.9)))),
+        ];
+        l.fill_opacity = fill;
+        d.layers.push(l);
+        fx_check(&mut g, &d, &format!("two outside strokes at fill {fill}"));
+    }
+    // Stroke Emboss over two strokes with the fill see-through: the shaded strokes keep their
+    // own colour where the layer is clear.
+    for fill in [0.0, 0.5] {
+        let mut d = fx_doc(80, 80, SampleType::U8);
+        let mut l = blob("emboss", d.pixel_format(), 40.0, 40.0, 18.0, [0.2, 0.6, 0.9]);
+        l.effects.items = vec![
+            Effect::Stroke(stroke(3.0, StrokePosition::Outside, FxPaint::Color(Color::rgb(0.9, 0.2, 0.2)))),
+            Effect::Stroke(stroke(6.0, StrokePosition::Inside, FxPaint::Color(Color::rgb(0.2, 0.3, 0.9)))),
+            Effect::BevelEmboss(bevel(BevelStyle::StrokeEmboss, true, 5.0, 0.0)),
+        ];
+        l.fill_opacity = fill;
+        d.layers.push(l);
+        fx_check(&mut g, &d, &format!("stroke emboss two strokes at fill {fill}"));
     }
     // An Outside stroke has no share beneath fully opaque pixels: non-Normal layers with an
     // Outside stroke on a soft blob and a hard square. (Blend Interior Effects as Group, where

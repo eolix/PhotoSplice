@@ -63,6 +63,7 @@ pub enum Kernel {
     MBevelShade,
     MStroke,
     MBevelTex,
+    MRing,
 }
 
 impl Kernel {
@@ -91,6 +92,7 @@ impl Kernel {
             Kernel::MBevelShade => "fs_mbevelshade",
             Kernel::MStroke => "fs_mstroke",
             Kernel::MBevelTex => "fs_mbeveltex",
+            Kernel::MRing => "fs_mring",
         })
     }
 
@@ -107,11 +109,12 @@ impl Kernel {
                 | Kernel::MBevelShade
                 | Kernel::MStroke
                 | Kernel::MBevelTex
+                | Kernel::MRing
         )
     }
 
     /// Every kernel with a pipeline.
-    pub const DRAWN: [Kernel; 21] = [
+    pub const DRAWN: [Kernel; 22] = [
         Kernel::Content,
         Kernel::Mask,
         Kernel::Blend,
@@ -133,6 +136,7 @@ impl Kernel {
         Kernel::MBevelShade,
         Kernel::MStroke,
         Kernel::MBevelTex,
+        Kernel::MRing,
     ];
 }
 
@@ -401,12 +405,6 @@ fn cpu_clipping(layers: &[Layer], depth: u32) -> Option<String> {
         if !l.clipped && clipped && (l.fill_opacity < 1.0 || !l.blend_clipped) {
             return Some(format!("layers clipped to `{}` (faded or ungrouped base, composited on the CPU)", l.name));
         }
-        // Stroke Emboss shades the stroke's ring on the CPU; with an inside stroke (or none, where
-        // it draws nothing) it is an inner bevel the GPU draws the same, resp. not at all.
-        let inside_stroke = l.effects.items.iter().find_map(|e| if let Effect::Stroke(s) = e { Some(s.position) } else { None }) == Some(photosplice_doc::StrokePosition::Inside);
-        if !inside_stroke && l.effects.items.iter().any(|e| e.enabled() && matches!(e, Effect::BevelEmboss(b) if b.style == photosplice_doc::BevelStyle::StrokeEmboss)) {
-            return Some(format!("Stroke Emboss on `{}` (composited on the CPU)", l.name));
-        }
         if l.effects.items.iter().any(|e| e.enabled() && photosplice_compose::effects::has_anti_aliased_contour(e)) {
             return Some(format!("anti-aliased contour on `{}` (composited on the CPU)", l.name));
         }
@@ -493,6 +491,8 @@ pub const F_COVER_MIX: u32 = 2097152;
 /// (compose::quantize_opaque): 8 bits, or 16 bits (32768 levels).
 pub const F_ROUND8: u32 = 4194304;
 pub const F_ROUND16: u32 = 8388608;
+/// Lerp: A towards B by the pass's effect map × opacity (Stroke Emboss's shaded inside strokes).
+pub const F_MAP_MIX: u32 = 16777216;
 
 /// A layer's Blend If ranges for `F_BLEND_IF`: Gray, then the colour channels, each as
 /// [this layer, underlying layer]; every range as two floats, `black low × 256 + black high` and
@@ -1394,11 +1394,48 @@ impl<'a> Planner<'a> {
             p.clip = Some(clip);
             l = self.emit(p);
         }
+        // Stroke Emboss shades every stroke in its own colour before it is laid down
+        // (`effects::composite_with_effects`): maps 0-1 the inside parts, 2-3 the outside ones.
+        let embossed: Vec<(usize, &'a photosplice_doc::Bevel)> = if items.iter().any(|e| matches!(e, Effect::Stroke(_))) {
+            rev.iter()
+                .filter_map(|&(i, e)| match e {
+                    Effect::BevelEmboss(b) if b.style == photosplice_doc::BevelStyle::StrokeEmboss => Some((i, b)),
+                    _ => None,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let shade = |me: &mut Self, mut slot: Slot, k: usize, flags: u32| {
+            for &(bi, b) in &embossed {
+                for (kk, color, fxc) in [(k, &b.highlight_color, &b.highlight), (k + 1, &b.shadow_color, &b.shadow)] {
+                    slot =
+                        me.paint(slot, content, Cov::Map(map(bi, kk), 0.0), &Paint::Color(color.to_rgb_unclamped()), fxc.blend, fxc.opacity, flags, clip, sb);
+                }
+            }
+            slot
+        };
         // Inside stroke parts are painted over the layer (bottom instance first).
         for &(i, e) in &rev {
             if let Effect::Stroke(st) = e {
                 let (in_w, _) = stroke_widths(st);
-                if in_w > 0.0 {
+                if in_w > 0.0 && !embossed.is_empty() {
+                    // Stroke Emboss: the stroke at full strength over a copy of the layer, shaded,
+                    // then laid over the layer by the stroke's band × opacity.
+                    let paint = self.fx_paint(&st.paint, anchor);
+                    let frame = photosplice_compose::stroke_frame(self.cx.doc, layer, st).unwrap_or(sb);
+                    let base = self.retain(l);
+                    let stroked = self.paint(base, content, Cov::One, &paint, st.common.blend, 1.0, F_GATE, clip, frame);
+                    let stroked = shade(self, stroked, 0, F_REL);
+                    let mut p = Pass::new(Kernel::Lerp, 0);
+                    p.a = Some(l);
+                    p.b = Some(stroked);
+                    p.flags = F_MAP_MIX;
+                    p.opacity = st.common.opacity;
+                    p.map = Some(map(i, 1));
+                    p.clip = Some(clip);
+                    l = self.emit(p);
+                } else if in_w > 0.0 {
                     let paint = self.fx_paint(&st.paint, anchor);
                     l = self.paint(
                         l,
@@ -1420,6 +1457,7 @@ impl<'a> Planner<'a> {
         let pillow = |b: &photosplice_doc::Bevel| b.style == photosplice_doc::BevelStyle::PillowEmboss;
         for &(i, e) in &rev {
             if let Effect::BevelEmboss(b) = e
+                && b.style != photosplice_doc::BevelStyle::StrokeEmboss
                 && (bevel_paint(b) == photosplice_compose::effects::BevelPaint::Inner || pillow(b))
             {
                 l = self.paint(
@@ -1460,19 +1498,22 @@ impl<'a> Planner<'a> {
             for (n, &(i, st)) in outs.iter().enumerate() {
                 let paint = self.fx_paint(&st.paint, anchor);
                 let flags = F_STROKE_OUT | if vector_shape { F_VECTOR } else { 0 } | if outline { F_OUTLINE } else { 0 } | if n == 0 { F_FIRST } else { 0 };
+                let frame = photosplice_compose::stroke_frame(self.cx.doc, layer, st).unwrap_or(sb);
+                // Stroke Emboss: the stroke over the result at full strength, shaded by the
+                // outside maps; its share takes that colour as it is.
+                let shaded = (!embossed.is_empty()).then(|| {
+                    let base = self.retain(w);
+                    let blend = if st.common.blend == BlendMode::Dissolve { BlendMode::Normal } else { st.common.blend };
+                    let blended = self.paint(base, content, Cov::One, &paint, blend, 1.0, 0, clip, frame);
+                    shade(self, blended, 2, 0)
+                });
                 // Share × blended colour, then coverage (both read the coverage so far).
-                let mut p = self.fx_pass_kernel(
-                    Kernel::FxStroke,
-                    w,
-                    content,
-                    &paint,
-                    st.common.blend,
-                    st.common.opacity,
-                    flags,
-                    clip,
-                    photosplice_compose::stroke_frame(self.cx.doc, layer, st).unwrap_or(sb),
-                );
-                if matches!(paint, Paint::None) {
+                let mut p = self.fx_pass_kernel(Kernel::FxStroke, w, content, &paint, st.common.blend, st.common.opacity, flags, clip, frame);
+                if let Some(bl) = shaded {
+                    self.release(w);
+                    p.a = Some(bl);
+                    p.params[2][2] = 3.0;
+                } else if matches!(paint, Paint::None) {
                     // A missing pattern paints nothing: the stroke's share keeps the result as is.
                     p.params[2][2] = 3.0;
                 }
